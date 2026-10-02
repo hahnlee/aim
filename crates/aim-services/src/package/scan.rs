@@ -16,6 +16,8 @@ mod identity;
 mod image;
 mod policy;
 pub use policy::{ScanPolicy, application_flags};
+mod compatibility;
+pub use compatibility::LibraryCompatibility;
 mod setting;
 mod signing;
 mod uids;

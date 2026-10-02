@@ -2,6 +2,33 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("library-policy")) {
+            System.out.println(com.android.server.pm.parsing.library.PackageBackwardCompatibility
+                .bootClassPathContainsATB());
+            return;
+        }
+        if (args.length != 0 && args[0].equals("libraries")) {
+            var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            pkg.setTargetSdkVersion(Integer.parseInt(args[2]));
+            for (String name : args[6].split(",")) if (!name.equals("-")) pkg.addUsesLibrary(name);
+            for (String name : args[7].split(",")) if (!name.equals("-")) pkg.addUsesOptionalLibrary(name);
+            boolean system = Boolean.parseBoolean(args[3]);
+            boolean onBcp = com.android.server.pm.parsing.library.PackageBackwardCompatibility
+                .bootClassPathContainsATB();
+            if (!system && !onBcp) {
+                var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
+                    android.os.ServiceManager.getService("platform_compat"));
+                System.out.println(compat.isChangeEnabled(133396946L,
+                    com.android.server.pm.parsing.pkg.AndroidPackageUtils.generateAppInfoWithoutState(pkg)));
+            }
+            com.android.server.pm.parsing.library.PackageBackwardCompatibility.modifySharedLibraries(
+                pkg, system, Boolean.parseBoolean(args[4]));
+            java.nio.file.Files.write(java.nio.file.Path.of(args[5]),
+                com.android.server.pm.parsing.PackageCacher.toCacheEntryStatic(pkg));
+            return;
+        }
         if (args.length != 0 && args[0].equals("policy")) {
             var pkg = com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
                 java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));

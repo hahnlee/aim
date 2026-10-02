@@ -23,6 +23,7 @@ use super::parse::Platform;
 
 mod libraries;
 pub use libraries::Library;
+pub(crate) use libraries::Sdk;
 
 /// `PackageManager.FEATURE_*` that SystemConfig adds from the environment.
 const FEATURE_FILE_BASED_ENCRYPTION: &str = "android.software.file_based_encryption";
@@ -48,6 +49,8 @@ const ALLOW_ALL: u32 = !0;
 pub struct SystemConfig {
     /// `mSharedLibraries`, including public native libraries.
     pub libraries: BTreeMap<String, Library>,
+    /// First insertion order, retained for ArrayMap hash-collision ordering.
+    pub library_order: Vec<String>,
     /// `mAvailableFeatures`, as added: name and version.
     pub features: Vec<(String, i32)>,
     pub hidden_api_allowlist: Vec<String>,
@@ -237,7 +240,7 @@ impl SystemConfig {
                 }
                 "library" | "apex-library" if flags & ALLOW_LIBS != 0 => {
                     if let Some(library) = Library::read(e, image, prop) {
-                        self.libraries.insert(library.name.clone(), library);
+                        self.add_library(library);
                     }
                 }
                 "feature" if flags & ALLOW_FEATURES != 0 => {
@@ -303,9 +306,16 @@ impl SystemConfig {
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
             {
                 let name = line.trim().split(' ').next().unwrap().to_owned();
-                self.libraries.insert(name.clone(), Library::native(name));
+                self.add_library(Library::native(name));
             }
         }
+    }
+
+    fn add_library(&mut self, library: Library) {
+        if !self.libraries.contains_key(&library.name) {
+            self.library_order.push(library.name.clone());
+        }
+        self.libraries.insert(library.name.clone(), library);
     }
 
     /// `addFeature`: a feature added twice keeps its highest version.
@@ -324,7 +334,7 @@ fn int(s: Option<String>) -> Option<i32> {
 
 /// Integer.parseInt's decimal syntax: no whitespace, optional ASCII
 /// sign, Character.digit(char, 10) for BMP digits, checked signed range.
-fn decimal_uid(s: &str) -> Option<i32> {
+pub(crate) fn decimal_uid(s: &str) -> Option<i32> {
     const ZEROES: &[u32] = &[
         0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
         0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90,

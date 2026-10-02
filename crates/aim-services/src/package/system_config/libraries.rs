@@ -79,7 +79,8 @@ impl Library {
     }
 }
 
-struct Sdk {
+#[derive(Clone, Debug)]
+pub(crate) struct Sdk {
     version: i32,
     codename: String,
     known: Vec<String>,
@@ -113,6 +114,10 @@ mod tests {
             );
         }
         let preview = sdk("Baklava");
+        assert!(release.at_least_checked("VanillaIceCream").is_err());
+        assert!(!release.at_least_checked("Future").unwrap());
+        assert!(release.at_least_checked("").is_err());
+        assert!(release.at_least_checked("３６").unwrap());
         assert!(preview.at_least("36"));
         assert!(!preview.at_most("36"));
         assert!(preview.at_most("37"));
@@ -126,7 +131,7 @@ mod tests {
 }
 
 impl Sdk {
-    fn new(prop: &dyn Fn(&str) -> Option<String>) -> Self {
+    pub(crate) fn new(prop: &dyn Fn(&str) -> Option<String>) -> Self {
         Self {
             version: prop("ro.build.version.sdk")
                 .and_then(|v| v.parse().ok())
@@ -141,12 +146,23 @@ impl Sdk {
     }
 
     fn at_least(&self, version: &str) -> bool {
-        if version.starts_with(char::is_uppercase) {
+        self.at_least_checked(version).unwrap_or(false)
+    }
+
+    /// UnboundedSdkLevel without SystemConfig's caught-error fallback.
+    pub(crate) fn at_least_checked(&self, version: &str) -> Result<bool, String> {
+        let first = version.encode_utf16().next().ok_or("empty SDK version")?;
+        if char::from_u32(u32::from(first)).is_some_and(char::is_uppercase) {
             let version = version.split('.').next().unwrap();
-            self.codename != "REL" && self.known.iter().any(|v| v == version)
+            let known = self.known.iter().any(|v| v == version);
+            if self.codename == "REL" && known {
+                return Err(format!("known codename {version} requires a finalized SDK"));
+            }
+            Ok(self.codename != "REL" && known)
         } else {
-            // SystemConfig catches IllegalArgumentException as false.
-            version.parse::<i32>().is_ok_and(|v| self.version >= v)
+            let sdk =
+                super::decimal_uid(version).ok_or_else(|| format!("invalid SDK {version}"))?;
+            Ok(self.version >= sdk)
         }
     }
 

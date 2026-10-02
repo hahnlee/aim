@@ -401,6 +401,122 @@ fn new_settings_match_the_original_runtime() {
         apks.scan_file_time(&template.parsed).unwrap(),
         expected_time
     );
+    let properties =
+        String::from_utf8(run(boot.command().args(["shell", "getprop"])).stdout).unwrap();
+    let properties: std::collections::BTreeMap<_, _> = properties
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line
+                .strip_prefix('[')?
+                .strip_suffix(']')?
+                .split_once("]: [")?;
+            Some((name.to_owned(), value.to_owned()))
+        })
+        .collect();
+    let config = SystemConfig::read(&aim_paths::derived_image(), &|p| properties.get(p).cloned());
+    let original_bcp = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "library-policy",
+    ]));
+    let on_bcp: bool = String::from_utf8(original_bcp.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let compatibility =
+        LibraryCompatibility::new(&config, &|p| properties.get(p).cloned(), on_bcp).unwrap();
+    if !on_bcp {
+        let mut unresolved = template.parsed.clone();
+        unresolved.booleans |= aim_services::package::pkg::booleans::CORE_APP;
+        let unchanged = unresolved.clone();
+        assert!(
+            ScanPolicy::default()
+                .apply(
+                    &mut unresolved,
+                    &template.signing,
+                    Some(&platform_signing),
+                    false,
+                    &apks,
+                    &compatibility,
+                    None
+                )
+                .is_err()
+        );
+        assert_eq!(unresolved, unchanged);
+    }
+    let mut checked = 0;
+    for sdk in [27, 28, 29, 30] {
+        for system in [false, true] {
+            for updated in [false, true] {
+                for (required, optional) in [
+                    ("-", "-"),
+                    (
+                        "android.test.runner,wear-sdk,android.net.ipsec.ike,com.google.android.maps",
+                        "android.hidl.base-V1.0-java",
+                    ),
+                    (
+                        "android.hidl.manager-V1.0-java",
+                        "android.test.runner,org.apache.http.legacy,wear-sdk",
+                    ),
+                ] {
+                    let result = run(boot.command().args([
+                        "shell", "/system/bin/app_process",
+                        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                        "/system/bin", "com.android.server.pm.NewSettingOracle", "libraries",
+                        "/data/local/tmp/code-time.cache", &sdk.to_string(), &system.to_string(), &updated.to_string(),
+                        "/data/local/tmp/library-policy.cache", required, optional,
+                    ]));
+                    let change = if !system && !on_bcp {
+                        Some(
+                            String::from_utf8(result.stdout)
+                                .unwrap()
+                                .trim()
+                                .parse::<bool>()
+                                .unwrap(),
+                        )
+                    } else {
+                        None
+                    };
+                    let expected = AndroidPackage::read_cache_entry(
+                        &fs::read(boot.data.join("data/local/tmp/library-policy.cache")).unwrap(),
+                    )
+                    .unwrap();
+                    let mut actual = template.parsed.clone();
+                    actual.target_sdk_version = sdk;
+                    for (names, list) in [
+                        (required, &mut actual.uses_libraries),
+                        (optional, &mut actual.uses_optional_libraries),
+                    ] {
+                        for name in names.split(',').filter(|n| *n != "-") {
+                            if !list.iter().any(|n| n == name) {
+                                list.push(name.into());
+                            }
+                        }
+                    }
+                    compatibility
+                        .apply(&mut actual, system, updated, change)
+                        .unwrap();
+                    assert_eq!(
+                        actual.uses_libraries, expected.uses_libraries,
+                        "required libraries sdk={sdk} system={system} updated={updated}"
+                    );
+                    assert_eq!(
+                        actual.uses_optional_libraries, expected.uses_optional_libraries,
+                        "optional libraries sdk={sdk} system={system} updated={updated}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 48);
+    eprintln!(
+        "native/original library compatibility matches {checked} cases; test.base on BCP={on_bcp}"
+    );
     // Run the original applyPolicy on the same native-parsed original APK.
     // Shared library compatibility belongs to another owner; compare the
     // manifest/component restrictions without claiming full parcel equality.
@@ -507,12 +623,14 @@ fn new_settings_match_the_original_runtime() {
         signing: template.signing.clone(),
     };
     ScanPolicy::for_location(&code.location)
-        .apply_manifest(
+        .apply(
             &mut code.parsed,
             &code.signing,
             Some(&platform_signing),
             false,
             &apks,
+            &compatibility,
+            None,
         )
         .unwrap();
     let (flags, private_flags) = application_flags(&code.parsed, false);

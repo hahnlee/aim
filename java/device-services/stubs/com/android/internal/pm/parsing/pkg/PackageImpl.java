@@ -6,6 +6,9 @@ public abstract class PackageImpl implements ParsedPackage {
     public PackageImpl(android.os.Parcel in) { throw new RuntimeException("stub"); }
     public static ParsingPackage forTesting(String name) { throw new RuntimeException("stub"); }
     public PackageImpl setPackageName(String name) { throw new RuntimeException("stub"); }
+    public PackageImpl setTargetSdkVersion(int value) { throw new RuntimeException("stub"); }
+    public PackageImpl addUsesLibrary(String name) { throw new RuntimeException("stub"); }
+    public PackageImpl addUsesOptionalLibrary(String name) { throw new RuntimeException("stub"); }
     public String getPackageName() { throw new RuntimeException("stub"); }
     public String getManifestPackageName() { throw new RuntimeException("stub"); }
     public PackageImpl addActivity(ParsedActivity component) { throw new RuntimeException("stub"); }

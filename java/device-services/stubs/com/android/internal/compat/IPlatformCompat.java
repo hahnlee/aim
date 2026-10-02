@@ -3,6 +3,8 @@
 package com.android.internal.compat;
 
 public interface IPlatformCompat extends android.os.IInterface {
+    boolean isChangeEnabled(long changeId, android.content.pm.ApplicationInfo appInfo)
+            throws android.os.RemoteException;
     CompatibilityChangeConfig getAppConfig(android.content.pm.ApplicationInfo appInfo)
             throws android.os.RemoteException;
 

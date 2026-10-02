@@ -97,11 +97,35 @@ impl ScanPolicy {
         // Read before mutation so an inaccessible compressed inventory rejects
         // atomically. Unlike Java File.listFiles, errors remain observable.
         let compressed = self.system && apks.scan_compressed_files_exist(pkg)?;
-        self.apply(pkg, signing, platform, updated_system_app, compressed);
+        self.apply_components(pkg, signing, platform, updated_system_app, compressed);
         Ok(())
     }
 
-    fn apply(
+    /// Full manifest and library policy with atomic rejection. The caller
+    /// resolves boot-classpath/PlatformCompat inputs before reconciliation.
+    pub fn apply(
+        self,
+        pkg: &mut AndroidPackage,
+        signing: &SigningDetails,
+        platform: Option<&SigningDetails>,
+        updated_system_app: bool,
+        apks: &Apks,
+        compatibility: &super::LibraryCompatibility,
+        remove_test_base: Option<bool>,
+    ) -> Result<(), String> {
+        let mut next = pkg.clone();
+        self.apply_manifest(&mut next, signing, platform, updated_system_app, apks)?;
+        compatibility.apply(
+            &mut next,
+            self.system || updated_system_app,
+            updated_system_app,
+            remove_test_base,
+        )?;
+        *pkg = next;
+        Ok(())
+    }
+
+    fn apply_components(
         self,
         pkg: &mut AndroidPackage,
         signing: &SigningDetails,
@@ -251,7 +275,7 @@ mod tests {
     fn data_policy_restricts_manifest_without_erasing_component_direct_boot() {
         let mut pkg = manifest();
         pkg.receivers[0].main.direct_boot_aware = true;
-        ScanPolicy::default().apply(&mut pkg, &signer(&[1]), None, false, false);
+        ScanPolicy::default().apply_components(&mut pkg, &signer(&[1]), None, false, false);
         assert_eq!(pkg.booleans, b::PARTIALLY_DIRECT_BOOT_AWARE);
         assert!(!pkg.is2(b2::APEX));
         assert!(pkg.activities[0].main.exported);
@@ -265,7 +289,7 @@ mod tests {
         assert_eq!(pkg.original_packages, Some(vec![]));
         assert!(pkg.adopt_permissions.is_empty());
         let mut updated = manifest();
-        ScanPolicy::default().apply(&mut updated, &signer(&[1]), None, true, false);
+        ScanPolicy::default().apply_components(&mut updated, &signer(&[1]), None, true, false);
         assert_eq!(updated.original_packages, Some(vec![Some("old".into())]));
         assert_eq!(updated.adopt_permissions, ["old"]);
         assert!(!updated.is(b::SYSTEM));
@@ -282,7 +306,7 @@ mod tests {
         };
         let policy = ScanPolicy::for_location(&location);
         let mut pkg = manifest();
-        policy.apply(
+        policy.apply_components(
             &mut pkg,
             &signer(&[2, 1]),
             Some(&signer(&[1, 2])),
@@ -307,11 +331,11 @@ mod tests {
         );
         let mut rotated = signer(&[3]);
         rotated.past_signing_certificates = Some(vec![(vec![1], 31), (vec![3], 31)]);
-        policy.apply(&mut pkg, &rotated, Some(&signer(&[1])), false, false);
+        policy.apply_components(&mut pkg, &rotated, Some(&signer(&[1])), false, false);
         assert!(!pkg.is(b::SIGNED_WITH_PLATFORM_KEY));
         assert!(pkg.is2(b2::STUB)); // applyPolicy does not clear a previously set stub.
         pkg.package_name = "android".into();
-        policy.apply(&mut pkg, &signer(&[3]), None, false, false);
+        policy.apply_components(&mut pkg, &signer(&[3]), None, false, false);
         assert!(pkg.is(b::SIGNED_WITH_PLATFORM_KEY));
     }
 
@@ -338,7 +362,7 @@ mod tests {
             }
         );
         let mut pkg = manifest();
-        policy.apply(&mut pkg, &signer(&[1]), None, true, false);
+        policy.apply_components(&mut pkg, &signer(&[1]), None, true, false);
         assert!(!pkg.is(b::SIGNED_WITH_PLATFORM_KEY));
         assert!(!pkg.is2(b2::APEX));
         assert_eq!(application_flags(&pkg, true).1 & (1 << 9), 0);
