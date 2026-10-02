@@ -3,6 +3,7 @@
 package android.content.pm;
 
 public class ApplicationInfo extends PackageItemInfo {
+    public static final android.os.Parcelable.Creator<ApplicationInfo> CREATOR = null;
     public boolean enabled;
     public int targetSdkVersion;
     public int uid;

@@ -61,4 +61,10 @@ interface IBridge {
     /** PlatformCompat's install-time native shared-library policy. */
     boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk);
 
+    /** The selected image's PackageBackwardCompatibility build policy. */
+    boolean isTestBaseOnBootclasspath();
+
+    /** PlatformCompat.isChangeEnabled for native PackageImpl's raw ApplicationInfo parcel. */
+    boolean isPackageChangeEnabled(long changeId, in byte[] applicationInfo);
+
 }

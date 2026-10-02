@@ -20,6 +20,7 @@ public final class Parcel {
     public final void writeSerializable(java.io.Serializable value) { throw new RuntimeException("stub"); }
     public final byte[] createByteArray() { throw new RuntimeException("stub"); }
     public final byte[] marshall() { throw new RuntimeException("stub"); }
+    public final void unmarshall(byte[] data, int offset, int length) { throw new RuntimeException("stub"); }
     public final void writeBoolean(boolean val) { throw new RuntimeException("stub"); }
     public final boolean readBoolean() { throw new RuntimeException("stub"); }
     public final void writeNoException() { throw new RuntimeException("stub"); }

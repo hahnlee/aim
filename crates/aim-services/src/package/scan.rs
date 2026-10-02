@@ -18,6 +18,8 @@ mod policy;
 pub use policy::{ScanPolicy, application_flags};
 mod compatibility;
 pub use compatibility::LibraryCompatibility;
+mod bridge;
+pub use bridge::PolicyBridgeError;
 mod setting;
 mod signing;
 mod uids;

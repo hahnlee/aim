@@ -2,9 +2,11 @@ package dev.aim.server;
 
 import android.app.WindowConfiguration;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.os.Binder;
 import android.os.Environment;
 import android.os.IBinder;
+import android.os.Parcel;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
@@ -16,6 +18,7 @@ import android.view.IWindowManager;
 import com.android.internal.os.ApplicationSharedMemory;
 import com.android.server.SystemService;
 import com.android.server.compat.PlatformCompat;
+import com.android.server.pm.parsing.library.PackageBackwardCompatibility;
 
 import java.io.File;
 import java.io.IOException;
@@ -225,11 +228,37 @@ public final class DeviceServices extends SystemService {
         @Override
         public boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk) {
             enforceSystemUid();
+            return platformCompat().isChangeEnabledInternal(
+                    ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES, packageName, targetSdk);
+        }
+
+        @Override
+        public boolean isTestBaseOnBootclasspath() {
+            enforceSystemUid();
+            return PackageBackwardCompatibility.bootClassPathContainsATB();
+        }
+
+        @Override
+        public boolean isPackageChangeEnabled(long changeId, byte[] applicationInfo) {
+            enforceSystemUid();
+            if (applicationInfo == null) throw new IllegalArgumentException("missing ApplicationInfo");
+            Parcel parcel = Parcel.obtain();
+            try {
+                parcel.unmarshall(applicationInfo, 0, applicationInfo.length);
+                parcel.setDataPosition(0);
+                ApplicationInfo info = ApplicationInfo.CREATOR.createFromParcel(parcel);
+                parcel.enforceNoDataAvail();
+                return platformCompat().isChangeEnabled(changeId, info);
+            } finally {
+                parcel.recycle();
+            }
+        }
+
+        private static PlatformCompat platformCompat() {
             PlatformCompat compat = (PlatformCompat) ServiceManager.getService(
                     Context.PLATFORM_COMPAT_SERVICE);
             if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
-            return compat.isChangeEnabledInternal(
-                    ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES, packageName, targetSdk);
+            return compat;
         }
 
         private static void enforceSystemUid() {

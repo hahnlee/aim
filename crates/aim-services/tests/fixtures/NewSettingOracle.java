@@ -2,6 +2,22 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("compat-info")) {
+            byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1]));
+            android.os.Parcel parcel = android.os.Parcel.obtain();
+            try {
+                parcel.unmarshall(bytes, 0, bytes.length);
+                parcel.setDataPosition(0);
+                var info = android.content.pm.ApplicationInfo.CREATOR.createFromParcel(parcel);
+                parcel.enforceNoDataAvail();
+                var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
+                    android.os.ServiceManager.getService("platform_compat"));
+                System.out.println(compat.isChangeEnabled(133396946L, info));
+            } finally {
+                parcel.recycle();
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("library-policy")) {
             System.out.println(com.android.server.pm.parsing.library.PackageBackwardCompatibility
                 .bootClassPathContainsATB());

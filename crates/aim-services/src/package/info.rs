@@ -1578,7 +1578,7 @@ fn data_directory(volume: Option<&str>) -> String {
 }
 
 /// `PackageImpl.toAppInfoWithoutState`.
-fn app_info_without_state(pkg: &AndroidPackage, sys: &System) -> ApplicationInfo {
+pub fn app_info_without_state(pkg: &AndroidPackage, sys: &System) -> ApplicationInfo {
     let split_paths = pkg.split_code_paths.clone().filter(|p| !p.is_empty());
     let use_round = sys.use_round_icon && pkg.round_icon_res != 0;
     ApplicationInfo {

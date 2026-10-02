@@ -18,7 +18,7 @@ const TEST_BASE: &str = "android.test.base";
 pub struct LibraryCompatibility {
     libraries: Vec<Library>,
     sdk: Sdk,
-    test_base_on_bootclasspath: bool,
+    pub(super) test_base_on_bootclasspath: bool,
 }
 
 impl LibraryCompatibility {

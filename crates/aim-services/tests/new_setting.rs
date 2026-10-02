@@ -414,6 +414,13 @@ fn new_settings_match_the_original_runtime() {
         })
         .collect();
     let config = SystemConfig::read(&aim_paths::derived_image(), &|p| properties.get(p).cloned());
+    let framework =
+        aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
+    let app_system = aim_services::package::system_config::system(
+        &aim_paths::derived_image(),
+        &|p| properties.get(p).cloned(),
+        &framework,
+    );
     let original_bcp = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
@@ -496,6 +503,33 @@ fn new_settings_match_the_original_runtime() {
                                 list.push(name.into());
                             }
                         }
+                    }
+                    if let Some(expected_change) =
+                        change.filter(|_| required == "-" && optional == "-" && !updated)
+                    {
+                        let mut encoded = aim_binder_host::parcel::Parcel::new();
+                        aim_services::package::info::app_info_without_state(&actual, &app_system)
+                            .write(&mut encoded, None);
+                        fs::write(
+                            boot.data.join("data/local/tmp/compat-info.parcel"),
+                            encoded.data(),
+                        )
+                        .unwrap();
+                        let result = run(boot.command().args([
+                            "shell", "/system/bin/app_process",
+                            "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                            "/system/bin", "com.android.server.pm.NewSettingOracle", "compat-info",
+                            "/data/local/tmp/compat-info.parcel",
+                        ]));
+                        assert_eq!(
+                            String::from_utf8(result.stdout)
+                                .unwrap()
+                                .trim()
+                                .parse::<bool>()
+                                .unwrap(),
+                            expected_change,
+                            "native ApplicationInfo compatibility input SDK {sdk}"
+                        );
                     }
                     compatibility
                         .apply(&mut actual, system, updated, change)
