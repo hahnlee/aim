@@ -225,6 +225,57 @@ fn allocation_matches_the_original_runtime() {
     for saved in &state.settings.packages {
         assert_eq!(merged.ids.get(saved.app_id), restored.get(saved.app_id));
     }
+    let image = aim_paths::derived_image();
+    let mut platform =
+        aim_services::package::parse::Platform::load(&image, Default::default()).unwrap();
+    let density =
+        String::from_utf8(run(boot.command().args(["shell", "wm", "density"])).stdout).unwrap();
+    let density = density
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("Physical density: ")
+                .or_else(|| line.strip_prefix("Override density: "))
+                .map(|n| n.parse().unwrap())
+        })
+        .last()
+        .expect("original display density");
+    platform.density_dpi = Some(density);
+    let data_files = boot.data.join("data");
+    let apks = aim_services::package::write::Apks {
+        files: Box::new(move |path| {
+            Some(if let Some(relative) = path.strip_prefix("/data/") {
+                data_files.join(relative)
+            } else {
+                image.join(path.trim_start_matches('/'))
+            })
+        }),
+        platform,
+    };
+    let inputs = aim_services::package::scan::Inputs::load(&state, &apks).unwrap();
+    assert_eq!(inputs.active.len(), state.settings.packages.len());
+    for (name, record) in &inputs.active {
+        assert_eq!(&record.identity.internal_name, name);
+        assert_eq!(
+            merged.ids.get(record.settings.app_id),
+            restored.get(record.settings.app_id)
+        );
+    }
+    let static_libraries: Vec<_> = inputs
+        .active
+        .values()
+        .filter(|r| r.parsed.static_shared_library_name.is_some())
+        .collect();
+    assert!(!static_libraries.is_empty());
+    for record in static_libraries {
+        assert_ne!(record.identity.internal_name, record.identity.manifest_name);
+        assert_eq!(
+            record.identity.internal_name,
+            format!(
+                "{}_{}",
+                record.identity.manifest_name, record.parsed.static_shared_lib_version
+            )
+        );
+    }
     for package in &state.settings.packages {
         if package.shared_user {
             assert!(matches!(

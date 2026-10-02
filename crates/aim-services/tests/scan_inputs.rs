@@ -122,6 +122,15 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     );
     assert!(!active.signing.public_keys.is_empty());
 
+    // A valid signed APK cannot inherit a different persisted identity.
+    state.settings.packages[0].name = "unrelated.saved.package".into();
+    let before = state.clone();
+    let error = Inputs::load(&state, &apks).unwrap_err();
+    assert_eq!(error.phase, "identity");
+    assert!(error.message.contains("com.google.android.gsf"));
+    assert_eq!(state, before);
+    state.settings.packages[0].name = "com.google.android.gsf".into();
+
     state.settings.packages[0].code_path = "/data/app/missing/base.apk".into();
     let error = Inputs::load(&state, &apks).unwrap_err();
     assert_eq!(error.package, "com.google.android.gsf");

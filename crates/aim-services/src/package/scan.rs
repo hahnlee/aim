@@ -6,7 +6,9 @@
 use super::{State, parse, pkg::AndroidPackage, settings, sign, write::Apks};
 use std::collections::BTreeMap;
 
+mod identity;
 mod image;
+pub use identity::Identity;
 pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
 
 #[derive(Debug)]
@@ -14,6 +16,7 @@ pub struct Record {
     pub settings: settings::Package,
     pub parsed: AndroidPackage,
     pub signing: sign::SigningDetails,
+    pub identity: Identity,
 }
 
 #[derive(Debug, Default)]
@@ -55,6 +58,20 @@ impl Inputs {
                 let parsed = apks
                     .parsed_path(&ps.code_path, flags)
                     .map_err(|e| fail("parse", e))?;
+                let identity = Identity::select(
+                    &parsed,
+                    &state.settings,
+                    ps.flags & settings::FLAG_SYSTEM != 0,
+                );
+                if identity.internal_name != ps.name {
+                    return Err(fail(
+                        "identity",
+                        format!(
+                            "manifest {} selects {}, settings claim {}",
+                            identity.manifest_name, identity.internal_name, ps.name
+                        ),
+                    ));
+                }
                 let signing = apks
                     .signing_details(&parsed)
                     .map_err(|e| fail("signatures", e))?;
@@ -70,6 +87,7 @@ impl Inputs {
                             settings: ps.clone(),
                             parsed,
                             signing,
+                            identity,
                         },
                     )
                     .is_some()

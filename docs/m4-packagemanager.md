@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 139 package unit tests pass. The image has no
+linkage verification and 140 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -601,7 +601,7 @@ runtime restriction on reusing deleted IDs and fresh-restoration holes.
 An explicitly run original-runtime test matches allocation, deletion,
 ownership replacement and exhaustion. On its disposable original-PMS
 boot (boot completed), all 243 active packages and 16 shared UID groups
-restored with their saved IDs. Java API linkage and 139 package unit tests
+restored with their saved IDs. Java API linkage and 140 package unit tests
 pass. `owner::shared_users::Bootstrap` now seeds the nine pinned platform
 shared users and the valid OEM declarations with fixed IDs and
 system/privileged flags (#803). Rejected OEM names, ranges and slot
@@ -621,11 +621,26 @@ original-PMS boot (2026-10-02, boot completed) restores all 243 active
 package IDs; after pruning, all 16 group names, IDs and signing records
 match the original saved settings. Unit tests cover flags, memberships,
 disabled-only members, snapshot/input immutability and cursor behavior;
-all 139 package unit tests pass. Conflicting decoded settings fail with
+all 140 package unit tests pass. Conflicting decoded settings fail with
 context; ordered recovery from corrupt raw Settings records remains
 unimplemented (#803). Scan reconciliation, shared UID signature/migration
 policy, UID persistence and snapshot publication are not connected
-(#702, #803). The pinned Settings
+(#702, #803).
+`scan::Identity` now selects manifest, internal and real names using the
+pinned static-library suffix and authorized original-package system rename
+rules (#804). Persisted scan inputs compare the selected internal name
+with Settings and reject mismatches. Full signature verification alone
+does not authorize a saved package identity/UID. An explicit disposable
+original-PMS boot (2026-10-02, boot completed) reads the actual display
+density and native-parses/verifies all 243 active APKs plus disabled
+originals. Every active selected internal name and restored UID matches
+the original saved state; static library internal names differ from their
+manifest names as the original records. Original-image scan-input tests
+cover a different saved name pointing at a valid signed APK and preserve
+input settings on failure. Component-name transformation and scan-time
+signing/UID authorization remain unimplemented (#804); this is identity
+selection, not a published native scan or the C switch.
+The pinned Settings
 DEX compiles out the SDK/no-ID exception in the source: SDK libraries
 require a positive app/shared-user ID (#802). An explicit original-image
 test pins the inspected read/registration control flow, and native reader
