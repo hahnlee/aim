@@ -706,7 +706,7 @@ package/group signing state changes only after all fallible work succeeds,
 and later rejection or fatal mismatch leaves earlier candidate commits
 intact. `Inputs::load_verified_code` supplies integrity-verified code for
 this owner phase; its records do not grant saved signer/UID authorization.
-Four explicit native scan tests pass, including initial/OTA sequences and
+Five explicit native scan tests pass, including initial/OTA sequences and
 /data, origin and UID-change rejection, missing/changed manifest groups,
 and retained versus already-left shared UID declarations. The OTA sequence
 uses an explicitly synthetic signer candidate with an unchanged manifest.
@@ -714,7 +714,19 @@ On a disposable original-PMS boot
 all 243 active saved APKs pass SigningScan in supplied persisted-record
 order. Package metadata and all 16 saved group signing/UID records survive;
 verified serialized keys are supplied for package records. This is not
-the complete image/data scan order or query-snapshot publication.
+the complete image/data scan order or query-snapshot publication. Candidate shared UID migration now implements the
+pinned single-user conversion: an accepted active member must be leaving,
+and at most one disabled version may remain, itself parsed and leaving.
+With the image's BEST_EFFORT policy selected explicitly, both versions
+become independent under the same app ID, the group is removed, and the
+UID-slot owner becomes the package without moving the allocation cursor.
+NEW_INSTALL_ONLY remains the default and leaves existing groups intact.
+Five explicit scan tests cover unparsed/non-leaving members, absent or
+non-leaving disabled code, multiple members, policy selection, unchanged
+metadata, snapshots and preserved allocation. An original-image DEX test
+pins the three inspected eligibility/conversion methods. These are
+candidate-state checks; ownership persistence, publication and full boot
+migration remain under #803 and #798.
 `Store::commit_signatures` now persists package/group certificate and
 lineage capability state in the retained packages.xml document. It emits
 ABX with document-wide certificate definitions/references and the existing

@@ -261,7 +261,7 @@ record finishes all fallible work before updating package/group signatures,
 and later rejection or fatal mismatch leaves prior candidate commits
 intact. `Inputs::load_verified_code` provides integrity-verified records
 for this phase without granting saved signer/UID authorization; `load`
-retains the normal-gate diagnostic. Four explicit native scan tests pass,
+retains the normal-gate diagnostic. Five explicit native scan tests pass,
 including sequential initial/OTA cases and rejection of /data replacement,
 tampered origin and UID changes, changed/missing manifest groups, and
 retained versus already-left shared UID declarations. The signer-mismatch
@@ -271,7 +271,19 @@ manifest. On a disposable original-PMS boot, all
 all package metadata and 16 saved group signatures/UIDs remain unchanged,
 with verified serialized keys supplied for package records. This is a
 candidate signing phase, not the complete image/data scan order or query
-snapshot publication. `Store::commit_signatures` now writes the candidate
+snapshot publication. Candidate shared UID migration now implements the
+pinned single-user conversion: an accepted active member must be leaving,
+and at most one disabled version may remain, itself parsed and leaving.
+With the image's BEST_EFFORT policy selected explicitly, both versions
+become independent under the same app ID, the group is removed, and the
+UID-slot owner becomes the package without moving the allocation cursor.
+NEW_INSTALL_ONLY remains the default and leaves existing groups intact.
+Five explicit scan tests cover unparsed/non-leaving members, absent or
+non-leaving disabled code, multiple members, policy selection, unchanged
+metadata, snapshots and preserved allocation. An original-image DEX test
+pins the three inspected eligibility/conversion methods. These are
+candidate-state checks; ownership persistence, publication and full boot
+migration remain under #803 and #798. `Store::commit_signatures` now writes the candidate
 package/group certificates and capabilities to the retained packages.xml
 document as ABX with the existing backup/reserve and system inode protocol.
 Its document-wide certificate table defines each encoding once and

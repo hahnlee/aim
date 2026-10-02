@@ -1,8 +1,12 @@
 //! Ordered signing reconciliation for already-saved APK identities.
 //! Candidate state is separate from the published snapshot and disk.
 //! New/removed package reconciliation and side effects remain under #702.
+//! Shared UID migration is ported from android-16.0.0_r1 Settings,
+//! SharedUserSetting and SharedUidMigration.
+//! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{Error, Record, authorize, physical_parse_flags};
 use crate::package::{
+    owner::app_ids::Owner,
     owner::shared_users::{Bootstrap, RestoreError, ScanOrigin, SignatureError, saved_signatures},
     parse,
     pkg::booleans,
@@ -10,13 +14,23 @@ use crate::package::{
     sign::SigningDetails,
     system_config::SystemConfig,
 };
+use std::collections::BTreeMap;
+
+/// SharedUidMigration permits only these two strategies in the pinned image.
+/// The owner supplies image policy; this does not read a host environment flag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SharedUidMigration {
+    #[default]
+    NewInstallOnly,
+    BestEffort,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SigningScan {
     pub settings: Settings,
     pub identities: Bootstrap,
     first_api_level: i32,
-    parsed: Vec<(String, i32, SigningDetails)>,
+    parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -138,8 +152,8 @@ impl SigningScan {
                     let others: Vec<_> = self
                         .parsed
                         .iter()
-                        .filter(|(name, id, _)| name != &previous.name && *id == previous.app_id)
-                        .map(|(_, _, details)| details.clone())
+                        .filter(|(name, id, _, _)| name != &previous.name && *id == previous.app_id)
+                        .map(|(_, _, details, _)| details.clone())
                         .collect();
                     group
                         .merge_authorized_lineage(&record.signing, &others)
@@ -194,15 +208,97 @@ impl SigningScan {
             self.identities.shared_users.insert(name, group);
         }
         self.parsed
-            .retain(|(name, _, _)| name != &record.settings.name);
+            .retain(|(name, _, _, _)| name != &record.settings.name);
         self.parsed.push((
             record.settings.name.clone(),
             record.settings.app_id,
             record.signing.clone(),
+            record.parsed.is(booleans::LEAVING_SHARED_UID),
         ));
         Ok(SigningOutcome {
             system_signature_mismatch: mismatch,
         })
+    }
+
+    /// Settings.checkAndConvertSharedUserSettingsLPw and SharedUserSetting's
+    /// isSingleUser. Only an accepted parsed active member can leave. A lone
+    /// disabled version must also have parsed successfully and be leaving.
+    /// This changes candidate UID ownership, not disk or published queries.
+    pub fn migrate_single_shared_user(
+        &mut self,
+        name: &str,
+        strategy: SharedUidMigration,
+        disabled: &BTreeMap<String, Record>,
+    ) -> Result<bool, Error> {
+        if strategy != SharedUidMigration::BestEffort {
+            return Ok(false);
+        }
+        let group = self
+            .identities
+            .shared_users
+            .get(name)
+            .ok_or_else(|| Error {
+                package: name.into(),
+                path: String::new(),
+                phase: "identity",
+                message: "shared UID migration group disappeared (#803)".into(),
+            })?;
+        let id = group.app_id;
+        let active: Vec<_> = self
+            .settings
+            .packages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.shared_user && p.app_id == id)
+            .map(|(at, _)| at)
+            .collect();
+        let old: Vec<_> = self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.shared_user && p.app_id == id)
+            .map(|(at, _)| at)
+            .collect();
+        if active.len() != 1 || old.len() > 1 {
+            return Ok(false);
+        }
+        let package = &self.settings.packages[active[0]];
+        if !self
+            .parsed
+            .iter()
+            .any(|(n, app_id, _, leaving)| n == &package.name && *app_id == id && *leaving)
+        {
+            return Ok(false);
+        }
+        if let Some(&at) = old.first() {
+            let saved = &self.settings.disabled_system_packages[at];
+            if !disabled.get(&saved.name).is_some_and(|r| {
+                r.settings == *saved
+                    && r.parsed.package_name == saved.name
+                    && r.parsed.is(booleans::LEAVING_SHARED_UID)
+            }) {
+                return Ok(false);
+            }
+        }
+        // replaceSetting retains the same app ID and allocation cursor. All
+        // fallible work precedes unlinking either active or disabled settings.
+        self.identities
+            .ids
+            .replace(id, Owner::Package(package.name.clone()))
+            .map_err(|e| Error {
+                package: package.name.clone(),
+                path: package.code_path.clone(),
+                phase: "identity",
+                message: format!("shared UID migration failed: {e:?}"),
+            })?;
+        self.settings.packages[active[0]].shared_user = false;
+        if let Some(&at) = old.first() {
+            self.settings.disabled_system_packages[at].shared_user = false;
+        }
+        self.settings.shared_users.retain(|g| g.name != name);
+        self.identities.shared_users.remove(name);
+        Ok(true)
     }
 }
 

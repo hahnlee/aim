@@ -115,3 +115,81 @@ fn shared_uid_signature_scan_policy_matches_the_pinned_image() {
     }
     assert_eq!(checked, 2);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn single_shared_uid_migration_matches_the_pinned_image() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        for (owner, method, length, expected, calls) in [
+            (
+                "Lcom/android/server/pm/SharedUserSetting;",
+                "isSingleUser",
+                51,
+                "2d2c9c51a1dc31736591076174b35cf6c4521e88d6a2a414bb408efbfb85dbfb",
+                &[
+                    (0x2, "size"),
+                    (0xd, "size"),
+                    (0x16, "size"),
+                    (0x24, "getPkg"),
+                    (0x2a, "isLeavingSharedUser"),
+                ][..],
+            ),
+            (
+                "Lcom/android/server/pm/Settings;",
+                "convertSharedUserSettingsLPw",
+                57,
+                "407d1321ce1eea64fc37b19618218855867621f535ed95100f6df6e8c1382472",
+                &[
+                    (0xd, "getAppId"),
+                    (0x11, "replaceSetting"),
+                    (0x15, "setSharedUserAppId"),
+                    (0x2c, "setSharedUserAppId"),
+                    (0x35, "remove"),
+                ][..],
+            ),
+            (
+                "Lcom/android/server/pm/Settings;",
+                "checkAndConvertSharedUserSettingsLPw",
+                41,
+                "3a52ac1dd5a7dbae83a372423371b44997fb2a49b98342f33018e8bd49e75620",
+                &[
+                    (0, "isSingleUser"),
+                    (0x12, "getPkg"),
+                    (0x18, "isLeavingSharedUser"),
+                    (0x1f, "applyStrategy"),
+                    (0x25, "convertSharedUserSettingsLPw"),
+                ][..],
+            ),
+        ] {
+            let Some(class) = dex.class(owner) else {
+                continue;
+            };
+            let code = dex.methods_named(class, method).unwrap();
+            assert_eq!(code.len(), 1);
+            let words = units(&bytes, &code[0]).unwrap();
+            assert_eq!(words.len(), length);
+            let raw: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(format!("{:x}", Sha256::digest(&raw)), expected);
+            for (at, called) in calls {
+                assert_eq!(dex.method(words[at + 1] as u32).unwrap().1, *called);
+            }
+            match method {
+                "isSingleUser" => {
+                    assert_eq!(&words[8..10], &[0x2032, 3]); // Active count must be one.
+                    assert_eq!(&words[17..19], &[0x2037, 3]); // Disabled count must not exceed one.
+                    assert_eq!(&words[40..42], &[0x0338, 9]); // Null disabled parsed package rejects.
+                }
+                "convertSharedUserSettingsLPw" => assert_eq!(words[0x14], 0xf212), // INVALID_UID = -1.
+                _ => assert_eq!(words[0x1e], 0x2012), // BEST_EFFORT = 2.
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 3);
+}

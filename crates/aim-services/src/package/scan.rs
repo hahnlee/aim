@@ -15,7 +15,7 @@ mod image;
 mod signing;
 pub use identity::Identity;
 pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
-pub use signing::{SigningError, SigningOutcome, SigningScan};
+pub use signing::{SharedUidMigration, SigningError, SigningOutcome, SigningScan};
 
 #[derive(Debug)]
 pub struct Record {

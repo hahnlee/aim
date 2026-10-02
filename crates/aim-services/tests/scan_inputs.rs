@@ -488,3 +488,179 @@ fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() 
     ));
     assert_eq!(data_scan, before);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn single_shared_uid_migration_preserves_ids_and_requires_both_versions_to_leave() {
+    use aim_services::package::{
+        owner::app_ids::Owner,
+        pkg::booleans,
+        scan::{SharedUidMigration, SigningScan},
+    };
+    let root = aim_paths::original_image();
+    let image = root.clone();
+    let apks = Apks {
+        files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    let mut state = State {
+        settings: settings::Settings {
+            packages: vec![settings::Package {
+                name: "com.google.android.gsf".into(),
+                code_path:
+                    "/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"
+                        .into(),
+                app_id: 10001,
+                shared_user: true,
+                ..Default::default()
+            }],
+            shared_users: vec![settings::SharedUser {
+                name: "pending".into(),
+                app_id: 10001,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        list: vec![],
+        access: None,
+        users: vec![],
+    };
+    let mut inputs = Inputs::load_verified_code(&state, &apks).unwrap();
+    let record = inputs.active.get_mut("com.google.android.gsf").unwrap();
+    let group = record.parsed.shared_user_id.clone().unwrap();
+    state.settings.shared_users[0].name = group.clone();
+    record.parsed.booleans &= !booleans::LEAVING_SHARED_UID;
+    let mut scan = SigningScan::new(&Default::default(), &state.settings, 36).unwrap();
+    let snapshot = scan.clone();
+    assert!(
+        !scan
+            .migrate_single_shared_user(&group, SharedUidMigration::BestEffort, &inputs.disabled)
+            .unwrap()
+    );
+    assert_eq!(scan, snapshot); // Unparsed active setting cannot migrate.
+    scan.apply(&inputs.active["com.google.android.gsf"])
+        .unwrap();
+    let snapshot = scan.clone();
+    assert!(
+        !scan
+            .migrate_single_shared_user(&group, SharedUidMigration::BestEffort, &inputs.disabled)
+            .unwrap()
+    );
+    assert_eq!(scan, snapshot); // Parsed package is not leaving.
+
+    // Synthetic parser-policy inputs; the original APK and its verified signers
+    // stay untouched. Both version states are checked before unlinking either.
+    inputs
+        .active
+        .get_mut("com.google.android.gsf")
+        .unwrap()
+        .parsed
+        .booleans |= booleans::LEAVING_SHARED_UID;
+    let mut no_disabled = SigningScan::new(&Default::default(), &state.settings, 36).unwrap();
+    no_disabled
+        .apply(&inputs.active["com.google.android.gsf"])
+        .unwrap();
+    assert!(
+        no_disabled
+            .migrate_single_shared_user(&group, SharedUidMigration::BestEffort, &Default::default())
+            .unwrap()
+    );
+    assert!(!no_disabled.settings.packages[0].shared_user);
+    assert_eq!(no_disabled.settings.packages[0].app_id, 10001);
+    state.settings.disabled_system_packages = state.settings.packages.clone();
+    let old = &inputs.active["com.google.android.gsf"];
+    inputs.disabled.insert(
+        old.settings.name.clone(),
+        aim_services::package::scan::Record {
+            settings: old.settings.clone(),
+            parsed: old.parsed.clone(),
+            signing: old.signing.clone(),
+            identity: old.identity.clone(),
+            origin: old.origin,
+        },
+    );
+    let mut scan = SigningScan::new(&Default::default(), &state.settings, 36).unwrap();
+    scan.apply(&inputs.active["com.google.android.gsf"])
+        .unwrap();
+    let snapshot = scan.clone();
+    assert!(
+        !scan
+            .migrate_single_shared_user(
+                &group,
+                SharedUidMigration::NewInstallOnly,
+                &inputs.disabled
+            )
+            .unwrap()
+    );
+    assert_eq!(scan, snapshot);
+    inputs
+        .disabled
+        .get_mut("com.google.android.gsf")
+        .unwrap()
+        .parsed
+        .booleans &= !booleans::LEAVING_SHARED_UID;
+    assert!(
+        !scan
+            .migrate_single_shared_user(&group, SharedUidMigration::BestEffort, &inputs.disabled)
+            .unwrap()
+    );
+    assert_eq!(scan, snapshot);
+    assert!(
+        !scan
+            .migrate_single_shared_user(&group, SharedUidMigration::BestEffort, &Default::default())
+            .unwrap()
+    );
+    assert_eq!(scan, snapshot);
+    inputs
+        .disabled
+        .get_mut("com.google.android.gsf")
+        .unwrap()
+        .parsed
+        .booleans |= booleans::LEAVING_SHARED_UID;
+    for disabled_member in [false, true] {
+        let mut multiple = scan.clone();
+        let packages = if disabled_member {
+            &mut multiple.settings.disabled_system_packages
+        } else {
+            &mut multiple.settings.packages
+        };
+        let mut other = packages[0].clone();
+        other.name = "other.member".into();
+        packages.push(other);
+        let before = multiple.clone();
+        assert!(
+            !multiple
+                .migrate_single_shared_user(
+                    &group,
+                    SharedUidMigration::BestEffort,
+                    &inputs.disabled
+                )
+                .unwrap()
+        );
+        assert_eq!(multiple, before);
+    }
+    assert!(
+        scan.migrate_single_shared_user(&group, SharedUidMigration::BestEffort, &inputs.disabled)
+            .unwrap()
+    );
+    assert!(!scan.settings.packages[0].shared_user);
+    assert!(!scan.settings.disabled_system_packages[0].shared_user);
+    assert_eq!(scan.settings.packages[0].app_id, 10001);
+    assert_eq!(scan.settings.disabled_system_packages[0].app_id, 10001);
+    assert_eq!(
+        scan.identities.ids.get(10001),
+        Some(&Owner::Package("com.google.android.gsf".into()))
+    );
+    assert!(!scan.identities.shared_users.contains_key(&group));
+    assert!(scan.settings.shared_users.is_empty());
+    let mut expected = snapshot.settings.clone();
+    expected.packages[0].shared_user = false;
+    expected.disabled_system_packages[0].shared_user = false;
+    expected.shared_users.clear();
+    assert_eq!(scan.settings, expected); // All other persisted metadata survives.
+    let mut before_ids = snapshot.identities.ids.clone();
+    assert_eq!(
+        scan.identities.ids.acquire(Owner::Package("next".into())),
+        before_ids.acquire(Owner::Package("next".into()))
+    );
+}
