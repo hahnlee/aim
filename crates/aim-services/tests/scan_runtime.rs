@@ -161,6 +161,35 @@ fn saved_scan_libraries_match_original_pms() {
         factory_users.lines().collect::<Vec<_>>(),
         ["0", "456", "456"]
     );
+    let code_parent = boot.data.join("data/app/~~aim-cleanup-proof");
+    let code_child = code_parent.join("com.aim.cleanup-test");
+    fs::create_dir_all(code_child.join("lib/arm64")).unwrap();
+    fs::write(code_child.join("base.apk"), b"disposable replaced code").unwrap();
+    fs::write(
+        code_child.join("lib/arm64/libfixture.so"),
+        b"disposable library",
+    )
+    .unwrap();
+    let protected = boot.data.join("data/local/tmp/aim-cleanup-invalid");
+    fs::create_dir(&protected).unwrap();
+    fs::write(protected.join("keep"), b"unrelated data").unwrap();
+    let installer = String::from_utf8(
+        run(boot.client(1000).args([
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/boot-scan.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.BootScanOracle",
+            "installer-cleanup",
+        ]))
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        installer.lines().collect::<Vec<_>>(),
+        ["child-removed", "parent-removed", "invalid-root-rejected"]
+    );
+    assert!(!code_parent.exists());
+    assert!(protected.join("keep").exists());
     let mut platform = Platform::load(&image, Default::default()).unwrap();
     let density =
         String::from_utf8(run(boot.command().args(["shell", "wm", "density"])).stdout).unwrap();

@@ -25,6 +25,36 @@ pub struct Boot {
     pub data: PathBuf,
 }
 impl Boot {
+    /// Start a client with the Linux credentials its original daemon requires.
+    pub fn client(&self, uid: u32) -> Command {
+        let state = fs::read_to_string(PathBuf::from(format!(
+            "{}.aimctl/state",
+            self.data.display()
+        )))
+        .unwrap();
+        let guest: u32 = state
+            .lines()
+            .find_map(|line| line.strip_prefix("guest="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let runtime = PathBuf::from(format!("{}.run", self.data.display()));
+        let environ = fs::read_to_string(runtime.join("environ")).unwrap();
+        let mut command = Command::new(aim_paths::root().join("target/release/linux-run"));
+        command
+            .env_clear()
+            .envs(environ.lines().filter_map(|line| line.split_once('=')))
+            .arg("--inherit-env")
+            .arg("--root")
+            .arg(aim_paths::derived_image())
+            .arg("--path-map")
+            .arg(runtime.join("path-map"))
+            .arg("--by-pid")
+            .arg(runtime.join("identity/by-pid"))
+            .args(["--binder", &format!("dev.aim.guest-init.{guest}.binder")])
+            .args(["--identity-text", &format!("uid\t{uid}\ngid\t{uid}\n")]);
+        command
+    }
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.ctl);
         cmd.arg("--data").arg(&self.data);

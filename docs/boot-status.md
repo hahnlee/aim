@@ -176,7 +176,7 @@ physical order and preserves the five no-APK directory rejections. Final public/
 private flags, version, target SDK, file time, update hash and current signing
 certificates match all 240 original packages at unchanged code paths. The saved
 scan still matches 243 active/3 disabled packages, 16 groups and 23 libraries;
-the whole comparison passes (254.72s), with unchanged disposable disk state and
+the whole comparison passes (262.38s), with unchanged disposable disk state and
 owned process/mount cleanup. A separate original-APK fixture passes (22.28s),
 including reserved APEX UID preservation, invalid seed rejection, domain-owner
 failure, missing framework/image policy and unavailable pre-platform privilege
@@ -246,9 +246,17 @@ updated-system bit. Stale selection and incremental errors preserve code and
 settings. Filesystem tests cover directory order, parent/cache cleanup, app
 data preservation and partial installer failure/retry; the directory backend
 in those tests deletes disposable files, not the original installd daemon.
-Actual original-installer acceptance, incremental/external-volume storage,
-durable partial cleanup recovery and old-path bookkeeping remain #816/#798,
-as does complete native boot integration.
+A native Binder client test now sends generated rmPackageDir requests through
+servicemanager to a disposable filesystem endpoint: system UID, real directory
+deletion, returned installer exceptions and parent-only retry all pass. The
+original-runtime comparison separately invokes the image's IInstalld Java
+interface as system UID against the original daemon, checks the child and
+random parent disappear after each call, and verifies an invalid /data/local/tmp
+root rejects with unrelated data intact. The original image API linkage for
+IInstalld/Stub is checked too. These are separate native-client and original-
+daemon proofs, not an integrated native restoration boot. That integration,
+incremental/external-volume storage, durable partial cleanup recovery and
+old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
@@ -256,7 +264,7 @@ All 301 units pass (3.07s). The original signed framework/GSF fixture passes
 (22.53s), including real disposable file cleanup, setting enable and the factory
 active rescan. All eight
 original-APK scan-input tests passed before this settings transition (5.69s). The Java image
-API linkage build passes (14.6s). This is the initial system APK phase, not a
+API linkage build passes (13.2s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version
 selection, stub expansion, graph/permission/commit side effects, persistence and
 replica publication remain #707/#702/#798/#810/#812/#813. Original PMS still runs.
