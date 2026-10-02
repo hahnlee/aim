@@ -496,6 +496,24 @@ successful files, as the copy helper does; whole-install rollback remains with t
 install owner. Incremental copies, production filesystem/clock owner delivery and
 boot/install publication remain #810/#798/#702; native PMS is not activated.
 
+`SigningScan::finish_scan_metadata` now stages accepted ABI/copy, page-size and
+code-time/version metadata through one completion path. It validates the current
+candidate and required image page policy, returns copy reports and both ABI and
+alignment diagnostics, and accepts the staged settings only after all stages
+succeed. Factory/saved reuse needs no writable destination; required extraction
+still rejects without one. Page alignment now binds handle flags to the parsed
+package and its root to the accepted setting's legacy native path (#811).
+The runtime verifies compressed extracted ELF alignment despite contradictory
+caller flags and a divergent parsed root, direct-mapping and missing-file
+diagnostics, copy-then-code-time failure preservation, and successful copied and
+saved-ABI completion. All 288 aim-services units pass (3.25s); the expanded original
+runtime passes (83.02s), with prior component comparisons, Settings launch and
+owned cleanup. Generated ZIP completion tests isolate these seams; they do not
+prove a complete signed APK install or the original full ScanPackageUtils entry
+point. Files copied before a later error remain with the install cleanup owner.
+Complete boot ordering, final flags, persistence of the full result and replica
+publication remain #702/#810/#798.
+
 `Store::commit_native_library_metadata` now persists completed scan ABI/path
 metadata for retained active and disabled-system packages through the existing
 ABX backup/reserve owner. Active packages also persist page-size compatibility;

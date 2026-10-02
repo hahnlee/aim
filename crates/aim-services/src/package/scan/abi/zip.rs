@@ -37,6 +37,14 @@ pub struct NativeLibraryEntry {
 }
 
 impl NativeLibraryInstallPolicy {
+    pub(crate) fn package_flags(mut self, pkg: &crate::package::pkg::AndroidPackage) -> Self {
+        use crate::package::pkg::booleans;
+        self.extract = pkg.is(booleans::EXTRACT_NATIVE_LIBS);
+        self.debuggable = pkg.is(booleans::DEBUGGABLE);
+        self.manifest_compat_disabled = pkg.page_size_app_compat_flags == 64;
+        self
+    }
+
     /// NativeLibraryHelper.copyFileIfChanged's admission and extraction rules.
     /// This reads the APK only; a plan is not proof of completed extraction.
     pub fn inspect(

@@ -78,6 +78,7 @@ impl SigningScan {
     ) -> Result<(NewPackageOutcome, Option<String>), SigningError> {
         let record = &mut candidate.record;
         let at = self.accepted_slot(record, "page-size")?;
+        let install = install.package_flags(&record.parsed);
         if record.parsed.path.as_deref() != Some(&record.settings.code_path) {
             return Err(SigningError::Rejected(Error {
                 package: record.settings.name.clone(),
@@ -86,13 +87,10 @@ impl SigningScan {
                 message: "parsed code path disagrees with accepted setting".into(),
             }));
         }
+        let native_root = record.settings.legacy_native_library_path.clone();
         let alignment = || {
             let paths = super::NativeLibraryPaths {
-                root: record
-                    .parsed
-                    .native_library_root_dir
-                    .clone()
-                    .ok_or("missing native library root")?,
+                root: native_root.clone().ok_or("missing native library root")?,
                 requires_isa: record.parsed.native_library_root_requires_isa,
                 primary: record.parsed.native_library_dir.clone().unwrap_or_default(),
                 secondary: record.parsed.secondary_native_library_dir.clone(),
@@ -195,7 +193,7 @@ impl SigningScan {
         let mut copies = Vec::new();
         if let Some(scan) = scan {
             if scan.requires_extraction {
-                let Some((mut install, destination)) = installation else {
+                let Some((install, destination)) = installation else {
                     return Err(reject(
                         "native library extraction has not completed (#810)".into(),
                     ));
@@ -205,9 +203,7 @@ impl SigningScan {
                         "writable native root disagrees with derived guest path".into(),
                     ));
                 }
-                install.extract = record.parsed.is(booleans::EXTRACT_NATIVE_LIBS);
-                install.debuggable = record.parsed.is(booleans::DEBUGGABLE);
-                install.manifest_compat_disabled = record.parsed.page_size_app_compat_flags == 64;
+                let install = install.package_flags(&record.parsed);
                 for abi in &scan.extraction_abis {
                     let copied = apks
                         .copy_native_libraries_for_supported_abi(
@@ -256,7 +252,11 @@ impl SigningScan {
         Ok((candidate, mismatch, copies))
     }
 
-    fn accepted_slot(&self, record: &Record, phase: &'static str) -> Result<usize, SigningError> {
+    pub(super) fn accepted_slot(
+        &self,
+        record: &Record,
+        phase: &'static str,
+    ) -> Result<usize, SigningError> {
         let reject = || {
             SigningError::Rejected(Error {
                 package: record.settings.name.clone(),

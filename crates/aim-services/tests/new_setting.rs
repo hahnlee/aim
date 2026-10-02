@@ -2104,6 +2104,132 @@ fn new_settings_match_the_original_runtime() {
         .unwrap();
     assert!(!mismatch);
     let page_policy = PageSizeCompatPolicy::from_platform(&apks.platform).unwrap();
+    if page_policy.enabled && page_size == 16384 {
+        // The generated compressed ELF fixture's original extracted alignment
+        // result is 4. A caller's contradictory direct-map flags must not select
+        // the APK path instead of the parsed package's extracted library.
+        let mut alignment_candidate = duplicate(&installed);
+        alignment_candidate.record.parsed.base_apk_path =
+            Some("/data/local/tmp/native-alignment-38-0.zip".into());
+        alignment_candidate.record.parsed.page_size_app_compat_flags = 0;
+        alignment_candidate.record.parsed.native_library_root_dir =
+            Some("/data/local/tmp/unaccepted-native-root".into());
+        let library = native_root.join("lib0.so");
+        let payload =
+            fs::read(boot.data.join("data/local/tmp/native-alignment-38/lib0.so")).unwrap();
+        fs::write(&library, &payload).unwrap();
+        let before = alignment_candidate.record.settings.page_size_compat;
+        let alignment_context = AbiScanContext {
+            system: false,
+            ..install_context
+        };
+        let (aligned, diagnostic) = install_scan
+            .finish_page_size_metadata(
+                alignment_candidate,
+                &zip_apks,
+                &page_policy,
+                &bit64,
+                install_policy,
+                alignment_context,
+            )
+            .unwrap();
+        assert_eq!(diagnostic, None);
+        assert_eq!(aligned.record.settings.page_size_compat, before | 4);
+        let mut direct = duplicate(&aligned);
+        direct.record.parsed.booleans &= !aim_services::package::pkg::booleans::EXTRACT_NATIVE_LIBS;
+        let unchanged = install_scan.clone();
+        let (_, diagnostic) = install_scan
+            .finish_page_size_metadata(
+                direct,
+                &zip_apks,
+                &page_policy,
+                &bit64,
+                NativeLibraryInstallPolicy {
+                    extract: true,
+                    ..install_policy
+                },
+                alignment_context,
+            )
+            .unwrap();
+        assert_eq!(
+            diagnostic.as_deref(),
+            Some("native library is compressed with extractNativeLibs=false")
+        );
+        assert_eq!(install_scan, unchanged);
+        fs::remove_file(&library).unwrap();
+        let (_, diagnostic) = install_scan
+            .finish_page_size_metadata(
+                duplicate(&aligned),
+                &zip_apks,
+                &page_policy,
+                &bit64,
+                install_policy,
+                alignment_context,
+            )
+            .unwrap();
+        assert!(diagnostic.unwrap().contains("No such file"));
+        assert_eq!(install_scan, unchanged);
+        // Copy succeeds, then the separate code-time mapping fails. The
+        // completion transaction retains all accepted metadata; copied files
+        // remain the installation cleanup owner's responsibility.
+        let inputs = || ScanMetadataCompletion {
+            abi_policy: &abi_policy,
+            native_environment: &install_env,
+            context: install_context,
+            install: install_policy,
+            destination: Some(&destination),
+            clock: ScanClock {
+                current_time: 0,
+                user_id: 0,
+                update_time: false,
+            },
+        };
+        assert!(
+            matches!(install_scan.finish_scan_metadata(duplicate(&aligned), &zip_apks, inputs()),
+            Err(SigningError::Rejected(ref e)) if e.phase == "code-time")
+        );
+        assert_eq!(install_scan, unchanged);
+        assert_eq!(fs::read(&library).unwrap(), payload);
+        let image = root.clone();
+        let data_root = boot.data.clone();
+        let mapped = aim_services::package::write::Apks {
+            platform: aim_services::package::parse::Platform::load(&root, Default::default())
+                .unwrap(),
+            files: Box::new(move |path| {
+                Some(if path.starts_with("/data/") {
+                    data_root.join(path.trim_start_matches('/'))
+                } else {
+                    image.join(path.trim_start_matches('/'))
+                })
+            }),
+        };
+        let finished = install_scan
+            .finish_scan_metadata(duplicate(&aligned), &mapped, inputs())
+            .unwrap();
+        assert_eq!(finished.copies.len(), 1);
+        assert!(!finished.multi_arch_mismatch);
+        assert_eq!(finished.alignment_diagnostic, None);
+        assert_eq!(
+            finished
+                .candidate
+                .record
+                .settings
+                .primary_cpu_abi
+                .as_deref(),
+            Some("arm64-v8a")
+        );
+        assert_eq!(
+            finished.candidate.record.settings.last_modified_time,
+            expected_time
+        );
+        assert_eq!(
+            finished.candidate.users[&0].first_install_time,
+            expected_time
+        );
+        eprintln!(
+            "accepted scan binds extraction flags for alignment and stages copy/page/time completion with late-failure rollback"
+        );
+    }
     let install = NativeLibraryInstallPolicy {
         page_size,
         extract: false,
@@ -2262,6 +2388,52 @@ fn new_settings_match_the_original_runtime() {
     assert_eq!(completed.users[&0].first_install_time, expected_time);
     assert_eq!(scan.identities.ids, snapshot.identities.ids);
     eprintln!("native/original GSF file time and accepted metadata match: {expected_time}");
+    let combined_context = AbiScanContext {
+        mode: AbiScanMode::Existing {
+            first_boot_or_upgrade: false,
+            old_was_stub: false,
+            saved: Some(&completed.record.settings),
+        },
+        override_abi: None,
+        ..context
+    };
+    let inputs = || ScanMetadataCompletion {
+        abi_policy: &abi_policy,
+        native_environment: &abi_environment,
+        context: combined_context,
+        install,
+        destination: None,
+        clock,
+    };
+    let before = scan.clone();
+    assert!(
+        matches!(scan.finish_scan_metadata(duplicate(&completed), &unreadable, inputs()),
+        Err(SigningError::Rejected(ref e)) if e.phase == "code-time")
+    );
+    assert_eq!(scan, before);
+    let mut stale = duplicate(&completed);
+    stale.record.settings.app_id += 1;
+    assert!(matches!(
+        scan.finish_scan_metadata(stale, &unreadable, inputs()),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(scan, before);
+    let combined = scan
+        .finish_scan_metadata(duplicate(&completed), &apks, inputs())
+        .unwrap();
+    assert!(combined.copies.is_empty());
+    assert!(!combined.multi_arch_mismatch);
+    assert_eq!(combined.alignment_diagnostic, None);
+    assert_eq!(
+        combined.candidate.record.settings.last_modified_time,
+        expected_time
+    );
+    assert_eq!(combined.candidate.record.settings.cpu_abi_override, None);
+    assert_eq!(combined.candidate.users, completed.users);
+    assert_eq!(scan.identities.ids, before.identities.ids);
+    eprintln!(
+        "accepted scan reuse completion clears install-only override and preserves all stages on code-time failure"
+    );
     let started = run(boot.command().args([
         "shell",
         "am",

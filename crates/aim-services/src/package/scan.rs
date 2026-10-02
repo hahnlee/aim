@@ -29,8 +29,10 @@ pub use abi::{
     PageSizeCompatPolicy, SharedUserAbi, SharedUserAbiMismatch, SupportedAbi, SupportedAbis,
     ZipNativeLibraries,
 };
+mod completion;
 mod setting;
 mod signing;
+pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 mod uids;
 mod validate;
 pub use identity::Identity;
