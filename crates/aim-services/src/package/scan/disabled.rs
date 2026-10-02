@@ -57,6 +57,7 @@ pub enum UpdatedSystemSource {
 
 #[derive(Debug)]
 pub struct UpdatedSystemScan {
+    active: crate::package::settings::Package,
     pub factory: DisabledSystemMetadata,
     pub source: UpdatedSystemSource,
 }
@@ -117,6 +118,54 @@ impl SigningScan {
             self.disabled_users.remove(&identity.internal_name);
         }
         Ok(removed)
+    }
+
+    /// Apply a selected factory restoration only after the real installer and
+    /// cache cleanup succeeds. A partial resource failure preserves settings;
+    /// the resource owner retains pending directory cleanup for retry (#816).
+    pub fn restore_updated_system_setting(
+        &mut self,
+        selected: &UpdatedSystemScan,
+        resources: &crate::package::owner::resources::CodeResources,
+        incremental: bool,
+        domain_set_id: [u8; 16],
+    ) -> Result<crate::package::settings::Package, SigningError> {
+        let factory = &selected.factory.record.settings;
+        let reject = |message: String| {
+            SigningError::Rejected(Error {
+                package: factory.name.clone(),
+                path: factory.code_path.clone(),
+                phase: "factory-restoration",
+                message,
+            })
+        };
+        if selected.source != UpdatedSystemSource::RestoreFactory
+            || !self
+                .settings
+                .disabled_system_packages
+                .iter()
+                .any(|p| p == factory)
+        {
+            return Err(reject(
+                "factory restoration selection is stale or retains data".into(),
+            ));
+        }
+        let active = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == factory.name)
+            .ok_or_else(|| reject("factory restoration has no active data setting".into()))?;
+        if active != &selected.active {
+            return Err(reject(
+                "active data setting changed after source selection".into(),
+            ));
+        }
+        resources
+            .clean(&active.code_path, incremental)
+            .map_err(reject)?;
+        self.enable_system_setting(&factory.name, domain_set_id)
+            .ok_or_else(|| reject("factory setting could not reserve its original UID".into()))
     }
 
     /// Settings.enableSystemPackageLPw. The caller must first clean the old
@@ -291,6 +340,7 @@ impl SigningScan {
             active.version_code,
             group != selected,
         );
+        let active = active.clone();
         let mut staged = self.clone();
         let mut factory = staged.scan_disabled_system(code, update, all_users, apks, inputs)?;
         if source == UpdatedSystemSource::KeepData
@@ -312,7 +362,11 @@ impl SigningScan {
                 .clone_from(&factory.record.settings.signatures);
         }
         *self = staged;
-        Ok(UpdatedSystemScan { factory, source })
+        Ok(UpdatedSystemScan {
+            active,
+            factory,
+            source,
+        })
     }
 
     /// Refresh a disabled factory setting without registering its libraries,

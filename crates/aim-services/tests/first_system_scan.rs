@@ -45,6 +45,23 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
+    let driver = aim_binder_driver::Driver::new();
+    let process = aim_binder_host::local::LocalProcess::open(
+        &driver,
+        aim_binder_driver::Device::Binder,
+        aim_binder_driver::Credentials {
+            pid: std::process::id() as i32,
+            euid: 1000,
+            security_context: None,
+        },
+    );
+    let writable = fixture.0.join("writable-data");
+    std::fs::create_dir_all(writable.join("app")).unwrap();
+    let resources = aim_services::package::owner::resources::CodeResources::new(
+        process,
+        writable.clone(),
+        None,
+    );
     let config = SystemConfig::default();
     let compatibility = LibraryCompatibility::new(&config, &|_| None, true).unwrap();
     let abi_policy = AbiPolicy {
@@ -450,7 +467,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 }
             }
             let mut expected = before;
-            expected.settings.disabled_system_packages[0] = selected.factory.record.settings;
+            expected.settings.disabled_system_packages[0] =
+                selected.factory.record.settings.clone();
             assert_eq!(owner.settings, expected.settings);
             assert_eq!(owner.identities, expected.identities);
             assert_eq!(owner.libraries, expected.libraries);
@@ -468,7 +486,36 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     .unwrap()
                     .clone();
                 let ids = owner.identities.clone();
-                let enabled = owner.enable_system_setting(&saved.name, [98; 16]).unwrap();
+                let disposable_code = writable.join("app/fixture-update");
+                std::fs::write(&disposable_code, b"disposable replaced code").unwrap();
+                let mut stale = owner.clone();
+                stale
+                    .settings
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == saved.name)
+                    .unwrap()
+                    .version_code += 1;
+                let before = stale.clone();
+                assert!(
+                    stale
+                        .restore_updated_system_setting(&selected, &resources, false, [98; 16])
+                        .is_err()
+                );
+                assert_eq!(stale, before);
+                assert!(disposable_code.exists());
+                let before = owner.clone();
+                assert!(
+                    owner
+                        .restore_updated_system_setting(&selected, &resources, true, [98; 16])
+                        .is_err()
+                );
+                assert_eq!(owner, before);
+                assert!(disposable_code.exists());
+                let enabled = owner
+                    .restore_updated_system_setting(&selected, &resources, false, [98; 16])
+                    .unwrap();
+                assert!(!disposable_code.exists());
                 assert_eq!(enabled.code_path, active.code_path);
                 assert_eq!(enabled.domain_set_id, active.domain_set_id);
                 assert_eq!(enabled.signatures, active.signatures);

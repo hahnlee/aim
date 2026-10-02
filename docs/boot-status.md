@@ -232,16 +232,29 @@ successful fresh scan at the retained shared UID, with the updated-system bit
 clear. Active settings and eligible original-name adoption prevent stale
 removal; new-package allocation rejects an eligible adoption until the caller
 uses its existing-setting path (#804). Data locations reject without mutation.
-The original signed framework/GSF fixture now enables the retained setting
-and completes the active factory rescan for a restore decision, preserving UID
-and user restrictions and clearing the updated-system bit. This sequence tests
-settings/scan ownership only: actual replaced-code cleanup must precede it in
-the native boot pipeline, and is still tracked in #816.
+The resource owner now serializes ordinary /data/app cleanup: directories use
+generated IInstalld.rmPackageDir calls, including a random ~~ parent and its
+matching parser cache entries; monolithic files are removed from the checked
+writable data root. It rejects traversal, symlinks, escaped cache roots and
+unimplemented incremental storage before deletion. Directory failures retain
+pending cleanup for retry after the child disappears. Factory restoration
+checks both selected factory and active settings before deletion, and enables
+the factory setting only after cleanup succeeds. The original signed
+framework/GSF fixture actually deletes a disposable monolithic update and
+completes the active factory rescan, preserving UID/users and clearing the
+updated-system bit. Stale selection and incremental errors preserve code and
+settings. Filesystem tests cover directory order, parent/cache cleanup, app
+data preservation and partial installer failure/retry; the directory backend
+in those tests deletes disposable files, not the original installd daemon.
+Actual original-installer acceptance, incremental/external-volume storage,
+durable partial cleanup recovery and old-path bookkeeping remain #816/#798,
+as does complete native boot integration.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 297 units pass (3.06s). The original signed framework/GSF fixture passes
-(22.30s), including settings enable and the factory active rescan. All eight
+All 301 units pass (3.07s). The original signed framework/GSF fixture passes
+(22.53s), including real disposable file cleanup, setting enable and the factory
+active rescan. All eight
 original-APK scan-input tests passed before this settings transition (5.69s). The Java image
 API linkage build passes (14.6s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version

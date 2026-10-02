@@ -23,6 +23,7 @@ use super::write::Enabled;
 use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
+pub mod resources;
 mod native_libraries;
 pub mod shared_users;
 mod signing;
