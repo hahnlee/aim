@@ -123,6 +123,7 @@ impl Apks {
                     paths,
                     multi_arch_mismatch: false,
                     requires_extraction: false,
+                    extraction_abis: Vec::new(),
                 }
             }
         };

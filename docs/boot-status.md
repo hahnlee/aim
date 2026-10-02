@@ -479,9 +479,22 @@ failures propagate; unresolved final symlinks require filesystem-owner resolutio
 The same runtime matches 64 layout/multiarch/override cases with original helper
 return codes and complete directory/file trees, bytes, modes and timestamps,
 including split overwrite order. Unit tests cover directory creation metadata,
-existing-mode preservation and restorecon failure. Incremental copies, production
-filesystem/clock owner delivery, accepted-scan copy completion and boot/install
-publication remain #810/#798/#702; native PMS is not activated.
+existing-mode preservation and restorecon failure.
+`SigningScan::finish_native_library_install` now completes required ordinary-storage
+copies before committing accepted ABI/path settings. It checks the retained
+identity/UID/signer candidate and binds the writable guest root to the derived
+path before writes; copy flags come from parsed metadata. Extraction ABIs retain
+32-before-64 ordering before the platform ABI override. Typed failures preserve
+the accepted setting and report both the manager error and the native copy cause.
+The disposable runtime verifies stale candidates, missing completion, root mismatch,
+corrupt compressed payload cleanup and successful copy followed by metadata commit
+using generated ZIP seam inputs; this is not a complete signed APK install or the
+original full scan entry point. The expanded runtime passes in 81.47s, including
+earlier original helper comparisons, Settings launch and owned cleanup; all 286
+aim-services unit tests pass. A failed copy can retain created directories or earlier
+successful files, as the copy helper does; whole-install rollback remains with the
+install owner. Incremental copies, production filesystem/clock owner delivery and
+boot/install publication remain #810/#798/#702; native PMS is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

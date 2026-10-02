@@ -16,6 +16,7 @@ use std::{fs, path::Path, time::SystemTime};
 /// The filesystem/clock owners supply a checked writable root and restorecon.
 /// APK read mapping is never used to obtain a writable destination.
 pub struct NativeLibraryDestination<'a> {
+    pub guest_root: &'a str,
     pub root: &'a Path,
     pub owner: GuestInode,
     pub zip_time: &'a dyn Fn(u32) -> Result<SystemTime, String>,
@@ -256,6 +257,7 @@ mod tests {
         };
         let clock = |_| Err("unexpected clock read".into());
         let destination = NativeLibraryDestination {
+            guest_root: "/data/app/fixture/lib",
             root: &root,
             owner: GuestInode {
                 uid: Some(1000),
@@ -305,6 +307,7 @@ mod tests {
         let restore = |_: &Path| Err("restorecon denied".into());
         let clock = |_| Err("unexpected clock read".into());
         let destination = NativeLibraryDestination {
+            guest_root: "/data/app/fixture/lib",
             root: &root,
             owner: GuestInode::default(),
             zip_time: &clock,

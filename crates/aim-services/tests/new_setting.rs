@@ -994,6 +994,7 @@ fn new_settings_match_the_original_runtime() {
             }
         };
         let destination = NativeLibraryDestination {
+            guest_root: &format!("/data/local/tmp/native-package-native-{cases}"),
             root: &native,
             owner: aim_storage::guest_inode::GuestInode {
                 uid: Some(0),
@@ -1873,6 +1874,208 @@ fn new_settings_match_the_original_runtime() {
         files: Box::new(|_| None),
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
+    // Isolate the accepted scan/copy seam with generated library ZIPs. This
+    // does not represent signature verification or a complete APK install.
+    let mut install_scan = scan.clone();
+    let mut install_candidate = duplicate(&candidate);
+    install_candidate.record.parsed.base_apk_path =
+        Some("/data/local/tmp/native-package-copy-0-0.zip".into());
+    install_candidate.record.parsed.split_code_paths = None;
+    install_candidate.record.parsed.booleans |=
+        aim_services::package::pkg::booleans::EXTRACT_NATIVE_LIBS;
+    let install_context = AbiScanContext {
+        mode: AbiScanMode::Existing {
+            first_boot_or_upgrade: true,
+            old_was_stub: false,
+            saved: None,
+        },
+        system: true,
+        updated: true,
+        override_abi: Some("arm64-v8a"),
+        platform_runtime_64bit: None,
+    };
+    let install_env = NativeLibraryEnvironment {
+        app_lib32_install_dir: "/data/local/tmp/scan-native-install",
+        code_is_directory: false,
+        ..abi_environment
+    };
+    let staged = zip_apks
+        .scan_native_libraries(
+            &install_candidate.record.parsed,
+            &abi_policy,
+            &install_env,
+            install_context,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(staged.requires_extraction);
+    let native_root = boot.data.join(staged.paths.root.trim_start_matches('/'));
+    fs::create_dir_all(native_root.parent().unwrap()).unwrap();
+    let clock = |_| Ok(std::time::UNIX_EPOCH + Duration::from_secs(zip_seconds));
+    let restorecon = |path: &std::path::Path| {
+        let guest = format!("/{}", path.strip_prefix(&boot.data).unwrap().display());
+        let restored = boot
+            .command()
+            .args([
+                "shell",
+                "/system/bin/app_process",
+                "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                "/system/bin",
+                "com.android.server.pm.NewSettingOracle",
+                "restore-native-directory",
+                &guest,
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if restored.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&restored.stderr).into_owned())
+        }
+    };
+    let mut destination = NativeLibraryDestination {
+        guest_root: "/data/local/tmp/wrong-native-root",
+        root: &native_root,
+        owner: aim_storage::guest_inode::GuestInode {
+            uid: Some(0),
+            gid: Some(0),
+            mode: None,
+        },
+        zip_time: &clock,
+        restorecon: &restorecon,
+    };
+    let install_policy = NativeLibraryInstallPolicy {
+        page_size,
+        extract: false,
+        debuggable: false,
+        compat_16kb_disabled: false,
+        manifest_compat_disabled: false,
+    };
+    let before_install = install_scan.clone();
+    assert!(matches!(
+        install_scan.finish_native_library_metadata(
+            duplicate(&install_candidate),
+            &zip_apks,
+            &abi_policy,
+            &install_env,
+            install_context,
+        ),
+        Err(SigningError::Rejected(Error { message, .. })) if message == "native library extraction has not completed (#810)"
+    ));
+    assert!(matches!(
+        install_scan.finish_native_library_install(
+            duplicate(&install_candidate),
+            &zip_apks,
+            &abi_policy,
+            &install_env,
+            install_context,
+            install_policy,
+            &destination,
+        ),
+        Err(SigningError::Rejected(Error { message, .. })) if message == "writable native root disagrees with derived guest path"
+    ));
+    assert_eq!(install_scan, before_install);
+    assert!(!native_root.exists());
+    destination.guest_root = &staged.paths.root;
+    let mut stale = duplicate(&install_candidate);
+    stale.record.settings.version_code += 1;
+    assert!(matches!(
+        install_scan.finish_native_library_install(
+            stale,
+            &zip_apks,
+            &abi_policy,
+            &install_env,
+            install_context,
+            install_policy,
+            &destination,
+        ),
+        Err(SigningError::Rejected(_))
+    ));
+    assert!(!native_root.exists());
+    let corrupt_guest = "/data/local/tmp/scan-native-corrupt.zip";
+    let corrupt_host = boot.data.join(corrupt_guest.trim_start_matches('/'));
+    let source = (zip_apks.files)(
+        install_candidate
+            .record
+            .parsed
+            .base_apk_path
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut bytes = fs::read(source).unwrap();
+    bytes[100] = 255;
+    fs::write(&corrupt_host, bytes).unwrap();
+    let mut corrupt = duplicate(&install_candidate);
+    corrupt.record.parsed.base_apk_path = Some(corrupt_guest.into());
+    assert!(matches!(
+        install_scan.finish_native_library_install(
+            corrupt,
+            &zip_apks,
+            &abi_policy,
+            &install_env,
+            install_context,
+            install_policy,
+            &destination,
+        ),
+        Err(SigningError::NativeLibrary {
+            error: NativeLibraryError::Copy {
+                code: -110,
+                cause: NativeLibraryInstallError { code: -18, .. },
+                ..
+            },
+            ..
+        })
+    ));
+    assert_eq!(install_scan, before_install);
+    assert!(
+        native_tree(&native_root)
+            .values()
+            .all(|(bytes, _, _)| bytes.is_none())
+    );
+    let (installed, mismatch, copies) = install_scan
+        .finish_native_library_install(
+            install_candidate,
+            &zip_apks,
+            &abi_policy,
+            &install_env,
+            install_context,
+            install_policy,
+            &destination,
+        )
+        .unwrap();
+    assert!(!mismatch);
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].abi, "arm64-v8a");
+    assert_eq!(
+        fs::read(
+            boot.data
+                .join(staged.paths.primary.trim_start_matches('/'))
+                .join("libx.so")
+        )
+        .unwrap(),
+        b"payload-0-0"
+    );
+    assert_eq!(
+        installed.record.settings.primary_cpu_abi.as_deref(),
+        Some("arm64-v8a")
+    );
+    assert_eq!(
+        installed
+            .record
+            .settings
+            .legacy_native_library_path
+            .as_deref(),
+        Some(staged.paths.root.as_str())
+    );
+    assert_eq!(
+        installed.record.parsed.native_library_dir.as_deref(),
+        Some(staged.paths.primary.as_str())
+    );
+    assert_ne!(install_scan, before_install);
+    eprintln!(
+        "accepted native scan commits only after extraction; stale/path/corrupt failures preserve settings"
+    );
     let context = AbiScanContext {
         mode: AbiScanMode::Existing {
             first_boot_or_upgrade: true,

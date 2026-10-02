@@ -123,12 +123,51 @@ impl SigningScan {
     /// Returns the original both-ABI/non-multiarch diagnostic to the caller.
     pub fn finish_native_library_metadata(
         &mut self,
-        mut candidate: NewPackageOutcome,
+        candidate: NewPackageOutcome,
         apks: &crate::package::write::Apks,
         policy: &super::AbiPolicy,
         env: &super::NativeLibraryEnvironment<'_>,
         context: super::AbiScanContext<'_>,
     ) -> Result<(NewPackageOutcome, bool), SigningError> {
+        self.finish_native_library_phase(candidate, apks, policy, env, context, None)
+            .map(|(candidate, mismatch, _)| (candidate, mismatch))
+    }
+
+    /// Complete required ordinary-storage copies before committing scan ABI
+    /// metadata. The filesystem owner binds the writable root to the derived
+    /// guest path; typed failures retain the accepted setting state.
+    pub fn finish_native_library_install(
+        &mut self,
+        candidate: NewPackageOutcome,
+        apks: &crate::package::write::Apks,
+        policy: &super::AbiPolicy,
+        env: &super::NativeLibraryEnvironment<'_>,
+        context: super::AbiScanContext<'_>,
+        install: super::NativeLibraryInstallPolicy,
+        destination: &super::NativeLibraryDestination<'_>,
+    ) -> Result<(NewPackageOutcome, bool, Vec<super::NativeLibraryAbiCopy>), SigningError> {
+        self.finish_native_library_phase(
+            candidate,
+            apks,
+            policy,
+            env,
+            context,
+            Some((install, destination)),
+        )
+    }
+
+    fn finish_native_library_phase(
+        &mut self,
+        mut candidate: NewPackageOutcome,
+        apks: &crate::package::write::Apks,
+        policy: &super::AbiPolicy,
+        env: &super::NativeLibraryEnvironment<'_>,
+        context: super::AbiScanContext<'_>,
+        installation: Option<(
+            super::NativeLibraryInstallPolicy,
+            &super::NativeLibraryDestination<'_>,
+        )>,
+    ) -> Result<(NewPackageOutcome, bool, Vec<super::NativeLibraryAbiCopy>), SigningError> {
         let record = &mut candidate.record;
         let at = self.accepted_slot(record, "native-library")?;
         let reject = |message| {
@@ -153,11 +192,55 @@ impl SigningScan {
             .scan_native_libraries(&record.parsed, policy, env, context)
             .map_err(error)?;
         let mut mismatch = false;
+        let mut copies = Vec::new();
         if let Some(scan) = scan {
             if scan.requires_extraction {
-                return Err(reject(
-                    "native library extraction has not completed (#810)".into(),
-                ));
+                let Some((mut install, destination)) = installation else {
+                    return Err(reject(
+                        "native library extraction has not completed (#810)".into(),
+                    ));
+                };
+                if destination.guest_root != scan.paths.root {
+                    return Err(reject(
+                        "writable native root disagrees with derived guest path".into(),
+                    ));
+                }
+                install.extract = record.parsed.is(booleans::EXTRACT_NATIVE_LIBS);
+                install.debuggable = record.parsed.is(booleans::DEBUGGABLE);
+                install.manifest_compat_disabled = record.parsed.page_size_app_compat_flags == 64;
+                for abi in &scan.extraction_abis {
+                    let copied = apks
+                        .copy_native_libraries_for_supported_abi(
+                            &record.parsed,
+                            std::slice::from_ref(abi),
+                            scan.paths.requires_isa,
+                            install,
+                            destination,
+                        )
+                        .map_err(|cause| {
+                            let multi = record.parsed.is(booleans::MULTI_ARCH);
+                            let code = if multi { cause.code } else { -110 };
+                            let message = if multi {
+                                let wide =
+                                    policy.bit64.contains(abi) || policy.native64.contains(abi);
+                                format!(
+                                    "Error unpackaging {} bit native libs for multiarch app.",
+                                    if wide { 64 } else { 32 }
+                                )
+                            } else {
+                                format!(
+                                    "Error unpackaging native libs for app, errorCode={}",
+                                    cause.code
+                                )
+                            };
+                            error(super::NativeLibraryError::Copy {
+                                code,
+                                message,
+                                cause,
+                            })
+                        })?;
+                    copies.push(copied);
+                }
             }
             mismatch = scan.multi_arch_mismatch;
             scan.apply_metadata(&mut record.parsed);
@@ -170,7 +253,7 @@ impl SigningScan {
                 error,
             })?;
         self.settings.packages[at] = record.settings.clone();
-        Ok((candidate, mismatch))
+        Ok((candidate, mismatch, copies))
     }
 
     fn accepted_slot(&self, record: &Record, phase: &'static str) -> Result<usize, SigningError> {

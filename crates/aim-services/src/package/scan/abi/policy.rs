@@ -55,6 +55,11 @@ pub struct AbiSelectionError {
 pub enum NativeLibraryError {
     Input(String),
     Selection(AbiSelectionError),
+    Copy {
+        code: i32,
+        message: String,
+        cause: super::NativeLibraryInstallError,
+    },
 }
 
 #[derive(Debug)]
@@ -63,6 +68,7 @@ pub struct NativeLibraryScan {
     pub paths: NativeLibraryPaths,
     pub multi_arch_mismatch: bool,
     pub requires_extraction: bool,
+    pub(crate) extraction_abis: Vec<String>,
 }
 
 impl NativeLibraryScan {
@@ -122,6 +128,17 @@ impl crate::package::write::Apks {
                 .as_ref()
                 .is_some_and(|a| inventory.abis.contains(a.as_bytes()));
         let mut selected = pkg.clone();
+        let mut extraction_abis = Vec::new();
+        if requires_extraction {
+            for wide in [false, true] {
+                for abi in [&abis.primary, &abis.secondary].into_iter().flatten() {
+                    let isa = instruction_set(abi).map_err(NativeLibraryError::Input)?;
+                    if matches!(isa, "arm64" | "x86_64" | "riscv64") == wide {
+                        extraction_abis.push(abi.clone());
+                    }
+                }
+            }
+        }
         abis.clone().apply(&mut selected);
         let paths = NativeLibraryPaths::derive(&selected, env, system, updated)
             .map_err(NativeLibraryError::Input)?;
@@ -130,6 +147,7 @@ impl crate::package::write::Apks {
             paths,
             multi_arch_mismatch: mismatch,
             requires_extraction,
+            extraction_abis,
         })
     }
 }
