@@ -736,8 +736,16 @@ and integrity-verified, reconciled and migrated under BEST_EFFORT, then
 written while that disposable original PMS is stopped. On reboot original
 PMS retains the migrated UID (10213 in the recorded run), all 244 package
 UID/signature records and the other 16 groups; Settings launches. Main and
-reserve bytes match and owned data/process cleanup completes. The fixture
-requests no runtime permissions. Publication, permission-owner migration,
+reserve bytes match and owned data/process cleanup completes. The signed fixture now requests READ_CONTACTS and READ_CALENDAR. Original
+permissionmgr grants contacts with USER_SET and denies calendar with
+USER_SET/USER_FIXED; original AppOps sets RUN_IN_BACKGROUND to ignore.
+The test waits for those exact flags/mode in AccessPersistence before
+stopping its owner. Native package persistence leaves access.abx bytes and
+its decoded state unchanged. Original reboot preserves the complete fixture
+app ID permission flags and AppOps modes, and original permissionmgr and
+AppOps queries confirm the grant, fixed denial and ignore mode. These
+Android 16 states remain attached to the same numeric app ID during the
+conversion. Live permission-owner notifications/package feed, publication,
 complete native boot and CTS remain under #803, #798 and #702.
 `Store::commit_signatures` now persists package/group certificate and
 lineage capability state in the retained packages.xml document. It emits

@@ -155,6 +155,8 @@ fn migration_apk(dir: &std::path::Path, version: i32, leaving: bool) -> std::pat
         package="org.example.aimmigration" android:versionCode="{version}"
         android:sharedUserId="org.example.aimmigration.uid" {attribute}>
         <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35" />
+        <uses-permission android:name="android.permission.READ_CONTACTS" />
+        <uses-permission android:name="android.permission.READ_CALENDAR" />
         <application android:hasCode="false" android:label="AIM migration fixture" />
         </manifest>"#
         ),
@@ -211,6 +213,94 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
         let output = run(boot.command().arg("install").arg(apk));
         assert!(String::from_utf8_lossy(&output.stdout).contains("Success"));
     }
+    for args in [
+        vec![
+            "shell",
+            "pm",
+            "grant",
+            NAME,
+            "android.permission.READ_CONTACTS",
+        ],
+        vec![
+            "shell",
+            "pm",
+            "set-permission-flags",
+            NAME,
+            "android.permission.READ_CONTACTS",
+            "user-set",
+        ],
+        vec![
+            "shell",
+            "pm",
+            "revoke",
+            NAME,
+            "android.permission.READ_CALENDAR",
+        ],
+        vec![
+            "shell",
+            "pm",
+            "set-permission-flags",
+            NAME,
+            "android.permission.READ_CALENDAR",
+            "user-set",
+            "user-fixed",
+        ],
+        vec![
+            "shell",
+            "cmd",
+            "appops",
+            "set",
+            "--uid",
+            NAME,
+            "RUN_IN_BACKGROUND",
+            "ignore",
+        ],
+    ] {
+        run(boot.command().args(args));
+    }
+    check_migrated_permissions(&boot, NAME);
+    // AccessPersistence writes asynchronously. Wait for these specific states
+    // on this owned image before stopping the original permission owner.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+        let id = state
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == NAME)
+            .unwrap()
+            .app_id;
+        let access = state.users[0].1.access.as_ref().unwrap();
+        let permissions = access
+            .app_id_permissions
+            .iter()
+            .find(|(app_id, _)| *app_id == id);
+        let modes = access
+            .app_id_app_ops
+            .iter()
+            .find(|(app_id, _)| *app_id == id);
+        // Pinned PermissionFlags: RUNTIME_GRANTED=16, USER_SET=32, USER_FIXED=64.
+        if permissions.is_some_and(|(_, flags)| {
+            flags
+                .iter()
+                .any(|(name, value)| name == "android.permission.READ_CONTACTS" && value & 48 == 48)
+                && flags.iter().any(|(name, value)| {
+                    name == "android.permission.READ_CALENDAR" && value & 112 == 96
+                })
+        }) && modes.is_some_and(|(_, modes)| {
+            modes
+                .iter()
+                .any(|(name, mode)| name == "android:run_in_background" && *mode == 1)
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "original permission owner did not persist fixture grants/mode"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
     let mut store = Store::open(&boot.data.join("data"), &[0]).unwrap().unwrap();
@@ -226,6 +316,11 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
         saved.shared_user,
         "original NEW_INSTALL_ONLY must retain an existing shared member"
     );
+    let permission_state = store.state().users[0].1.access.clone().unwrap();
+    let permission_file = boot
+        .data
+        .join("data/misc_de/0/apexdata/com.android.permission/access.abx");
+    let permission_bytes = fs::read(&permission_file).unwrap();
     let mut input = store.state().clone();
     input.settings.packages.retain(|p| p.name == NAME);
     input.settings.disabled_system_packages.clear();
@@ -243,6 +338,11 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
             .unwrap()
     );
     store.commit_shared_uid_migrations(&scan.settings).unwrap();
+    assert_eq!(fs::read(&permission_file).unwrap(), permission_bytes);
+    assert_eq!(
+        store.state().users[0].1.access.as_ref(),
+        Some(&permission_state)
+    );
     let expected = store.state().settings.clone();
     let path = boot.data.join("data/system/packages.xml");
     assert_eq!(
@@ -263,6 +363,28 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     volume.detach().unwrap();
     start(&boot);
     let after = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let access = after.users[0].1.access.as_ref().unwrap();
+    assert_eq!(
+        access
+            .app_id_permissions
+            .iter()
+            .find(|(id, _)| *id == saved.app_id),
+        permission_state
+            .app_id_permissions
+            .iter()
+            .find(|(id, _)| *id == saved.app_id)
+    );
+    assert_eq!(
+        access
+            .app_id_app_ops
+            .iter()
+            .find(|(id, _)| *id == saved.app_id),
+        permission_state
+            .app_id_app_ops
+            .iter()
+            .find(|(id, _)| *id == saved.app_id)
+    );
+    check_migrated_permissions(&boot, NAME);
     let migrated = after
         .settings
         .packages
@@ -306,8 +428,45 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     ]));
     assert!(String::from_utf8_lossy(&launch.stdout).contains("Status: ok"));
     println!(
-        "original PMS reboot retained migrated UID {} and {} package records; Settings launched",
+        "original PMS reboot retained migrated UID {}, grants/denials/flags/AppOps and {} package records; Settings launched",
         saved.app_id,
         expected.packages.len()
     );
+}
+
+fn check_migrated_permissions(boot: &Boot, package: &str) {
+    let dump =
+        run(boot
+            .command()
+            .args(["shell", "dumpsys", "permissionmgr", "--package", package]));
+    let text = String::from_utf8(dump.stdout).unwrap();
+    let granted = text
+        .lines()
+        .find(|line| line.contains("android.permission.READ_CONTACTS: granted="))
+        .expect("fixture permission owner has no contacts grant record");
+    assert!(
+        granted.contains("granted=true") && granted.contains("USER_SET"),
+        "{granted}"
+    );
+    let denied = text
+        .lines()
+        .find(|line| line.contains("android.permission.READ_CALENDAR: granted="))
+        .expect("fixture permission owner has no calendar denial record");
+    assert!(
+        denied.contains("granted=false")
+            && denied.contains("USER_SET")
+            && denied.contains("USER_FIXED"),
+        "{denied}"
+    );
+    let modes = run(boot.command().args([
+        "shell",
+        "cmd",
+        "appops",
+        "get",
+        "--uid",
+        package,
+        "RUN_IN_BACKGROUND",
+    ]));
+    let text = String::from_utf8(modes.stdout).unwrap();
+    assert!(text.contains("RUN_IN_BACKGROUND: ignore"), "{text}");
 }
