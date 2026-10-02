@@ -599,16 +599,30 @@ impl SigningScan {
         })
     }
 
-    /// Reconcile verified new system-directory code through UID preparation,
-    /// setting construction, INSTALL shared-UID gates, merge and signer commit.
-    /// Rejection publishes no package/user state, but retains the original UID
-    /// cleanup cursor and an allocated group until final pruning.
+    /// Prepare verified new system-directory code and reconcile its signers.
+    /// Shared-UID admission follows final application metadata. Call
+    /// scan_new_system for allocation cleanup across all metadata gates.
+    /// Rejection retains the original UID cleanup cursor and an allocated group
+    /// until final pruning; this candidate does not publish package/user state.
     pub fn apply_new_system(
         &mut self,
         code: &Code,
         metadata: SettingMetadata,
         users: UserPolicy<'_>,
     ) -> Result<NewPackageOutcome, SigningError> {
+        let (candidate, mut preparation) = self.prepare_new_system(code, metadata, users)?;
+        preparation
+            .accept_uid(&candidate.record.settings.name)
+            .map_err(SigningError::Fatal)?;
+        Ok(candidate)
+    }
+
+    pub(super) fn prepare_new_system(
+        &mut self,
+        code: &Code,
+        metadata: SettingMetadata,
+        users: UserPolicy<'_>,
+    ) -> Result<(NewPackageOutcome, UidScan), SigningError> {
         let identity = Identity::select(&code.parsed, &self.settings, true);
         let reject = |phase, message: &str| {
             SigningError::Rejected(Error {
@@ -667,7 +681,7 @@ impl SigningScan {
             origin: ScanOrigin::SystemDirectory,
         };
         next.settings.packages.push(record.settings.clone());
-        let signing = match next.apply(&record) {
+        let signing = match next.apply_candidate(&record, None, false) {
             Ok(outcome) => outcome,
             Err(error) => {
                 preparation
@@ -677,17 +691,16 @@ impl SigningScan {
                 return Err(error);
             }
         };
-        // No fallible work follows publication into this scan candidate.
-        preparation
-            .accept_uid(&record.settings.name)
-            .map_err(SigningError::Fatal)?;
         record.settings = next.settings.packages.last().unwrap().clone();
         *self = next;
-        Ok(NewPackageOutcome {
-            record,
-            users: setting.users,
-            signing,
-        })
+        Ok((
+            NewPackageOutcome {
+                record,
+                users: setting.users,
+                signing,
+            },
+            preparation,
+        ))
     }
 
     /// Apply one verified saved record in the caller's actual scan order.
@@ -705,6 +718,15 @@ impl SigningScan {
         &mut self,
         record: &Record,
         disabled: Option<&Record>,
+    ) -> Result<SigningOutcome, SigningError> {
+        self.apply_candidate(record, disabled, true)
+    }
+
+    fn apply_candidate(
+        &mut self,
+        record: &Record,
+        disabled: Option<&Record>,
+        admit_member: bool,
     ) -> Result<SigningOutcome, SigningError> {
         let check = self
             .libraries
@@ -739,7 +761,7 @@ impl SigningScan {
                 }));
             }
         }
-        self.reconcile(record, check.as_ref(), disabled)
+        self.reconcile(record, check.as_ref(), disabled, admit_member)
     }
 
     fn reconcile(
@@ -747,6 +769,7 @@ impl SigningScan {
         record: &Record,
         signature_check: Option<&crate::package::settings::Package>,
         disabled: Option<&Record>,
+        admit_member: bool,
     ) -> Result<SigningOutcome, SigningError> {
         let fail = |phase, message| Error {
             package: record.settings.name.clone(),
@@ -898,7 +921,9 @@ impl SigningScan {
                     .any(|p| p.name == previous.name),
             )
             .map_err(|e| reject("libraries", e.0.into()))?;
-        if let Some(group) = &mut group {
+        if let Some(group) = &mut group
+            && admit_member
+        {
             group.add_package(
                 &record.settings.name,
                 record.settings.flags,

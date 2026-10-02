@@ -27,6 +27,41 @@ pub struct CompletedScanMetadata {
 }
 
 impl SigningScan {
+    /// Stage a new system package through all metadata gates before admitting
+    /// its final shared-UID member. A rejected independent allocation advances
+    /// the original cleanup cursor; a new shared group survives until pruning.
+    pub fn scan_new_system(
+        &mut self,
+        code: &super::Code,
+        metadata: super::SettingMetadata,
+        users: super::UserPolicy<'_>,
+        apks: &Apks,
+        inputs: ScanMetadataCompletion<'_>,
+    ) -> Result<CompletedScanMetadata, SigningError> {
+        let mut staged = self.clone();
+        let (candidate, mut preparation) = match staged.prepare_new_system(code, metadata, users) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.identities = staged.identities;
+                return Err(error);
+            }
+        };
+        let name = candidate.record.settings.name.clone();
+        let completed = match staged.finish_scan_metadata(candidate, apks, inputs) {
+            Ok(completed) => completed,
+            Err(error) => {
+                preparation
+                    .reject_pending(&name)
+                    .map_err(SigningError::Fatal)?;
+                self.identities = preparation.identities;
+                return Err(error);
+            }
+        };
+        preparation.accept_uid(&name).map_err(SigningError::Fatal)?;
+        *self = staged;
+        Ok(completed)
+    }
+
     /// Complete ABI/copy, page-size, code and final application metadata.
     /// Only the finished candidate becomes accepted state. Files copied before
     /// a later error require cleanup by the install owner; this does not persist
@@ -136,8 +171,8 @@ impl SigningScan {
             updated_system_app,
         );
         if let Some((name, mut group)) = shared.take() {
-            // A retained member's mutable setting changes in place in AOSP.
-            // Refresh its removal inputs without re-ORing cached group flags.
+            // First admission uses final flags. A retained member's mutable
+            // setting changes in place without re-ORing cached group flags.
             group.add_package(
                 &record.settings.name,
                 record.settings.flags,

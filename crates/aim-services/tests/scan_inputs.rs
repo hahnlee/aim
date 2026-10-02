@@ -863,10 +863,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
             scan.identities.shared_users[group].flags,
             scan.identities.shared_users[group].private_flags
         ),
-        (
-            accepted.record.settings.flags,
-            accepted.record.settings.private_flags
-        ),
+        (0, 0),
     );
     assert!(accepted.record.settings.shared_user);
     assert!(accepted.signing.system_signature_mismatch.is_none());
@@ -896,6 +893,139 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         scan.identities.ids.get(uid),
         Some(&Owner::SharedUser(group.clone()))
     );
+    let mut absent = scan.identities.shared_users[group].clone();
+    assert!(!absent.remove_package(&accepted.record.settings.name));
+    let mut accepted = accepted;
+    accepted
+        .record
+        .parsed
+        .requested_permissions
+        .push("android.permission.FACTORY_TEST".into());
+    let completed = scan
+        .finish_application_metadata(accepted, true, false)
+        .unwrap();
+    let final_flags = (
+        completed.record.settings.flags,
+        completed.record.settings.private_flags,
+    );
+    assert_ne!(final_flags.0 & 16, 0);
+    assert_eq!(
+        (
+            scan.identities.shared_users[group].flags,
+            scan.identities.shared_users[group].private_flags
+        ),
+        final_flags
+    );
+    let retained = scan
+        .finish_application_metadata(completed, false, true)
+        .unwrap();
+    assert_eq!(
+        (
+            scan.identities.shared_users[group].flags,
+            scan.identities.shared_users[group].private_flags
+        ),
+        final_flags
+    );
+    let mut removed = scan.identities.shared_users[group].clone();
+    assert!(removed.remove_package(&retained.record.settings.name));
+    assert_eq!((removed.flags, removed.private_flags), (0, 0));
+
+    use aim_services::package::scan::{
+        AbiPolicy, AbiScanContext, AbiScanMode, NativeLibraryEnvironment,
+        NativeLibraryInstallPolicy, ScanClock, ScanMetadataCompletion,
+    };
+    let abi_policy = AbiPolicy {
+        all: vec!["arm64-v8a".into()],
+        bit32: vec![],
+        bit64: vec!["arm64-v8a".into()],
+        native32: vec![],
+        native64: vec!["arm64-v8a".into()],
+        force_multi_arch_match: false,
+    };
+    let environment = NativeLibraryEnvironment {
+        preferred_abi: "arm64-v8a",
+        app_lib32_install_dir: "/data/app-lib",
+        code_is_directory: false,
+        canonical_source: None,
+    };
+    let completion = || ScanMetadataCompletion {
+        abi_policy: &abi_policy,
+        native_environment: &environment,
+        context: AbiScanContext {
+            mode: AbiScanMode::Install { moved: None },
+            system: true,
+            updated: false,
+            override_abi: None,
+            platform_runtime_64bit: None,
+        },
+        install: NativeLibraryInstallPolicy {
+            page_size: 4096,
+            extract: false,
+            debuggable: false,
+            compat_16kb_disabled: false,
+            manifest_compat_disabled: false,
+        },
+        destination: None,
+        clock: ScanClock {
+            current_time: 0,
+            user_id: -1,
+            update_time: false,
+        },
+        factory_test: true,
+    };
+    let unreadable = Apks {
+        files: Box::new(|_| None),
+        platform: Platform::load(&root, Default::default()).unwrap(),
+    };
+    for shared in [true, false] {
+        let mut code = Code {
+            location: google.location.clone(),
+            parsed: google.parsed.clone(),
+            signing: google.signing.clone(),
+        };
+        code.parsed.package_name = "late.failure".into();
+        code.parsed
+            .requested_permissions
+            .push("android.permission.FACTORY_TEST".into());
+        if !shared {
+            code.parsed.shared_user_id = None;
+        }
+        let mut transaction =
+            SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+        let before = transaction.clone();
+        assert!(
+            matches!(transaction.scan_new_system(&code, metadata(&code), policy, &unreadable, completion()), Err(SigningError::Rejected(ref e)) if e.phase == "code-time")
+        );
+        assert_eq!(transaction.settings, before.settings);
+        assert_eq!(transaction.libraries, before.libraries);
+        if shared {
+            let mut group = transaction.identities.shared_users[group].clone();
+            assert!(!group.remove_package("late.failure"));
+            assert_eq!((group.flags, group.private_flags), (0, 0));
+            assert!(group.signatures.is_none());
+        } else {
+            assert!(transaction.identities.ids.get(10000).is_none());
+        }
+        let completed = transaction
+            .scan_new_system(&code, metadata(&code), policy, &apks, completion())
+            .unwrap();
+        assert_eq!(
+            completed.candidate.record.settings.app_id,
+            if shared { 10000 } else { 10001 }
+        );
+        if shared {
+            let group = &transaction.identities.shared_users[group];
+            assert_eq!(
+                (group.flags, group.private_flags),
+                (
+                    completed.candidate.record.settings.flags,
+                    completed.candidate.record.settings.private_flags
+                )
+            );
+            assert_ne!(group.flags & 16, 0);
+        }
+    }
+
     let snapshot = scan.clone();
     assert!(matches!(
         scan.apply_new_system(&google, metadata(&google), policy),
@@ -969,6 +1099,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
                 assert!(e.message.contains("-104"));
             }
             SigningError::Fatal(_) => assert_eq!(first_api, 36),
+            error => panic!("unexpected signing rejection: {error:?}"),
         }
         assert_eq!(ota, snapshot);
     }
