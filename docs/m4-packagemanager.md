@@ -577,6 +577,17 @@ Settings launched successfully (warm, 90 ms). These inputs are not a
 reconciled query snapshot. APEX state stays separate for apexd verification,
 and new/removed image package reconciliation and publication remain
 unimplemented (#702).
+Verified SPKI keys now become the pinned runtime's Serializable public
+keys for native query records (#738). An explicitly run disposable-boot
+integration test compares six RSA/EC/DSA serialization streams byte for
+byte, reads the native streams through the original ObjectInputStream,
+and verifies ArraySet's signed hash ordering and key deduplication. The
+complete native GSF SigningInfo parcel matches an actual original-PMS
+`getPackageInfo(GET_SIGNING_CERTIFICATES)` reply, including the rotation
+lineage. The runtime uses Conscrypt/Bouncy Castle class layouts; its
+BigInteger serialized cache fields differ from the host JDK's. Java API
+linkage verification passes. These checks complete public-key reply
+serialization, not native PMS activation or CTS acceptance.
 `Selection::files` assembles the provider's base/split paths followed by
 its already-resolved transitive files, preserving first occurrence.
 Tests cover ordering, missing/optional dependencies, SDK policy,

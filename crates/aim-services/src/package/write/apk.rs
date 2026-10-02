@@ -32,13 +32,18 @@ impl Apks {
         Ok(Signatures {
             scheme_version: details.scheme_version,
             signatures: details.signatures,
-            public_keys: None,
+            public_keys: Some(
+                sign::serialize_public_keys(&details.public_keys)?
+                    .into_iter()
+                    .map(Some)
+                    .collect(),
+            ),
             past_signatures: details.past_signing_certificates,
         })
     }
 
     /// Native verified details retain SPKI keys for the persistence owner;
-    /// Java serialization for query parcels is separate (#738).
+    /// `signatures` adds the query parcel's Java serialization.
     pub fn signing_details(&self, pkg: &AndroidPackage) -> Result<sign::SigningDetails, String> {
         let base = pkg
             .base_apk_path

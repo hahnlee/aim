@@ -107,8 +107,15 @@ original signed GSF APK verifies through nonstandard base/split guest
 paths, retaining v3 and its two-certificate lineage; null and unreadable
 split paths fail explicitly (#801). `scan::Inputs` now reads persisted
 active and disabled-system APK locations with native parsing and full
-signature verification, retaining SPKI keys separately from Java query
-serialization (#738). Parse flags follow the physical partition, rather
+signature verification, retaining SPKI keys. The signature adapter now
+also serializes those keys for query parcels: RSA, EC and DSA streams
+match the original runtime byte for byte and deserialize successfully
+there (#738). The explicit runtime integration test checks six generated
+keys, ArraySet hash ordering and duplicate keys, then compares the entire
+native GSF SigningInfo parcel against an actual original-PMS
+`getPackageInfo(GET_SIGNING_CERTIFICATES)` reply, including its rotation
+lineage. Java API linkage verification also passes. Parse flags follow
+the physical partition, rather
 than an updated system package's saved system flag. On a disposable
 original-PMS boot (2026-10-02, boot completed), all 243 active APK packages
 and five disabled system packages parsed and verified. Every active

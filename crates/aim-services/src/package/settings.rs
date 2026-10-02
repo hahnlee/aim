@@ -170,7 +170,7 @@ pub struct UsesSdkLibrary {
 pub struct Signatures {
     pub scheme_version: i32,
     pub signatures: Vec<Vec<u8>>,
-    /// Java-serialized public keys, when the in-memory feed supplies them.
+    /// Java-serialized public keys from the feed or native verified SPKI.
     pub public_keys: Option<Vec<Option<super::pkg::Serialized>>>,
     pub past_signatures: Option<Vec<(Vec<u8>, i32)>>,
 }

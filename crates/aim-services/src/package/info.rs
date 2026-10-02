@@ -836,8 +836,8 @@ impl PermissionInfo {
 pub struct SigningInfo {
     pub scheme_version: i32,
     pub signatures: Vec<Vec<u8>>,
-    /// The signers' public keys as the original serialized them; `None`
-    /// where the model has none (#738).
+    /// The signers' public keys in the original runtime's serialization
+    /// format; absent only where no signing-key state has been supplied.
     pub public_keys: Option<Vec<Option<pkg::Serialized>>>,
     pub past_signing_certificates: Option<Vec<Vec<u8>>>,
 }

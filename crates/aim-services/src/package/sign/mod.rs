@@ -27,6 +27,8 @@ mod asn1;
 mod block;
 mod crypto;
 mod jar;
+mod serialize;
+pub use serialize::public_keys as serialize_public_keys;
 #[cfg(test)]
 mod tests;
 mod v2;

@@ -3,6 +3,7 @@
 package android.content.pm;
 
 public class PackageInfo {
+    public SigningInfo signingInfo;
     public String[] requestedPermissions;
     public ApplicationInfo applicationInfo;
     public ProviderInfo[] providers;
