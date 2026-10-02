@@ -33,7 +33,7 @@ mod boot;
 mod completion;
 mod disabled;
 pub use boot::{FirstBootSystemInputs, SystemImageScan};
-pub use disabled::DisabledSystemMetadata;
+pub use disabled::{DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
 mod setting;
 mod signing;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};

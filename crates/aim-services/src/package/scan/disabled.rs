@@ -21,15 +21,125 @@ pub struct DisabledSystemMetadata {
     pub alignment_diagnostic: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdatedSystemSource {
+    /// Continue with the installed data package after refreshing factory state.
+    KeepData,
+    /// Resource cleanup and enabling the factory setting must precede its
+    /// active scan. This outcome has not replaced the active package.
+    RestoreFactory,
+}
+
+#[derive(Debug)]
+pub struct UpdatedSystemScan {
+    pub factory: DisabledSystemMetadata,
+    pub source: UpdatedSystemSource,
+}
+
+fn updated_system_source(
+    same_path: bool,
+    image_version: i64,
+    data_version: i64,
+    shared_uid_changed: bool,
+) -> UpdatedSystemSource {
+    if !same_path && (image_version > data_version || shared_uid_changed) {
+        UpdatedSystemSource::RestoreFactory
+    } else {
+        UpdatedSystemSource::KeepData
+    }
+}
+
 impl SigningScan {
+    /// Factory refresh followed by scanPackageForInitLI's updated-system
+    /// source decision. Only factory metadata is committed here; a restore
+    /// outcome requires resource cleanup, enableSystemPackage and active scan.
+    pub fn scan_updated_system(
+        &mut self,
+        code: &Code,
+        update: SettingUpdate,
+        factory_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        all_users: Option<&[super::User]>,
+        config: &crate::package::system_config::SystemConfig,
+        apks: &Apks,
+        inputs: ScanMetadataCompletion<'_>,
+    ) -> Result<UpdatedSystemScan, SigningError> {
+        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let reject = |message: String| {
+            SigningError::Rejected(Error {
+                package: identity.internal_name.clone(),
+                path: code.location.path.clone(),
+                phase: "system-source",
+                message,
+            })
+        };
+        let active = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == identity.internal_name)
+            .ok_or_else(|| reject("updated-system selection has no active setting".into()))?;
+        let group = if active.shared_user {
+            Some(
+                self.settings
+                    .shared_users
+                    .iter()
+                    .find(|g| g.app_id == active.app_id)
+                    .ok_or_else(|| reject("active shared UID owner is missing".into()))?
+                    .name
+                    .as_str(),
+            )
+        } else {
+            None
+        };
+        let selected = super::signing::selected_shared_user(
+            active.shared_user,
+            code.parsed.shared_user_id.as_deref(),
+            code.parsed
+                .is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
+        );
+        let version = (i64::from(code.parsed.version_code_major) << 32)
+            | i64::from(code.parsed.version_code as u32);
+        let source = updated_system_source(
+            active.code_path == code.location.path,
+            version,
+            active.version_code,
+            group != selected,
+        );
+        let mut staged = self.clone();
+        let mut factory =
+            staged.scan_disabled_system(code, update, factory_users, all_users, apks, inputs)?;
+        if source == UpdatedSystemSource::KeepData
+            && config
+                .preinstall_packages_with_strict_signature_check
+                .contains(&factory.record.parsed.package_name)
+        {
+            let signatures = crate::package::owner::shared_users::saved_signatures(&code.signing)
+                .map_err(reject)?;
+            factory.record.settings.signatures = Some(signatures);
+            let saved = staged
+                .settings
+                .disabled_system_packages
+                .iter_mut()
+                .find(|p| p.name == factory.record.settings.name)
+                .expect("factory scan retained its disabled setting");
+            saved
+                .signatures
+                .clone_from(&factory.record.settings.signatures);
+        }
+        *self = staged;
+        Ok(UpdatedSystemScan { factory, source })
+    }
+
     /// Refresh a disabled factory setting without registering its libraries,
     /// replacing live signatures or adding it to a shared UID's active members.
     /// Manifest policy must already have run with updated-system policy enabled.
+    /// User states belong to the disabled setting; restored and live copied
+    /// factory settings have different user-state provenance (#815).
     pub fn scan_disabled_system(
         &mut self,
         code: &Code,
         update: SettingUpdate,
-        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        factory_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
         all_users: Option<&[super::User]>,
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
@@ -101,7 +211,7 @@ impl SigningScan {
         }
         super::validate::static_library(&code.parsed, false)
             .map_err(|e| reject("validation", e))?;
-        let users = saved_users.get(&saved.name).ok_or_else(|| {
+        let users = factory_users.get(&saved.name).ok_or_else(|| {
             reject(
                 "setting",
                 "disabled package user states were not supplied".into(),
@@ -197,5 +307,29 @@ impl SigningScan {
             multi_arch_mismatch,
             alignment_diagnostic,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn updated_system_source_requires_path_change_and_strictly_newer_version_or_uid_change() {
+        use UpdatedSystemSource::{KeepData, RestoreFactory};
+        for (same_path, image, data, changed, expected) in [
+            (false, 4, 5, false, KeepData),
+            (false, 5, 5, false, KeepData),
+            (false, 6, 5, false, RestoreFactory),
+            (false, 4, 5, true, RestoreFactory),
+            (true, 6, 5, false, KeepData),
+            (true, 4, 5, true, KeepData),
+            (false, i64::MAX, i64::MAX - 1, false, RestoreFactory),
+            (false, i64::MIN, i64::MAX, false, KeepData),
+        ] {
+            assert_eq!(
+                updated_system_source(same_path, image, data, changed),
+                expected
+            );
+        }
     }
 }

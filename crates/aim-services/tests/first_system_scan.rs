@@ -279,6 +279,110 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     expected.settings.disabled_system_packages[0] = factory.record.settings;
     assert_eq!(factory_owner, expected);
 
+    let mut stale_factory = saved.clone();
+    stale_factory.signatures = scan.packages[0]
+        .candidate
+        .record
+        .settings
+        .signatures
+        .clone();
+    assert_ne!(stale_factory.signatures, saved.signatures);
+    let selection_inputs = || {
+        let mut inputs = completion();
+        inputs.context.mode = AbiScanMode::Existing {
+            first_boot_or_upgrade: false,
+            old_was_stub: false,
+            saved: Some(&stale_factory),
+        };
+        inputs
+    };
+    use aim_services::package::scan::UpdatedSystemSource::{KeepData, RestoreFactory};
+    for strict in [false, true] {
+        let mut policy = SystemConfig::default();
+        if strict {
+            policy
+                .preinstall_packages_with_strict_signature_check
+                .insert(saved.name.clone());
+        }
+        for (version, same_path, source) in [
+            (saved.version_code + 1, false, KeepData),
+            (saved.version_code, false, KeepData),
+            (saved.version_code - 1, false, RestoreFactory),
+            (saved.version_code - 1, true, KeepData),
+        ] {
+            let mut settings = state.clone();
+            settings.disabled_system_packages[0] = stale_factory.clone();
+            let active = settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == saved.name)
+                .unwrap();
+            active.version_code = version;
+            if same_path {
+                active.code_path.clone_from(&saved.code_path);
+            }
+            let mut owner =
+                aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+            let before = owner.clone();
+            assert!(
+                matches!(owner.scan_updated_system(&factory_code, update(), &saved_users,
+                None, &policy, &unreadable, selection_inputs()),
+                Err(SigningError::Rejected(ref error)) if error.phase == "code-time")
+            );
+            assert_eq!(owner, before);
+            let selected = owner
+                .scan_updated_system(
+                    &factory_code,
+                    update(),
+                    &saved_users,
+                    None,
+                    &policy,
+                    &apks,
+                    selection_inputs(),
+                )
+                .unwrap();
+            assert_eq!(selected.source, source);
+            assert_eq!(
+                selected.factory.record.settings.signatures,
+                if strict && source == KeepData {
+                    saved.signatures.clone()
+                } else {
+                    stale_factory.signatures.clone()
+                }
+            );
+            if source == KeepData {
+                let mut data_location = factory_code.location.clone();
+                data_location.path = "/data/app/fixture-update".into();
+                let data_code = aim_services::package::scan::Code {
+                    location: data_location,
+                    parsed: factory_code.parsed.clone(),
+                    signing: factory_code.signing.clone(),
+                };
+                let mut data_update = update();
+                data_update.code_path.clone_from(&data_code.location.path);
+                let mut authorization_owner = owner.clone();
+                let result = authorization_owner.apply_existing(
+                    &data_code,
+                    data_update,
+                    &saved_users,
+                    None,
+                    Some(&selected.factory.record),
+                );
+                if strict {
+                    assert!(result.is_ok());
+                } else {
+                    assert!(
+                        matches!(result, Err(SigningError::Rejected(ref error)) if error.phase == "authorization")
+                    );
+                    assert_eq!(authorization_owner, owner);
+                }
+            }
+            let mut expected = before;
+            expected.settings.disabled_system_packages[0] = selected.factory.record.settings;
+            assert_eq!(owner, expected);
+        }
+    }
+
     let reserved = aim_services::package::settings::Settings {
         packages: vec![aim_services::package::settings::Package {
             name: "fixture.apex.module".into(),

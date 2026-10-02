@@ -176,8 +176,8 @@ physical order and preserves the five no-APK directory rejections. Final public/
 private flags, version, target SDK, file time, update hash and current signing
 certificates match all 240 original packages at unchanged code paths. The saved
 scan still matches 243 active/3 disabled packages, 16 groups and 23 libraries;
-the whole comparison passes (249.84s), with unchanged disposable disk state and
-owned process/mount cleanup. A separate original-APK fixture passes (19.91s),
+the whole comparison passes (252.03s), with unchanged disposable disk state and
+owned process/mount cleanup. A separate original-APK fixture passes (20.69s),
 including reserved APEX UID preservation, invalid seed rejection, domain-owner
 failure, missing framework/image policy and unavailable pre-platform privilege
 policy. `SigningScan::scan_existing` also stages retained-UID reconciliation
@@ -192,12 +192,26 @@ registration or shared-UID admission. It uses the original factory scan's -1
 clock and saved updated-system state, and preserves saved signatures. In a
 fixture with original signed framework/GSF code and synthetic updated-data
 settings, read failure preserves the whole owner, and successful refresh changes
-only the disabled setting. This is not yet an original disabled-scan oracle or
-image/data selection integration. Changed factory shared UID and required
-extraction reject pending their owners (#804/#810); strict image signature
-configuration and selected-data recollection remain #814.
-All 292 units pass (3.02s), and the Java image
-API linkage build passes (13.0s). This is the initial system APK phase, not a
+only the disabled setting. `scan_updated_system` follows that refresh with
+the original changed-path and strictly-newer-version/shared-UID source decision.
+SystemConfig reads require-strict-signature without a partition gate and ignores
+only empty package names. Configured factory signatures refresh from verified
+code only when data is selected; the fixture checks higher/equal/lower data
+versions, unchanged paths, stale factory certificates and their effect on the
+later native data authorization gate. A restore outcome requires cleanup,
+enabling the factory setting and active scanning; it does not change the active
+package. This is not yet an original disabled-scan oracle or complete boot
+selection integration. The disposable comparison also matches the complete
+strict-signature configuration against original SystemConfig and selects the
+original data source for WebView, Chrome and versioned Trichrome, preserving all
+active settings, identities and libraries. It passes raw Image code to identity
+selection, rather than already renamed saved Record input. Factory user states
+in this diagnostic come from the captured active-user snapshot; cold disabled
+user-state initialization remains #815. Changed factory shared UID and required extraction reject
+pending their owners (#804/#810); full strict-policy boot acceptance remains
+#814.
+All 294 units pass (3.27s), and the Java image
+API linkage build passes (13.5s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version
 selection, stub expansion, graph/permission/commit side effects, persistence and
 replica publication remain #707/#702/#798/#810/#812/#813. Original PMS still runs.

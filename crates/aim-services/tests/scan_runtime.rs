@@ -5,9 +5,10 @@ use aim_services::package::{
     libraries::TYPE_STATIC,
     parse::Platform,
     scan::{
-        AbiPolicy, Apex, FirstBootSystemInputs, Image, Inputs, Kind, LibraryCompatibility,
-        Location, NativeLibraryInstallPolicy, Partition, ScanClock, ScanPolicy, SigningScan,
-        SupportedAbis, SystemImageScan, UserPolicy, application_flags,
+        AbiPolicy, AbiScanContext, AbiScanMode, Apex, Code, FirstBootSystemInputs, Image, Inputs,
+        Kind, LibraryCompatibility, Location, NativeLibraryEnvironment, NativeLibraryInstallPolicy,
+        Partition, ScanClock, ScanMetadataCompletion, ScanPolicy, SettingUpdate, SigningScan,
+        SupportedAbis, SystemImageScan, UpdatedSystemSource, UserPolicy, application_flags,
     },
     system_config::SystemConfig,
     write::Apks,
@@ -128,6 +129,22 @@ fn saved_scan_libraries_match_original_pms() {
         config.initial_non_stopped_system_packages,
         initial_non_stopped
     );
+    let strict_signatures = String::from_utf8(
+        run(boot.command().args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/boot-scan.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.BootScanOracle",
+            "strict-signatures",
+        ]))
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        config.preinstall_packages_with_strict_signature_check,
+        strict_signatures.lines().map(str::to_owned).collect()
+    );
     let mut platform = Platform::load(&image, Default::default()).unwrap();
     let density =
         String::from_utf8(run(boot.command().args(["shell", "wm", "density"])).stdout).unwrap();
@@ -244,7 +261,6 @@ fn saved_scan_libraries_match_original_pms() {
     )
     .unwrap();
     let system_image = Image::load(&apks, &apexes).unwrap();
-    let system_count = system_image.packages.len();
     let domain_sequence = std::sync::atomic::AtomicU32::new(1);
     let domain_ids = || {
         let mut id = [0; 16];
@@ -255,6 +271,123 @@ fn saved_scan_libraries_match_original_pms() {
         );
         Ok(id)
     };
+    let saved_users: BTreeMap<_, _> = original.users[0]
+        .1
+        .restrictions
+        .packages
+        .iter()
+        .map(|(name, user)| (name.clone(), BTreeMap::from([(0, user.clone())])))
+        .collect();
+    let mut updated_scan = SigningScan::new(&config, &original.settings, first_api).unwrap();
+    for saved in &original.settings.disabled_system_packages {
+        let image_code = system_image
+            .packages
+            .iter()
+            .find(|code| code.location.path == saved.code_path)
+            .expect("disabled factory code remains in the physical image");
+        let mut code = Code {
+            location: image_code.location.clone(),
+            parsed: image_code.parsed.clone(),
+            signing: image_code.signing.clone(),
+        };
+        let mut policy = ScanPolicy::for_location(&code.location);
+        policy.adjust_shared_uid_privilege(
+            &code.parsed,
+            &code.signing,
+            platform_signing,
+            &updated_scan.identities,
+            vendor_sdk,
+        );
+        policy
+            .apply(
+                &mut code.parsed,
+                &code.signing,
+                Some(platform_signing),
+                true,
+                &apks,
+                &compatibility,
+                None,
+            )
+            .unwrap();
+        let updated = saved.flags & aim_services::package::info::FLAG_UPDATED_SYSTEM_APP != 0;
+        let (flags, private_flags) = application_flags(&code.parsed, updated);
+        let environment = NativeLibraryEnvironment {
+            preferred_abi: all_abis.first().unwrap(),
+            app_lib32_install_dir: "/data/app-lib",
+            code_is_directory: fs::metadata((apks.files)(&saved.code_path).unwrap())
+                .unwrap()
+                .is_dir(),
+            canonical_source: None,
+        };
+        let before = updated_scan.clone();
+        let selected = updated_scan
+            .scan_updated_system(
+                &code,
+                SettingUpdate {
+                    code_path: saved.code_path.clone(),
+                    legacy_native_library_path: None,
+                    primary_cpu_abi: saved.primary_cpu_abi.clone(),
+                    secondary_cpu_abi: saved.secondary_cpu_abi.clone(),
+                    flags,
+                    private_flags,
+                    uses_sdk_libraries: saved.uses_sdk_libraries.clone(),
+                    uses_static_libraries: saved.uses_static_libraries.clone(),
+                    mime_groups: code.parsed.mime_groups.clone(),
+                    domain_set_id: domain_ids().unwrap(),
+                    target_sdk_version: code.parsed.target_sdk_version,
+                    restrict_update_hash: code.parsed.restrict_update_hash.clone(),
+                },
+                &saved_users,
+                None,
+                &config,
+                &apks,
+                ScanMetadataCompletion {
+                    abi_policy: &abi_policy,
+                    native_environment: &environment,
+                    context: AbiScanContext {
+                        mode: AbiScanMode::Existing {
+                            first_boot_or_upgrade: true,
+                            old_was_stub: false,
+                            saved: Some(saved),
+                        },
+                        system: true,
+                        updated,
+                        override_abi: None,
+                        platform_runtime_64bit: None,
+                    },
+                    install: NativeLibraryInstallPolicy {
+                        page_size: 16384,
+                        extract: false,
+                        debuggable: false,
+                        compat_16kb_disabled: false,
+                        manifest_compat_disabled: false,
+                    },
+                    destination: None,
+                    clock: ScanClock {
+                        current_time: 0,
+                        user_id: 0,
+                        update_time: false,
+                    },
+                    factory_test: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            selected.source,
+            UpdatedSystemSource::KeepData,
+            "{}",
+            saved.name
+        );
+        assert_eq!(selected.factory.record.settings.app_id, saved.app_id);
+        assert_eq!(updated_scan.settings.packages, before.settings.packages);
+        assert_eq!(updated_scan.identities, before.identities);
+        assert_eq!(updated_scan.libraries, before.libraries);
+        eprintln!(
+            "native factory refresh keeps original data source: {}",
+            saved.name
+        );
+    }
+    let system_count = system_image.packages.len();
     let first_system = SystemImageScan::first_boot(
         system_image,
         &apks,

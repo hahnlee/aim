@@ -2,6 +2,13 @@ package com.android.server;
 
 public final class BootScanOracle {
     public static void main(String[] args) {
+        if (args.length == 1 && args[0].equals("strict-signatures")) {
+            for (String name : new java.util.TreeSet<>(SystemConfig.getInstance()
+                    .getPreinstallPackagesWithStrictSignatureCheck())) {
+                System.out.println(name);
+            }
+            return;
+        }
         System.out.println(com.android.server.pm.parsing.library.PackageBackwardCompatibility
             .bootClassPathContainsATB());
         android.content.res.Resources resources = android.content.res.Resources.getSystem();

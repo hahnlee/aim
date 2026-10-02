@@ -56,6 +56,8 @@ pub struct SystemConfig {
     pub hidden_api_allowlist: Vec<String>,
     /// Initial system packages explicitly exempted from stopped state.
     pub initial_non_stopped_system_packages: BTreeSet<String>,
+    /// Preinstalled packages requiring fresh factory signatures during boot.
+    pub preinstall_packages_with_strict_signature_check: BTreeSet<String>,
     /// `mNamedActors`: namespace, actor name and package.
     pub named_actors: Vec<(String, String, String)>,
     /// OEM names and IDs in ArrayMap order (signed String hash; ties
@@ -202,6 +204,14 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "require-strict-signature" => {
+                    if let Some(package) = e.string("package")
+                        && !package.is_empty()
+                    {
+                        self.preinstall_packages_with_strict_signature_check
+                            .insert(package.into_owned());
+                    }
+                }
                 "initial-package-state" => {
                     if let (Some(package), Some(stopped)) =
                         (e.string("package"), e.string("stopped"))
@@ -446,6 +456,36 @@ pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Fr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_signature_packages_ignore_partition_gate_and_only_empty_names() {
+        let root = aim_android_xml::read(
+            br#"<permissions>
+            <require-strict-signature package="test.package" />
+            <require-strict-signature package="test.package" />
+            <require-strict-signature package=" " />
+            <require-strict-signature package="" />
+            <require-strict-signature />
+        </permissions>"#,
+        )
+        .unwrap();
+        let mut config = SystemConfig::default();
+        config.read_root(
+            &root,
+            0,
+            false,
+            Path::new("."),
+            &|_| None,
+            Path::new("policy.xml"),
+        );
+        assert_eq!(
+            config.preinstall_packages_with_strict_signature_check,
+            [" ", "test.package"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
 
     #[test]
     fn initial_package_state_uses_java_boolean_semantics_without_partition_gate() {
