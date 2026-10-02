@@ -9,6 +9,7 @@ interface PackageAbiHelper {
         public void applyTo(com.android.internal.pm.parsing.pkg.ParsedPackage pkg) { throw new RuntimeException("stub"); }
     }
     final class NativeLibraryPaths {
+        public void applyTo(com.android.internal.pm.parsing.pkg.ParsedPackage pkg) { throw new RuntimeException("stub"); }
         public final String nativeLibraryRootDir;
         public final boolean nativeLibraryRootRequiresIsa;
         public final String nativeLibraryDir;

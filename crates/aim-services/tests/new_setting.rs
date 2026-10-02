@@ -747,6 +747,143 @@ fn new_settings_match_the_original_runtime() {
     assert_eq!(cases, 240);
     assert_eq!(original.next(), None);
     eprintln!("native/original PackageAbiHelper ABI policy matches {cases} cases");
+    let result = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "abi-lifecycle",
+        "/data/local/tmp/code-time.cache",
+    ]));
+    let result = String::from_utf8(result.stdout).unwrap();
+    let mut original = result.lines();
+    let saved = aim_services::package::settings::Package {
+        name: "fixture".into(),
+        primary_cpu_abi: Some("armeabi-v7a".into()),
+        secondary_cpu_abi: Some("arm64-v8a".into()),
+        ..Default::default()
+    };
+    let no_inventory = aim_services::package::write::Apks {
+        files: Box::new(|_| None),
+        platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
+    };
+    let mut cases = 0;
+    for mode in 0..8 {
+        for system in [false, true] {
+            for updated in [false, true] {
+                for requested in [None, Some("-"), Some("arm64-v8a")] {
+                    let mut pkg = template.parsed.clone();
+                    pkg.package_name = "fixture".into();
+                    pkg.primary_cpu_abi = Some("x86".into());
+                    pkg.secondary_cpu_abi = Some("x86_64".into());
+                    let context = AbiScanContext {
+                        mode: match mode {
+                            0 | 7 => AbiScanMode::Existing {
+                                first_boot_or_upgrade: false,
+                                old_was_stub: false,
+                                saved: Some(&saved),
+                            },
+                            1 => AbiScanMode::Existing {
+                                first_boot_or_upgrade: true,
+                                old_was_stub: false,
+                                saved: Some(&saved),
+                            },
+                            2 => AbiScanMode::Existing {
+                                first_boot_or_upgrade: false,
+                                old_was_stub: true,
+                                saved: Some(&saved),
+                            },
+                            3 => AbiScanMode::Existing {
+                                first_boot_or_upgrade: false,
+                                old_was_stub: false,
+                                saved: None,
+                            },
+                            4 => AbiScanMode::Install {
+                                moved: Some(&saved),
+                            },
+                            5 => AbiScanMode::Install { moved: None },
+                            _ => AbiScanMode::Apex,
+                        },
+                        system,
+                        updated,
+                        override_abi: requested,
+                        platform_runtime_64bit: (mode == 7).then_some(true),
+                    };
+                    let inputs = if (1..=3).contains(&mode) {
+                        &apks
+                    } else {
+                        &no_inventory
+                    };
+                    if let Some(planned) = inputs
+                        .scan_native_libraries(
+                            &pkg,
+                            &abi_policy,
+                            &NativeLibraryEnvironment {
+                                preferred_abi,
+                                app_lib32_install_dir: "/data/app-lib",
+                                code_is_directory: false,
+                                canonical_source: None,
+                            },
+                            context,
+                        )
+                        .unwrap()
+                    {
+                        assert!(!planned.requires_extraction);
+                        planned.apply_metadata(&mut pkg);
+                    }
+                    let mut setting = saved.clone();
+                    context.apply_setting(&pkg, &mut setting).unwrap();
+                    assert_eq!(original.next().unwrap(), format!("case {cases}"));
+                    let fields = [
+                        setting
+                            .primary_cpu_abi
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                        pkg.secondary_cpu_abi
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                        pkg.native_library_root_dir
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                        pkg.native_library_root_requires_isa.to_string(),
+                        pkg.native_library_dir
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                        pkg.secondary_native_library_dir
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                        setting
+                            .cpu_abi_override
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                        setting
+                            .legacy_native_library_path
+                            .as_deref()
+                            .unwrap_or("null")
+                            .to_owned(),
+                    ];
+                    for field in fields {
+                        assert_eq!(
+                            original.next().unwrap(),
+                            field,
+                            "ABI lifecycle: mode={mode}, system={system}, updated={updated}, requested={requested:?}"
+                        );
+                    }
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 96);
+    assert_eq!(original.next(), None);
+    eprintln!("native ABI lifecycle matches original helper/setter routes in {cases} cases");
     let inventory = aim_paths::derived_image();
     let bundled_apks = aim_services::package::write::Apks {
         platform: aim_services::package::parse::Platform::load(&inventory, Default::default())
@@ -1364,7 +1501,7 @@ fn new_settings_match_the_original_runtime() {
             },
         )
         .unwrap();
-    let failed_candidate = NewPackageOutcome {
+    let duplicate = |candidate: &NewPackageOutcome| NewPackageOutcome {
         record: Record {
             settings: candidate.record.settings.clone(),
             parsed: candidate.record.parsed.clone(),
@@ -1377,6 +1514,66 @@ fn new_settings_match_the_original_runtime() {
             system_signature_mismatch: None,
         },
     };
+    let no_inventory = aim_services::package::write::Apks {
+        files: Box::new(|_| None),
+        platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
+    };
+    let context = AbiScanContext {
+        mode: AbiScanMode::Existing {
+            first_boot_or_upgrade: true,
+            old_was_stub: false,
+            saved: None,
+        },
+        system: true,
+        updated: false,
+        override_abi: Some("arm64-v8a"),
+        platform_runtime_64bit: None,
+    };
+    let unchanged = scan.clone();
+    assert!(matches!(
+        scan.finish_native_library_metadata(
+            duplicate(&candidate),
+            &no_inventory,
+            &abi_policy,
+            &abi_environment,
+            context
+        ),
+        Err(SigningError::NativeLibrary { .. })
+    ));
+    assert_eq!(scan, unchanged);
+    let (candidate, mismatch) = scan
+        .finish_native_library_metadata(candidate, &apks, &abi_policy, &abi_environment, context)
+        .unwrap();
+    assert!(!mismatch);
+    assert_eq!(
+        candidate.record.settings.primary_cpu_abi.as_deref(),
+        Some("arm64-v8a")
+    );
+    assert_eq!(
+        candidate.record.settings.cpu_abi_override.as_deref(),
+        Some("arm64-v8a")
+    );
+    assert_eq!(
+        candidate.record.settings.legacy_native_library_path,
+        candidate.record.parsed.native_library_root_dir
+    );
+    assert_eq!(
+        scan.settings
+            .packages
+            .iter()
+            .find(|p| p.name == candidate.record.settings.name)
+            .unwrap(),
+        &candidate.record.settings
+    );
+    let mut stale = duplicate(&candidate);
+    stale.record.settings.version_code += 1;
+    let unchanged = scan.clone();
+    assert!(matches!(
+        scan.finish_native_library_metadata(stale, &apks, &abi_policy, &abi_environment, context),
+        Err(SigningError::Rejected(_))
+    ));
+    assert_eq!(scan, unchanged);
+    let failed_candidate = duplicate(&candidate);
     assert_eq!(
         candidate.record.settings.legacy_native_library_path,
         code.parsed.native_library_root_dir

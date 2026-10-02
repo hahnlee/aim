@@ -5,6 +5,9 @@ public class PackageSetting extends SettingBase {
     public PackageSetting setPrimaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
     public PackageSetting setSecondaryCpuAbi(String abi) { throw new RuntimeException("stub"); }
     public PackageSetting setPkg(com.android.server.pm.pkg.AndroidPackage pkg) { throw new RuntimeException("stub"); }
+    public PackageSetting setCpuAbiOverride(String abi) { throw new RuntimeException("stub"); }
+    public String getCpuAbiOverride() { throw new RuntimeException("stub"); }
+    public PackageSetting setLegacyNativeLibraryPath(String path) { throw new RuntimeException("stub"); }
     void setInstalled(boolean installed, int user) { throw new RuntimeException("stub"); }
     void setUninstallReason(int reason, int user) { throw new RuntimeException("stub"); }
     int getUninstallReason(int user) { throw new RuntimeException("stub"); }

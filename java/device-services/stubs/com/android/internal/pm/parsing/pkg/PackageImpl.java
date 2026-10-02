@@ -14,6 +14,10 @@ public abstract class PackageImpl implements ParsedPackage {
     public PackageImpl setMultiArch(boolean value) { throw new RuntimeException("stub"); }
     public PackageImpl set32BitAbiPreferred(boolean value) { throw new RuntimeException("stub"); }
     public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
+    public String getNativeLibraryRootDir() { throw new RuntimeException("stub"); }
+    public boolean isNativeLibraryRootRequiresIsa() { throw new RuntimeException("stub"); }
+    public String getNativeLibraryDir() { throw new RuntimeException("stub"); }
+    public String getSecondaryNativeLibraryDir() { throw new RuntimeException("stub"); }
     public PackageImpl setTargetSdkVersion(int value) { throw new RuntimeException("stub"); }
     public PackageImpl addUsesLibrary(String name) { throw new RuntimeException("stub"); }
     public PackageImpl addUsesOptionalLibrary(String name) { throw new RuntimeException("stub"); }

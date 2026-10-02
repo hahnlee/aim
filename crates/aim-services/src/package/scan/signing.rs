@@ -43,6 +43,11 @@ pub struct SigningScan {
 pub enum SigningError {
     Rejected(Error),
     Fatal(Error),
+    NativeLibrary {
+        package: String,
+        path: String,
+        error: super::NativeLibraryError,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -60,6 +65,90 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Finish the accepted candidate's scan ABI branch and setting metadata.
+    /// Required extraction remains an explicit rejection until its owner has
+    /// completed it (#810); factory/reuse phases can commit without copying.
+    /// Returns the original both-ABI/non-multiarch diagnostic to the caller.
+    pub fn finish_native_library_metadata(
+        &mut self,
+        mut candidate: NewPackageOutcome,
+        apks: &crate::package::write::Apks,
+        policy: &super::AbiPolicy,
+        env: &super::NativeLibraryEnvironment<'_>,
+        context: super::AbiScanContext<'_>,
+    ) -> Result<(NewPackageOutcome, bool), SigningError> {
+        let record = &mut candidate.record;
+        let at = self.accepted_slot(record, "native-library")?;
+        let reject = |message| {
+            SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "native-library",
+                message,
+            })
+        };
+        if record.parsed.path.as_deref() != Some(&record.settings.code_path) {
+            return Err(reject(
+                "parsed code path disagrees with accepted setting".into(),
+            ));
+        }
+        let error = |error| SigningError::NativeLibrary {
+            package: record.settings.name.clone(),
+            path: record.settings.code_path.clone(),
+            error,
+        };
+        let scan = apks
+            .scan_native_libraries(&record.parsed, policy, env, context)
+            .map_err(error)?;
+        let mut mismatch = false;
+        if let Some(scan) = scan {
+            if scan.requires_extraction {
+                return Err(reject(
+                    "native library extraction has not completed (#810)".into(),
+                ));
+            }
+            mismatch = scan.multi_arch_mismatch;
+            scan.apply_metadata(&mut record.parsed);
+        }
+        context
+            .apply_setting(&record.parsed, &mut record.settings)
+            .map_err(|error| SigningError::NativeLibrary {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                error,
+            })?;
+        self.settings.packages[at] = record.settings.clone();
+        Ok((candidate, mismatch))
+    }
+
+    fn accepted_slot(&self, record: &Record, phase: &'static str) -> Result<usize, SigningError> {
+        let reject = || {
+            SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase,
+                message: "metadata candidate is stale or was not reconciled".into(),
+            })
+        };
+        let at = self
+            .settings
+            .packages
+            .iter()
+            .position(|p| *p == record.settings)
+            .ok_or_else(reject)?;
+        if record.parsed.package_name != record.settings.name
+            || record.identity.internal_name != record.settings.name
+            || !self.parsed.iter().any(|(name, id, signing, leaving)| {
+                name == &record.settings.name
+                    && *id == record.settings.app_id
+                    && signing == &record.signing
+                    && *leaving == record.parsed.is(booleans::LEAVING_SHARED_UID)
+            })
+        {
+            return Err(reject());
+        }
+        Ok(at)
+    }
     /// Read the accepted code's actual file timestamp before finishing metadata.
     /// No original image/data file is written, and read failures leave the scan
     /// candidate unchanged. Full scan reconciliation handles removed code.
@@ -97,38 +186,15 @@ impl SigningScan {
 
     /// Finish timestamp/version/volume metadata of this accepted setting
     /// candidate. The caller obtains time inputs from the scan clock and
-    /// verified code owner. Final flags/ABI and snapshot publication are separate.
+    /// verified code owner. ABI metadata has its own accepted stage; final
+    /// flags and snapshot publication are separate.
     pub fn finish_metadata(
         &mut self,
         mut candidate: NewPackageOutcome,
         time: super::ScanTime,
     ) -> Result<NewPackageOutcome, SigningError> {
         let record = &mut candidate.record;
-        let reject = || {
-            SigningError::Rejected(Error {
-                package: record.settings.name.clone(),
-                path: record.settings.code_path.clone(),
-                phase: "metadata",
-                message: "metadata candidate is stale or was not reconciled".into(),
-            })
-        };
-        let at = self
-            .settings
-            .packages
-            .iter()
-            .position(|p| *p == record.settings)
-            .ok_or_else(reject)?;
-        if record.parsed.package_name != record.settings.name
-            || record.identity.internal_name != record.settings.name
-            || !self.parsed.iter().any(|(name, id, signing, leaving)| {
-                name == &record.settings.name
-                    && *id == record.settings.app_id
-                    && signing == &record.signing
-                    && *leaving == record.parsed.is(booleans::LEAVING_SHARED_UID)
-            })
-        {
-            return Err(reject());
-        }
+        let at = self.accepted_slot(record, "metadata")?;
         let flags = physical_parse_flags(&record.settings.code_path).map_err(|message| {
             SigningError::Rejected(Error {
                 package: record.settings.name.clone(),

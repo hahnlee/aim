@@ -57,7 +57,7 @@ then after a native reset to default, Settings launched successfully
 PackageManager service and SystemServer facade are not activated. The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
-shared snapshot publication (190 package unit tests pass). These are not
+shared snapshot publication (192 package unit tests pass). These are not
 registered in guest-init; their write path still returns an explicit
 unsupported-operation exception.
 The native scan's SystemConfig library reader also matches all 19
@@ -400,9 +400,31 @@ original helper calls on four unchanged image apps; GSF's ZIP decision and
 combined metadata feed the accepted setting. Disappearing APKs reject unchanged.
 All prior runtime checks, Settings launch and owned cleanup pass (2026-10-03,
 80.20s); 190 package units pass (3.45s), including native-bridge filtering,
-and Java image API linkage passes (16.3s). Extraction/alignment, saved-ABI/move
-scan branches, full boot selection/publication and install side effects remain
+and Java image API linkage passes (16.3s). Extraction/alignment,
+full boot selection/publication and install side effects remain
 #810/#702; native PMS is not activated.
+
+`AbiScanContext` now selects ABI lifecycle inputs: normal rescans reuse retained
+ABIs, first boot/upgrades, prior stubs and missing settings rederive; installs
+retain compilation ABIs and moves reuse settings. APEX libraries stay with
+apexd. The validated platform package uses the VM owner's primary ABI after path
+calculation, retaining secondary ABI and path ordering. Setting enrichment writes
+primary/secondary ABI, normalized override (`-` clears it) and legacy root.
+`SigningScan::finish_native_library_metadata` validates accepted identity/UID/
+signer/setting state, stages the lifecycle result and commits parsed/setting ABI
+metadata together. Required extraction rejects until its owner has completed it;
+typed selection/input errors and multiarch diagnostics reach the caller. The
+disposable original runtime compares 96 lifecycle combinations with original
+helper/setter routes (2026-10-03, 80.44s), including system/update origins, clear
+override, saved/stub/missing/move/compiled/APEX and platform-ABI ordering. Native
+reuse/APEX cases use an unreadable inventory mapper, proving they do not reopen
+APKs. Accepted GSF metadata receives the requested arm64 ABI and override through
+the signing owner; unreadable code and stale candidates preserve owner state.
+All earlier runtime checks, Settings launch and owned cleanup pass; 192 package
+units pass (3.00s), and Java image API linkage passes (13.5s). The runtime uses
+original ABI/path/setter APIs, not the complete original ScanPackageUtils entry
+point. Full boot/install selection, extraction/alignment, membership effects and
+snapshot publication remain #810/#702; native PMS is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

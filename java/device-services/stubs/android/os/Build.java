@@ -3,6 +3,7 @@
 package android.os;
 
 public class Build {
+    public static final String[] SUPPORTED_64_BIT_ABIS = null;
     public static class VERSION_CODES {
         public static final int TIRAMISU = 33;
     }

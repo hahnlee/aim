@@ -2,6 +2,10 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("abi-lifecycle")) {
+            abiLifecycle(java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])));
+            return;
+        }
         if (args.length != 0 && args[0].equals("scan-abi-package")) {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
@@ -244,6 +248,44 @@ public final class NewSettingOracle {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void abiLifecycle(byte[] cache) throws Exception {
+        int cases = 0;
+        for (int mode = 0; mode < 8; mode++) {
+            for (boolean system : new boolean[] {false, true}) {
+                for (boolean updated : new boolean[] {false, true}) {
+                    for (String requested : new String[] {null, "-", "arm64-v8a"}) {
+                        var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                            com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(cache);
+                        pkg.setPackageName("fixture").setPrimaryCpuAbi("x86").setSecondaryCpuAbi("x86_64");
+                        String overrideAbi = PackageManagerServiceUtils.deriveAbiOverride(requested);
+                        var helper = new PackageAbiHelperImpl();
+                        if (mode != 6) {
+                            if (mode >= 1 && mode <= 3) {
+                                var derived = helper.derivePackageAbi(pkg, system, updated, overrideAbi, new java.io.File("/data/app-lib"));
+                                derived.first.applyTo(pkg); derived.second.applyTo(pkg);
+                                if (system && !updated && derived.first.primary == null) helper.getBundledAppAbis(pkg).applyTo(pkg);
+                            } else if (mode != 5) {
+                                pkg.setPrimaryCpuAbi("armeabi-v7a").setSecondaryCpuAbi("arm64-v8a");
+                            }
+                            helper.deriveNativeLibraryPaths(pkg, system, updated, new java.io.File("/data/app-lib")).applyTo(pkg);
+                            if (mode == 7) pkg.setPrimaryCpuAbi(android.os.Build.SUPPORTED_64_BIT_ABIS[0]);
+                        }
+                        var setting = member("fixture", 0, 0).setCpuAbiOverride(overrideAbi)
+                            .setPrimaryCpuAbi(com.android.server.pm.parsing.pkg.AndroidPackageUtils.getRawPrimaryCpuAbi(pkg))
+                            .setSecondaryCpuAbi(com.android.server.pm.parsing.pkg.AndroidPackageUtils.getRawSecondaryCpuAbi(pkg))
+                            .setLegacyNativeLibraryPath(pkg.getNativeLibraryRootDir());
+                        System.out.println("case " + cases++);
+                        System.out.println(setting.getPrimaryCpuAbiLegacy());
+                        System.out.println(com.android.server.pm.parsing.pkg.AndroidPackageUtils.getRawSecondaryCpuAbi(pkg));
+                        System.out.println(pkg.getNativeLibraryRootDir()); System.out.println(pkg.isNativeLibraryRootRequiresIsa());
+                        System.out.println(pkg.getNativeLibraryDir()); System.out.println(pkg.getSecondaryNativeLibraryDir());
+                        System.out.println(setting.getCpuAbiOverride()); System.out.println(setting.getLegacyNativeLibraryPath());
                     }
                 }
             }
