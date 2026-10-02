@@ -5,6 +5,8 @@ use crate::package::pkg::AndroidPackage;
 mod alignment;
 mod page_size;
 pub use page_size::PageSizeCompatPolicy;
+mod package_copy;
+pub use package_copy::{NativeLibraryAbiCopy, NativeLibraryDestination, NativeLibraryPackageCopy};
 mod install;
 mod lifecycle;
 pub use install::{NativeLibraryCopy, NativeLibraryInstallError};

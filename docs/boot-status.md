@@ -440,10 +440,10 @@ checked into an exclusive temporary file, synced, assigned ZIP modification
 time, 0755 mode and guest ownership, then renamed. Failures preserve the old
 file and remove temporary output; installation error codes remain typed.
 DOS time conversion requires the guest clock owner, avoiding host timezone
-assumptions. APKs remain read-only. Package units pass (201, 2.98s), including
+assumptions. APKs remain read-only. Package units pass (203, 3.17s), including
 corrupt-payload rollback, metadata and reuse. The disposable original runtime
 matches admission errors, extraction content/mtime and repeated-copy reuse in
-48 combinations at 16 KiB guest pages (2026-10-03, 83.74s); all earlier checks,
+48 combinations at 16 KiB guest pages (2026-10-03, 84.27s); all earlier checks,
 Settings launch and owned cleanup pass. Java image API linkage passes (14.2s).
 `Apks::native_library_alignment` selects the original supported 64-bit ABI over
 the base/split union, applies the root's ISA rule, and combines pinned ZIP/ELF
@@ -465,9 +465,23 @@ identity/UID/signer validation and commits setting flags; invalid values and
 stale candidates reject. The runtime exercises accepted GSF metadata with the
 actual image policy; unit tests cover exclusions, failure preservation and
 invalid persisted settings. This does not exercise the complete original
-ScanPackageUtils entry point. Guest-clock delivery, complete base/split and
-multiarch copy orchestration, boot/install policy delivery and publication remain
-#810/#702; native PMS is not activated.
+ScanPackageUtils entry point.
+`Apks::copy_native_libraries_for_supported_abi` and
+`copy_native_libraries_with_override` now orchestrate ordinary-storage package
+copies over a held base/split union. They select supported-list preference,
+create the native root/ISA directory and copy APKs in input order. Multiarch
+copies 32-bit before 64-bit and reports ignored overrides; single-ABI copies
+apply clear/explicit overrides and RenderScript policy. Missing/mismatched ABIs
+retain the original helper's distinct return codes and wrapper handling.
+Writable roots, guest ownership, ZIP clock conversion and existing-directory
+restorecon come from their owners, independently of APK read mapping. Directory
+failures propagate; unresolved final symlinks require filesystem-owner resolution.
+The same runtime matches 64 layout/multiarch/override cases with original helper
+return codes and complete directory/file trees, bytes, modes and timestamps,
+including split overwrite order. Unit tests cover directory creation metadata,
+existing-mode preservation and restorecon failure. Incremental copies, production
+filesystem/clock owner delivery, accepted-scan copy completion and boot/install
+publication remain #810/#798/#702; native PMS is not activated.
 
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained

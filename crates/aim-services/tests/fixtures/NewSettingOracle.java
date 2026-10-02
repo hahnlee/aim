@@ -2,6 +2,15 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("restore-native-directory")) {
+            if (!android.os.SELinux.restorecon(new java.io.File(args[1])))
+                throw new java.io.IOException("restorecon rejected native directory");
+            return;
+        }
+        if (args.length != 0 && args[0].equals("native-package-copy")) {
+            nativePackageCopy();
+            return;
+        }
         if (args.length != 0 && args[0].equals("page-size-setting")) {
             for (int seed : new int[] {0, 6, 8, 16, 32, 64, 127}) {
                 for (int mode = -1; mode <= 128; mode++) {
@@ -242,6 +251,38 @@ public final class NewSettingOracle {
                 System.out.println(com.android.internal.content.NativeLibraryHelper.hasRenderscriptBitcode(handle));
             } catch (java.io.IOException error) {
                 System.out.println("error");
+            }
+        }
+    }
+
+    private static void nativePackageCopy() throws Exception {
+        String[][] layouts = {
+            {"lib/arm64-v8a/libx.so"}, {"lib/unknown/libx.so"}, {"assets/file"},
+            {"lib/x86/libx.so", "lib/arm64-v8a/liby.so"},
+            {"lib/armeabi-v7a/libx.so", "lib/arm64-v8a/liby.so"},
+            {"lib/arm64-v8a/libx.so", "assets/file.bc"},
+            {"lib/unknown/libx.so", "assets/file"},
+            {"lib/arm64-v8a/libx.so", "lib/arm64-v8a/libx.so"}
+        };
+        int cases = 0;
+        for (int layout = 0; layout < layouts.length; layout++) {
+            for (boolean multi : new boolean[] {false, true}) {
+                for (String overrideAbi : new String[] {null, "-", "arm64-v8a", "x86"}) {
+                    int id = cases++;
+                    var paths = new java.util.ArrayList<String>();
+                    for (int split = 0; split < layouts[layout].length; split++) {
+                        String path = "/data/local/tmp/native-package-copy-" + id + "-" + split + ".zip";
+                        byte[] payload = ("payload-" + layout + "-" + split).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                        writeNativeZip(path, layouts[layout][split], payload, 8, 100); paths.add(path);
+                    }
+                    String root = "/data/local/tmp/native-package-original-" + id;
+                    try (var handle = com.android.internal.content.NativeLibraryHelper.Handle.create(paths, multi, true, false, false)) {
+                        int status = com.android.internal.content.NativeLibraryHelper.copyNativeBinariesWithOverride(
+                            handle, new java.io.File(root), overrideAbi, false);
+                        System.out.println("case " + id + " " + String.join(",", paths) + " " + root + " "
+                            + multi + " " + (overrideAbi == null ? "null" : overrideAbi) + " " + status);
+                    }
+                }
             }
         }
     }

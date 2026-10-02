@@ -22,9 +22,10 @@ mod bridge;
 pub use bridge::PolicyBridgeError;
 mod abi;
 pub use abi::{
-    AbiPolicy, AbiScanContext, AbiScanMode, AbiSelectionError, BundledAbis, NativeLibraryCopy,
-    NativeLibraryEntry, NativeLibraryEnvironment, NativeLibraryError, NativeLibraryInstallError,
-    NativeLibraryInstallPolicy, NativeLibraryPaths, NativeLibraryScan, PackageAbis,
+    AbiPolicy, AbiScanContext, AbiScanMode, AbiSelectionError, BundledAbis, NativeLibraryAbiCopy,
+    NativeLibraryCopy, NativeLibraryDestination, NativeLibraryEntry, NativeLibraryEnvironment,
+    NativeLibraryError, NativeLibraryInstallError, NativeLibraryInstallPolicy,
+    NativeLibraryPackageCopy, NativeLibraryPaths, NativeLibraryScan, PackageAbis,
     PageSizeCompatPolicy, SharedUserAbi, SharedUserAbiMismatch, SupportedAbi, SupportedAbis,
     ZipNativeLibraries,
 };

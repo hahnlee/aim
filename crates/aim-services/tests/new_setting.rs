@@ -896,6 +896,145 @@ fn new_settings_match_the_original_runtime() {
         properties.get(key).cloned()
     })
     .unwrap();
+    let packages = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "native-package-copy",
+    ]));
+    fn native_tree(
+        root: &std::path::Path,
+    ) -> std::collections::BTreeMap<String, (Option<Vec<u8>>, u32, u128)> {
+        fn visit(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            result: &mut std::collections::BTreeMap<String, (Option<Vec<u8>>, u32, u128)>,
+        ) {
+            use std::os::unix::fs::PermissionsExt;
+            if !path.exists() {
+                return;
+            }
+            let metadata = fs::metadata(path).unwrap();
+            let mode = aim_storage::guest_inode::read(path)
+                .unwrap()
+                .and_then(|i| i.mode)
+                .unwrap_or(metadata.permissions().mode())
+                & 0o7777;
+            let key = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let (bytes, modified) = if metadata.is_file() {
+                (
+                    Some(fs::read(path).unwrap()),
+                    metadata
+                        .modified()
+                        .unwrap()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+            } else {
+                (None, 0)
+            };
+            result.insert(key, (bytes, mode, modified));
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), result);
+                }
+            }
+        }
+        let mut result = std::collections::BTreeMap::new();
+        visit(root, root, &mut result);
+        result
+    }
+    let output = String::from_utf8(packages.stdout).unwrap();
+    let mut cases = 0;
+    for line in output.lines() {
+        let columns: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(columns[0], "case");
+        assert_eq!(columns[1].parse::<usize>().unwrap(), cases);
+        let paths: Vec<_> = columns[2].split(',').collect();
+        let multi: bool = columns[4].parse().unwrap();
+        let override_abi = (columns[5] != "null").then_some(columns[5]);
+        let package = AndroidPackage {
+            base_apk_path: Some(paths[0].into()),
+            split_code_paths: Some(paths[1..].iter().map(|p| Some((*p).into())).collect()),
+            booleans: if multi {
+                aim_services::package::pkg::booleans::MULTI_ARCH
+            } else {
+                0
+            },
+            ..Default::default()
+        };
+        let native = boot
+            .data
+            .join(format!("data/local/tmp/native-package-native-{cases}"));
+        let clock = |_| Ok(std::time::UNIX_EPOCH + Duration::from_secs(zip_seconds));
+        let restorecon = |path: &std::path::Path| {
+            let guest = format!(
+                "/{}",
+                path.strip_prefix(&boot.data)
+                    .map_err(|e| e.to_string())?
+                    .display()
+            );
+            let restored = boot.command().args([
+                "shell", "/system/bin/app_process",
+                "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+                "/system/bin", "com.android.server.pm.NewSettingOracle", "restore-native-directory", &guest,
+            ]).output().map_err(|e| e.to_string())?;
+            if restored.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&restored.stderr).into_owned())
+            }
+        };
+        let destination = NativeLibraryDestination {
+            root: &native,
+            owner: aim_storage::guest_inode::GuestInode {
+                uid: Some(0),
+                gid: Some(0),
+                mode: None,
+            },
+            zip_time: &clock,
+            restorecon: &restorecon,
+        };
+        let copied = zip_apks.copy_native_libraries_with_override(
+            &package,
+            &abi_policy,
+            override_abi,
+            NativeLibraryInstallPolicy {
+                page_size,
+                extract: true,
+                debuggable: false,
+                compat_16kb_disabled: false,
+                manifest_compat_disabled: false,
+            },
+            &destination,
+        );
+        assert_eq!(
+            copied.as_ref().map(|_| 1).unwrap_or_else(|e| e.code),
+            columns[6].parse::<i32>().unwrap(),
+            "{line}"
+        );
+        if let Ok(copied) = copied {
+            assert_eq!(
+                copied.ignored_override,
+                multi && override_abi.is_some_and(|v| v != "-")
+            );
+        }
+        let original = boot.data.join(columns[3].trim_start_matches('/'));
+        assert_eq!(native_tree(&native), native_tree(&original), "{line}");
+        cases += 1;
+    }
+    assert_eq!(cases, 64);
+    eprintln!(
+        "native/original split and multiarch package copy matches {cases} layout/override cases"
+    );
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
