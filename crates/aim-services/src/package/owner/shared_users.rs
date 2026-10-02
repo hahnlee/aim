@@ -266,6 +266,10 @@ impl Bootstrap {
             .filter(|p| p.shared_user)
             .map(|p| p.app_id)
             .collect();
+        self.prune_unreferenced(&used)
+    }
+
+    pub(in crate::package) fn prune_unreferenced(&mut self, used: &BTreeSet<i32>) -> Vec<String> {
         let removed: Vec<_> = self
             .shared_users
             .iter()

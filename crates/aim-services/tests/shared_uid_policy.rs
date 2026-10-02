@@ -251,3 +251,62 @@ fn uid_creation_matches_the_pinned_settings_policy() {
     }
     assert_eq!(checked, 2);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn uid_cleanup_matches_the_pinned_owner_policy() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        for (owner, method, length, expected) in [
+            (
+                "Lcom/android/server/pm/InstallPackageHelper;",
+                "cleanUpAppIdCreation",
+                51,
+                "39a4a930e641c04299d23719d9936c2fe32f624e76a3d38a67c798f66f0348c8",
+            ),
+            (
+                "Lcom/android/server/pm/Settings;",
+                "checkAndPruneSharedUserLPw",
+                41,
+                "945f56ed3afd114b52e71487416295195a8a403c46e8b2c49bc4c23163dd8cbb",
+            ),
+        ] {
+            let Some(class) = dex.class(owner) else {
+                continue;
+            };
+            let code = dex.methods_named(class, method).unwrap();
+            assert_eq!(code.len(), 1);
+            let words = units(&bytes, &code[0]).unwrap();
+            assert_eq!(words.len(), length);
+            let raw: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(format!("{:x}", Sha256::digest(&raw)), expected);
+            if method == "cleanUpAppIdCreation" {
+                assert_eq!(
+                    dex.method(words[1] as u32).unwrap().1,
+                    "getScannedPackageSetting"
+                );
+                assert_eq!(&words[4..6], &[0x0038, 0x2e]); // Null setting returns without removal.
+                assert_eq!(&words[0xe..0x10], &[0x003d, 0x24]); // Nonpositive UID returns.
+                assert_eq!(dex.method(words[0x21] as u32).unwrap().1, "getAppId");
+                assert_eq!(dex.method(words[0x25] as u32).unwrap().1, "removeAppIdLPw");
+            } else {
+                assert_eq!(dex.method(words[3] as u32).unwrap().1, "getPackageStates");
+                assert_eq!(
+                    dex.method(words[0xd] as u32).unwrap().1,
+                    "getDisabledPackageStates"
+                );
+                assert_eq!(&words[0xa..0xc], &[0x0338, 0x1d]); // Nonempty active group returns false.
+                assert_eq!(&words[0x14..0x16], &[0x0338, 0x13]); // Nonempty disabled group returns false.
+                assert_eq!(dex.method(words[0x1b] as u32).unwrap().1, "remove");
+                assert_eq!(dex.method(words[0x23] as u32).unwrap().1, "removeAppIdLPw");
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+}

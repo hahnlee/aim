@@ -741,6 +741,21 @@ fn new_uid_scan_creates_manifest_groups_and_keeps_leaving_new_packages_independe
     assert_eq!(scan.apply(&code).unwrap_err().phase, "identity");
     assert_eq!(scan, snapshot);
     code.parsed.shared_user_id = Some(group.clone());
+    assert!(scan.reject_pending(&code.parsed.package_name).unwrap());
+    assert_eq!(
+        scan.identities.ids.get(10000),
+        Some(&Owner::SharedUser(group.clone()))
+    );
+    assert!(scan.prune_unused_groups().unwrap().contains(&group));
+    let (_, retried) = scan.apply(&code).unwrap();
+    assert_eq!(retried.app_id, 10001);
+    assert!(scan.accept_uid(&code.parsed.package_name).unwrap());
+    assert!(!scan.prune_unused_groups().unwrap().contains(&group));
+    assert_eq!(
+        scan.identities.ids.get(10001),
+        Some(&Owner::SharedUser(group.clone()))
+    );
+
     code.parsed.booleans |= booleans::LEAVING_SHARED_UID;
     let mut leaving = UidScan::new(&Default::default(), &Default::default()).unwrap();
     let (_, uid) = leaving.apply(&code).unwrap();

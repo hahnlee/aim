@@ -552,7 +552,7 @@ the system UID only; it currently attaches after bootstrap, so C's facade
 still must expose the same owner query before the native boot scan (#702).
 A disposable original-PMS boot (2026-10-02, boot completed) tested the
 Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
-linkage verification and 156 package unit tests pass. The image has no
+linkage verification and 159 package unit tests pass. The image has no
 `android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
 for that flag. Inspecting its original `services.jar` shows that the SDK
 dependency collection call passes `required=true` directly. `Policy::pinned`
@@ -601,7 +601,7 @@ runtime restriction on reusing deleted IDs and fresh-restoration holes.
 An explicitly run original-runtime test matches allocation, deletion,
 ownership replacement and exhaustion. On its disposable original-PMS
 boot (boot completed), all 243 active packages and 16 shared UID groups
-restored with their saved IDs. Java API linkage and 156 package unit tests
+restored with their saved IDs. Java API linkage and 159 package unit tests
 pass. `owner::shared_users::Bootstrap` now seeds the nine pinned platform
 shared users and the valid OEM declarations with fixed IDs and
 system/privileged flags (#803). Rejected OEM names, ranges and slot
@@ -621,7 +621,7 @@ original-PMS boot (2026-10-02, boot completed) restores all 243 active
 package IDs; after pruning, all 16 group names, IDs and signing records
 match the original saved settings. Unit tests cover flags, memberships,
 disabled-only members, snapshot/input immutability and cursor behavior;
-all 156 package unit tests pass. Conflicting decoded settings fail with
+all 159 package unit tests pass. Conflicting decoded settings fail with
 context; ordered recovery from corrupt raw Settings
 records remains pending (#803). `scan::UidScan` now prepares UID
 ownership from fully parsed and verified system-directory Code inputs.
@@ -633,13 +633,23 @@ suffix. `Bootstrap::get_shared_user` preserves existing groups/flags and
 creates a new group only after UID allocation succeeds. Lookup without
 creation, exhausted allocation, older snapshots and rejected transitions
 remain unchanged. Disabled/original-package metadata adoption and changed
-saved groups reject explicitly (#804). All 156 package unit tests, six
-explicit original-APK scan tests and three original-image DEX policy tests
+saved groups reject explicitly (#804). All 159 package unit tests, six
+explicit original-APK scan tests and four original-image DEX policy tests
 pass. The DEX policy test pins group creation and package registration
-branches, including the original insufficient-storage error. These are UID
-candidates; complete new PackageSettings, signing reconciliation for new
-members, failed-scan cleanup, persistence and query publication remain
-under #702, #803 and #798. Saved signing reconciliation and UID conversion
+branches, including the original insufficient-storage error and cleanup
+and empty-group removal guards. UID preparations now track pending members.
+After reconciliation, accept_uid retains their ownership; reject_pending
+removes only a rejected independently allocated package slot and advances
+the original allocation cursor. A rejected shared member loses its candidate
+membership while its group slot survives until final pruning. Restored and
+accepted identities remain intact; a changed slot owner rejects cleanup.
+Final pruning requires all preparations resolved and retains accepted active
+or saved disabled members. Six explicit native scan tests include verified
+GSF input rejected, pruned and retried under the next UID. All 159 package
+unit tests and four original-image DEX policy tests pass. These are UID
+candidates; complete new PackageSettings, new-member signing reconciliation,
+full pipeline failure/side-effect cleanup, persistence and query publication
+remain under #702, #803 and #798. Saved signing reconciliation and UID conversion
 persistence are verified below.
 `scan::Identity` now selects manifest, internal and real names using the
 pinned static-library suffix and authorized original-package system rename
@@ -659,7 +669,7 @@ class and process names retain their parsed values. An explicit original
 runtime fixture fills the ComponentName cache before renaming and compares
 all seven kinds, their recomputed ComponentNames and unchanged name fields
 with native records. Java linkage verification and all explicit
-scan/runtime tests pass. All 156 package unit tests pass, and every active
+scan/runtime tests pass. All 159 package unit tests pass, and every active
 parsed package carries its selected internal name.
 `sign::History` now follows pinned SigningDetails certificate relationship
 rules: lineage capabilities, strict/existing ancestors and exact
@@ -745,7 +755,7 @@ and disabled records from sharedUserId to the same numeric userId, removes
 the group, and rebuilds certificate definitions/references after removal.
 Unrelated XML nodes and package metadata survive; partial conversions,
 remapped IDs, empty/multiple-member group deletion and cleared retained
-signers reject before writing. All 156 package unit tests pass. A real
+signers reject before writing. All 159 package unit tests pass. A real
 signed APK fixture is installed and updated by original PMS, native-parsed
 and integrity-verified, reconciled and migrated under BEST_EFFORT, then
 written while that disposable original PMS is stopped. On reboot original
@@ -769,7 +779,7 @@ backup/reserve/inode protocol, preserving unrelated attributes and nodes.
 Serialized public keys remain in the scan snapshot; packages.xml stores
 certificates. Metadata changes, cleared retained identities, duplicate/
 unmodelled owners and external document changes reject before commit.
-All 156 package unit tests pass. The disposable original-PMS runtime test
+All 159 package unit tests pass. The disposable original-PMS runtime test
 wrote all 243 active package and 16 group signing records into a separate
 native-owned fixture; native re-read matches complete persisted settings
 and main/reserve bytes match. Its live original-PMS data was not written.

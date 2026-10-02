@@ -11,7 +11,7 @@ use crate::package::{
     settings::Settings,
     system_config::SystemConfig,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Uid {
@@ -26,6 +26,7 @@ pub struct UidScan {
     pub identities: Bootstrap,
     settings: Settings,
     pub packages: BTreeMap<String, Uid>,
+    pending: BTreeSet<String>,
 }
 
 impl UidScan {
@@ -61,6 +62,7 @@ impl UidScan {
             identities,
             settings: settings.clone(),
             packages,
+            pending: BTreeSet::new(),
         })
     }
 
@@ -127,7 +129,82 @@ impl UidScan {
         };
         self.packages
             .insert(identity.internal_name.clone(), uid.clone());
+        self.pending.insert(identity.internal_name.clone());
         Ok((identity, uid))
+    }
+
+    /// After signature and metadata reconciliation succeeds, retain the UID
+    /// preparation. Returns whether a new preparation was pending. No disk
+    /// or query state is published here.
+    pub fn accept_uid(&mut self, name: &str) -> Result<bool, Error> {
+        if !self.packages.contains_key(name) {
+            return Err(uid_error(name, "package has no UID preparation"));
+        }
+        Ok(self.pending.remove(name))
+    }
+
+    /// Discard a rejected new package. Original cleanUpAppIdCreation removes
+    /// only an independently allocated package slot. Shared group slots remain
+    /// until final pruning, as their optimistic package registration was not
+    /// a new slot. Restored and accepted package identities remain untouched.
+    pub fn reject_pending(&mut self, name: &str) -> Result<bool, Error> {
+        let uid = self
+            .packages
+            .get(name)
+            .ok_or_else(|| uid_error(name, "package has no UID preparation"))?;
+        if !self.pending.contains(name) {
+            return Ok(false);
+        }
+        let owner = match &uid.shared_user {
+            Some(group) => Owner::SharedUser(group.clone()),
+            None => Owner::Package(name.into()),
+        };
+        if self.identities.ids.get(uid.app_id) != Some(&owner) {
+            return Err(uid_error(
+                name,
+                "rejected UID preparation no longer owns its slot",
+            ));
+        }
+        if uid.shared_user.is_none() {
+            self.identities.ids.remove(uid.app_id);
+        }
+        self.pending.remove(name);
+        self.packages.remove(name);
+        Ok(true)
+    }
+
+    /// Settings.pruneSharedUsersLPw after every preparation is resolved.
+    /// Accepted active identities and saved disabled members retain groups.
+    pub fn prune_unused_groups(&mut self) -> Result<Vec<String>, Error> {
+        if !self.pending.is_empty() {
+            return Err(uid_error(
+                "",
+                "UID preparations remain unresolved before pruning",
+            ));
+        }
+        let used = self
+            .packages
+            .values()
+            .filter(|p| p.shared_user.is_some())
+            .map(|p| p.app_id)
+            .chain(
+                self.settings
+                    .disabled_system_packages
+                    .iter()
+                    .filter(|p| p.shared_user)
+                    .map(|p| p.app_id),
+            )
+            .collect();
+        Ok(self.identities.prune_unreferenced(&used))
+    }
+}
+
+fn uid_error(name: &str, message: &str) -> Error {
+    Error {
+        package: name.into(),
+        path: String::new(),
+        phase: "identity",
+        message: message.into(),
     }
 }
 
@@ -245,5 +322,116 @@ mod tests {
             scan.identities.ids.acquire(Owner::Package("next".into())),
             Ok(10001)
         );
+    }
+
+    #[test]
+    fn rejected_independent_preparation_releases_only_its_slot_and_advances_cursor() {
+        let settings = Settings {
+            packages: vec![Package {
+                name: "saved".into(),
+                app_id: 10002,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut scan = UidScan::new(&Default::default(), &settings).unwrap();
+        assert_eq!(scan.apply(&code("failed")).unwrap().1.app_id, 10000);
+        assert_eq!(scan.apply(&code("accepted")).unwrap().1.app_id, 10001);
+        assert!(scan.accept_uid("accepted").unwrap());
+        let before = scan.clone();
+        assert!(!scan.reject_pending("saved").unwrap());
+        assert!(!scan.reject_pending("accepted").unwrap());
+        assert!(scan.accept_uid("missing").is_err());
+        assert!(scan.reject_pending("missing").is_err());
+        assert_eq!(scan, before);
+        assert!(scan.reject_pending("failed").unwrap());
+        assert_eq!(scan.identities.ids.get(10000), None);
+        assert_eq!(
+            scan.identities.ids.get(10001),
+            Some(&Owner::Package("accepted".into()))
+        );
+        assert_eq!(
+            scan.identities.ids.get(10002),
+            Some(&Owner::Package("saved".into()))
+        );
+        assert_eq!(scan.apply(&code("next")).unwrap().1.app_id, 10003);
+        assert_eq!(
+            before.identities.ids.get(10000),
+            Some(&Owner::Package("failed".into()))
+        );
+        scan.identities
+            .ids
+            .replace(10003, Owner::Package("other".into()))
+            .unwrap();
+        let before = scan.clone();
+        assert!(scan.reject_pending("next").is_err());
+        assert_eq!(scan, before);
+    }
+
+    #[test]
+    fn rejected_shared_members_keep_group_slots_until_completed_scan_pruning() {
+        let mut scan = UidScan::new(&Default::default(), &Default::default()).unwrap();
+        let mut first = code("first");
+        first.parsed.shared_user_id = Some("group".into());
+        let uid = scan.apply(&first).unwrap().1;
+        let before = scan.clone();
+        assert!(scan.prune_unused_groups().is_err());
+        assert_eq!(scan, before);
+        assert!(scan.reject_pending("first").unwrap());
+        assert_eq!(
+            scan.identities.ids.get(uid.app_id),
+            Some(&Owner::SharedUser("group".into()))
+        );
+        let mut second = code("second");
+        second.parsed.shared_user_id = Some("group".into());
+        assert_eq!(scan.apply(&second).unwrap().1, uid);
+        assert!(scan.accept_uid("second").unwrap());
+        scan.prune_unused_groups().unwrap();
+        assert!(scan.identities.shared_users.contains_key("group"));
+        assert_eq!(
+            scan.identities.ids.get(uid.app_id),
+            Some(&Owner::SharedUser("group".into()))
+        );
+
+        let mut scan = UidScan::new(&Default::default(), &Default::default()).unwrap();
+        scan.apply(&first).unwrap();
+        scan.reject_pending("first").unwrap();
+        assert!(
+            scan.prune_unused_groups()
+                .unwrap()
+                .contains(&"group".into())
+        );
+        assert_eq!(scan.identities.ids.get(10000), None);
+        assert_eq!(scan.apply(&code("next")).unwrap().1.app_id, 10001);
+    }
+
+    #[test]
+    fn final_uid_pruning_retains_disabled_only_saved_members() {
+        let settings = Settings {
+            shared_users: vec![crate::package::settings::SharedUser {
+                name: "disabled".into(),
+                app_id: 10004,
+                ..Default::default()
+            }],
+            disabled_system_packages: vec![Package {
+                name: "old".into(),
+                app_id: 10004,
+                shared_user: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut scan = UidScan::new(&Default::default(), &settings).unwrap();
+        let before = scan.clone();
+        let removed = scan.prune_unused_groups().unwrap();
+        assert!(!removed.contains(&"disabled".into()));
+        assert_eq!(scan.identities.shared_users.len(), 1);
+        assert_eq!(
+            scan.identities.ids.get(10004),
+            Some(&Owner::SharedUser("disabled".into()))
+        );
+        assert_eq!(scan.apply(&code("next")).unwrap().1.app_id, 10000);
+        assert_eq!(before.settings, settings);
+        assert_eq!(scan.settings, settings);
     }
 }
