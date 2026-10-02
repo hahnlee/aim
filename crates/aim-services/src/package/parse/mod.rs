@@ -8,7 +8,7 @@
 //! This parser makes what `PackageParser2.parsePackage` caches during a
 //! scan: no certificates (`PARSE_COLLECT_CERTIFICATES` is not set), and
 //! nothing the scan sets afterwards. What it does not port yet it refuses
-//! with [`Error::Unsupported`] rather than guess, among them split APKs,
+//! with [`Error::Unsupported`] rather than guess, among them isolated splits,
 //! `<key-sets>`, `<install-constraints>`, `<extension-sdk>` and advanced
 //! glob patterns; none of the image's packages has them.
 //!
@@ -19,6 +19,7 @@
 //! Project, Licensed under the Apache License, Version 2.0.
 
 mod attrs;
+mod cluster;
 pub mod component;
 mod components;
 pub mod package;
@@ -211,33 +212,11 @@ struct Parser<'a> {
 /// the guest sees at `path`, with the scan's `flags`.
 pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result<Package> {
     let (host, path) = descend(host, path)?;
-    let (apk_host, apk_path, code_path) = if host.is_dir() {
-        let apks: Vec<_> = std::fs::read_dir(&host)
-            .map_err(|e| Error::Parse(format!("{}: {e}", host.display())))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".apk"))
-            .collect();
-        match apks.as_slice() {
-            [one] => {
-                let name = one.file_name().to_string_lossy().into_owned();
-                (one.path(), format!("{path}/{name}"), path.clone())
-            }
-            [] => return fail("No packages found in split"),
-            _ => return Err(Error::Unsupported("split APKs".into())),
-        }
-    } else {
-        (host.clone(), path.clone(), path.clone())
-    };
-    let apk = Apk::open(&apk_host).map_err(|e| Error::Parse(e.to_string()))?;
-    let manifest = apk.manifest().map_err(|e| Error::Parse(e.to_string()))?;
-    let app_table = apk.file("resources.arsc").ok().map(|b| Table::parse(&b));
-    let app_table = app_table
-        .transpose()
-        .map_err(|e| Error::Parse(e.to_string()))?;
+    let parts = cluster::load(&host, &path)?;
+    let base = &parts[0];
+    let manifest = &base.manifest;
     let mut tables = vec![&platform.framework];
-    if let Some(t) = &app_table {
-        tables.push(t);
-    }
+    tables.extend(parts.iter().filter_map(|part| part.table.as_ref()));
     let res = Resources {
         tables,
         overlays: &platform.framework_overlays,
@@ -253,7 +232,25 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
         flags,
         input: RefCell::new(Input::default()),
     };
-    let mut pkg = parser.parse_base_apk(&manifest, &apk_path, &code_path)?;
+    let mut pkg = parser.parse_base_apk(manifest, &base.path, &path)?;
+    if base.table.as_ref().is_some_and(Table::defines_overlayable) {
+        for t in &res.tables {
+            for (name, actor) in t.overlayables() {
+                pkg.overlayables.put(name, actor.to_owned());
+            }
+        }
+    }
+    if parts.len() > 1 {
+        let splits = &parts[1..];
+        pkg.split_names = Some(splits.iter().map(|p| p.split.clone().unwrap()).collect());
+        pkg.split_code_paths = Some(splits.iter().map(|p| p.path.clone()).collect());
+        pkg.split_revision_codes = Some(splits.iter().map(|p| p.revision).collect());
+        pkg.split_flags = Some(vec![0; splits.len()]);
+        pkg.split_class_loader_names = Some(vec![None; splits.len()]);
+        for (index, part) in splits.iter().enumerate() {
+            parser.parse_split(&mut pkg, part, index)?;
+        }
+    }
     if let Some(e) = parser.ctx.error.take() {
         return fail(e);
     }
@@ -431,16 +428,6 @@ impl Parser<'_> {
         );
         pkg.set(b::CORE_APP, attr_bool(manifest, "", "coreApp", false));
         self.parse_base_apk_tags(&mut pkg, manifest)?;
-        // `parseBaseApk`: when the APK's resources define overlayables,
-        // those of every package its resources hold, the framework's too.
-        let res = self.ctx.res;
-        if res.tables.last().is_some_and(|t| t.defines_overlayable()) {
-            for t in &res.tables {
-                for (name, actor) in t.overlayables() {
-                    pkg.overlayables.put(name, actor.to_owned());
-                }
-            }
-        }
         Ok(pkg)
     }
 
@@ -1070,6 +1057,7 @@ impl Parser<'_> {
         pkg.process_name = process;
         if let Some(cl) = &pkg.class_loader_name
             && cl != "dalvik.system.PathClassLoader"
+            && cl != "dalvik.system.DexClassLoader"
             && cl != "dalvik.system.DelegateLastClassLoader"
         {
             return fail(format!("Invalid class loader name: {cl}"));

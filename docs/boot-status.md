@@ -65,10 +65,16 @@ built-in library names and paths from `pm list libraries -v` and
 `dumpsys package libraries` on a disposable original-PMS boot
 (2026-10-02, `sys.boot_completed=1`). The declaration registry assembled
 from persisted package settings and native-parsed APKs matches 22 of the
-original's 23 library names/paths. GMS's declaration is missing because
-split APK parsing is unimplemented (#720). The diagnostic failed three
-package parses (GMS/Play Store splits and Google Search without runtime
-display density); it is an incomplete scan check. Dependency resolution
+original's 23 library names/paths. With nonisolated split cluster parsing
+and runtime density supplied, the diagnostic parses 242 packages; only
+the installed GMS's isolated split asset dependencies remain unsupported
+(#720), leaving its declaration missing. The native parser's output also
+matches all 288 original-PMS scan cache entries byte for byte on a
+disposable boot (2026-10-02, `sys.boot_completed=1`); these include the
+system GMS/Play Store packages, not the installed GMS cluster. A compiled
+split APK integration test passes for manifest merging, split ordering,
+cache serialization and malformed clusters. This remains an incomplete
+native scan check. Dependency resolution
 and native PackageManager activation remain pending (#707); no native
 PackageManager CTS result is claimed.
 

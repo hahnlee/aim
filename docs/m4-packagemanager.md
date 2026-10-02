@@ -531,10 +531,11 @@ system app may expose only names its original declared. A disposable
 original-PMS data check (2026-10-02, boot completed) read `packages.xml`
 and parsed APKs without the feed: 22 of the original's 23 library names
 and paths matched, including Trichrome's static version 694313732 and
-internal package name. The missing GMS declaration is blocked by split
-APK parsing (#720). The diagnostic parsed 240 packages and failed three:
-GMS and Play Store splits, and Google Search's layout without a supplied
-runtime display density. These failures make the scan check incomplete.
+internal package name. With nonisolated split cluster parsing and runtime
+display density supplied, the diagnostic parses 242 packages; the
+installed GMS's isolated split asset dependencies remain unsupported
+(#720), leaving its declaration missing. This makes the scan check
+incomplete.
 Library dependency resolution, the complete native scan and #707's CTS
 acceptance still remain; declaration records are not yet served as full
 shared-library query results.
@@ -544,8 +545,17 @@ matching resource configurations across all supplied APK tables instead
 of stopping at the first table. It combines all type-spec change flags,
 including nonmatching configurations, and retains the first ordinary APK
 on a configuration tie, as pinned `AssetManager2` does. This is tested
-with base/language-split tables; cluster parsing and manifest merging
-remain unimplemented (#720).
+with base/language-split tables. Nonisolated cluster parsing validates
+package/version and split names, orders splits by name and merges their
+application manifests. Split type names are validated as `ApkLite` does;
+install-time type requirements remain the install owner's responsibility.
+An explicitly run integration test compiles base/feature/config APKs with
+the pinned aapt2 and checks the merged components, class loader, split
+fields and cache serialization, plus rejection of malformed clusters.
+On a disposable original-PMS boot (2026-10-02, boot completed), native
+output matches all 288 scan cache entries byte for byte, including the
+system GMS/Play Store packages. The installed GMS's isolated split loader
+and dependency tree remain unimplemented (#720).
 
 **Who writes what, by slice:**
 
