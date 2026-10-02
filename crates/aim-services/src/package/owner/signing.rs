@@ -18,7 +18,7 @@ fn without_signatures(mut settings: Settings) -> Settings {
     }
     settings
 }
-fn persisted(mut settings: Settings) -> Settings {
+pub(super) fn persisted(mut settings: Settings) -> Settings {
     for signatures in settings
         .packages
         .iter_mut()

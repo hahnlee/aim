@@ -33,6 +33,112 @@ impl Drop for Data {
 const RESTRICTIONS: &[u8] = b"<package-restrictions><pkg name='example.app' stopped='true' inst='true'><suspend-params suspending-package='android'><dialog-info dialogMessage='keep me' /></suspend-params></pkg><crossProfile-intent-filters><item targetUserId='10'><filter><action name='example.ACTION' /></filter></item></crossProfile-intent-filters></package-restrictions>";
 
 #[test]
+fn native_library_commit_preserves_other_owners_and_clears_legacy_abi_fallback() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    let original = b"<packages future='keep'><package name='example.app' codePath='/data/app/example' userId='10100' requiredCpuAbi='armeabi-v7a' nativeLibraryPath='/data/app-lib/old' pageSizeCompat='8'><future value='retained'/></package><updated-package name='example.app' codePath='/system/app/example.apk' userId='10100' requiredCpuAbi='armeabi-v7a'/><future-owner value='unchanged'/></packages>";
+    fs::write(&path, original).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let previous = store.state().clone();
+    let mut desired = previous.settings.clone();
+    let package = &mut desired.packages[0];
+    package.legacy_native_library_path = Some("/data/app/example/lib".into());
+    package.primary_cpu_abi = Some("arm64-v8a".into());
+    package.secondary_cpu_abi = Some("armeabi-v7a".into());
+    package.cpu_abi_override = Some("arm64-v8a".into());
+    package.page_size_compat = 32;
+    desired.disabled_system_packages[0].primary_cpu_abi = None;
+    store.commit_native_library_metadata(&desired).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(abx::MAGIC));
+    assert_eq!(bytes, fs::read(sibling(&path, ".reservecopy")).unwrap());
+    assert!(!data.0.join("system/packages-backup.xml").exists());
+    let root = aim_android_xml::read(&bytes).unwrap();
+    assert_eq!(root.string("future").as_deref(), Some("keep"));
+    assert!(root.children().any(|e| e.name == "future-owner"));
+    let package = root.children().find(|e| e.name == "package").unwrap();
+    assert!(package.children().any(|e| e.name == "future"));
+    assert_eq!(package.int("pageSizeCompat").unwrap(), Some(32));
+    assert!(
+        root.children()
+            .filter(|e| matches!(e.name.as_str(), "package" | "updated-package"))
+            .all(|e| e.string("requiredCpuAbi").is_none())
+    );
+    let reread = State::read(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(reread.settings, desired);
+    assert_eq!(store.state(), &reread);
+    assert_eq!(reread.users, previous.users);
+    desired.packages[0].legacy_native_library_path = None;
+    desired.packages[0].primary_cpu_abi = None;
+    desired.packages[0].secondary_cpu_abi = None;
+    desired.packages[0].cpu_abi_override = None;
+    desired.packages[0].page_size_compat = 0;
+    store.commit_native_library_metadata(&desired).unwrap();
+    let root = aim_android_xml::read(&fs::read(path).unwrap()).unwrap();
+    let package = root.children().find(|e| e.name == "package").unwrap();
+    for name in [
+        "nativeLibraryPath",
+        "primaryCpuAbi",
+        "secondaryCpuAbi",
+        "cpuAbiOverride",
+        "requiredCpuAbi",
+        "pageSizeCompat",
+    ] {
+        assert!(!package.attrs.iter().any(|(key, _)| key == name));
+    }
+    assert_eq!(
+        State::read(&data.0, &[0]).unwrap().unwrap().settings,
+        desired
+    );
+}
+
+#[test]
+fn native_library_commit_rejects_identity_signer_and_unrelated_changes_before_writes() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let previous = store.state().clone();
+    let bytes = fs::read(&path).unwrap();
+    for change in 0..8 {
+        let mut desired = previous.settings.clone();
+        desired.packages[0].primary_cpu_abi = Some("arm64-v8a".into());
+        match change {
+            0 => desired.packages[0].app_id += 1,
+            1 => desired.packages[0].code_path.push_str("/other"),
+            2 => desired.packages[0].version_code += 1,
+            3 => desired.packages[0].signatures = Some(Default::default()),
+            4 => desired.packages[0].page_size_compat = -1,
+            5 => desired.packages[0].page_size_compat = 128,
+            6 => desired.packages.clear(),
+            _ => desired.packages.push(desired.packages[0].clone()),
+        }
+        assert!(
+            !store
+                .commit_native_library_metadata(&desired)
+                .unwrap_err()
+                .committed
+        );
+        assert_eq!(store.state(), &previous);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!data.0.join("system/packages-backup.xml").exists());
+        assert!(!sibling(&path, ".reservecopy").exists());
+    }
+    fs::write(&path, b"<packages/>").unwrap();
+    let mut desired = previous.settings.clone();
+    desired.packages[0].primary_cpu_abi = Some("arm64-v8a".into());
+    assert!(
+        !store
+            .commit_native_library_metadata(&desired)
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(path).unwrap(), b"<packages/>");
+    assert_eq!(store.state(), &previous);
+}
+
+#[test]
 fn writes_enabled_state_and_preserves_unmodelled_fields() {
     let data = Data::new();
     let path = data.settings();

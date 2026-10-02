@@ -30,6 +30,103 @@ fn start(boot: &Boot) {
 
 #[test]
 #[ignore = "requires aimctl and the pinned derived image; run explicitly"]
+fn original_pms_boots_with_native_library_metadata_persistence() {
+    let dir = std::env::temp_dir().join(format!("aim-libr-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let data = Data(dir);
+    let boot = Boot {
+        ctl: aim_paths::root().join("target/release/aimctl"),
+        data: data.0.join("guest"),
+    };
+    start(&boot);
+    run(boot.command().arg("stop"));
+    let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
+    let mut store = Store::open(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let before = store.state().settings.clone();
+    let mut desired = before.clone();
+    let package = desired
+        .packages
+        .iter_mut()
+        .find(|p| {
+            p.primary_cpu_abi.as_deref() == Some("arm64-v8a")
+                && p.legacy_native_library_path.is_some()
+        })
+        .unwrap();
+    package.cpu_abi_override = Some("arm64-v8a".into());
+    package.set_page_size_compat(8).unwrap();
+    let expected = package.clone();
+    store.commit_native_library_metadata(&desired).unwrap();
+    assert_eq!(store.state().settings, desired);
+    let path = boot.data.join("data/system/packages.xml");
+    let written = fs::read(&path).unwrap();
+    assert!(written.starts_with(aim_android_xml::abx::MAGIC));
+    assert_eq!(
+        written,
+        fs::read(path.with_file_name("packages.xml.reservecopy")).unwrap()
+    );
+    assert!(!path.with_file_name("packages-backup.xml").exists());
+    drop(store);
+    volume.detach().unwrap();
+    start(&boot);
+    let reread = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let actual = reread
+        .settings
+        .packages
+        .iter()
+        .find(|p| p.name == expected.name)
+        .unwrap();
+    assert_eq!(
+        actual.legacy_native_library_path,
+        expected.legacy_native_library_path
+    );
+    assert_eq!(actual.primary_cpu_abi, expected.primary_cpu_abi);
+    assert_eq!(actual.secondary_cpu_abi, expected.secondary_cpu_abi);
+    // ScanPackageUtils sets this from the scan request, which supplies no
+    // install-only override during an ordinary boot.
+    assert_eq!(actual.cpu_abi_override, None);
+    assert_eq!(actual.page_size_compat, expected.page_size_compat);
+    for saved in &before.packages {
+        let package = reread
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == saved.name)
+            .unwrap();
+        assert_eq!(
+            (
+                package.app_id,
+                package.shared_user,
+                &package.code_path,
+                &package.signatures
+            ),
+            (
+                saved.app_id,
+                saved.shared_user,
+                &saved.code_path,
+                &saved.signatures
+            ),
+            "{}",
+            saved.name
+        );
+    }
+    assert_eq!(reread.settings.shared_users, before.shared_users);
+    assert_eq!(reread.settings.key_sets, before.key_sets);
+    let settings = run(boot.command().args([
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.android.settings/.Settings",
+    ]));
+    assert!(String::from_utf8_lossy(&settings.stdout).contains("Status: ok"));
+    println!(
+        "original PMS reboot retained native ABI/path/page-size settings and cleared the install-only override; Settings launched"
+    );
+}
+
+#[test]
+#[ignore = "requires aimctl and the pinned derived image; run explicitly"]
 fn original_pms_boots_with_native_signature_persistence() {
     let dir = std::env::temp_dir().join(format!("aim-sigr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();

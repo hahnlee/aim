@@ -496,6 +496,23 @@ successful files, as the copy helper does; whole-install rollback remains with t
 install owner. Incremental copies, production filesystem/clock owner delivery and
 boot/install publication remain #810/#798/#702; native PMS is not activated.
 
+`Store::commit_native_library_metadata` now persists completed scan ABI/path
+metadata for retained active and disabled-system packages through the existing
+ABX backup/reserve owner. Active packages also persist page-size compatibility;
+the pinned disabled-system writer does not write that field. Optional values
+are removed when cleared, including the old `requiredCpuAbi` fallback. The writer
+rejects package additions/removals, UID/signer/code-path and unrelated changes,
+invalid page flags, duplicate owners and concurrent document changes before
+writing. Unit tests verify typed values, cleared attributes, retained unknown
+nodes and no mutation on rejection; all 288 aim-services units pass (3.07s).
+An explicit stopped-volume write and original-PMS reboot passes (17.85s): an
+actual arm64 package retains its ABI/library paths and native-written page-size
+settings; its install-only ABI override is cleared by the original ordinary-boot
+scan, as ScanPackageUtils specifies. All original package UID/code/signers,
+shared users and key sets survive, and Settings launches. This is persisted
+metadata compatibility, not native boot ownership or complete install publication
+(#798/#810/#702).
+
 `SigningScan::finish_metadata` now completes timestamp/version/volume metadata
 for a current accepted setting candidate (2026-10-03). It checks the retained
 setting, identity, UID, signer and leaving status before mutation; stale or

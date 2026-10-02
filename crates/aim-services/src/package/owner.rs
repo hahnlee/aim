@@ -23,6 +23,7 @@ use super::write::Enabled;
 use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
+mod native_libraries;
 pub mod shared_users;
 mod signing;
 
@@ -117,6 +118,18 @@ impl Store {
         settings: &super::settings::Settings,
     ) -> Result<(), WriteError> {
         let root = signing::replace_migrations(&self.settings_document, settings)
+            .map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
+    /// Persist completed native-library scan metadata for retained packages.
+    /// Required copies and ABI policy belong to the scan/installation owners;
+    /// this writer rejects changes to identity, signers or unrelated settings.
+    pub fn commit_native_library_metadata(
+        &mut self,
+        settings: &super::settings::Settings,
+    ) -> Result<(), WriteError> {
+        let root = native_libraries::replace(&self.settings_document, settings)
             .map_err(WriteError::before)?;
         self.commit_package_document(root)
     }
