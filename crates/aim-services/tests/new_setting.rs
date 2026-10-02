@@ -88,6 +88,66 @@ fn new_settings_match_the_original_runtime() {
         boot.data.join("data/local/tmp/new-setting.dex"),
     )
     .unwrap();
+    let original_groups = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.NewSettingOracle",
+        "group-flags",
+    ]));
+    let mut expected_groups = String::new();
+    for seed in [0, 64] {
+        for private_seed in [0, 8] {
+            for update in [0, 2, 128] {
+                for private_update in [0, 16] {
+                    use aim_services::package::owner::shared_users::SharedUser;
+                    use std::fmt::Write;
+                    let mut group = SharedUser::new(10001, seed, private_seed);
+                    let mut state = |g: &SharedUser| {
+                        writeln!(&mut expected_groups, "{} {}", g.flags, g.private_flags).unwrap();
+                    };
+                    state(&group);
+                    group.add_package("a", 1, 32);
+                    state(&group);
+                    group.add_package("a", 1, 32);
+                    state(&group);
+                    group.add_package("a", update, private_update);
+                    state(&group);
+                    group.add_package("b", 128, 16);
+                    state(&group);
+                    for name in ["a", "a", "b"] {
+                        writeln!(&mut expected_groups, "{}", group.remove_package(name)).unwrap();
+                        writeln!(
+                            &mut expected_groups,
+                            "{} {}",
+                            group.flags, group.private_flags
+                        )
+                        .unwrap();
+                    }
+                    group.add_package("a", update, private_update);
+                    writeln!(
+                        &mut expected_groups,
+                        "{} {}",
+                        group.flags, group.private_flags
+                    )
+                    .unwrap();
+                    writeln!(&mut expected_groups, "{}", group.remove_package("a")).unwrap();
+                    writeln!(
+                        &mut expected_groups,
+                        "{} {}",
+                        group.flags, group.private_flags
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+    assert_eq!(
+        String::from_utf8(original_groups.stdout).unwrap(),
+        expected_groups
+    );
+    eprintln!("native/original shared UID flags match 24 add/update/remove sequences");
     let original = boot
         .command()
         .args([

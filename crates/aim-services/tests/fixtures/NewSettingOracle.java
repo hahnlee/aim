@@ -2,6 +2,10 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("group-flags")) {
+            groupFlags();
+            return;
+        }
         if (args.length != 0 && args[0].equals("compat-call")) {
             byte[] bytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1]));
             var owner = android.os.ServiceManager.getService("platform_compat");
@@ -97,6 +101,42 @@ public final class NewSettingOracle {
                                 + " " + p.getVirtualPreload(id));
                         }
                         System.out.println();
+                    }
+                }
+            }
+        }
+    }
+
+    private static PackageSetting member(String name, int flags, int privateFlags) {
+        return Settings.createNewSetting(name, null, null, null, null,
+            new java.io.File("/system/nonexistent/" + name), null, null, null,
+            1L, flags, privateFlags, null, true, false, false, false, null,
+            null, null, null, null, null, null, new java.util.UUID(0, 0), 36, null);
+    }
+
+    private static void groupState(SharedUserSetting group) {
+        System.out.println(group.getFlags() + " " + group.getPrivateFlags());
+    }
+
+    private static void groupFlags() {
+        for (int seed : new int[] {0, 64}) {
+            for (int privateSeed : new int[] {0, 8}) {
+                for (int update : new int[] {0, 2, 128}) {
+                    for (int privateUpdate : new int[] {0, 16}) {
+                        var group = new SharedUserSetting("group", seed, privateSeed);
+                        var a = member("a", 1, 32);
+                        var b = member("b", 128, 16);
+                        groupState(group);
+                        group.addPackage(a); groupState(group);
+                        group.addPackage(a); groupState(group);
+                        a.setFlags(update); a.setPrivateFlags(privateUpdate);
+                        group.addPackage(a); groupState(group);
+                        group.addPackage(b); groupState(group);
+                        System.out.println(group.removePackage(a)); groupState(group);
+                        System.out.println(group.removePackage(a)); groupState(group);
+                        System.out.println(group.removePackage(b)); groupState(group);
+                        group.addPackage(a); groupState(group);
+                        System.out.println(group.removePackage(a)); groupState(group);
                     }
                 }
             }

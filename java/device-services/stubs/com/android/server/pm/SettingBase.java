@@ -3,6 +3,8 @@ package com.android.server.pm;
 
 public abstract class SettingBase {
     SettingBase(int flags, int privateFlags) {}
+    public SettingBase setFlags(int flags) { throw new RuntimeException("stub"); }
+    public SettingBase setPrivateFlags(int flags) { throw new RuntimeException("stub"); }
     public int getFlags() { throw new RuntimeException("stub"); }
     public int getPrivateFlags() { throw new RuntimeException("stub"); }
 }

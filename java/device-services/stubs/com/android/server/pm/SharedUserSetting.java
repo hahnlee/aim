@@ -4,6 +4,7 @@ package com.android.server.pm;
 public final class SharedUserSetting extends SettingBase {
     int mAppId;
     final PackageSignatures signatures = null;
+    boolean removePackage(PackageSetting setting) { throw new RuntimeException("stub"); }
     void addPackage(PackageSetting setting) { throw new RuntimeException("stub"); }
     SharedUserSetting(String name, int flags, int privateFlags) {
         super(flags, privateFlags);

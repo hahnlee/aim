@@ -233,13 +233,7 @@ fn shared_uid_scan_signatures_follow_commit_and_ota_order() {
         verified("/system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk");
     let platform = verified("/system/framework/framework-res.apk");
     assert_ne!(google.signatures, platform.signatures);
-    let mut group = SharedUser {
-        app_id: 1000,
-        flags: 1,
-        private_flags: 8,
-        signatures: None,
-        signatures_changed: None,
-    };
+    let mut group = SharedUser::new(1000, 1, 8);
     assert!(!group.merge_authorized_lineage(&google, &[]).unwrap());
     assert_eq!(group.signatures_changed, Some(false));
     assert!(group.signatures.is_none());
@@ -864,6 +858,16 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     let group = google.parsed.shared_user_id.as_ref().unwrap();
     let uid = accepted.record.settings.app_id;
     assert_eq!(uid, 10000);
+    assert_eq!(
+        (
+            scan.identities.shared_users[group].flags,
+            scan.identities.shared_users[group].private_flags
+        ),
+        (
+            accepted.record.settings.flags,
+            accepted.record.settings.private_flags
+        ),
+    );
     assert!(accepted.record.settings.shared_user);
     assert!(accepted.signing.system_signature_mismatch.is_none());
     assert_eq!(

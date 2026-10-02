@@ -13,6 +13,9 @@ pub struct SharedUser {
     pub app_id: i32,
     pub flags: i32,
     pub private_flags: i32,
+    uid_flags: i32,
+    uid_private_flags: i32,
+    packages: BTreeMap<String, (i32, i32)>,
     pub signatures: Option<Signatures>,
     /// Per-scan state: None before reconciliation, false after a normal
     /// check, true after an OTA signer replacement. Never persisted.
@@ -51,6 +54,51 @@ pub(in crate::package) fn saved_signatures(details: &SigningDetails) -> Result<S
 }
 
 impl SharedUser {
+    pub fn new(app_id: i32, flags: i32, private_flags: i32) -> Self {
+        Self {
+            app_id,
+            flags,
+            private_flags,
+            uid_flags: flags,
+            uid_private_flags: private_flags,
+            packages: BTreeMap::new(),
+            signatures: None,
+            signatures_changed: None,
+        }
+    }
+
+    /// SharedUserSetting.addPackage. Re-adding the same setting updates the
+    /// live member's flags without OR-ing them again, as the original set does.
+    pub fn add_package(&mut self, name: &str, flags: i32, private_flags: i32) -> bool {
+        let added = self
+            .packages
+            .insert(name.into(), (flags, private_flags))
+            .is_none();
+        if added {
+            self.flags |= flags;
+            self.private_flags |= private_flags;
+        }
+        added
+    }
+
+    /// SharedUserSetting.removePackage: only active members contribute flags;
+    /// constructor UID flags survive the removal of the last member.
+    pub fn remove_package(&mut self, name: &str) -> bool {
+        let Some((flags, private_flags)) = self.packages.remove(name) else {
+            return false;
+        };
+        if self.flags & flags != 0 {
+            self.flags = self.packages.values().fold(self.uid_flags, |v, p| v | p.0);
+        }
+        if self.private_flags & private_flags != 0 {
+            self.private_flags = self
+                .packages
+                .values()
+                .fold(self.uid_private_flags, |v, p| v | p.1);
+        }
+        true
+    }
+
     /// ReconcilePackageUtils's normal, already-authorized merge. Members
     /// are the other parsed packages in this group, in owner scan order.
     /// Errors leave the group and its scan state intact.
@@ -172,16 +220,8 @@ impl Bootstrap {
     ) -> Result<Option<&SharedUser>, Error> {
         if !self.shared_users.contains_key(name) && create {
             let app_id = self.ids.acquire(Owner::SharedUser(name.into()))?;
-            self.shared_users.insert(
-                name.into(),
-                SharedUser {
-                    app_id,
-                    flags,
-                    private_flags,
-                    signatures: None,
-                    signatures_changed: None,
-                },
-            );
+            self.shared_users
+                .insert(name.into(), SharedUser::new(app_id, flags, private_flags));
         }
         Ok(self.shared_users.get(name))
     }
@@ -246,7 +286,17 @@ impl Bootstrap {
             boot.shared_users.get_mut(&saved.name).unwrap().signatures = saved.signatures.clone();
         }
         for package in &settings.packages {
-            if !package.shared_user {
+            if package.shared_user {
+                let name = match boot.ids.get(package.app_id) {
+                    Some(Owner::SharedUser(name)) => name.clone(),
+                    _ => unreachable!("AppIds::restore validated shared UID ownership"),
+                };
+                boot.shared_users.get_mut(&name).unwrap().add_package(
+                    &package.name,
+                    package.flags,
+                    package.private_flags,
+                );
+            } else {
                 boot.ids
                     .register_existing(package.app_id, Owner::Package(package.name.clone()))
                     .map_err(RestoreError::Settings)?;
@@ -302,16 +352,8 @@ impl Bootstrap {
         self.ids
             .register_existing(app_id, Owner::SharedUser(name.into()))
             .map_err(Rejection::Slot)?;
-        self.shared_users.insert(
-            name.into(),
-            SharedUser {
-                app_id,
-                flags,
-                private_flags,
-                signatures: None,
-                signatures_changed: None,
-            },
-        );
+        self.shared_users
+            .insert(name.into(), SharedUser::new(app_id, flags, private_flags));
         Ok(())
     }
 }
@@ -320,6 +362,65 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn active_member_flags_preserve_uid_seeds_duplicate_state_and_removal_conditions() {
+        let mut group = SharedUser::new(10001, 64, 8);
+        assert!(group.add_package("a", 1, 32));
+        assert!(group.add_package("b", 128, 16));
+        assert_eq!((group.flags, group.private_flags), (193, 56));
+        assert!(!group.add_package("a", 2, 0));
+        assert_eq!((group.flags, group.private_flags), (193, 56));
+        assert!(group.remove_package("a"));
+        // Its current bits were never aggregated, so removal does not rebuild.
+        assert_eq!((group.flags, group.private_flags), (193, 56));
+        assert!(!group.remove_package("a"));
+        assert!(group.remove_package("b"));
+        assert_eq!((group.flags, group.private_flags), (64, 8));
+        assert!(group.add_package("a", 1, 32));
+        assert!(!group.add_package("a", 1, 16));
+        assert!(group.add_package("b", 128, 32));
+        assert!(group.remove_package("b"));
+        assert_eq!((group.flags, group.private_flags), (65, 24));
+    }
+
+    #[test]
+    fn restoration_aggregates_active_members_without_disabled_package_flags() {
+        use crate::package::settings::{Package, SharedUser as Saved};
+        let settings = Settings {
+            shared_users: vec![Saved {
+                name: "group".into(),
+                app_id: 10001,
+                flags: 1,
+                ..Default::default()
+            }],
+            packages: vec![Package {
+                name: "active".into(),
+                app_id: 10001,
+                shared_user: true,
+                flags: 64,
+                private_flags: 8,
+                ..Default::default()
+            }],
+            disabled_system_packages: vec![Package {
+                name: "old".into(),
+                app_id: 10001,
+                shared_user: true,
+                flags: 128,
+                private_flags: 16,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let before = settings.clone();
+        let mut boot = Bootstrap::restore(&Default::default(), &settings).unwrap();
+        let group = boot.shared_users.get_mut("group").unwrap();
+        assert_eq!((group.flags, group.private_flags), (65, 8));
+        assert!(!group.remove_package("old"));
+        assert!(group.remove_package("active"));
+        assert_eq!((group.flags, group.private_flags), (1, 0));
+        assert_eq!(settings, before);
+    }
 
     #[test]
     fn dynamic_shared_user_lookup_and_exhaustion_preserve_existing_ownership() {
@@ -369,16 +470,11 @@ mod tests {
 
     #[test]
     fn invalid_saved_merge_certificates_leave_the_group_unchanged() {
-        let mut group = SharedUser {
-            app_id: 10001,
-            flags: 1,
-            private_flags: 8,
-            signatures_changed: None,
-            signatures: Some(Signatures {
-                signatures: vec![vec![1, 2, 3]],
-                ..Default::default()
-            }),
-        };
+        let mut group = SharedUser::new(10001, 1, 8);
+        group.signatures = Some(Signatures {
+            signatures: vec![vec![1, 2, 3]],
+            ..Default::default()
+        });
         let before = group.clone();
         let unknown = SigningDetails::from_saved(&Default::default()).unwrap();
         assert!(group.merge_authorized_lineage(&unknown, &[]).is_err());
@@ -495,13 +591,7 @@ mod tests {
         assert_eq!(boot.shared_users["android.uid.system"].app_id, 1000);
         assert_eq!(
             boot.shared_users["android.uid.oem"],
-            SharedUser {
-                app_id: 2900,
-                flags: 1,
-                private_flags: 8,
-                signatures: None,
-                signatures_changed: None,
-            }
+            SharedUser::new(2900, 1, 8)
         );
         assert_eq!(boot.rejected.len(), 5);
         assert!(matches!(

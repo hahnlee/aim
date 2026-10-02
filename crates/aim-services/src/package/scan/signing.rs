@@ -697,6 +697,13 @@ impl SigningScan {
                     .any(|p| p.name == previous.name),
             )
             .map_err(|e| reject("libraries", e.0.into()))?;
+        if let Some(group) = &mut group {
+            group.add_package(
+                &record.settings.name,
+                record.settings.flags,
+                record.settings.private_flags,
+            );
+        }
         // All fallible work finishes before changing this candidate.
         self.settings.packages[at].signatures = Some(signatures);
         self.libraries = libraries;

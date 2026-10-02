@@ -667,13 +667,10 @@ fn allocation_matches_the_original_runtime() {
                     }
                 } else {
                     for (k, (member, _)) in merged_cases.iter().enumerate() {
-                        let mut group = aim_services::package::owner::shared_users::SharedUser {
-                            app_id: 10001,
-                            flags: 0,
-                            private_flags: 0,
-                            signatures: Some(saved.clone()),
-                            signatures_changed: None,
-                        };
+                        let mut group = aim_services::package::owner::shared_users::SharedUser::new(
+                            10001, 0, 0,
+                        );
+                        group.signatures = Some(saved.clone());
                         let changed = group
                             .merge_authorized_lineage(b, std::slice::from_ref(member))
                             .unwrap();
