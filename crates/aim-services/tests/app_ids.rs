@@ -136,9 +136,7 @@ fn allocation_matches_the_original_runtime() {
         );
     }
     for package in &state.settings.packages {
-        if package.app_id == -1 && package.is_sdk_library {
-            assert_eq!(restored.get(-1), None);
-        } else if package.shared_user {
+        if package.shared_user {
             assert!(matches!(
                 restored.get(package.app_id),
                 Some(Owner::SharedUser(_))

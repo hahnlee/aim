@@ -157,8 +157,11 @@ packages and 16 shared UID groups restored with their saved IDs. Java
 API linkage verification and 136 package unit tests pass. The allocator
 is not connected to scan reconciliation, persistence or snapshot
 publication; first-boot shared-user seeding also remains under #702.
-Accepted SDK libraries without an app ID have no slot; their image-policy
-handling in the settings reader is tracked in #802.
+The pinned Settings DEX compiles out `disallowSdkLibsToBeApps`: SDK
+libraries require a positive app/shared-user ID, and native restoration
+rejects missing identities (#802). An explicit original-image test checks
+the complete inspected reader/registration control flow; a settings test
+covers SDK/non-SDK negative IDs, zero IDs and positive/shared ownership.
 
 The device's own system service (`dev.aim.server.DeviceServices`,
 docs/system-services.md, "The system_server bridge") is on the system

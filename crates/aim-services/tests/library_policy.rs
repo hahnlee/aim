@@ -80,3 +80,94 @@ fn sdk_dependency_collection_requires_the_library_in_the_pinned_image() {
     );
     assert!(!Policy::pinned(true).sdk_library_independence);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn sdk_libraries_require_an_app_id_in_the_pinned_settings_owner() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        let Some(class) = dex.class("Lcom/android/server/pm/Settings;") else {
+            continue;
+        };
+        for (name, digest) in [
+            (
+                "addPackageLPw",
+                "58647c19cc00db53606912ef2564148b12770c9d82070576bf226f5a28fe3aae",
+            ),
+            (
+                "readPackageLPw",
+                "f0d10b6622b22c5b17d769ca67c1e8f65e5be0ecb2a642a5769f360b0539abb4",
+            ),
+        ] {
+            let methods = dex.methods_named(class, name).unwrap();
+            assert_eq!(methods.len(), 1);
+            let words = units(&bytes, &methods[0]).unwrap();
+            // Fingerprint the complete inspected control flow: a future
+            // image must re-establish policy, including register assignment
+            // and branch targets, rather than infer an absent flag's default.
+            let data: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(data)),
+                digest,
+                "{name} changed"
+            );
+            if name == "addPackageLPw" {
+                // setAppId -> result -> mAppIds -> registerExistingAppId,
+                // with no SDK/no-ID bypass. The SDK argument is unused.
+                assert_eq!(dex.method(words[0x35] as u32).unwrap().1, "setAppId");
+                assert_eq!(words[0x37], 0x0b0c);
+                assert_eq!(words[0x38] & 255, 0x54);
+                assert_eq!(words[0x3a], 0x406e);
+                assert_eq!(
+                    dex.method(words[0x3b] as u32).unwrap().1,
+                    "registerExistingAppId"
+                );
+            } else {
+                assert_eq!(dex.method(words[0x1d] as u32).unwrap().1, "parseAppId");
+                assert_eq!(words[0x1f], 0x050a); // result v5
+                assert_eq!(&words[0x9f..0xa1], &[0x2202, 5]); // v34 = v5
+                // Only appId > 0 takes the standalone addPackage path.
+                assert_eq!(&words[0x277..0x27b], &[0x223c, 0xf7, 0x0738, 0xa2]);
+                assert_eq!(0x277 + words[0x278] as usize, 0x36e);
+                assert_eq!(dex.method(words[0x3ab] as u32).unwrap().1, "addPackageLPw");
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+}
+
+#[test]
+fn settings_keep_sdk_libraries_only_with_valid_id_ownership() {
+    use aim_services::package::{
+        owner::app_ids::{AppIds, Owner},
+        settings::Settings,
+    };
+    let xml = br#"<packages>
+        <shared-user name="group" userId="1000" />
+        <package name="sdk-no-id" codePath="/data/app/no-id" userId="-1" isSdkLibrary="true" />
+        <package name="sdk-zero-id" codePath="/data/app/zero" userId="0" isSdkLibrary="true" />
+        <package name="app-no-id" codePath="/data/app/no-id-app" userId="-1" />
+        <package name="sdk-id" codePath="/data/app/sdk" userId="10001" isSdkLibrary="true" />
+        <package name="sdk-shared" codePath="/data/app/shared" userId="-1" sharedUserId="1000" isSdkLibrary="true" />
+    </packages>"#;
+    let settings = Settings::parse(&aim_android_xml::read(xml).unwrap()).unwrap();
+    assert_eq!(
+        settings
+            .packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["sdk-id", "sdk-shared"]
+    );
+    assert!(settings.packages.iter().all(|p| p.is_sdk_library));
+    let ids = AppIds::restore(&settings).unwrap();
+    assert_eq!(ids.get(10001), Some(&Owner::Package("sdk-id".into())));
+    assert_eq!(ids.get(1000), Some(&Owner::SharedUser("group".into())));
+    assert_eq!(ids.get(-1), None);
+}

@@ -603,8 +603,11 @@ ownership replacement and exhaustion. On its disposable original-PMS
 boot (boot completed), all 243 active packages and 16 shared UID groups
 restored with their saved IDs. Java API linkage and 136 package unit tests
 pass. Scan reconciliation, first-boot shared-user seeding, UID persistence
-and snapshot publication are not connected (#702). The settings reader's
-image policy for SDK libraries without an app ID is tracked in #802.
+and snapshot publication are not connected (#702). The pinned Settings
+DEX compiles out the SDK/no-ID exception in the source: SDK libraries
+require a positive app/shared-user ID (#802). An explicit original-image
+test pins the inspected read/registration control flow, and native reader
+and restoration tests cover negative/zero/positive/shared ownership.
 Verified SPKI keys now become the pinned runtime's Serializable public
 keys for native query records (#738). An explicitly run disposable-boot
 integration test compares six RSA/EC/DSA serialization streams byte for

@@ -396,6 +396,8 @@ fn updated_package(e: &Element) -> Result<Package, String> {
 /// `readPackageLPw`: `None` for an entry the original drops (no name, code
 /// path or app id).
 fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Package>, String> {
+    // The pinned Settings DEX compiles out disallowSdkLibsToBeApps:
+    // SDK libraries still need a positive app/shared-user ID (#802).
     let Some(mut p) = package_attributes(e)?.filter(|p| p.app_id > 0) else {
         return Ok(None);
     };

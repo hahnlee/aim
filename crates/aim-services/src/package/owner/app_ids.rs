@@ -61,8 +61,8 @@ impl Default for AppIds {
 impl AppIds {
     /// Active packages reserve slots even when uninstalled for every
     /// user. Disabled system versions share the active version's identity
-    /// and do not independently register a UID. Settings must already
-    /// have been accepted by the image's read policy (#802).
+    /// and do not independently register a UID. The pinned Settings
+    /// reader requires an app ID even for SDK libraries (#802).
     pub fn restore(settings: &Settings) -> Result<Self, Error> {
         let mut ids = Self::default();
         let mut shared_names = BTreeSet::new();
@@ -82,11 +82,6 @@ impl AppIds {
         for package in &settings.packages {
             if !packages.insert(&package.name) {
                 return Err(Error::DuplicatePackage(package.name.clone()));
-            }
-            if package.app_id == -1 && package.is_sdk_library && !package.shared_user {
-                // An accepted SDK library without an app identity has
-                // declarations, but no UID slot or process (#802).
-                continue;
             }
             if package.app_id <= 0 {
                 return Err(Error::InvalidId {
@@ -232,7 +227,7 @@ mod tests {
                 },
                 Package {
                     name: "sdk".into(),
-                    app_id: -1,
+                    app_id: 10003,
                     is_sdk_library: true,
                     ..Default::default()
                 },
@@ -249,6 +244,7 @@ mod tests {
         assert_eq!(ids.get(1000), Some(&Owner::SharedUser("group".into())));
         assert_eq!(ids.get(10002), Some(&owner("app")));
         assert_eq!(ids.get(-1), None);
+        assert_eq!(ids.get(10003), Some(&owner("sdk")));
         assert_eq!(ids.acquire(owner("new")), Ok(10000));
         assert_eq!(settings, before);
         let mut invalid = settings.clone();
@@ -262,6 +258,12 @@ mod tests {
         assert!(matches!(
             AppIds::restore(&invalid),
             Err(Error::Occupied { .. })
+        ));
+        invalid = settings.clone();
+        invalid.packages[3].app_id = -1;
+        assert!(matches!(
+            AppIds::restore(&invalid),
+            Err(Error::InvalidId { .. })
         ));
     }
 
