@@ -57,4 +57,8 @@ interface IBridge {
      * original's install sessions from now on (IPackageWritesHost).
      */
     void watchPackageWrites(IPackageWritesHost host);
+
+    /** PlatformCompat's install-time native shared-library policy. */
+    boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk);
+
 }

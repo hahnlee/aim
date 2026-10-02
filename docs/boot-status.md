@@ -86,7 +86,15 @@ resolves acyclic APK provider graphs, fills nested dependency records and
 package file paths, and marks static libraries installed for the direct
 consumer's installed users. Tests check multihop ordering, input
 immutability and user effects. Cyclic provider updates fail explicitly
-(#799); policy wiring, native scan integration and native PackageManager
+(#799). The original PlatformCompat install-time native-library policy
+is now queried through the system-server bridge (package name and target
+SDK, without PMS lookup). On a disposable original-PMS boot (2026-10-02,
+boot completed), a temporary Rust diagnostic received false for SDK 30
+and true for 31/36; Settings started successfully (warm, 90 ms). The
+diagnostic was removed and the boot/data cleaned. SDK library independence
+has no matching Flags API or aconfig entry in this image and still needs
+an authoritative policy (#800). Bootstrap facade wiring, native scan
+integration and native PackageManager
 activation remain pending (#707);
 no native PackageManager CTS result is claimed.
 

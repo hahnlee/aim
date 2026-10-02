@@ -543,6 +543,19 @@ them, then SDK. Versioned dependencies check the provider's verified
 signatures, including certificate rotation and the pre-27 multi-signer
 rule. SDK independence and native enforcement are explicit policy inputs;
 the native scan still needs to supply them from their owners.
+For native enforcement, `IBridge.areNativeLibraryDependenciesEnforced`
+now calls the original `PlatformCompat.isChangeEnabledInternal` install
+API with package name and target SDK, without looking up PMS state.
+`native_dependencies_enforced` uses generated Binder transaction codes
+and preserves transport errors and owner exceptions. The bridge serves
+the system UID only; it currently attaches after bootstrap, so C's facade
+still must expose the same owner query before the native boot scan (#702).
+A disposable original-PMS boot (2026-10-02, boot completed) tested the
+Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
+linkage verification and 130 package unit tests pass. The image has no
+`android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
+for that flag; SDK policy provenance remains #800, without a guessed
+fallback.
 `Selection::files` assembles the provider's base/split paths followed by
 its already-resolved transitive files, preserving first occurrence.
 Tests cover ordering, missing/optional dependencies, SDK policy,

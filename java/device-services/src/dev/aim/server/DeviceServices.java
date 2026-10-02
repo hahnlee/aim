@@ -15,6 +15,7 @@ import android.view.IWindowManager;
 
 import com.android.internal.os.ApplicationSharedMemory;
 import com.android.server.SystemService;
+import com.android.server.compat.PlatformCompat;
 
 import java.io.File;
 import java.io.IOException;
@@ -153,6 +154,8 @@ public final class DeviceServices extends SystemService {
     }
 
     private static final class Bridge extends IBridge.Stub {
+        // SharedLibrariesImpl, android-16.0.0_r1.
+        private static final long ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES = 142191088L;
         private final Context context;
         private final IServiceHost host;
         private final LocationBridge location;
@@ -217,6 +220,16 @@ public final class DeviceServices extends SystemService {
         public void watchPackageWrites(IPackageWritesHost host) {
             enforceSystemUid();
             packageWrites.attach(host);
+        }
+
+        @Override
+        public boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk) {
+            enforceSystemUid();
+            PlatformCompat compat = (PlatformCompat) ServiceManager.getService(
+                    Context.PLATFORM_COMPAT_SERVICE);
+            if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
+            return compat.isChangeEnabledInternal(
+                    ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES, packageName, targetSdk);
         }
 
         private static void enforceSystemUid() {

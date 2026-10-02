@@ -14,6 +14,8 @@ mod resolve;
 pub use resolve::{Policy, ResolveError, Selection};
 mod graph;
 pub use graph::{GraphError, Resolved};
+mod policy;
+pub use policy::{NativePolicyError, native_dependencies_enforced};
 
 pub const VERSION_UNDEFINED: i64 = -1;
 pub const TYPE_BUILTIN: i32 = 0;
