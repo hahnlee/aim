@@ -60,6 +60,59 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Finish timestamp/version/volume metadata of this accepted setting
+    /// candidate. The caller obtains time inputs from the scan clock and
+    /// verified code owner. Final flags/ABI and snapshot publication are separate.
+    pub fn finish_metadata(
+        &mut self,
+        mut candidate: NewPackageOutcome,
+        time: super::ScanTime,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let record = &mut candidate.record;
+        let reject = || {
+            SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "metadata",
+                message: "metadata candidate is stale or was not reconciled".into(),
+            })
+        };
+        let at = self
+            .settings
+            .packages
+            .iter()
+            .position(|p| *p == record.settings)
+            .ok_or_else(reject)?;
+        if record.parsed.package_name != record.settings.name
+            || record.identity.internal_name != record.settings.name
+            || !self.parsed.iter().any(|(name, id, signing, leaving)| {
+                name == &record.settings.name
+                    && *id == record.settings.app_id
+                    && signing == &record.signing
+                    && *leaving == record.parsed.is(booleans::LEAVING_SHARED_UID)
+            })
+        {
+            return Err(reject());
+        }
+        let flags = physical_parse_flags(&record.settings.code_path).map_err(|message| {
+            SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "location",
+                message,
+            })
+        })?;
+        super::enrich::apply(
+            &mut record.settings,
+            &record.parsed,
+            &mut candidate.users,
+            time,
+            flags & parse::PARSE_IS_SYSTEM_DIR != 0,
+        );
+        self.settings.packages[at] = record.settings.clone();
+        Ok(candidate)
+    }
+
     pub fn new(
         config: &SystemConfig,
         settings: &Settings,

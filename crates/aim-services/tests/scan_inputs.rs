@@ -1232,6 +1232,50 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     assert_eq!(updated.users, old_users);
     assert_eq!(scan.identities.ids, snapshot.identities.ids);
     assert!(updated.signing.system_signature_mismatch.is_none());
+    let stale = aim_services::package::scan::NewPackageOutcome {
+        record: aim_services::package::scan::Record {
+            settings: settings::Package {
+                last_update_time: -1,
+                ..updated.record.settings.clone()
+            },
+            parsed: updated.record.parsed.clone(),
+            signing: updated.record.signing.clone(),
+            identity: updated.record.identity.clone(),
+            origin: updated.record.origin,
+        },
+        users: updated.users.clone(),
+        signing: aim_services::package::scan::SigningOutcome {
+            system_signature_mismatch: None,
+        },
+    };
+    let time = aim_services::package::scan::ScanTime {
+        current_time: 0,
+        file_time: 77,
+        user_id: -1,
+        update_time: false,
+    };
+    let snapshot = scan.clone();
+    assert!(
+        matches!(scan.finish_metadata(stale, time), Err(SigningError::Rejected(ref e)) if e.phase == "metadata")
+    );
+    assert_eq!(scan, snapshot);
+    let expected_version = (i64::from(updated.record.parsed.version_code_major) << 32)
+        | i64::from(updated.record.parsed.version_code as u32);
+    let completed = scan.finish_metadata(updated, time).unwrap();
+    let mut expected_users = old_users;
+    expected_users.get_mut(&10).unwrap().first_install_time = 77;
+    assert_eq!(completed.users, expected_users);
+    assert_eq!(completed.record.settings.last_update_time, 77);
+    assert_eq!(completed.record.settings.last_modified_time, 77);
+    assert_eq!(completed.record.settings.version_code, expected_version);
+    assert_eq!(
+        completed.record.settings.volume_uuid,
+        completed.record.parsed.volume_uuid
+    );
+    assert!(completed.record.settings.install_source.is_orphaned);
+    assert_eq!(scan.settings.packages[0], completed.record.settings);
+    assert_eq!(scan.identities.ids, snapshot.identities.ids);
+    assert_eq!(scan.libraries, snapshot.libraries);
 }
 
 #[test]

@@ -509,3 +509,63 @@ fn original_package_adoption_and_updates_match_the_pinned_image() {
     }
     assert_eq!(checked, 5);
 }
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn scan_metadata_and_earliest_install_policy_match_the_pinned_image() {
+    use sha2::{Digest, Sha256};
+    let jar =
+        Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+    let mut checked = 0;
+    for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+        let bytes = jar.file(name).unwrap();
+        let dex = Dex::parse(&bytes).unwrap();
+        for (owner, method, length, hash, calls) in [
+            (
+                "Lcom/android/server/pm/ScanPackageUtils;",
+                "scanPackageOnly",
+                1353,
+                "b050629fa31cf09b3fbe002fe95b727652203832ee3ddd044b276dd377847d31",
+                vec![
+                    (0x40e, "setIsOrphaned"),
+                    (0x415, "setDebuggable"),
+                    (0x41c, "setBaseRevisionCode"),
+                    (0x427, "getEarliestFirstInstallTime"),
+                    (0x435, "setFirstInstallTime"),
+                    (0x439, "setLastUpdateTime"),
+                    (0x449, "setFirstInstallTime"),
+                    (0x45d, "setLastUpdateTime"),
+                    (0x460, "setLastModifiedTime"),
+                    (0x486, "setLongVersionCode"),
+                    (0x4d6, "setVolumeUuid"),
+                ],
+            ),
+            (
+                "Lcom/android/server/pm/pkg/PackageStateUtils;",
+                "getEarliestFirstInstallTime",
+                53,
+                "f0122a450672b3a7b9a9698c9fea90d2822cedc30dc8c04b25a310a7a0557e2d",
+                vec![
+                    (0x04, "size"),
+                    (0x18, "valueAt"),
+                    (0x1e, "getFirstInstallTimeMillis"),
+                ],
+            ),
+        ] {
+            let Some(class) = dex.class(owner) else {
+                continue;
+            };
+            let methods = dex.methods_named(class, method).unwrap();
+            assert_eq!(methods.len(), 1);
+            let words = units(&bytes, &methods[0]).unwrap();
+            assert_eq!(words.len(), length);
+            let raw: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert_eq!(format!("{:x}", Sha256::digest(raw)), hash, "{method}");
+            for (at, name) in calls {
+                assert_eq!(dex.method(words[at + 1] as u32).unwrap().1, name);
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+}
