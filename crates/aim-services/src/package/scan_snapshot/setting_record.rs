@@ -116,5 +116,15 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     if p.data().len() > i32::MAX as usize {
         return Err("package setting exceeds transport size".into());
     }
+    p.write_bool(snapshot.owner().has_legacy_permissions());
+    if snapshot.owner().has_legacy_permissions() {
+        let legacy = snapshot
+            .owner()
+            .legacy_permissions(name, factory)?
+            .ok_or("missing legacy setting owner")?;
+        let users: Vec<_> = legacy.users().iter().map(|user| user.id).collect();
+        aim_service_aidl::write_int_array(&mut p, Some(&users));
+        write_byte_array(&mut p, Some(&legacy.bytes()));
+    }
     Ok(Some(p.data().to_vec()))
 }

@@ -952,8 +952,18 @@ reads both.
   These are separate checks, not a live SystemServer query. This exporter is
   distinct from `SettingBase`'s legacy migration input: on this image the original
   AccessCheckingService's `writeLegacyPermissionStateTEMP` is empty. Resolving
-  boot order, full user/shared UID ownership and capturing the correct legacy
-  state with the facade's package versions remain #858/#836.
+  boot order and actual user/shared UID restoration/import remain #858/#836.
+  A distinct native `Migration` owner now implements the original migration
+  readers, user/name/missing/reset behavior and detached copies. Explicit
+  active/factory/shared owners with resolved users can be assigned to SigningScan;
+  Store rejects stale owner inventories and retains earlier versions. Setting
+  pages carry the migration projection, and Java reconstructs detached original
+  LegacyPermissionState objects. An unresolved owner is represented explicitly
+  and its getter fails rather than supplying an empty state. Native Binder and
+  original ART tests verify capture/reconstruction/copy isolation and 16 text/ABX
+  pinned reader-loop ports using original parsers/owners. Actual Settings boot
+  restoration, original import/live producers,
+  callbacks and complete PackageState/SharedUserApi export remain #858/#836.
 - **Users.** UserManagerService is built by PMS's injector (D2).
 - **The original keeps running until parity.** Slices A and B change no
   answer an app or system_server gets. Slice C replaces the original

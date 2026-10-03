@@ -1,10 +1,12 @@
 //! Detached LegacyPermissionDataProvider projection for the C facade (#836).
 //! Pinned android-16.0.0_r1 LegacyPermissionState, Copyright (C) The Android
 //! Open Source Project, Apache License 2.0. The original permission service
-//! owns flags/grants; access.abx and runtime-permissions.xml are not substitutes.
+//! owns live flags/grants; saved XML is not a substitute for its live projection.
 use aim_binder_host::parcel::{Exception, Parcel, Reader};
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 use std::collections::BTreeSet;
+mod migration;
+pub use migration::Migration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Permission {

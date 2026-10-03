@@ -94,6 +94,9 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
         return Err(fail("scan metadata is not finalized"));
     }
     owner.validate_seinfo().map_err(Error::Invalid)?;
+    owner
+        .validate_legacy_permissions()
+        .map_err(Error::Invalid)?;
     let package_names: BTreeSet<_> = owner
         .settings
         .packages

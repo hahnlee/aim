@@ -454,6 +454,75 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(directory.join(&name), &entry.bytes).unwrap();
         expected.push((name, pkg.package_name.clone(), entry));
     }
+    let migration_cases = [
+        "<perms/>",
+        "<perms><item name='BB'/><item/><item name=''/><item name='Aa' flags='-1'/><item name='BB' granted='false' flags='17'/></perms>",
+        "<perms><item name='outer'><item name='inner'/></item><unknown><item name='ignored'/></unknown></perms>",
+        "<perms><item name='bad' granted='nonsense' flags='overflow'/><item name='true' granted='TRUE' flags='+7f'/><item name='negative' flags='-80000000'/><item name='overflow' flags='80000000'/></perms>",
+        "<permissions/>",
+        "<permissions><item name='BB'/><item/><item name=''/><item name='Aa' flags='-1'/><item name='BB' granted='false' flags='17'/></permissions>",
+        "<permissions><unknown><item name='nested'/></unknown><item name='outer'><item name='inner'/></item></permissions>",
+        "<permissions><item name='bad' granted='nonsense' flags='overflow'/><item name='true' granted='TRUE' flags='+7f'/><item name='negative' flags='-80000000'/><item name='overflow' flags='80000000'/></permissions>",
+    ];
+    for binary in [false, true] {
+        for (case, text) in migration_cases.iter().enumerate() {
+            let root = aim_android_xml::read_next(text.as_bytes()).unwrap();
+            let index = case + if binary { 8 } else { 0 };
+            fs::write(
+                directory.join(format!("legacy-migration-{index}.xml")),
+                if binary {
+                    aim_android_xml::abx::write(&root).unwrap()
+                } else {
+                    text.as_bytes().to_vec()
+                },
+            )
+            .unwrap();
+            use aim_services::package::{
+                owner::legacy_permissions::{Migration, Permission},
+                permissions::RuntimePermission,
+            };
+            let mut migration = Migration::default();
+            migration
+                .put(
+                    0,
+                    Permission {
+                        name: Some("seed".into()),
+                        runtime: false,
+                        granted: false,
+                        flags: i32::MAX,
+                    },
+                )
+                .unwrap();
+            migration.set_missing(10, true).unwrap();
+            if case >= 4 {
+                migration.read_legacy_runtime(&root, 10).unwrap();
+            } else {
+                migration.read_install(&root, &[10, 0]).unwrap();
+            }
+            migration
+                .read_runtime(
+                    0,
+                    &[
+                        RuntimePermission {
+                            name: "modern".into(),
+                            granted: false,
+                            flags: i32::MIN,
+                        },
+                        RuntimePermission {
+                            name: "seed".into(),
+                            granted: true,
+                            flags: 0x408030,
+                        },
+                    ],
+                )
+                .unwrap();
+            fs::write(
+                directory.join(format!("legacy-migration-{index}.input")),
+                migration.project(10042, &[10, 0, 11]).unwrap().bytes(),
+            )
+            .unwrap();
+        }
+    }
     let mut legacy = aim_binder_host::parcel::Parcel::new();
     legacy.write_i32(10042);
     legacy.write_i32(3);
@@ -507,6 +576,22 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    for index in 0..16 {
+        let original =
+            fs::read(directory.join(format!("legacy-migration-{index}.original"))).unwrap();
+        let native = fs::read(directory.join(format!("legacy-migration-{index}.input"))).unwrap();
+        assert_eq!(original, native, "migration case {index}");
+        assert_eq!(
+            aim_services::package::owner::legacy_permissions::State::read(
+                &original,
+                10042,
+                &[10, 0, 11]
+            )
+            .unwrap()
+            .bytes(),
+            original
+        );
+    }
     let original_permissions = fs::read(directory.join("legacy-permissions.original")).unwrap();
     assert_eq!(
         aim_services::package::owner::legacy_permissions::State::read(
@@ -899,6 +984,50 @@ fn native_scan_objects(
     }
     owner
         .assign_seinfo_at_boot(&policy, &mut |_| Ok(36))
+        .unwrap();
+    use aim_services::package::owner::legacy_permissions::{Migration, Permission};
+    let legacy_packages = owner
+        .settings
+        .packages
+        .iter()
+        .map(|setting| {
+            let mut migration = Migration::default();
+            if setting.name == "com.google.android.gsf" {
+                migration
+                    .put(
+                        10,
+                        Permission {
+                            name: None,
+                            runtime: false,
+                            granted: true,
+                            flags: -1,
+                        },
+                    )
+                    .unwrap();
+                migration
+                    .put(
+                        10,
+                        Permission {
+                            name: Some("BB".into()),
+                            runtime: true,
+                            granted: false,
+                            flags: 17,
+                        },
+                    )
+                    .unwrap();
+                migration.set_missing(10, true).unwrap();
+            }
+            ((setting.name.clone(), false), migration)
+        })
+        .collect();
+    let legacy_groups = owner
+        .identities
+        .shared_users
+        .keys()
+        .map(|name| (name.clone(), Migration::default()))
+        .collect();
+    owner
+        .capture_legacy_permissions(&[10, 0, 11], legacy_packages, legacy_groups)
         .unwrap();
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()

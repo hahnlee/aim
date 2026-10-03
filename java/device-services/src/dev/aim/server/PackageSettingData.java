@@ -13,6 +13,8 @@ public final class PackageSettingData {
     private final boolean factory;
     private final byte[] restrictUpdateHash;
     private final List<String> oldPaths;
+    private final int[] legacyUsers;
+    private final byte[] legacyPermissions;
     public final InstallSourceData installSource;
     public final KeySetData keySets;
     private final String[] sdkLibraries, staticLibraries;
@@ -110,12 +112,22 @@ public final class PackageSettingData {
             map.put(group, Collections.unmodifiableSet(types));
         }
         mimeGroups = Collections.unmodifiableMap(map);
+        if (in.readBoolean()) {
+            legacyUsers = Objects.requireNonNull(in.createIntArray());
+            legacyPermissions = Objects.requireNonNull(in.createByteArray());
+            PackageLegacyPermissions.restore(appId, legacyUsers, legacyPermissions);
+        } else { legacyUsers = null; legacyPermissions = null; }
     }
     private static int count(Parcel in, int minimum) {
         int value = in.readInt();
         if (value < 0 || value > in.dataAvail() / minimum) throw new IllegalArgumentException("invalid setting collection count");
         return value;
     }
+    public com.android.server.pm.permission.LegacyPermissionState getLegacyPermissionState() {
+        if (legacyPermissions == null) throw new IllegalStateException("legacy migration owner is not captured");
+        return PackageLegacyPermissions.restore(appId, legacyUsers, legacyPermissions);
+    }
+    public boolean hasLegacyPermissionState() { return legacyPermissions != null; }
     public String[] getUsesSdkLibraries() { return sdkLibraries.clone(); }
     public long[] getUsesSdkLibrariesVersionsMajor() { return sdkVersions.clone(); }
     public boolean[] getUsesSdkLibrariesOptional() { return sdkOptional.clone(); }

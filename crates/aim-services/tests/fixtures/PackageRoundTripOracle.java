@@ -291,6 +291,32 @@ public final class PackageRoundTripOracle {
         try { lease.getSetting(name, true); throw new AssertionError("setting scope mismatch accepted"); } catch (java.io.IOException expected) {}
         owner.factorySetting = null;
         var metadata = lease.getSetting(name, false);
+        if (!metadata.hasLegacyPermissionState()) throw new AssertionError("missing captured legacy migration owner");
+        var legacy = metadata.getLegacyPermissionState();
+        boolean populatedLegacy = name.equals("com.google.android.gsf");
+        if (legacy.isMissing(10) != populatedLegacy || !legacy.getPermissionStates(0).isEmpty()
+            || !legacy.getPermissionStates(11).isEmpty() || legacy.getPermissionStates(10).size() != (populatedLegacy ? 2 : 0)) throw new AssertionError("captured legacy migration users differ");
+        if (populatedLegacy && (legacy.getPermissionState(null, 10).getFlags() != -1
+            || !legacy.getPermissionState("BB", 10).isRuntime() || legacy.getPermissionState("BB", 10).isGranted()
+            || legacy.getPermissionState("BB", 10).getFlags() != 17)) throw new AssertionError("captured legacy migration permissions differ");
+        var legacySuffix = android.os.Parcel.obtain();
+        byte[] unresolvedSetting;
+        try {
+            legacySuffix.writeBoolean(true); legacySuffix.writeIntArray(new int[] {10, 0, 11});
+            legacySuffix.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(uid, new int[] {10, 0, 11}, legacy));
+            int suffixLength = legacySuffix.marshall().length;
+            unresolvedSetting = java.util.Arrays.copyOf(settingBytes, settingBytes.length - suffixLength + 4);
+            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 4, unresolvedSetting.length, (byte) 0);
+        } finally { legacySuffix.recycle(); }
+        var unresolvedParcel = android.os.Parcel.obtain();
+        try {
+            unresolvedParcel.unmarshall(unresolvedSetting, 0, unresolvedSetting.length); unresolvedParcel.setDataPosition(0);
+            var unresolved = dev.aim.server.PackageSettingData.read(unresolvedParcel);
+            if (unresolved.hasLegacyPermissionState() || unresolvedParcel.dataAvail() != 0) throw new AssertionError("unresolved legacy marker lost");
+            try { unresolved.getLegacyPermissionState(); throw new AssertionError("unresolved legacy became empty state"); } catch (IllegalStateException expected) {}
+        } finally { unresolvedParcel.recycle(); }
+        legacy.reset();
+        if (metadata.getLegacyPermissionState().isMissing(10) != populatedLegacy) throw new AssertionError("mutable legacy owner escaped capture");
         com.android.server.pm.CapturedKeySetOracle.verifyCaptured(metadata, name.equals("com.google.android.gsf"));
         if (metadata != lease.getSetting(name, false) || metadata.appId != uid || metadata.getVersion() != 1
                 || !metadata.getPackageName().equals(name) || metadata.isFactory()

@@ -72,14 +72,14 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 383
-units pass (3.16s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 386
+units pass (3.14s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 16.07s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.17s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -503,10 +503,27 @@ original ART LegacyPermissionState codec/copy oracle passes (16.07s with the
 complete package oracle), including all truncated lengths and detached mutable
 replicas; device-services links against original APIs. This validates the
 transport and original objects separately, not a live SystemServer permission
-query. The live exporter differs from SettingBase's legacy migration state;
-permission boot order, complete user inventory, shared UID ownership and captured
-PackageState/SharedUserApi lifecycle integration remain #858. The native service
-switch is not activated and original PMS remains active.
+query. The live exporter differs from SettingBase's legacy migration state.
+A separate native Migration owner now ports original user-ID checks, permission
+name replacement/hash ordering, missing markers, reset/copy behavior and install,
+legacy-runtime and decoded-runtime merges. The two XML readers preserve their
+different unknown-subtree behavior and original default-valued attribute getters.
+Its explicit active/factory/shared owner graph can now be assigned to SigningScan
+with resolved users and captured by the existing Store. Missing/foreign owners,
+invalid user inventories and later package/UID inventory mismatches reject without
+replacing prior state. Older captures retain earlier permissions. Setting pages
+carry the migration projection and Java rebuilds detached original
+LegacyPermissionState objects; an unresolved marker makes the getter fail instead
+of supplying an empty substitute. The real native Binder test now retains a
+150,000-character legacy permission across a changed publication. Original ART
+agrees on 16 text/ABX pinned reader-loop ports using original parsers/owners,
+original SettingBase/PackageSetting copies,
+empty/populated native captured getters and unresolved-owner rejection (16.17s
+with the complete package oracle); device-services original API linkage passes
+(14.2s). These are explicit supplied migration owners: actual Settings restore,
+original-state import, complete live user inventory, permission boot ordering,
+callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
+service switch is not activated and original PMS remains active.
 The native usage owner now reads PackageUsage's original v0/v1
 package-usage.list formats for known package settings, preserving each of the
 8 reason timestamps and the original partial-update behavior on malformed rows.

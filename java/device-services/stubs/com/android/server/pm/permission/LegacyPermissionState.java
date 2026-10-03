@@ -3,6 +3,7 @@ package com.android.server.pm.permission;
 public final class LegacyPermissionState {
     public LegacyPermissionState() { throw new RuntimeException("stub"); }
     public void copyFrom(LegacyPermissionState other) { throw new RuntimeException("stub"); }
+    public boolean hasPermissionState(java.util.Collection<String> names) { throw new RuntimeException("stub"); }
     public void reset() { throw new RuntimeException("stub"); }
     public boolean isMissing(int userId) { throw new RuntimeException("stub"); }
     public void setMissing(boolean missing, int userId) { throw new RuntimeException("stub"); }

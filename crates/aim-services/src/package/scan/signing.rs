@@ -44,6 +44,7 @@ pub struct SigningScan {
     pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) pending_metadata: BTreeSet<String>,
     pub(super) seinfo: Option<super::seinfo::Assignments>,
+    pub(super) legacy_permissions: Option<super::legacy::Assignments>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -468,6 +469,7 @@ impl SigningScan {
             disabled_loaded: BTreeMap::new(),
             pending_metadata: BTreeSet::new(),
             seinfo: None,
+            legacy_permissions: None,
             first_api_level,
             parsed: Vec::new(),
         })
@@ -1443,6 +1445,36 @@ mod tests {
         owner.settings.packages[0].add_old_path(Some("/data/old"));
         owner.settings.packages[0].set_loading_progress(0.5);
         owner.settings.packages[0].add_old_path(Some(&"x".repeat(150_000)));
+        let mut legacy = crate::package::owner::legacy_permissions::Migration::default();
+        legacy
+            .put(
+                10,
+                crate::package::owner::legacy_permissions::Permission {
+                    name: Some("x".repeat(150_000)),
+                    runtime: false,
+                    granted: true,
+                    flags: 17,
+                },
+            )
+            .unwrap();
+        legacy.set_missing(10, true).unwrap();
+        owner
+            .capture_legacy_permissions(
+                &[10, 0],
+                BTreeMap::from([(("fixture".into(), false), legacy)]),
+                owner
+                    .identities
+                    .shared_users
+                    .keys()
+                    .map(|name| {
+                        (
+                            name.clone(),
+                            crate::package::owner::legacy_permissions::Migration::default(),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let mut invalid = owner.clone();
@@ -1512,7 +1544,59 @@ mod tests {
             .mime_groups
             .retain(|(name, _)| name.is_some());
         owner.settings.packages[0].uses_static_libraries[0].1 = 29;
+        let mut updated_legacy = crate::package::owner::legacy_permissions::Migration::default();
+        updated_legacy
+            .put(
+                10,
+                crate::package::owner::legacy_permissions::Permission {
+                    name: Some("x".repeat(150_000)),
+                    runtime: true,
+                    granted: false,
+                    flags: 33,
+                },
+            )
+            .unwrap();
+        owner
+            .capture_legacy_permissions(
+                &[10, 0],
+                BTreeMap::from([(("fixture".into(), false), updated_legacy)]),
+                owner
+                    .identities
+                    .shared_users
+                    .keys()
+                    .map(|name| {
+                        (
+                            name.clone(),
+                            crate::package::owner::legacy_permissions::Migration::default(),
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_eq!(
+            base.owner()
+                .legacy_permissions("fixture", false)
+                .unwrap()
+                .unwrap()
+                .user(10)
+                .unwrap()
+                .permissions[0]
+                .flags,
+            17
+        );
+        assert_eq!(
+            current
+                .owner()
+                .legacy_permissions("fixture", false)
+                .unwrap()
+                .unwrap()
+                .user(10)
+                .unwrap()
+                .permissions[0]
+                .flags,
+            33
+        );
         assert_eq!(
             base.owner().settings.packages[0]
                 .mime_groups

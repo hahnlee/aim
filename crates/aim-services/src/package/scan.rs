@@ -44,6 +44,7 @@ mod removal;
 mod setting;
 mod signing;
 mod seinfo;
+mod legacy;
 pub use seinfo::{SeInfoCompatibility, SeInfoScan, SeInfoSetting, SeInfoState};
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 pub use removal::RemovedSetting;
