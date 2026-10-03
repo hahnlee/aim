@@ -121,6 +121,7 @@ public final class PackageRoundTripOracle {
         var owner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user").toPath());
+        owner.libraries = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".libraries").toPath());
         stale.userState = owner.userState;
         owner.setting = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".setting").toPath());
         stale.setting = owner.setting;
@@ -785,9 +786,69 @@ public final class PackageRoundTripOracle {
             throw new AssertionError("wrong code path accepted"); } catch (IllegalArgumentException expected) {}
         try { dev.aim.server.PackageObjects.restoreCollectedCode(detached, code, 2, false);
             throw new AssertionError("wrong code capture accepted"); } catch (IllegalArgumentException expected) {}
-        for (int missing = 1; missing <= 4; missing++) {
+        var libraryState = lease.getLibraries(name);
+        if (lease.getLibraries(name) != libraryState || lease.getLibraries("missing") != null
+                || libraryState.getLibraries().get(0) == libraryState.getLibraries().get(0)) throw new AssertionError("library capture cache or detached object identity differs");
+        var libraryInput = android.os.Parcel.obtain();
+        var libraryOutput = android.os.Parcel.obtain();
+        try {
+            libraryInput.unmarshall(owner.libraries, 0, owner.libraries.length); libraryInput.setDataPosition(0);
+            libraryInput.readLong(); libraryInput.readString(); libraryInput.readInt(); libraryInput.createStringArray();
+            byte[] expectedLibraries = libraryInput.createByteArray();
+            var decodedLibraries = libraryState.getLibraries();
+            libraryOutput.writeInt(decodedLibraries.size());
+            for (var library : decodedLibraries) { libraryOutput.writeInt(1); library.writeToParcel(libraryOutput, 0); }
+            if (!java.util.Arrays.equals(expectedLibraries, libraryOutput.marshall())) throw new AssertionError("native/original library Parcelable differs");
+            byte[] unreproducible = expectedLibraries.clone();
+            java.util.Arrays.fill(unreproducible, unreproducible.length - 8, unreproducible.length - 4, (byte) 0);
+            libraryOutput.setDataPosition(0);
+            var invalidLibraryEnvelope = android.os.Parcel.obtain();
+            try {
+                invalidLibraryEnvelope.writeLong(1); invalidLibraryEnvelope.writeString(name); invalidLibraryEnvelope.writeInt(uid);
+                invalidLibraryEnvelope.writeStringArray(libraryState.getFiles().toArray(new String[0])); invalidLibraryEnvelope.writeByteArray(unreproducible);
+                invalidLibraryEnvelope.setDataPosition(0);
+                try { dev.aim.server.PackageLibraryState.read(invalidLibraryEnvelope); throw new AssertionError("unreproducible optional owner normalized"); } catch (IllegalArgumentException expected) {}
+            } finally { invalidLibraryEnvelope.recycle(); }
+        } finally { libraryInput.recycle(); libraryOutput.recycle(); }
+        var badLibraryOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+        badLibraryOwner.libraries = owner.libraries;
+        try (var badLibraryLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(badLibraryOwner))) {
+            badLibraryOwner.fail = true;
+            try { badLibraryLease.getLibraries(name); throw new AssertionError("library owner error swallowed"); } catch (android.os.RemoteException expected) {}
+            badLibraryOwner.fail = false; badLibraryOwner.shortChunk = true;
+            try { badLibraryLease.getLibraries(name); throw new AssertionError("short library chunk accepted"); } catch (java.io.IOException expected) {}
+            badLibraryOwner.shortChunk = false; badLibraryOwner.libraries = java.util.Arrays.copyOf(owner.libraries, owner.libraries.length + 4);
+            try { badLibraryLease.getLibraries(name); throw new AssertionError("trailing library envelope accepted"); } catch (java.io.IOException expected) {}
+            badLibraryOwner.libraries = owner.libraries;
+            if (badLibraryLease.getLibraries(name) == null) throw new AssertionError("failed library reads poisoned retry");
+        }
+        var wrongLibraryUid = com.android.server.pm.CapturedPackageSetting.from(metadata, 1, false).setAppId(uid + 1);
+        badLibraryOwner.version = 2;
+        try (var wrongVersionLibraryLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(badLibraryOwner))) {
+            try { wrongVersionLibraryLease.getLibraries(name); throw new AssertionError("wrong library capture version accepted"); } catch (java.io.IOException expected) {}
+        }
+        try { dev.aim.server.PackageObjects.restoreLibraries(wrongLibraryUid, libraryState, 1); throw new AssertionError("wrong library UID accepted"); } catch (IllegalArgumentException expected) {}
+        var originalLibraries = ((com.android.server.pm.pkg.PackageState)detached).getSharedLibraryDependencies();
+        if (originalLibraries.size() != 1 || !originalLibraries.get(0).getName().equals("aim.fixture")
+                || !originalLibraries.get(0).getPath().equals(libraryState.getFiles().get(0))
+                || !((com.android.server.pm.pkg.PackageState)detached).getUsesLibraryFiles().equals(libraryState.getFiles())) throw new AssertionError("original dependency getters differ");
+        libraryState.getFiles().clear();
+        libraryState.getLibraries().clear();
+        var freshLibrarySetting = lease.newScannedSetting(name, true);
+        if (((com.android.server.pm.pkg.PackageState)freshLibrarySetting).getSharedLibraryDependencies().size() != 1) throw new AssertionError("dependency getter mutation escaped input");
+        var emptyLibraries = android.os.Parcel.obtain();
+        try {
+            emptyLibraries.writeLong(1); emptyLibraries.writeString(name); emptyLibraries.writeInt(uid);
+            emptyLibraries.writeStringArray(new String[0]); emptyLibraries.writeByteArray(new byte[4]); emptyLibraries.setDataPosition(0);
+            dev.aim.server.PackageObjects.restoreLibraries(freshLibrarySetting, dev.aim.server.PackageLibraryState.read(emptyLibraries), 1);
+            var cleared = (com.android.server.pm.pkg.PackageState)freshLibrarySetting;
+            if (!cleared.getSharedLibraryDependencies().isEmpty() || !cleared.getUsesLibraryFiles().isEmpty()) throw new AssertionError("empty dependency owner kept stale state");
+        } finally { emptyLibraries.recycle(); }
+        try { dev.aim.server.PackageObjects.restoreLibraries(detached, libraryState, 2); throw new AssertionError("wrong library version accepted"); } catch (IllegalArgumentException expected) {}
+        for (int missing = 1; missing <= 5; missing++) {
             var incompleteOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
             incompleteOwner.setting = owner.setting;
+            incompleteOwner.libraries = owner.libraries;
             incompleteOwner.userInventory = new int[0];
             incompleteOwner.missingOwner = missing;
             try (var incompleteLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(incompleteOwner))) {
@@ -811,6 +872,7 @@ public final class PackageRoundTripOracle {
         try { lease.getSetting(name, false); throw new AssertionError("closed setting lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.newSettingWithUsers(name, false, true); throw new AssertionError("closed assembly lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.newScannedSetting(name, true); throw new AssertionError("closed scanned setting lease accepted"); } catch (IllegalStateException expected) {}
+        try { lease.getLibraries(name); throw new AssertionError("closed dependency lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
     }
@@ -1049,7 +1111,7 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
-        byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting;
+        byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting, libraries;
         int[] userInventory = {0, 10, 11, 12, 13, 14};
         int userReads;
         boolean signingTail;
@@ -1074,6 +1136,11 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override public int getLibraryStateLength(String candidate) { return missingOwner != 5 && name.equals(candidate) ? libraries.length : -1; }
+        @Override public byte[] getLibraryStateChunk(String candidate, int offset, int length) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            return java.util.Arrays.copyOfRange(libraries, offset, Math.min(libraries.length, offset + length) - (shortChunk ? 1 : 0));
+        }
         @Override public int getSettingLength(String candidate, boolean disabled) { return name.equals(candidate) && (!disabled || factorySetting != null) ? (disabled ? factorySetting.length : setting.length) : -1; }
         @Override public byte[] getSettingChunk(String candidate, boolean disabled, int offset, int length) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();

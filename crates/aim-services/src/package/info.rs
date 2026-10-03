@@ -1239,7 +1239,7 @@ fn write_typed_array<T>(p: &mut Parcel, v: Option<&[T]>, mut item: impl FnMut(&m
 }
 
 /// `writeTypedList` of `SharedLibraryInfo`s.
-fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibrary]>) {
+pub(in crate::package) fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibrary]>) {
     write_typed_array(p, v, write_library);
 }
 

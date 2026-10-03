@@ -66,6 +66,10 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/CapturedPackageSetting.java"),
         )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageLibraryState.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()
@@ -296,6 +300,16 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.setting")), setting_bytes).unwrap();
+        fs::write(
+            directory.join(format!("{name}.libraries")),
+            aim_services::package::scan_snapshot::library_record::captured(
+                &snapshot,
+                &pkg.package_name,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
         for (suffix, leaving) in [
             ("true", Some(true)),
             ("false", Some(false)),
@@ -440,6 +454,11 @@ fn native_package_parcels_match_original_read_write() {
                 saved.signatures = group.signatures.clone();
             }
         }
+        changed_signing
+            .complete_library_dependencies(&|_, _| {
+                Ok(aim_services::package::libraries::Policy::pinned(false))
+            })
+            .unwrap();
         let changed = signing_store
             .publish(&signing_base, changed_signing, snapshot.usage().clone())
             .unwrap();
@@ -909,7 +928,21 @@ fn native_scan_objects(
         files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
-    let config = SystemConfig::default();
+    let mut config = SystemConfig::default();
+    config.library_order.push("aim.fixture".into());
+    // Controlled declaration/path inputs for the original object transport oracle.
+    config.libraries.insert(
+        "aim.fixture".into(),
+        aim_services::package::system_config::Library {
+            name: "aim.fixture".into(),
+            filename: format!("/system/framework/{}.jar", "x".repeat(150_000)),
+            native: false,
+            dependencies: vec![],
+            on_bootclasspath_since: None,
+            on_bootclasspath_before: None,
+            can_be_safely_ignored: false,
+        },
+    );
     let compatibility = LibraryCompatibility::new(&config, &|_| None, true).unwrap();
     let abi = AbiPolicy {
         all: vec!["arm64-v8a".into()],
@@ -925,7 +958,10 @@ fn native_scan_objects(
         next.set(id + 1);
         Ok([id; 16])
     };
-    let image = Image::load(&apks, &[]).unwrap();
+    let mut image = Image::load(&apks, &[]).unwrap();
+    for code in &mut image.packages {
+        code.parsed.uses_libraries.push("aim.fixture".into());
+    }
     let collected: std::collections::BTreeMap<_, _> = image
         .packages
         .iter()
@@ -1201,6 +1237,11 @@ fn native_scan_objects(
         })
         .collect();
     owner.capture_install_permissions_fixed(fixed).unwrap();
+    owner
+        .complete_library_dependencies(&|_, _| {
+            Ok(aim_services::package::libraries::Policy::pinned(false))
+        })
+        .unwrap();
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()

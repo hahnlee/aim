@@ -1705,6 +1705,10 @@ fn java_oracles_link_against_original_image() {
             aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/CapturedPackageSetting.java"),
         )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageLibraryState.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()

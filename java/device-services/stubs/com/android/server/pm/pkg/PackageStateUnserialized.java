@@ -1,6 +1,8 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm.pkg;
 public class PackageStateUnserialized {
+    public PackageStateUnserialized setUsesLibraryInfos(java.util.List<android.content.pm.SharedLibraryInfo> values) { throw new RuntimeException("stub"); }
+    public PackageStateUnserialized setUsesLibraryFiles(java.util.List<String> values) { throw new RuntimeException("stub"); }
     public PackageStateUnserialized setSeInfo(String value) { throw new RuntimeException("stub"); }
     public PackageStateUnserialized setOverrideSeInfo(String value) { throw new RuntimeException("stub"); }
     public String getSeInfo() { throw new RuntimeException("stub"); }

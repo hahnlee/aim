@@ -1483,8 +1483,17 @@ mod tests {
         owner
             .capture_leaving_shared_users(BTreeMap::from([(("fixture".into(), false), true)]))
             .unwrap();
+        owner
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy::pinned(false))
+            })
+            .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
+        let captured_library =
+            crate::package::scan_snapshot::library_record::captured(&base, "fixture")
+                .unwrap()
+                .unwrap();
         let mut invalid = owner.clone();
         invalid.settings.packages[0]
             .mime_groups
@@ -1597,6 +1606,11 @@ mod tests {
                 crate::package::restrictions::UserState::default(),
             )
             .unwrap();
+        owner
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy::pinned(false))
+            })
+            .unwrap();
         let current = store.publish(&base, owner, changed_usage).unwrap();
         assert_eq!(
             crate::package::scan_snapshot::user_record::ids(&base, "fixture", false).unwrap(),
@@ -1612,6 +1626,11 @@ mod tests {
         );
         let mut sparse = base.owner().clone();
         sparse.scanned_users.get_mut("fixture").unwrap().clear();
+        sparse
+            .complete_library_dependencies(&|_, _| {
+                Ok(crate::package::libraries::Policy::pinned(false))
+            })
+            .unwrap();
         let sparse = Store::new(sparse, base.usage().clone()).unwrap().capture();
         assert_eq!(
             crate::package::scan_snapshot::user_record::ids(&sparse, "fixture", false).unwrap(),
@@ -2025,6 +2044,77 @@ mod tests {
         p.write_bool(false);
         p.write_i32(1);
         assert!(remote.transact(api::GET_USER_STATE_IDS, &p, false).is_err());
+
+        let library_bytes = captured_library;
+        let mut library_request = request();
+        library_request.write_string16(Some("fixture"));
+        let library_reply = remote
+            .transact(api::GET_LIBRARY_STATE_LENGTH, &library_request, false)
+            .unwrap();
+        let mut library_reader = library_reply.reader();
+        library_reader.read_exception().unwrap().unwrap();
+        assert_eq!(
+            library_reader.read_i32().unwrap(),
+            library_bytes.len() as i32
+        );
+        let mut received = Vec::new();
+        while received.len() < library_bytes.len() {
+            let mut p = request();
+            p.write_string16(Some("fixture"));
+            p.write_i32(received.len() as i32);
+            p.write_i32(7);
+            let reply = remote
+                .transact(api::GET_LIBRARY_STATE_CHUNK, &p, false)
+                .unwrap();
+            let mut reader = reply.reader();
+            reader.read_exception().unwrap().unwrap();
+            received.extend(
+                aim_service_aidl::read_byte_array(&mut reader)
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert_eq!(reader.remaining(), 0);
+        }
+        assert_eq!(received, library_bytes);
+        for (offset, length) in [
+            (-1, 7),
+            (0, 0),
+            (0, MAX_CHUNK as i32 + 1),
+            (library_bytes.len() as i32 + 1, 7),
+        ] {
+            let mut p = request();
+            p.write_string16(Some("fixture"));
+            p.write_i32(offset);
+            p.write_i32(length);
+            let reply = remote
+                .transact(api::GET_LIBRARY_STATE_CHUNK, &p, false)
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
+        for name in [None, Some("missing")] {
+            let mut p = request();
+            p.write_string16(name);
+            let reply = remote
+                .transact(api::GET_LIBRARY_STATE_LENGTH, &p, false)
+                .unwrap();
+            let mut reader = reply.reader();
+            if name.is_none() {
+                assert_eq!(reader.read_exception().unwrap().unwrap_err().code, -3);
+            } else {
+                reader.read_exception().unwrap().unwrap();
+                assert_eq!(reader.read_i32().unwrap(), -1);
+            }
+        }
+        let mut p = library_request.clone();
+        p.write_i32(1);
+        assert!(
+            remote
+                .transact(api::GET_LIBRARY_STATE_LENGTH, &p, false)
+                .is_err()
+        );
         let setting_request = |name: Option<&str>, factory: bool| {
             let mut p = request();
             p.write_string16(name);

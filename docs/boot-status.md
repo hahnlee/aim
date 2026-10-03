@@ -276,8 +276,16 @@ native and query-input multihop results, code retention and static-user effects;
 all 392 units pass (3.22s; one ignored/not run), and all integration targets compile.
 The actual first-system image fixture passes (42.31s), exercising candidate/commit, policy failure
 atomicity, stale-user rejection and old/new publication under controlled native
-enforcement policy. Live policy delivery, overlay effects, factory graph handling
-and captured Java dependency transport/assembly remain #707/#808/#836.
+enforcement policy. Finalized active dependency owners now have generated snapshot
+length/chunk methods and detached original SharedLibraryInfo/file-list assembly.
+Unknown packages remain distinct from unresolved owners; version/name/UID checks,
+strict ranges and closed-lease checks guard transport and restoration. Native Binder
+checks retained captures after publication. A controlled declaration/path fixture
+exceeding 64 KiB exercises original generated Java Binder paging and concrete
+PackageSetting restoration under original ART. Declaration reconstruction preserves
+original constructor null optional fields and requires exact parcel reproduction;
+unsupported optional dependent/certificate states reject (#740). Live policy
+delivery, overlay effects and factory graph handling remain #707/#808/#836.
 The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target
 SDK, without PMS lookup). On a disposable original-PMS boot (2026-10-02,
@@ -605,14 +613,17 @@ assembly uses retained original mutations. Captured raw states that those APIs
 cannot reproduce (including allocated-empty label owners) reject and remain
 #862. PackageScanLease.newScannedSetting now combines active metadata and all
 explicit users with freshly decoded original PackageImpl code, saved signing,
-eight usage timestamps and complete base/override seInfo from the same capture.
+eight usage timestamps, complete base/override seInfo and finalized active library
+dependency metadata from the same capture.
 Code name, active UID, path and long version must match the setting before code
 attachment; absent collected owners reject, while unknown settings return null.
 Collected code signing remains distinct from saved setting signing. Original ART
 checks combined concrete getters, detached mutable code/usage/user state,
-missing code/signing/usage/seInfo, UID/path/version mismatches and closed leases
-(17.08s with the complete package oracle). All original Java oracle linkage
-passes (4.22s), and device-services builds against original APIs (14.5s).
+missing code/signing/usage/seInfo/dependencies, UID/path/version mismatches and
+closed leases. Dependency assembly additionally checks detached lists/objects,
+empty-owner clearing, malformed/canonical-byte rejection, paged failures and retry
+(16.91s with the complete package oracle). All original Java oracle linkage
+passes (4.12s), and device-services builds against original APIs (14.9s).
 The current PackageSetting leaving-shared-user bit now has a separate nullable
 native owner (#861). Original disk-reader/new-setting construction initializes
 false, copies retain the current value, and ScanPackageUtils enrichment explicitly
@@ -627,8 +638,9 @@ Units pass 392 (3.14s; one ignored/not run), all integration targets compile,
 original Java linkage passes (4.02s), device-services builds (16.6s), and the
 actual first-system image scan checks every accepted setting's enriched bit
 (42.90s). Live original-state export/import wiring remains #861/#836.
-This is not a complete facade: factory transient assembly and library dependency
-transport/Java assembly remain #836. Original-state import,
+Factory transient/dependency assembly and remaining transient scalar owners remain
+#836; arbitrary original library optional/certificate import remains #740.
+Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

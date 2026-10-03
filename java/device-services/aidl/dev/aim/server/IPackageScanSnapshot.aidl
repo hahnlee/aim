@@ -21,4 +21,7 @@ interface IPackageScanSnapshot {
     byte[] getSettingChunk(String packageName, boolean disabled, int offset, int length);
     /** Explicit sparse PackageSetting user entries; null only for an unknown setting. */
     int[] getUserStateIds(String packageName, boolean disabled);
+    /** Finalized active dependency owner; missing/unresolved inputs are errors. */
+    int getLibraryStateLength(String packageName);
+    byte[] getLibraryStateChunk(String packageName, int offset, int length);
 }

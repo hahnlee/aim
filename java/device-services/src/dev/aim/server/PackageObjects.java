@@ -58,6 +58,16 @@ public final class PackageObjects {
         }
     }
 
+    public static void restoreLibraries(com.android.server.pm.PackageSetting setting,
+            PackageLibraryState state, long version) {
+        if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())
+                || state.getAppId() != setting.getAppId()) throw new IllegalArgumentException("library capture mismatch");
+        var infos = state.getLibraries();
+        var files = state.getFiles();
+        setting.getPkgState().setUsesLibraryInfos(infos);
+        setting.getPkgState().setUsesLibraryFiles(files);
+    }
+
     /** Boot shared-user fixups set an override; ordinary scan labels set the base. */
     public static void restoreBootSeInfo(com.android.server.pm.PackageSetting setting,
             PackageSeInfoState state, long version) {

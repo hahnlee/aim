@@ -16,6 +16,7 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageCode> disabled = new HashMap<>();
     private final Map<String, PackageUsageState> usage = new HashMap<>();
     private final Map<String, PackageSeInfoState> seinfo = new HashMap<>();
+    private final Map<String, PackageLibraryState> libraries = new HashMap<>();
     private final Map<String, PackageSigningState> signing = new HashMap<>();
     private final Map<String, PackageSigningState> factorySigning = new HashMap<>();
     private record SettingKey(String name, boolean factory) {}
@@ -104,6 +105,7 @@ public final class PackageScanLease implements AutoCloseable {
         disabled.clear();
         usage.clear();
         seinfo.clear();
+        libraries.clear();
         signing.clear();
         factorySigning.clear();
         users.clear();
@@ -159,6 +161,34 @@ public final class PackageScanLease implements AutoCloseable {
         } finally { parcel.recycle(); }
     }
 
+    public synchronized PackageLibraryState getLibraries(String name)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(name);
+        String key = name;
+        if (libraries.containsKey(key)) return libraries.get(key);
+        int length = endpoint.getLibraryStateLength(name);
+        if (length == -1) { libraries.put(key, null); return null; }
+        if (length <= 0) throw new IOException("invalid package library length");
+        byte[] bytes = new byte[length];
+        for (int offset = 0; offset < length;) {
+            int requested = Math.min(CHUNK, length - offset);
+            byte[] chunk = endpoint.getLibraryStateChunk(name, offset, requested);
+            if (chunk == null || chunk.length != requested) throw new IOException("incomplete package library chunk");
+            System.arraycopy(chunk, 0, bytes, offset, requested);
+            offset += requested;
+        }
+        Parcel in = Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            PackageLibraryState state = PackageLibraryState.read(in);
+            if (in.dataAvail() != 0 || state.getVersion() != version || !state.getPackageName().equals(name)) {
+                throw new IOException("package library capture mismatch");
+            }
+            libraries.put(key, state);
+            return state;
+        } finally { in.recycle(); }
+    }
     public synchronized PackageSettingData getSetting(String name, boolean factory)
             throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");
@@ -207,7 +237,7 @@ public final class PackageScanLease implements AutoCloseable {
         return com.android.server.pm.CapturedPackageSetting.withUsers(data, inputs, version, factory, crossUserSuspensions);
     }
 
-    /** Collected active code and its saved owners; library/transient dependencies remain separate. */
+    /** Collected active code, saved owners and finalized dependency metadata. */
     public synchronized com.android.server.pm.PackageSetting newScannedSetting(String name,
             boolean crossUserSuspensions) throws RemoteException, IOException {
         var setting = newSettingWithUsers(name, false, crossUserSuspensions);
@@ -216,13 +246,15 @@ public final class PackageScanLease implements AutoCloseable {
         PackageSigningState saved = getSigningState(name, false);
         PackageUsageState times = getUsage(name);
         PackageSeInfoState labels = getSeInfo(name);
-        if (code == null || saved == null || times == null || labels == null) {
+        PackageLibraryState dependencies = getLibraries(name);
+        if (code == null || saved == null || times == null || labels == null || dependencies == null) {
             throw new IOException("missing collected package owner");
         }
         PackageObjects.restoreCollectedCode(setting, code, version, false);
         PackageObjects.restoreSavedSigning(setting, saved, version, false);
         PackageObjects.restoreUsage(setting, times, version);
         PackageObjects.restoreSeInfo(setting, labels, version);
+        PackageObjects.restoreLibraries(setting, dependencies, version);
         return setting;
     }
 
