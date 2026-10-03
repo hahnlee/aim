@@ -449,25 +449,47 @@ fn components(e: &Element) -> Vec<String> {
 /// `parseArchiveState`: `None` for a state without an installer title or
 /// activities, which the original drops.
 fn archive_state(e: &Element) -> Result<Option<ArchiveState>, String> {
-    let activities: Vec<ArchiveActivity> = children(e, "archive-activity-info")
-        .filter_map(|a| {
-            Some(ArchiveActivity {
-                title: string(a, "activity-title")?,
-                original_component_name: string(a, "original-component-name")
-                    .filter(|c| c.contains('/'))?,
-                icon_path: string(a, "icon-path")?,
+    let mut activities = Vec::new();
+    let mut cursor = persistable::Cursor::new(e);
+    // Settings.parseArchiveActivityInfos visits descendant start tags.
+    while let Some(event) = cursor.next() {
+        if let persistable::Event::Start(a, _) = event
+            && a.name == "archive-activity-info"
+            && let Some(title) = string(a, "activity-title")
+            && let Some(component) = string(a, "original-component-name")
+            && let Some((package, class)) = component.split_once('/')
+            && !class.is_empty()
+            && let Some(icon_path) = string(a, "icon-path")
+        {
+            // ComponentName.unflattenFromString expands a relative class name.
+            let class = if class.starts_with('.') {
+                format!("{package}{class}")
+            } else {
+                class.to_owned()
+            };
+            activities.push(ArchiveActivity {
+                title,
+                original_component_name: format!("{package}/{class}"),
+                icon_path,
                 monochrome_icon_path: string(a, "monochrome-icon-path"),
-            })
-        })
-        .collect();
-    let archive_time = e.long_hex("archive-time")?.unwrap_or(0);
-    Ok(string(e, "installer-title")
-        .filter(|_| !activities.is_empty())
-        .map(|installer_title| ArchiveState {
-            installer_title,
-            archive_time,
-            activities,
-        }))
+            });
+        }
+    }
+    // The default-valued TypedXmlPullParser getter returns zero on conversion errors.
+    let archive_time = e.long_hex("archive-time").ok().flatten().unwrap_or(0);
+    let Some(installer_title) = string(e, "installer-title").filter(|_| !activities.is_empty())
+    else {
+        return Ok(None);
+    };
+    // ArchiveState validates its @CurrentTimeMillisLong constructor argument.
+    if archive_time < 0 {
+        return Err("ArchiveState: negative archive time".into());
+    }
+    Ok(Some(ArchiveState {
+        installer_title,
+        archive_time,
+        activities,
+    }))
 }
 
 #[cfg(test)]

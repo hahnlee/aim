@@ -73,7 +73,7 @@ nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 375
-units pass (3.14s), as do 11 XML units; the ignored
+units pass (3.10s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
@@ -107,7 +107,14 @@ circuit behavior. ART verifies null map entries under both read policies and
 original removal behavior. A port of the original null-parameter writer loop
 emits the named empty XML tag; native reread creates the original-defined default
 parameter object. Full native suspension persistence/notifications remain #706;
-archive XML descendant/component validation remains #849. Native PMS activation and its acceptance gates remain
+The native archive XML reader now traverses descendant activities, expands relative
+component classes and drops missing attributes or invalid names as the original
+reader does (#849). It preserves ordered duplicate activities, saved timestamps
+and optional monochrome paths; malformed timestamp attributes default to zero,
+while a negative timestamp in a constructed archive fails original validation.
+A Settings reader-loop port running with original ComponentName, Path and
+ArchiveState APIs agrees on 32 text/ABX cases. Nullable runtime primary archive
+icons remain #850. Native PMS activation and its acceptance gates remain
 unestablished. Component ownership
 now distinguishes original default null sets from Settings-initialized empty
 sets (#845), including missing-file initialization and third-party new settings.
@@ -529,7 +536,7 @@ both fields on rejected name/version restoration. The fixture scans establish
 base assignments before boot overrides, using explicit compatibility target
 SDK 36; this still does not prove live compatibility decisions. Final oracle
 linkage passes (3.29s).
-All 356 units pass (3.14s), including runtime lower-SDK update, retained override,
+All 356 units pass (3.10s), including runtime lower-SDK update, retained override,
 fresh replacement, subsequent boot minimum, owner-error atomicity and captured
 value isolation. Original PackageSetting copy/base/override/effective getter
 behavior passes in the shared-UID runtime oracle (14.83s with snapshot/usage
@@ -551,7 +558,7 @@ The parcel fixture now obtains base labels from the real scan completion, using
 its explicit compatibility target SDK 36, before shared boot overrides. Native
 Bridge implements the scan compatibility interface and rejects trailing SDK
 reply data. The protocol test checks this owner adapter and malformed responses.
-All 356 regular native units pass (3.14s). The disposable original-PMS saved
+All 356 regular native units pass (3.10s). The disposable original-PMS saved
 scan passes (374.26s): all 243 active APKs and three disabled factories retain
 their accepted code; every active scan owns an assigned base without premature
 boot overrides, and the captured version preserves those fields. Saved system,

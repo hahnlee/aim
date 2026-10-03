@@ -47,6 +47,10 @@ fn suspension_parameters_match_original_xml_owners() {
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/ComponentOwnerOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ArchiveOwnerOracle.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -65,7 +69,8 @@ fn suspension_parameters_match_original_xml_owners() {
         .arg(&dex)
         .arg(classes.join("SuspensionDialogOracle.class"))
         .arg(classes.join("PersistableBundleOracle.class"))
-        .arg(classes.join("ComponentOwnerOracle.class")));
+        .arg(classes.join("ComponentOwnerOracle.class"))
+        .arg(classes.join("ArchiveOwnerOracle.class")));
     common::java::check_linkage(
         &dex.join("classes.dex"),
         &["/system/framework/services.jar"],
@@ -179,6 +184,7 @@ fn suspension_parameters_match_original_xml_owners() {
     }
     check_extras(&boot, &directory);
     check_components(&boot, &directory);
+    check_archives(&boot, &directory);
 }
 
 fn check_extras(boot: &Boot, directory: &std::path::Path) {
@@ -593,6 +599,105 @@ fn check_components(boot: &Boot, directory: &std::path::Path) {
             &fs::read(directory.join(format!("component-{i}.original"))).unwrap(),
             bytes,
             "original parser/ArraySet component case {i}"
+        );
+    }
+}
+
+fn check_archives(boot: &Boot, directory: &std::path::Path) {
+    let activity = |name: &str| {
+        format!(
+            "<archive-activity-info activity-title='title' original-component-name='{name}' icon-path='/data/icon' monochrome-icon-path='/data/mono'/>"
+        )
+    };
+    let cases = [
+        ("installer-title='installer' archive-time='-1'", activity("p/A")),
+        ("installer-title='installer' archive-time='-1'", String::new()),
+        ("installer-title='installer' archive-time='bad-value'", activity("p/A")),
+        ("installer-title='installer' archive-time='55'", String::new()),
+        ("", activity("p/.Activity")),
+        ("installer-title=''", activity("p/.Activity")),
+        ("installer-title='installer' archive-time='ffffffffffffffff'", activity("p/Activity")),
+        ("installer-title='installer'", activity("p/")),
+        ("installer-title='installer'", activity("missing")),
+        ("installer-title='installer'", activity("/Activity")),
+        ("installer-title='installer'", activity("/")),
+        ("installer-title='installer'", activity("p//Activity")),
+        ("installer-title='installer'", activity("p/.")),
+        ("installer-title='installer' archive-time='1234'", format!("<unknown>{}<nested>{}</nested></unknown>{}", activity("p/.A"), activity("q/B"), activity("p/.A"))),
+        ("installer-title='installer'", "<archive-activity-info activity-title='no icon' original-component-name='p/A'/><archive-activity-info original-component-name='p/A' icon-path='/data/icon'/>".into()),
+        ("installer-title='installer'", "<archive-activity-info activity-title='' original-component-name='p/A' icon-path=''><archive-activity-info activity-title='inner' original-component-name='q/.B' icon-path='/data/inner'/></archive-activity-info>".into()),
+    ];
+    let mut expected = Vec::new();
+    for (i, (attrs, content)) in cases.iter().enumerate() {
+        let xml = format!("<archive-state {attrs}>{content}</archive-state>");
+        let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        for (j, input) in [
+            xml.into_bytes(),
+            aim_android_xml::abx::write(&root).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let parsed = aim_android_xml::read(&input).unwrap();
+            let wrapper = Element {
+                name: "package-restrictions".into(),
+                attrs: vec![],
+                content: vec![aim_android_xml::Node::Element(Element {
+                    name: "pkg".into(),
+                    attrs: vec![("name".into(), Value::String("fixture".into()))],
+                    content: vec![aim_android_xml::Node::Element(parsed)],
+                })],
+            };
+            let state = aim_services::package::restrictions::Restrictions::parse(&wrapper);
+            let archive = state
+                .as_ref()
+                .ok()
+                .and_then(|state| state.packages[0].1.archive_state.as_ref());
+            let mut bytes = vec![if state.is_err() {
+                2
+            } else {
+                u8::from(archive.is_some())
+            }];
+            let text = |bytes: &mut Vec<u8>, value: Option<&str>| {
+                bytes.extend_from_slice(&value.map_or(-1, |s| s.len() as i32).to_be_bytes());
+                if let Some(value) = value {
+                    bytes.extend_from_slice(value.as_bytes());
+                }
+            };
+            if let Some(archive) = archive {
+                text(&mut bytes, Some(&archive.installer_title));
+                bytes.extend_from_slice(&archive.archive_time.to_be_bytes());
+                bytes.extend_from_slice(&(archive.activities.len() as i32).to_be_bytes());
+                for activity in &archive.activities {
+                    text(&mut bytes, Some(&activity.title));
+                    text(&mut bytes, Some(&activity.original_component_name));
+                    text(&mut bytes, Some(&activity.icon_path));
+                    text(&mut bytes, activity.monochrome_icon_path.as_deref());
+                }
+            }
+            fs::write(directory.join(format!("archive-{}.xml", i * 2 + j)), input).unwrap();
+            expected.push(bytes);
+        }
+    }
+    let count = expected.len().to_string();
+    let result = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/suspension-dialogs/oracle.dex:/system/framework/services.jar",
+        "/system/bin",
+        "ArchiveOwnerOracle",
+        "/data/local/tmp/suspension-dialogs",
+        &count,
+    ]));
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        format!("ARCHIVES {count}\n")
+    );
+    for (i, bytes) in expected.iter().enumerate() {
+        assert_eq!(
+            &fs::read(directory.join(format!("archive-{i}.original"))).unwrap(),
+            bytes,
+            "original Settings reader loop/ArchiveState case {i}"
         );
     }
 }
