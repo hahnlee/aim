@@ -373,7 +373,7 @@ references. Removing a registered installer clears remaining active packages'
 installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
-removal, repeated missing removal and installer source effects (18.51s). All 331
+removal, repeated missing removal and installer source effects (29.52s). All 332
 units pass (3.05s), and image API linkage passes (13.1s). This in-memory stage is
 not yet called by boot cleanup: full side-owner ordering, permission uninstall
 reconciliation, persistence and publication remain #822/#798.
@@ -386,7 +386,7 @@ including shared app IDs. Replacement retains the retained class and preserves
 ordinary grants only when requested. Snapshot clones retain their prior grants.
 The original AppsFilterImpl grant oracle, with its own original mutable
 ApplicationSharedMemory for cache invalidation, passes in the combined fixture
-(18.51s). All 331 units pass (3.05s), and added image APIs link (13.1s).
+(29.52s). All 332 units pass (3.05s), and added image APIs link (13.1s).
 ActivityManager/WindowManager producers and boot removal/query publication are
 not connected to this owner yet (#724/#822).
 The native keystore cleanup owner captures full per-user UIDs when requests
@@ -399,10 +399,10 @@ the generator recipe was advanced to regenerate the bindings. The Binder
 transport fixture independently checks primitive wire fields, captured user
 scope, unrelated keys and retry order (two resource-client tests pass). The
 original maintenance wrapper acknowledges empty namespaces 19001 and 1019001
-with success in the disposable combined fixture (18.51s), after checking no
+with success in the disposable combined fixture (29.52s), after checking no
 package owns app ID 19001 and user 10 has no saved state. This does not prove
 existing-key deletion; the native queue has no boot deletion executor yet
-(#822). All 31 build-generator tests pass, all 331 service units pass (3.05s),
+(#822). All 31 build-generator tests pass, all 332 service units pass (3.05s),
 and compile-only image API linkage passes (13.1s).
 The native settings store now clears one user's saved preferred activities under
 Settings.clearPackagePreferredActivities rules (#822): a named package removes
@@ -410,9 +410,19 @@ only always choices, while a null package clears all valid choices. Last choices
 other packages' candidate sets, persistent policy choices, cross-profile filters
 and unrelated XML remain intact. Writes use resilient ABX and reject an external
 writer; reopening preserves the result and other users remain unchanged. The
-original Settings oracle verifies named, repeated and null clearing results.
-This owner is not yet connected to the boot removal transaction; all-user change
-reporting, home updates and broadcasts still belong to that integration (#822).
+native owner also clears all restored preferred resolvers in ascending user
+order and returns the original changed-user inventory. The pinned Settings
+method carries its removal list between users: after its first removal, later
+existing resolvers are reported changed even if no choice was removed there.
+Empty or invalid-only documents create no resolver; an emptied in-process
+resolver remains known until reopening. The original Settings oracle verifies
+named, repeated and null clearing for both one user and USER_ALL, including
+this propagation and an absent empty resolver (combined fixture 29.52s).
+The persistence failure test proves that earlier user writes remain committed,
+a conflicting external writer is preserved, later users remain untouched and
+the returned error identifies users requiring publication. All 332 service
+units pass (3.05s). This owner is not yet connected to the boot removal
+transaction; home updates and broadcasts remain with that integration (#822).
 APK and cluster parsing now distinguish an absent resources.arsc from a present
 entry failing archive reads (#826). Disposable code-only, bad-CRC and invalid
 deflate inputs verify absence acceptance and explicit read-error rejection.
