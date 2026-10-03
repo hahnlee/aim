@@ -70,6 +70,16 @@ impl SigningScan {
     pub(super) fn has_scanned_package(&self, name: &str) -> bool {
         self.parsed.iter().any(|(n, _, _, _)| n == name)
     }
+
+    /// Withdraw the scan's loaded package and declarations while retaining its
+    /// saved setting, UID membership and user state for an ex-system rescan.
+    /// Component/permission/property publication belongs to the commit owner.
+    pub(super) fn withdraw_scanned_package(&mut self, record: &Record) {
+        self.libraries.remove_scan_record(record);
+        self.parsed
+            .retain(|(name, _, _, _)| name != &record.settings.name);
+        self.scanned_users.remove(&record.settings.name);
+    }
     /// Apply page-size scan policy after ABI/path and installation ownership.
     /// Alignment errors retain existing flags and are returned for reporting.
     pub fn finish_page_size_metadata(

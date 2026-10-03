@@ -77,7 +77,8 @@ impl ScanPolicy {
     /// adjustScanFlagsWithPackageSetting's system inheritance. The owner
     /// selects the disabled original, or the existing system setting only
     /// for SCAN_NEW_INSTALL with no disabled original.
-    /// Supply the factory scan's refreshed flags, not disabled XML's partial flags.
+    /// Supply refreshed factory flags when available. A disappeared factory
+    /// retains its restored attributes until the ex-system data rescan.
     pub fn inherit_system_setting(&mut self, original: &settings::Package) {
         self.system = true;
         for (value, mask) in [

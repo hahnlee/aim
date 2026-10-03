@@ -1,5 +1,6 @@
 //! Known data APK boot admission, ported from android-16.0.0_r1
-//! InstallPackageHelper.assertPackageIsValid/adjustScanFlags and ScanPackageUtils.
+//! InstallPackageHelper.assertPackageIsValid/adjustScanFlags,
+//! cleanupDisabledPackageSettings and ScanPackageUtils.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{
     AbiScanContext, AbiScanMode, Code, CompletedScanMetadata, DataCode, DisabledSystemMetadata,
@@ -65,9 +66,10 @@ pub struct DataImagePackages {
 }
 
 impl SigningScan {
-    /// Iterate verified data candidates, then recover selected factories whose
-    /// data code was absent or rejected. Earlier package/resource effects remain
-    /// authoritative on a later error. This does not persist or publish a replica.
+    /// Iterate verified data candidates, rescan surviving ex-system updates,
+    /// then recover factories whose data code was absent or rejected. Earlier
+    /// package/resource effects remain authoritative on a later error. This does
+    /// not persist or publish a replica.
     pub fn scan_data_image(
         &mut self,
         image: super::DataImage,
@@ -99,6 +101,7 @@ impl SigningScan {
                 .map(|f| f.record.settings.name.clone()),
         );
         let mut packages = Vec::new();
+        let mut admitted_code = BTreeMap::new();
         let mut recovered = Vec::new();
         let mut removed = Vec::new();
         let mut incremental = BTreeSet::new();
@@ -202,9 +205,114 @@ impl SigningScan {
                 incremental,
             )?;
             match completed {
-                DataCandidateOutcome::Accepted(completed) => packages.push(completed),
+                DataCandidateOutcome::Accepted(completed) => {
+                    admitted_code.insert(
+                        completed.candidate.record.settings.name.clone(),
+                        code.clone(),
+                    );
+                    packages.push(completed);
+                }
                 DataCandidateOutcome::Removed(error) => removed.push((entry.scan_path, error)),
             }
+        }
+        // cleanupDisabledPackageSettings runs after data admission and before
+        // checkExistingBetterPackages. A missing factory retains its persisted
+        // attributes for the first data scan, then loses them on this rescan.
+        let disappeared: Vec<_> = self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .filter(|p| {
+                !inputs
+                    .factories
+                    .retained_data
+                    .iter()
+                    .any(|f| f.record.settings.name == p.name)
+                    && !inputs
+                        .factories
+                        .packages
+                        .iter()
+                        .any(|f| f.candidate.record.settings.name == p.name)
+            })
+            .map(|p| p.name.clone())
+            .collect();
+        for name in disappeared.into_iter().rev() {
+            self.settings
+                .disabled_system_packages
+                .retain(|p| p.name != name);
+            self.disabled_users.remove(&name);
+            let Some(at) = packages
+                .iter()
+                .position(|p| p.candidate.record.settings.name == name)
+            else {
+                return Err(fatal(name, String::new(), "package-data",
+                    "removed system package requires complete app-data and setting deletion (#702/#798)".into()));
+            };
+            let previous = packages.remove(at);
+            self.withdraw_scanned_package(&previous.candidate.record);
+            let raw = &admitted_code[&name];
+            let host = (apks.files)(&raw.location.path).ok_or_else(|| {
+                fatal(
+                    name.clone(),
+                    raw.location.path.clone(),
+                    "location",
+                    "data code path not mapped".into(),
+                )
+            })?;
+            let environment = super::NativeLibraryEnvironment {
+                preferred_abi: inputs.preferred_abi,
+                app_lib32_install_dir: inputs.app_lib32_install_dir,
+                code_is_directory: std::fs::metadata(host)
+                    .map_err(|e| {
+                        fatal(
+                            name.clone(),
+                            raw.location.path.clone(),
+                            "location",
+                            e.to_string(),
+                        )
+                    })?
+                    .is_dir(),
+                canonical_source: None,
+            };
+            let remove_test_base = (inputs.remove_test_base)(&raw.parsed)
+                .map_err(|e| fatal(name.clone(), raw.location.path.clone(), "policy", e))?;
+            let mut users = inputs.users.clone();
+            users.insert(name.clone(), previous.candidate.users);
+            let completed = self.scan_known_data(
+                raw,
+                &users,
+                inputs.all_users,
+                apks,
+                DataScanInputs {
+                    factory: None,
+                    platform: inputs.platform,
+                    vendor_sdk: inputs.vendor_sdk,
+                    compatibility: inputs.compatibility,
+                    remove_test_base,
+                    expecting_better: &expecting_better,
+                    new_domain_id: inputs.new_domain_id,
+                    completion: ScanMetadataCompletion {
+                        abi_policy: inputs.abi_policy,
+                        native_environment: &environment,
+                        context: AbiScanContext {
+                            mode: AbiScanMode::Existing {
+                                first_boot_or_upgrade: inputs.first_boot_or_upgrade,
+                                old_was_stub: inputs.old_stub_packages.contains(&name),
+                                saved: None,
+                            },
+                            system: false,
+                            updated: false,
+                            override_abi: None,
+                            platform_runtime_64bit: None,
+                        },
+                        install: inputs.install,
+                        destination: inputs.destinations.get(&name),
+                        clock: inputs.clock,
+                        factory_test: inputs.factory_test,
+                    },
+                },
+            )?;
+            packages.push(completed);
         }
         for (index, (factory, code)) in inputs
             .factories
@@ -478,6 +586,10 @@ impl SigningScan {
             .find(|p| p.name == system_identity.internal_name);
         match (factory_setting, inputs.factory) {
             (Some(setting), Some(factory)) if setting == &factory.record.settings => {}
+            // A disappeared factory has only its persisted setting at boot.
+            // Authorization still checks its saved certificates; dynamic
+            // declarations requiring parsed factory metadata fail explicitly.
+            (Some(_), None) => {}
             (None, None) => {}
             _ => {
                 return Err(fatal(
@@ -534,8 +646,8 @@ impl SigningScan {
             signing: raw.signing.clone(),
         };
         let mut policy = ScanPolicy::default();
-        if let Some(factory) = inputs.factory {
-            policy.inherit_system_setting(&factory.record.settings);
+        if let Some(factory) = factory_setting {
+            policy.inherit_system_setting(factory);
         }
         policy.adjust_shared_uid_privilege(
             &code.parsed,

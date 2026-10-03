@@ -322,9 +322,20 @@ packages and resource effects survive a later failure. The signed-APK fixture
 proves accepted updates, changed-path admission with UID/users preserved,
 missing inventory recovery, wrong-identity deletion followed by recovery,
 duplicate data deletion preserving the first accepted package, and preservation
-of earlier admission on a later policy-owner failure. Stub expansion, removed
-system package cleanup/promotion, certificate/library/copy error classification,
-publication and failure persistence remain pending (#707/#702/#810/#816/#798).
+of earlier admission on a later policy-owner failure. Surviving data updates
+whose system factory disappeared now follow cleanupDisabledPackageSettings:
+initial admission inherits the restored disabled setting, then that setting is
+removed and the loaded scan/declarations are withdrawn before a fresh ordinary
+data rescan. UID, code path and user state are retained; system/update and
+partition flags are recomputed, with the original shared-UID privilege exception
+still applied. A failed rescan preserves disabled-setting removal and withdrawal.
+The signed fixture verifies demotion and this failure order. An absent update
+removes the disabled entry but stops explicitly at the missing complete app-data
+and setting deletion owner; it does not pretend to delete user data. Loaded
+component/permission/property publication and library dependency overlays are
+not owned by the scan registry. Stub expansion, complete removed-system package
+cleanup, certificate/library/copy error classification, publication and failure
+persistence remain pending (#707/#702/#810/#816/#798).
 Filesystem tests cover directory order, parent/cache cleanup, app
 data preservation and partial installer failure/retry; the directory backend
 in those tests deletes disposable files, not the original installd daemon.
@@ -342,11 +353,12 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 301 units pass (3.04s). The original signed framework/GSF fixture passes
-(41.45s), including saved-image iteration, duplicate rejection, integrated source
-completion, disposable cleanup, the data loop and factory fallback, owner
-failures and preserved earlier effects. The full saved-system/data comparison
-passes (374.43s) on the final loop/duplicate/expectingBetter code. The nine
+All 302 units pass (3.05s). The original signed framework/GSF fixture passes
+(41.87s), including saved-image iteration, duplicate rejection, integrated source
+completion, disposable cleanup, the data loop, ex-system demotion and factory
+fallback, owner failures and preserved earlier effects. The full saved-system/data
+comparison passed (374.43s) before the ex-system demotion change, on the
+loop/duplicate/expectingBetter code. The nine
 original-APK scan-input tests passed (6.21s) before this loop change; the Java
 image API linkage build passes (13.2s). These are system/data APK phases, not a
 complete native boot or template: native APEX preparation, removed-package

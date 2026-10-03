@@ -1,6 +1,6 @@
 //! Shared library identities built by the native scan (#707). Ported
-//! from AOSP android-16.0.0_r1 `SharedLibrariesImpl` and
-//! `AndroidPackageUtils`, Copyright (C) The Android Open Source Project,
+//! from AOSP android-16.0.0_r1 `SharedLibrariesImpl`, `AndroidPackageUtils`
+//! and `RemovePackageHelper`, Copyright (C) The Android Open Source Project,
 //! Apache License 2.0. Dependency resolution is separate from declaration
 //! registration; these records initially have no consumers or edges.
 
@@ -72,6 +72,33 @@ impl Registry {
 
     pub fn entries(&self) -> impl Iterator<Item = &SharedLibrary> {
         self.entries.values().flat_map(|versions| versions.values())
+    }
+
+    /// RemovePackageHelper.cleanPackageDataStructuresLILPw uses exact library
+    /// versions (including zero for system dynamic declarations). This scan
+    /// registry does not own published dependency overlays (#798).
+    pub(in crate::package) fn remove_scan_record(&mut self, record: &super::scan::Record) {
+        let pkg = &record.parsed;
+        if record.settings.flags & super::settings::FLAG_SYSTEM != 0 {
+            for name in &pkg.library_names {
+                self.remove(name, 0);
+            }
+        }
+        if let Some(name) = &pkg.sdk_library_name {
+            self.remove(name, i64::from(pkg.sdk_lib_version_major));
+        }
+        if let Some(name) = &pkg.static_shared_library_name {
+            self.remove(name, pkg.static_shared_lib_version);
+        }
+    }
+
+    fn remove(&mut self, name: &str, version: i64) {
+        if let Some(versions) = self.entries.get_mut(name) {
+            versions.remove(&version);
+            if versions.is_empty() {
+                self.entries.remove(name);
+            }
+        }
     }
 
     /// Registers declarations after the scan validated the package and

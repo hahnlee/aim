@@ -521,6 +521,72 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert!(complete.recovered.is_empty());
             assert!(complete.removed.is_empty());
             assert!(data_code.exists());
+            let missing_factory = aim_services::package::scan::SystemImagePackages {
+                packages: Vec::new(),
+                retained_data: Vec::new(),
+                retained_code: Vec::new(),
+                rejected: Vec::new(),
+            };
+            let mut ex_system = before.clone();
+            let demoted = ex_system
+                .scan_data_image(
+                    DataImage::load(&apks, &[]).unwrap(),
+                    &apks,
+                    DataImageScanInputs {
+                        factories: &missing_factory,
+                        ..loop_inputs()
+                    },
+                )
+                .unwrap();
+            assert_eq!(demoted.packages.len(), 1);
+            assert!(demoted.recovered.is_empty());
+            assert!(ex_system.settings.disabled_system_packages.is_empty());
+            let ordinary = &demoted.packages[0].candidate;
+            assert_eq!(ordinary.record.settings.flags & (1 | (1 << 7)), 0);
+            assert_eq!(
+                ordinary.record.settings.private_flags,
+                ordinary_data.candidate.record.settings.private_flags
+            );
+            assert_eq!(ordinary.record.settings.app_id, active.app_id);
+            assert_eq!(ordinary.record.settings.code_path, active.code_path);
+            assert_eq!(ordinary.users, full_users[&active.name]);
+            assert!(data_code.exists());
+            let calls = std::cell::Cell::new(0);
+            let fail_rescan = |_: &aim_services::package::pkg::AndroidPackage| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    Err("ex-system policy owner unavailable".into())
+                } else {
+                    Ok(None)
+                }
+            };
+            let mut failed_demotion = before.clone();
+            assert!(
+                matches!(failed_demotion.scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks,
+                DataImageScanInputs { factories: &missing_factory, remove_test_base: &fail_rescan, ..loop_inputs() }),
+                Err(SigningError::Fatal(e)) if e.phase == "policy")
+            );
+            assert_eq!(calls.get(), 2);
+            assert!(failed_demotion.settings.disabled_system_packages.is_empty());
+            assert!(failed_demotion.scanned_user_states(&active.name).is_none());
+            assert_eq!(
+                failed_demotion
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == active.name)
+                    .unwrap()
+                    .app_id,
+                active.app_id
+            );
+            assert!(data_code.exists());
+            let mut gone = before.clone();
+            assert!(matches!(gone.scan_data_image(DataImage::default(), &apks,
+                DataImageScanInputs { factories: &missing_factory, ..loop_inputs() }),
+                Err(SigningError::Fatal(e)) if e.phase == "package-data"));
+            assert!(gone.settings.disabled_system_packages.is_empty());
+            assert!(gone.settings.packages.iter().any(|p| p.name == active.name));
+            assert!(data_code.exists());
             let changed_path = fixture.0.join("data/app/other-path");
             std::fs::create_dir_all(&changed_path).unwrap();
             std::os::unix::fs::symlink(

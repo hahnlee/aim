@@ -12,6 +12,65 @@ fn policy(native: bool, independence: bool) -> Policy {
 }
 
 #[test]
+fn loaded_library_withdrawal_preserves_other_versions_and_builtins() {
+    use crate::package::{
+        owner::shared_users::ScanOrigin,
+        scan::{Identity, Record},
+        settings::{Package, Settings},
+        sign::SigningDetails,
+    };
+    let mut registry = Registry::new(&SystemConfig::default());
+    registry.insert(SharedLibrary {
+        name: Some("builtin".into()),
+        version: VERSION_UNDEFINED,
+        kind: TYPE_BUILTIN,
+        path: Some("/system/framework/builtin.jar".into()),
+        ..Default::default()
+    });
+    for sdk in [false, true] {
+        let name = if sdk { "sdk" } else { "static" };
+        for version in [1, 2] {
+            let ps = package("provider", |p| {
+                if sdk {
+                    p.sdk_library_name = Some(name.into());
+                    p.sdk_lib_version_major = version;
+                } else {
+                    p.static_shared_library_name = Some(name.into());
+                    p.static_shared_lib_version = i64::from(version);
+                }
+            });
+            registry.add_package(&ps, None).unwrap();
+            if version == 2 {
+                let parsed = ps.pkg.as_deref().unwrap().clone();
+                let record = Record {
+                    identity: Identity::select(&parsed, &Settings::default(), false),
+                    parsed,
+                    settings: Package {
+                        name: "provider".into(),
+                        ..Default::default()
+                    },
+                    signing: SigningDetails {
+                        signatures: Vec::new(),
+                        scheme_version: 0,
+                        public_keys: Vec::new(),
+                        past_signing_certificates: None,
+                    },
+                    origin: ScanOrigin::Data,
+                };
+                registry.remove_scan_record(&record);
+                assert!(registry.get(name, 2).is_none());
+                assert!(registry.get(name, 1).is_some());
+                registry.remove_scan_record(&record);
+            }
+        }
+    }
+    assert_eq!(
+        registry.get("builtin", VERSION_UNDEFINED).unwrap().kind,
+        TYPE_BUILTIN
+    );
+}
+
+#[test]
 fn graph_resolves_multihop_paths_and_nested_apk_dependencies() {
     let mut registry = Registry::new(&SystemConfig::default());
     registry.insert(SharedLibrary {
