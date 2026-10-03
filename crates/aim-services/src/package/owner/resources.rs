@@ -1,10 +1,11 @@
 //! Replaced APK resource cleanup, ported from android-16.0.0_r1
-//! RemovePackageHelper and PackageCacher (#816).
+//! RemovePackageHelper, AppDataHelper and PackageCacher (#816/#798).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
+use crate::package::{restrictions::UserState, scan::User, settings::Package};
 use crate::system::System;
 use aim_binder_host::local::LocalProcess;
 use aim_service_aidl::android_os_iinstalld as installd;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -54,6 +55,54 @@ impl CodeResources {
                     .map_err(|e| format!("rmPackageDir {path}: {e:?}"))
             },
         )
+    }
+
+    /// PMS construction has not initialized ART Service: AppDataHelper omits
+    /// separate ART-service profile clearing. Destroy CE/DE/external storage for
+    /// every resolved user, preserving installer failures and earlier effects.
+    /// Domain, dex/dynamic-code, permission and keystore state belong to their
+    /// owners; this method does not remove a package setting (#798).
+    pub fn destroy_boot_app_storage(
+        &self,
+        package: &Package,
+        users: &[User],
+        states: &BTreeMap<i32, UserState>,
+    ) -> Result<(), String> {
+        if package.name.is_empty()
+            || matches!(package.name.as_str(), "." | "..")
+            || package.name.contains(['/', '\\', '\0'])
+        {
+            return Err("invalid app storage package name".into());
+        }
+        if package.volume_uuid.is_some() {
+            return Err(
+                "private-volume app storage deletion requires its storage owner (#816)".into(),
+            );
+        }
+        let mut ids = BTreeSet::new();
+        if users.is_empty() || users.iter().any(|u| u.id < 0 || !ids.insert(u.id)) {
+            return Err("app storage deletion requires distinct resolved users".into());
+        }
+        let _install = self.install_lock.lock().unwrap();
+        for user in users {
+            let request = installd::DestroyAppData {
+                uuid: package.volume_uuid.clone(),
+                package_name: Some(package.name.clone()),
+                user_id: user.id,
+                // FLAG_STORAGE_DE | FLAG_STORAGE_CE | FLAG_STORAGE_EXTERNAL.
+                flags: 1 | 2 | 4,
+                ce_data_inode: states.get(&user.id).map_or(0, |s| s.ce_data_inode),
+            };
+            self.system
+                .call(
+                    "installd",
+                    installd::DESTROY_APP_DATA,
+                    |p| request.write(p),
+                    installd::read_destroy_app_data_reply,
+                )
+                .map_err(|e| format!("destroyAppData {} user {}: {e:?}", package.name, user.id))?;
+        }
+        Ok(())
     }
 }
 

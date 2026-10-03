@@ -190,6 +190,26 @@ fn saved_scan_libraries_match_original_pms() {
     );
     assert!(!code_parent.exists());
     assert!(protected.join("keep").exists());
+    let app_data = String::from_utf8(
+        run(boot.client(1000).args([
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/boot-scan.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.BootScanOracle",
+            "installer-app-data",
+        ]))
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        app_data.lines().collect::<Vec<_>>(),
+        [
+            "app-data-removed",
+            "app-data-retry",
+            "invalid-user-rejected"
+        ]
+    );
+    assert!(protected.join("keep").exists());
     let mut platform = Platform::load(&image, Default::default()).unwrap();
     let density =
         String::from_utf8(run(boot.command().args(["shell", "wm", "density"])).stdout).unwrap();

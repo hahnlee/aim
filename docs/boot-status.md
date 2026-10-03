@@ -330,10 +330,19 @@ data rescan. UID, code path and user state are retained; system/update and
 partition flags are recomputed, with the original shared-UID privilege exception
 still applied. A failed rescan preserves disabled-setting removal and withdrawal.
 The signed fixture verifies demotion and this failure order. An absent update
-removes the disabled entry but stops explicitly at the missing complete app-data
-and setting deletion owner; it does not pretend to delete user data. Loaded
-component/permission/property publication and library dependency overlays are
-not owned by the scan registry. Stub expansion, complete removed-system package
+removes the disabled entry and now reaches actual per-user installd.destroyAppData
+requests for CE/DE/external storage, using saved CE inodes (default zero for a
+user without a state). The boot owner must supply the complete resolved user
+inventory and saved inode state before deletion starts. Installer failure stops
+the scan and preserves earlier user deletions. After successful storage deletion
+the scan still stops at missing domain/keyset/update ownership/filter/preferred/
+keystore and setting/permission cleanup owners (#798/#822). Separate ART-service
+profile clearing is omitted during PMS construction, as in AppDataHelper;
+installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
+phase also detects disappeared non-updated system settings in reverse order,
+preventing their data APKs from being admitted as known before full removal
+(#822). Loaded component/permission/property publication and library dependency
+overlays are not owned by the scan registry. Stub expansion, complete removed-system package
 cleanup, certificate/library/copy error classification, publication and failure
 persistence remain pending (#707/#702/#810/#816/#798).
 Filesystem tests cover directory order, parent/cache cleanup, app
@@ -342,23 +351,32 @@ in those tests deletes disposable files, not the original installd daemon.
 A native Binder client test now sends generated rmPackageDir requests through
 servicemanager to a disposable filesystem endpoint: system UID, real directory
 deletion, returned installer exceptions and parent-only retry all pass. The
+same generated Binder client test deletes real disposable CE/DE directories for
+user 0, propagates user 10 installer failure, retries successfully and preserves
+other packages. It verifies saved 64-bit CE inodes/default-zero inodes, flags 7,
+and validation before any call for invalid names/users/private volumes. Its
+endpoint is a test filesystem service, not original installd. The
 original-runtime comparison separately invokes the image's IInstalld Java
 interface as system UID against the original daemon, checks the child and
 random parent disappear after each call, and verifies an invalid /data/local/tmp
-root rejects with unrelated data intact. The original image API linkage for
-IInstalld/Stub is checked too. These are separate native-client and original-
+root rejects with unrelated data intact. A system-UID Java call also uses the
+original daemon to delete diagnostic CE/DE directories, retries absent data,
+rejects USER_ALL (-1) as an unresolved installer user, and preserves unrelated
+data (375.05s full runtime). The original image API linkage for IInstalld/Stub,
+including destroyAppData, is checked too (13.2s). These are separate native-client and original-
 daemon proofs, not an integrated native restoration boot. That integration,
 incremental/external-volume storage, durable partial cleanup recovery and
 old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 302 units pass (3.05s). The original signed framework/GSF fixture passes
-(41.87s), including saved-image iteration, duplicate rejection, integrated source
+All 302 units pass (3.03s). The original signed framework/GSF fixture passes
+(42.13s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
-fallback, owner failures and preserved earlier effects. The full saved-system/data
-comparison passed (374.43s) before the ex-system demotion change, on the
-loop/duplicate/expectingBetter code. The nine
+fallback, the pre-data missing-system input gate, owner failures and preserved
+earlier effects. The full saved-system/data
+comparison passes (375.05s) with ex-system demotion and the pre-data
+missing-system gate. The nine
 original-APK scan-input tests passed (6.21s) before this loop change; the Java
 image API linkage build passes (13.2s). These are system/data APK phases, not a
 complete native boot or template: native APEX preparation, removed-package

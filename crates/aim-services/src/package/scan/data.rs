@@ -105,6 +105,21 @@ impl SigningScan {
         let mut recovered = Vec::new();
         let mut removed = Vec::new();
         let mut incremental = BTreeSet::new();
+        // prepareSystemPackageCleanUp removes disappeared, non-updated system
+        // settings before a data APK can be considered known (#822).
+        if let Some(package) = self.settings.packages.iter().rev().find(|p| {
+            p.flags & crate::package::settings::FLAG_SYSTEM != 0
+                && !self.has_scanned_package(&p.name)
+                && !self
+                    .settings
+                    .disabled_system_packages
+                    .iter()
+                    .any(|d| d.name == p.name)
+        }) {
+            Self::destroy_removed_boot_storage(package, &inputs)?;
+            return Err(fatal(package.name.clone(), package.code_path.clone(), "package-state",
+                "app storage removed; domain/keyset/update ownership/filter/preferred/keystore and setting/permission deletion require their owners (#822/#798)".into()));
+        }
         for rejected in &image.rejected {
             if (inputs.is_incremental)(&rejected.location.path).map_err(|e| {
                 fatal(
@@ -245,8 +260,12 @@ impl SigningScan {
                 .iter()
                 .position(|p| p.candidate.record.settings.name == name)
             else {
-                return Err(fatal(name, String::new(), "package-data",
-                    "removed system package requires complete app-data and setting deletion (#702/#798)".into()));
+                let Some(package) = self.settings.packages.iter().find(|p| p.name == name) else {
+                    continue;
+                };
+                Self::destroy_removed_boot_storage(package, &inputs)?;
+                return Err(fatal(name, package.code_path.clone(), "package-state",
+                    "app storage removed; remaining package state deletion requires its owners (#822/#798)".into()));
             };
             let previous = packages.remove(at);
             self.withdraw_scanned_package(&previous.candidate.record);
@@ -452,6 +471,31 @@ impl SigningScan {
             rejected: image.rejected,
             removed,
         })
+    }
+
+    fn destroy_removed_boot_storage(
+        package: &crate::package::settings::Package,
+        inputs: &DataImageScanInputs<'_>,
+    ) -> Result<(), SigningError> {
+        let fail = |message: String| {
+            SigningError::Fatal(Error {
+                package: package.name.clone(),
+                path: package.code_path.clone(),
+                phase: "package-data",
+                message,
+            })
+        };
+        let users = inputs
+            .all_users
+            .ok_or_else(|| fail("removed package requires the resolved user inventory".into()))?;
+        let states = inputs
+            .users
+            .get(&package.name)
+            .ok_or_else(|| fail("removed package user inode state was not supplied".into()))?;
+        inputs
+            .resources
+            .destroy_boot_app_storage(package, users, states)
+            .map_err(fail)
     }
 
     /// Remove rejected parse/signature inputs using their original scan paths.

@@ -52,12 +52,47 @@ struct Installer {
     data: PathBuf,
     calls: Mutex<Vec<(String, String)>>,
     reject_parent: Mutex<bool>,
+    data_calls: Mutex<Vec<(String, i32, i32, i64)>>,
+    reject_user: Mutex<Option<i32>>,
 }
 impl Service for Installer {
     fn descriptor(&self) -> &str {
         installd::DESCRIPTOR
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == installd::DESTROY_APP_DATA {
+            assert_eq!(call.sender_euid, 1000);
+            let request = installd::DestroyAppData::read(&mut call.data)?;
+            assert!(request.uuid.is_none());
+            let name = request.package_name.unwrap();
+            self.data_calls.lock().unwrap().push((
+                name.clone(),
+                request.user_id,
+                request.flags,
+                request.ce_data_inode,
+            ));
+            let mut reply = Parcel::new();
+            if *self.reject_user.lock().unwrap() == Some(request.user_id) {
+                reply.write_exception(&Exception::new(-8, "installer data failure"));
+            } else {
+                for (directory, flag) in [("user", 2), ("user_de", 1)] {
+                    if request.flags & flag != 0 {
+                        let path = self
+                            .data
+                            .join(directory)
+                            .join(request.user_id.to_string())
+                            .join(&name);
+                        match fs::remove_dir_all(path) {
+                            Ok(()) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => panic!("{e}"),
+                        }
+                    }
+                }
+                installd::write_destroy_app_data_reply(&mut reply);
+            }
+            return Ok(reply);
+        }
         if call.code != installd::RM_PACKAGE_DIR {
             return Err(UNKNOWN_TRANSACTION);
         }
@@ -123,6 +158,8 @@ fn generated_installer_calls_preserve_failure_and_retry_parent_cleanup() {
         data: data.clone(),
         calls: Mutex::new(Vec::new()),
         reject_parent: Mutex::new(true),
+        data_calls: Mutex::new(Vec::new()),
+        reject_user: Mutex::new(Some(10)),
     });
     let endpoint = manager.add_service(installer.clone());
     let Binder::Local(ptr) = manager.add_service(Arc::new(Registry(endpoint))) else {
@@ -181,6 +218,93 @@ fn generated_installer_calls_preserve_failure_and_retry_parent_cleanup() {
             ("package".into(), "/data/app/~~native-proof".into()),
         ]
     );
+    use aim_services::package::{restrictions::UserState, scan::User, settings::Package};
+    let package = Package {
+        name: "org.example.removed".into(),
+        ..Default::default()
+    };
+    let users = [0, 10].map(|id| User {
+        id,
+        pre_created: false,
+        adb_install_disallowed: false,
+    });
+    let states = std::collections::BTreeMap::from([(
+        0,
+        UserState {
+            ce_data_inode: i64::MAX,
+            ..Default::default()
+        },
+    )]);
+    for user in [0, 10] {
+        for directory in ["user", "user_de"] {
+            for name in [package.name.as_str(), "org.example.keep"] {
+                let path = data.join(directory).join(user.to_string()).join(name);
+                fs::create_dir_all(&path).unwrap();
+                fs::write(path.join("data"), b"disposable app data").unwrap();
+            }
+        }
+    }
+    let error = resources
+        .destroy_boot_app_storage(&package, &users, &states)
+        .unwrap_err();
+    assert!(error.contains("installer data failure") && error.contains("user 10"));
+    for directory in ["user", "user_de"] {
+        assert!(!data.join(directory).join("0").join(&package.name).exists());
+        assert!(data.join(directory).join("10").join(&package.name).exists());
+        for user in ["0", "10"] {
+            assert!(
+                data.join(directory)
+                    .join(user)
+                    .join("org.example.keep/data")
+                    .exists()
+            );
+        }
+    }
+    *installer.reject_user.lock().unwrap() = None;
+    resources
+        .destroy_boot_app_storage(&package, &users, &states)
+        .unwrap();
+    assert_eq!(
+        *installer.data_calls.lock().unwrap(),
+        [
+            (package.name.clone(), 0, 7, i64::MAX),
+            (package.name.clone(), 10, 7, 0),
+            (package.name.clone(), 0, 7, i64::MAX),
+            (package.name.clone(), 10, 7, 0),
+        ]
+    );
+    for directory in ["user", "user_de"] {
+        assert!(!data.join(directory).join("10").join(&package.name).exists());
+    }
+    let count = installer.data_calls.lock().unwrap().len();
+    for invalid in [
+        Package {
+            name: "../escape".into(),
+            ..package.clone()
+        },
+        Package {
+            volume_uuid: Some("private-volume".into()),
+            ..package.clone()
+        },
+    ] {
+        assert!(
+            resources
+                .destroy_boot_app_storage(&invalid, &users, &states)
+                .is_err()
+        );
+    }
+    for invalid_users in [
+        &[][..],
+        &[users[0], users[0]][..],
+        &[User { id: -1, ..users[0] }][..],
+    ] {
+        assert!(
+            resources
+                .destroy_boot_app_storage(&package, invalid_users, &states)
+                .is_err()
+        );
+    }
+    assert_eq!(installer.data_calls.lock().unwrap().len(), count);
     drop(resources);
     drop(fixture);
 }

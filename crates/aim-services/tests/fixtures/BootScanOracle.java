@@ -26,6 +26,35 @@ public final class BootScanOracle {
             System.out.println("invalid-root-rejected");
             return;
         }
+        if (args.length == 1 && args[0].equals("installer-app-data")) {
+            android.os.IInstalld installer = android.os.IInstalld.Stub.asInterface(
+                android.os.ServiceManager.getService("installd"));
+            if (installer == null) throw new IllegalStateException("missing original installd");
+            String name = "com.aim.removed";
+            java.io.File ce = new java.io.File("/data/user/0/" + name);
+            java.io.File de = new java.io.File("/data/user_de/0/" + name);
+            if (ce.exists() || de.exists() || !ce.mkdirs() || !de.mkdirs())
+                throw new IllegalStateException("app storage fixture creation failed");
+            new java.io.File(ce, "disposable").createNewFile();
+            new java.io.File(de, "disposable").createNewFile();
+            installer.destroyAppData(null, name, 0, 7, 0);
+            if (ce.exists() || de.exists())
+                throw new IllegalStateException("installd retained CE/DE storage");
+            System.out.println("app-data-removed");
+            installer.destroyAppData(null, name, 0, 7, 0);
+            System.out.println("app-data-retry");
+            boolean rejected = false;
+            try {
+                installer.destroyAppData(null, name, -1, 7, 0);
+            } catch (RuntimeException expected) {
+                rejected = true;
+            }
+            if (!rejected) throw new IllegalStateException("installd accepted unresolved user");
+            if (!new java.io.File("/data/local/tmp/aim-cleanup-invalid/keep").exists())
+                throw new IllegalStateException("unrelated data disappeared");
+            System.out.println("invalid-user-rejected");
+            return;
+        }
         if (args.length == 1 && args[0].equals("factory-users")) {
             com.android.server.pm.PackageSetting cold = new com.android.server.pm.PackageSetting(
                 "fixture", null, new java.io.File("/system/app/fixture"), 1, 0,

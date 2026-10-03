@@ -528,6 +528,16 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 rejected: Vec::new(),
             };
             let mut ex_system = before.clone();
+            let mut unupdated = before.clone();
+            unupdated.settings.disabled_system_packages.clear();
+            let untouched = unupdated.clone();
+            assert!(
+                matches!(unupdated.scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks,
+                DataImageScanInputs { factories: &missing_factory, ..loop_inputs() }),
+                Err(SigningError::Fatal(e)) if e.phase == "package-data" && e.message.contains("resolved user"))
+            );
+            assert_eq!(unupdated, untouched);
+            assert!(data_code.exists());
             let demoted = ex_system
                 .scan_data_image(
                     DataImage::load(&apks, &[]).unwrap(),
