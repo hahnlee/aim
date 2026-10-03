@@ -4,7 +4,9 @@
 use crate::package::settings::{KeySetData, Settings};
 use aim_android_xml::{Element, Node, Value};
 use std::collections::{BTreeMap, BTreeSet};
+mod persistence;
 mod registration;
+pub(super) use persistence::replace_registered;
 pub use registration::{register, restore};
 
 /// Signing sets and defined aliases each hold a reference; upgrade sets do

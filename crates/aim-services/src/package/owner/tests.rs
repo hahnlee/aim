@@ -33,6 +33,104 @@ impl Drop for Data {
 const RESTRICTIONS: &[u8] = b"<package-restrictions><pkg name='example.app' stopped='true' inst='true'><suspend-params suspending-package='android'><dialog-info dialogMessage='keep me' /></suspend-params></pkg><crossProfile-intent-filters><item targetUserId='10'><filter><action name='example.ACTION' /></filter></item></crossProfile-intent-filters></package-restrictions>";
 
 #[test]
+fn scanned_keyset_commit_reopens_and_rejects_unrelated_or_counter_changes() {
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    let key = |scalar: u8| {
+        let mut encoded = vec![
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+        ];
+        let mut bytes = [0; 32];
+        bytes[31] = scalar;
+        let secret = p256::SecretKey::from_slice(&bytes).unwrap();
+        encoded.extend_from_slice(secret.public_key().to_encoded_point(false).as_bytes());
+        encoded
+    };
+    let data = Data::new();
+    let restrictions = data.settings();
+    fs::write(&restrictions, RESTRICTIONS).unwrap();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages future='keep'><package name='a' codePath='/system/app/a' userId='10100'><future-package/></package><package name='b' codePath='/system/app/b' userId='10101'/><keyset-settings version='1'><keys><future-key/></keys><keysets><future-set/></keysets><lastIssuedKeyId value='9'/><lastIssuedKeySetId value='10'/><future-owner/></keyset-settings></packages>").unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let users = store.state().users.clone();
+    let mut desired = store.state().settings.clone();
+    let signer = key(1);
+    let alias = key(2);
+    key_sets::register(
+        &mut desired,
+        "a",
+        &[signer.clone()],
+        Some(&[("next".into(), vec![alias.clone()])]),
+        &["next".into()],
+    )
+    .unwrap();
+    key_sets::register(&mut desired, "b", &[signer], None, &[]).unwrap();
+    store.commit_key_sets(&desired).unwrap();
+    assert_eq!(desired.packages[0].key_set_data.proper_signing_key_set, 11);
+    assert_eq!(desired.packages[1].key_set_data.proper_signing_key_set, 11);
+    assert_eq!(desired.packages[0].key_set_data.upgrade_key_sets, [12]);
+    assert_eq!(desired.key_sets.last_issued_key_id, 11);
+    assert_eq!(desired.key_sets.last_issued_key_set_id, 12);
+    let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(reopened.state().settings, desired);
+    assert_eq!(reopened.state().users, users);
+    assert_eq!(fs::read(&restrictions).unwrap(), RESTRICTIONS);
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(abx::MAGIC));
+    assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
+    let root = aim_android_xml::read(&bytes).unwrap();
+    assert_eq!(root.string("future").as_deref(), Some("keep"));
+    let global = root
+        .children()
+        .find(|e| e.name == "keyset-settings")
+        .unwrap();
+    assert!(global.children().any(|e| e.name == "future-owner"));
+    assert!(
+        global
+            .children()
+            .find(|e| e.name == "keys")
+            .unwrap()
+            .children()
+            .any(|e| e.name == "future-key")
+    );
+    assert!(
+        global
+            .children()
+            .find(|e| e.name == "keysets")
+            .unwrap()
+            .children()
+            .any(|e| e.name == "future-set")
+    );
+    assert!(
+        root.children()
+            .find(|e| e.name == "package")
+            .unwrap()
+            .children()
+            .any(|e| e.name == "future-package")
+    );
+    key_sets::register(&mut desired, "a", &[alias], Some(&[]), &[]).unwrap();
+    desired.key_sets.last_issued_key_id = 99;
+    desired.key_sets.last_issued_key_set_id = 100;
+    store.commit_key_sets(&desired).unwrap();
+    assert_eq!(
+        Store::open(&data.0, &[0])
+            .unwrap()
+            .unwrap()
+            .state()
+            .settings,
+        desired
+    );
+    let bytes = fs::read(&path).unwrap();
+    let mut invalid = desired.clone();
+    invalid.packages[0].app_id += 1;
+    assert!(!store.commit_key_sets(&invalid).unwrap_err().committed);
+    invalid = desired.clone();
+    invalid.key_sets.last_issued_key_id -= 1;
+    assert!(!store.commit_key_sets(&invalid).unwrap_err().committed);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
 fn boot_removal_metadata_commit_retains_uid_users_legacy_domains_and_unknown_xml() {
     let data = Data::new();
     let restrictions = data.settings();

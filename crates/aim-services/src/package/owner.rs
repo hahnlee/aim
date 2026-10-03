@@ -136,6 +136,17 @@ impl Store {
         self.commit_package_document(root)
     }
 
+    /// Persist keyset ownership for retained packages after scan completion.
+    /// Other package metadata and publication remain with their owners.
+    pub fn commit_key_sets(
+        &mut self,
+        settings: &super::settings::Settings,
+    ) -> Result<(), WriteError> {
+        let root = key_sets::replace_registered(&self.settings_document, settings)
+            .map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
     /// Persist the domain/keyset stage of an owner-authorized boot removal.
     /// Package settings, UID/user state and permission deletion follow later.
     pub fn commit_removed_boot_metadata(&mut self, package: &str) -> Result<(), WriteError> {

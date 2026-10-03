@@ -349,8 +349,13 @@ without writes. This is a component writer, not a complete deletion commit. Scan
 sets and shared canonical RSA/EC/DSA keys, and allocates monotonic IDs. Restored
 settings prune unreferenced sets with the original active-package reference
 rules, retaining unrelated unused public keys. Defined-keyset ownership supports
-alias replacement and upgrade references; manifest keyset parsing/decoding and
-registration persistence remain #824. Separate ART-service
+alias replacement and upgrade references. Store.commit_key_sets persists this
+owner for retained active packages as resilient ABX, preserving disabled settings,
+UIDs, restrictions and unrelated XML. Reopen tests verify signer/alias IDs, shared
+keys, reserve copies and rejection of unrelated state or counter regression. This
+component writer does not commit new package metadata or publish the scan. Original
+PMS reading native-written registrations and manifest keyset parsing/decoding
+remain unverified (#824). Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,
@@ -384,7 +389,8 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 311 units pass (3.09s). The original signed framework/GSF fixture passes
+All 312 units pass (3.07s); the subsequent counter-regression persistence test
+also passes. The original signed framework/GSF fixture passes
 (43.58s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
 fallback, the pre-data missing-system input gate, owner failures and preserved
