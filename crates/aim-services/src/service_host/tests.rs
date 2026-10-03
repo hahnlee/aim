@@ -16,7 +16,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -84,6 +84,8 @@ fn find(process: &Arc<LocalProcess>, name: &str) -> Strong {
 struct Owner {
     calls: Mutex<Vec<i32>>,
     reject: AtomicBool,
+    bcp_reads: AtomicUsize,
+    malformed_bcp: AtomicBool,
     gid: i32,
 }
 impl Service for Owner {
@@ -93,6 +95,9 @@ impl Service for Owner {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         assert_eq!(call.sender_euid, 1000);
         call.data.enforce_interface(bootstrap::DESCRIPTOR)?;
+        if call.code == bootstrap::IS_TEST_BASE_ON_BOOTCLASSPATH {
+            self.bcp_reads.fetch_add(1, Ordering::SeqCst);
+        }
         let mut reply = Parcel::new();
         if self.reject.load(Ordering::SeqCst) {
             reply.write_exception(&Exception::security("original owner denied"));
@@ -100,7 +105,12 @@ impl Service for Owner {
         }
         reply.write_no_exception();
         match call.code {
-            bootstrap::IS_TEST_BASE_ON_BOOTCLASSPATH => reply.write_i32(1),
+            bootstrap::IS_TEST_BASE_ON_BOOTCLASSPATH => {
+                reply.write_i32(1);
+                if self.malformed_bcp.load(Ordering::SeqCst) {
+                    reply.write_i32(99);
+                }
+            }
             bootstrap::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
                 assert_eq!(
                     call.data.read_string16()?.as_deref(),
@@ -227,6 +237,8 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert!(system.package_bootstrap().is_err());
     assert!(attach(&first, None).is_err());
     let owner = Arc::new(Owner {
+        bcp_reads: AtomicUsize::new(0),
+        malformed_bcp: AtomicBool::new(false),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -234,6 +246,8 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     let node = first.add_service(owner.clone());
     assert!(attach(&foreign, None).is_err_and(|e| e.code == -1));
     let foreign_node = foreign.add_service(Arc::new(Owner {
+        bcp_reads: AtomicUsize::new(0),
+        malformed_bcp: AtomicBool::new(false),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -250,6 +264,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
             .is_err()
     );
     let old = system.package_bootstrap().unwrap();
+    assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
     assert!(!late.load(Ordering::SeqCst));
     let config = SystemConfig::default();
     let mut parsed = crate::package::pkg::AndroidPackage {
@@ -291,10 +306,16 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         old.seinfo_target_sdk(&parsed),
         Err(crate::package::bootstrap::SeInfoError::Owner(_))
     ));
-    assert!(matches!(
-        old.library_compatibility(&config, &|_| None),
-        Err(crate::package::scan::PolicyBridgeError::Owner(_))
-    ));
+    assert!(old.library_compatibility(&config, &|_| None).is_ok());
+    assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
+    assert!(attach(&first, Some(node)).is_err_and(|error| error.code == -1));
+    assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
+    owner.reject.store(false, Ordering::SeqCst);
+    owner.malformed_bcp.store(true, Ordering::SeqCst);
+    assert!(attach(&first, Some(node)).is_err_and(|error| error.code == -5));
+    assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
+    owner.malformed_bcp.store(false, Ordering::SeqCst);
+    owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
         old.library_policy("fixture.package", 31),
         Err(crate::package::libraries::NativePolicyError::Owner(_))
@@ -310,6 +331,8 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert!(attach(&first, Some(wrong)).is_err());
     assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
     let replacement = second.add_service(Arc::new(Owner {
+        bcp_reads: AtomicUsize::new(0),
+        malformed_bcp: AtomicBool::new(false),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,

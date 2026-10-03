@@ -13,6 +13,7 @@ use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 pub struct Bridge {
     pub(crate) owner: Strong,
+    test_base_on_bcp: bool,
 }
 
 #[derive(Debug)]
@@ -65,7 +66,34 @@ impl Bridge {
                 "wrong package bootstrap bridge interface",
             ));
         }
-        Ok(Self { owner })
+        let mut data = Parcel::new();
+        bridge::IsTestBaseOnBootclasspath {}.write(&mut data);
+        let reply = owner
+            .transact(bridge::IS_TEST_BASE_ON_BOOTCLASSPATH, &data, false)
+            .map_err(|status| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("package bootstrap classpath policy: status {status}"),
+                )
+            })?;
+        let mut reader = reply.reader();
+        let on_bcp =
+            bridge::read_is_test_base_on_bootclasspath_reply(&mut reader).map_err(|status| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("package bootstrap classpath reply: status {status}"),
+                )
+            })??;
+        if reader.remaining() != 0 {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "package bootstrap classpath reply has trailing data",
+            ));
+        }
+        Ok(Self {
+            owner,
+            test_base_on_bcp: on_bcp,
+        })
     }
 
     pub fn library_compatibility(
@@ -73,16 +101,9 @@ impl Bridge {
         config: &SystemConfig,
         prop: &dyn Fn(&str) -> Option<String>,
     ) -> Result<LibraryCompatibility, PolicyBridgeError> {
-        let mut data = Parcel::new();
-        bridge::IsTestBaseOnBootclasspath {}.write(&mut data);
-        let reply = self
-            .owner
-            .transact(bridge::IS_TEST_BASE_ON_BOOTCLASSPATH, &data, false)
-            .map_err(PolicyBridgeError::Transport)?;
-        let on_bcp = bridge::read_is_test_base_on_bootclasspath_reply(&mut reply.reader())
-            .map_err(PolicyBridgeError::Transport)?
-            .map_err(PolicyBridgeError::Owner)?;
-        LibraryCompatibility::new(config, prop, on_bcp).map_err(PolicyBridgeError::Policy)
+        // This is a pinned image/build property, read before attachment succeeds.
+        LibraryCompatibility::new(config, prop, self.test_base_on_bcp)
+            .map_err(PolicyBridgeError::Policy)
     }
 
     pub fn library_policy(

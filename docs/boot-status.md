@@ -158,8 +158,9 @@ IServiceHost attachment (#834); existing late-service methods retain their
 original transaction codes and oneway behavior. It retains the typed Binder
 endpoint without mapping nonce memory or starting late-service listeners. Only
 the matching endpoint is removed on death, so an old server cannot erase its
-replacement. Native clients query the original boot-classpath/native-library
-policy and complete active-user permission GIDs, retaining owner/transport
+replacement. Attachment reads and retains the pinned original boot-classpath
+policy before publishing the endpoint. Native clients reuse that build policy
+and query native-library policy and complete active-user permission GIDs, retaining owner/transport
 errors and GID ordering/duplicates. Java's early endpoint and normal IBridge
 share the same original PlatformCompat, PackageBackwardCompatibility and
 PermissionManagerServiceInternal implementations, with system-UID checks and
@@ -172,8 +173,19 @@ Production device-services image API checking passes (14.0s), and system-server
 symbolic call-count/signature and DEX verification pass (1.1s). The complete
 derived image/oat/template build passes (55.8s), with disposable template settings
 at 7.4s, sys.boot_completed at 10.2s and permissions at 22.7s. The template
-builder cleans its owned processes/mounts. Native scan consumption and actual
-original bridge policy/GID calls are still unverified (#834/#798).
+builder cleans its owned processes/mounts. The native bootstrap now reads the
+original PackageBackwardCompatibility policy over its attached Binder, rejects
+owner errors/malformed/trailing replies before replacing any current endpoint,
+and uses the retained image property for LibraryCompatibility. All 356 units
+pass (4.90s), including one-time reads, cached input use, failed-policy attach
+preserving the current endpoint, replacement/death and no late listeners. The
+full build passes (15.2s; template cached), followed by an explicitly run
+disposable original-PMS boot and snapshot/usage/shared-UID runtime oracle
+(11.35s) using the rebuilt native guest-init. Attachment cannot succeed without
+the original policy response, and failed attachment aborts the PMS-main wrapper;
+boot completion therefore verifies the real early policy transaction. Owned
+process/mount cleanup completes. Native scan consumption, actual native-library/
+seInfo compatibility and GID calls remain unverified (#834/#838/#798).
 A Binder-driver test passes
 (0.02s), exercising synchronous attach, invalid/null/foreign callers and tokens,
 wrong endpoint rejection, policy/GID inputs and failures, replacement, actual
@@ -181,7 +193,7 @@ endpoint death, cleanup and absence of late listeners. All three native
 resource-client tests pass (0.01s); AIDL generation and image API linkage pass
 (14.2s combined). These protocol/linkage checks supplement the verified early
 original-PMS handoff. Native facade boot ordering,
-actual booted owner transactions and callback delivery remain unverified, and
+other booted owner transactions and callback delivery remain unverified, and
 original PMS remains active. The full late bridge's nonce mapping separately
 needs matching-owner death cleanup (#835).
 The facade now has Java PackageManagerLocal unfiltered/filtered snapshot scopes
