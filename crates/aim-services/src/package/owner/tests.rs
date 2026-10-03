@@ -109,6 +109,165 @@ fn preferred_clearings_preserve_last_choices_persistent_filters_and_other_users(
 }
 
 #[test]
+fn removed_setting_persistence_preserves_signer_references_sources_and_other_user_xml() {
+    let data = Data::new();
+    let restriction = data.settings();
+    let input = b"<packages future='keep'><package name='store' codePath='/data/app/store' userId='10100'><sigs count='1' schemeVersion='3'><cert index='0' key='0102'/></sigs></package><package name='app' codePath='/data/app/app' userId='10101' installer='store' installerUid='10100' installInitiator='store' installOriginator='store' updateOwner='store' installerAttributionTag='tag'><sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='0' flags='7'/></pastSigs></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/></install-initiator-sigs><future-package/></package><updated-package name='app' codePath='/system/app/app' userId='10101' installer='store'/><future-owner/></packages>";
+    fs::write(data.0.join("system/packages.xml"), input).unwrap();
+    let user_xml = b"<package-restrictions future='keep'><pkg name='store' stopped='true'/><pkg name='app' enabled='2'><future-package/></pkg><preferred-activities><future-list/></preferred-activities><future-root/></package-restrictions>";
+    fs::write(&restriction, user_xml).unwrap();
+    let other = data.0.join("system/users/10/package-restrictions.xml");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, user_xml).unwrap();
+    let mut store = Store::open(&data.0, &[0, 10]).unwrap().unwrap();
+    assert!(
+        store
+            .commit_removed_package_restrictions("store", 0)
+            .is_err()
+    );
+    let mut desired = store.state().settings.clone();
+    let mut installers = install_sources::Installers::restore(&desired);
+    desired.packages.remove(0);
+    installers.remove("store", &mut desired);
+    let mut wrong = desired.clone();
+    wrong.packages[0].app_id = 10500;
+    assert!(
+        !store
+            .commit_removed_package_setting(&wrong, "store")
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(data.0.join("system/packages.xml")).unwrap(), input);
+    store
+        .commit_removed_package_setting(&desired, "store")
+        .unwrap();
+    assert_eq!(store.state().settings, desired);
+    assert!(
+        store.state().users.iter().all(|(_, u)| u
+            .restrictions
+            .packages
+            .iter()
+            .all(|(n, _)| n != "store"))
+    );
+    let root =
+        aim_android_xml::read(&fs::read(data.0.join("system/packages.xml")).unwrap()).unwrap();
+    assert!(root.children().any(|e| e.name == "future-owner"));
+    assert!(
+        root.children()
+            .find(|e| e.name == "package")
+            .unwrap()
+            .children()
+            .any(|e| e.name == "future-package")
+    );
+    assert!(
+        store
+            .commit_removed_package_restrictions("store", 0)
+            .unwrap()
+    );
+    assert_eq!(fs::read(&other).unwrap(), user_xml);
+    assert!(
+        !store
+            .commit_removed_package_restrictions("store", 0)
+            .unwrap()
+    );
+    assert!(
+        store
+            .commit_removed_package_restrictions("store", 10)
+            .unwrap()
+    );
+    let reopened = Store::open(&data.0, &[0, 10]).unwrap().unwrap();
+    assert_eq!(reopened.state().settings, desired);
+    for user in [0, 10] {
+        let path = data
+            .0
+            .join(format!("system/users/{user}/package-restrictions.xml"));
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
+        let root = aim_android_xml::read(&bytes).unwrap();
+        assert_eq!(root.attrs, aim_android_xml::read(user_xml).unwrap().attrs);
+        assert!(root.children().any(|e| e.name == "future-root"));
+        assert_eq!(root.children().filter(|e| e.name == "pkg").count(), 1);
+    }
+}
+
+#[test]
+fn removed_setting_writer_accepts_live_installer_registry_history_and_preserves_unknown_groups() {
+    let root = aim_android_xml::read(b"<packages><package name='store' codePath='/data/app/store' userId='10100'/><package name='app' codePath='/data/app/app' userId='10101' updateOwner='store' installerAttributionTag='tag'/><shared-user userId='10199'><future-group/></shared-user></packages>").unwrap();
+    let original = super::super::settings::Settings::parse(&root).unwrap();
+    let mut desired = original.clone();
+    let mut installers = install_sources::Installers::restore(&desired);
+    installers.add(&super::super::settings::InstallSource {
+        originating_package: Some("store".into()),
+        ..Default::default()
+    });
+    desired.packages.remove(0);
+    installers.remove("store", &mut desired);
+    let output = removal::replace(&root, &desired, "store").unwrap();
+    assert_eq!(
+        super::super::settings::Settings::parse(&output).unwrap(),
+        desired
+    );
+    assert_eq!(
+        output.children().find(|e| e.name == "shared-user"),
+        root.children().find(|e| e.name == "shared-user")
+    );
+    let mut unregistered = original;
+    unregistered.packages.remove(0);
+    assert!(removal::replace(&root, &unregistered, "store").is_ok());
+    let mut invalid = desired;
+    invalid.packages[0].install_source.update_owner = Some("other".into());
+    assert!(removal::replace(&root, &invalid, "store").is_err());
+}
+
+#[test]
+fn removed_shared_setting_persistence_preserves_disabled_uid_reservation_and_external_writers() {
+    for disabled in [false, true] {
+        let data = Data::new();
+        let restrictions = data.settings();
+        fs::write(restrictions, b"<package-restrictions/>").unwrap();
+        let input = format!(
+            "<packages><shared-user name='group' userId='10100'><future-group/></shared-user><package name='app' codePath='/data/app/app' sharedUserId='10100'/>{}<future-owner/></packages>",
+            if disabled {
+                "<updated-package name='app' codePath='/system/app/app' sharedUserId='10100'/>"
+            } else {
+                ""
+            }
+        );
+        let path = data.0.join("system/packages.xml");
+        fs::write(&path, &input).unwrap();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        let mut desired = store.state().settings.clone();
+        desired.packages.clear();
+        if !disabled {
+            desired.shared_users.clear();
+        }
+        let mut external = aim_android_xml::read(input.as_bytes()).unwrap();
+        external.attrs.push(("external".into(), Value::Bool(true)));
+        fs::write(&path, abx::write(&external).unwrap()).unwrap();
+        assert!(
+            !store
+                .commit_removed_package_setting(&desired, "app")
+                .unwrap_err()
+                .committed
+        );
+        assert_eq!(
+            aim_android_xml::read(&fs::read(&path).unwrap()).unwrap(),
+            external
+        );
+        fs::write(&path, &input).unwrap();
+        store
+            .commit_removed_package_setting(&desired, "app")
+            .unwrap();
+        let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+        assert_eq!(reopened.state().settings, desired);
+        assert_eq!(
+            reopened.state().settings.shared_users.len(),
+            usize::from(disabled)
+        );
+    }
+}
+
+#[test]
 fn all_user_preferred_cleanup_reports_committed_users_on_later_writer_conflict() {
     let data = Data::new();
     data.settings();

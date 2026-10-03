@@ -373,10 +373,26 @@ references. Removing a registered installer clears remaining active packages'
 installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
-removal, repeated missing removal and installer source effects (29.52s). All 332
-units pass (3.05s), and image API linkage passes (13.1s). This in-memory stage is
+removal, repeated missing removal and installer source effects (19.10s). All 335
+units pass (3.07s), and image API linkage passes (13.1s). This in-memory stage is
 not yet called by boot cleanup: full side-owner ordering, permission uninstall
-reconciliation, persistence and publication remain #822/#798.
+reconciliation and publication remain #822/#798. The native store now persists
+that completed setting removal and its installer-source effects, rejecting
+unrelated metadata changes before writing. A last shared-UID group is removed
+only without an active or disabled factory member; unknown XML stays intact.
+Certificate references are materialized before deleting their defining owner,
+including retained packages, past signers and install-initiator signatures.
+The writer accepts both restored and retained live installer-registry history
+without permitting reassignment. User restriction entries have a separate
+resilient removal commit after global settings commit; other users, future XML,
+permissions and preferred choices remain with their respective owners.
+Unit tests cover reopening, reserve copies, shared UID reservation, external
+writer rejection and unrelated-state rejection. Original PackageSignatures
+reads native-written current/past/initiator certificates in the combined fixture
+(19.10s). All 335 service units pass (3.07s). This verifies saved-setting deletion
+and original signature parsing, not a full native uninstall or original-PMS
+reboot after deletion; packages.list, permission persistence, renamed-package
+cleanup and full graph/publication remain #798/#822.
 Native query snapshots now own AppsFilter's ordinary and update-retained
 interaction grants (#724). Full recipient/visible UIDs preserve direction and
 user scope; duplicate grants and self-grants follow original return values.
@@ -386,7 +402,7 @@ including shared app IDs. Replacement retains the retained class and preserves
 ordinary grants only when requested. Snapshot clones retain their prior grants.
 The original AppsFilterImpl grant oracle, with its own original mutable
 ApplicationSharedMemory for cache invalidation, passes in the combined fixture
-(29.52s). All 332 units pass (3.05s), and added image APIs link (13.1s).
+(19.10s). All 335 units pass (3.07s), and added image APIs link (13.1s).
 ActivityManager/WindowManager producers and boot removal/query publication are
 not connected to this owner yet (#724/#822).
 The native keystore cleanup owner captures full per-user UIDs when requests
@@ -399,10 +415,10 @@ the generator recipe was advanced to regenerate the bindings. The Binder
 transport fixture independently checks primitive wire fields, captured user
 scope, unrelated keys and retry order (two resource-client tests pass). The
 original maintenance wrapper acknowledges empty namespaces 19001 and 1019001
-with success in the disposable combined fixture (29.52s), after checking no
+with success in the disposable combined fixture (19.10s), after checking no
 package owns app ID 19001 and user 10 has no saved state. This does not prove
 existing-key deletion; the native queue has no boot deletion executor yet
-(#822). All 31 build-generator tests pass, all 332 service units pass (3.05s),
+(#822). All 31 build-generator tests pass, all 335 service units pass (3.07s),
 and compile-only image API linkage passes (13.1s).
 The native settings store now clears one user's saved preferred activities under
 Settings.clearPackagePreferredActivities rules (#822): a named package removes
@@ -417,11 +433,11 @@ existing resolvers are reported changed even if no choice was removed there.
 Empty or invalid-only documents create no resolver; an emptied in-process
 resolver remains known until reopening. The original Settings oracle verifies
 named, repeated and null clearing for both one user and USER_ALL, including
-this propagation and an absent empty resolver (combined fixture 29.52s).
+this propagation and an absent empty resolver (combined fixture 19.10s).
 The persistence failure test proves that earlier user writes remain committed,
 a conflicting external writer is preserved, later users remain untouched and
-the returned error identifies users requiring publication. All 332 service
-units pass (3.05s). This owner is not yet connected to the boot removal
+the returned error identifies users requiring publication. All 335 service
+units pass (3.07s). This owner is not yet connected to the boot removal
 transaction; home updates and broadcasts remain with that integration (#822).
 APK and cluster parsing now distinguish an absent resources.arsc from a present
 entry failing archive reads (#826). Disposable code-only, bad-CRC and invalid
@@ -446,7 +462,7 @@ SystemConfig reader (15.04s); its added compile-only API passes image linkage
 targets' saved update owners unless SystemConfig names an owner; disabled factory
 records and unrelated install-source fields stay intact. Failed resource reads
 preserve the pending provider and settings, and unqueued completions are rejected.
-All 322 service units pass (3.05s). Queued providers now resolve their manifest
+All 322 service units pass (3.07s). Queued providers now resolve their manifest
 property directly through guest-owned base/all split APK files and the framework's
 system assets. The original uses PackageImpl.toAppInfoWithoutState: app-state
 resourceDirs, overlayPaths and sharedLibraryFiles are null on this path. The

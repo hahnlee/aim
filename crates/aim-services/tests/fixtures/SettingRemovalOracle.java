@@ -7,6 +7,14 @@ public final class SettingRemovalOracle {
         if (shared) p.setSharedUserAppId(id);
         return p;
     }
+    private static String hex(byte[] bytes) {
+        var text = new StringBuilder();
+        for (byte b : bytes) {
+            text.append(Character.forDigit((b & 255) >>> 4, 16));
+            text.append(Character.forDigit(b & 15, 16));
+        }
+        return text.toString();
+    }
     public static void main(String[] args) throws Exception {
         for (int kind = 0; kind < 3; kind++) {
             boolean shared = kind != 0;
@@ -45,6 +53,27 @@ public final class SettingRemovalOracle {
             + " " + source.mOriginatingPackageName + " " + source.mInstallerPackageName
             + " " + source.mInstallerPackageUid + " " + source.mUpdateOwnerPackageName
             + " " + source.mInstallerAttributionTag + " " + source.mIsOrphaned + " " + source.mPackageSource);
+        if (args.length != 0) {
+            var certificates = new java.util.ArrayList<android.content.pm.Signature>();
+            try (var input = new java.io.FileInputStream(args[0])) {
+                var parser = android.util.Xml.resolvePullParser(input);
+                int type;
+                while ((type = parser.next()) != 1) {
+                    if (type == 2 && parser.getDepth() == 3
+                            && ("sigs".equals(parser.getName())
+                                || "install-initiator-sigs".equals(parser.getName()))) {
+                        String tag = parser.getName();
+                        var signatures = new PackageSignatures();
+                        signatures.readXml(parser, certificates);
+                        var details = signatures.mSigningDetails;
+                        System.out.println("persist " + tag + " " + hex(details.getSignatures()[0].toByteArray())
+                            + " " + (details.getPastSigningCertificates() == null ? "-"
+                                : hex(details.getPastSigningCertificates()[0].toByteArray()) + ":"
+                                    + details.getPastSigningCertificates()[0].getFlags()));
+                    }
+                }
+            }
+        }
         // The test-only Settings constructor starts BackgroundThread.
         System.exit(0);
     }

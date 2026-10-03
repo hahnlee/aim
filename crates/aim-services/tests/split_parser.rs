@@ -1412,9 +1412,63 @@ fn manifest_keysets_match_original_parser() {
         source.package_source
     )
     .unwrap();
+    let snapshot_for_removal = aim_services::package::State::read(&boot.data.join("data"), &[0])
+        .unwrap()
+        .unwrap();
+    let certificate = snapshot_for_removal
+        .settings
+        .packages
+        .iter()
+        .filter_map(|p| p.signatures.as_ref())
+        .flat_map(|s| &s.signatures)
+        .next()
+        .unwrap();
+    let certificate_hex = hex(certificate);
+    let removal_data = data.0.join("setting-removal");
+    fs::create_dir_all(removal_data.join("system/users/0")).unwrap();
+    let xml = format!(
+        "<packages><package name='store' codePath='/data/app/store' userId='19001'><sigs count='1' schemeVersion='3'><cert index='0' key='{certificate_hex}'/></sigs></package><package name='app' codePath='/data/app/app' userId='19002' installer='store' installerUid='19001' installInitiator='store'><sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='0' flags='7'/></pastSigs></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/></install-initiator-sigs></package></packages>"
+    );
+    fs::write(removal_data.join("system/packages.xml"), xml).unwrap();
+    fs::write(
+        removal_data.join("system/users/0/package-restrictions.xml"),
+        b"<package-restrictions><pkg name='store'/><pkg name='app'/></package-restrictions>",
+    )
+    .unwrap();
+    let mut owner = aim_services::package::owner::Store::open(&removal_data, &[0])
+        .unwrap()
+        .unwrap();
+    let mut removal_scan = aim_services::package::scan::SigningScan::new(
+        &Default::default(),
+        &owner.state().settings,
+        36,
+    )
+    .unwrap();
+    removal_scan.remove_package_setting("store").unwrap();
+    owner
+        .commit_removed_package_setting(&removal_scan.settings, "store")
+        .unwrap();
+    owner
+        .commit_removed_package_restrictions("store", 0)
+        .unwrap();
+    fs::copy(
+        removal_data.join("system/packages.xml"),
+        guest.join("removed-setting.xml"),
+    )
+    .unwrap();
+    writeln!(
+        &mut expected,
+        "persist sigs {certificate_hex} {certificate_hex}:7"
+    )
+    .unwrap();
+    writeln!(
+        &mut expected,
+        "persist install-initiator-sigs {certificate_hex} -"
+    )
+    .unwrap();
     let original = String::from_utf8(run(boot.command().args([
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
-        "/system/bin", "com.android.server.pm.SettingRemovalOracle",
+        "/system/bin", "com.android.server.pm.SettingRemovalOracle", "/data/local/tmp/manifest-keysets/removed-setting.xml",
     ])).stdout).unwrap();
     assert_eq!(original, expected);
     let saved = aim_services::package::State::read(&boot.data.join("data"), &[0])

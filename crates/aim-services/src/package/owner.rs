@@ -27,6 +27,7 @@ pub mod install_sources;
 pub mod key_sets;
 pub mod keystore;
 mod native_libraries;
+mod removal;
 pub mod resources;
 pub mod shared_users;
 mod signing;
@@ -188,6 +189,79 @@ impl Store {
             }
         }
         Ok(changed_users)
+    }
+
+    /// Persist a completed setting/UID removal after its side owners finish.
+    /// Per-user restrictions, permissions and query publication are separate
+    /// commits; a committed error still requires publishing the new settings.
+    pub fn commit_removed_package_setting(
+        &mut self,
+        settings: &super::settings::Settings,
+        package: &str,
+    ) -> Result<(), WriteError> {
+        let root = removal::replace(&self.settings_document, settings, package)
+            .map_err(WriteError::before)?;
+        let result = self.commit_package_document(root);
+        if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            for (_, user) in &mut self.state.users {
+                user.restrictions
+                    .packages
+                    .retain(|(name, _)| name != package);
+            }
+        }
+        result
+    }
+
+    /// Remove a deleted setting's saved user entry, preserving other XML.
+    /// Call only after the global setting commit; permission files have their
+    /// own owner and are not changed by this stage (#798/#822).
+    pub fn commit_removed_package_restrictions(
+        &mut self,
+        package: &str,
+        user: u32,
+    ) -> Result<bool, WriteError> {
+        if self
+            .state
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == package)
+        {
+            return Err(WriteError::before("package setting still exists"));
+        }
+        let original = self
+            .restrictions
+            .get(&user)
+            .ok_or_else(|| WriteError::before(format!("unknown user {user}")))?;
+        let mut root = original.clone();
+        let before = root.content.len();
+        root.content.retain(|node| {
+            !matches!(node, Node::Element(e)
+            if e.name == "pkg" && e.string("name").as_deref() == Some(package))
+        });
+        if root.content.len() == before {
+            return Ok(false);
+        }
+        Restrictions::parse(&root).map_err(WriteError::before)?;
+        let bytes = abx::write(&root).map_err(WriteError::before)?;
+        let dir = self.data.join("system/users").join(user.to_string());
+        let path = dir.join("package-restrictions.xml");
+        let backup = dir.join("package-restrictions-backup.xml");
+        prepare(&path, &backup, original).map_err(WriteError::before)?;
+        let result = write_resilient(&path, &backup, &bytes);
+        if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.restrictions.insert(user, root);
+            let current = &mut self
+                .state
+                .users
+                .iter_mut()
+                .find(|(id, _)| *id == user)
+                .expect("opened user")
+                .1
+                .restrictions;
+            current.packages.retain(|(name, _)| name != package);
+        }
+        result.map(|()| true)
     }
 
     /// Persist an owner-authorized signing scan. This changes signature
