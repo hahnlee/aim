@@ -420,6 +420,113 @@ fn migration_apk(dir: &std::path::Path, version: i32, leaving: bool) -> std::pat
 }
 
 #[test]
+#[ignore = "requires aimctl, pinned image, JDK and Android build tools; run explicitly"]
+fn original_pms_reboots_with_native_update_owner_clearing() {
+    const NAME: &str = "org.example.aimmigration";
+    let dir = std::env::temp_dir().join(format!("aim-ownr-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let data = Data(dir);
+    let apk = migration_apk(&data.0, 1, false);
+    let boot = Boot {
+        ctl: aim_paths::root().join("target/release/aimctl"),
+        data: data.0.join("guest"),
+    };
+    start(&boot);
+    let guest = boot.data.join("data/local/tmp/update-owner.apk");
+    fs::copy(apk, &guest).unwrap();
+    let result = run(boot.command().args([
+        "shell",
+        "pm",
+        "install",
+        "--update-ownership",
+        "-i",
+        "com.android.shell",
+        "/data/local/tmp/update-owner.apk",
+    ]));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("Success"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let state = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+        if state.settings.packages.iter().any(|p| {
+            p.name == NAME && p.install_source.update_owner.as_deref() == Some("com.android.shell")
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "original install did not retain requested update owner"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let before_dump = run(boot.command().args(["shell", "dumpsys", "package", NAME]));
+    assert!(
+        String::from_utf8_lossy(&before_dump.stdout)
+            .contains("updateOwnerPackageName=com.android.shell")
+    );
+    run(boot.command().arg("stop"));
+    let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
+    let mut store = Store::open(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let mut desired = store.state().settings.clone();
+    let target = desired
+        .packages
+        .iter_mut()
+        .find(|p| p.name == NAME)
+        .unwrap();
+    assert_eq!(
+        target.install_source.update_owner.as_deref(),
+        Some("com.android.shell")
+    );
+    target.install_source.update_owner = None;
+    store.commit_update_owner_clearings(&desired).unwrap();
+    let path = boot.data.join("data/system/packages.xml");
+    let written = fs::read(&path).unwrap();
+    assert!(written.starts_with(aim_android_xml::abx::MAGIC));
+    assert_eq!(
+        written,
+        fs::read(path.with_file_name("packages.xml.reservecopy")).unwrap()
+    );
+    assert_eq!(
+        Store::open(&boot.data.join("data"), &[0])
+            .unwrap()
+            .unwrap()
+            .state()
+            .settings,
+        desired
+    );
+    drop(store);
+    volume.detach().unwrap();
+    start(&boot);
+    let actual = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let target = actual
+        .settings
+        .packages
+        .iter()
+        .find(|p| p.name == NAME)
+        .unwrap();
+    assert_eq!(target.install_source.update_owner, None);
+    assert_eq!(
+        target.install_source.installer.as_deref(),
+        Some("com.android.shell")
+    );
+    let expected = desired.packages.iter().find(|p| p.name == NAME).unwrap();
+    assert_eq!(target.install_source, expected.install_source);
+    assert_eq!(target.app_id, expected.app_id);
+    assert_eq!(target.shared_user, expected.shared_user);
+    assert_eq!(target.signatures, expected.signatures);
+    assert_eq!(target.key_set_data, expected.key_set_data);
+    assert_eq!(actual.settings.key_sets, desired.key_sets);
+    assert_eq!(actual.settings.shared_users, desired.shared_users);
+    let result = run(boot.command().args(["shell", "dumpsys", "package", NAME]));
+    let dump = String::from_utf8(result.stdout).unwrap();
+    assert!(dump.contains("installerPackageName=com.android.shell"));
+    // Settings.dumpPackageLPr omits this field when its value is null.
+    assert!(!dump.contains("updateOwnerPackageName="));
+    println!(
+        "original PMS retained native-cleared update owner and original installer/signing/UID state"
+    );
+}
+
+#[test]
 #[ignore = "requires aimctl, the pinned image, JDK and Android build tools; run explicitly"]
 fn original_pms_reboots_after_native_shared_uid_migration() {
     use aim_services::package::{

@@ -382,9 +382,19 @@ original generateAppInfoWithoutState call also verifies null app-state assets
 and both parsed split resource paths. Missing
 APK sources, corrupt code-only splits and null split paths preserve pending
 providers and settings. The new compile-only APIs pass image linkage (15.1s).
-Executing pending reads at the original asynchronous commit phase and publishing
-the changed records remain #825. This in-memory component is separate from InstallSource.update_owner
-and is not a complete removal commit. Store.commit_removed_boot_metadata writes just the completed
+Store.commit_update_owner_clearings now persists completed opt-out effects on
+retained active packages as resilient ABX, removing only the updateOwner
+attribute. Assigning a new owner, changing disabled records or other metadata,
+removing a package or another writer changing the document is rejected before
+writes. Unknown XML, installer fields, UID/users and reserve copies are checked;
+all 323 service units pass (3.07s). A disposable original-PMS install requests
+com.android.shell as update owner and verifies it in the live package dump;
+after native persistence clears it, original PMS reboots, reports no update owner
+and retains installer/signing/keysets/shared UID state (18.44s). Executing pending
+reads at the original asynchronous commit phase and publishing the changed
+records remain #825. Contributor relations are distinct from saved
+InstallSource.update_owner, and this is not a complete removal commit.
+Store.commit_removed_boot_metadata writes just the completed
 domain/keyset stage as resilient ABX, retaining UID/users, unrelated XML and
 legacy domains; unit tests reopen the files and check reserve copies and failure
 without writes. This is a component writer, not a complete deletion commit. Scan completion now registers verified signing public keys, reuses unchanged

@@ -6,6 +6,7 @@ use crate::package::{pkg::AndroidPackage, settings::Package};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod assets;
+pub(super) mod persistence;
 
 /// Read the selected XML asset from the caller's complete ResourcesManager
 /// asset inventory (tables followed by overlays). A missing asset is an error;

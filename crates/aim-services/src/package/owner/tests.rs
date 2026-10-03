@@ -33,6 +33,92 @@ impl Drop for Data {
 const RESTRICTIONS: &[u8] = b"<package-restrictions><pkg name='example.app' stopped='true' inst='true'><suspend-params suspending-package='android'><dialog-info dialogMessage='keep me' /></suspend-params></pkg><crossProfile-intent-filters><item targetUserId='10'><filter><action name='example.ACTION' /></filter></item></crossProfile-intent-filters></package-restrictions>";
 
 #[test]
+fn update_owner_clearings_preserve_other_records_and_reject_unrelated_writes() {
+    let data = Data::new();
+    let restrictions = data.settings();
+    fs::write(&restrictions, RESTRICTIONS).unwrap();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages future='keep'><package name='free' codePath='/data/app/free' userId='10100' updateOwner='installer' installer='store' installerUid='10102'><future-package/></package><package name='fixed' codePath='/system/app/fixed' userId='10101' updateOwner='fixed.installer'/><updated-package name='free' codePath='/system/app/free' userId='10100' updateOwner='factory.installer'/><future-owner/></packages>").unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let original = store.state().settings.clone();
+    let users = store.state().users.clone();
+    let mut desired = original.clone();
+    desired.packages[0].install_source.update_owner = None;
+    store.commit_update_owner_clearings(&desired).unwrap();
+    assert_eq!(store.state().settings, desired);
+    let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(reopened.state().settings, desired);
+    assert_eq!(reopened.state().users, users);
+    assert_eq!(fs::read(&restrictions).unwrap(), RESTRICTIONS);
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(abx::MAGIC));
+    assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
+    let root = aim_android_xml::read(&bytes).unwrap();
+    assert_eq!(root.string("future").as_deref(), Some("keep"));
+    assert!(root.children().any(|e| e.name == "future-owner"));
+    let free = root
+        .children()
+        .find(|e| e.name == "package" && e.string("name").as_deref() == Some("free"))
+        .unwrap();
+    assert!(free.string("updateOwner").is_none());
+    assert!(free.children().any(|e| e.name == "future-package"));
+    assert_eq!(
+        root.children()
+            .find(|e| e.name == "updated-package")
+            .unwrap()
+            .string("updateOwner")
+            .as_deref(),
+        Some("factory.installer")
+    );
+    let mut invalid = desired.clone();
+    invalid.packages[0].install_source.update_owner = Some("new.installer".into());
+    assert!(
+        !store
+            .commit_update_owner_clearings(&invalid)
+            .unwrap_err()
+            .committed
+    );
+    invalid = desired.clone();
+    invalid.packages[0].install_source.installer = None;
+    assert!(
+        !store
+            .commit_update_owner_clearings(&invalid)
+            .unwrap_err()
+            .committed
+    );
+    invalid = desired.clone();
+    invalid.disabled_system_packages[0]
+        .install_source
+        .update_owner = Some("unexpected.installer".into());
+    assert!(
+        !store
+            .commit_update_owner_clearings(&invalid)
+            .unwrap_err()
+            .committed
+    );
+    invalid = desired.clone();
+    invalid.packages.pop();
+    assert!(
+        !store
+            .commit_update_owner_clearings(&invalid)
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(store.state().settings, desired);
+    // Another writer invalidates the native document before any file writes.
+    fs::write(&path, b"<packages/>").unwrap();
+    assert!(
+        !store
+            .commit_update_owner_clearings(&desired)
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"<packages/>");
+    assert_eq!(store.state().settings, desired);
+}
+
+#[test]
 fn scanned_keyset_commit_reopens_and_rejects_unrelated_or_counter_changes() {
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     let key = |scalar: u8| {

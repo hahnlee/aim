@@ -148,6 +148,19 @@ impl Store {
         self.commit_package_document(root)
     }
 
+    /// Persist completed denylist effects on retained active packages. This
+    /// writer only clears update owners; policy, async ordering and replica
+    /// publication belong to the package commit owner.
+    pub fn commit_update_owner_clearings(
+        &mut self,
+        settings: &super::settings::Settings,
+    ) -> Result<(), WriteError> {
+        let root =
+            update_ownership::persistence::replace_clearings(&self.settings_document, settings)
+                .map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
     /// Persist the domain/keyset stage of an owner-authorized boot removal.
     /// Package settings, UID/user state and permission deletion follow later.
     pub fn commit_removed_boot_metadata(&mut self, package: &str) -> Result<(), WriteError> {
