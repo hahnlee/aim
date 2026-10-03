@@ -141,16 +141,21 @@ pub fn register(
             .collect();
         let mut added = Vec::new();
         for (alias, keys) in aliases {
-            added.push((alias, add_set(&mut staged, &keys)?));
+            added.push((Some(alias), add_set(&mut staged, &keys)?));
         }
-        staged.packages[at].key_set_data.defined_key_sets = added;
+        staged.packages[at].key_set_data.defined_key_sets.clear();
+        for (alias, id) in added {
+            staged.packages[at]
+                .key_set_data
+                .add_defined_key_set(id, alias);
+        }
         staged.packages[at].key_set_data.upgrade_key_sets.clear();
         for alias in upgrades {
             let id = staged.packages[at]
                 .key_set_data
                 .defined_key_sets
                 .iter()
-                .find(|(name, _)| name == alias)
+                .find(|(name, _)| name.as_deref() == Some(alias.as_str()))
                 .unwrap()
                 .1;
             if !staged.packages[at]
@@ -278,7 +283,7 @@ mod tests {
         assert_eq!(settings.packages[0].key_set_data.proper_signing_key_set, 1);
         assert_eq!(
             settings.packages[0].key_set_data.defined_key_sets,
-            [("common".into(), 1), ("extra".into(), 2)]
+            [(Some("common".into()), 1), (Some("extra".into()), 2)]
         );
         assert_eq!(settings.packages[0].key_set_data.upgrade_key_sets, [2]);
         register(&mut settings, "b", &[first.clone()], None, &[]).unwrap();
@@ -292,7 +297,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             settings.packages[0].key_set_data.defined_key_sets,
-            [("renamed".into(), 2)]
+            [(Some("renamed".into()), 2)]
         );
         assert!(
             settings.packages[0]

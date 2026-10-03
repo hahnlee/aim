@@ -45,6 +45,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedInstallSourceOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/CapturedKeySetOracle.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
@@ -62,6 +66,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/CapturedInstallSource.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/CapturedKeySetData.java"),
         )
         .arg(
             aim_paths::root()
@@ -228,6 +236,12 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.user")), user_state).unwrap();
+        fs::write(
+            directory.join(format!("{name}.keysets-native")),
+            keysets_xml_expected(&directory, &name),
+        )
+        .unwrap();
+
         let setting_bytes = aim_services::package::scan_snapshot::setting_record::captured(
             &snapshot,
             &pkg.package_name,
@@ -419,6 +433,11 @@ fn native_package_parcels_match_original_read_write() {
     );
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            assert_eq!(
+                fs::read(directory.join(format!("{name}.keysets-original"))).unwrap(),
+                fs::read(directory.join(format!("{name}.keysets-native"))).unwrap()
+            );
+
             assert_eq!(
                 fs::read(directory.join(format!("{name}.loading-original"))).unwrap(),
                 fs::read(directory.join(format!("{name}.loading-native"))).unwrap()
@@ -664,6 +683,19 @@ fn native_scan_objects(
         setting.add_old_path(None);
         setting.add_old_path(Some(&"x".repeat(100_000)));
         setting.restrict_update_hash = Some(vec![1, 2, 3]);
+        if name == "com.google.android.gsf" {
+            let keys = &mut setting.key_set_data;
+            let id = keys.proper_signing_key_set;
+            assert!(id > 0, "native scan did not register its signing keyset");
+            keys.upgrade_key_sets.clear();
+            keys.defined_key_sets.clear();
+            keys.add_upgrade_key_set(id);
+            keys.add_upgrade_key_set(id);
+            for alias in [Some("BB"), Some("Aa"), None, Some(""), Some("BB")] {
+                keys.add_defined_key_set(id, alias.map(str::to_owned));
+            }
+        }
+
         if name == "com.google.android.gsf" {
             setting.install_source = aim_services::package::settings::InstallSource {
                 initiating_package: Some(name.into()),
@@ -1007,4 +1039,29 @@ fn loading_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
         }
     }
     expected
+}
+
+fn keysets_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, content) in ["", "<upgrade-keyset identifier='2'/><upgrade-keyset identifier='1'/><upgrade-keyset identifier='2'/>", "<defined-keyset identifier='1'/><defined-keyset alias='' identifier='2'/><defined-keyset identifier='3'/>", "<defined-keyset alias='BB' identifier='1'/><defined-keyset alias='Aa' identifier='2'/><defined-keyset alias='BB' identifier='3'/>", "<defined-keyset alias='zzzzzz' identifier='1'/><defined-keyset alias='😀' identifier='2'/><proper-signing-keyset identifier='17'/><proper-signing-keyset identifier='19'/>", "<defined-keyset alias='same' identifier='1'/><defined-keyset alias='only' identifier='2'/><defined-keyset alias='same' identifier='3'/><upgrade-keyset identifier='-1'/><upgrade-keyset identifier='-1'/>"] .iter().enumerate() {
+        let xml = format!("<package name='p' codePath='/data/p' userId='10001'>{content}</package>");
+        let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        for (j, bytes) in [xml.into_bytes(), aim_android_xml::abx::write(&root).unwrap()].into_iter().enumerate() {
+            let e = aim_android_xml::read(&bytes).unwrap();
+            let document = aim_android_xml::Element { name: "packages".into(), attrs: vec![], content: vec![aim_android_xml::Node::Element(e)] };
+            let parsed = aim_services::package::settings::Settings::parse(&document).unwrap();
+            let data = &parsed.packages[0].key_set_data;
+            out.extend_from_slice(&data.proper_signing_key_set.to_be_bytes());
+            out.extend_from_slice(&if data.upgrade_key_sets.is_empty() { -1i32 } else { data.upgrade_key_sets.len() as i32 }.to_be_bytes());
+            for id in &data.upgrade_key_sets { out.extend_from_slice(&id.to_be_bytes()); }
+            out.extend_from_slice(&(data.defined_key_sets.len() as i32).to_be_bytes());
+            for (alias, id) in &data.defined_key_sets {
+                out.extend_from_slice(&alias.as_ref().map_or(-1, |s| s.len() as i32).to_be_bytes());
+                if let Some(alias) = alias { out.extend_from_slice(alias.as_bytes()); }
+                out.extend_from_slice(&id.to_be_bytes());
+            }
+            fs::write(directory.join(format!("{name}.keysets-{}.xml", i*2+j)), bytes).unwrap();
+        }
+    }
+    out
 }

@@ -196,7 +196,7 @@ mod tests {
                     name: "a".into(),
                     key_set_data: KeySetData {
                         proper_signing_key_set: 1,
-                        defined_key_sets: vec![("same".into(), 1), ("only".into(), 2)],
+                        defined_key_sets: vec![(Some("same".into()), 1), (Some("only".into()), 2)],
                         upgrade_key_sets: vec![2],
                     },
                     ..Default::default()

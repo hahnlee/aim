@@ -73,13 +73,13 @@ nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 377
-units pass (3.17s), as do 11 XML units; the ignored
+units pass (3.16s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 16.45s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.13s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -122,8 +122,17 @@ normalization/precondition behavior. Native Settings normalizes only unspecified
 empty sources and rejects signatures without an initiator (#853), while capture
 publication rejects invalid/non-normalized sources without replacing the prior
 version. Native text/ABX owner tests retain explicit nondefault source values.
-Keyset alias/upgrade reader semantics remain #852. Complete PackageState adapters
-and live producer/import wiring remain #836.
+Native keyset owners now deduplicate upgrade IDs in insertion order and retain
+nullable aliases separately from empty names, replacing duplicate aliases in
+signed Java hash order (#852). Native registration uses those same owner
+transitions. Captured setting pages carry proper/upgrade/defined keysets;
+Java reconstructs detached original PackageKeySetData objects, with null upgrade
+arrays for default/cleared owners. Original ART agrees on 12 text/ABX keyset
+reader cases and actual native captured getters; returned arrays/maps can change
+without affecting the capture. Original text/ABX serializers fail on null alias
+writes; native commits reject them before changing files or published state.
+Persisted keyset reference-count import/cleanup remains #854. Complete
+PackageState adapters and live producer/import wiring remain #836.
 Live overlay/component producers, original-state import and full PackageState
 metadata/callback wiring remain #836. Native suspension records now distinguish
 explicit null parameter values from missing keys/maps (#848); runtime put/remove

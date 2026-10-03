@@ -263,7 +263,32 @@ pub struct KeySetData {
     pub proper_signing_key_set: i64,
     pub upgrade_key_sets: Vec<i64>,
     /// Key sets the package defines: alias, id.
-    pub defined_key_sets: Vec<(String, i64)>,
+    pub defined_key_sets: Vec<(Option<String>, i64)>,
+}
+
+impl KeySetData {
+    pub fn add_upgrade_key_set(&mut self, id: i64) {
+        if !self.upgrade_key_sets.contains(&id) {
+            self.upgrade_key_sets.push(id);
+        }
+    }
+    pub fn add_defined_key_set(&mut self, id: i64, alias: Option<String>) {
+        match self
+            .defined_key_sets
+            .iter_mut()
+            .find(|(name, _)| name == &alias)
+        {
+            Some((_, value)) => *value = id,
+            None => self.defined_key_sets.push((alias, id)),
+        }
+        // ArrayMap keeps signed UTF-16 String hashes; null hashes to zero.
+        self.defined_key_sets.sort_by_key(|(name, _)| {
+            name.as_ref().map_or(0, |name| {
+                name.encode_utf16()
+                    .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
+            })
+        });
+    }
 }
 
 impl Default for KeySetData {
@@ -544,10 +569,10 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
             "proper-signing-keyset" => {
                 data.proper_signing_key_set = identifier(child)?;
             }
-            "upgrade-keyset" => data.upgrade_key_sets.push(identifier(child)?),
+            "upgrade-keyset" => data.add_upgrade_key_set(identifier(child)?),
             "defined-keyset" => {
-                let alias = string(child, "alias").unwrap_or_default();
-                data.defined_key_sets.push((alias, identifier(child)?));
+                let alias = string(child, "alias");
+                data.add_defined_key_set(identifier(child)?, alias);
             }
             "mime-group" => {
                 if let Some(group) = string(child, "name") {

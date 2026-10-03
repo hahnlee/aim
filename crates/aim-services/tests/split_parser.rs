@@ -1186,7 +1186,14 @@ fn manifest_keysets_match_original_parser() {
             for (alias, id) in &package.key_set_data.defined_key_sets {
                 assert_eq!(
                     lines.next(),
-                    Some(format!("ALIAS {} {alias} {id}", package.name).as_str())
+                    Some(
+                        format!(
+                            "ALIAS {} {} {id}",
+                            package.name,
+                            alias.as_deref().unwrap_or("null")
+                        )
+                        .as_str()
+                    )
                 );
             }
             for id in &package.key_set_data.upgrade_key_sets {
@@ -1655,6 +1662,10 @@ fn java_oracles_link_against_original_image() {
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/CapturedInstallSource.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/CapturedKeySetData.java"),
         )
         .arg(
             aim_paths::root()

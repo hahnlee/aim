@@ -636,6 +636,12 @@ fn scanned_keyset_commit_reopens_and_rejects_unrelated_or_counter_changes() {
     assert_eq!(fs::read(&restrictions).unwrap(), RESTRICTIONS);
     let bytes = fs::read(&path).unwrap();
     assert!(bytes.starts_with(abx::MAGIC));
+    let mut null_alias = desired.clone();
+    null_alias.packages[0].key_set_data.defined_key_sets[0].0 = None;
+    assert!(!store.commit_key_sets(&null_alias).unwrap_err().committed);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(store.state().settings, desired);
+
     assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
     let root = aim_android_xml::read(&bytes).unwrap();
     assert_eq!(root.string("future").as_deref(), Some("keep"));

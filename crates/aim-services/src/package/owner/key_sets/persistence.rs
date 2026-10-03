@@ -85,6 +85,9 @@ pub(in crate::package::owner) fn replace_registered(
         }
         for (alias, id) in &package.key_set_data.defined_key_sets {
             let mut keyset = identifier("defined-keyset", *id);
+            let alias = alias
+                .as_ref()
+                .ok_or("original keyset writer cannot serialize a null alias")?;
             attribute(&mut keyset, "alias", Some(Value::String(alias.clone())));
             owner.content.push(Node::Element(keyset));
         }

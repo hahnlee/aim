@@ -290,6 +290,7 @@ public final class PackageRoundTripOracle {
         try { lease.getSetting(name, true); throw new AssertionError("setting scope mismatch accepted"); } catch (java.io.IOException expected) {}
         owner.factorySetting = null;
         var metadata = lease.getSetting(name, false);
+        com.android.server.pm.CapturedKeySetOracle.verifyCaptured(metadata, name.equals("com.google.android.gsf"));
         if (metadata != lease.getSetting(name, false) || metadata.appId != uid || metadata.getVersion() != 1
                 || !metadata.getPackageName().equals(name) || metadata.isFactory()
                 || metadata.loadingProgress != .5f || !metadata.isLoading() || metadata.loadingCompletedTime != 17
@@ -308,6 +309,7 @@ public final class PackageRoundTripOracle {
 
         verifySettingRuntime(setting, file);
         verifyLoadingXml(file);
+        com.android.server.pm.CapturedKeySetOracle.verify(file);
         owner.fail = true;
         try { lease.getSigningState(name, false); throw new AssertionError("signing owner failure swallowed"); }
         catch (android.os.RemoteException expected) {}

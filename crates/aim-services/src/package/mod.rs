@@ -524,7 +524,10 @@ mod tests {
         let initiator = app.install_source.initiating_package_signatures.as_ref();
         assert_eq!(initiator.unwrap().signatures, [vec![0x30, 0x82, 0xaa]]);
         assert_eq!(s.shared_users[0].signatures, android.signatures);
-        assert_eq!(app.key_set_data.defined_key_sets, [("upgrade".into(), 3)]);
+        assert_eq!(
+            app.key_set_data.defined_key_sets,
+            [(Some("upgrade".into()), 3)]
+        );
         assert_eq!(app.mime_groups[0].1, ["image/png", "image/gif"]);
         let sys = &s.disabled_system_packages[0];
         assert_eq!((sys.flags, sys.private_flags), (1, 8));

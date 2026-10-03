@@ -144,7 +144,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let keydata = &declared.packages[1].candidate.record.settings.key_set_data;
     assert_eq!(
         keydata.defined_key_sets,
-        [("next".into(), keydata.proper_signing_key_set)]
+        [(Some("next".into()), keydata.proper_signing_key_set)]
     );
     assert_eq!(keydata.upgrade_key_sets, [keydata.proper_signing_key_set]);
     let failure = SystemImageScan::first_boot(corrupt, &apks, &config, inputs(&domain_ids))

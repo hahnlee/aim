@@ -14,6 +14,7 @@ public final class PackageSettingData {
     private final byte[] restrictUpdateHash;
     private final List<String> oldPaths;
     public final InstallSourceData installSource;
+    public final KeySetData keySets;
     public final String realName;
     public final String path;
     public final String legacyNativeLibraryPath;
@@ -87,6 +88,7 @@ public final class PackageSettingData {
             oldPaths = Collections.unmodifiableList(paths);
         }
         installSource = new InstallSourceData(in);
+        keySets = new KeySetData(in);
     }
     public static PackageSettingData read(Parcel in) { return new PackageSettingData(in); }
     public long getVersion() { return version; }
@@ -114,6 +116,26 @@ public final class PackageSettingData {
     }
     public com.android.server.pm.InstallSource getInstallSource() {
         return com.android.server.pm.CapturedInstallSource.from(installSource);
+    }
+
+    public static final class KeySetData {
+        public final long properSigningKeySet;
+        private final long[] upgrades;
+        public record Alias(String name, long id) {}
+        public final List<Alias> aliases;
+        private KeySetData(Parcel in) {
+            properSigningKeySet = in.readLong(); upgrades = in.createLongArray();
+            if (upgrades != null && upgrades.length == 0) throw new IllegalArgumentException("original upgrade array cannot be allocated-empty");
+            int count = in.readInt();
+            if (count < 0 || count > in.dataAvail() / 12) throw new IllegalArgumentException("invalid keyset alias count");
+            var values = new ArrayList<Alias>(count);
+            for (int i = 0; i < count; i++) values.add(new Alias(in.readString(), in.readLong()));
+            aliases = List.copyOf(values);
+        }
+        public long[] getUpgradeKeySets() { return upgrades == null ? null : upgrades.clone(); }
+    }
+    public com.android.server.pm.PackageKeySetData getKeySetData() {
+        return com.android.server.pm.CapturedKeySetData.from(keySets);
     }
 
 }

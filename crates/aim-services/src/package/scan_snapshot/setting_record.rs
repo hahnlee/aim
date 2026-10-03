@@ -77,6 +77,17 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
         .map(crate::package::sign::SigningDetails::from_saved)
         .transpose()?;
     super::endpoint::write_signing(&mut p, signing.as_ref());
+    let keys = &s.key_set_data;
+    p.write_i64(keys.proper_signing_key_set);
+    aim_service_aidl::write_long_array(
+        &mut p,
+        (!keys.upgrade_key_sets.is_empty()).then_some(keys.upgrade_key_sets.as_slice()),
+    );
+    p.write_i32(i32::try_from(keys.defined_key_sets.len()).map_err(|_| "too many keyset aliases")?);
+    for (alias, id) in &keys.defined_key_sets {
+        p.write_string16(alias.as_deref());
+        p.write_i64(*id);
+    }
     if p.data().len() > i32::MAX as usize {
         return Err("package setting exceeds transport size".into());
     }
