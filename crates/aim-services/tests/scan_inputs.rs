@@ -1194,7 +1194,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         code_path: "/system/app/old/base.apk".into(),
         app_id: 11000,
         flags: settings::FLAG_SYSTEM,
-        mime_groups: vec![("old.mime".into(), vec!["text/plain".into()])],
+        mime_groups: vec![(Some("old.mime".into()), vec![Some("text/plain".into())])],
         pending_restore: true,
         category_hint: 8,
         ..Default::default()
@@ -1365,8 +1365,8 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     assert_eq!(
         updated.record.settings.mime_groups,
         vec![
-            ("old.mime".into(), vec!["text/plain".into()]),
-            ("new.mime".into(), vec![])
+            (Some("old.mime".into()), vec![Some("text/plain".into())]),
+            (Some("new.mime".into()), vec![])
         ]
     );
     assert_eq!(updated.users, old_users);

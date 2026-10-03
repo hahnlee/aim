@@ -107,10 +107,10 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
         if !groups.insert(name) {
             return Err("duplicate MIME group owner".into());
         }
-        p.write_string16(Some(name));
+        p.write_string16(name.as_deref());
         p.write_i32(i32::try_from(types.len()).map_err(|_| "too many MIME types")?);
         for value in types {
-            p.write_string16(Some(value));
+            p.write_string16(value.as_deref());
         }
     }
     if p.data().len() > i32::MAX as usize {

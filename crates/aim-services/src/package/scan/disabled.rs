@@ -615,7 +615,7 @@ mod tests {
             version_code: 10,
             target_sdk_version: 35,
             primary_cpu_abi: Some("arm64-v8a".into()),
-            mime_groups: vec![("group".into(), vec!["image/png".into()])],
+            mime_groups: vec![(Some("group".into()), vec![Some("image/png".into())])],
             ..Default::default()
         };
         let mut owner = SigningScan::new(

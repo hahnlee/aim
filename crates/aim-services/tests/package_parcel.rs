@@ -704,6 +704,17 @@ fn native_scan_objects(
                 ["text/plain".into(), "image/png".into(), "text/plain".into()],
             );
             setting.add_mime_types("Aa".into(), ["".into()]);
+            setting.add_nullable_mime_types(
+                Some("nullable".into()),
+                [
+                    Some("BB".into()),
+                    None,
+                    Some(String::new()),
+                    Some("Aa".into()),
+                    None,
+                ],
+            );
+            setting.add_nullable_mime_types(None, [None, Some(String::new())]);
         }
         if name == "com.google.android.gsf" {
             let keys = &mut setting.key_set_data;
@@ -1095,10 +1106,12 @@ fn mime_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
             let groups = &parsed.packages[0].mime_groups;
             out.extend_from_slice(&(groups.len() as i32).to_be_bytes());
             for (name, types) in groups {
+                let name = name.as_ref().expect("XML does not import null MIME groups");
                 out.extend_from_slice(&(name.len() as i32).to_be_bytes());
                 out.extend_from_slice(name.as_bytes());
                 out.extend_from_slice(&(types.len() as i32).to_be_bytes());
                 for value in types {
+                    let value = value.as_ref().expect("XML does not import null MIME types");
                     out.extend_from_slice(&(value.len() as i32).to_be_bytes());
                     out.extend_from_slice(value.as_bytes());
                 }

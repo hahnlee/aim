@@ -73,13 +73,13 @@ nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 378
-units pass (3.12s), as do 11 XML units; the ignored
+units pass (3.13s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 16.36s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.67s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -134,11 +134,21 @@ keeps signed UTF-16 Java hash/collision order (#855). A pinned reader-loop port
 using actual original PackageSetting.addMimeTypes agrees on 12 text/ABX cases,
 including known-tag nesting, ignored unknown subtrees, missing names/values,
 empty strings and negative/colliding hashes. The complete package ART oracle
-passes (16.36s); all integration targets compile and device-services builds
-against original APIs (13.8s). Original runtime MIME sets can contain explicit
-null types (also proven in ART), which native capture/import cannot yet carry
-(#856). Resolved library graphs, transient/legacy-permission inputs and full
-facade assembly/import/live producers remain #836/#834/#837.
+passes (16.67s); all integration targets compile and device-services builds
+against original APIs (13.8s). Native PackageSetting runtime MIME ownership and
+capture now preserve nullable group names and type members, distinct from empty
+strings, with signed Java hash/collision ordering and duplicate suppression
+(#856). Original ART agrees with actual native populated captures, original
+PackageSetting copy isolation and immutable Java map/set values. Known XML
+restoration continues to ignore missing names/values; original text/ABX MIME
+writer loops throw on null names or members. The native Binder fixture keeps
+prior null owners after a newer publication removes them, and setting updates
+retain null members of preserved declared groups. The existing original-state
+feed still fails on null group/member sorting and its native read model cannot
+preserve these values (#857), both independently demonstrated from the feed
+code and actual original TreeMap/TreeSet exceptions in ART. Resolved library
+graphs, transient/legacy-permission inputs and full facade assembly/import/live
+producers remain #836/#834/#837.
 Native keyset owners now deduplicate upgrade IDs in insertion order and retain
 nullable aliases separately from empty names, replacing duplicate aliases in
 signed Java hash order (#852). Native registration uses those same owner

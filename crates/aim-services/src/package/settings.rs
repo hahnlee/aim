@@ -118,7 +118,7 @@ pub struct Package {
     pub signatures: Option<Signatures>,
     pub key_set_data: KeySetData,
     /// MIME groups and their types.
-    pub mime_groups: Vec<(String, Vec<String>)>,
+    pub mime_groups: Vec<(Option<String>, Vec<Option<String>>)>,
     /// Split names and revision codes, kept for a package without code
     /// (archived, or deleted keeping its data).
     pub split_versions: Vec<(String, i32)>,
@@ -127,6 +127,14 @@ pub struct Package {
 impl Package {
     /// PackageSetting.addMimeTypes: existing groups accumulate distinct types.
     pub fn add_mime_types(&mut self, name: String, values: impl IntoIterator<Item = String>) {
+        self.add_nullable_mime_types(Some(name), values.into_iter().map(Some));
+    }
+
+    pub fn add_nullable_mime_types(
+        &mut self,
+        name: Option<String>,
+        values: impl IntoIterator<Item = Option<String>>,
+    ) {
         let at = match self
             .mime_groups
             .iter()
@@ -144,8 +152,9 @@ impl Package {
                 types.push(value);
             }
         }
-        types.sort_by_key(|value| string_hash(value));
-        self.mime_groups.sort_by_key(|(name, _)| string_hash(name));
+        types.sort_by_key(|value| value.as_deref().map_or(0, string_hash));
+        self.mime_groups
+            .sort_by_key(|(name, _)| name.as_deref().map_or(0, string_hash));
     }
 
     pub fn is_loading(&self) -> bool {

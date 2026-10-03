@@ -113,10 +113,10 @@ impl NewSetting {
                 let values = original
                     .mime_groups
                     .iter()
-                    .find(|(n, _)| n == &name)
+                    .find(|(n, _)| n.as_deref() == Some(name.as_str()))
                     .map(|(_, v)| v.clone())
                     .unwrap_or_default();
-                (name, values)
+                (Some(name), values)
             })
             .collect();
         package.domain_set_id = Some(domain_id(m.domain_set_id));
@@ -220,7 +220,7 @@ impl NewSetting {
                 mime_groups: m
                     .mime_groups
                     .into_iter()
-                    .map(|name| (name, Vec::new()))
+                    .map(|name| (Some(name), Vec::new()))
                     .collect(),
                 domain_set_id: Some(domain_set_id),
                 target_sdk_version: m.target_sdk_version,
@@ -266,8 +266,8 @@ mod tests {
             last_modified_time: 99,
             legacy_native_library_path: Some("old.lib".into()),
             mime_groups: vec![
-                ("keep".into(), vec!["text/plain".into()]),
-                ("remove".into(), vec![]),
+                (Some("keep".into()), vec![Some("text/plain".into()), None]),
+                (Some("remove".into()), vec![]),
             ],
             ..Default::default()
         };
@@ -343,8 +343,8 @@ mod tests {
                     assert_eq!(
                         result.package.mime_groups,
                         vec![
-                            ("new".into(), vec![]),
-                            ("keep".into(), vec!["text/plain".into()])
+                            (Some("new".into()), vec![]),
+                            (Some("keep".into()), vec![Some("text/plain".into()), None])
                         ]
                     );
                 }
@@ -352,7 +352,10 @@ mod tests {
         }
         assert!(!saved_users[&0].installed);
         assert_eq!(saved_users[&0].uninstall_reason, 3);
-        assert_eq!(original.mime_groups[0].1, vec!["text/plain"]);
+        assert_eq!(
+            original.mime_groups[0].1,
+            vec![Some("text/plain".into()), None]
+        );
     }
 
     fn metadata(flags: i32) -> SettingMetadata {

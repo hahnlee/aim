@@ -251,7 +251,7 @@ fn new_settings_match_the_original_runtime() {
                     let p = &candidate.package;
                     assert_eq!(p.uses_sdk_libraries, metadata.uses_sdk_libraries);
                     assert_eq!(p.uses_static_libraries, metadata.uses_static_libraries);
-                    assert_eq!(p.mime_groups, vec![("mime".into(), Vec::new())]);
+                    assert_eq!(p.mime_groups, vec![(Some("mime".into()), Vec::new())]);
                     assert_eq!(p.flags, flags);
                     assert_eq!(p.private_flags, 8);
                     assert_eq!(p.version_code, 0x100000002);
@@ -349,7 +349,10 @@ fn new_settings_match_the_original_runtime() {
                         flags: 64 | old_system,
                         private_flags: required,
                         version_code: 7,
-                        mime_groups: vec![("keep".into(), vec![]), ("remove".into(), vec![])],
+                        mime_groups: vec![
+                            (Some("keep".into()), vec![]),
+                            (Some("remove".into()), vec![]),
+                        ],
                         ..Default::default()
                     };
                     let settings = Settings {
@@ -410,7 +413,11 @@ fn new_settings_match_the_original_runtime() {
                         )
                         .unwrap();
                     let p = candidate.record.settings;
-                    let mut names: Vec<_> = p.mime_groups.iter().map(|(n, _)| n.as_str()).collect();
+                    let mut names: Vec<_> = p
+                        .mime_groups
+                        .iter()
+                        .map(|(n, _)| n.as_deref().unwrap())
+                        .collect();
                     names.sort();
                     lines.push(format!(
                         "{} {} {} {} {} {} {} {} {} [{}]",

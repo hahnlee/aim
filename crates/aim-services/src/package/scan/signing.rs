@@ -1438,6 +1438,7 @@ mod tests {
             .assign_seinfo_at_boot(&policy, &mut |_| Ok(30))
             .unwrap();
         owner.settings.packages[0].add_mime_types("group".into(), ["text/plain".into()]);
+        owner.settings.packages[0].add_nullable_mime_types(None, [None, Some(String::new())]);
         owner.settings.packages[0].uses_static_libraries = vec![("static".into(), 17)];
         owner.settings.packages[0].add_old_path(Some("/data/old"));
         owner.settings.packages[0].set_loading_progress(0.5);
@@ -1447,7 +1448,7 @@ mod tests {
         let mut invalid = owner.clone();
         invalid.settings.packages[0]
             .mime_groups
-            .push(("group".into(), Vec::new()));
+            .push((Some("group".into()), Vec::new()));
         assert!(matches!(
             store.publish(&base, invalid, base.usage().clone()),
             Err(crate::package::scan_snapshot::Error::Invalid(_))
@@ -1507,11 +1508,34 @@ mod tests {
         owner.settings.packages[0].set_loading_progress(1.0);
         owner.settings.packages[0].remove_old_path(Some(&"x".repeat(150_000)));
         owner.settings.packages[0].add_mime_types("group".into(), ["image/png".into()]);
+        owner.settings.packages[0]
+            .mime_groups
+            .retain(|(name, _)| name.is_some());
         owner.settings.packages[0].uses_static_libraries[0].1 = 29;
         let current = store.publish(&base, owner, changed_usage).unwrap();
         assert_eq!(
-            base.owner().settings.packages[0].mime_groups[0].1,
-            ["text/plain"]
+            base.owner().settings.packages[0]
+                .mime_groups
+                .iter()
+                .find(|(name, _)| name.is_none())
+                .unwrap()
+                .1,
+            [None, Some(String::new())]
+        );
+        assert!(
+            current.owner().settings.packages[0]
+                .mime_groups
+                .iter()
+                .all(|(name, _)| name.is_some())
+        );
+        assert_eq!(
+            base.owner().settings.packages[0]
+                .mime_groups
+                .iter()
+                .find(|(name, _)| name.as_deref() == Some("group"))
+                .unwrap()
+                .1,
+            [Some("text/plain".into())]
         );
         assert_eq!(
             base.owner().settings.packages[0].uses_static_libraries[0].1,

@@ -528,7 +528,10 @@ mod tests {
             app.key_set_data.defined_key_sets,
             [(Some("upgrade".into()), 3)]
         );
-        assert_eq!(app.mime_groups[0].1, ["image/gif", "image/png"]);
+        assert_eq!(
+            app.mime_groups[0].1,
+            [Some("image/gif".into()), Some("image/png".into())]
+        );
         let sys = &s.disabled_system_packages[0];
         assert_eq!((sys.flags, sys.private_flags), (1, 8));
         assert!(sys.shared_user);

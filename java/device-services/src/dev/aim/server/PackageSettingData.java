@@ -102,11 +102,11 @@ public final class PackageSettingData {
         int groups = count(in, 8);
         var map = new android.util.ArrayMap<String, java.util.Set<String>>();
         for (int i = 0; i < groups; i++) {
-            String group = Objects.requireNonNull(in.readString());
+            String group = in.readString();
             if (map.containsKey(group)) throw new IllegalArgumentException("duplicate captured MIME group");
             String[] values = Objects.requireNonNull(in.createStringArray());
             var types = new android.util.ArraySet<String>();
-            for (String value : values) types.add(Objects.requireNonNull(value));
+            for (String value : values) types.add(value);
             map.put(group, Collections.unmodifiableSet(types));
         }
         mimeGroups = Collections.unmodifiableMap(map);

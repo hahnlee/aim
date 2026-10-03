@@ -329,9 +329,24 @@ public final class PackageRoundTripOracle {
             try { metadata.getMimeGroups().get("BB").clear(); throw new AssertionError("mutable captured MIME types"); } catch (UnsupportedOperationException expected) {}
         }
         try { metadata.getMimeGroups().clear(); throw new AssertionError("mutable captured MIME groups"); } catch (UnsupportedOperationException expected) {}
+        if (name.equals("com.google.android.gsf")) {
+            var expectedTypes = java.util.Arrays.asList(null, "", "BB", "Aa");
+            if (!new java.util.ArrayList<>(metadata.getMimeGroups().get("nullable")).equals(expectedTypes)
+                    || !new java.util.ArrayList<>(metadata.getMimeGroups().get(null)).equals(java.util.Arrays.asList(null, ""))) throw new AssertionError("nullable captured MIME order differs");
+            var copy = new com.android.server.pm.PackageSetting(restoredSetting, false);
+            copy.getMimeGroups().get("nullable").clear();
+            if (!new java.util.ArrayList<>(restoredSetting.getMimeGroups().get("nullable")).equals(expectedTypes)) throw new AssertionError("original MIME copy shared its types");
+            restoredSetting.getMimeGroups().get("nullable").clear();
+            if (!new java.util.ArrayList<>(metadata.getMimeGroups().get("nullable")).equals(expectedTypes)) throw new AssertionError("original nullable types escaped capture");
+            try { metadata.getMimeGroups().get(null).clear(); throw new AssertionError("mutable captured null group"); } catch (UnsupportedOperationException expected) {}
+        }
         var nullableTypes = new android.util.ArraySet<String>(); nullableTypes.add(null);
         restoredSetting.addMimeTypes("nullable", nullableTypes);
         if (!restoredSetting.getMimeGroups().get("nullable").contains(null)) throw new AssertionError("original nullable MIME type owner differs");
+        try { new java.util.TreeSet<String>(nullableTypes); throw new AssertionError("original feed TreeSet accepted null"); } catch (NullPointerException expected) {}
+        if (name.equals("com.google.android.gsf")) {
+            try { new java.util.TreeMap<String, java.util.Set<String>>(metadata.getMimeGroups()); throw new AssertionError("original feed TreeMap accepted null group"); } catch (NullPointerException expected) {}
+        }
         restoredSetting.setLoadingProgress(metadata.loadingProgress); restoredSetting.setLoadingCompletedTime(metadata.loadingCompletedTime);
         for (String path : metadata.getOldPaths()) restoredSetting.addOldPath(path == null ? null : new java.io.File(path));
         if (!new java.util.ArrayList<>(restoredSetting.getOldPaths()).equals(metadata.getOldPaths().stream().map(path -> path == null ? null : new java.io.File(path)).toList())
@@ -342,6 +357,7 @@ public final class PackageRoundTripOracle {
         verifyLoadingXml(file);
         com.android.server.pm.CapturedKeySetOracle.verify(file);
         verifyMimeXml(file);
+        verifyNullableMimeWriter();
         owner.fail = true;
         try { lease.getSigningState(name, false); throw new AssertionError("signing owner failure swallowed"); }
         catch (android.os.RemoteException expected) {}
@@ -923,6 +939,28 @@ public final class PackageRoundTripOracle {
                     for (String value : group.getValue()) writeMimeString(out, value);
                 }
             }
+        }
+    }
+
+    // Pinned Settings.writeMimeGroupLPr loop on original serializers.
+    private static void verifyNullableMimeWriter() throws Exception {
+        for (boolean binary : new boolean[] {false, true}) for (boolean nullName : new boolean[] {false, true}) {
+            var setting = new com.android.server.pm.PackageSetting("p", null, new java.io.File("/data/p"), 0, 0, new java.util.UUID(1, 1));
+            var values = new android.util.ArraySet<String>(); values.add(nullName ? "text/plain" : null);
+            setting.addMimeTypes(nullName ? null : "types", values);
+            var output = new java.io.ByteArrayOutputStream();
+            var xml = binary ? android.util.Xml.resolveSerializer(output) : android.util.Xml.newSerializer();
+            if (!binary) xml.setOutput(output, "UTF-8");
+            try {
+                for (var group : setting.getMimeGroups().entrySet()) {
+                    xml.startTag(null, "mime-group"); xml.attribute(null, "name", group.getKey());
+                    for (String value : group.getValue()) {
+                        xml.startTag(null, "mime-type"); xml.attribute(null, "value", value); xml.endTag(null, "mime-type");
+                    }
+                    xml.endTag(null, "mime-group");
+                }
+                throw new AssertionError("original MIME writer accepted null name/type");
+            } catch (NullPointerException expected) {}
         }
     }
 
