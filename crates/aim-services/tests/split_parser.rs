@@ -173,6 +173,82 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     assert_eq!(list.len(), 501);
     assert!(list.contains(&"p500".into()));
     assert!(!list.contains(&"p501".into()));
+    use aim_services::package::{
+        owner::update_ownership::UpdateOwnership,
+        pkg::{Property, PropertyValue, UsesPermission},
+        settings::{FLAG_SYSTEM, Package, Settings},
+        system_config::SystemConfig,
+    };
+    let provider = Package {
+        name: "provider".into(),
+        flags: FLAG_SYSTEM,
+        ..Package::default()
+    };
+    let parsed = AndroidPackage {
+        properties: Some(vec![(
+            "android.app.PROPERTY_LEGACY_UPDATE_OWNERSHIP_DENYLIST".into(),
+            Property {
+                name: None,
+                package_name: None,
+                class_name: None,
+                value: PropertyValue::Resource(id as i32),
+            },
+        )]),
+        uses_permissions: vec![UsesPermission {
+            name: Some("android.permission.INSTALL_PACKAGES".into()),
+            flags: 0,
+        }],
+        ..AndroidPackage::default()
+    };
+    let mut owner = UpdateOwnership::default();
+    owner.queue(&provider, &parsed);
+    let mut target = Package {
+        name: "one".into(),
+        ..Package::default()
+    };
+    target.install_source.update_owner = Some("saved.installer".into());
+    let mut settings = Settings {
+        packages: vec![provider, target],
+        ..Settings::default()
+    };
+    let config = SystemConfig::default();
+    let before = (owner.clone(), settings.clone());
+    assert!(
+        owner
+            .complete_resource_read(
+                "provider",
+                &mut settings,
+                &config,
+                &resources,
+                id,
+                |_, _| Err(aim_apps::res::bad("missing provider asset"))
+            )
+            .is_err()
+    );
+    assert_eq!((owner.clone(), settings.clone()), before);
+    assert_eq!(
+        owner
+            .complete_resource_read("provider", &mut settings, &config, &resources, id, file)
+            .unwrap(),
+        ["one"]
+    );
+    assert_eq!(settings.packages[1].install_source.update_owner, None);
+    assert_eq!(owner.is_provider(Some("provider")), Ok(true));
+    assert_eq!(owner.is_denylisted(" one "), Ok(true));
+    let before = (owner.clone(), settings.clone());
+    assert!(
+        owner
+            .complete_resource_read(
+                "removed",
+                &mut settings,
+                &config,
+                &resources,
+                id,
+                |_, _| panic!("unqueued provider must not open resources")
+            )
+            .is_err()
+    );
+    assert_eq!((owner, settings), before);
     resources.config.language = *b"en";
     assert_eq!(read_denylist(&resources, id, file).unwrap(), ["english"]);
     assert!(read_denylist(&resources, 0, file).is_err());
@@ -260,10 +336,46 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     }
     let guest = boot.data.join("data/local/tmp/update-ownership");
     fs::create_dir(&guest).unwrap();
+    let policy_root = data.0.join("policy");
+    let policy_dir = policy_root.join("system/etc/permissions");
+    fs::create_dir_all(&policy_dir).unwrap();
+    fs::write(
+        policy_dir.join("ownership.xml"),
+        r#"<permissions>
+        <update-ownership package="app" installer="first"/>
+        <update-ownership package="app" installer="second"/>
+        <update-ownership package="app" installer=""/>
+        <update-ownership package="missing"/>
+        <update-ownership installer="missing"/>
+        <update-ownership package="" installer="missing"/>
+        <update-ownership package=" " installer=" "/>
+        <other><update-ownership package="nested" installer="ignored"/></other>
+    </permissions>"#,
+    )
+    .unwrap();
+    let policy = SystemConfig::read(&policy_root, &|_| None);
+    fs::create_dir(guest.join("policy")).unwrap();
+    fs::copy(
+        policy_dir.join("ownership.xml"),
+        guest.join("policy/ownership.xml"),
+    )
+    .unwrap();
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
     let mut command = boot.command();
     command.args(["shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/update-ownership/oracle.dex:/system/framework/services.jar", "/system/bin", "com.android.server.pm.UpdateOwnershipResourceOracle"]);
-    let mut native = String::new();
+    command.arg("/data/local/tmp/update-ownership/policy");
+    let mut native = String::from("POLICY");
+    for name in ["app", "missing", " ", "nested"] {
+        native.push(' ');
+        if let Some(installer) = policy.system_app_update_owners.get(name) {
+            for b in installer.as_bytes() {
+                write!(&mut native, "{b:02x}").unwrap();
+            }
+        } else {
+            native.push_str("null");
+        }
+    }
+    native.push('\n');
     for (apk, contents) in apks.iter().zip([&expected, &expected, &list]) {
         let name = apk.file_name().unwrap().to_str().unwrap();
         fs::copy(apk, guest.join(name)).unwrap();

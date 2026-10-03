@@ -58,6 +58,8 @@ pub struct SystemConfig {
     pub initial_non_stopped_system_packages: BTreeSet<String>,
     /// Preinstalled packages requiring fresh factory signatures during boot.
     pub preinstall_packages_with_strict_signature_check: BTreeSet<String>,
+    /// Explicit system-app update owners, retained against manifest opt-outs.
+    pub system_app_update_owners: BTreeMap<String, String>,
     /// `mNamedActors`: namespace, actor name and package.
     pub named_actors: Vec<(String, String, String)>,
     /// OEM names and IDs in ArrayMap order (signed String hash; ties
@@ -204,6 +206,16 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "update-ownership" => {
+                    if let (Some(package), Some(installer)) =
+                        (e.string("package"), e.string("installer"))
+                        && !package.is_empty()
+                        && !installer.is_empty()
+                    {
+                        self.system_app_update_owners
+                            .insert(package.into_owned(), installer.into_owned());
+                    }
+                }
                 "require-strict-signature" => {
                     if let Some(package) = e.string("package")
                         && !package.is_empty()
@@ -456,6 +468,36 @@ pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Fr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_owners_ignore_partition_gate_and_keep_last_valid_declaration() {
+        let root = aim_android_xml::read(
+            br#"<permissions>
+            <update-ownership package="app" installer="first"/>
+            <update-ownership package="app" installer="second"/>
+            <update-ownership package="app" installer=""/>
+            <update-ownership package="missing"/>
+            <update-ownership installer="missing"/>
+            <update-ownership package="" installer="missing"/>
+            <update-ownership package=" " installer=" "/>
+            <other><update-ownership package="nested" installer="ignored"/></other>
+        </permissions>"#,
+        )
+        .unwrap();
+        let mut config = SystemConfig::default();
+        config.read_root(
+            &root,
+            0,
+            false,
+            Path::new("."),
+            &|_| None,
+            Path::new("policy.xml"),
+        );
+        assert_eq!(
+            config.system_app_update_owners,
+            [("app".into(), "second".into()), (" ".into(), " ".into())].into()
+        );
+    }
 
     #[test]
     fn strict_signature_packages_ignore_partition_gate_and_only_empty_names() {

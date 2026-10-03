@@ -361,10 +361,18 @@ entry. Compiled APK fixtures compare mixed content, whitespace, hash collisions,
 resource aliases and truncation with the actual original
 UpdateOwnershipHelper.readUpdateOwnerDenyList on disposable boot data; locale
 selection and explicit missing/malformed-input errors are also checked natively.
-This reader takes the caller's complete asset inventory; supplying the boot's
-base/split/shared-library/overlay inputs and completing pending reads at the
-original commit phase, with SystemConfig-conditioned update-owner clearing,
-remain #825. This in-memory component is separate from InstallSource.update_owner
+SystemConfig now retains valid update-ownership package/installer declarations
+without a partition gate, with last-valid declaration winning and raw whitespace
+preserved. The fixture compares those policies with the actual original
+SystemConfig reader (15.04s); its added compile-only API passes image linkage
+(14.3s). A completed pending provider read records contributors and clears active
+targets' saved update owners unless SystemConfig names an owner; disabled factory
+records and unrelated install-source fields stay intact. Failed resource reads
+preserve the pending provider and settings, and unqueued completions are rejected.
+All 322 service units pass (3.03s). This reader takes the caller's complete asset
+inventory; supplying the boot's base/split/shared-library/overlay inputs,
+executing pending reads at the original asynchronous commit phase and publishing
+the changed records remain #825. This in-memory component is separate from InstallSource.update_owner
 and is not a complete removal commit. Store.commit_removed_boot_metadata writes just the completed
 domain/keyset stage as resilient ABX, retaining UID/users, unrelated XML and
 legacy domains; unit tests reopen the files and check reserve copies and failure
