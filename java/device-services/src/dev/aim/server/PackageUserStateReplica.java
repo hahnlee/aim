@@ -34,16 +34,20 @@ public final class PackageUserStateReplica implements PackageUserStateInternal {
             var resolved = new LinkedHashMap<UserPackage, PackageUserStateData.Suspension>();
             for (var owner : owners) {
                 // Pinned Settings.readSuspensionParamsLPr owner resolution.
-                int user = data.getUserId();
-                if (!owner.currentUser && crossUserSuspensions) {
+                int user = owner.resolvedUser ? owner.storedUser : data.getUserId();
+                if (!owner.resolvedUser && !owner.currentUser && crossUserSuspensions) {
                     if (owner.storedUser != null && owner.storedUser != -10000) user = owner.storedUser;
                     else if (owner.packageName.equals("android") || owner.packageName.equals("root")
                             || owner.packageName.equals("com.android.shell")) user = 0;
                 }
                 resolved.put(UserPackage.of(user, owner.packageName), owner);
-                dialog(owner.dialog); // Validate before publishing the replica.
+                if (owner.params != null) dialog(owner.params.dialog); // Validate before publishing.
             }
-            suspensions = Collections.unmodifiableMap(resolved);
+            var entries = new ArrayList<>(resolved.entrySet());
+            entries.sort(java.util.Comparator.comparingInt(entry -> entry.getKey().hashCode()));
+            var ordered = new LinkedHashMap<UserPackage, PackageUserStateData.Suspension>();
+            for (var entry : entries) ordered.put(entry.getKey(), entry.getValue());
+            suspensions = Collections.unmodifiableMap(ordered);
         }
         getArchiveState();
     }
@@ -80,16 +84,16 @@ public final class PackageUserStateReplica implements PackageUserStateInternal {
     @Override public boolean isComponentDisabled(String component) { return getDisabledComponents().contains(component); }
     @Override public boolean isSuspended() { return suspensions != null && !suspensions.isEmpty(); }
     @Override public boolean isQuarantined() {
-        if (suspensions != null) for (var owner : suspensions.values()) if (owner.quarantined) return true;
+        if (suspensions != null) for (var owner : suspensions.values()) if (Objects.requireNonNull(owner.params).quarantined) return true;
         return false;
     }
     @Override public WatchedArrayMap<UserPackage, SuspendParams> getSuspendParams() {
         if (suspensions == null) return null;
         var map = new WatchedArrayMap<UserPackage, SuspendParams>();
         for (var entry : suspensions.entrySet()) {
-            var owner = entry.getValue();
-            map.put(entry.getKey(), new SuspendParams(dialog(owner.dialog), owner.getAppExtras(),
-                    owner.getLauncherExtras(), owner.quarantined));
+            var params = entry.getValue().params;
+            map.put(entry.getKey(), params == null ? null : new SuspendParams(dialog(params.dialog), params.getAppExtras(),
+                    params.getLauncherExtras(), params.quarantined));
         }
         return map.snapshot();
     }

@@ -508,6 +508,7 @@ fn native_extras(root: &Element) -> Vec<u8> {
             return vec![2];
         };
         let s = &state.packages[0].1.suspensions.as_ref().unwrap()[0];
+        let s = s.params.as_ref().unwrap();
         out.push(u8::from(s.quarantined));
         out.push(u8::from(s.dialog.is_some()));
         if let Some(d) = &s.dialog {

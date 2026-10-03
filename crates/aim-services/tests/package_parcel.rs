@@ -216,7 +216,7 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.user")), user_state).unwrap();
-        for user in [10, 11] {
+        for user in [10, 11, 12, 13] {
             let bytes = aim_services::package::scan_snapshot::user_record::captured(
                 &snapshot,
                 &pkg.package_name,
@@ -391,6 +391,20 @@ fn native_package_parcels_match_original_read_write() {
         format!("PARCELS {}\n", expected.len())
     );
     for (name, package, entry) in expected {
+        if name.starts_with("scan-") {
+            let root = aim_android_xml::read(
+                &fs::read(directory.join(format!("{name}.null-params.xml"))).unwrap(),
+            )
+            .unwrap();
+            let restored = aim_services::package::restrictions::Restrictions::parse(&root).unwrap();
+            let state = &restored.packages[0].1;
+            assert_eq!(
+                state.suspensions.as_ref().unwrap()[0].params,
+                Some(aim_services::package::restrictions::SuspendParams::default())
+            );
+            assert_eq!(state.is_quarantined(10, true), Ok(false));
+            assert_eq!(state.resolved_suspensions(10, true)[0].0, 0);
+        }
         let original = fs::read(directory.join(format!("{name}.original"))).unwrap();
         let mut native = AndroidPackage::read_cache_entry(&entry.bytes).unwrap();
         let mut original = AndroidPackage::read_cache_entry(&original).unwrap();
@@ -599,6 +613,29 @@ fn native_scan_objects(
         let mut empty = aim_services::package::restrictions::UserState::initialized();
         empty.suspensions = Some(vec![]);
         owner.set_user_state(name, 11, empty).unwrap();
+        use aim_services::package::restrictions::{SuspendParams, UserState};
+        for (user, null_name, positive_name) in [(12, "android", "B"), (13, "B", "android")] {
+            let mut state = UserState::default();
+            for package in ["B", "android"] {
+                let params = (package == positive_name).then(|| SuspendParams {
+                    quarantined: true,
+                    ..Default::default()
+                });
+                state.put_suspension(user, false, 0, package.into(), params);
+            }
+            assert_eq!(
+                state
+                    .suspensions
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.package == null_name)
+                    .unwrap()
+                    .params,
+                None
+            );
+            owner.set_user_state(name, user, state).unwrap();
+        }
     }
     owner
         .assign_seinfo_at_boot(&policy, &mut |_| Ok(36))

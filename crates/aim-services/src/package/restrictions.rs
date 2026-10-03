@@ -101,6 +101,11 @@ impl Default for UserState {
 pub struct Suspension {
     pub package: String,
     pub user: SuspendingUser,
+    pub params: Option<SuspendParams>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SuspendParams {
     pub dialog: Option<dialog::DialogInfo>,
     pub quarantined: bool,
     pub app_extras: Option<persistable::Bundle>,
@@ -109,6 +114,8 @@ pub struct Suspension {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SuspendingUser {
+    /// Runtime UserPackage key; never reinterpret it with XML read policy.
+    Resolved(i32),
     /// Legacy `suspended`: always the package's user, including platform suspensions.
     Current,
     /// `suspend-params`: interpret with `crossUserSuspensionEnabledRo`.
@@ -121,13 +128,10 @@ impl Suspension {
         let Some(Event::Start(e, depth)) = cursor.event() else {
             return Err("expected suspension tag".into());
         };
-        let mut suspension = Self {
-            package,
-            user: SuspendingUser::Persisted(e.int("suspending-user").ok().flatten()),
-            dialog: None,
+        let user = SuspendingUser::Persisted(e.int("suspending-user").ok().flatten());
+        let mut params = SuspendParams {
             quarantined: e.bool("quarantined").ok().flatten().unwrap_or(false),
-            app_extras: None,
-            launcher_extras: None,
+            ..Default::default()
         };
         while let Some(event) = cursor.next() {
             let parameter = match event {
@@ -136,7 +140,7 @@ impl Suspension {
                 _ => continue,
             };
             match parameter.name.as_str() {
-                "dialog-info" => suspension.dialog = Some(dialog::DialogInfo::restore(parameter)),
+                "dialog-info" => params.dialog = Some(dialog::DialogInfo::restore(parameter)),
                 "app-extras" | "launcher-extras" => {
                     let bundle = match persistable::Bundle::read(cursor) {
                         Ok(bundle) => bundle,
@@ -146,15 +150,19 @@ impl Suspension {
                         Err(error) => return Err(error.to_string()),
                     };
                     if parameter.name == "app-extras" {
-                        suspension.app_extras = Some(bundle);
+                        params.app_extras = Some(bundle);
                     } else {
-                        suspension.launcher_extras = Some(bundle);
+                        params.launcher_extras = Some(bundle);
                     }
                 }
                 _ => {}
             }
         }
-        Ok(suspension)
+        Ok(Self {
+            package,
+            user,
+            params: Some(params),
+        })
     }
 }
 
@@ -174,6 +182,7 @@ impl UserState {
         let mut resolved: Vec<(i32, &Suspension)> = Vec::new();
         for suspension in self.suspensions.iter().flatten() {
             let owner = match suspension.user {
+                SuspendingUser::Resolved(id) => id,
                 SuspendingUser::Current => user,
                 SuspendingUser::Persisted(_) if !cross_user => user,
                 SuspendingUser::Persisted(Some(id)) if id != -10000 => id,
@@ -191,15 +200,87 @@ impl UserState {
                 resolved.push((owner, suspension));
             }
         }
+        resolved.sort_by_key(|(id, s)| {
+            id.wrapping_mul(31).wrapping_add(
+                s.package
+                    .encode_utf16()
+                    .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c))),
+            )
+        });
         resolved
     }
 
-    pub fn is_quarantined(&self, user: i32, cross_user: bool) -> bool {
-        self.resolved_suspensions(user, cross_user)
-            .iter()
-            .any(|(_, s)| s.quarantined)
+    fn runtime_suspensions(&self, user: i32, cross_user: bool) -> Option<Vec<Suspension>> {
+        self.suspensions.as_ref().map(|_| {
+            self.resolved_suspensions(user, cross_user)
+                .into_iter()
+                .map(|(id, value)| Suspension {
+                    package: value.package.clone(),
+                    user: SuspendingUser::Resolved(id),
+                    params: value.params.clone(),
+                })
+                .collect()
+        })
+    }
+    /// Store a runtime UserPackage key, including an explicit null value.
+    pub fn put_suspension(
+        &mut self,
+        user: i32,
+        cross_user: bool,
+        suspender: i32,
+        package: String,
+        params: Option<SuspendParams>,
+    ) {
+        let mut entries = self
+            .runtime_suspensions(user, cross_user)
+            .unwrap_or_default();
+        if let Some(value) = entries.iter_mut().find(|value| {
+            value.user == SuspendingUser::Resolved(suspender) && value.package == package
+        }) {
+            value.params = params;
+        } else {
+            entries.push(Suspension {
+                package,
+                user: SuspendingUser::Resolved(suspender),
+                params,
+            });
+        }
+        self.suspensions = Some(entries);
+    }
+    /// Original removal leaves an allocated empty map and preserves null maps.
+    pub fn remove_suspension(
+        &mut self,
+        user: i32,
+        cross_user: bool,
+        suspender: i32,
+        package: &str,
+    ) {
+        let Some(mut entries) = self.runtime_suspensions(user, cross_user) else {
+            return;
+        };
+        entries.retain(|value| {
+            value.user != SuspendingUser::Resolved(suspender) || value.package != package
+        });
+        self.suspensions = Some(entries);
+    }
+
+    pub fn is_quarantined(&self, user: i32, cross_user: bool) -> Result<bool, NullSuspendParams> {
+        for (_, suspension) in self.resolved_suspensions(user, cross_user) {
+            if suspension
+                .params
+                .as_ref()
+                .ok_or(NullSuspendParams)?
+                .quarantined
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NullSuspendParams;
 
 /// `ArchiveState`: what the launcher shows of an archived package.
 #[derive(Clone, Debug, PartialEq)]
@@ -332,10 +413,12 @@ fn user_state(e: &Element) -> Result<UserState, String> {
         s.suspensions.get_or_insert_with(Vec::new).push(Suspension {
             package: by,
             user: SuspendingUser::Current,
-            dialog: legacy_dialog,
-            quarantined: false,
-            app_extras: legacy_app_extras,
-            launcher_extras: legacy_launcher_extras,
+            params: Some(SuspendParams {
+                dialog: legacy_dialog,
+                quarantined: false,
+                app_extras: legacy_app_extras,
+                launcher_extras: legacy_launcher_extras,
+            }),
         });
     }
     Ok(s)
@@ -411,8 +494,22 @@ mod tests {
         </pkg>"#,
         );
         assert_eq!(s.suspensions.as_ref().unwrap().len(), 2);
-        assert!(s.suspensions.as_ref().unwrap()[0].app_extras.is_some());
-        assert!(s.suspensions.as_ref().unwrap()[1].launcher_extras.is_some());
+        assert!(
+            s.suspensions.as_ref().unwrap()[0]
+                .params
+                .as_ref()
+                .unwrap()
+                .app_extras
+                .is_some()
+        );
+        assert!(
+            s.suspensions.as_ref().unwrap()[1]
+                .params
+                .as_ref()
+                .unwrap()
+                .launcher_extras
+                .is_some()
+        );
         assert_eq!(
             s.resolved_suspensions(10, true)
                 .iter()
@@ -420,14 +517,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 10]
         );
-        assert!(s.is_quarantined(10, true));
+        assert!(s.is_quarantined(10, true).unwrap());
         let resolved = s.resolved_suspensions(10, false);
         assert_eq!(resolved.len(), 1);
         assert_eq!(
-            resolved[0].1.dialog.as_ref().unwrap().title.as_deref(),
+            resolved[0]
+                .1
+                .params
+                .as_ref()
+                .unwrap()
+                .dialog
+                .as_ref()
+                .unwrap()
+                .title
+                .as_deref(),
             Some("last")
         );
-        assert!(!s.is_quarantined(10, false));
+        assert!(!s.is_quarantined(10, false).unwrap());
     }
 
     #[test]
@@ -443,15 +549,36 @@ mod tests {
         let suspension = resolved[0].1;
         assert_eq!(suspension.package, "android");
         assert_eq!(
-            suspension.dialog.as_ref().unwrap().title.as_deref(),
+            suspension
+                .params
+                .as_ref()
+                .unwrap()
+                .dialog
+                .as_ref()
+                .unwrap()
+                .title
+                .as_deref(),
             Some("legacy")
         );
-        assert_eq!(suspension.dialog.as_ref().unwrap().message, None);
-        assert!(suspension.app_extras.is_some());
-        assert!(!s.is_quarantined(10, true));
+        assert_eq!(
+            suspension
+                .params
+                .as_ref()
+                .unwrap()
+                .dialog
+                .as_ref()
+                .unwrap()
+                .message,
+            None
+        );
+        assert!(suspension.params.as_ref().unwrap().app_extras.is_some());
+        assert!(!s.is_quarantined(10, true).unwrap());
         let fallback = state(b"<pkg suspended='true' suspend_dialog_message='fallback'/>");
         assert_eq!(
             fallback.suspensions.as_ref().unwrap()[0]
+                .params
+                .as_ref()
+                .unwrap()
                 .dialog
                 .as_ref()
                 .unwrap()
@@ -464,6 +591,71 @@ mod tests {
                 .suspensions
                 .is_none()
         );
+    }
+
+    #[test]
+    fn runtime_put_null_and_removal_preserve_map_allocation() {
+        let mut state = UserState::default();
+        state.remove_suspension(10, false, 0, "android");
+        assert!(state.suspensions.is_none());
+        state.put_suspension(10, false, 0, "android".into(), None);
+        assert_eq!(state.is_quarantined(10, true), Err(NullSuspendParams));
+        assert_eq!(state.resolved_suspensions(10, false)[0].0, 0);
+        let captured = state.clone();
+        state.put_suspension(
+            10,
+            false,
+            0,
+            "android".into(),
+            Some(SuspendParams::default()),
+        );
+        assert_eq!(state.suspensions.as_ref().unwrap().len(), 1);
+        assert_eq!(state.is_quarantined(10, false), Ok(false));
+        assert_eq!(captured.is_quarantined(10, false), Err(NullSuspendParams));
+        state.remove_suspension(10, true, 0, "android");
+        assert_eq!(state.suspensions, Some(vec![]));
+    }
+
+    #[test]
+    fn null_params_keep_runtime_keys_and_quarantine_short_circuit_order() {
+        let suspension = |package: &str, params| Suspension {
+            package: package.into(),
+            user: SuspendingUser::Resolved(0),
+            params,
+        };
+        let mut state = UserState {
+            suspensions: Some(vec![
+                suspension(
+                    "B",
+                    Some(SuspendParams {
+                        quarantined: true,
+                        ..Default::default()
+                    }),
+                ),
+                suspension("android", None),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(
+            state
+                .resolved_suspensions(10, false)
+                .iter()
+                .map(|(id, s)| (*id, s.package.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "android"), (0, "B")]
+        );
+        assert_eq!(state.is_quarantined(10, false), Err(NullSuspendParams));
+        state.suspensions = Some(vec![
+            suspension("B", None),
+            suspension(
+                "android",
+                Some(SuspendParams {
+                    quarantined: true,
+                    ..Default::default()
+                }),
+            ),
+        ]);
+        assert_eq!(state.is_quarantined(10, false), Ok(true));
     }
 
     #[test]
@@ -481,7 +673,7 @@ mod tests {
                 .iter()
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
-            [0, 12, 0, 0]
+            [0, 0, 12, 0]
         );
     }
 }

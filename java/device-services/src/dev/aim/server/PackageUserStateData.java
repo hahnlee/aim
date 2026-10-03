@@ -112,14 +112,24 @@ public final class PackageUserStateData {
 
     public static final class Suspension {
         public final String packageName;
-        public final boolean currentUser, quarantined;
+        public final boolean currentUser, resolvedUser;
         public final Integer storedUser;
-        public final Dialog dialog;
-        private final byte[] appExtras, launcherExtras;
+        public final SuspensionParams params;
         private Suspension(Parcel in) {
             packageName = Objects.requireNonNull(in.readString());
-            currentUser = in.readBoolean(); storedUser = in.readBoolean() ? in.readInt() : null;
-            if (currentUser && storedUser != null) throw new IllegalArgumentException("legacy suspension has stored user");
+            currentUser = in.readBoolean(); resolvedUser = in.readBoolean();
+            storedUser = in.readBoolean() ? in.readInt() : null;
+            if ((currentUser && (storedUser != null || resolvedUser)) || (resolvedUser && storedUser == null)) {
+                throw new IllegalArgumentException("invalid suspension user key");
+            }
+            params = in.readBoolean() ? new SuspensionParams(in) : null;
+        }
+    }
+    public static final class SuspensionParams {
+        public final boolean quarantined;
+        public final Dialog dialog;
+        private final byte[] appExtras, launcherExtras;
+        private SuspensionParams(Parcel in) {
             quarantined = in.readBoolean(); dialog = in.readBoolean() ? new Dialog(in) : null;
             appExtras = in.createByteArray(); launcherExtras = in.createByteArray();
             decode(appExtras); decode(launcherExtras);

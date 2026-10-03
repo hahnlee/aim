@@ -96,17 +96,23 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
     for suspension in state.suspensions.iter().flatten() {
         p.write_string16(Some(&suspension.package));
         p.write_bool(matches!(suspension.user, SuspendingUser::Current));
+        p.write_bool(matches!(suspension.user, SuspendingUser::Resolved(_)));
         let user = match suspension.user {
             SuspendingUser::Current => None,
+            SuspendingUser::Resolved(id) => Some(id),
             SuspendingUser::Persisted(user) => user,
         };
         p.write_bool(user.is_some());
         if let Some(user) = user {
             p.write_i32(user);
         }
-        p.write_bool(suspension.quarantined);
-        p.write_bool(suspension.dialog.is_some());
-        if let Some(d) = &suspension.dialog {
+        p.write_bool(suspension.params.is_some());
+        let Some(params) = &suspension.params else {
+            continue;
+        };
+        p.write_bool(params.quarantined);
+        p.write_bool(params.dialog.is_some());
+        if let Some(d) = &params.dialog {
             p.write_i32(d.icon);
             p.write_i32(d.title_resource);
             p.write_string16(d.title.as_deref());
@@ -116,7 +122,7 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
             p.write_string16(d.button.as_deref());
             p.write_i32(d.button_action);
         }
-        for bundle in [&suspension.app_extras, &suspension.launcher_extras] {
+        for bundle in [&params.app_extras, &params.launcher_extras] {
             let parcel = bundle.as_ref().map(|b| b.parcel()).transpose()?;
             write_byte_array(p, parcel.as_ref().map(|p| p.data()));
         }
@@ -184,7 +190,7 @@ mod tests {
         assert_ne!(default, initialized);
         let mut empty_suspensions = default.clone();
         empty_suspensions.suspensions = Some(vec![]);
-        assert!(!empty_suspensions.is_quarantined(0, true));
+        assert!(!empty_suspensions.is_quarantined(0, true).unwrap());
         let mut absent = Parcel::new();
         let mut allocated = Parcel::new();
         write(&mut absent, &default).unwrap();

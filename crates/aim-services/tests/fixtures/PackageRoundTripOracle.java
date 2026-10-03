@@ -123,6 +123,8 @@ public final class PackageRoundTripOracle {
         stale.userState = owner.userState;
         owner.user10 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-10").toPath());
         owner.user11 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-11").toPath());
+        owner.user12 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-12").toPath());
+        owner.user13 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-13").toPath());
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
@@ -188,7 +190,7 @@ public final class PackageRoundTripOracle {
         catch (UnsupportedOperationException expected) {}
         try { userState.getLabelIcons().clear(); throw new AssertionError("mutable captured label icons"); }
         catch (UnsupportedOperationException expected) {}
-        verifyUserReplica(lease, name);
+        verifyUserReplica(lease, name, file);
         if (originalDefault.getSuspendParams() != null) throw new AssertionError("default suspension map is not null");
         originalDefault.setSuspendParams(new android.util.ArrayMap<android.content.pm.UserPackage, com.android.server.pm.pkg.SuspendParams>());
         if (originalDefault.getSuspendParams() == null || originalDefault.getSuspendParams().size() != 0) {
@@ -503,7 +505,46 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
     }
 
-    private static void verifyUserReplica(dev.aim.server.PackageScanLease lease, String name) throws Exception {
+    private static void verifyUserReplica(dev.aim.server.PackageScanLease lease, String name, java.io.File file) throws Exception {
+        for (int user : new int[] {12, 13}) {
+            var original = new com.android.server.pm.pkg.PackageUserStateImpl(new com.android.server.utils.WatchableImpl());
+            original.putSuspendParams(android.content.pm.UserPackage.of(0, "B"), user == 12 ? new com.android.server.pm.pkg.SuspendParams(null, null, null, true) : null);
+            original.putSuspendParams(android.content.pm.UserPackage.of(0, "android"), user == 13 ? new com.android.server.pm.pkg.SuspendParams(null, null, null, true) : null);
+            for (boolean policy : new boolean[] {false, true}) {
+                var captured = lease.getUserStateReplica(name, false, user, policy);
+                var nullKey = android.content.pm.UserPackage.of(0, user == 12 ? "android" : "B");
+                if (!captured.isSuspended() || !original.isSuspended() || captured.getSuspendParams().size() != 2
+                        || !captured.getSuspendParams().containsKey(nullKey) || captured.getSuspendParams().get(nullKey) != null) {
+                    throw new AssertionError("explicit null runtime owner or absolute user key lost");
+                }
+                if (user == 12) {
+                    try { original.isQuarantined(); throw new AssertionError("original null quarantine did not throw"); } catch (NullPointerException expected) {}
+                    try { captured.isQuarantined(); throw new AssertionError("captured null quarantine did not throw"); } catch (NullPointerException expected) {}
+                } else if (!original.isQuarantined() || !captured.isQuarantined()) throw new AssertionError("quarantine short circuit differs");
+            }
+            original.removeSuspension(android.content.pm.UserPackage.of(0, "B"));
+            original.removeSuspension(android.content.pm.UserPackage.of(0, "android"));
+            if (original.isSuspended() || original.getSuspendParams() == null || original.getSuspendParams().size() != 0) {
+                throw new AssertionError("removal must retain allocated original map");
+            }
+        }
+        // Pinned Settings writer loop emits a named empty tag for null params.
+        var nil = new com.android.server.pm.pkg.PackageUserStateImpl(new com.android.server.utils.WatchableImpl());
+        var key = android.content.pm.UserPackage.of(0, "android");
+        nil.putSuspendParams(key, null);
+        try (var output = new java.io.FileOutputStream(file.getPath() + ".null-params.xml")) {
+            var serializer = android.util.Xml.resolveSerializer(output);
+            serializer.startDocument(null, true);
+            serializer.startTag(null, "package-restrictions");
+            serializer.startTag(null, "pkg"); serializer.attribute(null, "name", name);
+            serializer.startTag(null, "suspend-params");
+            serializer.attribute(null, "suspending-package", key.packageName);
+            serializer.attribute(null, "suspending-user", Integer.toString(key.userId));
+            if (nil.getSuspendParams().get(key) != null) throw new AssertionError("null parameter unexpectedly materialized");
+            serializer.endTag(null, "suspend-params");
+            serializer.endTag(null, "pkg"); serializer.endTag(null, "package-restrictions");
+            serializer.endDocument();
+        }
         var state = lease.getUserStateReplica(name, false, 10, true);
         if (lease.getUserStateReplica(name, false, 10, true) != state) throw new AssertionError("replica identity differs");
         com.android.server.pm.pkg.PackageUserStateInternal internal = state;
@@ -616,7 +657,7 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
-        byte[] userState, user10, user11;
+        byte[] userState, user10, user11, user12, user13;
         int userReads;
         boolean signingTail;
         byte[] signingOverride;
@@ -639,15 +680,18 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
+        private byte[] userBytes(int userId) {
+            return switch (userId) { case 0 -> userState; case 10 -> user10; case 11 -> user11; case 12 -> user12; case 13 -> user13; default -> null; };
+        }
         @Override public int getUserStateLength(String candidate, boolean disabled, int userId) {
-            return !disabled && name.equals(candidate) && (userId == 0 || userId == 10 || userId == 11)
-                ? (userId == 0 ? userState : userId == 10 ? user10 : user11).length : -1;
+            return !disabled && name.equals(candidate) && (userId == 0 || (userId >= 10 && userId <= 13))
+                ? userBytes(userId).length : -1;
         }
         @Override public byte[] getUserStateChunk(String candidate, boolean disabled, int userId, int offset, int length)
                 throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
             userReads++;
-            byte[] state = userId == 0 ? userState : userId == 10 ? user10 : user11;
+            byte[] state = userBytes(userId);
             int end = Math.min(state.length, offset + length) - (shortChunk ? 1 : 0);
             return java.util.Arrays.copyOfRange(state, offset, end);
         }

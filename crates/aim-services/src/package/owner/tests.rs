@@ -46,7 +46,7 @@ fn enabled_write_preserves_typed_suspension_and_text_cdata_meaning() {
         .unwrap()[0]
         .clone();
     assert_eq!(
-        suspension.app_extras,
+        suspension.params.as_ref().unwrap().app_extras,
         Some(Bundle {
             entries: vec![
                 (

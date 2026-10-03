@@ -72,14 +72,14 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 373
-units pass (3.13s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 375
+units pass (3.14s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 26.48s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.94s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -98,9 +98,16 @@ Suspension maps distinguish null from allocated-empty owners (#847), and
 cross-user owner keys/last duplicate/quarantine aggregation use the supplied
 pinned policy. Native owner updates refresh existing disabled-user aliases.
 Live overlay/component producers, original-state import and full PackageState
-metadata/callback wiring remain #836. Explicit null runtime SuspendParams
-values remain unsupported (#848), and archive XML descendant/component
-validation remains #849. Native PMS activation and its acceptance gates remain
+metadata/callback wiring remain #836. Native suspension records now distinguish
+explicit null parameter values from missing keys/maps (#848); runtime put/remove
+retains allocation and freezes absolute UserPackage keys independently of XML
+read policy. Native and Java quarantine evaluation follow signed UserPackage
+hash order, preserving original null-parameter failure and true-value short
+circuit behavior. ART verifies null map entries under both read policies and
+original removal behavior. A port of the original null-parameter writer loop
+emits the named empty XML tag; native reread creates the original-defined default
+parameter object. Full native suspension persistence/notifications remain #706;
+archive XML descendant/component validation remains #849. Native PMS activation and its acceptance gates remain
 unestablished. Component ownership
 now distinguishes original default null sets from Settings-initialized empty
 sets (#845), including missing-file initialization and third-party new settings.
