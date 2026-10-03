@@ -31,6 +31,7 @@ mod package_list;
 pub mod permission_gids;
 mod removal;
 pub mod resources;
+pub mod seinfo;
 pub mod shared_users;
 mod signing;
 pub mod update_ownership;

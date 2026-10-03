@@ -207,6 +207,18 @@ public final class PackageRoundTripOracle {
                 || setting.getPkgState().getLatestForegroundPackageUseTimeInMills() != usage.getLatestForegroundPackageUseTimeInMills()) {
             throw new AssertionError("original usage getters differ");
         }
+        var securitySetting = new com.android.server.pm.PackageSetting(name, null,
+                new java.io.File("/data/app/fixture"), 1, 8, new java.util.UUID(1, 3));
+        boolean readPolicy = com.android.server.pm.SELinuxMMAC.readInstallPolicy();
+        String expectedRead = new String(java.nio.file.Files.readAllBytes(
+                new java.io.File(file.getPath() + ".seinfo-read").toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        if (!Boolean.toString(readPolicy).equals(expectedRead)) {
+            throw new AssertionError("original/native policy load differs: original " + readPolicy + " native " + expectedRead);
+        }
+        String seinfo = com.android.server.pm.SELinuxMMAC.getSeInfo(
+                (com.android.server.pm.pkg.PackageState)(Object)securitySetting, pkg, true, 36);
+        String nativeSeinfo = new String(java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".seinfo").toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        if (!seinfo.equals(nativeSeinfo)) throw new AssertionError("native/original seinfo differs: " + nativeSeinfo + " vs " + seinfo);
         setting.getPkgState().setLastPackageUsageTimeInMills(0, 99);
         try { dev.aim.server.PackageObjects.restoreUsage(setting, usage, 2);
             throw new AssertionError("wrong usage version restored"); }

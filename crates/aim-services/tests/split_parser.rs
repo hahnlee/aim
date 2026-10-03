@@ -1625,7 +1625,8 @@ fn java_oracles_link_against_original_image() {
         .arg(&stubs)
         .args(common::java::sources(
             &aim_paths::root().join("java/device-services/stubs"),
-        )));
+        ))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java")));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)

@@ -30,7 +30,8 @@ fn native_package_parcels_match_original_read_write() {
         .arg(&stubs)
         .args(sources(
             &aim_paths::root().join("java/device-services/stubs"),
-        )));
+        ))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java")));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
@@ -191,6 +192,31 @@ fn native_package_parcels_match_original_read_write() {
         let mut parcel = aim_binder_host::parcel::Parcel::new();
         aim_service_aidl::WriteParcelable::write_to(&usage, &mut parcel);
         fs::write(directory.join(format!("{name}.usage")), parcel.data()).unwrap();
+        let (policy, policy_read) = match aim_services::package::owner::seinfo::Policy::load(
+            &aim_paths::original_image(),
+        ) {
+            Ok(policy) => (policy, true),
+            Err(error) => {
+                assert_eq!(error, "duplicate mac-permissions policy");
+                (
+                    aim_services::package::owner::seinfo::Policy::unread(),
+                    false,
+                )
+            }
+        };
+        fs::write(
+            directory.join(format!("{name}.seinfo-read")),
+            if policy_read { "true" } else { "false" },
+        )
+        .unwrap();
+        let label = policy.label(
+            &pkg.package_name,
+            aim_services::package::owner::seinfo::Signing::Known(&loaded.collected_signing),
+            true,
+            36,
+            aim_services::package::owner::seinfo::Partition::System,
+        );
+        fs::write(directory.join(format!("{name}.seinfo")), label).unwrap();
         let mut metadata = Vec::new();
         match facade.past_signing_certificates {
             None => metadata.extend_from_slice(&(-1_i32).to_be_bytes()),

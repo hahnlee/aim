@@ -295,6 +295,26 @@ AbstractStatsBase inheritance, also checked by the production build. These are
 separate native-driver and original-Java tests; the bootstrap has not exported
 the endpoint into SystemServer, and full PackageState replicas, live
 notifyPackageUse and persistence scheduling remain #836/#798.
+The native seInfo policy owner now reads the original platform and optional
+system_ext/product/vendor/odm MAC permission files, validates signer stanzas and
+matches current or rotated collected certificates with package-specific rules
+before global rules. Label composition preserves privilege/target SDK/partition
+suffixes and partition precedence. Compatibility decisions and a nonempty
+shared UID's boot-fixed target SDK are explicit caller inputs, not inferred
+from missing metadata. The short-array ordering follows the pinned Java
+TimSort comparison sequence: duplicate detection occurs on compared pairs,
+matching the original rather than rejecting every repeated selector pair.
+The pinned image has seven rules and loads successfully, including its repeated
+platform/vendor global selector. Policy sets with 32 or more rules explicitly
+fail until the merging path is implemented (#838); no partial policy is
+published. All 351 units pass (3.07s). The 572-parcel original-runtime oracle
+passes (19.59s), comparing policy load success and assignments for actual
+native-collected framework/GSF objects with original SELinuxMMAC. Oracle classes
+link against the original image (2.94s); device-services remains fresh. The
+original utility's static-only compile declaration is fixture-local, and every
+actual fixture reference is checked against the image before boot. This policy
+has not yet populated the native scan/Java PackageState graph; compatibility,
+shared UID SDK ownership, larger-policy sorting and publication remain #838/#836.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest
