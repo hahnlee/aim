@@ -33,6 +33,7 @@ pub use merge::MergeRule;
 mod jar;
 mod serialize;
 pub(crate) use serialize::canonical_public_keys;
+pub use serialize::decode_public_key as deserialize_public_key;
 pub use serialize::public_keys as serialize_public_keys;
 #[cfg(test)]
 mod tests;

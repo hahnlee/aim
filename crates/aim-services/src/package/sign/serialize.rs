@@ -7,6 +7,8 @@
 use super::asn1::{self, BIT_STRING, INTEGER, OID, Reader, SEQUENCE};
 use crate::package::pkg::Serialized;
 use std::collections::BTreeMap;
+mod decode;
+pub use decode::public_key as decode_public_key;
 
 struct Class {
     name: &'static str,

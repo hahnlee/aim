@@ -108,6 +108,48 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         new_domain_id,
     };
     let image = Image::load(&apks, &[]).unwrap();
+    // Exercise a declared-key DTO independently of the unchanged APKs. Native
+    // manifest parsing is tested separately; this covers scan decoder wiring.
+    let mut declared = Image {
+        packages: image.packages.clone(),
+        rejected: Vec::new(),
+    };
+    let code = &mut declared.packages[1];
+    let keys =
+        aim_services::package::sign::serialize_public_keys(&code.signing.public_keys).unwrap();
+    code.parsed.key_set_mapping = Some(vec![(
+        Some("next".into()),
+        Some(keys.into_iter().map(Some).collect()),
+    )]);
+    code.parsed.upgrade_key_sets = vec!["next".into()];
+    let mut corrupt = Image {
+        packages: declared.packages.clone(),
+        rejected: Vec::new(),
+    };
+    corrupt.packages[1].parsed.key_set_mapping.as_mut().unwrap()[0]
+        .1
+        .as_mut()
+        .unwrap()[0]
+        .as_mut()
+        .unwrap()
+        .bytes
+        .push(0);
+    let declared =
+        SystemImageScan::first_boot(declared, &apks, &config, inputs(&domain_ids)).unwrap();
+    let keydata = &declared.packages[1].candidate.record.settings.key_set_data;
+    assert_eq!(
+        keydata.defined_key_sets,
+        [("next".into(), keydata.proper_signing_key_set)]
+    );
+    assert_eq!(keydata.upgrade_key_sets, [keydata.proper_signing_key_set]);
+    let failure = SystemImageScan::first_boot(corrupt, &apks, &config, inputs(&domain_ids))
+        .err()
+        .unwrap();
+    let SigningError::Fatal(failure) = failure else {
+        panic!("expected fatal keyset error")
+    };
+    assert_eq!(failure.phase, "keysets");
+    assert!(failure.message.contains("noncanonical"));
     let source_times: Vec<_> = image
         .packages
         .iter()

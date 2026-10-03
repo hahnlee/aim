@@ -165,21 +165,35 @@ impl SigningScan {
                 message,
             })
         };
-        if record
+        let defined = record
             .parsed
             .key_set_mapping
             .as_ref()
-            .is_some_and(|mapping| !mapping.is_empty())
-        {
-            return Err(fail(
-                "defined manifest keysets require their native parser/decoder (#824)".into(),
-            ));
-        }
+            .map(|mapping| {
+                mapping
+                    .iter()
+                    .map(|(alias, keys)| {
+                        let alias = alias.clone().ok_or("null defined keyset alias")?;
+                        let keys = keys.as_ref().ok_or("null defined public-key set")?;
+                        let keys = keys
+                            .iter()
+                            .map(|key| {
+                                crate::package::sign::deserialize_public_key(
+                                    key.as_ref().ok_or("null defined public key")?,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        Ok((alias, keys))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .transpose()
+            .map_err(fail)?;
         crate::package::owner::key_sets::register(
             &mut self.settings,
             &record.settings.name,
             &record.signing.public_keys,
-            record.parsed.key_set_mapping.as_ref().map(|_| &[][..]),
+            defined.as_deref(),
             &record.parsed.upgrade_key_sets,
         )
         .map_err(fail)?;

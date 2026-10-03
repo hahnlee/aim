@@ -359,7 +359,13 @@ test retires a singly-owned signing set, registers the same verified public keys
 under a new monotonic ID, writes ABX, then verifies original PMS preserves every
 package keyset and the complete global key/set/counter table. Package identities,
 signatures and shared UIDs remain intact; Settings launches and owned processes/
-mounts are cleaned. Manifest keyset parsing/decoding remains #824. Separate ART-service
+mounts are cleaned. Declared-key Parcel DTOs now decode the pinned Conscrypt
+RSA/EC and Bouncy Castle DSA serialization schemas to canonical SPKI before scan
+registration. Exact descriptors/handles, integer fields and end markers are
+validated; null names/keys, truncation, foreign schemas and trailing data reject
+before owner mutation. The original-runtime public-key oracle (14.82s) verifies
+native decoding of original RSA-1024/2048, EC-256/384/521 and DSA-1024 streams
+against their SPKI bytes. XML manifest keyset parsing remains #824. Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,
@@ -393,12 +399,13 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 312 units pass (3.07s); the subsequent counter-regression persistence test
-also passes. The original signed framework/GSF fixture passes
-(43.58s), including saved-image iteration, duplicate rejection, integrated source
+All 313 units pass (3.10s); the subsequent decoder validation test also passes. The original signed framework/GSF fixture passes
+(42.42s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
 fallback, the pre-data missing-system input gate, owner failures and preserved
-earlier effects and scanned signing-key registration. The full saved-system/data
+earlier effects and scanned signing-key registration. A separate declared-key
+DTO fixture exercises decoder-to-alias/upgrade registration and fatal rejection
+of a damaged key stream, without changing the original APKs. The full saved-system/data
 comparison passed (388.29s), including exact per-package keyset IDs and the
 entire restored public-key/set/counter table against original PMS. Fresh scans
 also verify registered public keys against each APK signer. Ex-system demotion

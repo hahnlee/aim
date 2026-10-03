@@ -132,6 +132,16 @@ fn public_keys_match_and_deserialize_on_the_original_runtime() {
         let key = serialize_public_keys(&[spki.clone()]).unwrap().remove(0);
         assert_eq!(key.class, fields[1]);
         assert_eq!(key.bytes, unhex(fields[3]), "{}", fields[0]);
+        let original = aim_services::package::pkg::Serialized {
+            class: fields[1].into(),
+            bytes: unhex(fields[3]),
+        };
+        assert_eq!(
+            sign::deserialize_public_key(&original).unwrap(),
+            spki,
+            "decode original {} stream",
+            fields[0]
+        );
         fs::write(guest.join(format!("{}.native", fields[0])), &key.bytes).unwrap();
         ordered.push((fields[2].parse::<i32>().unwrap(), key));
         keys.push(spki);
