@@ -62,6 +62,10 @@ fn native_package_parcels_match_original_read_write() {
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
         )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/CapturedPackageSetting.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()
@@ -292,6 +296,31 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.setting")), setting_bytes).unwrap();
+        for (suffix, paths) in [("null", None), ("empty", Some(vec![]))] {
+            let mut changed = snapshot.owner().clone();
+            changed
+                .settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == pkg.package_name)
+                .unwrap()
+                .old_paths = paths;
+            let changed =
+                aim_services::package::scan_snapshot::Store::new(changed, snapshot.usage().clone())
+                    .unwrap()
+                    .capture();
+            fs::write(
+                directory.join(format!("{name}.setting-{suffix}")),
+                aim_services::package::scan_snapshot::setting_record::captured(
+                    &changed,
+                    &pkg.package_name,
+                    false,
+                )
+                .unwrap()
+                .unwrap(),
+            )
+            .unwrap();
+        }
 
         fs::write(
             directory.join(format!("{name}.loading-native")),
@@ -524,6 +553,30 @@ fn native_package_parcels_match_original_read_write() {
                     .unwrap()
                     .unwrap()
                     .bytes(),
+            )
+            .unwrap();
+        }
+        scan.assign_seinfo_at_boot(
+            &aim_services::package::owner::seinfo::Policy::unread(),
+            &mut |_| Ok(36),
+        )
+        .unwrap();
+        let usage = aim_services::package::owner::usage::Usage::new(
+            scan.settings.packages.iter().map(|p| p.name.as_str()),
+        );
+        let snapshot = aim_services::package::scan_snapshot::Store::new(scan, usage)
+            .unwrap()
+            .capture();
+        for package in &state.settings.disabled_system_packages {
+            fs::write(
+                input.join(format!("factory-{}.setting", package.name)),
+                aim_services::package::scan_snapshot::setting_record::captured(
+                    &snapshot,
+                    &package.name,
+                    true,
+                )
+                .unwrap()
+                .unwrap(),
             )
             .unwrap();
         }

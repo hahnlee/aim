@@ -52,6 +52,18 @@ public final class LegacyRestoreOracle {
         compareBytes(root, stem, owner.getAppId(), owner.getLegacyPermissionState());
         boolean expected = Boolean.parseBoolean(new String(Files.readAllBytes(new File(root, stem + ".fixed").toPath()), java.nio.charset.StandardCharsets.UTF_8));
         if (expected != owner.isInstallPermissionsFixed()) throw new AssertionError("install permissions fixed differs: " + stem);
+        if (stem.startsWith("factory-")) {
+            byte[] bytes = Files.readAllBytes(new File(root, stem + ".setting").toPath());
+            var in = android.os.Parcel.obtain();
+            try {
+                in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+                var data = dev.aim.server.PackageSettingData.read(in);
+                var replica = CapturedPackageSetting.from(data, 1, true);
+                if (in.dataAvail() != 0 || !replica.getDomainSetId().equals(com.android.server.pm.verify.domain.DomainVerificationManagerInternal.DISABLED_ID)
+                        || replica.getAppId() != owner.getAppId() || !replica.hasSharedUser() || replica.isInstallPermissionsFixed()) throw new AssertionError("factory original metadata owner differs");
+                compareBytes(root, stem, replica.getAppId(), replica.getLegacyPermissionState());
+            } finally { in.recycle(); }
+        }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {
         byte[] expected = Files.readAllBytes(new File(root, stem + ".input").toPath());

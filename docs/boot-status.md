@@ -552,7 +552,24 @@ invalid and unresolved transport markers (19.25s with the complete package
 oracle); the real native Binder-driver capture test retains its old true value
 across changed publication. Units pass 389 (3.16s; one ignored/not run), all
 integration targets compile and device-services original API build passes
-(18.7s). Original-state import,
+(18.7s).
+A production CapturedPackageSetting constructor now assembles the captured
+metadata into detached original concrete PackageSetting owners: identity/flags,
+raw ABIs, times/version, update/query/restore bits, loading, domain/metadata,
+install source/signing, keysets, SDK/static arrays, nullable MIME groups, retained
+paths and migration permissions/fixed bits. Missing active domain or permission
+ownership, wrong version/scope and setter values that cannot reproduce the
+capture reject. Factory disk inputs use original DISABLED_ID when their metadata
+has no domain UUID. Null and allocated-empty path sets stay distinct. The pinned
+image removes setKeySetData, so construction populates its original keyset
+object with the already validated pinned methods. Original ART compares concrete
+getters, independent mutable replicas, active/factory metadata, legacy
+permissions, null/empty paths and version/scope/unresolved rejection (18.72s
+with the complete package oracle); full original Java oracle linkage passes
+(3.72s), and device-services builds against original APIs (13.6s). This assembles
+metadata inputs, not a complete facade: code, per-user state, transient/library
+owners and the current leaving-shared-UID bit (#861) are not assembled by this
+constructor. Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

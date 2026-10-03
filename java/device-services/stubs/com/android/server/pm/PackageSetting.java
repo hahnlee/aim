@@ -1,6 +1,28 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
+    public String getRealName() { throw new RuntimeException("stub"); }
+    public String getSecondaryCpuAbiLegacy() { throw new RuntimeException("stub"); }
+    public String getAppMetadataFilePath() { throw new RuntimeException("stub"); }
+    public int getAppMetadataSource() { throw new RuntimeException("stub"); }
+    public int getBaseRevisionCode() { throw new RuntimeException("stub"); }
+
+    public PackageSetting setLastModifiedTime(long value) { throw new RuntimeException("stub"); }
+    public PackageSetting setLastUpdateTime(long value) { throw new RuntimeException("stub"); }
+    public PackageSetting setLongVersionCode(long value) { throw new RuntimeException("stub"); }
+    public PackageSetting setTargetSdkVersion(int value) { throw new RuntimeException("stub"); }
+    public PackageSetting setRestrictUpdateHash(byte[] value) { throw new RuntimeException("stub"); }
+    public PackageSetting setVolumeUuid(String value) { throw new RuntimeException("stub"); }
+    public PackageSetting setCategoryOverride(int value) { throw new RuntimeException("stub"); }
+    public PackageSetting setUpdateAvailable(boolean value) { throw new RuntimeException("stub"); }
+    public PackageSetting setForceQueryableOverride(boolean value) { throw new RuntimeException("stub"); }
+    public PackageSetting setPendingRestore(boolean value) { throw new RuntimeException("stub"); }
+    public PackageSetting setDebuggable(boolean value) { throw new RuntimeException("stub"); }
+    public PackageSetting setScannedAsStoppedSystemApp(boolean value) { throw new RuntimeException("stub"); }
+    public PackageSetting setBaseRevisionCode(int value) { throw new RuntimeException("stub"); }
+    public PackageSetting setAppMetadataFilePath(String value) { throw new RuntimeException("stub"); }
+    public PackageSetting setAppMetadataSource(int value) { throw new RuntimeException("stub"); }
+
     public boolean isInstallPermissionsFixed() { throw new RuntimeException("stub"); }
     public PackageSetting setInstallPermissionsFixed(boolean fixed) { throw new RuntimeException("stub"); }
     public String getPackageName() { throw new RuntimeException("stub"); }

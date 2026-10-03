@@ -336,6 +336,7 @@ public final class PackageRoundTripOracle {
             var unresolved = dev.aim.server.PackageSettingData.read(unresolvedParcel);
             if (unresolved.hasLegacyPermissionState() || unresolvedParcel.dataAvail() != 0) throw new AssertionError("unresolved legacy marker lost");
             if (unresolved.hasInstallPermissionsFixed()) throw new AssertionError("unresolved fixed marker lost");
+            try { com.android.server.pm.CapturedPackageSetting.from(unresolved, 1, false); throw new AssertionError("unresolved setting became a replica"); } catch (IllegalStateException expected) {}
             try { unresolved.isInstallPermissionsFixed(); throw new AssertionError("unresolved fixed became false"); } catch (IllegalStateException expected) {}
             try { unresolved.getLegacyPermissionState(); throw new AssertionError("unresolved legacy became empty state"); } catch (IllegalStateException expected) {}
         } finally { unresolvedParcel.recycle(); }
@@ -351,13 +352,49 @@ public final class PackageRoundTripOracle {
         if (metadata.getRestrictUpdateHash()[0] != 1) throw new AssertionError("mutable setting hash escaped capture");
         try { metadata.getOldPaths().clear(); throw new AssertionError("mutable old paths capture"); } catch (UnsupportedOperationException expected) {}
         if (lease.getSetting("missing", false) != null || lease.getSetting(name, true) != null) throw new AssertionError("unknown/factory setting mismatch");
-        var restoredSetting = new com.android.server.pm.PackageSetting(name, null, new java.io.File(metadata.path), metadata.flags, metadata.privateFlags, new java.util.UUID(1, 1));
-        restoredSetting.setUsesSdkLibraries(metadata.getUsesSdkLibraries());
-        restoredSetting.setUsesSdkLibrariesVersionsMajor(metadata.getUsesSdkLibrariesVersionsMajor());
-        restoredSetting.setUsesSdkLibrariesOptional(metadata.getUsesSdkLibrariesOptional());
-        restoredSetting.setUsesStaticLibraries(metadata.getUsesStaticLibraries());
-        restoredSetting.setUsesStaticLibrariesVersions(metadata.getUsesStaticLibrariesVersions());
-        for (var group : metadata.getMimeGroups().entrySet()) restoredSetting.addMimeTypes(group.getKey(), group.getValue());
+        var restoredSetting = com.android.server.pm.CapturedPackageSetting.from(metadata, 1, false);
+        var originalState = (com.android.server.pm.pkg.PackageState) restoredSetting;
+        if (!java.util.Objects.equals(restoredSetting.getRealName(), metadata.realName)
+                || !originalState.getPath().equals(new java.io.File(metadata.path))
+                || restoredSetting.getFlags() != metadata.flags || restoredSetting.getPrivateFlags() != metadata.privateFlags
+                || restoredSetting.getAppId() != metadata.appId || restoredSetting.hasSharedUser() != metadata.sharedUser
+                || !java.util.Objects.equals(restoredSetting.getPrimaryCpuAbiLegacy(), metadata.primaryCpuAbiRaw)
+                || !java.util.Objects.equals(restoredSetting.getSecondaryCpuAbiLegacy(), metadata.secondaryCpuAbiRaw)
+                || !java.util.Objects.equals(restoredSetting.getCpuAbiOverride(), metadata.cpuAbiOverride)
+                || originalState.getLastModifiedTime() != metadata.lastModifiedTime
+                || originalState.getLastUpdateTime() != metadata.lastUpdateTime || originalState.getVersionCode() != metadata.versionCode
+                || originalState.getTargetSdkVersion() != metadata.targetSdkVersion
+                || originalState.getCategoryOverride() != metadata.categoryOverride
+                || !java.util.Objects.equals(originalState.getVolumeUuid(), metadata.volumeUuid)
+                || originalState.isUpdateAvailable() != metadata.updateAvailable
+                || originalState.isForceQueryableOverride() != metadata.forceQueryable
+                || originalState.isPendingRestore() != metadata.pendingRestore || originalState.isDebuggable() != metadata.debuggable
+                || originalState.isScannedAsStoppedSystemApp() != metadata.scannedAsStoppedSystemApp
+                || restoredSetting.getBaseRevisionCode() != metadata.baseRevisionCode
+                || !java.util.Objects.equals(restoredSetting.getAppMetadataFilePath(), metadata.appMetadataFilePath)
+                || restoredSetting.getAppMetadataSource() != metadata.appMetadataSource
+                || !restoredSetting.getDomainSetId().equals(java.util.UUID.fromString(metadata.domainSetId))
+                || !java.util.Arrays.equals(originalState.getRestrictUpdateHash(), metadata.getRestrictUpdateHash())
+                || !restoredSetting.getOldPaths().equals(new java.util.LinkedHashSet<>(metadata.getOldPaths().stream().map(p -> p == null ? null : new java.io.File(p)).collect(java.util.stream.Collectors.toList())))) throw new AssertionError("original concrete metadata owner differs");
+        var detachedSetting = com.android.server.pm.CapturedPackageSetting.from(metadata, 1, false);
+        restoredSetting.getOldPaths().clear();
+        restoredSetting.getLegacyPermissionState().reset();
+        originalState.getRestrictUpdateHash()[0] = 99;
+        if (detachedSetting.getOldPaths().size() != 3 || ((com.android.server.pm.pkg.PackageState)detachedSetting).getRestrictUpdateHash()[0] != 1
+                || detachedSetting.getLegacyPermissionState().isMissing(10) != populatedLegacy) throw new AssertionError("original concrete replicas share mutable state");
+        for (String suffix : new String[] {"null", "empty"}) {
+            byte[] pathBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".setting-" + suffix).toPath());
+            var in = android.os.Parcel.obtain();
+            try {
+                in.unmarshall(pathBytes, 0, pathBytes.length); in.setDataPosition(0);
+                var input = dev.aim.server.PackageSettingData.read(in);
+                var replica = com.android.server.pm.CapturedPackageSetting.from(input, 1, false);
+                if (in.dataAvail() != 0 || ("null".equals(suffix) ? replica.getOldPaths() != null : replica.getOldPaths() == null || !replica.getOldPaths().isEmpty())) throw new AssertionError("old path allocation lost");
+            } finally { in.recycle(); }
+        }
+        try { com.android.server.pm.CapturedPackageSetting.from(metadata, 2, false); throw new AssertionError("foreign version accepted"); } catch (IllegalArgumentException expected) {}
+        try { com.android.server.pm.CapturedPackageSetting.from(metadata, 1, true); throw new AssertionError("foreign scope accepted"); } catch (IllegalArgumentException expected) {}
+
         if (!java.util.Arrays.equals(restoredSetting.getUsesSdkLibraries(), metadata.getUsesSdkLibraries())
                 || !java.util.Arrays.equals(restoredSetting.getUsesSdkLibrariesVersionsMajor(), metadata.getUsesSdkLibrariesVersionsMajor())
                 || !java.util.Arrays.equals(restoredSetting.getUsesSdkLibrariesOptional(), metadata.getUsesSdkLibrariesOptional())
