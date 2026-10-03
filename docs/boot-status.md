@@ -55,6 +55,17 @@ reached `sys.boot_completed=1`: Settings read as disabled (`enabled=2`),
 then after a native reset to default, Settings launched successfully
 (`am start -W`, 85 ms). This checks file compatibility; the native
 PackageManager service and SystemServer facade are not activated. The
+native restrictions reader now retains each suspension's owner, original
+dialog fields and quarantine flag, including the legacy suspension format;
+app and launcher extras remain owned XML awaiting PersistableBundle decoding
+(#706). User ownership is resolved only with an explicit cross-user image
+policy, before duplicate replacement and quarantine aggregation. A disposable
+original-PMS oracle (2026-10-03, 20.90s) verifies all 66 text/ABX dialog
+restore/save cases against the original SuspendDialogInfo, including malformed
+attributes, invalid resources, resource/text precedence and partial builder
+validation. All 363 units pass (3.18s; the ignored integration test was not run).
+This does not establish native suspension operations or native PMS activation.
+The
 C branch also has Binder query receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
 shared snapshot publication (192 package unit tests pass). These are not

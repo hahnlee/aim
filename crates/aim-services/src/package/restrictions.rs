@@ -6,9 +6,11 @@
 //! `Settings.readPackageRestrictionsLPr` reads it
 //! (`writePackageRestrictions` writes it).
 //!
-//! Not modelled yet (#706): a suspension's parameters (dialog, extras)
-//! beyond who suspended the package, preferred and persistent preferred
+//! Not decoded yet (#706): a suspension's PersistableBundle extras;
+//! preferred and persistent preferred
 //! activities and cross-profile intent filters.
+
+pub mod dialog;
 
 use aim_android_xml::Element;
 
@@ -35,9 +37,9 @@ pub struct UserState {
     pub not_launched: bool,
     pub hidden: bool,
     pub distraction_flags: i32,
-    /// Who suspended the package: package and user (`None`: the user's
-    /// own, or the platform's for a legacy `suspended` attribute).
-    pub suspended_by: Vec<(String, Option<i32>)>,
+    /// Suspension owners in file order. User IDs remain unresolved until
+    /// the reader has the image's cross-user suspension policy.
+    pub suspensions: Vec<Suspension>,
     pub instant_app: bool,
     pub virtual_preload: bool,
     /// `COMPONENT_ENABLED_STATE_*`.
@@ -73,7 +75,7 @@ impl Default for UserState {
             not_launched: false,
             hidden: false,
             distraction_flags: 0,
-            suspended_by: Vec::new(),
+            suspensions: Vec::new(),
             instant_app: false,
             virtual_preload: false,
             enabled: COMPONENT_ENABLED_STATE_DEFAULT,
@@ -89,6 +91,59 @@ impl Default for UserState {
             archive_state: None,
             domain_verification_status: 0,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suspension {
+    pub package: String,
+    pub user: SuspendingUser,
+    pub dialog: Option<dialog::DialogInfo>,
+    pub quarantined: bool,
+    /// Lossless owned XML until the PersistableBundle decoder is complete (#706).
+    pub app_extras: Option<Element>,
+    pub launcher_extras: Option<Element>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SuspendingUser {
+    /// Legacy `suspended`: always the package's user, including platform suspensions.
+    Current,
+    /// `suspend-params`: interpret with `crossUserSuspensionEnabledRo`.
+    Persisted(Option<i32>),
+}
+
+impl UserState {
+    /// `Settings.readSuspensionParamsLPr` and ArrayMap.put: resolve user
+    /// ownership with the image policy, then let the last duplicate win.
+    pub fn resolved_suspensions(&self, user: i32, cross_user: bool) -> Vec<(i32, &Suspension)> {
+        let mut resolved: Vec<(i32, &Suspension)> = Vec::new();
+        for suspension in &self.suspensions {
+            let owner = match suspension.user {
+                SuspendingUser::Current => user,
+                SuspendingUser::Persisted(_) if !cross_user => user,
+                SuspendingUser::Persisted(Some(id)) if id != -10000 => id,
+                SuspendingUser::Persisted(_) => match suspension.package.as_str() {
+                    "root" | "com.android.shell" | "android" => 0,
+                    _ => user,
+                },
+            };
+            if let Some(entry) = resolved
+                .iter_mut()
+                .find(|(id, s)| *id == owner && s.package == suspension.package)
+            {
+                *entry = (owner, suspension);
+            } else {
+                resolved.push((owner, suspension));
+            }
+        }
+        resolved
+    }
+
+    pub fn is_quarantined(&self, user: i32, cross_user: bool) -> bool {
+        self.resolved_suspensions(user, cross_user)
+            .iter()
+            .any(|(_, s)| s.quarantined)
     }
 }
 
@@ -170,22 +225,65 @@ fn user_state(e: &Element) -> Result<UserState, String> {
         domain_verification_status: e.int("domainVerificationStatus")?.unwrap_or(0),
         ..UserState::default()
     };
+    let mut legacy_dialog = None;
+    let mut legacy_app_extras = None;
+    let mut legacy_launcher_extras = None;
     for child in e.children() {
         match child.name.as_str() {
             "enabled-components" => s.enabled_components = components(child),
             "disabled-components" => s.disabled_components = components(child),
             "suspend-params" => {
                 if let Some(by) = string(child, "suspending-package") {
-                    s.suspended_by.push((by, child.int("suspending-user")?));
+                    let mut suspension = Suspension {
+                        package: by,
+                        user: SuspendingUser::Persisted(
+                            child.int("suspending-user").ok().flatten(),
+                        ),
+                        dialog: None,
+                        quarantined: child.bool("quarantined").ok().flatten().unwrap_or(false),
+                        app_extras: None,
+                        launcher_extras: None,
+                    };
+                    for parameter in child.children() {
+                        match parameter.name.as_str() {
+                            "dialog-info" => {
+                                suspension.dialog = Some(dialog::DialogInfo::restore(parameter))
+                            }
+                            "app-extras" => suspension.app_extras = Some(parameter.clone()),
+                            "launcher-extras" => {
+                                suspension.launcher_extras = Some(parameter.clone())
+                            }
+                            _ => {}
+                        }
+                    }
+                    s.suspensions.push(suspension);
                 }
             }
+            "suspended-dialog-info" => legacy_dialog = Some(dialog::DialogInfo::restore(child)),
+            "suspended-app-extras" => legacy_app_extras = Some(child.clone()),
+            "suspended-launcher-extras" => legacy_launcher_extras = Some(child.clone()),
             "archive-state" => s.archive_state = archive_state(child)?,
             _ => {}
         }
     }
-    if suspended && s.suspended_by.is_empty() {
+    if suspended && s.suspensions.is_empty() {
         let by = string(e, "suspending-package").unwrap_or_else(|| "android".into());
-        s.suspended_by.push((by, None));
+        if legacy_dialog.is_none() {
+            legacy_dialog = string(e, "suspend_dialog_message")
+                .filter(|m| !m.is_empty())
+                .map(|message| dialog::DialogInfo {
+                    message: Some(message),
+                    ..dialog::DialogInfo::default()
+                });
+        }
+        s.suspensions.push(Suspension {
+            package: by,
+            user: SuspendingUser::Current,
+            dialog: legacy_dialog,
+            quarantined: false,
+            app_extras: legacy_app_extras,
+            launcher_extras: legacy_launcher_extras,
+        });
     }
     Ok(s)
 }
@@ -222,4 +320,103 @@ fn archive_state(e: &Element) -> Result<Option<ArchiveState>, String> {
             archive_time,
             activities,
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(xml: &[u8]) -> UserState {
+        user_state(&aim_android_xml::read(xml).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn suspension_parameters_survive_read_and_contextual_duplicate_resolution() {
+        let s = state(
+            br#"<pkg>
+            <suspend-params suspending-package='android' quarantined='true'>
+                <dialog-info title='first'/>
+                <app-extras><string name='message'>kept</string></app-extras>
+            </suspend-params>
+            <suspend-params suspending-package='android' suspending-user='10' quarantined='false'>
+                <dialog-info title='last'/>
+                <launcher-extras><int name='count' value='3'/></launcher-extras>
+            </suspend-params>
+            <suspend-params><dialog-info title='no owner'/></suspend-params>
+        </pkg>"#,
+        );
+        assert_eq!(s.suspensions.len(), 2);
+        assert!(s.suspensions[0].app_extras.is_some());
+        assert!(s.suspensions[1].launcher_extras.is_some());
+        assert_eq!(
+            s.resolved_suspensions(10, true)
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [0, 10]
+        );
+        assert!(s.is_quarantined(10, true));
+        let resolved = s.resolved_suspensions(10, false);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].1.dialog.as_ref().unwrap().title.as_deref(),
+            Some("last")
+        );
+        assert!(!s.is_quarantined(10, false));
+    }
+
+    #[test]
+    fn legacy_suspension_uses_current_user_and_explicit_dialog_precedes_message() {
+        let s = state(
+            br#"<pkg suspended='true' suspend_dialog_message='fallback'>
+            <suspended-dialog-info title='legacy'/>
+            <suspended-app-extras><string name='old'>kept</string></suspended-app-extras>
+        </pkg>"#,
+        );
+        let resolved = s.resolved_suspensions(10, true);
+        assert_eq!(resolved[0].0, 10);
+        let suspension = resolved[0].1;
+        assert_eq!(suspension.package, "android");
+        assert_eq!(
+            suspension.dialog.as_ref().unwrap().title.as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(suspension.dialog.as_ref().unwrap().message, None);
+        assert!(suspension.app_extras.is_some());
+        assert!(!s.is_quarantined(10, true));
+        let fallback = state(b"<pkg suspended='true' suspend_dialog_message='fallback'/>");
+        assert_eq!(
+            fallback.suspensions[0]
+                .dialog
+                .as_ref()
+                .unwrap()
+                .message
+                .as_deref(),
+            Some("fallback")
+        );
+        assert!(
+            state(b"<pkg suspended='false' suspend_dialog_message='ignored'/>")
+                .suspensions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn malformed_or_sentinel_users_follow_original_default_policy() {
+        let s = state(
+            br#"<pkg>
+            <suspend-params suspending-package='android' suspending-user='bad'/>
+            <suspend-params suspending-package='ordinary' suspending-user='-10000'/>
+            <suspend-params suspending-package='root'/>
+            <suspend-params suspending-package='com.android.shell'/>
+        </pkg>"#,
+        );
+        assert_eq!(
+            s.resolved_suspensions(12, true)
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [0, 12, 0, 0]
+        );
+    }
 }
