@@ -365,7 +365,15 @@ registration. Exact descriptors/handles, integer fields and end markers are
 validated; null names/keys, truncation, foreign schemas and trailing data reject
 before owner mutation. The original-runtime public-key oracle (14.82s) verifies
 native decoding of original RSA-1024/2048, EC-256/384/521 and DSA-1024 streams
-against their SPKI bytes. XML manifest keyset parsing remains #824. Separate ART-service
+against their SPKI bytes. Native XML keyset parsing now applies named-key reuse/
+conflict checks, distinct key/set names, nested-tag rejection, omission of empty
+or invalid sets and retained upgrade definitions. Nullable public-key names and
+Android Base64.DEFAULT skipping/padding are modeled. Defined aliases/public-key
+sets serialize in Java collection order and roundtrip through AndroidPackage.
+A compiled disposable APK fixture (0.95s) verifies the real TypedArray path,
+reused keys, alias/upgrade output, missing first values, name collisions and
+invalid-key omission. Unsupported EC curves fail explicitly. Direct original
+parser comparison and broader key-factory conformance remain #824. Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,
@@ -399,7 +407,8 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 313 units pass (3.10s); the subsequent decoder validation test also passes. The original signed framework/GSF fixture passes
+All 317 units pass (3.08s), including keyset rule, nullable-name, Base64 and
+Parcel roundtrip tests. The original signed framework/GSF fixture passes
 (42.42s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
 fallback, the pre-data missing-system input gate, owner failures and preserved

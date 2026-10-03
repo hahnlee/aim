@@ -230,3 +230,89 @@ fn compiled_split_cluster_merges_and_validates_manifests() {
         Err(Error::Parse(_))
     ));
 }
+
+#[test]
+#[ignore = "requires the pinned image and aapt2; run explicitly"]
+fn compiled_manifest_keysets_parse_and_roundtrip() {
+    use aim_services::package::sign::deserialize_public_key;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    let data = Data::new();
+    let platform = Platform::load(&aim_paths::derived_image(), Default::default()).unwrap();
+    let mut der = vec![
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1, 0x06, 8, 0x2a,
+        0x86, 0x48, 0xce, 0x3d, 3, 1, 7, 3, 0x42, 0,
+    ];
+    let secret = p256::SecretKey::from_slice(&[1; 32]).unwrap();
+    der.extend_from_slice(secret.public_key().to_encoded_point(false).as_bytes());
+    let value = aim_android_xml::Element {
+        name: "key".into(),
+        attrs: vec![(
+            "value".into(),
+            aim_android_xml::Value::BytesBase64(der.clone()),
+        )],
+        content: vec![],
+    }
+    .string("value")
+    .unwrap()
+    .into_owned();
+    let manifest = |body: &str| {
+        format!(
+            r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.example.keys"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/><key-sets>{body}</key-sets><application android:hasCode="false"/></manifest>"#
+        )
+    };
+    let body = format!(
+        r#"<key-set android:name="z"><public-key android:name="one" android:value="{value}"/></key-set><key-set android:name="a"><public-key android:name="one"/></key-set><upgrade-key-set android:name="a"/>"#
+    );
+    let apk = link(&data.0.join("valid"), "base", &manifest(&body));
+    let parsed = parse(&apk, "/data/app/keys/base.apk", 0, &platform).unwrap();
+    let read = AndroidPackage::read_cache_entry(&parsed.to_cache_entry().bytes).unwrap();
+    assert_eq!(read.upgrade_key_sets, ["a"]);
+    let mapping = read.key_set_mapping.unwrap();
+    assert_eq!(
+        mapping
+            .iter()
+            .map(|(name, _)| name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        ["a", "z"]
+    );
+    for (_, keys) in mapping {
+        assert_eq!(
+            deserialize_public_key(keys.unwrap()[0].as_ref().unwrap()).unwrap(),
+            der
+        );
+    }
+    for (name, body) in [
+        (
+            "missing",
+            r#"<key-set android:name="a"><public-key android:name="one"/></key-set>"#.to_owned(),
+        ),
+        (
+            "upgrade",
+            r#"<key-set android:name="a"/><upgrade-key-set android:name="a"/>"#.to_owned(),
+        ),
+        (
+            "collision",
+            format!(
+                r#"<key-set android:name="one"><public-key android:name="one" android:value="{value}"/></key-set>"#
+            ),
+        ),
+    ] {
+        let apk = link(&data.0.join(name), "base", &manifest(&body));
+        assert!(
+            matches!(
+                parse(&apk, "/data/app/keys/base.apk", 0, &platform),
+                Err(Error::Parse(_))
+            ),
+            "{name}"
+        );
+    }
+    let apk = link(
+        &data.0.join("invalid-key"),
+        "base",
+        &manifest(
+            r#"<key-set android:name="a"><public-key android:name="one" android:value="invalid"/></key-set>"#,
+        ),
+    );
+    let parsed = parse(&apk, "/data/app/keys/base.apk", 0, &platform).unwrap();
+    assert!(parsed.key_set_mapping.is_empty());
+}

@@ -173,6 +173,7 @@ pub struct Package {
     pub uses_permissions: Vec<UsesPermission>,
     pub implicit_permissions: ArraySet,
     pub upgrade_key_sets: ArraySet,
+    pub key_set_mapping: ArrayMap<Vec<crate::package::pkg::Serialized>>,
     pub protected_broadcasts: Vec<String>,
     pub activities: Vec<Activity>,
     pub apex_system_services: Vec<ApexSystemService>,
@@ -313,6 +314,7 @@ impl Package {
             uses_permissions: Vec::new(),
             implicit_permissions: ArraySet::default(),
             upgrade_key_sets: ArraySet::default(),
+            key_set_mapping: ArrayMap::default(),
             protected_broadcasts: Vec::new(),
             activities: Vec::new(),
             apex_system_services: Vec::new(),
@@ -560,10 +562,16 @@ impl Package {
         w.set(&self.implicit_permissions);
         w.field("upgradeKeySets");
         w.set(&self.upgrade_key_sets);
-        // The parser refuses a package that defines key sets (their keys
-        // are written Java-serialized), so the mapping is empty.
         w.field("keySetMapping");
-        w.int(0);
+        w.int(self.key_set_mapping.len() as i32);
+        for (alias, keys) in self.key_set_mapping.iter() {
+            w.string(Some(alias));
+            w.int(keys.len() as i32);
+            for key in keys {
+                w.string(Some(&key.class));
+                w.bytes(Some(&key.bytes));
+            }
+        }
         w.field("protectedBroadcasts");
         w.strings(Some(&self.protected_broadcasts));
         w.field("activities");

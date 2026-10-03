@@ -9,7 +9,7 @@
 //! scan: no certificates (`PARSE_COLLECT_CERTIFICATES` is not set), and
 //! nothing the scan sets afterwards. What it does not port yet it refuses
 //! with [`Error::Unsupported`] rather than guess, among them
-//! `<key-sets>`, `<install-constraints>`, `<extension-sdk>` and advanced
+//! `<install-constraints>`, `<extension-sdk>` and advanced
 //! glob patterns; none of the image's packages has them.
 //!
 //! Ported from the Android Open Source Project (`android-16.0.0_r1`,
@@ -22,6 +22,7 @@ mod attrs;
 mod cluster;
 pub mod component;
 mod components;
+mod key_sets;
 pub mod package;
 pub mod parcel;
 pub mod platform;
@@ -606,7 +607,9 @@ impl Parser<'_> {
     fn parse_base_apk_tag(&self, pkg: &mut Package, e: &Element) -> Result<()> {
         match e.name.as_str() {
             "overlay" => self.parse_overlay(pkg, e),
-            "key-sets" => Err(Error::Unsupported("<key-sets>".into())),
+            "key-sets" => {
+                key_sets::parse(pkg, e, |e, name| self.obtain(e).non_resource_string(name))
+            }
             "feature" | "attribution" => {
                 let a = self.parse_attribution(e)?;
                 pkg.attributions.push(a);
