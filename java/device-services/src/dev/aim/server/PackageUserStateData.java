@@ -48,7 +48,10 @@ public final class PackageUserStateData {
         return count;
     }
     private static String[] strings(Parcel in) {
-        String[] values = new String[count(in)];
+        int count = in.readInt();
+        if (count == -1) return null;
+        if (count < 0 || count > in.dataAvail() / 4) throw new IllegalArgumentException("invalid component count");
+        String[] values = new String[count];
         for (int i = 0; i < values.length; i++) values[i] = Objects.requireNonNull(in.readString());
         return values;
     }
@@ -57,8 +60,8 @@ public final class PackageUserStateData {
     public int getAppId() { return appId; }
     public int getUserId() { return userId; }
     public boolean isFactory() { return factory; }
-    public String[] getEnabledComponents() { return enabledComponents.clone(); }
-    public String[] getDisabledComponents() { return disabledComponents.clone(); }
+    public String[] getEnabledComponents() { return enabledComponents == null ? null : enabledComponents.clone(); }
+    public String[] getDisabledComponents() { return disabledComponents == null ? null : disabledComponents.clone(); }
     public List<Suspension> getSuspensions() { return suspensions; }
 
     public static final class Suspension {

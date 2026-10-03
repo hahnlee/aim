@@ -154,6 +154,20 @@ public final class PackageRoundTripOracle {
         } catch (java.io.IOException expected) {}
         owner.shortChunk = false;
         var userState = lease.getUserState(name, false, 0);
+        var originalDefault = new com.android.server.pm.pkg.PackageUserStateImpl(new com.android.server.utils.WatchableImpl());
+        if (userState.getEnabledComponents() != null || userState.getDisabledComponents() != null
+                || originalDefault.getEnabledComponentsNoCopy() != null
+                || originalDefault.getDisabledComponentsNoCopy() != null) {
+            throw new AssertionError("default nullable component owners differ");
+        }
+        originalDefault.setEnabledComponents((android.util.ArraySet<String>) null);
+        originalDefault.setDisabledComponents((android.util.ArraySet<String>) null);
+        if (originalDefault.getEnabledComponentsNoCopy() == null
+                || originalDefault.getDisabledComponentsNoCopy() == null
+                || originalDefault.getEnabledComponentsNoCopy().size() != 0
+                || originalDefault.getDisabledComponentsNoCopy().size() != 0) {
+            throw new AssertionError("Settings null setters must initialize empty component owners");
+        }
         int userReads = owner.userReads;
         if (userState.getVersion() != 1 || !userState.getPackageName().equals(name)
                 || userState.getAppId() != uid || userState.getUserId() != 0 || userState.isFactory()

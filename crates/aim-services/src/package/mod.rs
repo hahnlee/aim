@@ -129,7 +129,13 @@ fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String
         .packages
         .iter()
         .map(|p| {
-            let mut state = states.remove(&p.name).unwrap_or_default();
+            let mut state = states.remove(&p.name).unwrap_or_else(|| {
+                if legacy_times {
+                    UserState::default()
+                } else {
+                    UserState::initialized()
+                }
+            });
             if legacy_times && state.first_install_time == 0 {
                 state.first_install_time = p.legacy_first_install_time;
             }
@@ -461,7 +467,10 @@ mod tests {
         assert_eq!(domains.active[0].signature.as_deref(), Some("abc"));
         assert_eq!(
             domains.active[0].domains,
-            [(Some("example.com".into()), 4), (Some("other.com".into()), 2)]
+            [
+                (Some("example.com".into()), 4),
+                (Some("other.com".into()), 2)
+            ]
         );
         assert_eq!(domains.active[0].users.len(), 1);
         assert_eq!(domains.active[0].users[0].enabled_hosts, ["example.com"]);
@@ -543,7 +552,10 @@ mod tests {
         assert_eq!((app.enabled, app.install_reason), (3, 4));
         assert_eq!(app.last_disable_app_caller.as_deref(), Some("shell:1000"));
         assert_eq!(app.first_install_time, 0x2b);
-        assert_eq!(app.disabled_components, ["org.example.app.B"]);
+        assert_eq!(
+            app.disabled_components.as_deref(),
+            Some(["org.example.app.B".to_string()].as_slice())
+        );
         assert_eq!(r.default_browser.as_deref(), Some("org.example.app"));
         assert_eq!(r.block_uninstall, ["org.example.app"]);
 
@@ -607,7 +619,11 @@ mod tests {
         let state = read().unwrap().unwrap();
         let r = &state.users[0].1.restrictions;
         assert_eq!(r.packages.len(), 2);
-        assert!(r.packages.iter().all(|(_, s)| *s == UserState::default()));
+        assert!(
+            r.packages
+                .iter()
+                .all(|(_, s)| *s == UserState::initialized())
+        );
 
         // A missing access file is missing even with a reserve copy: the
         // original then migrates.

@@ -1204,7 +1204,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         aim_services::package::restrictions::UserState {
             installed: false,
             enabled: 2,
-            disabled_components: vec!["old.Component".into()],
+            disabled_components: Some(vec!["old.Component".into()]),
             ..Default::default()
         },
     )]);

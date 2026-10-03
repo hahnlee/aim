@@ -115,7 +115,9 @@ fn enabled_write_accepts_unchanged_nan_payload_and_rejects_external_signed_zero_
     set(&mut root, -0.0);
     let external = abx::write(&root).unwrap();
     fs::write(&path, &external).unwrap();
-    let error = store.commit_enabled("example.app", 0, &enabled).unwrap_err();
+    let error = store
+        .commit_enabled("example.app", 0, &enabled)
+        .unwrap_err();
     assert!(!error.committed);
     assert!(error.message.contains("changed outside the native owner"));
     assert_eq!(fs::read(path).unwrap(), external);
@@ -872,7 +874,10 @@ fn writes_enabled_state_and_preserves_unmodelled_fields() {
     assert!(user.stopped && user.installed);
     assert_eq!(user.first_install_time, 0x12);
     assert_eq!(user.enabled, 2);
-    assert_eq!(user.disabled_components, ["example.app.Disabled"]);
+    assert_eq!(
+        user.disabled_components.as_deref(),
+        Some(["example.app.Disabled".to_string()].as_slice())
+    );
     let bytes = fs::read(&path).unwrap();
     assert!(bytes.starts_with(abx::MAGIC));
     assert_eq!(bytes, fs::read(sibling(&path, ".reservecopy")).unwrap());
@@ -909,6 +914,11 @@ fn writes_enabled_state_and_preserves_unmodelled_fields() {
     assert!(package.attr("enabled").is_none());
     assert!(package.attr("enabledCaller").is_none());
     assert!(!package.children().any(|e| e.name == "disabled-components"));
+    let reread = State::read(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(store.state(), &reread);
+    let user = &reread.users[0].1.restrictions.packages[0].1;
+    assert_eq!(user.enabled_components.as_deref(), Some([].as_slice()));
+    assert_eq!(user.disabled_components.as_deref(), Some([].as_slice()));
 }
 
 #[test]

@@ -539,8 +539,9 @@ impl Store {
                 .1;
             updated.enabled = enabled.enabled;
             updated.last_disable_app_caller = enabled.last_disable_app_caller.clone();
-            updated.enabled_components = enabled.enabled_components.iter().cloned().collect();
-            updated.disabled_components = enabled.disabled_components.iter().cloned().collect();
+            updated.enabled_components = Some(enabled.enabled_components.iter().cloned().collect());
+            updated.disabled_components =
+                Some(enabled.disabled_components.iter().cloned().collect());
         }
         result
     }

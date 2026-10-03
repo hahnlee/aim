@@ -45,8 +45,9 @@ pub struct UserState {
     /// `COMPONENT_ENABLED_STATE_*`.
     pub enabled: i32,
     pub last_disable_app_caller: Option<String>,
-    pub enabled_components: Vec<String>,
-    pub disabled_components: Vec<String>,
+    /// None for the default state; initialized Settings owners may be empty.
+    pub enabled_components: Option<Vec<String>>,
+    pub disabled_components: Option<Vec<String>>,
     /// `PackageManager.INSTALL_REASON_*`, `UNINSTALL_REASON_*`.
     pub install_reason: i32,
     pub uninstall_reason: i32,
@@ -64,8 +65,7 @@ pub struct UserState {
 }
 
 impl Default for UserState {
-    /// A package's state when the file is missing: installed, enabled, not
-    /// stopped.
+    /// The original default user state, before Settings initializes its sets.
     fn default() -> Self {
         UserState {
             ce_data_inode: 0,
@@ -80,8 +80,8 @@ impl Default for UserState {
             virtual_preload: false,
             enabled: COMPONENT_ENABLED_STATE_DEFAULT,
             last_disable_app_caller: None,
-            enabled_components: Vec::new(),
-            disabled_components: Vec::new(),
+            enabled_components: None,
+            disabled_components: None,
             install_reason: 0,
             uninstall_reason: 0,
             harmful_app_warning: None,
@@ -156,6 +156,15 @@ impl Suspension {
 }
 
 impl UserState {
+    /// Settings.setUserState calls the ArraySet setters even for null inputs,
+    /// creating nonnull empty component owners in the initialized state.
+    pub fn initialized() -> Self {
+        Self {
+            enabled_components: Some(Vec::new()),
+            disabled_components: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
     /// `Settings.readSuspensionParamsLPr` and ArrayMap.put: resolve user
     /// ownership with the image policy, then let the last duplicate win.
     pub fn resolved_suspensions(&self, user: i32, cross_user: bool) -> Vec<(i32, &Suspension)> {
@@ -265,7 +274,7 @@ fn user_state(e: &Element) -> Result<UserState, String> {
         first_install_time: e.long_hex("first-install-time")?.unwrap_or(0),
         min_aspect_ratio: e.int("min-aspect-ratio")?.unwrap_or(0),
         domain_verification_status: e.int("domainVerificationStatus")?.unwrap_or(0),
-        ..UserState::default()
+        ..UserState::initialized()
     };
     let mut legacy_dialog = None;
     let mut legacy_app_extras = None;
@@ -277,11 +286,11 @@ fn user_state(e: &Element) -> Result<UserState, String> {
         };
         match child.name.as_str() {
             "enabled-components" => {
-                s.enabled_components = components(child);
+                s.enabled_components = Some(components(child));
                 cursor.skip();
             }
             "disabled-components" => {
-                s.disabled_components = components(child);
+                s.disabled_components = Some(components(child));
                 cursor.skip();
             }
             "suspend-params" => {

@@ -1359,7 +1359,7 @@ mod tests {
         let user = crate::package::restrictions::UserState {
             stopped: true,
             harmful_app_warning: Some("warning".repeat(30_000)),
-            enabled_components: vec!["fixture.Activity".into()],
+            enabled_components: Some(vec!["fixture.Activity".into()]),
             ..Default::default()
         };
         owner

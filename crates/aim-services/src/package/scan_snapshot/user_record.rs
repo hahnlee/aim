@@ -51,7 +51,11 @@ fn count(p: &mut Parcel, n: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn strings(p: &mut Parcel, values: &[String]) -> Result<(), String> {
+fn strings(p: &mut Parcel, values: &Option<Vec<String>>) -> Result<(), String> {
+    let Some(values) = values else {
+        p.write_i32(-1);
+        return Ok(());
+    };
     count(p, values.len())?;
     for value in values {
         p.write_string16(Some(value));
@@ -126,4 +130,43 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn nullable_component_owners_keep_default_and_initialized_states_distinct() {
+        let default = UserState::default();
+        let initialized = UserState::initialized();
+        assert_ne!(default, initialized);
+        for (values, expected) in [
+            (None, -1),
+            (Some(vec![]), 0),
+            (Some(vec!["fixture.Activity".to_string()]), 1),
+        ] {
+            let mut p = Parcel::new();
+            strings(&mut p, &values).unwrap();
+            let mut r = aim_binder_host::parcel::Reader::new(p.data(), &[]);
+            assert_eq!(r.read_i32().unwrap(), expected);
+            if expected == 1 {
+                assert_eq!(
+                    r.read_string16().unwrap().as_deref(),
+                    Some("fixture.Activity")
+                );
+            }
+            assert_eq!(r.remaining(), 0);
+        }
+        for xml in [
+            "<pkg name=\"fixture\"/>",
+            "<pkg name=\"fixture\"><enabled-components/><disabled-components/></pkg>",
+        ] {
+            let root = aim_android_xml::read(
+                format!("<package-restrictions>{xml}</package-restrictions>").as_bytes(),
+            )
+            .unwrap();
+            let parsed = crate::package::restrictions::Restrictions::parse(&root).unwrap();
+            assert_eq!(parsed.packages[0].1, initialized);
+        }
+    }
 }

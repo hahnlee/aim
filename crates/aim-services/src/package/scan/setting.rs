@@ -188,7 +188,7 @@ impl NewSetting {
                             not_launched: true,
                             instant_app: p.instant_app,
                             virtual_preload: p.virtual_preload,
-                            ..UserState::default()
+                            ..UserState::initialized()
                         },
                     );
                 }
@@ -436,7 +436,7 @@ mod tests {
                         not_launched: true,
                         instant_app: true,
                         virtual_preload: true,
-                        ..Default::default()
+                        ..UserState::initialized()
                     }
                 );
             }
