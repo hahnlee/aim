@@ -362,6 +362,15 @@ denylisted/provider queries fail explicitly until the resource owner supplies
 validated contents. The original UpdateOwnershipHelper oracle
 compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
 transitions with the native owner: denied-target and provider/null queries match.
+The native settings store now clears one user's saved preferred activities under
+Settings.clearPackagePreferredActivities rules (#822): a named package removes
+only always choices, while a null package clears all valid choices. Last choices,
+other packages' candidate sets, persistent policy choices, cross-profile filters
+and unrelated XML remain intact. Writes use resilient ABX and reject an external
+writer; reopening preserves the result and other users remain unchanged. The
+original Settings oracle verifies named, repeated and null clearing results.
+This owner is not yet connected to the boot removal transaction; all-user change
+reporting, home updates and broadcasts still belong to that integration (#822).
 APK and cluster parsing now distinguish an absent resources.arsc from a present
 entry failing archive reads (#826). Disposable code-only, bad-CRC and invalid
 deflate inputs verify absence acceptance and explicit read-error rejection.

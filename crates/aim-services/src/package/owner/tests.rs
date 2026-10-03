@@ -33,6 +33,82 @@ impl Drop for Data {
 const RESTRICTIONS: &[u8] = b"<package-restrictions><pkg name='example.app' stopped='true' inst='true'><suspend-params suspending-package='android'><dialog-info dialogMessage='keep me' /></suspend-params></pkg><crossProfile-intent-filters><item targetUserId='10'><filter><action name='example.ACTION' /></filter></item></crossProfile-intent-filters></package-restrictions>";
 
 #[test]
+fn preferred_clearings_preserve_last_choices_persistent_filters_and_other_users() {
+    let data = Data::new();
+    let path = data.settings();
+    let input = b"<package-restrictions future='keep'><pkg name='example.app' stopped='true'/><preferred-activities><item name='removed/.Always' always='true' set='0'><filter><action name='always'/></filter><future/></item><item name='removed/.Default' set='0'><filter/></item><item name='removed/.Last' always='false' set='0'><filter/></item><item name='kept/.Main' always='true' set='1'><set name='removed/.Candidate'/><filter/></item><future-list/></preferred-activities><persistent-preferred-activities><item name='removed/.Policy' set-by-dpm='true'><filter/></item></persistent-preferred-activities><crossProfile-intent-filters><item ownerPackage='removed'/></crossProfile-intent-filters><future-root/></package-restrictions>";
+    fs::write(&path, input).unwrap();
+    let other = data.0.join("system/users/10/package-restrictions.xml");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, input).unwrap();
+    let mut store = Store::open(&data.0, &[0, 10]).unwrap().unwrap();
+    let state = store.state().clone();
+    assert!(
+        store
+            .clear_package_preferred_activities(0, Some("removed"))
+            .unwrap()
+    );
+    assert_eq!(store.state(), &state);
+    assert_eq!(fs::read(&other).unwrap(), input);
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
+    let root = aim_android_xml::read(&bytes).unwrap();
+    let mut expected = aim_android_xml::read(input).unwrap();
+    let list = expected
+        .content
+        .iter_mut()
+        .find_map(|node| match node {
+            Node::Element(e) if e.name == "preferred-activities" => Some(e),
+            _ => None,
+        })
+        .unwrap();
+    list.content.retain(|node| !matches!(node, Node::Element(e) if matches!(e.string("name").as_deref(), Some("removed/.Always" | "removed/.Default"))));
+    assert_eq!(root, expected);
+    let mut reopened = Store::open(&data.0, &[0, 10]).unwrap().unwrap();
+    assert!(
+        !reopened
+            .clear_package_preferred_activities(0, Some("removed"))
+            .unwrap()
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    // Detect an external writer before replacing any of its data.
+    let mut external = root.clone();
+    external
+        .attrs
+        .push(("external".into(), Value::String("writer".into())));
+    fs::write(&path, abx::write(&external).unwrap()).unwrap();
+    assert!(
+        !reopened
+            .clear_package_preferred_activities(0, None)
+            .unwrap_err()
+            .committed
+    );
+    fs::write(&path, &bytes).unwrap();
+    assert!(
+        reopened
+            .clear_package_preferred_activities(0, None)
+            .unwrap()
+    );
+    let root = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
+    let list = root
+        .children()
+        .find(|e| e.name == "preferred-activities")
+        .unwrap();
+    assert!(list.children().all(|e| e.name != "item"));
+    assert!(
+        root.children()
+            .any(|e| e.name == "persistent-preferred-activities")
+    );
+    assert_eq!(fs::read(&other).unwrap(), input);
+    assert!(
+        !reopened
+            .clear_package_preferred_activities(20, None)
+            .unwrap_err()
+            .committed
+    );
+}
+
+#[test]
 fn update_owner_clearings_preserve_other_records_and_reject_unrelated_writes() {
     let data = Data::new();
     let restrictions = data.settings();

@@ -885,6 +885,10 @@ fn manifest_keysets_match_original_parser() {
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/KeySetOwnerOracle.java"))
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/UpdateOwnershipOracle.java"),
+        )
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/PreferredClearingOracle.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -907,6 +911,7 @@ fn manifest_keysets_match_original_parser() {
             classes.join("com/android/server/pm/KeySetOwnerOracle.class"),
             classes.join("com/android/server/pm/KeySetOwnerOracle$1.class"),
             classes.join("com/android/server/pm/UpdateOwnershipOracle.class"),
+            classes.join("com/android/server/pm/PreferredClearingOracle.class"),
         ]));
     let key = |scalar| {
         let mut der = vec![
@@ -1211,6 +1216,38 @@ fn manifest_keysets_match_original_parser() {
     let original = String::from_utf8(run(boot.command().args([
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.UpdateOwnershipOracle",
+    ])).stdout).unwrap();
+    assert_eq!(original, expected);
+    let native_data = data.0.join("preferred");
+    let restrictions = native_data.join("system/users/0/package-restrictions.xml");
+    fs::create_dir_all(restrictions.parent().unwrap()).unwrap();
+    fs::write(native_data.join("system/packages.xml"), b"<packages/>").unwrap();
+    let input = include_bytes!("fixtures/preferred-clearings.xml");
+    fs::write(&restrictions, input).unwrap();
+    fs::write(guest.join("preferred.xml"), input).unwrap();
+    let mut store = aim_services::package::owner::Store::open(&native_data, &[0])
+        .unwrap()
+        .unwrap();
+    let mut expected = String::new();
+    for package in [Some("removed"), Some("removed"), None] {
+        let changed = store
+            .clear_package_preferred_activities(0, package)
+            .unwrap();
+        let root = aim_android_xml::read(&fs::read(&restrictions).unwrap()).unwrap();
+        let mut names = root
+            .children()
+            .find(|e| e.name == "preferred-activities")
+            .unwrap()
+            .children()
+            .filter(|e| e.name == "item")
+            .map(|e| e.string("name").unwrap().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        writeln!(&mut expected, "{changed} {}", names.join(",")).unwrap();
+    }
+    let original = String::from_utf8(run(boot.command().args([
+        "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.PreferredClearingOracle", "/data/local/tmp/manifest-keysets/preferred.xml",
     ])).stdout).unwrap();
     assert_eq!(original, expected);
 }

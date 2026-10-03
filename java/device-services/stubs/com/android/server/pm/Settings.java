@@ -10,6 +10,11 @@ public final class Settings {
         throw new RuntimeException("stub");
     }
     public Settings(java.util.Map<String, PackageSetting> packages) { throw new RuntimeException("stub"); }
+    void readPreferredActivitiesLPw(com.android.modules.utils.TypedXmlPullParser parser, int userId)
+        throws java.io.IOException { throw new RuntimeException("stub"); }
+    void writePreferredActivitiesLPr(com.android.modules.utils.TypedXmlSerializer serializer, int userId, boolean full)
+        throws java.io.IOException { throw new RuntimeException("stub"); }
+    void clearPackagePreferredActivities(String packageName, android.util.SparseBooleanArray changed, int userId) { throw new RuntimeException("stub"); }
     static PackageSetting createNewSetting(String name, PackageSetting original,
         PackageSetting disabled, String realName, SharedUserSetting shared,
         java.io.File path, String legacyLib, String primaryAbi, String secondaryAbi,

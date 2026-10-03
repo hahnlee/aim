@@ -101,6 +101,35 @@ impl Store {
         &self.state
     }
 
+    /// Clear one user's preferred activities under the original Settings rules
+    /// (#822). The caller owns the all-user iteration, home update and broadcast.
+    /// An error with committed=true requires publication even on reserve failure.
+    pub fn clear_package_preferred_activities(
+        &mut self,
+        user: u32,
+        package: Option<&str>,
+    ) -> Result<bool, WriteError> {
+        let original = self
+            .restrictions
+            .get(&user)
+            .ok_or_else(|| WriteError::before(format!("unknown user {user}")))?;
+        let mut root = original.clone();
+        if !super::preferred::clear_package_document(&mut root, package) {
+            return Ok(false);
+        }
+        Restrictions::parse(&root).map_err(WriteError::before)?;
+        let bytes = abx::write(&root).map_err(WriteError::before)?;
+        let dir = self.data.join("system/users").join(user.to_string());
+        let path = dir.join("package-restrictions.xml");
+        let backup = dir.join("package-restrictions-backup.xml");
+        prepare(&path, &backup, original).map_err(WriteError::before)?;
+        let result = write_resilient(&path, &backup, &bytes);
+        if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.restrictions.insert(user, root);
+        }
+        result.map(|()| true)
+    }
+
     /// Persist an owner-authorized signing scan. This changes signature
     /// state only, retaining every unrelated XML node. Serialized keys
     /// remain in the scan snapshot; packages.xml persists certificates.
