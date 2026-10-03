@@ -54,6 +54,15 @@ impl Uri {
         Ok(Some(Uri { kind, string }))
     }
 
+    pub(crate) fn write_cache(&self, writer: &mut super::parse::parcel::Writer) {
+        writer.int(match self.kind {
+            Kind::String => STRING_TYPE_ID,
+            Kind::Opaque => OPAQUE_TYPE_ID,
+            Kind::Hierarchical => HIERARCHICAL_TYPE_ID,
+        });
+        writer.string(Some(&self.string));
+    }
+
     /// The string `toString` returns for a URI read from a parcel.
     pub fn as_str(&self) -> &str {
         &self.string

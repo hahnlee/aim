@@ -20,6 +20,9 @@ public abstract class PackageImpl implements ParsedPackage {
     public java.util.Set<String> getRequestedPermissions() { throw new RuntimeException("stub"); }
     public PackageImpl addImplicitPermission(String permission) { throw new RuntimeException("stub"); }
     public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
+    public int getUid() { throw new RuntimeException("stub"); }
+    public String getPrimaryCpuAbi() { throw new RuntimeException("stub"); }
+    public int getPageSizeAppCompatFlags() { throw new RuntimeException("stub"); }
     public String getNativeLibraryRootDir() { throw new RuntimeException("stub"); }
     public boolean isNativeLibraryRootRequiresIsa() { throw new RuntimeException("stub"); }
     public String getNativeLibraryDir() { throw new RuntimeException("stub"); }
