@@ -23,6 +23,17 @@ public final class PackageObjects {
         return pkg;
     }
 
+    public static void restoreUsage(com.android.server.pm.PackageSetting setting,
+            PackageUsageState usage, long version) {
+        if (usage.getVersion() != version || !usage.getPackageName().equals(setting.getPackageName())) {
+            throw new IllegalArgumentException("package usage capture mismatch");
+        }
+        long[] times = usage.getLastPackageUsageTimeInMills();
+        for (int reason = 0; reason < times.length; reason++) {
+            setting.getPkgState().setLastPackageUsageTimeInMills(reason, times[reason]);
+        }
+    }
+
     public static PackageImpl fromCache(byte[] cache, byte[][] pastCertificates, int[] capabilities) {
         PackageImpl pkg = (PackageImpl) PackageCacher.fromCacheEntryStatic(cache);
         pkg.setSigningDetails(restoreSigning(pkg.getSigningDetails(), pastCertificates, capabilities));

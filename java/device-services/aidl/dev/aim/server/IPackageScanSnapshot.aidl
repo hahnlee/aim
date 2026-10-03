@@ -7,4 +7,6 @@ interface IPackageScanSnapshot {
     int getCodeLength(String packageName, boolean disabled);
     byte[] getCodeChunk(String packageName, boolean disabled, int offset, int length);
     void close();
+    /** Captured active-package usage; null for a name outside this capture. */
+    byte[] getUsage(String packageName);
 }

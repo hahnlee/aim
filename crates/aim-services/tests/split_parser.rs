@@ -1640,6 +1640,10 @@ fn java_oracles_link_against_original_image() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageUsageState.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));

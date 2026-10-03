@@ -6,7 +6,7 @@ use aim_binder_host::{
     parcel::{EX_ILLEGAL_STATE, Exception, Parcel, UNKNOWN_TRANSACTION},
 };
 use aim_service_aidl::{
-    WriteParcelable, dev_aim_server_ipackagescansnapshot as api, write_byte_array,
+    WriteParcelable, dev_aim_server_ipackagescansnapshot as api, write_byte_array, write_long_array,
 };
 use std::{
     collections::BTreeMap,
@@ -57,6 +57,33 @@ impl WriteParcelable for PackageCode {
                 }
             }
         }
+    }
+}
+
+pub struct PackageUsage {
+    version: u64,
+    name: String,
+    historical: bool,
+    times: [i64; super::super::owner::usage::REASONS],
+}
+
+impl PackageUsage {
+    pub fn captured(snapshot: &Snapshot, name: &str) -> Option<Self> {
+        Some(Self {
+            version: snapshot.version(),
+            name: name.into(),
+            historical: snapshot.usage().historical_available(),
+            times: *snapshot.usage().times(name)?,
+        })
+    }
+}
+
+impl WriteParcelable for PackageUsage {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(self.version as i64);
+        p.write_string16(Some(&self.name));
+        p.write_bool(self.historical);
+        write_long_array(p, Some(&self.times));
     }
 }
 
@@ -170,6 +197,25 @@ impl Service for Endpoint {
                 };
                 let names = Some(settings.iter().map(|p| Some(p.name.clone())).collect());
                 api::write_get_package_names_reply(&mut reply, &names);
+            }
+            api::GET_USAGE => {
+                let args = api::GetUsage::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                match args.package_name.as_deref() {
+                    None => {
+                        reply.write_exception(&Exception::illegal_argument("package name is null"))
+                    }
+                    Some(name) => {
+                        let bytes = PackageUsage::captured(&snapshot, name).map(|usage| {
+                            let mut parcel = Parcel::new();
+                            usage.write_to(&mut parcel);
+                            parcel.data().to_vec()
+                        });
+                        api::write_get_usage_reply(&mut reply, &bytes);
+                    }
+                }
             }
             api::GET_CODE_LENGTH => {
                 let args = api::GetCodeLength::read(&mut call.data)?;

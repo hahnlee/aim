@@ -43,6 +43,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageUsageState.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));
@@ -179,6 +183,14 @@ fn native_package_parcels_match_original_read_write() {
         let mut parcel = aim_binder_host::parcel::Parcel::new();
         aim_service_aidl::WriteParcelable::write_to(&code, &mut parcel);
         fs::write(directory.join(format!("{name}.snapshot")), parcel.data()).unwrap();
+        let usage = aim_services::package::scan_snapshot::endpoint::PackageUsage::captured(
+            &snapshot,
+            &pkg.package_name,
+        )
+        .unwrap();
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&usage, &mut parcel);
+        fs::write(directory.join(format!("{name}.usage")), parcel.data()).unwrap();
         let mut metadata = Vec::new();
         match facade.past_signing_certificates {
             None => metadata.extend_from_slice(&(-1_i32).to_be_bytes()),
@@ -390,9 +402,14 @@ fn native_scan_objects(
         objects.iter().map(|p| p.package.uid).collect::<Vec<_>>(),
         [1000, 10000]
     );
-    let usage = aim_services::package::owner::usage::Usage::new(
+    let mut usage = aim_services::package::owner::usage::Usage::new(
         scan.owner.settings.packages.iter().map(|p| p.name.as_str()),
     );
+    for name in ["android", "com.google.android.gsf"] {
+        for (reason, time) in [-1, 17, 29, 0, 0, 0, 0, 55].into_iter().enumerate() {
+            usage.notify(name, reason as i32, time);
+        }
+    }
     aim_services::package::scan_snapshot::Store::new(scan.owner, usage)
         .unwrap()
         .capture()

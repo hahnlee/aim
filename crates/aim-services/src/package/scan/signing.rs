@@ -1202,15 +1202,16 @@ mod tests {
         owner
             .scanned_users
             .insert(package.name.clone(), BTreeMap::new());
-        let store = Store::new(
-            owner.clone(),
-            crate::package::owner::usage::Usage::new(["fixture"]),
-        )
-        .unwrap();
+        let mut usage = crate::package::owner::usage::Usage::new(["fixture"]);
+        usage.notify("fixture", 0, 17);
+        usage.notify("fixture", 2, 29);
+        let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let old = Arc::downgrade(&base);
         let endpoint = Arc::new(Endpoint::new(base.clone()));
-        store.publish(&base, owner, base.usage().clone()).unwrap();
+        let mut changed_usage = base.usage().clone();
+        changed_usage.notify("fixture", 0, 99);
+        store.publish(&base, owner, changed_usage).unwrap();
         drop(base);
         let driver = Driver::new();
         let open = |pid, euid| {
@@ -1280,6 +1281,42 @@ mod tests {
         assert!(remote.transact(api::CLOSE, &trailing, false).is_err());
         assert!(remote.transact(0x7777, &request(), false).is_err());
         assert!(old.upgrade().is_some());
+        for (name, expected) in [
+            (Some("fixture"), Some([17, 0, 29, 0, 0, 0, 0, 0])),
+            (Some("missing"), None),
+        ] {
+            let mut p = request();
+            p.write_string16(name);
+            let reply = remote.transact(api::GET_USAGE, &p, false).unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let bytes = aim_service_aidl::read_byte_array(&mut r).unwrap();
+            if let Some(expected) = expected {
+                let bytes = bytes.unwrap();
+                let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+                assert_eq!(r.read_i64().unwrap(), 1);
+                assert_eq!(r.read_string16().unwrap().as_deref(), name);
+                assert!(r.read_bool().unwrap());
+                assert_eq!(
+                    aim_service_aidl::read_long_array(&mut r).unwrap().unwrap(),
+                    expected
+                );
+                assert_eq!(r.remaining(), 0);
+            } else {
+                assert!(bytes.is_none());
+            }
+        }
+        let mut p = request();
+        p.write_string16(None);
+        let reply = remote.transact(api::GET_USAGE, &p, false).unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -3
+        );
+        let mut p = request();
+        p.write_string16(Some("fixture"));
+        p.write_i32(123);
+        assert!(remote.transact(api::GET_USAGE, &p, false).is_err());
         let mut p = request();
         p.write_bool(false);
         let names = remote.transact(api::GET_PACKAGE_NAMES, &p, false).unwrap();

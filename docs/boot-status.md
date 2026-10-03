@@ -277,8 +277,24 @@ stale or invalid usage publication preserves the current graph. The original
 first-system scan passes (43.24s), including old/new timestamp isolation; all
 350 units pass, and all integration tests compile. The saved-scan fixture now
 loads its real disposable usage file before capture; that updated fixture has
-not been run in this change. Java replica transport/adapters and live
-notifyPackageUse/persistence scheduling remain #836/#798.
+not been run in this change. IPackageScanSnapshot now also transports a usage
+envelope with version/name, historical availability and all eight timestamps.
+PackageScanLease caches immutable PackageUsageState objects only after complete
+version/name/trailing-data validation. PackageObjects binds the envelope to an
+original PackageSetting before restoring it through the image's reason-specific
+setters; detached arrays cannot mutate either owner. Native Binder verification
+passes (0.03s), preserving old timestamps after a new scan version is published,
+with absent-name/null-name/trailing-data checks. The 572-parcel original runtime
+passes (21.36s), including generated usage Proxy/Stub framing, owner failure and
+retry, trailing-data/version/name rejection, DTO identity/input isolation and
+exact native/Java bytes. Original usage getters match the transported values,
+and rejected restoration preserves the original state. All 350 units pass
+(3.17s), all oracle classes link (2.83s), and device-services builds (14.2s).
+The compile-only PackageUsage declaration now matches its original
+AbstractStatsBase inheritance, also checked by the production build. These are
+separate native-driver and original-Java tests; the bootstrap has not exported
+the endpoint into SystemServer, and full PackageState replicas, live
+notifyPackageUse and persistence scheduling remain #836/#798.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

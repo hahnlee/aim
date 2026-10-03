@@ -113,14 +113,19 @@ public final class PackageRoundTripOracle {
 
     private static void verifySnapshot(java.io.File file, String name, int uid) throws Exception {
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
-        var owner = new PageOwner(name, bytes);
-        var stale = new PageOwner(name, bytes);
+        byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
+        var owner = new PageOwner(name, bytes, usageBytes);
+        var stale = new PageOwner(name, bytes, usageBytes);
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
             try {
                 bad.getCode(name, false);
                 throw new AssertionError("wrong page version accepted");
+            } catch (java.io.IOException expected) {}
+            try {
+                bad.getUsage(name);
+                throw new AssertionError("wrong usage version accepted");
             } catch (java.io.IOException expected) {}
         }
         // Force generated Proxy/Stub parcel framing using the original Binder and Parcel.
@@ -172,6 +177,57 @@ public final class PackageRoundTripOracle {
             dev.aim.server.PackageObjects.fromSnapshot(code, 1, "different");
             throw new AssertionError("wrong name accepted");
         } catch (IllegalArgumentException expected) {}
+        owner.fail = true;
+        try { lease.getUsage(name); throw new AssertionError("usage owner error swallowed"); }
+        catch (android.os.RemoteException expected) {}
+        owner.fail = false;
+        owner.usageTail = true;
+        try { lease.getUsage(name); throw new AssertionError("usage trailing bytes accepted"); }
+        catch (java.io.IOException expected) {}
+        owner.usageTail = false;
+        try { lease.getUsage("alias"); throw new AssertionError("usage name mismatch accepted"); }
+        catch (java.io.IOException expected) {}
+        var usage = lease.getUsage(name);
+        int usageReads = owner.usageReads;
+        if (lease.getUsage(name) != usage || owner.usageReads != usageReads
+                || lease.getUsage("missing") != null || usage.getVersion() != 1
+                || !usage.isHistoricalAvailable()
+                || !java.util.Arrays.equals(usage.getLastPackageUsageTimeInMills(), new long[]{-1,17,29,0,0,0,0,55})
+                || usage.getLatestPackageUseTimeInMills() != 55
+                || usage.getLatestForegroundPackageUseTimeInMills() != 29) {
+            throw new AssertionError("captured usage differs");
+        }
+        usage.getLastPackageUsageTimeInMills()[0] = 99;
+        var setting = new com.android.server.pm.PackageSetting(name, null,
+                new java.io.File("/data/app/fixture"), 0, 0, new java.util.UUID(1, 1));
+        dev.aim.server.PackageObjects.restoreUsage(setting, usage, 1);
+        if (!java.util.Arrays.equals(setting.getPkgState().getLastPackageUsageTimeInMills(),
+                usage.getLastPackageUsageTimeInMills())
+                || setting.getPkgState().getLatestPackageUseTimeInMills() != usage.getLatestPackageUseTimeInMills()
+                || setting.getPkgState().getLatestForegroundPackageUseTimeInMills() != usage.getLatestForegroundPackageUseTimeInMills()) {
+            throw new AssertionError("original usage getters differ");
+        }
+        setting.getPkgState().setLastPackageUsageTimeInMills(0, 99);
+        try { dev.aim.server.PackageObjects.restoreUsage(setting, usage, 2);
+            throw new AssertionError("wrong usage version restored"); }
+        catch (IllegalArgumentException expected) {}
+        var other = new com.android.server.pm.PackageSetting("other", null,
+                new java.io.File("/data/app/other"), 0, 0, new java.util.UUID(1, 2));
+        try { dev.aim.server.PackageObjects.restoreUsage(other, usage, 1);
+            throw new AssertionError("wrong usage name restored"); }
+        catch (IllegalArgumentException expected) {}
+        if (usage.getLastPackageUsageTimeInMills()[0] != -1
+                || setting.getPkgState().getLastPackageUsageTimeInMills()[0] != 99
+                || other.getPkgState().getLatestPackageUseTimeInMills() != 0) {
+            throw new AssertionError("usage mutation or rejected restore changed an owner");
+        }
+        out = android.os.Parcel.obtain();
+        try {
+            usage.writeToParcel(out, 0);
+            if (!java.util.Arrays.equals(out.marshall(), usageBytes)) {
+                throw new AssertionError("native/Java usage DTO differs");
+            }
+        } finally { out.recycle(); }
         lease.close();
         lease.close();
         if (owner.closes != 1) throw new AssertionError("close is not idempotent");
@@ -179,17 +235,22 @@ public final class PackageRoundTripOracle {
             lease.getCode(name, false);
             throw new AssertionError("closed lease accepted");
         } catch (IllegalStateException expected) {}
+        try { lease.getUsage(name); throw new AssertionError("closed usage lease accepted"); }
+        catch (IllegalStateException expected) {}
     }
 
     private static final class PageOwner extends dev.aim.server.IPackageScanSnapshot.Stub {
         private final String name;
         private final byte[] bytes;
+        private final byte[] usage;
+        boolean usageTail;
+        int usageReads;
         boolean fail;
         boolean shortChunk;
         int reads;
         int closes;
         long version = 1;
-        PageOwner(String name, byte[] bytes) { this.name = name; this.bytes = bytes; }
+        PageOwner(String name, byte[] bytes, byte[] usage) { this.name = name; this.bytes = bytes; this.usage = usage; }
         @Override
         public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
         @Override
@@ -206,5 +267,12 @@ public final class PackageRoundTripOracle {
         }
         @Override
         public void close() { closes++; }
+        @Override
+        public byte[] getUsage(String candidate) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            usageReads++;
+            if (candidate.equals("missing")) return null;
+            return usageTail ? java.util.Arrays.copyOf(usage, usage.length + 4) : usage.clone();
+        }
     }
 }
