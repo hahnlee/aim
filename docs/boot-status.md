@@ -372,8 +372,15 @@ Android Base64.DEFAULT skipping/padding are modeled. Defined aliases/public-key
 sets serialize in Java collection order and roundtrip through AndroidPackage.
 A compiled disposable APK fixture (0.95s) verifies the real TypedArray path,
 reused keys, alias/upgrade output, missing first values, name collisions and
-invalid-key omission. Unsupported EC curves fail explicitly. Direct original
-parser comparison and broader key-factory conformance remain #824. Separate ART-service
+invalid-key omission. A disposable original PackageParser2 oracle (14.88s)
+compares eleven identical compiled APKs: key reuse, nullable public names,
+conflicts, key/set name collisions, invalid keys, first-use errors, empty upgrade
+sets, repeated set names, multiple keyset sections, Base64 skipped characters
+and multiple public keys. Parse acceptance, alias/key iteration, canonical SPKI,
+Java serialization bytes and upgrade output all match. Owned processes and mounts
+are cleaned. Added compile-only parser APIs link against the original image
+(device-services build, 13.5s). Unsupported EC curves fail explicitly; broader
+key-factory and global-owner conformance remain #824. Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,

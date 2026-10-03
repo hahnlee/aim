@@ -316,3 +316,164 @@ fn compiled_manifest_keysets_parse_and_roundtrip() {
     let parsed = parse(&apk, "/data/app/keys/base.apk", 0, &platform).unwrap();
     assert!(parsed.key_set_mapping.is_empty());
 }
+
+mod common {
+    pub mod java;
+    pub mod runtime;
+}
+
+#[test]
+#[ignore = "requires pinned image, aimctl, JDK, aapt2 and d8; run explicitly"]
+fn manifest_keysets_match_original_parser() {
+    use common::runtime::{Boot, run};
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use std::fmt::Write;
+    use std::time::{Duration, Instant};
+    let data = Data::new();
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let classes = data.0.join("classes");
+    let stubs = data.0.join("stubs");
+    let dex = data.0.join("dex");
+    for dir in [&classes, &stubs, &dex] {
+        fs::create_dir(dir).unwrap();
+    }
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&stubs)
+        .args(common::java::sources(
+            &aim_paths::root().join("java/device-services/stubs"),
+        )));
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg("-classpath")
+        .arg(&stubs)
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ManifestKeySetsOracle.java"),
+        ));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
+        .args([
+            "com.android.tools.r8.D8",
+            "--release",
+            "--min-api",
+            "36",
+            "--lib",
+        ])
+        .arg(&jdk)
+        .arg("--classpath")
+        .arg(&stubs)
+        .arg("--output")
+        .arg(&dex)
+        .args(
+            fs::read_dir(&classes)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>(),
+        ));
+    let key = |scalar| {
+        let mut der = vec![
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1, 0x06, 8, 0x2a,
+            0x86, 0x48, 0xce, 0x3d, 3, 1, 7, 3, 0x42, 0,
+        ];
+        let secret = p256::SecretKey::from_slice(&[scalar; 32]).unwrap();
+        der.extend_from_slice(secret.public_key().to_encoded_point(false).as_bytes());
+        aim_android_xml::Element {
+            name: "key".into(),
+            attrs: vec![("value".into(), aim_android_xml::Value::BytesBase64(der))],
+            content: vec![],
+        }
+        .string("value")
+        .unwrap()
+        .into_owned()
+    };
+    let one = key(1);
+    let two = key(2);
+    let cases = [
+        ("reuse", format!(r#"<key-set android:name="z"><public-key android:name="one" android:value="{one}"/></key-set><key-set android:name="a"><public-key android:name="one"/></key-set><upgrade-key-set android:name="a"/>"#)),
+        ("nullable", format!(r#"<key-set android:name="a"><public-key android:value="{one}"/></key-set>"#)),
+        ("conflict", format!(r#"<key-set android:name="a"><public-key android:name="one" android:value="{one}"/><public-key android:name="one" android:value="{two}"/></key-set>"#)),
+        ("collision", format!(r#"<key-set android:name="one"><public-key android:name="one" android:value="{one}"/></key-set>"#)),
+        ("invalid", r#"<key-set android:name="a"><public-key android:name="one" android:value="invalid"/></key-set>"#.into()),
+        ("missing", r#"<key-set android:name="a"><public-key android:name="one"/></key-set>"#.into()),
+        ("empty-upgrade", r#"<key-set android:name="a"/><upgrade-key-set android:name="a"/>"#.into()),
+        ("repeat-set", format!(r#"<key-set android:name="a"><public-key android:name="one" android:value="{one}"/></key-set><key-set android:name="a"><public-key android:name="two" android:value="{two}"/></key-set>"#)),
+        ("sections", format!(r#"<key-set android:name="a"><public-key android:name="one" android:value="{one}"/></key-set></key-sets><key-sets><key-set android:name="a"><public-key android:name="two" android:value="{two}"/></key-set><upgrade-key-set android:name="a"/>"#)),
+        ("base64-skip", format!(r#"<key-set android:name="a"><public-key android:name="one" android:value=" !{one} !"/></key-set>"#)),
+        ("multiple", format!(r#"<key-set android:name="a"><public-key android:name="two" android:value="{two}"/><public-key android:name="one" android:value="{one}"/></key-set><upgrade-key-set android:name="a"/>"#)),
+    ];
+    let platform = Platform::load(&aim_paths::derived_image(), Default::default()).unwrap();
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let mut expected = String::new();
+    let mut apks = Vec::new();
+    for (name, body) in cases {
+        let xml = format!(
+            r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.example.keys"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/><key-sets>{body}</key-sets><application android:hasCode="false"/></manifest>"#
+        );
+        let apk = link(&data.0.join("apks"), name, &xml);
+        match parse(&apk, "/data/app/keys/base.apk", 0, &platform) {
+            Ok(package) => {
+                writeln!(&mut expected, "CASE {name}.apk OK").unwrap();
+                for (alias, keys) in package.key_set_mapping.iter() {
+                    for key in keys {
+                        let der = aim_services::package::sign::deserialize_public_key(key).unwrap();
+                        writeln!(
+                            &mut expected,
+                            "SET {alias} {} {} {}",
+                            key.class,
+                            hex(&der),
+                            hex(&key.bytes)
+                        )
+                        .unwrap();
+                    }
+                }
+                for upgrade in package.upgrade_key_sets.iter() {
+                    writeln!(&mut expected, "UPGRADE {upgrade}").unwrap();
+                }
+            }
+            Err(Error::Parse(_)) => {
+                writeln!(&mut expected, "CASE {name}.apk ERROR").unwrap();
+            }
+            Err(error) => panic!("native parser gap for {name}: {error}"),
+        }
+        apks.push(apk);
+    }
+    let boot = Boot {
+        ctl: aim_paths::root().join("target/release/aimctl"),
+        data: data.0.join("guest"),
+    };
+    run(boot.command().args(["start", "--windows"]));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let result = boot
+            .command()
+            .args(["shell", "getprop", "sys.boot_completed"])
+            .output()
+            .unwrap();
+        if result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == "1" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "disposable boot did not complete"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let guest = boot.data.join("data/local/tmp/manifest-keysets");
+    fs::create_dir(&guest).unwrap();
+    fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
+    let mut command = boot.command();
+    command.args(["shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar", "/system/bin", "ManifestKeySetsOracle"]);
+    for apk in apks {
+        let name = apk.file_name().unwrap();
+        fs::copy(&apk, guest.join(name)).unwrap();
+        command.arg(format!(
+            "/data/local/tmp/manifest-keysets/{}",
+            name.to_str().unwrap()
+        ));
+    }
+    let original = String::from_utf8(run(&mut command).stdout).unwrap();
+    assert_eq!(original, expected);
+}

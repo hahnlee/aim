@@ -3,6 +3,8 @@ package com.android.internal.pm.parsing.pkg;
 import com.android.internal.pm.pkg.component.*;
 import com.android.internal.pm.pkg.parsing.ParsingPackage;
 public abstract class PackageImpl implements ParsedPackage {
+    public java.util.Map<String, android.util.ArraySet<java.security.PublicKey>> getKeySetMapping() { throw new RuntimeException("stub"); }
+    public java.util.Set<String> getUpgradeKeySets() { throw new RuntimeException("stub"); }
     public PackageImpl(android.os.Parcel in) { throw new RuntimeException("stub"); }
     public static ParsingPackage forTesting(String name) { throw new RuntimeException("stub"); }
     public PackageImpl setPackageName(String name) { throw new RuntimeException("stub"); }
