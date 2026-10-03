@@ -307,9 +307,20 @@ non-reproducible input rejects. The complete original package ART oracle passes
 (17.60s): seven original owner forms, nested nullable constructor owners inside
 populated optional/certificate records, exact bytes, original concrete setting
 restoration, mutation isolation and malformed-owner rejection. Original Java
-linkage passes (3.95s); device-services builds (14.5s). The changed live full-PMS
-feed batch has not been exercised (#740); native-to-SystemServer lease bootstrap
-and complete facade import remain #836. Live policy delivery, overlay effects and
+linkage passes (3.95s); device-services builds (14.5s). The complete boot build
+passes (57.3s), rebuilding the native host, derived bridge image/translation cache
+and original-PMS userdata template. A disposable 90-second original-PMS shadow
+then publishes the changed live feed without read/publication errors: final
+generation 73 contains 285 active packages and five disabled factories. It exits
+successfully and leaves no owned processes or mounted data. Its 23,347 shadow
+calls include 21,965 matches, 539 classified races, 13 differences and 830 not
+modelled; five write checks also differ. Category differences are #865,
+enabled-state/eligibility/write differences #866, provider eligibility #867 and
+install-parse lifecycle comparison #868. No library-field differences were
+observed in this boot workload; targeted original owner fixtures prove nullable
+optional/certificate reproduction. This is original-PMS feed validation, not
+native PMS conformance. Native-to-SystemServer lease bootstrap and complete
+facade import remain #836. Live policy delivery, overlay effects and
 factory graph handling remain #707/#808/#836.
 The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target
@@ -664,7 +675,7 @@ original Java linkage passes (4.02s), device-services builds (16.6s), and the
 actual first-system image scan checks every accepted setting's enriched bit
 (42.90s). Live original-state export/import wiring remains #861/#836.
 Factory transient/dependency assembly and remaining transient scalar owners remain
-#836; live full-PMS library feed validation remains #740.
+#836; live query/write shadow differences remain #865-#868.
 Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
