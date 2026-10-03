@@ -353,9 +353,13 @@ alias replacement and upgrade references. Store.commit_key_sets persists this
 owner for retained active packages as resilient ABX, preserving disabled settings,
 UIDs, restrictions and unrelated XML. Reopen tests verify signer/alias IDs, shared
 keys, reserve copies and rejection of unrelated state or counter regression. This
-component writer does not commit new package metadata or publish the scan. Original
-PMS reading native-written registrations and manifest keyset parsing/decoding
-remain unverified (#824). Separate ART-service
+component writer does not commit new package metadata or publish the scan. A
+disposable original-PMS reboot (19.29s) reads native-written registrations: the
+test retires a singly-owned signing set, registers the same verified public keys
+under a new monotonic ID, writes ABX, then verifies original PMS preserves every
+package keyset and the complete global key/set/counter table. Package identities,
+signatures and shared UIDs remain intact; Settings launches and owned processes/
+mounts are cleaned. Manifest keyset parsing/decoding remains #824. Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,

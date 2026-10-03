@@ -30,6 +30,140 @@ fn start(boot: &Boot) {
 
 #[test]
 #[ignore = "requires aimctl and the pinned derived image; run explicitly"]
+fn original_pms_boots_with_native_keyset_registration() {
+    use aim_services::package::owner::key_sets;
+    let dir = std::env::temp_dir().join(format!("aim-keyr-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let data = Data(dir);
+    let boot = Boot {
+        ctl: aim_paths::root().join("target/release/aimctl"),
+        data: data.0.join("guest"),
+    };
+    start(&boot);
+    run(boot.command().arg("stop"));
+    let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
+    let mut store = Store::open(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let before = store.state().settings.clone();
+    assert_eq!(before.packages.len(), 243);
+    let target = before
+        .packages
+        .iter()
+        .find(|p| {
+            let id = p.key_set_data.proper_signing_key_set;
+            id > 0
+                && p.key_set_data.defined_key_sets.is_empty()
+                && before
+                    .packages
+                    .iter()
+                    .filter(|other| {
+                        other.key_set_data.proper_signing_key_set == id
+                            || other
+                                .key_set_data
+                                .defined_key_sets
+                                .iter()
+                                .any(|(_, alias)| *alias == id)
+                    })
+                    .count()
+                    == 1
+        })
+        .expect("image has no singly-owned signing keyset");
+    let signing: Vec<_> = before
+        .key_sets
+        .key_sets
+        .iter()
+        .find(|(id, _)| *id == target.key_set_data.proper_signing_key_set)
+        .unwrap()
+        .1
+        .iter()
+        .map(|id| {
+            before
+                .key_sets
+                .public_keys
+                .iter()
+                .find(|(key, _)| key == id)
+                .unwrap()
+                .1
+                .clone()
+        })
+        .collect();
+    let mut desired = before.clone();
+    key_sets::clear_package(&mut desired, &target.name).unwrap();
+    key_sets::register(&mut desired, &target.name, &signing, Some(&[]), &[]).unwrap();
+    let changed = desired
+        .packages
+        .iter()
+        .find(|p| p.name == target.name)
+        .unwrap();
+    assert_eq!(
+        changed.key_set_data.proper_signing_key_set,
+        before.key_sets.last_issued_key_set_id + 1
+    );
+    assert_ne!(changed.key_set_data, target.key_set_data);
+    store.commit_key_sets(&desired).unwrap();
+    let path = boot.data.join("data/system/packages.xml");
+    let written = fs::read(&path).unwrap();
+    assert!(written.starts_with(aim_android_xml::abx::MAGIC));
+    assert_eq!(
+        written,
+        fs::read(path.with_file_name("packages.xml.reservecopy")).unwrap()
+    );
+    assert!(!path.with_file_name("packages-backup.xml").exists());
+    assert_eq!(
+        Store::open(&boot.data.join("data"), &[0])
+            .unwrap()
+            .unwrap()
+            .state()
+            .settings,
+        desired
+    );
+    drop(store);
+    volume.detach().unwrap();
+    start(&boot);
+    let reread = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    assert_eq!(reread.settings.key_sets, desired.key_sets);
+    assert_eq!(reread.settings.packages.len(), desired.packages.len());
+    for saved in &desired.packages {
+        let actual = reread
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == saved.name)
+            .unwrap();
+        assert_eq!(actual.key_set_data, saved.key_set_data, "{}", saved.name);
+        assert_eq!(
+            (
+                actual.app_id,
+                actual.shared_user,
+                &actual.code_path,
+                &actual.signatures
+            ),
+            (
+                saved.app_id,
+                saved.shared_user,
+                &saved.code_path,
+                &saved.signatures
+            ),
+            "{}",
+            saved.name
+        );
+    }
+    assert_eq!(reread.settings.shared_users, before.shared_users);
+    let settings = run(boot.command().args([
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        "com.android.settings/.Settings",
+    ]));
+    assert!(String::from_utf8_lossy(&settings.stdout).contains("Status: ok"));
+    println!(
+        "original PMS retained native-reallocated signing keyset IDs and global keys/counters; Settings launched"
+    );
+}
+
+#[test]
+#[ignore = "requires aimctl and the pinned derived image; run explicitly"]
 fn original_pms_boots_with_native_library_metadata_persistence() {
     let dir = std::env::temp_dir().join(format!("aim-libr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
