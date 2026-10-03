@@ -36,6 +36,15 @@ impl Registry {
         available: &BTreeMap<String, PackageState>,
         policy: Policy,
     ) -> Result<Selection, ResolveError> {
+        self.collect_packages(pkg, available, policy)
+    }
+
+    pub(super) fn collect_packages<P: LibraryPackage>(
+        &self,
+        pkg: &AndroidPackage,
+        available: &BTreeMap<String, P>,
+        policy: Policy,
+    ) -> Result<Selection, ResolveError> {
         let mut libraries = Vec::new();
         let mut add = |names: &[String],
                        versions: Option<&[i64]>,
@@ -74,8 +83,7 @@ impl Registry {
                         .and_then(|n| available.get(n))
                         .ok_or_else(|| ResolveError::MissingLibrary(name.clone()))?;
                     let signatures = provider
-                        .signatures
-                        .as_ref()
+                        .signatures()
                         .ok_or(ResolveError::Incomplete("verified library signing details"))?;
                     check_signers(name, expected, signatures, pkg.target_sdk_version)?;
                 }
@@ -125,6 +133,13 @@ impl Selection {
         &self,
         available: &BTreeMap<String, PackageState>,
     ) -> Result<Vec<String>, ResolveError> {
+        self.files_packages(available)
+    }
+
+    pub(super) fn files_packages<P: LibraryPackage>(
+        &self,
+        available: &BTreeMap<String, P>,
+    ) -> Result<Vec<String>, ResolveError> {
         let mut files = Vec::new();
         let mut add = |path: &str| {
             if !files.iter().any(|p| p == path) {
@@ -141,8 +156,7 @@ impl Selection {
                     .and_then(|n| available.get(n))
                     .ok_or(ResolveError::Incomplete("library provider snapshot"))?;
                 let pkg = provider
-                    .pkg
-                    .as_ref()
+                    .code()
                     .ok_or(ResolveError::Incomplete("library provider APK"))?;
                 add(pkg
                     .base_apk_path
@@ -155,7 +169,7 @@ impl Selection {
                             .ok_or(ResolveError::Incomplete("library split APK path"))?);
                     }
                 }
-                for path in &provider.uses_library_files {
+                for path in provider.files() {
                     add(path);
                 }
             }

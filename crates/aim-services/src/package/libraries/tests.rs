@@ -11,6 +11,36 @@ fn policy(native: bool, independence: bool) -> Policy {
     }
 }
 
+fn scan_inputs(available: &BTreeMap<String, PackageState>) -> BTreeMap<String, ScanPackage> {
+    available
+        .iter()
+        .map(|(name, package)| {
+            (
+                name.clone(),
+                ScanPackage {
+                    code: package.pkg.clone().unwrap(),
+                    signatures: package.signatures.clone(),
+                    users: package
+                        .users
+                        .iter()
+                        .map(|(id, state)| {
+                            (
+                                *id,
+                                crate::package::restrictions::UserState {
+                                    installed: state.installed,
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect(),
+                    uses_library_files: package.uses_library_files.clone(),
+                    uses_library_infos: package.uses_library_infos.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn loaded_library_withdrawal_preserves_other_versions_and_builtins() {
     use crate::package::{
@@ -111,6 +141,23 @@ fn graph_resolves_multihop_paths_and_nested_apk_dependencies() {
     assert_eq!(a.dependencies[0].dependencies[0].name.as_deref(), Some("c"));
     assert_eq!(resolved.packages["app"].uses_library_infos[0], *a);
     assert!(available["app"].uses_library_files.is_empty());
+    let inputs = scan_inputs(&available);
+    let native = registry
+        .resolve_scan(&inputs, &|_| Ok(policy(false, false)))
+        .unwrap();
+    assert_eq!(native.registry, resolved.registry);
+    for (name, package) in &native.packages {
+        assert_eq!(
+            package.uses_library_files,
+            resolved.packages[name].uses_library_files
+        );
+        assert_eq!(
+            package.uses_library_infos,
+            resolved.packages[name].uses_library_infos
+        );
+        assert!(Arc::ptr_eq(&package.code, &inputs[name].code));
+    }
+    assert!(inputs["app"].uses_library_files.is_empty());
 }
 
 #[test]
@@ -169,6 +216,33 @@ fn graph_marks_static_libraries_installed_for_the_consumers_users() {
     assert!(resolved.packages["provider"].users[&0].installed);
     assert!(!resolved.packages["provider"].users[&10].installed);
     assert!(!available["provider"].users[&0].installed);
+
+    let inputs = scan_inputs(&available);
+    let native = registry
+        .resolve_scan(&inputs, &|_| Ok(policy(false, false)))
+        .unwrap();
+    assert!(native.packages["provider"].users[&0].installed);
+    assert!(!native.packages["provider"].users[&10].installed);
+    assert!(!inputs["provider"].users[&0].installed);
+    let mut missing = inputs.clone();
+    missing.get_mut("provider").unwrap().signatures = None;
+    assert_eq!(
+        registry
+            .resolve_scan(&missing, &|_| Ok(policy(false, false)))
+            .unwrap_err()
+            .cause,
+        ResolveError::Incomplete("verified library signing details")
+    );
+    missing = inputs.clone();
+    missing.get_mut("provider").unwrap().users.remove(&0);
+    assert_eq!(
+        registry
+            .resolve_scan(&missing, &|_| Ok(policy(false, false)))
+            .unwrap_err()
+            .cause,
+        ResolveError::Incomplete("static library user state")
+    );
+    assert!(!missing["provider"].users.contains_key(&0));
     available.get_mut("provider").unwrap().users.remove(&0);
     assert_eq!(
         registry

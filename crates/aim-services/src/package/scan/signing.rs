@@ -45,6 +45,7 @@ pub struct SigningScan {
     pub(super) pending_metadata: BTreeSet<String>,
     pub(super) seinfo: Option<super::seinfo::Assignments>,
     pub(super) legacy_permissions: Option<super::legacy::Assignments>,
+    pub(super) library_dependencies: Option<super::libraries::Assignments>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -470,6 +471,7 @@ impl SigningScan {
             pending_metadata: BTreeSet::new(),
             seinfo: None,
             legacy_permissions: None,
+            library_dependencies: None,
             first_api_level,
             parsed: Vec::new(),
         })

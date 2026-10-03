@@ -264,7 +264,21 @@ resolves acyclic APK provider graphs, fills nested dependency records and
 package file paths, and marks static libraries installed for the direct
 consumer's installed users. Tests check multihop ordering, input
 immutability and user effects. Cyclic provider updates fail explicitly
-(#799). The original PlatformCompat install-time native-library policy
+(#799). The same resolver now accepts explicit native scan code, saved signing
+and user owners, without constructing a partial query PackageState. Native
+SigningScan computes dependency candidates from finalized active code, then
+commits nested library metadata and static-provider installed-user changes
+together. Missing policy/signing/provider/user inputs reject before mutation.
+Captured assignments retain code/signing/user-inventory/installed-state and
+registry inputs; changed inputs reject queries and publication until recomputed.
+Original captures remain usable after a new graph publication. Unit tests compare
+native and query-input multihop results, code retention and static-user effects;
+all 392 units pass (3.22s; one ignored/not run), and all integration targets compile.
+The actual first-system image fixture passes (42.31s), exercising candidate/commit, policy failure
+atomicity, stale-user rejection and old/new publication under controlled native
+enforcement policy. Live policy delivery, overlay effects, factory graph handling
+and captured Java dependency transport/assembly remain #707/#808/#836.
+The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target
 SDK, without PMS lookup). On a disposable original-PMS boot (2026-10-02,
 boot completed), a temporary Rust diagnostic received false for SDK 30
@@ -275,7 +289,7 @@ diagnostic was removed and the boot/data cleaned. The original image's
 image integration test verifies that call argument and its straight-line
 assignment, rejecting changed policy code (#800). `Policy::from_bridge`
 combines it with the original PlatformCompat response. SDK dependency CTS
-is still pending. Bootstrap facade wiring, native scan
+is still pending. Bootstrap facade wiring, native boot dependency-stage
 integration and native PackageManager
 activation remain pending (#707);
 no native PackageManager CTS result is claimed.
@@ -614,7 +628,7 @@ original Java linkage passes (4.02s), device-services builds (16.6s), and the
 actual first-system image scan checks every accepted setting's enriched bit
 (42.90s). Live original-state export/import wiring remains #861/#836.
 This is not a complete facade: factory transient assembly and library dependency
-owners remain #836. Original-state import,
+transport/Java assembly remain #836. Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

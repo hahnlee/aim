@@ -198,6 +198,95 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     ));
     assert_eq!(scan.owner.loaded_packages().len(), scan.packages.len());
     assert!(scan.owner.disabled_loaded_packages().is_empty());
+    // This fixture supplies a controlled policy; live PlatformCompat is a
+    // separate owner. Exercise dependency inputs from the actual native scan.
+    let dependencies = scan
+        .owner
+        .resolve_library_dependencies(&|_, _| {
+            Ok(aim_services::package::libraries::Policy::pinned(false))
+        })
+        .unwrap();
+    assert_eq!(
+        dependencies.packages.len(),
+        scan.owner.loaded_packages().len()
+    );
+    let mut graph_owner = scan.owner.clone();
+    assert!(graph_owner.library_dependencies("android").is_err());
+    let before_graph = graph_owner.clone();
+    assert!(
+        graph_owner
+            .complete_library_dependencies(&|_, _| Err(
+                aim_services::package::libraries::ResolveError::Incomplete(
+                    "unavailable compatibility owner"
+                )
+            ))
+            .is_err()
+    );
+    assert_eq!(graph_owner, before_graph);
+    graph_owner
+        .complete_library_dependencies(&|_, _| {
+            Ok(aim_services::package::libraries::Policy::pinned(false))
+        })
+        .unwrap();
+    for (name, dependency) in &dependencies.packages {
+        let (files, infos) = graph_owner.library_dependencies(name).unwrap().unwrap();
+        assert_eq!(files, dependency.uses_library_files);
+        assert_eq!(infos, dependency.uses_library_infos);
+        assert_eq!(
+            graph_owner.scanned_user_states(name).unwrap(),
+            &dependency.users
+        );
+    }
+    assert!(
+        graph_owner
+            .library_dependencies("unknown")
+            .unwrap()
+            .is_none()
+    );
+    let graph_store = aim_services::package::scan_snapshot::Store::new(
+        graph_owner.clone(),
+        original_capture.usage().clone(),
+    )
+    .unwrap();
+    let old_graph = graph_store.capture();
+    let mut changed_user = graph_owner.scanned_user_states("android").unwrap()[&0].clone();
+    changed_user.installed = !changed_user.installed;
+    graph_owner
+        .set_user_state("android", 0, changed_user)
+        .unwrap();
+    assert!(graph_owner.library_dependencies("android").is_err());
+    assert!(
+        graph_store
+            .publish(&old_graph, graph_owner.clone(), old_graph.usage().clone())
+            .is_err()
+    );
+    assert!(std::sync::Arc::ptr_eq(&old_graph, &graph_store.capture()));
+    graph_owner
+        .complete_library_dependencies(&|_, _| {
+            Ok(aim_services::package::libraries::Policy::pinned(false))
+        })
+        .unwrap();
+    let new_graph = graph_store
+        .publish(&old_graph, graph_owner, old_graph.usage().clone())
+        .unwrap();
+    assert_ne!(
+        old_graph.owner().scanned_user_states("android").unwrap()[&0].installed,
+        new_graph.owner().scanned_user_states("android").unwrap()[&0].installed
+    );
+    assert!(
+        old_graph
+            .owner()
+            .library_dependencies("android")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        new_graph
+            .owner()
+            .library_dependencies("android")
+            .unwrap()
+            .is_some()
+    );
     for completed in &scan.packages {
         let record = &completed.candidate.record;
         let loaded = &scan.owner.loaded_packages()[&record.settings.name];

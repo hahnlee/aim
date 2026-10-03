@@ -13,7 +13,7 @@ use super::system_config::SystemConfig;
 mod resolve;
 pub use resolve::{Policy, ResolveError, Selection};
 mod graph;
-pub use graph::{GraphError, Resolved};
+pub use graph::{GraphError, Resolved, ScanResolved};
 mod policy;
 pub use policy::{NativePolicyError, native_dependencies_enforced};
 
@@ -22,6 +22,95 @@ pub const TYPE_BUILTIN: i32 = 0;
 pub const TYPE_DYNAMIC: i32 = 1;
 pub const TYPE_STATIC: i32 = 2;
 pub const TYPE_SDK_PACKAGE: i32 = 3;
+
+/// Library resolution inputs owned by a native scan, without a query facade.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanPackage {
+    pub code: std::sync::Arc<super::pkg::AndroidPackage>,
+    pub signatures: Option<super::settings::Signatures>,
+    pub users: BTreeMap<i32, super::restrictions::UserState>,
+    pub uses_library_files: Vec<String>,
+    pub uses_library_infos: Vec<SharedLibrary>,
+}
+
+trait LibraryPackage: Clone {
+    fn code(&self) -> Option<&super::pkg::AndroidPackage>;
+    fn unparsed_code(&self) -> bool;
+    fn signatures(&self) -> Option<&super::settings::Signatures>;
+    fn files(&self) -> &[String];
+    fn set_files(&mut self, files: Vec<String>);
+    fn set_infos(&mut self, infos: Vec<SharedLibrary>);
+    fn installed_users(&self) -> Vec<i32>;
+    fn install_for_user(&mut self, id: i32) -> Result<(), ResolveError>;
+}
+
+impl LibraryPackage for PackageState {
+    fn code(&self) -> Option<&super::pkg::AndroidPackage> {
+        self.pkg.as_deref()
+    }
+    fn unparsed_code(&self) -> bool {
+        self.parcel.is_some() && self.pkg.is_none()
+    }
+    fn signatures(&self) -> Option<&super::settings::Signatures> {
+        self.signatures.as_ref()
+    }
+    fn files(&self) -> &[String] {
+        &self.uses_library_files
+    }
+    fn set_files(&mut self, files: Vec<String>) {
+        self.uses_library_files = files;
+    }
+    fn set_infos(&mut self, infos: Vec<SharedLibrary>) {
+        self.uses_library_infos = infos;
+    }
+    fn installed_users(&self) -> Vec<i32> {
+        self.users
+            .iter()
+            .filter_map(|(id, state)| state.installed.then_some(*id))
+            .collect()
+    }
+    fn install_for_user(&mut self, id: i32) -> Result<(), ResolveError> {
+        self.users
+            .get_mut(&id)
+            .ok_or(ResolveError::Incomplete("static library user state"))?
+            .installed = true;
+        Ok(())
+    }
+}
+
+impl LibraryPackage for ScanPackage {
+    fn code(&self) -> Option<&super::pkg::AndroidPackage> {
+        Some(&self.code)
+    }
+    fn unparsed_code(&self) -> bool {
+        false
+    }
+    fn signatures(&self) -> Option<&super::settings::Signatures> {
+        self.signatures.as_ref()
+    }
+    fn files(&self) -> &[String] {
+        &self.uses_library_files
+    }
+    fn set_files(&mut self, files: Vec<String>) {
+        self.uses_library_files = files;
+    }
+    fn set_infos(&mut self, infos: Vec<SharedLibrary>) {
+        self.uses_library_infos = infos;
+    }
+    fn installed_users(&self) -> Vec<i32> {
+        self.users
+            .iter()
+            .filter_map(|(id, state)| state.installed.then_some(*id))
+            .collect()
+    }
+    fn install_for_user(&mut self, id: i32) -> Result<(), ResolveError> {
+        self.users
+            .get_mut(&id)
+            .ok_or(ResolveError::Incomplete("static library user state"))?
+            .installed = true;
+        Ok(())
+    }
+}
 
 /// SharedLibrariesImpl's name/version map. Scan order matters: dynamic
 /// declarations cannot replace an existing built-in or dynamic library.

@@ -15,10 +15,13 @@ pub struct GraphError {
 /// A fully computed candidate. The owner publishes it only after the
 /// scan validates all packages; no input state or persistence is changed.
 #[derive(Debug)]
-pub struct Resolved {
+pub struct ResolvedPackages<P> {
     pub registry: Registry,
-    pub packages: BTreeMap<String, PackageState>,
+    pub packages: BTreeMap<String, P>,
 }
+
+pub type Resolved = ResolvedPackages<PackageState>;
+pub type ScanResolved = ResolvedPackages<ScanPackage>;
 
 impl Registry {
     pub fn resolve(
@@ -26,10 +29,26 @@ impl Registry {
         available: &BTreeMap<String, PackageState>,
         policy: &dyn Fn(&PackageState) -> Result<Policy, ResolveError>,
     ) -> Result<Resolved, GraphError> {
+        self.resolve_packages(available, policy)
+    }
+
+    pub fn resolve_scan(
+        &self,
+        available: &BTreeMap<String, ScanPackage>,
+        policy: &dyn Fn(&ScanPackage) -> Result<Policy, ResolveError>,
+    ) -> Result<ScanResolved, GraphError> {
+        self.resolve_packages(available, policy)
+    }
+
+    fn resolve_packages<P: LibraryPackage>(
+        &self,
+        available: &BTreeMap<String, P>,
+        policy: &dyn Fn(&P) -> Result<Policy, ResolveError>,
+    ) -> Result<ResolvedPackages<P>, GraphError> {
         let mut selections = BTreeMap::new();
         for (name, ps) in available {
-            let Some(pkg) = &ps.pkg else {
-                if ps.parcel.is_some() {
+            let Some(pkg) = ps.code() else {
+                if ps.unparsed_code() {
                     return Err(error(
                         name,
                         ResolveError::Incomplete("unparsed package APK"),
@@ -38,7 +57,7 @@ impl Registry {
                 continue;
             };
             let selection = policy(ps)
-                .and_then(|p| self.collect(pkg, available, p))
+                .and_then(|p| self.collect_packages(pkg, available, p))
                 .map_err(|e| error(name, e))?;
             selections.insert(name.clone(), selection);
         }
@@ -71,7 +90,7 @@ impl Registry {
                                 .ok_or_else(|| {
                                     error(provider, ResolveError::Incomplete("dependency provider"))
                                 })?;
-                            if ps.pkg.is_some() {
+                            if ps.code().is_some() {
                                 library.dependencies.push(dependency.clone());
                             }
                         }
@@ -97,12 +116,8 @@ impl Registry {
                         .clone()
                 })
                 .collect();
-            packages.get_mut(&name).unwrap().uses_library_infos = infos;
-            let users: Vec<_> = packages[&name]
-                .users
-                .iter()
-                .filter_map(|(id, s)| s.installed.then_some(*id))
-                .collect();
+            packages.get_mut(&name).unwrap().set_infos(infos);
+            let users = packages[&name].installed_users();
             for library in selection.libraries.iter().filter(|l| l.kind == TYPE_STATIC) {
                 let provider_name = library.package_name.as_ref().ok_or_else(|| {
                     error(
@@ -115,23 +130,19 @@ impl Registry {
                 })?;
                 for user in &users {
                     provider
-                        .users
-                        .get_mut(user)
-                        .ok_or_else(|| {
-                            error(&name, ResolveError::Incomplete("static library user state"))
-                        })?
-                        .installed = true;
+                        .install_for_user(*user)
+                        .map_err(|e| error(&name, e))?;
                 }
             }
         }
-        Ok(Resolved { registry, packages })
+        Ok(ResolvedPackages { registry, packages })
     }
 }
 
-fn resolve_files(
+fn resolve_files<P: LibraryPackage>(
     name: &str,
     selections: &BTreeMap<String, Selection>,
-    packages: &mut BTreeMap<String, PackageState>,
+    packages: &mut BTreeMap<String, P>,
     active: &mut BTreeSet<String>,
     done: &mut BTreeSet<String>,
 ) -> Result<(), GraphError> {
@@ -156,8 +167,10 @@ fn resolve_files(
             resolve_files(provider, selections, packages, active, done)?;
         }
     }
-    let files = selection.files(packages).map_err(|e| error(name, e))?;
-    packages.get_mut(name).unwrap().uses_library_files = files;
+    let files = selection
+        .files_packages(packages)
+        .map_err(|e| error(name, e))?;
+    packages.get_mut(name).unwrap().set_files(files);
     active.remove(name);
     done.insert(name.to_owned());
     Ok(())

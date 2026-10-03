@@ -95,6 +95,9 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
     }
     owner.validate_seinfo().map_err(Error::Invalid)?;
     owner
+        .validate_library_dependencies()
+        .map_err(Error::Invalid)?;
+    owner
         .validate_legacy_permissions()
         .map_err(Error::Invalid)?;
     let package_names: BTreeSet<_> = owner
