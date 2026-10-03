@@ -178,7 +178,7 @@ fn user_state(r: &mut Reader<'_>) -> Result<PackageUserState> {
             activities.push(ArchiveActivity {
                 title: string(r)?.unwrap_or_default(),
                 original_component_name: string(r)?.unwrap_or_default(),
-                icon_path: string(r)?.unwrap_or_default(),
+                icon_path: string(r)?,
                 monochrome_icon_path: string(r)?,
             });
         }

@@ -175,7 +175,7 @@ public final class PackageUserStateData {
         public final String title, component, icon, monochromeIcon;
         private ArchiveActivity(Parcel in) {
             title = Objects.requireNonNull(in.readString()); component = Objects.requireNonNull(in.readString());
-            icon = Objects.requireNonNull(in.readString()); monochromeIcon = in.readString();
+            icon = in.readString(); monochromeIcon = in.readString();
         }
     }
 }

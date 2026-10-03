@@ -135,7 +135,7 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
         for activity in &archive.activities {
             p.write_string16(Some(&activity.title));
             p.write_string16(Some(&activity.original_component_name));
-            p.write_string16(Some(&activity.icon_path));
+            p.write_string16(activity.icon_path.as_deref());
             p.write_string16(activity.monochrome_icon_path.as_deref());
         }
     }

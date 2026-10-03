@@ -140,7 +140,7 @@ public final class PackageUserStateReplica implements PackageUserStateInternal {
         if (archive == null) return null;
         var activities = new ArrayList<ArchiveState.ArchiveActivityInfo>();
         for (var activity : archive.activities) activities.add(new ArchiveState.ArchiveActivityInfo(activity.title,
-            Objects.requireNonNull(ComponentName.unflattenFromString(activity.component)), Path.of(activity.icon),
+            Objects.requireNonNull(ComponentName.unflattenFromString(activity.component)), activity.icon == null ? null : Path.of(activity.icon),
             activity.monochromeIcon == null ? null : Path.of(activity.monochromeIcon)));
         return new ArchiveState(List.copyOf(activities), archive.installerTitle, archive.time);
     }

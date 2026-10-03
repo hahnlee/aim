@@ -216,7 +216,7 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.user")), user_state).unwrap();
-        for user in [10, 11, 12, 13] {
+        for user in [10, 11, 12, 13, 14] {
             let bytes = aim_services::package::scan_snapshot::user_record::captured(
                 &snapshot,
                 &pkg.package_name,
@@ -392,6 +392,21 @@ fn native_package_parcels_match_original_read_write() {
     );
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            let xml = fs::read(directory.join(format!("{name}.null-icon.xml"))).unwrap();
+            let restored = aim_services::package::restrictions::Restrictions::parse(
+                &aim_android_xml::read(&xml).unwrap(),
+            )
+            .unwrap();
+            let archive = restored.packages[0].1.archive_state.as_ref().unwrap();
+            assert_eq!(archive.archive_time, 123);
+            assert_eq!(archive.activities.len(), 1);
+            assert_eq!(archive.activities[0].title, "icon");
+            assert_eq!(
+                archive.activities[0].icon_path.as_deref(),
+                Some("/data/icon")
+            );
+            assert_eq!(archive.activities[0].monochrome_icon_path, None);
+
             let root = aim_android_xml::read(
                 &fs::read(directory.join(format!("{name}.null-params.xml"))).unwrap(),
             )
@@ -613,7 +628,37 @@ fn native_scan_objects(
         let mut empty = aim_services::package::restrictions::UserState::initialized();
         empty.suspensions = Some(vec![]);
         owner.set_user_state(name, 11, empty).unwrap();
-        use aim_services::package::restrictions::{SuspendParams, UserState};
+        use aim_services::package::restrictions::{
+            ArchiveActivity, ArchiveState, SuspendParams, UserState,
+        };
+        let archive = ArchiveState {
+            installer_title: "runtime installer".into(),
+            archive_time: 123,
+            activities: vec![
+                ArchiveActivity {
+                    title: "no icon".into(),
+                    original_component_name: "fixture/fixture.NoIcon".into(),
+                    icon_path: None,
+                    monochrome_icon_path: Some("/data/mono".into()),
+                },
+                ArchiveActivity {
+                    title: "icon".into(),
+                    original_component_name: "fixture/fixture.Icon".into(),
+                    icon_path: Some("/data/icon".into()),
+                    monochrome_icon_path: None,
+                },
+            ],
+        };
+        owner
+            .set_user_state(
+                name,
+                14,
+                UserState {
+                    archive_state: Some(archive),
+                    ..UserState::default()
+                },
+            )
+            .unwrap();
         for (user, null_name, positive_name) in [(12, "android", "B"), (13, "B", "android")] {
             let mut state = UserState::default();
             for package in ["B", "android"] {

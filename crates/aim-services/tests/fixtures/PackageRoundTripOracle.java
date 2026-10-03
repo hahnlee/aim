@@ -125,6 +125,7 @@ public final class PackageRoundTripOracle {
         owner.user11 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-11").toPath());
         owner.user12 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-12").toPath());
         owner.user13 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-13").toPath());
+        owner.user14 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-14").toPath());
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
@@ -506,6 +507,40 @@ public final class PackageRoundTripOracle {
     }
 
     private static void verifyUserReplica(dev.aim.server.PackageScanLease lease, String name, java.io.File file) throws Exception {
+        var originalArchive = new com.android.server.pm.pkg.ArchiveState(new java.util.ArrayList<>(java.util.List.of(
+            new com.android.server.pm.pkg.ArchiveState.ArchiveActivityInfo("no icon", new android.content.ComponentName("fixture", "fixture.NoIcon"), null, java.nio.file.Path.of("/data/mono")),
+            new com.android.server.pm.pkg.ArchiveState.ArchiveActivityInfo("icon", new android.content.ComponentName("fixture", "fixture.Icon"), java.nio.file.Path.of("/data/icon"), null))), "runtime installer", 123);
+        var originalUser = new com.android.server.pm.pkg.PackageUserStateImpl(new com.android.server.utils.WatchableImpl());
+        originalUser.setArchiveState(originalArchive);
+        var runtimeArchive = lease.getUserStateReplica(name, false, 14, true);
+        if (!originalUser.getArchiveState().equals(runtimeArchive.getArchiveState())) throw new AssertionError("nullable archive runtime getters differ");
+        try { runtimeArchive.getArchiveState().getActivityInfos().clear(); throw new AssertionError("mutable captured archive list"); }
+        catch (UnsupportedOperationException expected) {}
+        originalArchive.getActivityInfos().clear();
+        if (runtimeArchive.getArchiveState().getActivityInfos().size() != 2
+                || runtimeArchive.getArchiveState().getActivityInfos().get(0).getIconBitmap() != null) throw new AssertionError("archive capture changed after original mutation");
+        // Pinned Settings.writeArchiveStateLPr loop with original XML serializer.
+        try (var output = new java.io.FileOutputStream(file.getPath() + ".null-icon.xml")) {
+            var serializer = android.util.Xml.resolveSerializer(output);
+            serializer.startDocument(null, true);
+            serializer.startTag(null, "package-restrictions");
+            serializer.startTag(null, "pkg"); serializer.attribute(null, "name", name);
+            var archive = runtimeArchive.getArchiveState();
+            serializer.startTag(null, "archive-state");
+            serializer.attribute(null, "installer-title", archive.getInstallerTitle());
+            serializer.attributeLongHex(null, "archive-time", archive.getArchiveTimeMillis());
+            for (var activity : archive.getActivityInfos()) {
+                serializer.startTag(null, "archive-activity-info");
+                serializer.attribute(null, "activity-title", activity.getTitle());
+                serializer.attribute(null, "original-component-name", activity.getOriginalComponentName().flattenToString());
+                if (activity.getIconBitmap() != null) serializer.attribute(null, "icon-path", activity.getIconBitmap().toAbsolutePath().toString());
+                if (activity.getMonochromeIconBitmap() != null) serializer.attribute(null, "monochrome-icon-path", activity.getMonochromeIconBitmap().toAbsolutePath().toString());
+                serializer.endTag(null, "archive-activity-info");
+            }
+            serializer.endTag(null, "archive-state");
+            serializer.endTag(null, "pkg"); serializer.endTag(null, "package-restrictions");
+            serializer.endDocument();
+        }
         for (int user : new int[] {12, 13}) {
             var original = new com.android.server.pm.pkg.PackageUserStateImpl(new com.android.server.utils.WatchableImpl());
             original.putSuspendParams(android.content.pm.UserPackage.of(0, "B"), user == 12 ? new com.android.server.pm.pkg.SuspendParams(null, null, null, true) : null);
@@ -657,7 +692,7 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
-        byte[] userState, user10, user11, user12, user13;
+        byte[] userState, user10, user11, user12, user13, user14;
         int userReads;
         boolean signingTail;
         byte[] signingOverride;
@@ -681,10 +716,10 @@ public final class PackageRoundTripOracle {
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
         private byte[] userBytes(int userId) {
-            return switch (userId) { case 0 -> userState; case 10 -> user10; case 11 -> user11; case 12 -> user12; case 13 -> user13; default -> null; };
+            return switch (userId) { case 0 -> userState; case 10 -> user10; case 11 -> user11; case 12 -> user12; case 13 -> user13; case 14 -> user14; default -> null; };
         }
         @Override public int getUserStateLength(String candidate, boolean disabled, int userId) {
-            return !disabled && name.equals(candidate) && (userId == 0 || (userId >= 10 && userId <= 13))
+            return !disabled && name.equals(candidate) && (userId == 0 || (userId >= 10 && userId <= 14))
                 ? userBytes(userId).length : -1;
         }
         @Override public byte[] getUserStateChunk(String candidate, boolean disabled, int userId, int offset, int length)

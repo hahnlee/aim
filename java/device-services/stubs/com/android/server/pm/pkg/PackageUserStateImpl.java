@@ -19,4 +19,6 @@ public class PackageUserStateImpl extends com.android.server.utils.WatchableImpl
     public PackageUserStateImpl setDisabledComponents(android.util.ArraySet<String> value) { throw new RuntimeException("stub"); }
     public com.android.server.utils.WatchedArraySet<String> getEnabledComponentsNoCopy() { throw new RuntimeException("stub"); }
     public com.android.server.utils.WatchedArraySet<String> getDisabledComponentsNoCopy() { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setArchiveState(ArchiveState value) { throw new RuntimeException("stub"); }
+    public ArchiveState getArchiveState() { throw new RuntimeException("stub"); }
 }

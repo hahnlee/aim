@@ -671,7 +671,7 @@ fn check_archives(boot: &Boot, directory: &std::path::Path) {
                 for activity in &archive.activities {
                     text(&mut bytes, Some(&activity.title));
                     text(&mut bytes, Some(&activity.original_component_name));
-                    text(&mut bytes, Some(&activity.icon_path));
+                    text(&mut bytes, activity.icon_path.as_deref());
                     text(&mut bytes, activity.monochrome_icon_path.as_deref());
                 }
             }

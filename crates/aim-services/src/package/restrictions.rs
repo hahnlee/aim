@@ -294,7 +294,7 @@ pub struct ArchiveState {
 pub struct ArchiveActivity {
     pub title: String,
     pub original_component_name: String,
-    pub icon_path: String,
+    pub icon_path: Option<String>,
     pub monochrome_icon_path: Option<String>,
 }
 
@@ -470,7 +470,7 @@ fn archive_state(e: &Element) -> Result<Option<ArchiveState>, String> {
             activities.push(ArchiveActivity {
                 title,
                 original_component_name: format!("{package}/{class}"),
-                icon_path,
+                icon_path: Some(icon_path),
                 monochrome_icon_path: string(a, "monochrome-icon-path"),
             });
         }

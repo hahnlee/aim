@@ -1400,6 +1400,16 @@ mod tests {
             enabled_components: Some(vec!["fixture.Activity".into()]),
             ..Default::default()
         };
+        user.archive_state = Some(crate::package::restrictions::ArchiveState {
+            installer_title: "installer".into(),
+            archive_time: 123,
+            activities: vec![crate::package::restrictions::ArchiveActivity {
+                title: "no icon".into(),
+                original_component_name: "fixture/Activity".into(),
+                icon_path: None,
+                monochrome_icon_path: Some("/data/mono".into()),
+            }],
+        });
         user.runtime.set_library_overlay_paths(
             "library".into(),
             Some(crate::package::model::OverlayPaths {
@@ -1470,7 +1480,31 @@ mod tests {
                 .set_user_runtime("fixture", -1, Default::default())
                 .is_err()
         );
+        let mut state = owner.scanned_user_states("fixture").unwrap()[&10].clone();
+        state.archive_state.as_mut().unwrap().activities[0].icon_path =
+            Some("/data/new-icon".into());
+        owner.set_user_state("fixture", 10, state).unwrap();
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_eq!(
+            base.owner().scanned_user_states("fixture").unwrap()[&10]
+                .archive_state
+                .as_ref()
+                .unwrap()
+                .activities[0]
+                .icon_path,
+            None
+        );
+        assert_eq!(
+            current.owner().scanned_user_states("fixture").unwrap()[&10]
+                .archive_state
+                .as_ref()
+                .unwrap()
+                .activities[0]
+                .icon_path
+                .as_deref(),
+            Some("/data/new-icon")
+        );
+
         assert!(
             current.owner().scanned_user_states("fixture").unwrap()[&10]
                 .runtime
