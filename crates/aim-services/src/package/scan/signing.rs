@@ -1477,7 +1477,7 @@ mod tests {
                 assert_eq!(r.read_i64().unwrap(), 1);
                 assert_eq!(r.read_string16().unwrap().as_deref(), name);
                 assert_eq!(r.read_string16().unwrap().as_deref(), Some(expected));
-                assert!(!r.read_bool().unwrap());
+                assert!(r.read_string16().unwrap().is_none());
                 assert_eq!(r.remaining(), 0);
             } else {
                 assert!(bytes.is_none());

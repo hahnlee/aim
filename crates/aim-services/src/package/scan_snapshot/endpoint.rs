@@ -92,8 +92,8 @@ pub const MAX_CHUNK: usize = 64 * 1024;
 pub struct PackageSeInfo {
     version: u64,
     name: String,
-    label: String,
-    override_label: bool,
+    base: Option<String>,
+    override_label: Option<String>,
 }
 
 impl PackageSeInfo {
@@ -101,17 +101,14 @@ impl PackageSeInfo {
         let Some(state) = snapshot.owner().seinfo_state(name)? else {
             return Ok(None);
         };
-        let label = state
+        state
             .effective()
             .ok_or_else(|| "seInfo label is missing".to_string())?;
         Ok(Some(Self {
             version: snapshot.version(),
             name: name.into(),
-            label: label.into(),
-            override_label: state
-                .override_label
-                .as_deref()
-                .is_some_and(|label| !label.is_empty()),
+            base: state.base.clone(),
+            override_label: state.override_label.clone(),
         }))
     }
 }
@@ -120,8 +117,8 @@ impl WriteParcelable for PackageSeInfo {
     fn write_to(&self, p: &mut Parcel) {
         p.write_i64(self.version as i64);
         p.write_string16(Some(&self.name));
-        p.write_string16(Some(&self.label));
-        p.write_bool(self.override_label);
+        p.write_string16(self.base.as_deref());
+        p.write_string16(self.override_label.as_deref());
     }
 }
 

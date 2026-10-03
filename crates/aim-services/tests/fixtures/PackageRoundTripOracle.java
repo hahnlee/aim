@@ -228,6 +228,30 @@ public final class PackageRoundTripOracle {
                 || !security.getLabel().equals(((com.android.server.pm.pkg.PackageState)setting).getSeInfo())) {
             throw new AssertionError("original boot base/override differs");
         }
+        setting.getPkgState().setSeInfo("stale-base");
+        setting.getPkgState().setOverrideSeInfo("stale-override");
+        dev.aim.server.PackageObjects.restoreSeInfo(setting, security, 1);
+        if (!java.util.Objects.equals(security.getBaseLabel(), setting.getPkgState().getSeInfo())
+                || !java.util.Objects.equals(security.getOverrideLabel(), setting.getPkgState().getOverrideSeInfo())
+                || !security.getLabel().equals(((com.android.server.pm.pkg.PackageState)setting).getSeInfo())) {
+            throw new AssertionError("original complete seInfo fields differ");
+        }
+        android.os.Parcel incompleteParcel = android.os.Parcel.obtain();
+        try {
+            incompleteParcel.writeLong(1);
+            incompleteParcel.writeString(name);
+            incompleteParcel.writeString(null);
+            incompleteParcel.writeString("boot-only-override");
+            incompleteParcel.setDataPosition(0);
+            var incomplete = dev.aim.server.PackageSeInfoState.CREATOR.createFromParcel(incompleteParcel);
+            try { dev.aim.server.PackageObjects.restoreSeInfo(setting, incomplete, 1);
+                throw new AssertionError("missing seInfo base fabricated"); }
+            catch (IllegalStateException expected) {}
+            if (!java.util.Objects.equals(security.getBaseLabel(), setting.getPkgState().getSeInfo())
+                    || !java.util.Objects.equals(security.getOverrideLabel(), setting.getPkgState().getOverrideSeInfo())) {
+                throw new AssertionError("incomplete seInfo restoration changed an owner");
+            }
+        } finally { incompleteParcel.recycle(); }
         android.os.Parcel securityParcel = android.os.Parcel.obtain();
         try {
             security.writeToParcel(securityParcel, 0);
@@ -237,6 +261,9 @@ public final class PackageRoundTripOracle {
         } finally { securityParcel.recycle(); }
         try { dev.aim.server.PackageObjects.restoreBootSeInfo(setting, security, 2);
             throw new AssertionError("wrong seInfo version restored"); }
+        catch (IllegalArgumentException expected) {}
+        try { dev.aim.server.PackageObjects.restoreSeInfo(setting, security, 2);
+            throw new AssertionError("wrong complete seInfo version restored"); }
         catch (IllegalArgumentException expected) {}
         dev.aim.server.PackageObjects.restoreUsage(setting, usage, 1);
         if (!java.util.Arrays.equals(setting.getPkgState().getLastPackageUsageTimeInMills(),
@@ -265,6 +292,9 @@ public final class PackageRoundTripOracle {
                 new java.io.File("/data/app/other"), 0, 0, new java.util.UUID(1, 2));
         try { dev.aim.server.PackageObjects.restoreBootSeInfo(other, security, 1);
             throw new AssertionError("wrong seInfo name restored"); }
+        catch (IllegalArgumentException expected) {}
+        try { dev.aim.server.PackageObjects.restoreSeInfo(other, security, 1);
+            throw new AssertionError("wrong complete seInfo name restored"); }
         catch (IllegalArgumentException expected) {}
         if (!security.getLabel().equals(((com.android.server.pm.pkg.PackageState)setting).getSeInfo())
                 || other.getPkgState().getOverrideSeInfo() != null) {

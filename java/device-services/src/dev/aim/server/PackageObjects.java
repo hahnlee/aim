@@ -44,6 +44,17 @@ public final class PackageObjects {
         else setting.getPkgState().setSeInfo(state.getLabel());
     }
 
+    /** Complete replica restoration requires the scan's base as well as its override. */
+    public static void restoreSeInfo(com.android.server.pm.PackageSetting setting,
+            PackageSeInfoState state, long version) {
+        if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())) {
+            throw new IllegalArgumentException("package seInfo capture mismatch");
+        }
+        if (state.getBaseLabel() == null) throw new IllegalStateException("seInfo base is not assigned");
+        setting.getPkgState().setSeInfo(state.getBaseLabel());
+        setting.getPkgState().setOverrideSeInfo(state.getOverrideLabel());
+    }
+
     public static PackageImpl fromCache(byte[] cache, byte[][] pastCertificates, int[] capabilities) {
         PackageImpl pkg = (PackageImpl) PackageCacher.fromCacheEntryStatic(cache);
         pkg.setSigningDetails(restoreSigning(pkg.getSigningDetails(), pastCertificates, capabilities));

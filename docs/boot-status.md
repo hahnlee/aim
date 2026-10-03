@@ -359,7 +359,8 @@ oracle also verifies boot label agreement and the lower-SDK adjustment
 live compatibility invocation and complete boot orchestration remain
 #838/#836/#798. Captures without this phase
 remain incomplete C state. The private snapshot AIDL now appends method 7 for
-the captured boot label, version/name and original base/override destination.
+the captured version/name and nullable base/override fields. Its private payload
+format is migrated on the C branch together with the Java decoder.
 Missing assignments return an explicit exception, unknown active code returns
 null, and null names/trailing arguments are rejected. The native Binder unit
 checks old-label retention after newer publication and envelope framing. Java
@@ -367,13 +368,16 @@ PackageSeInfoState is immutable; the lease validates version/name/trailing data
 before caching, and closed leases reject reads. PackageObjects restores a
 shared boot label through original setOverrideSeInfo (retaining the base) and
 an ordinary label through original setSeInfo, after name/version validation.
-All 356 units pass (3.12s), and the 572-parcel original-runtime oracle passes
-(20.23s), including exact native/Java bytes, generated Proxy/Stub framing,
+Its complete restoreSeInfo requires an assigned base and restores both fields,
+including an explicit null override to clear old state; a missing base or
+wrong name/version fails before changing either original field.
+All 356 units pass (3.72s), and the 572-parcel original-runtime oracle passes
+(20.14s), including exact native/Java bytes, generated Proxy/Stub framing,
 owner-error retry, invalid envelope/version/name rejection, lease identity,
 original base/override/effective getters and rejected restoration isolation.
 That oracle uses explicit target SDK 36 for its compatibility input; it does
 not prove live PlatformCompat decisions. All oracle references link (3.17s),
-and device-services builds with checked original setters/getters (14.4s).
+and device-services builds with checked original setters/getters (14.7s).
 These remain separate native-driver and controlled original-Java endpoint
 tests. Native seInfo state now separates nullable base and override fields.
 The per-scan assignment API copies a retained transient state's override while
@@ -384,15 +388,21 @@ state. Group privilege/SDK changes alone do not invalidate an old package's
 owned labels; code, package flags and membership still require the owning scan
 phase. Compatibility failure retains previous state. Boot finalization preserves
 an already assigned base and sets shared overrides. A boot-only override's
-missing base remains explicit. The transport destination now follows the actual
-override field rather than assuming every shared package has an override.
+missing base remains explicit. Transport retains both transient fields;
+effective selection uses a nonempty override before the base, as the original
+does. The original replica oracle verifies restoring complete fields, clearing
+a stale override, rejecting an incomplete base without mutation, and preserving
+both fields on rejected name/version restoration. The fixture scans establish
+base assignments before boot overrides, using explicit compatibility target
+SDK 36; this still does not prove live compatibility decisions. Final oracle
+linkage passes (3.29s).
 All 356 units pass (3.14s), including runtime lower-SDK update, retained override,
 fresh replacement, subsequent boot minimum, owner-error atomicity and captured
 value isolation. Original PackageSetting copy/base/override/effective getter
 behavior passes in the shared-UID runtime oracle (14.83s with snapshot/usage
 oracles). Actual scan/installation owners must still supply transient-state
-provenance and invoke this phase. Full base-plus-override transport, bootstrap
-export and complete Java PackageState replica construction remain unwired
+provenance and invoke this phase. Bootstrap export and complete Java
+PackageState replica construction remain unwired
 (#838/#836/#798).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An

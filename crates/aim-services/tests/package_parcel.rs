@@ -453,6 +453,16 @@ fn native_scan_objects(
     let policy = aim_services::package::owner::seinfo::Policy::load(&original).unwrap();
     // Controlled compatibility input for this envelope/replica oracle, which
     // already compares original SELinuxMMAC at explicit target SDK 36.
+    for name in owner.loaded_packages().keys().cloned().collect::<Vec<_>>() {
+        owner
+            .assign_seinfo_for_scan(
+                &name,
+                aim_services::package::scan::SeInfoSetting::New,
+                &policy,
+                &mut |_| Ok(36),
+            )
+            .unwrap();
+    }
     owner
         .assign_seinfo_at_boot(&policy, &mut |_| Ok(36))
         .unwrap();
