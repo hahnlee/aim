@@ -8,6 +8,7 @@ pub(super) struct Assignments {
     users: Vec<i32>,
     packages: BTreeMap<(String, bool), (i32, bool, Migration)>,
     shared_users: BTreeMap<String, (i32, Migration)>,
+    restoration: Option<crate::package::owner::legacy_permissions::Metadata>,
 }
 
 impl SigningScan {
@@ -54,6 +55,7 @@ impl SigningScan {
             users: users.to_vec(),
             packages: captured,
             shared_users: groups,
+            restoration: None,
         });
         Ok(())
     }
@@ -133,6 +135,52 @@ impl SigningScan {
             })
             .transpose()
     }
+    /// Read the original migration files against the exact saved Settings
+    /// input. All reads and assignments finish on a candidate before commit.
+    pub fn restore_legacy_permissions_from_data(
+        &mut self,
+        data: &std::path::Path,
+        state: &crate::package::State,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<(), String> {
+        let identities = |settings: &crate::package::settings::Settings| {
+            settings
+                .packages
+                .iter()
+                .map(|p| ((p.name.clone(), false), (p.app_id, p.shared_user)))
+                .chain(
+                    settings
+                        .disabled_system_packages
+                        .iter()
+                        .map(|p| ((p.name.clone(), true), (p.app_id, p.shared_user))),
+                )
+                .collect::<BTreeMap<_, _>>()
+        };
+        if identities(&self.settings) != identities(&state.settings) {
+            return Err("legacy restoration setting identities differ".into());
+        }
+        let restored =
+            crate::package::owner::legacy_permissions::restore::read(data, state, config)?;
+        let mut candidate = self.clone();
+        candidate.capture_legacy_permissions(
+            &restored.users,
+            restored.packages,
+            restored.shared_users,
+        )?;
+        candidate.legacy_permissions.as_mut().unwrap().restoration = Some(restored.metadata);
+        self.legacy_permissions = candidate.legacy_permissions;
+        Ok(())
+    }
+    pub fn legacy_restoration_metadata(
+        &self,
+    ) -> Result<Option<&crate::package::owner::legacy_permissions::Metadata>, String> {
+        self.validate_legacy_permissions()?;
+        Ok(self
+            .legacy_permissions
+            .as_ref()
+            .and_then(|owners| owners.restoration.as_ref()))
+    }
+
     pub fn has_legacy_permissions(&self) -> bool {
         self.legacy_permissions.is_some()
     }

@@ -5,6 +5,7 @@ import dev.aim.server.PackageLegacyPermissions;
 public final class LegacyPermissionOracle {
     public static void verify(java.io.File directory) throws Exception {
         verifyMigration(directory);
+        com.android.server.pm.LegacyRestoreOracle.verify(directory);
         int[] users = {10, 0, 11};
         var source = new LegacyPermissionState();
         source.setMissing(true, 10);

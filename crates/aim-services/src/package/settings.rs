@@ -4,8 +4,9 @@
 //! legacy permission definitions and the settings' versions, as
 //! `Settings.readSettingsLPw` reads them (`writeLPr` writes them).
 //!
+//! Legacy `<perms>` restore lives in owner::legacy_permissions.
 //! Not modelled yet: what only older platforms write (per-package
-//! `<perms>`, `<enabled-components>`, `<disabled-components>`,
+//! `<enabled-components>`, `<disabled-components>`,
 //! `<domain-verification>`, the single-user
 //! preferred activities, `last-platform-version`, the pre-M `flags`), which
 //! the original reads only to migrate.
@@ -377,10 +378,18 @@ type Certificates = Vec<Option<Vec<u8>>>;
 impl Settings {
     /// The settings in the document whose root is `root`.
     pub fn parse(root: &Element) -> Result<Settings, String> {
+        Self::parse_with_config(root, &Default::default())
+    }
+
+    /// Settings already has platform/OEM shared UID owners before reading XML.
+    pub fn parse_with_config(
+        root: &Element,
+        config: &super::system_config::SystemConfig,
+    ) -> Result<Settings, String> {
         let mut s = Settings::default();
         let mut certificates = Certificates::new();
         let mut key_set_refs = std::collections::BTreeMap::<i64, i32>::new();
-        for e in root.children() {
+        for e in records(root) {
             match e.name.as_str() {
                 "package" => {
                     if let Some(p) = package(e, &mut certificates)? {
@@ -449,7 +458,13 @@ impl Settings {
         }
         // `readLPw`: a package of an unknown shared user is dropped, an
         // updated system package of a shared user's app id belongs to it.
-        let shared: Vec<i32> = s.shared_users.iter().map(|u| u.app_id).collect();
+        let seeded = super::owner::shared_users::Bootstrap::new(config);
+        let shared: Vec<i32> = s
+            .shared_users
+            .iter()
+            .map(|u| u.app_id)
+            .chain(seeded.shared_users.values().map(|group| group.app_id))
+            .collect();
         s.packages
             .retain(|p| !p.shared_user || shared.contains(&p.app_id));
         for p in &mut s.disabled_system_packages {
@@ -457,6 +472,28 @@ impl Settings {
         }
         Ok(s)
     }
+}
+
+/// The original event loop leaves attribute-only/deprecated tags unconsumed.
+/// Helper-owned and unknown subtrees are skipped as a whole.
+pub(in crate::package) fn records(root: &Element) -> Vec<&Element> {
+    let mut out = Vec::new();
+    for entry in root.children() {
+        out.push(entry);
+        if matches!(
+            entry.name.as_str(),
+            "version"
+                | "renamed-package"
+                | "verifier"
+                | "last-platform-version"
+                | "database-version"
+                | "preferred-packages"
+                | "read-external-storage"
+        ) {
+            out.extend(records(entry));
+        }
+    }
+    out
 }
 
 /// `getAttributeInt(null, name)` without a default: the attribute must be

@@ -520,8 +520,27 @@ agrees on 16 text/ABX pinned reader-loop ports using original parsers/owners,
 original SettingBase/PackageSetting copies,
 empty/populated native captured getters and unresolved-owner rejection (16.17s
 with the complete package oracle); device-services original API linkage passes
-(14.2s). These are explicit supplied migration owners: actual Settings restore,
-original-state import, complete live user inventory, permission boot ordering,
+(14.2s). Native restoration now reads those migration owners from the original
+saved files, preserving XML event-time UID visibility, separate active/factory
+SettingBase state, install-permissions-fixed markers and per-user runtime
+version/fingerprint. Modern runtime maps use the last duplicate named entry;
+missing markers follow the saved internal SDK and shared role. Legacy fallback
+selects AtomicFile backup only when the main file exists and retains the original
+asynchronous rewrite request without writing permission files. Changed Settings
+or scan identities reject atomically. Settings metadata restoration now includes
+configured platform/OEM UID seeds and traverses the original non-consuming
+attribute-only/deprecated XML branches (#859/#860). Original ART agrees on four
+text/ABX Settings reader-loop ports with original PackageSetting/SharedUserSetting
+owners, including fixed markers and complete initialized group inventories
+(16.51s with the complete package oracle). Unit tests pass 389, with one ignored
+integration test not run by that command; all integration targets compile and
+original Java oracle linkage passes (3.72s); device-services builds against
+original APIs (13.8s). The explicit saved-scan diagnostic boots original PMS on
+disposable data, freezes it, restores migration owners using the actual image
+SystemConfig, rescans 243 active/3 disabled packages and publishes the captured
+Store successfully (393.16s). These are pinned reader-loop ports,
+not direct calls of private original Settings methods. Original-state import,
+complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.
 The native usage owner now reads PackageUsage's original v0/v1

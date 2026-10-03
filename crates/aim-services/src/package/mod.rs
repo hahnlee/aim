@@ -82,11 +82,20 @@ impl State {
     /// `None` without settings, which makes the original's boot a first
     /// boot.
     pub fn read(data: &Path, users: &[u32]) -> Result<Option<State>, String> {
+        Self::read_with_config(data, users, &Default::default())
+    }
+
+    /// Image SystemConfig supplies OEM UID seeds before Settings restoration.
+    pub fn read_with_config(
+        data: &Path,
+        users: &[u32],
+        config: &system_config::SystemConfig,
+    ) -> Result<Option<State>, String> {
         let system = data.join("system");
         let Some(settings) = resilient(
             &system.join("packages.xml"),
             &system.join("packages-backup.xml"),
-            Settings::parse,
+            |root| Settings::parse_with_config(root, config),
         )?
         else {
             return Ok(None);

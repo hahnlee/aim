@@ -1,6 +1,8 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
+    public boolean isInstallPermissionsFixed() { throw new RuntimeException("stub"); }
+    public PackageSetting setInstallPermissionsFixed(boolean fixed) { throw new RuntimeException("stub"); }
     public String getPackageName() { throw new RuntimeException("stub"); }
     public com.android.server.pm.pkg.PackageStateUnserialized getPkgState() { throw new RuntimeException("stub"); }
     public PackageSetting setPrimaryCpuAbi(String abi) { throw new RuntimeException("stub"); }

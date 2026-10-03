@@ -261,7 +261,9 @@ fn saved_scan_libraries_match_original_pms() {
     // Freeze only this owned data image before comparing disk state.
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
-    let original = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
+    let original = State::read_with_config(&boot.data.join("data"), &[0], &config)
+        .unwrap()
+        .unwrap();
     assert_eq!(original.settings.packages.len(), 243);
     assert_eq!(original.settings.shared_users.len(), 16);
     let data_files = boot.data.join("data");
@@ -286,6 +288,8 @@ fn saved_scan_libraries_match_original_pms() {
         .map(|n| n.parse().unwrap())
         .unwrap_or(0);
     let mut scan = SigningScan::new(&config, &original.settings, first_api).unwrap();
+    scan.restore_legacy_permissions_from_data(&boot.data.join("data"), &original, &config)
+        .unwrap();
     let platform_signing = &inputs.active["android"].signing;
     let vendor_sdk = properties
         .get("ro.vndk.version")
@@ -343,6 +347,9 @@ fn saved_scan_libraries_match_original_pms() {
         Ok(id)
     };
     let mut updated_scan = SigningScan::new(&config, &original.settings, first_api).unwrap();
+    updated_scan
+        .restore_legacy_permissions_from_data(&boot.data.join("data"), &original, &config)
+        .unwrap();
     for saved in &original.settings.disabled_system_packages {
         let image_code = system_image
             .packages
@@ -485,6 +492,9 @@ fn saved_scan_libraries_match_original_pms() {
         None,
     );
     let mut resumed = SigningScan::new(&config, &original.settings, first_api).unwrap();
+    resumed
+        .restore_legacy_permissions_from_data(&boot.data.join("data"), &original, &config)
+        .unwrap();
     let resumed_packages = resumed
         .scan_saved_system_image(
             Image::load(&apks, &apexes).unwrap(),

@@ -64,7 +64,14 @@ impl AppIds {
     /// and do not independently register a UID. The pinned Settings
     /// reader requires an app ID even for SDK libraries (#802).
     pub fn restore(settings: &Settings) -> Result<Self, Error> {
-        let mut ids = Self::default();
+        Self::restore_seeded(settings, &Self::default())
+    }
+
+    pub(in crate::package) fn restore_seeded(
+        settings: &Settings,
+        seeds: &Self,
+    ) -> Result<Self, Error> {
+        let mut ids = seeds.clone();
         let mut shared_names = BTreeSet::new();
         for shared in &settings.shared_users {
             if !shared_names.insert(&shared.name) {
@@ -76,7 +83,10 @@ impl AppIds {
                     app_id: shared.app_id,
                 });
             }
-            ids.register_existing(shared.app_id, Owner::SharedUser(shared.name.clone()))?;
+            let owner = Owner::SharedUser(shared.name.clone());
+            if ids.get(shared.app_id) != Some(&owner) {
+                ids.register_existing(shared.app_id, owner)?;
+            }
         }
         let mut packages = BTreeSet::new();
         for package in &settings.packages {

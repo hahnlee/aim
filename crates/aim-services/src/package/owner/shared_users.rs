@@ -311,8 +311,12 @@ impl Bootstrap {
     /// group; saved signatures are loaded into that group. Conflicting
     /// settings fail the candidate rather than remapping any package.
     pub fn restore(config: &SystemConfig, settings: &Settings) -> Result<Self, RestoreError> {
-        AppIds::restore(settings).map_err(RestoreError::Settings)?;
         let mut boot = Self::new(config);
+        AppIds::restore(&Settings {
+            shared_users: settings.shared_users.clone(),
+            ..Default::default()
+        })
+        .map_err(RestoreError::Settings)?;
         for saved in &settings.shared_users {
             boot.register(&saved.name, saved.app_id, saved.flags, 0)
                 .map_err(|reason| {
@@ -324,6 +328,7 @@ impl Bootstrap {
                 })?;
             boot.shared_users.get_mut(&saved.name).unwrap().signatures = saved.signatures.clone();
         }
+        AppIds::restore_seeded(settings, &boot.ids).map_err(RestoreError::Settings)?;
         for package in &settings.packages {
             if package.shared_user {
                 let name = match boot.ids.get(package.app_id) {

@@ -54,6 +54,10 @@ fn native_package_parcels_match_original_read_write() {
                 .join("tests/fixtures/LegacyPermissionOracle.java"),
         )
         .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/LegacyRestoreOracle.java"),
+        )
+        .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
         )
@@ -453,6 +457,76 @@ fn native_package_parcels_match_original_read_write() {
         let entry = facade.cache;
         fs::write(directory.join(&name), &entry.bytes).unwrap();
         expected.push((name, pkg.package_name.clone(), entry));
+    }
+    let restore_cases = [
+        "<packages><version sdkVersion='36' databaseVersion='3'/><package name='early' codePath='/data/early' sharedUserId='10050'><perms><item name='dropped'/></perms></package><shared-user name='group' userId='10050'><perms><item name='base' flags='17'/></perms></shared-user><package name='late' codePath='/data/late' sharedUserId='10050'><perms><item name='late'/></perms></package><updated-package name='late' codePath='/system/late' userId='10050'><perms><item name='factory'/></perms></updated-package><updated-package name='early' codePath='/system/early' sharedUserId='10050'><perms><item name='factory-shared'/></perms></updated-package><package name='standalone' codePath='/data/standalone' userId='10070'><signing-keyset><perms><item name='nested'/></perms></signing-keyset><unknown><perms><item name='ignored'/></perms></unknown></package></packages>",
+        "<packages><preferred-packages><package name='system' codePath='/system/app' sharedUserId='1000'><perms><item name='seed'/></perms></package></preferred-packages><package name='oem' codePath='/vendor/app' sharedUserId='2901'><perms><item name='oem'/></perms></package><updated-package name='system' codePath='/system/old' userId='1000'><perms><item name='factory'/></perms></updated-package><unknown><package name='ignored' codePath='/data/app' userId='10090'/></unknown></packages>",
+    ];
+    for (index, text) in restore_cases.iter().cycle().take(4).enumerate() {
+        let root = aim_android_xml::read_next(text.as_bytes()).unwrap();
+        let bytes = if index >= 2 {
+            aim_android_xml::abx::write(&root).unwrap()
+        } else {
+            text.as_bytes().to_vec()
+        };
+        let input = directory.join(format!("legacy-restore-{index}"));
+        fs::create_dir_all(input.join("system")).unwrap();
+        fs::write(input.join("system/packages.xml"), bytes).unwrap();
+        let mut config = aim_services::package::system_config::SystemConfig::default();
+        config.oem_defined_uids = vec![("android.uid.vendor.fixture".into(), 2901)];
+        let state = aim_services::package::State::read_with_config(&input, &[10, 0], &config)
+            .unwrap()
+            .unwrap();
+        let mut scan =
+            aim_services::package::scan::SigningScan::new(&config, &state.settings, 36).unwrap();
+        scan.restore_legacy_permissions_from_data(&input, &state, &config)
+            .unwrap();
+        for (settings, factory) in [
+            (&state.settings.packages, false),
+            (&state.settings.disabled_system_packages, true),
+        ] {
+            for package in settings {
+                let stem = format!(
+                    "{}-{}",
+                    if factory { "factory" } else { "active" },
+                    package.name
+                );
+                fs::write(
+                    input.join(format!("{stem}.input")),
+                    scan.legacy_permissions(&package.name, factory)
+                        .unwrap()
+                        .unwrap()
+                        .bytes(),
+                )
+                .unwrap();
+                fs::write(
+                    input.join(format!("{stem}.fixed")),
+                    if !factory
+                        && scan
+                            .legacy_restoration_metadata()
+                            .unwrap()
+                            .unwrap()
+                            .install_permissions_fixed
+                            .contains(&package.name)
+                    {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                )
+                .unwrap();
+            }
+        }
+        for name in scan.identities.shared_users.keys() {
+            fs::write(
+                input.join(format!("shared-{name}.input")),
+                scan.shared_legacy_permissions(name)
+                    .unwrap()
+                    .unwrap()
+                    .bytes(),
+            )
+            .unwrap();
+        }
     }
     let migration_cases = [
         "<perms/>",
