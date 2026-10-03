@@ -70,13 +70,18 @@ impl Platform {
     }
 
     /// The file a framework resource of type `kind` (such as `raw`)
-    /// names, from the APK its overlays leave it in (`openRawResource`),
-    /// of the image whose root is `root`.
-    pub fn framework_file(&self, root: &Path, kind: &str, name: &str) -> Option<Vec<u8>> {
+    /// names in a bare framework AssetManager, without resource overlays
+    /// (`FallbackCategoryProvider.loadFallbacks`).
+    pub fn framework_file_without_overlays(
+        &self,
+        root: &Path,
+        kind: &str,
+        name: &str,
+    ) -> Option<Vec<u8>> {
         let id = self.framework.id(kind, name)?;
         let res = Resources {
             tables: vec![&self.framework],
-            overlays: &self.framework_overlays,
+            overlays: &[],
             config: self.config(),
         };
         let mut v = super::resources::Selected {
@@ -92,10 +97,7 @@ impl Platform {
             return None;
         }
         let path = res.string(table, v.data)?;
-        let apk = match table {
-            0 => root.join("system/framework/framework-res.apk"),
-            i => self.framework_overlay_apks.get(i - 1)?.clone(),
-        };
+        let apk = root.join("system/framework/framework-res.apk");
         Apk::open(&apk).and_then(|a| a.file(path)).ok()
     }
 

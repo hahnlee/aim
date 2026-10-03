@@ -83,7 +83,7 @@ import java.util.TreeSet;
  *
  * The records are Parcels in the layout feed.rs reads; a parsed package
  * is PackageImpl as the parser cache keeps it (PackageCacher), sent again
- * only when the original holds another AndroidPackage for it.
+ * when its content hash changes, including mutations of the same object.
  */
 final class PackageFeed extends IPackageFeed.Stub {
     private static final String TAG = "AimPackageFeed";

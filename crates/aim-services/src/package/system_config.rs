@@ -420,8 +420,8 @@ fn fallback_categories(csv: &[u8], prop: &dyn Fn(&str) -> Option<String>) -> Vec
 pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// What the image's framework fixes: its aconfig flags,
-/// `config_useRoundIcon` and `raw/fallback_categories`, as its static
-/// overlays leave them (the parser's platform).
+/// `config_useRoundIcon` after static overlays and the bare framework's
+/// `raw/fallback_categories` (FallbackCategoryProvider's own AssetManager).
 pub struct Framework {
     flags: Vec<(String, bool)>,
     use_round_icon: bool,
@@ -437,7 +437,7 @@ impl Framework {
             flags,
             use_round_icon: platform.use_round_icon,
             fallback_categories: platform
-                .framework_file(root, "raw", "fallback_categories")
+                .framework_file_without_overlays(root, "raw", "fallback_categories")
                 .unwrap_or_default(),
         })
     }

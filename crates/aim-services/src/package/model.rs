@@ -110,7 +110,7 @@ pub struct PackageState {
     pub syncable_authorities: Vec<(String, String)>,
     /// The `AndroidPackage` as `PackageCacher.toCacheEntryStatic` writes
     /// it (the parser cache's format); `None` without code. Shared across
-    /// versions while the original keeps the same object.
+    /// versions while the original cache bytes remain unchanged.
     pub parcel: Option<Arc<[u8]>>,
     /// `parcel`, read (`AndroidPackage::read_cache_entry`).
     pub pkg: Option<Arc<AndroidPackage>>,

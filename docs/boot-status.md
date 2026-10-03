@@ -312,8 +312,9 @@ cache bytes and restoring the category restores the complete original bytes.
 The feed now serializes parsed code inside the unfiltered snapshot and uses
 content hashes for all records: retaining an AndroidPackage object's identity
 cannot suppress a changed code record. Original Java linkage passes (5.06s);
-device-services builds (14.0s). The complete boot build passes (44.3s), including
-the original-PMS userdata template. A disposable 90-second original-PMS shadow
+device-services builds (14.0s). The complete boot build passes (75.3s), including
+the original-PMS userdata template and the bare fallback-resource correction.
+Before that resource correction, a disposable 90-second original-PMS shadow
 publishes the changed live feed without read/publication errors: final generation
 74 contains 285 active packages and five disabled factories. It exits successfully
 and leaves no owned processes or mounted data. Its 22,074 shadow calls include
@@ -321,10 +322,19 @@ and leaves no owned processes or mounted data. Its 22,074 shadow calls include
 write checks also differ. Category differences still reproduce (#865): this run
 has six category mismatches, so code-record freshness alone does not resolve them.
 Enabled-state/eligibility/write differences are #866, provider eligibility #867
-and install-parse lifecycle comparison #868. The fallback-category parser's
-property, duplicate and malformed-line semantics also differ from the original
-(#869); the live image's single fallback entry does not explain these category
-mismatches. No library-field differences were
+and install-parse lifecycle comparison #868. Additional disposable shadow
+instrumentation confirms the mismatching native category 7 comes from a saved
+category override 7, with parsed category -1 and no GMS fallback. The final fed
+GMS code and override are both -1; the query/snapshot timing remains under #865,
+not a proved category-computation defect. Instrumentation has been removed and
+both diagnostic boots exit cleanly without owned processes or mounted data.
+FallbackCategoryProvider's bare AssetManager now selects the framework APK's raw
+CSV without applying framework overlays. An explicitly run image integration
+passes (2.53s), comparing the selected bytes to the actual framework APK and
+checking its sole printspooler category. This avoids importing the Google overlay's
+387-entry list, which the original owner does not load. All 395 units pass
+(4.11s; one ignored/not run). Property, duplicate and malformed-line parsing
+semantics remain #869. No library-field differences were
 observed in this boot workload; targeted original owner fixtures prove nullable
 optional/certificate reproduction. This is original-PMS feed validation, not
 native PMS conformance. Native-to-SystemServer lease bootstrap and complete
