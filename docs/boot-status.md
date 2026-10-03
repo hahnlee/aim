@@ -173,6 +173,33 @@ resource-client tests pass (0.01s); AIDL generation and image API linkage pass
 actual booted owner transactions and callback delivery remain unverified, and
 original PMS remains active. The full late bridge's nonce mapping separately
 needs matching-owner death cleanup (#835).
+The facade now has Java PackageManagerLocal unfiltered/filtered snapshot scopes
+(#836), constructed from captured immutable replica records and a native owner
+bound to that version. Maps are copied and immutable; package objects retain
+identity. Closing a parent makes its children unreadable, and child close leaves
+siblings/parent usable. Single-package lookup delegates internal-name resolution
+and filtering to the owner and rejects a returned key absent from the captured
+replica. List filtering is cached per scope and delegated with the exact captured
+version, candidate, caller UID and user. ART's uncommitted package bypasses
+single-lookup filtering but still participates in list filtering; it is not added
+to the list if absent from the captured inventory, matching the pinned original.
+An explicit original-runtime test passes (14.42s), using original sealed
+PackageSetting records/interfaces and controlled owner replies to check lifetime,
+identity, immutable maps, old/new version isolation, aliases, missing names,
+uncommitted candidates, owner errors and replica mismatch. This verifies snapshot
+plumbing, not native visibility-policy conformance or complete native records.
+All Java oracle classes, including these scopes, compile/dex/link against the
+original image (3.04s), and device-services API linkage passes (13.4s). The first
+attempt could not boot because its disposable display socket path exceeded
+Darwin SUN_LEN; a shorter owned fixture prefix fixes that test setup (#795).
+Native replica DTO/adapters, version-page capture/publication and original
+permission/ART callback integration remain incomplete (#836/#833); these scopes
+are not installed as PackageManagerLocal in SystemServer. Original PMS is active.
+Cache transport does not preserve historical Signature capability flags: original
+Signature.writeToParcel carries only certificate bytes. Native Record.signing
+retains the verified flags, but the facade must restore them into original
+SigningDetails separately before callbacks/publication (#837). The earlier
+PackageImpl oracle proves certificate/UID/metadata parity, not these capabilities.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest
@@ -483,7 +510,7 @@ old package, after permission uninstall/shared-UID conversion. Named, absent,
 null and repeated map removals match original Settings; disk reopening preserves
 the native change and unrelated XML. All 338 units pass (3.10s), the combined
 original fixture passes (19.35s), and new image APIs link (14.0s). These stages
-are not yet orchestrated by boot deletion (#798/#822). All seven Java-oracle DEX
+are not yet orchestrated by boot deletion (#798/#822). All eight Java-oracle DEX
 build paths now check references against the original boot classpath and the
 client's explicit services.jar before starting a guest (#830). A separate
 all-oracle compilation/linkage test passes (2.83s), and a JDK API regression

@@ -1633,7 +1633,10 @@ fn java_oracles_link_against_original_image() {
         .arg(&stubs)
         .args(common::java::sources(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
-        )));
+        ))
+        .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
+        ));
     let mut pending = vec![classes];
     let mut files = Vec::new();
     while let Some(dir) = pending.pop() {
