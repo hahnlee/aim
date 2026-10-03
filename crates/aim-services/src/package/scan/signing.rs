@@ -35,6 +35,7 @@ pub struct SigningScan {
     pub settings: Settings,
     pub identities: Bootstrap,
     pub libraries: Registry,
+    pub update_ownership: crate::package::owner::update_ownership::UpdateOwnership,
     pub(super) disabled_users: BTreeMap<String, super::disabled::DisabledUserStates>,
     pub(super) scanned_users: BTreeMap<String, BTreeMap<i32, UserState>>,
     first_api_level: i32,
@@ -376,6 +377,7 @@ impl SigningScan {
             identities: Bootstrap::restore(config, settings)?,
             settings: restored,
             libraries: Registry::new(config),
+            update_ownership: Default::default(),
             // readDisabledSysPackageLPw creates fresh settings; it does not
             // restore the active package's restriction state into them.
             disabled_users: settings

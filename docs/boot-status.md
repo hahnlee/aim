@@ -341,8 +341,18 @@ keys remain until their last owner disappears; upgrade aliases add no separate
 references and last-issued IDs never rewind (#823). KeySetData now restores
 KEYSET_UNASSIGNED=-1, including the original unversioned-settings reset. A keyset
 owner failure leaves the earlier domain removal in place. The scan then stops at
-missing update ownership/filter/preferred/keystore and setting/permission cleanup
-owners (#798/#822). Store.commit_removed_boot_metadata writes just the completed
+missing filter/preferred/keystore and setting/permission cleanup owners
+(#798/#822). Between keyset retirement and that boundary, the scan now removes
+the deleted provider from native update-ownership denylist relations, preserving
+other providers for overlapping targets. Repeated additions accumulate, matching
+UpdateOwnershipHelper; empty additions do not withdraw old contributions. Accepted
+metadata queues eligible system/update providers by the pinned property and
+INSTALL_PACKAGES/INSTALL_PACKAGE_UPDATES declaration. Pending provider reads make
+denylisted/provider queries fail explicitly until the resource owner supplies
+validated contents. Binary XML/resource ingress, original-owner conformance,
+SystemConfig-conditioned update-owner clearing and asynchronous commit ordering
+remain #825. This in-memory component is separate from InstallSource.update_owner
+and is not a complete removal commit. Store.commit_removed_boot_metadata writes just the completed
 domain/keyset stage as resilient ABX, retaining UID/users, unrelated XML and
 legacy domains; unit tests reopen the files and check reserve copies and failure
 without writes. This is a component writer, not a complete deletion commit. Scan completion now registers verified signing public keys, reuses unchanged
@@ -422,9 +432,9 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 317 units pass (3.08s), including keyset rule, nullable-name, Base64 and
+All 319 units pass (3.07s), including keyset rule, nullable-name, Base64 and
 Parcel roundtrip tests. The original signed framework/GSF fixture passes
-(42.42s), including saved-image iteration, duplicate rejection, integrated source
+(42.49s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
 fallback, the pre-data missing-system input gate, owner failures and preserved
 earlier effects and scanned signing-key registration. A separate declared-key

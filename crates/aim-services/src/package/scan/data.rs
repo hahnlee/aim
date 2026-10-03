@@ -126,7 +126,7 @@ impl SigningScan {
             Self::destroy_removed_boot_storage(&package, &inputs)?;
             self.clear_removed_boot_metadata(&package)?;
             return Err(fatal(package.name.clone(), package.code_path.clone(), "package-state",
-                "app storage/domain/keysets removed; update ownership/filter/preferred/keystore and setting/permission deletion require their owners (#822/#798)".into()));
+                "app storage/domain/keysets/update ownership removed; filter/preferred/keystore and setting/permission deletion require their owners (#822/#798)".into()));
         }
         for rejected in &image.rejected {
             if (inputs.is_incremental)(&rejected.location.path).map_err(|e| {
@@ -529,7 +529,9 @@ impl SigningScan {
                     message,
                 })
             },
-        )
+        )?;
+        self.update_ownership.remove(&package.name);
+        Ok(())
     }
 
     /// Remove rejected parse/signature inputs using their original scan paths.
@@ -805,11 +807,22 @@ mod tests {
         )
         .unwrap();
         owner.settings.packages[0].key_set_data = package.key_set_data.clone();
+        owner
+            .update_ownership
+            .add("a", &["shared".into(), "only-a".into()]);
+        owner.update_ownership.add("b", &["shared".into()]);
         assert!(
             matches!(owner.clear_removed_boot_metadata(&package), Err(SigningError::Fatal(e)) if e.phase == "keysets")
         );
         assert!(owner.settings.domain_verification.active.is_empty());
         assert_eq!(owner.settings.packages, settings.packages);
         assert_eq!(owner.settings.key_sets, settings.key_sets);
+        assert_eq!(owner.update_ownership.is_provider(Some("a")), Ok(true));
+        assert_eq!(owner.update_ownership.is_denylisted("only-a"), Ok(true));
+        owner.settings.packages[0].key_set_data = Default::default();
+        owner.clear_removed_boot_metadata(&package).unwrap();
+        assert_eq!(owner.update_ownership.is_provider(Some("a")), Ok(false));
+        assert_eq!(owner.update_ownership.is_denylisted("only-a"), Ok(false));
+        assert_eq!(owner.update_ownership.is_denylisted("shared"), Ok(true));
     }
 }

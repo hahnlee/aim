@@ -140,6 +140,9 @@ impl SigningScan {
             inputs.context.updated,
         )?;
         let candidate = staged.finish_key_set_metadata(candidate)?;
+        staged
+            .update_ownership
+            .queue(&candidate.record.settings, &candidate.record.parsed);
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,

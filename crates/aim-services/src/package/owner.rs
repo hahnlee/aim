@@ -28,6 +28,7 @@ mod native_libraries;
 pub mod resources;
 pub mod shared_users;
 mod signing;
+pub mod update_ownership;
 
 /// A failed write may have committed the main file before the reserve
 /// copy failed. Callers must publish that state even when reporting it.
