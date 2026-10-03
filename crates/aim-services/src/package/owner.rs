@@ -28,6 +28,7 @@ pub mod key_sets;
 pub mod keystore;
 mod native_libraries;
 mod package_list;
+pub mod permission_gids;
 mod removal;
 pub mod resources;
 pub mod shared_users;
@@ -212,6 +213,31 @@ impl Store {
         &mut self,
         entries: &[super::list::Entry],
     ) -> Result<(), WriteError> {
+        let text = self.validate_package_list(entries)?;
+        package_list::write(&self.data, self.list_document.as_deref(), text.as_bytes())?;
+        self.list_document = Some(text);
+        self.state.list = entries.to_vec();
+        Ok(())
+    }
+
+    /// Resolve every row's GIDs from the original permission owner before any
+    /// disk commit. An owner/transport failure leaves the old list intact.
+    pub fn commit_package_list_from_permissions(
+        &mut self,
+        entries: &[super::list::Entry],
+        users: &[i32],
+        owner: &aim_binder_host::local::Strong,
+    ) -> Result<(), WriteError> {
+        self.validate_package_list(entries)?;
+        let mut next = entries.to_vec();
+        for entry in &mut next {
+            entry.gids = permission_gids::query(owner, entry.uid as i32, users)
+                .map_err(|error| WriteError::before(format!("permission GID query: {error:?}")))?;
+        }
+        self.commit_package_list(&next)
+    }
+
+    fn validate_package_list(&self, entries: &[super::list::Entry]) -> Result<String, WriteError> {
         for entry in entries {
             let package = self
                 .state
@@ -228,11 +254,7 @@ impl Store {
                 ));
             }
         }
-        let text = super::list::serialize(entries).map_err(WriteError::before)?;
-        package_list::write(&self.data, self.list_document.as_deref(), text.as_bytes())?;
-        self.list_document = Some(text);
-        self.state.list = entries.to_vec();
-        Ok(())
+        super::list::serialize(entries).map_err(WriteError::before)
     }
 
     /// Persist Settings.removeRenamedPackageLPw's real-name key cleanup after

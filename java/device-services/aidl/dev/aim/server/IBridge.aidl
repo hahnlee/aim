@@ -64,4 +64,7 @@ interface IBridge {
     /** The selected image's PackageBackwardCompatibility build policy. */
     boolean isTestBaseOnBootclasspath();
 
+    /** Original permission owner's supplementary GIDs for a complete UID. */
+    int[] getPermissionGidsForUid(int uid);
+
 }

@@ -118,6 +118,165 @@ struct Fixture {
     data: PathBuf,
 }
 
+struct PermissionGids {
+    calls: Mutex<Vec<i32>>,
+    reject: Mutex<Option<i32>>,
+    result: Mutex<Option<Vec<i32>>>,
+}
+impl Service for PermissionGids {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_ibridge::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_ibridge as bridge;
+        if call.code != bridge::GET_PERMISSION_GIDS_FOR_UID {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        assert_eq!(call.sender_euid, 1000);
+        call.data.enforce_interface(bridge::DESCRIPTOR)?;
+        let uid = call.data.read_i32()?;
+        self.calls.lock().unwrap().push(uid);
+        let mut reply = Parcel::new();
+        if *self.reject.lock().unwrap() == Some(uid) {
+            reply.write_exception(&Exception::security("permission owner denied"));
+        } else {
+            reply.write_no_exception();
+            // Independent primitive int-array encoding, including null.
+            match self.result.lock().unwrap().as_ref() {
+                None => reply.write_i32(-1),
+                Some(gids) => {
+                    reply.write_i32(gids.len() as i32);
+                    for gid in gids {
+                        reply.write_i32(*gid);
+                    }
+                }
+            }
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+fn permission_owner_gids_preserve_active_user_order_and_duplicates_without_partial_success() {
+    use aim_services::package::owner::permission_gids::{PermissionGidError, query};
+    let driver = Driver::new();
+    let open = |pid| {
+        LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid,
+                euid: 1000,
+                security_context: None,
+            },
+        )
+    };
+    let manager = open(93001);
+    let client = open(93002);
+    let data =
+        std::env::temp_dir().join(format!("aim-native-permission-gids-{}", std::process::id()));
+    fs::create_dir(&data).unwrap();
+    let _fixture = Fixture {
+        driver: driver.clone(),
+        manager: manager.clone(),
+        client: client.clone(),
+        data,
+    };
+    let owner = Arc::new(PermissionGids {
+        calls: Mutex::new(Vec::new()),
+        reject: Mutex::new(None),
+        result: Mutex::new(Some(vec![3003, 3003])),
+    });
+    let Binder::Local(ptr) = manager.add_service(owner.clone()) else {
+        unreachable!()
+    };
+    let mut object = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: 0,
+        binder: ptr,
+        cookie: ptr,
+    }
+    .encode();
+    driver
+        .ioctl(
+            manager.proc_handle(),
+            93003,
+            BINDER_SET_CONTEXT_MGR_EXT,
+            &mut object,
+            &mut NoMemory,
+        )
+        .unwrap();
+    manager.start();
+    let strong = client.strong(0);
+    assert_eq!(
+        query(&strong, 19001, &[10, 0]).unwrap(),
+        [3003, 3003, 3003, 3003]
+    );
+    assert_eq!(*owner.calls.lock().unwrap(), [1019001, 19001]);
+    owner.calls.lock().unwrap().clear();
+    for (app, users) in [
+        (-1, vec![0]),
+        (19001, vec![]),
+        (19001, vec![0, 0]),
+        (19001, vec![-1]),
+        (19001, vec![i32::MAX]),
+    ] {
+        assert!(matches!(
+            query(&strong, app, &users),
+            Err(PermissionGidError::Input(_))
+        ));
+        assert!(owner.calls.lock().unwrap().is_empty());
+    }
+    *owner.reject.lock().unwrap() = Some(1019001);
+    assert_eq!(
+        query(&strong, 19001, &[0, 10, 11]).unwrap_err(),
+        PermissionGidError::Owner(Exception::security("permission owner denied"))
+    );
+    assert_eq!(*owner.calls.lock().unwrap(), [19001, 1019001]);
+    *owner.reject.lock().unwrap() = None;
+    *owner.result.lock().unwrap() = None;
+    assert!(matches!(
+        query(&strong, 19001, &[0]),
+        Err(PermissionGidError::Input(_))
+    ));
+    *owner.result.lock().unwrap() = Some(vec![-1]);
+    assert!(matches!(
+        query(&strong, 19001, &[0]),
+        Err(PermissionGidError::Input(_))
+    ));
+    *owner.result.lock().unwrap() = Some(Vec::new());
+    assert!(query(&strong, 19001, &[0]).unwrap().is_empty());
+    fs::create_dir_all(_fixture.data.join("system")).unwrap();
+    fs::write(_fixture.data.join("system/packages.xml"), b"<packages><package name='app' codePath='/data/app/app' userId='19001' version='7'/></packages>").unwrap();
+    let mut store = aim_services::package::owner::Store::open(&_fixture.data, &[0])
+        .unwrap()
+        .unwrap();
+    let rows =
+        aim_services::package::list::parse("app 19001 0 /data/user/0/app default 42 0 7 0 @null\n")
+            .unwrap();
+    *owner.result.lock().unwrap() = Some(vec![3003, 3003]);
+    *owner.reject.lock().unwrap() = Some(1019001);
+    assert!(
+        !store
+            .commit_package_list_from_permissions(&rows, &[0, 10], &strong)
+            .unwrap_err()
+            .committed
+    );
+    assert!(!_fixture.data.join("system/packages.list").exists());
+    assert!(store.state().list.is_empty());
+    *owner.reject.lock().unwrap() = None;
+    store
+        .commit_package_list_from_permissions(&rows, &[10, 0], &strong)
+        .unwrap();
+    assert_eq!(store.state().list[0].gids, [3003, 3003, 3003, 3003]);
+    assert_eq!(rows[0].gids, [42]);
+    assert_eq!(
+        fs::read_to_string(_fixture.data.join("system/packages.list")).unwrap(),
+        "app 19001 0 /data/user/0/app default 3003,3003,3003,3003 0 7 0 @null\n"
+    );
+    drop(strong);
+}
+
 struct Maintenance {
     calls: Mutex<Vec<i64>>,
     keys: Mutex<std::collections::BTreeSet<i64>>,

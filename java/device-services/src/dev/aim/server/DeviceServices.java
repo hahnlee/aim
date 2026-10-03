@@ -14,8 +14,10 @@ import android.util.Slog;
 import android.view.IWindowManager;
 
 import com.android.internal.os.ApplicationSharedMemory;
+import com.android.server.LocalServices;
 import com.android.server.SystemService;
 import com.android.server.compat.PlatformCompat;
+import com.android.server.pm.permission.PermissionManagerServiceInternal;
 import com.android.server.pm.parsing.library.PackageBackwardCompatibility;
 
 import java.io.File;
@@ -234,6 +236,16 @@ public final class DeviceServices extends SystemService {
         public boolean isTestBaseOnBootclasspath() {
             enforceSystemUid();
             return PackageBackwardCompatibility.bootClassPathContainsATB();
+        }
+
+        @Override
+        public int[] getPermissionGidsForUid(int uid) {
+            enforceSystemUid();
+            if (uid < 0) throw new IllegalArgumentException("negative permission UID");
+            PermissionManagerServiceInternal permissions = LocalServices.getService(
+                    PermissionManagerServiceInternal.class);
+            if (permissions == null) throw new IllegalStateException("permission owner is unavailable");
+            return permissions.getGidsForUid(uid);
         }
 
         private static PlatformCompat platformCompat() {

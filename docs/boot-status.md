@@ -374,7 +374,7 @@ installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
 removal, repeated missing removal and installer source effects (19.35s). All 338
-units pass (3.21s), and image API linkage passes (13.1s). This in-memory stage is
+units pass (3.10s), and image API linkage passes (13.1s). This in-memory stage is
 not yet called by boot cleanup: full side-owner ordering, permission uninstall
 reconciliation and publication remain #822/#798. The native store now persists
 that completed setting removal and its installer-source effects, rejecting
@@ -389,7 +389,7 @@ permissions and preferred choices remain with their respective owners.
 Unit tests cover reopening, reserve copies, shared UID reservation, external
 writer rejection and unrelated-state rejection. Original PackageSignatures
 reads native-written current/past/initiator certificates in the combined fixture
-(19.35s). All 338 service units pass (3.21s). This verifies saved-setting deletion
+(19.35s). All 338 service units pass (3.10s). This verifies saved-setting deletion
 and original signature parsing, not a full native uninstall or original-PMS
 reboot after deletion; full package-list/permission integration and graph
 publication remain #798/#822. Store.commit_package_list now writes the final
@@ -403,11 +403,24 @@ renames it and reports/cleans failures. Partial and first-write failures preserv
 the old or empty-placeholder main file and support retry. Original JournaledFile
 reads, rolls back and commits native-formatted rows in the combined fixture;
 this is journal/format evidence, not native libpackagelistparser coverage or
-proof of complete permission-GID generation. The scan/store also remove only a
+proof of complete permission-GID generation. The compiled SystemServer bridge
+now exposes the original PermissionManagerServiceInternal/LegacyPermissionDataProvider
+getGidsForUid call for system-UID clients, rejecting negative UIDs and an absent
+owner. The native GID client validates supplied active-user IDs, queries
+full UIDs in supplied order and preserves every returned GID, including repeats.
+Null/negative replies and owner/transport failures are explicit errors. The store
+can resolve all rows through this client before a package-list write; any failed
+query leaves the old file/state intact and never returns a partial inventory.
+The three Binder resource-client tests independently encode UID/int-array wire
+fields and cover invalid inputs, user order, duplicates, empty legitimate replies,
+owner failure and final file persistence. New image API linkage passes (13.0s).
+This is native transport and compile/link evidence: an actual DeviceServices
+GID transaction in a booted image and early facade bridge exposure are not yet
+verified (#798/#808/#822). The scan/store also remove only a
 renamed-package real-name key, preserving mappings whose values name the same
 old package, after permission uninstall/shared-UID conversion. Named, absent,
 null and repeated map removals match original Settings; disk reopening preserves
-the native change and unrelated XML. All 338 units pass (3.21s), the combined
+the native change and unrelated XML. All 338 units pass (3.10s), the combined
 original fixture passes (19.35s), and new image APIs link (14.0s). These stages
 are not yet orchestrated by boot deletion (#798/#822). Fixture preflight Java
 linkage remains #830; the failed oracle also exposed original crash reporting's
@@ -421,7 +434,7 @@ including shared app IDs. Replacement retains the retained class and preserves
 ordinary grants only when requested. Snapshot clones retain their prior grants.
 The original AppsFilterImpl grant oracle, with its own original mutable
 ApplicationSharedMemory for cache invalidation, passes in the combined fixture
-(19.35s). All 338 units pass (3.21s), and added image APIs link (13.1s).
+(19.35s). All 338 units pass (3.10s), and added image APIs link (13.1s).
 ActivityManager/WindowManager producers and boot removal/query publication are
 not connected to this owner yet (#724/#822).
 The native keystore cleanup owner captures full per-user UIDs when requests
@@ -437,7 +450,7 @@ original maintenance wrapper acknowledges empty namespaces 19001 and 1019001
 with success in the disposable combined fixture (19.35s), after checking no
 package owns app ID 19001 and user 10 has no saved state. This does not prove
 existing-key deletion; the native queue has no boot deletion executor yet
-(#822). All 31 build-generator tests pass, all 338 service units pass (3.21s),
+(#822). All 31 build-generator tests pass, all 338 service units pass (3.10s),
 and compile-only image API linkage passes (13.1s).
 The native settings store now clears one user's saved preferred activities under
 Settings.clearPackagePreferredActivities rules (#822): a named package removes
@@ -456,7 +469,7 @@ this propagation and an absent empty resolver (combined fixture 19.35s).
 The persistence failure test proves that earlier user writes remain committed,
 a conflicting external writer is preserved, later users remain untouched and
 the returned error identifies users requiring publication. All 338 service
-units pass (3.21s). This owner is not yet connected to the boot removal
+units pass (3.10s). This owner is not yet connected to the boot removal
 transaction; home updates and broadcasts remain with that integration (#822).
 APK and cluster parsing now distinguish an absent resources.arsc from a present
 entry failing archive reads (#826). Disposable code-only, bad-CRC and invalid
@@ -481,7 +494,7 @@ SystemConfig reader (15.04s); its added compile-only API passes image linkage
 targets' saved update owners unless SystemConfig names an owner; disabled factory
 records and unrelated install-source fields stay intact. Failed resource reads
 preserve the pending provider and settings, and unqueued completions are rejected.
-All 322 service units pass (3.21s). Queued providers now resolve their manifest
+All 322 service units pass (3.10s). Queued providers now resolve their manifest
 property directly through guest-owned base/all split APK files and the framework's
 system assets. The original uses PackageImpl.toAppInfoWithoutState: app-state
 resourceDirs, overlayPaths and sharedLibraryFiles are null on this path. The
@@ -586,7 +599,7 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 319 units pass (3.21s), including keyset rule, nullable-name, Base64 and
+All 319 units pass (3.10s), including keyset rule, nullable-name, Base64 and
 Parcel roundtrip tests. The original signed framework/GSF fixture passes
 (42.49s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
@@ -991,7 +1004,7 @@ are removed when cleared, including the old `requiredCpuAbi` fallback. The write
 rejects package additions/removals, UID/signer/code-path and unrelated changes,
 invalid page flags, duplicate owners and concurrent document changes before
 writing. Unit tests verify typed values, cleared attributes, retained unknown
-nodes and no mutation on rejection; all 288 aim-services units pass (3.21s).
+nodes and no mutation on rejection; all 288 aim-services units pass (3.10s).
 An explicit stopped-volume write and original-PMS reboot passes (17.85s): an
 actual arm64 package retains its ABI/library paths and native-written page-size
 settings; its install-only ABI override is cleared by the original ordinary-boot
