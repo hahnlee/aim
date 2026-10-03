@@ -5,7 +5,12 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 
 use super::Error;
-use crate::package::{parse, pkg::AndroidPackage, sign, write::Apks};
+use crate::package::{
+    parse,
+    pkg::AndroidPackage,
+    sign,
+    write::{ApkSigningError, Apks},
+};
 use std::fs;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,11 +111,15 @@ impl Image {
     /// Native parsing and full signature verification. No package feed,
     /// parser cache, settings, UID allocation or filesystem writes.
     pub fn load(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?)
+        Self::load_directories(apks, directories(apexes)?).map(|(image, _)| image)
     }
 
-    fn load_directories(apks: &Apks, directories: Vec<Location>) -> Result<Self, Error> {
+    fn load_directories(
+        apks: &Apks,
+        directories: Vec<Location>,
+    ) -> Result<(Self, Vec<String>), Error> {
         let mut image = Self::default();
+        let mut scan_paths = Vec::new();
         for directory in directories {
             let fail = |path: &str, phase, message| Error {
                 package: String::new(),
@@ -191,15 +200,23 @@ impl Image {
                             format!("native parcel does not read: {e}"),
                         )
                     })?;
-                let signing = match apks.signing_details(&parsed) {
+                let signing = match apks.checked_signing_details(&parsed) {
                     Ok(signing) => signing,
-                    Err(reason) if location.partition == Partition::Data => {
-                        image.rejected.push(Rejected { location, reason });
+                    Err(ApkSigningError::Invalid(error))
+                        if location.partition == Partition::Data =>
+                    {
+                        image.rejected.push(Rejected {
+                            location,
+                            reason: error.to_string(),
+                        });
                         continue;
                     }
-                    Err(reason) => return Err(fail(&location.path, "signatures", reason)),
+                    Err(reason) => {
+                        return Err(fail(&location.path, "signatures", reason.to_string()));
+                    }
                 };
                 if location.partition == Partition::Data {
+                    scan_paths.push(location.path.clone());
                     location.path = parsed.path.clone().ok_or_else(|| {
                         fail(
                             &location.path,
@@ -227,15 +244,22 @@ impl Image {
                 });
             }
         }
-        Ok(image)
+        Ok((image, scan_paths))
     }
 }
 
 /// Physical data APK inventory before known-package validation or reconciliation.
 /// Rejections retain the outer scan path for the removal owner.
+#[derive(Debug)]
+pub struct DataCode {
+    /// The outer file submitted by installPackagesFromDir, before descent.
+    pub scan_path: String,
+    pub code: Code,
+}
+
 #[derive(Debug, Default)]
 pub struct DataImage {
-    pub packages: Vec<Code>,
+    pub packages: Vec<DataCode>,
     pub rejected: Vec<Rejected>,
 }
 
@@ -267,7 +291,7 @@ impl DataImage {
             }
             roots.push(root);
         }
-        let image = Image::load_directories(
+        let (image, scan_paths) = Image::load_directories(
             apks,
             roots
                 .into_iter()
@@ -280,7 +304,12 @@ impl DataImage {
                 .collect(),
         )?;
         Ok(Self {
-            packages: image.packages,
+            packages: image
+                .packages
+                .into_iter()
+                .zip(scan_paths)
+                .map(|(code, scan_path)| DataCode { scan_path, code })
+                .collect(),
             rejected: image.rejected,
         })
     }

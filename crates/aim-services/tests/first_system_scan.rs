@@ -286,7 +286,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             .unwrap();
             let inventory = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
             assert_eq!(inventory.packages.len(), 1);
-            let raw = &inventory.packages[0];
+            let raw = &inventory.packages[0].code;
             let platform = &batch.packages[0].candidate.record.signing;
             let native_environment = NativeLibraryEnvironment {
                 preferred_abi: "arm64-v8a",
@@ -355,8 +355,61 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             stale.settings.disabled_system_packages[0].version_code += 1;
             let stale_before = stale.clone();
             assert!(
-                matches!(stale.scan_known_data(raw, &full_users, None, &apks, data_inputs()), Err(SigningError::Rejected(e)) if e.phase == "factory")
+                matches!(stale.scan_known_data(raw, &full_users, None, &apks, data_inputs()), Err(SigningError::Fatal(e)) if e.phase == "factory")
             );
+            assert_eq!(stale, stale_before);
+            use aim_services::package::scan::{DataCandidateOutcome, DataCode};
+            let moved_candidate = DataCode {
+                scan_path: moved.location.path.clone(),
+                code: moved,
+            };
+            let invalid_file = writable.join("app/unexpected");
+            std::fs::write(&invalid_file, b"disposable invalid code").unwrap();
+            let failed_cleanup = owner.scan_data_candidate(
+                &moved_candidate,
+                &full_users,
+                None,
+                &apks,
+                data_inputs(),
+                &resources,
+                true,
+            );
+            assert!(
+                matches!(failed_cleanup, Err(SigningError::Fatal(e)) if e.phase == "data-cleanup")
+            );
+            assert!(invalid_file.exists());
+            assert_eq!(owner, before);
+            let removed = owner
+                .scan_data_candidate(
+                    &moved_candidate,
+                    &full_users,
+                    None,
+                    &apks,
+                    data_inputs(),
+                    &resources,
+                    false,
+                )
+                .unwrap();
+            assert!(
+                matches!(removed, DataCandidateOutcome::Removed(SigningError::Rejected(e)) if e.phase == "require-known")
+            );
+            assert!(!invalid_file.exists());
+            assert_eq!(owner, before);
+            let valid_candidate = &inventory.packages[0];
+            let no_users = std::collections::BTreeMap::new();
+            assert!(
+                matches!(owner.scan_data_candidate(valid_candidate, &no_users, None, &apks, data_inputs(), &resources, false), Err(SigningError::Fatal(e)) if e.phase == "setting")
+            );
+            let domain_failure = || Err("domain owner unavailable".to_owned());
+            assert!(
+                matches!(owner.scan_data_candidate(valid_candidate, &full_users, None, &apks,
+                aim_services::package::scan::DataScanInputs { new_domain_id: &domain_failure, ..data_inputs() }, &resources, false), Err(SigningError::Fatal(e)) if e.phase == "domain")
+            );
+            assert!(
+                matches!(stale.scan_data_candidate(valid_candidate, &full_users, None, &apks, data_inputs(), &resources, false), Err(SigningError::Fatal(e)) if e.phase == "factory")
+            );
+            assert!(data_code.exists());
+            assert_eq!(owner, before);
             assert_eq!(stale, stale_before);
             let mut expecting = before.clone();
             expecting
@@ -403,9 +456,20 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 0
             );
             assert_eq!(ordinary_data.candidate.users, full_users[&active.name]);
-            let accepted = owner
-                .scan_known_data(raw, &full_users, None, &apks, data_inputs())
-                .unwrap();
+            let DataCandidateOutcome::Accepted(accepted) = owner
+                .scan_data_candidate(
+                    valid_candidate,
+                    &full_users,
+                    None,
+                    &apks,
+                    data_inputs(),
+                    &resources,
+                    false,
+                )
+                .unwrap()
+            else {
+                panic!("valid updated data must be accepted")
+            };
             assert_eq!(accepted.candidate.record.settings.app_id, active.app_id);
             assert_eq!(
                 accepted.candidate.record.settings.code_path,

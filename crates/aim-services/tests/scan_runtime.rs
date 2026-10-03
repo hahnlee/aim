@@ -529,7 +529,8 @@ fn saved_scan_libraries_match_original_pms() {
     let data_image = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
     assert!(data_image.rejected.is_empty());
     assert_eq!(data_image.packages.len(), 3);
-    for code in &data_image.packages {
+    for entry in &data_image.packages {
+        let code = &entry.code;
         let identity =
             aim_services::package::scan::Identity::select(&code.parsed, &resumed.settings, true);
         let factory = resumed_packages

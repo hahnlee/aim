@@ -33,7 +33,7 @@ mod boot;
 mod completion;
 mod data;
 mod disabled;
-pub use data::DataScanInputs;
+pub use data::{DataCandidateOutcome, DataScanInputs};
 mod updated_boot;
 pub use boot::{
     FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,
@@ -46,7 +46,7 @@ pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 mod uids;
 mod validate;
 pub use identity::Identity;
-pub use image::{Apex, Code, DataImage, Image, Kind, Location, Partition, Rejected};
+pub use image::{Apex, Code, DataCode, DataImage, Image, Kind, Location, Partition, Rejected};
 pub use setting::{NewSetting, SettingMetadata, SettingUpdate, User, UserPolicy};
 pub use signing::{
     NewPackageOutcome, SharedUidMigration, SigningError, SigningOutcome, SigningScan,

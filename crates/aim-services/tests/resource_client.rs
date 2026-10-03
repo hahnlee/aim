@@ -146,16 +146,32 @@ fn generated_installer_calls_preserve_failure_and_retry_parent_cleanup() {
         .unwrap();
     manager.start();
     let resources = CodeResources::new(client, data.clone(), None);
-    let error = resources
-        .clean("/data/app/~~native-proof/package", false)
-        .unwrap_err();
-    assert!(error.contains("installer parent failure"), "{error}");
+    use aim_services::package::scan::{
+        DataImage, Kind, Location, Partition, Rejected, SigningError, SigningScan,
+    };
+    let image = DataImage {
+        packages: Vec::new(),
+        rejected: vec![Rejected {
+            location: Location {
+                path: "/data/app/~~native-proof/package".into(),
+                partition: Partition::Data,
+                kind: Kind::App,
+                apex: None,
+            },
+            reason: "invalid disposable package".into(),
+        }],
+    };
+    let incremental = Default::default();
+    let error =
+        SigningScan::clean_invalid_data_inputs(&image, &resources, &incremental).unwrap_err();
+    assert!(
+        matches!(error, SigningError::Fatal(ref e) if e.phase == "data-cleanup" && e.message.contains("installer parent failure")),
+        "{error:?}"
+    );
     assert!(!data.join("app/~~native-proof/package").exists());
     assert!(data.join("app/~~native-proof").exists());
     *installer.reject_parent.lock().unwrap() = false;
-    resources
-        .clean("/data/app/~~native-proof/package", false)
-        .unwrap();
+    SigningScan::clean_invalid_data_inputs(&image, &resources, &incremental).unwrap();
     assert!(!data.join("app/~~native-proof").exists());
     assert_eq!(
         *installer.calls.lock().unwrap(),

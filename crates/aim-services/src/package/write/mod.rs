@@ -42,6 +42,7 @@ use super::info::{
 use super::model::{PackageState, State};
 use super::query::{Query, States};
 use crate::shadow::{Answer, Check, CheckOutcome, ShadowCall, Value};
+pub(crate) use apk::ApkSigningError;
 pub use apk::{Apks, Files};
 use session::Sessions;
 

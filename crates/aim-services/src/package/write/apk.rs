@@ -25,6 +25,21 @@ pub struct Apks {
     pub platform: Platform,
 }
 
+/// Keep failed source ownership separate from a verifier's APK rejection.
+#[derive(Debug)]
+pub(crate) enum ApkSigningError {
+    Input(String),
+    Invalid(sign::Error),
+}
+impl std::fmt::Display for ApkSigningError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Input(e) => f.write_str(e),
+            Self::Invalid(e) => e.fmt(f),
+        }
+    }
+}
+
 impl Apks {
     /// PackageManagerServiceUtils.compressedFileExists: the sibling of a
     /// code directory ending in -Stub contains an entry ending in .gz.
@@ -59,14 +74,25 @@ impl Apks {
     /// Native verified details retain SPKI keys for the persistence owner;
     /// `signatures` adds the query parcel's Java serialization.
     pub fn signing_details(&self, pkg: &AndroidPackage) -> Result<sign::SigningDetails, String> {
+        self.checked_signing_details(pkg).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn checked_signing_details(
+        &self,
+        pkg: &AndroidPackage,
+    ) -> Result<sign::SigningDetails, ApkSigningError> {
         let base = pkg
             .base_apk_path
             .as_ref()
-            .ok_or("no parsed base APK path")?;
+            .ok_or_else(|| ApkSigningError::Input("no parsed base APK path".into()))?;
         let mut paths = vec![base.clone()];
         if let Some(splits) = &pkg.split_code_paths {
             for path in splits {
-                paths.push(path.clone().ok_or("null parsed split APK path")?);
+                paths.push(
+                    path.clone().ok_or_else(|| {
+                        ApkSigningError::Input("null parsed split APK path".into())
+                    })?,
+                );
             }
         }
         let sources = paths
@@ -75,7 +101,8 @@ impl Apks {
                 let host = (self.files)(path).ok_or_else(|| format!("{path}: not readable"))?;
                 FileSource::open(&host).map_err(|e| format!("{path}: {e}"))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ApkSigningError::Input)?;
         let apk = |i: usize| Apk {
             path: &paths[i],
             data: &sources[i],
@@ -90,7 +117,7 @@ impl Apks {
             false,
             &Build::of(&self.platform),
         )
-        .map_err(|e| e.to_string())
+        .map_err(ApkSigningError::Invalid)
     }
 
     /// The package the native parser makes of the APK at `ps`'s code path,

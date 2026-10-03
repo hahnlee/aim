@@ -2,8 +2,8 @@
 //! InstallPackageHelper.assertPackageIsValid/adjustScanFlags and ScanPackageUtils.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{
-    AbiScanContext, AbiScanMode, Code, CompletedScanMetadata, DisabledSystemMetadata, Error,
-    Identity, Kind, LibraryCompatibility, Partition, ScanMetadataCompletion, ScanPolicy,
+    AbiScanContext, AbiScanMode, Code, CompletedScanMetadata, DataCode, DisabledSystemMetadata,
+    Error, Identity, Kind, LibraryCompatibility, Partition, ScanMetadataCompletion, ScanPolicy,
     SettingUpdate, SigningError, SigningScan, User, application_flags,
 };
 use crate::package::{restrictions::UserState, sign::SigningDetails, write::Apks};
@@ -24,7 +24,93 @@ pub struct DataScanInputs<'a> {
     pub completion: ScanMetadataCompletion<'a>,
 }
 
+#[derive(Debug)]
+pub enum DataCandidateOutcome {
+    Accepted(CompletedScanMetadata),
+    /// Actual code removal succeeded. Settings/factory fallback follows later.
+    Removed(SigningError),
+}
+
 impl SigningScan {
+    /// Remove rejected parse/signature inputs using their original scan paths.
+    /// Earlier deletions and pending resource retries survive a later failure.
+    pub fn clean_invalid_data_inputs(
+        image: &super::DataImage,
+        resources: &crate::package::owner::resources::CodeResources,
+        incremental_paths: &BTreeSet<String>,
+    ) -> Result<(), SigningError> {
+        for rejected in &image.rejected {
+            resources
+                .clean(
+                    &rejected.location.path,
+                    incremental_paths.contains(&rejected.location.path),
+                )
+                .map_err(|message| {
+                    SigningError::Fatal(Error {
+                        package: String::new(),
+                        path: rejected.location.path.clone(),
+                        phase: "data-cleanup",
+                        message,
+                    })
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Initial data admission plus actual invalid-code cleanup. Unimplemented
+    /// or unavailable owner behavior stops the scan without deleting valid code.
+    pub fn scan_data_candidate(
+        &mut self,
+        candidate: &DataCode,
+        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        all_users: Option<&[User]>,
+        apks: &Apks,
+        inputs: DataScanInputs<'_>,
+        resources: &crate::package::owner::resources::CodeResources,
+        incremental: bool,
+    ) -> Result<DataCandidateOutcome, SigningError> {
+        let path = &candidate.code.location.path;
+        if path != &candidate.scan_path && !path.starts_with(&format!("{}/", candidate.scan_path)) {
+            return Err(SigningError::Fatal(Error {
+                package: candidate.code.parsed.package_name.clone(),
+                path: candidate.scan_path.clone(),
+                phase: "data-cleanup",
+                message: "scan path does not own parsed data code".into(),
+            }));
+        }
+        let error =
+            match self.scan_known_data(&candidate.code, saved_users, all_users, apks, inputs) {
+                Ok(accepted) => return Ok(DataCandidateOutcome::Accepted(accepted)),
+                Err(SigningError::Rejected(error))
+                    if matches!(
+                        error.phase,
+                        "require-known" | "validation" | "authorization"
+                    ) =>
+                {
+                    SigningError::Rejected(error)
+                }
+                Err(
+                    error @ SigningError::NativeLibrary {
+                        error: super::NativeLibraryError::Selection(_),
+                        ..
+                    },
+                ) => error,
+                Err(SigningError::Rejected(error)) => return Err(SigningError::Fatal(error)),
+                Err(error) => return Err(error),
+            };
+        resources
+            .clean(&candidate.scan_path, incremental)
+            .map_err(|message| {
+                SigningError::Fatal(Error {
+                    package: candidate.code.parsed.package_name.clone(),
+                    path: candidate.scan_path.clone(),
+                    phase: "data-cleanup",
+                    message,
+                })
+            })?;
+        Ok(DataCandidateOutcome::Removed(error))
+    }
+
     /// Admit an already known data candidate through policy, signer/UID/library
     /// reconciliation and complete metadata. Failure leaves candidate settings
     /// unchanged; invalid-code cleanup and factory fallback belong to the loop.
@@ -62,6 +148,14 @@ impl SigningScan {
                 "data scan requires a canonical physical data APK".into(),
             ));
         }
+        let fatal = |phase, message| {
+            SigningError::Fatal(Error {
+                package: raw.parsed.package_name.clone(),
+                path: raw.location.path.clone(),
+                phase,
+                message,
+            })
+        };
         let system_identity = Identity::select(&raw.parsed, &self.settings, true);
         let factory_setting = self
             .settings
@@ -72,7 +166,7 @@ impl SigningScan {
             (Some(setting), Some(factory)) if setting == &factory.record.settings => {}
             (None, None) => {}
             _ => {
-                return Err(fail(
+                return Err(fatal(
                     "factory",
                     "verified factory metadata disagrees with current disabled setting".into(),
                 ));
@@ -100,11 +194,17 @@ impl SigningScan {
             ..
         } = inputs.completion.context.mode
         else {
-            return Err(fail(
+            return Err(fatal(
                 "native-library",
                 "boot data scan requires existing-package ABI mode".into(),
             ));
         };
+        if !saved_users.contains_key(&previous.name) {
+            return Err(fatal(
+                "setting",
+                "saved package user states were not supplied".into(),
+            ));
+        }
         let mut code = Code {
             location: raw.location.clone(),
             parsed: raw.parsed.clone(),
@@ -131,7 +231,7 @@ impl SigningScan {
                 inputs.compatibility,
                 inputs.remove_test_base,
             )
-            .map_err(|e| fail("policy", e))?;
+            .map_err(|e| fatal("policy", e))?;
         let (flags, private_flags) = application_flags(&code.parsed, updated);
         let update = SettingUpdate {
             code_path: code.location.path.clone(),
@@ -145,7 +245,7 @@ impl SigningScan {
             uses_static_libraries: super::boot::static_libraries(&code.parsed)
                 .map_err(|e| fail("metadata", e))?,
             mime_groups: code.parsed.mime_groups.clone(),
-            domain_set_id: (inputs.new_domain_id)().map_err(|e| fail("domain", e))?,
+            domain_set_id: (inputs.new_domain_id)().map_err(|e| fatal("domain", e))?,
             target_sdk_version: code.parsed.target_sdk_version,
             restrict_update_hash: code.parsed.restrict_update_hash.clone(),
         };

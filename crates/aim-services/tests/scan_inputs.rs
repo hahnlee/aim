@@ -1891,12 +1891,18 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
     };
     let image = DataImage::load(&apks, &["volume".into()]).unwrap();
     assert_eq!(image.packages.len(), 2);
-    assert_eq!(image.packages[0].location.path, "/data/app/~~container/gsf");
+    assert_eq!(image.packages[0].scan_path, "/data/app/~~container");
+    assert_eq!(image.packages[1].scan_path, "/mnt/expand/volume/app/other");
     assert_eq!(
-        image.packages[1].location.path,
+        image.packages[0].code.location.path,
+        "/data/app/~~container/gsf"
+    );
+    assert_eq!(
+        image.packages[1].code.location.path,
         "/mnt/expand/volume/app/other"
     );
-    for code in &image.packages {
+    for entry in &image.packages {
+        let code = &entry.code;
         assert_eq!(
             code.parsed.path.as_deref(),
             Some(code.location.path.as_str())
@@ -1910,7 +1916,10 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
         assert!(!code.location.privileged());
         assert_eq!(code.parsed.package_name, "com.google.android.gsf");
     }
-    assert_eq!(image.packages[0].signing, image.packages[1].signing);
+    assert_eq!(
+        image.packages[0].code.signing,
+        image.packages[1].code.signing
+    );
     assert_eq!(image.rejected.len(), 1);
     assert_eq!(image.rejected[0].location.path, "/data/app/empty");
     assert!(fixture.0.join("data/app/empty").exists());
@@ -1925,6 +1934,18 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
             "location"
         );
     }
+    let source_root = fixture.0.clone();
+    let unavailable = Apks {
+        files: Box::new(move |path| {
+            (!path.ends_with("base.apk")).then(|| source_root.join(path.trim_start_matches('/')))
+        }),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    assert_eq!(
+        DataImage::load(&unavailable, &[]).unwrap_err().phase,
+        "signatures"
+    );
+    assert!(fixture.0.join("data/app/~~container/gsf/base.apk").exists());
     std::fs::remove_dir_all(fixture.0.join("data/app")).unwrap();
     assert!(DataImage::load(&apks, &[]).unwrap().packages.is_empty());
     std::fs::write(fixture.0.join("data/app"), b"not a directory").unwrap();
