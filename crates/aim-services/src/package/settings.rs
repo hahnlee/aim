@@ -198,6 +198,29 @@ pub struct InstallSource {
     pub originating_package: Option<String>,
 }
 
+impl InstallSource {
+    /// Pinned InstallSource.createInternal's empty-owner normalization.
+    pub fn normalized(self) -> Result<Self, String> {
+        if self.initiating_package.is_none() && self.initiating_package_signatures.is_some() {
+            return Err("install signing owner has no initiating package".into());
+        }
+        if self.initiating_package.is_none()
+            && self.originating_package.is_none()
+            && self.installer.is_none()
+            && self.update_owner.is_none()
+            && self.initiating_package_signatures.is_none()
+            && !self.initiating_package_uninstalled
+            && self.package_source == 0
+        {
+            return Ok(Self {
+                is_orphaned: self.is_orphaned,
+                ..Self::default()
+            });
+        }
+        Ok(self)
+    }
+}
+
 impl Default for InstallSource {
     fn default() -> Self {
         InstallSource {
@@ -497,6 +520,7 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
         initiating_package_signatures: None,
         originating_package: string(e, "installOriginator"),
     };
+    p.install_source = p.install_source.normalized()?;
     p.volume_uuid = string(e, "volumeUuid");
     p.category_hint = e.int("categoryHint")?.unwrap_or(CATEGORY_UNDEFINED);
     p.update_available = e.bool("updateAvailable")?.unwrap_or(false);
@@ -545,6 +569,7 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
             _ => {}
         }
     }
+    p.install_source = p.install_source.normalized()?;
     Ok(Some(p))
 }
 
@@ -672,4 +697,59 @@ fn key_sets(e: &Element) -> Result<KeySets, String> {
         }
     }
     Ok(k)
+}
+
+#[cfg(test)]
+mod install_source_tests {
+    use super::*;
+    #[test]
+    fn empty_owner_normalizes_attributes_and_signing_requires_initiator() {
+        for orphan in [false, true] {
+            for input in [
+                "installerUid='123' installerAttributionTag='tag' packageSource='0'",
+                "",
+            ] {
+                let xml = format!(
+                    "<packages><package name='p' codePath='/data/p' userId='10001' isOrphaned='{orphan}' {input}/></packages>"
+                );
+                let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+                for root in [
+                    root.clone(),
+                    aim_android_xml::read(&aim_android_xml::abx::write(&root).unwrap()).unwrap(),
+                ] {
+                    let p = Settings::parse(&root).unwrap().packages.remove(0);
+                    assert_eq!(
+                        p.install_source,
+                        InstallSource {
+                            is_orphaned: orphan,
+                            ..Default::default()
+                        }
+                    );
+                }
+            }
+        }
+        let invalid = InstallSource {
+            initiating_package_signatures: Some(Signatures::default()),
+            ..Default::default()
+        };
+        assert!(invalid.normalized().is_err());
+        let retained = InstallSource {
+            initiating_package: Some("".into()),
+            installer_uid: 123,
+            installer_attribution_tag: Some("tag".into()),
+            package_source: 3,
+            ..Default::default()
+        };
+        assert_eq!(retained.clone().normalized().unwrap(), retained);
+        let unspecified_names = InstallSource {
+            installer_uid: 123,
+            installer_attribution_tag: Some("tag".into()),
+            package_source: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            unspecified_names.clone().normalized().unwrap(),
+            unspecified_names
+        );
+    }
 }

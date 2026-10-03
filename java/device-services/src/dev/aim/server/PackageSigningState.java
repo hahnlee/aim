@@ -39,7 +39,7 @@ public final class PackageSigningState implements Parcelable {
         return sharedGroup == null ? null : Signing.details(sharedSigning);
     }
 
-    private static final class Signing {
+    static final class Signing {
         private final int scheme;
         private final byte[][] current;
         private final byte[][] past;

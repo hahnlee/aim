@@ -72,14 +72,14 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 375
-units pass (3.14s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 377
+units pass (3.17s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 16.16s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.45s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -113,7 +113,17 @@ native Binder test retains a multi-page setting after newer publication and
 checks range/null/trailing/closed requests. ART exercises native captures through
 original Proxy/Stub framing, failure/retry, short pages, version/scope/trailing
 rejection, cache identity and original loading/old-path getter restoration.
-Complete PackageState adapters and live producer/import wiring remain #836.
+Install-source records now retain original package identities, installer UID,
+attribution, package source, orphan/uninstalled flags and optional initiating
+signing lineage in that same capture. Java recreates the original InstallSource
+through its package factory with detached signing objects; ART checks populated
+signed and empty-orphaned inputs, mutable signature isolation and original empty
+normalization/precondition behavior. Native Settings normalizes only unspecified
+empty sources and rejects signatures without an initiator (#853), while capture
+publication rejects invalid/non-normalized sources without replacing the prior
+version. Native text/ABX owner tests retain explicit nondefault source values.
+Keyset alias/upgrade reader semantics remain #852. Complete PackageState adapters
+and live producer/import wiring remain #836.
 Live overlay/component producers, original-state import and full PackageState
 metadata/callback wiring remain #836. Native suspension records now distinguish
 explicit null parameter values from missing keys/maps (#848); runtime put/remove

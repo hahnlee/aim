@@ -41,6 +41,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageRoundTripOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/CapturedInstallSourceOracle.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
@@ -54,6 +58,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageSettingData.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/CapturedInstallSource.java"),
         )
         .arg(
             aim_paths::root()
@@ -656,6 +664,20 @@ fn native_scan_objects(
         setting.add_old_path(None);
         setting.add_old_path(Some(&"x".repeat(100_000)));
         setting.restrict_update_hash = Some(vec![1, 2, 3]);
+        if name == "com.google.android.gsf" {
+            setting.install_source = aim_services::package::settings::InstallSource {
+                initiating_package: Some(name.into()),
+                originating_package: Some("origin".into()),
+                installer: Some("".into()),
+                installer_uid: 123,
+                update_owner: Some("owner".into()),
+                installer_attribution_tag: Some("tag".into()),
+                package_source: 3,
+                is_orphaned: true,
+                initiating_package_uninstalled: true,
+                initiating_package_signatures: setting.signatures.clone(),
+            };
+        }
 
         let xml = b"<package-restrictions><pkg name='fixture' ceDataInode='17' deDataInode='19' inst='false' stopped='true' nl='true' hidden='true' distraction_flags='3' instant-app='true' virtual-preload='true' enabled='3' enabledCaller='caller' install-reason='4' uninstall-reason='5' harmful-app-warning='warning' splash-screen-theme='theme' first-install-time='2b' min-aspect-ratio='2'><enabled-components><item name='fixture.Enabled'/></enabled-components><disabled-components><item name='fixture.Disabled'/></disabled-components><suspend-params suspending-package='android' suspending-user='0' quarantined='true'><dialog-info title='title' dialogMessage='message' buttonText='button' buttonAction='1'/><app-extras><int-array name='values' num='2'><item value='7'/><item value='9'/></int-array></app-extras></suspend-params><suspend-params suspending-package='android' suspending-user='10' quarantined='false'/><archive-state installer-title='installer' archive-time='55'><archive-activity-info activity-title='archived' original-component-name='fixture/.Archive' icon-path='/data/icon' monochrome-icon-path='/data/mono'/></archive-state></pkg></package-restrictions>";
         let mut state = aim_services::package::restrictions::Restrictions::parse(

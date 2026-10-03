@@ -57,6 +57,26 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
             }
         }
     }
+    let source = &s.install_source;
+    if source.clone().normalized()? != *source {
+        return Err("captured install source is not normalized".into());
+    }
+
+    p.write_string16(source.initiating_package.as_deref());
+    p.write_string16(source.originating_package.as_deref());
+    p.write_string16(source.installer.as_deref());
+    p.write_i32(source.installer_uid);
+    p.write_string16(source.update_owner.as_deref());
+    p.write_string16(source.installer_attribution_tag.as_deref());
+    p.write_i32(source.package_source);
+    p.write_bool(source.is_orphaned);
+    p.write_bool(source.initiating_package_uninstalled);
+    let signing = source
+        .initiating_package_signatures
+        .as_ref()
+        .map(crate::package::sign::SigningDetails::from_saved)
+        .transpose()?;
+    super::endpoint::write_signing(&mut p, signing.as_ref());
     if p.data().len() > i32::MAX as usize {
         return Err("package setting exceeds transport size".into());
     }

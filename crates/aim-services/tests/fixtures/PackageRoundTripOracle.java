@@ -333,6 +333,7 @@ public final class PackageRoundTripOracle {
         catch (IllegalArgumentException expected) {}
         owner.signingOverride = null;
         var savedSigning = lease.getSigningState(name, false);
+        com.android.server.pm.CapturedInstallSourceOracle.verify(metadata, savedSigning.getPackageSigningDetails(), name.equals("com.google.android.gsf"));
         int signingReads = owner.signingReads;
         if (lease.getSigningState(name, false) != savedSigning || owner.signingReads != signingReads
                 || lease.getSigningState("missing", false) != null || savedSigning.getAppId() != uid) {

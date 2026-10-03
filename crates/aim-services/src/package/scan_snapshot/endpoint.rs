@@ -151,7 +151,10 @@ impl PackageSigningState {
     }
 }
 
-fn write_signing(p: &mut Parcel, signing: Option<&crate::package::sign::SigningDetails>) {
+pub(super) fn write_signing(
+    p: &mut Parcel,
+    signing: Option<&crate::package::sign::SigningDetails>,
+) {
     p.write_bool(signing.is_some());
     if let Some(signing) = signing {
         p.write_i32(signing.scheme_version);

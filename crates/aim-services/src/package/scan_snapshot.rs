@@ -113,6 +113,15 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
     ] {
         let mut names = BTreeSet::new();
         for setting in settings {
+            let normalized = setting
+                .install_source
+                .clone()
+                .normalized()
+                .map_err(Error::Invalid)?;
+            if normalized != setting.install_source {
+                return Err(fail("install source is not normalized"));
+            }
+
             if !names.insert(setting.name.as_str()) {
                 return Err(fail("duplicate package setting"));
             }
@@ -233,6 +242,26 @@ mod tests {
             Error::Stale
         );
         assert!(Arc::ptr_eq(&current, &store.capture()));
+    }
+
+    #[test]
+    fn invalid_install_source_cannot_publish_over_a_capture() {
+        let store = Store::new(owner(), Usage::new(["fixture"])).unwrap();
+        let base = store.capture();
+        for signed in [false, true] {
+            let mut candidate = base.owner().clone();
+            let source = &mut candidate.settings.packages[0].install_source;
+            if signed {
+                source.initiating_package_signatures = Some(Default::default());
+            } else {
+                source.installer_uid = 123;
+            }
+            assert!(matches!(
+                store.publish(&base, candidate, base.usage().clone()),
+                Err(Error::Invalid(_))
+            ));
+            assert!(Arc::ptr_eq(&store.capture(), &base));
+        }
     }
 
     #[test]

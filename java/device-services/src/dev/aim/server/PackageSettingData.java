@@ -13,6 +13,7 @@ public final class PackageSettingData {
     private final boolean factory;
     private final byte[] restrictUpdateHash;
     private final List<String> oldPaths;
+    public final InstallSourceData installSource;
     public final String realName;
     public final String path;
     public final String legacyNativeLibraryPath;
@@ -85,6 +86,7 @@ public final class PackageSettingData {
             for (int i = 0; i < count; i++) paths.add(in.readString());
             oldPaths = Collections.unmodifiableList(paths);
         }
+        installSource = new InstallSourceData(in);
     }
     public static PackageSettingData read(Parcel in) { return new PackageSettingData(in); }
     public long getVersion() { return version; }
@@ -93,4 +95,25 @@ public final class PackageSettingData {
     public boolean isLoading() { return Math.abs(1f - loadingProgress) >= .00000001f; }
     public byte[] getRestrictUpdateHash() { return restrictUpdateHash == null ? null : restrictUpdateHash.clone(); }
     public List<String> getOldPaths() { return oldPaths; }
+    public static final class InstallSourceData {
+        public final String initiatingPackage, originatingPackage, installerPackage, updateOwner, attributionTag;
+        public final int installerUid, packageSource;
+        public final boolean orphaned, initiatingUninstalled;
+        private final PackageSigningState.Signing initiatingSigning;
+        private InstallSourceData(Parcel in) {
+            initiatingPackage = in.readString(); originatingPackage = in.readString(); installerPackage = in.readString();
+            installerUid = in.readInt(); updateOwner = in.readString(); attributionTag = in.readString();
+            packageSource = in.readInt(); orphaned = in.readBoolean(); initiatingUninstalled = in.readBoolean();
+            initiatingSigning = PackageSigningState.Signing.read(in);
+            if (initiatingPackage == null && initiatingSigning != null) throw new IllegalArgumentException("signing owner has no initiating package");
+            getInitiatingSigningDetails();
+        }
+        public android.content.pm.SigningDetails getInitiatingSigningDetails() {
+            return initiatingSigning == null ? null : PackageSigningState.Signing.details(initiatingSigning);
+        }
+    }
+    public com.android.server.pm.InstallSource getInstallSource() {
+        return com.android.server.pm.CapturedInstallSource.from(installSource);
+    }
+
 }
