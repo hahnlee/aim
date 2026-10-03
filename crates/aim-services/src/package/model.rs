@@ -319,6 +319,8 @@ pub struct User {
 /// SystemConfig and the device's constants the info generators read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct System {
+    /// Native AppsFilter interaction grants, carried with each query snapshot.
+    pub implicit_access: super::apps_filter::ImplicitAccess,
     /// `mAvailableFeatures`: name and version.
     pub features: Vec<(String, i32)>,
     /// `ro.opengles.version`, the `reqGlEsVersion` feature.

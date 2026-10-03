@@ -889,6 +889,9 @@ fn manifest_keysets_match_original_parser() {
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PreferredClearingOracle.java"),
+        )
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ImplicitAccessOracle.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -912,6 +915,7 @@ fn manifest_keysets_match_original_parser() {
             classes.join("com/android/server/pm/KeySetOwnerOracle$1.class"),
             classes.join("com/android/server/pm/UpdateOwnershipOracle.class"),
             classes.join("com/android/server/pm/PreferredClearingOracle.class"),
+            classes.join("com/android/server/pm/ImplicitAccessOracle.class"),
         ]));
     let key = |scalar| {
         let mut der = vec![
@@ -1249,5 +1253,71 @@ fn manifest_keysets_match_original_parser() {
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.PreferredClearingOracle", "/data/local/tmp/manifest-keysets/preferred.xml",
     ])).stdout).unwrap();
+    assert_eq!(original, expected);
+    use aim_services::package::{
+        apps_filter::{AppsFilter, Config},
+        model,
+    };
+    let mut state = model::State::default();
+    for (name, app_id) in [("a", 10001), ("b", 10002)] {
+        state.packages.insert(
+            name.into(),
+            model::PackageState {
+                name: name.into(),
+                app_id,
+                target_sdk_version: 35,
+                pkg: Some(std::sync::Arc::new(AndroidPackage {
+                    package_name: name.into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+    }
+    let filter = AppsFilter::new(&state, &Config::default());
+    let mut expected = String::new();
+    for (recipient, visible, retain) in [
+        (10002, 10002, false),
+        (10002, 10001, false),
+        (10002, 10001, false),
+        (10002, 10001, true),
+        (10002, 10001, true),
+        (20002, 10001, true),
+        (20002, 10001, false),
+        (1010002, 1010001, false),
+    ] {
+        let changed = state
+            .system
+            .implicit_access
+            .grant(recipient, visible, retain);
+        writeln!(
+            &mut expected,
+            "{changed} {} {} {}",
+            !filter.should_filter(&state, 10002, &state.packages["a"], 0),
+            !filter.should_filter(&state, 20002, &state.packages["a"], 0),
+            !filter.should_filter(&state, 1010002, &state.packages["a"], 10)
+        )
+        .unwrap();
+    }
+    let output = boot.command().args([
+        "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.ImplicitAccessOracle",
+    ]).output().unwrap();
+    if !output.status.success() {
+        let logs = boot
+            .command()
+            .args(["shell", "logcat", "-d", "-s", "AndroidRuntime"])
+            .output()
+            .unwrap();
+        for line in String::from_utf8_lossy(&logs.stdout).lines() {
+            eprintln!("{}", line.chars().take(700).collect::<String>());
+        }
+    }
+    assert!(
+        output.status.success(),
+        "implicit oracle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let original = String::from_utf8(output.stdout).unwrap();
     assert_eq!(original, expected);
 }

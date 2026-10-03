@@ -362,6 +362,18 @@ denylisted/provider queries fail explicitly until the resource owner supplies
 validated contents. The original UpdateOwnershipHelper oracle
 compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
 transitions with the native owner: denied-target and provider/null queries match.
+Native query snapshots now own AppsFilter's ordinary and update-retained
+interaction grants (#724). Full recipient/visible UIDs preserve direction and
+user scope; duplicate grants and self-grants follow original return values.
+Ordinary queries use both classes, while SDK sandboxes use ordinary grants only.
+Package removal clears both directions in both classes for every resolved user,
+including shared app IDs. Replacement retains the retained class and preserves
+ordinary grants only when requested. Snapshot clones retain their prior grants.
+The original AppsFilterImpl grant oracle, with its own original mutable
+ApplicationSharedMemory for cache invalidation, passes in the combined fixture
+(17.27s). All 327 units pass (3.09s), and added image APIs link (13.2s).
+ActivityManager/WindowManager producers and boot removal/query publication are
+not connected to this owner yet (#724/#822).
 The native settings store now clears one user's saved preferred activities under
 Settings.clearPackagePreferredActivities rules (#822): a named package removes
 only always choices, while a null package clears all valid choices. Last choices,

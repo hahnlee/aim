@@ -195,6 +195,7 @@ impl Join {
         });
         let mut state = (*fed).clone();
         state.system = System {
+            implicit_access: fed.system.implicit_access.clone(),
             force_system_packages_queryable: fed.system.force_system_packages_queryable,
             force_queryable_packages: fed.system.force_queryable_packages.clone(),
             ..device.clone()
