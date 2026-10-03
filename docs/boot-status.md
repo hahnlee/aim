@@ -589,9 +589,18 @@ including allocated-empty, and the original empty getter for uninitialized maps
 values remain detached. The pinned image removes bulk library/label setters;
 assembly uses retained original mutations. Captured raw states that those APIs
 cannot reproduce (including allocated-empty label owners) reject and remain
-#862. This assembles metadata and sparse user inputs, not a complete facade:
-code, transient/library dependency owners and the current leaving-shared-UID bit
-(#861) are not assembled by this constructor. Original-state import,
+#862. PackageScanLease.newScannedSetting now combines active metadata and all
+explicit users with freshly decoded original PackageImpl code, saved signing,
+eight usage timestamps and complete base/override seInfo from the same capture.
+Code name, active UID, path and long version must match the setting before code
+attachment; absent collected owners reject, while unknown settings return null.
+Collected code signing remains distinct from saved setting signing. Original ART
+checks combined concrete getters, detached mutable code/usage/user state,
+missing code/signing/usage/seInfo, UID/path/version mismatches and closed leases
+(17.08s with the complete package oracle). All original Java oracle linkage
+passes (4.22s), and device-services builds against original APIs (14.5s).
+This is not a complete facade: factory transient assembly, library dependency
+owners and the current leaving-shared-UID bit (#861) remain #836. Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

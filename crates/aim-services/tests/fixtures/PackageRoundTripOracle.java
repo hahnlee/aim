@@ -723,6 +723,50 @@ public final class PackageRoundTripOracle {
                 throw new AssertionError("native/Java usage DTO differs");
             }
         } finally { out.recycle(); }
+        var assembled = lease.newScannedSetting(name, true);
+        var assembledState = (com.android.server.pm.pkg.PackageState)assembled;
+        var assembledPkg = (com.android.internal.pm.parsing.pkg.PackageImpl)assembledState.getAndroidPackage();
+        if (assembledPkg.getUid() != uid || !assembledPkg.getPackageName().equals(name)
+                || assembledPkg.getLongVersionCode() != assembledState.getVersionCode()
+                || !new java.io.File(assembledPkg.getPath()).equals(assembledState.getPath())
+                || !java.util.Arrays.equals(assembled.getSigningDetails().getSignatures(), savedDetails.getSignatures())
+                || !java.util.Arrays.equals(assembled.getPkgState().getLastPackageUsageTimeInMills(), usage.getLastPackageUsageTimeInMills())
+                || !java.util.Objects.equals(assembled.getPkgState().getSeInfo(), security.getBaseLabel())
+                || !java.util.Objects.equals(assembled.getPkgState().getOverrideSeInfo(), security.getOverrideLabel())
+                || assembled.getUserStates().size() != 6) throw new AssertionError("combined captured setting differs");
+        assembledPkg.setPackageName("mutated-code");
+        assembled.getPkgState().setLastPackageUsageTimeInMills(0, 999);
+        assembled.getOrCreateUserState(10).setStopped(false);
+        var detached = lease.newScannedSetting(name, true);
+        if (detached == assembled || ((com.android.server.pm.pkg.PackageState)detached).getAndroidPackage() == assembledPkg
+                || !((com.android.internal.pm.parsing.pkg.PackageImpl)((com.android.server.pm.pkg.PackageState)detached).getAndroidPackage()).getPackageName().equals(name)
+                || detached.getPkgState().getLastPackageUsageTimeInMills()[0] != -1
+                || !detached.readUserState(10).isStopped()
+                || lease.newScannedSetting("missing", true) != null) throw new AssertionError("combined setting shares mutable owners");
+        var rejectedCode = com.android.server.pm.CapturedPackageSetting.from(metadata, 1, false);
+        rejectedCode.setAppId(uid + 1);
+        try { dev.aim.server.PackageObjects.restoreCollectedCode(rejectedCode, code, 1, false);
+            throw new AssertionError("wrong code UID accepted"); } catch (IllegalArgumentException expected) {}
+        rejectedCode.setAppId(uid).setLongVersionCode(metadata.versionCode + 1);
+        try { dev.aim.server.PackageObjects.restoreCollectedCode(rejectedCode, code, 1, false);
+            throw new AssertionError("wrong code version accepted"); } catch (IllegalArgumentException expected) {}
+        if (((com.android.server.pm.pkg.PackageState)rejectedCode).getAndroidPackage() != null) throw new AssertionError("rejected code was attached");
+        var wrongPath = new com.android.server.pm.PackageSetting(name, null, new java.io.File("/data/app/wrong"), 0, 0, new java.util.UUID(1, 2));
+        wrongPath.setAppId(uid).setLongVersionCode(metadata.versionCode);
+        try { dev.aim.server.PackageObjects.restoreCollectedCode(wrongPath, code, 1, false);
+            throw new AssertionError("wrong code path accepted"); } catch (IllegalArgumentException expected) {}
+        try { dev.aim.server.PackageObjects.restoreCollectedCode(detached, code, 2, false);
+            throw new AssertionError("wrong code capture accepted"); } catch (IllegalArgumentException expected) {}
+        for (int missing = 1; missing <= 4; missing++) {
+            var incompleteOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+            incompleteOwner.setting = owner.setting;
+            incompleteOwner.userInventory = new int[0];
+            incompleteOwner.missingOwner = missing;
+            try (var incompleteLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(incompleteOwner))) {
+                try { incompleteLease.newScannedSetting(name, true); throw new AssertionError("missing collected owner accepted: " + missing); }
+                catch (java.io.IOException expected) {}
+            }
+        }
         lease.close();
         lease.close();
         if (owner.closes != 1) throw new AssertionError("close is not idempotent");
@@ -738,6 +782,7 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
         try { lease.getSetting(name, false); throw new AssertionError("closed setting lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.newSettingWithUsers(name, false, true); throw new AssertionError("closed assembly lease accepted"); } catch (IllegalStateException expected) {}
+        try { lease.newScannedSetting(name, true); throw new AssertionError("closed scanned setting lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
     }
@@ -989,6 +1034,7 @@ public final class PackageRoundTripOracle {
         boolean fail;
         boolean shortChunk;
         int reads;
+        int missingOwner;
         int closes;
         long version = 1;
         PageOwner(String name, byte[] bytes, byte[] usage, byte[] seinfo, byte[] signing) { this.name = name; this.bytes = bytes; this.usage = usage; this.seinfo = seinfo; this.signing = signing; }
@@ -999,7 +1045,7 @@ public final class PackageRoundTripOracle {
         @Override
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
-        public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
+        public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && !disabled && name.equals(candidate) ? bytes.length : -1; }
         @Override public int getSettingLength(String candidate, boolean disabled) { return name.equals(candidate) && (!disabled || factorySetting != null) ? (disabled ? factorySetting.length : setting.length) : -1; }
         @Override public byte[] getSettingChunk(String candidate, boolean disabled, int offset, int length) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
@@ -1035,6 +1081,7 @@ public final class PackageRoundTripOracle {
         public void close() { closes++; }
         @Override
         public byte[] getUsage(String candidate) throws android.os.RemoteException {
+            if (missingOwner == 3) return null;
             if (fail) throw new android.os.RemoteException();
             usageReads++;
             if (candidate.equals("missing")) return null;
@@ -1042,6 +1089,7 @@ public final class PackageRoundTripOracle {
         }
         @Override
         public byte[] getSigningState(String candidate, boolean disabled) throws android.os.RemoteException {
+            if (missingOwner == 2) return null;
             if (fail) throw new android.os.RemoteException();
             signingReads++;
             if (candidate.equals("missing")) return null;
@@ -1050,6 +1098,7 @@ public final class PackageRoundTripOracle {
         }
         @Override
         public byte[] getSeInfo(String candidate) throws android.os.RemoteException {
+            if (missingOwner == 4) return null;
             if (fail) throw new android.os.RemoteException();
             seinfoReads++;
             if (candidate.equals("missing")) return null;

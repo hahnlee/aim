@@ -23,6 +23,18 @@ public final class PackageObjects {
         return pkg;
     }
 
+    public static void restoreCollectedCode(com.android.server.pm.PackageSetting setting,
+            PackageCode code, long version, boolean factory) {
+        PackageImpl pkg = fromSnapshot(code, version, setting.getPackageName());
+        var state = (com.android.server.pm.pkg.PackageState)setting;
+        if ((!factory && pkg.getUid() != setting.getAppId())
+                || !Objects.equals(state.getPath(), new java.io.File(pkg.getPath()))
+                || state.getVersionCode() != pkg.getLongVersionCode()) {
+            throw new IllegalArgumentException("package code setting mismatch");
+        }
+        setting.setPkg(pkg);
+    }
+
     public static void restoreSavedSigning(com.android.server.pm.PackageSetting setting,
             PackageSigningState state, long version, boolean factory) {
         if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())

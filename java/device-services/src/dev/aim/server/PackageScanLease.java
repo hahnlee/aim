@@ -207,6 +207,25 @@ public final class PackageScanLease implements AutoCloseable {
         return com.android.server.pm.CapturedPackageSetting.withUsers(data, inputs, version, factory, crossUserSuspensions);
     }
 
+    /** Collected active code and its saved owners; library/transient dependencies remain separate. */
+    public synchronized com.android.server.pm.PackageSetting newScannedSetting(String name,
+            boolean crossUserSuspensions) throws RemoteException, IOException {
+        var setting = newSettingWithUsers(name, false, crossUserSuspensions);
+        if (setting == null) return null;
+        PackageCode code = getCode(name, false);
+        PackageSigningState saved = getSigningState(name, false);
+        PackageUsageState times = getUsage(name);
+        PackageSeInfoState labels = getSeInfo(name);
+        if (code == null || saved == null || times == null || labels == null) {
+            throw new IOException("missing collected package owner");
+        }
+        PackageObjects.restoreCollectedCode(setting, code, version, false);
+        PackageObjects.restoreSavedSigning(setting, saved, version, false);
+        PackageObjects.restoreUsage(setting, times, version);
+        PackageObjects.restoreSeInfo(setting, labels, version);
+        return setting;
+    }
+
     public synchronized PackageUserStateData getUserState(String name, boolean factory, int user)
             throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");
