@@ -63,7 +63,7 @@ impl ScanPolicy {
     }
     pub fn for_location(location: &Location) -> Self {
         Self {
-            system: true,
+            system: location.partition != Partition::Data,
             privileged: location.privileged(),
             oem: location.partition == Partition::Oem,
             vendor: location.partition == Partition::Vendor,

@@ -266,9 +266,23 @@ The whole original saved-image comparison completes 240 active system APKs
 and retains the three original data updates, preserving UID/path/version/users
 and the retained active records. Its resource owner is idle for those retained
 data selections; the separate fixture proves actual recovery deletion. This
-validates the saved system phase, not complete native boot. Data-directory
-iteration, non-system promotion/removal, publication and failure persistence
-remain pending.
+validates the saved system phase, not complete native boot. Native DataImage now
+collects /data/app and explicitly supplied mounted private-volume app roots,
+filters installation stages, descends single-child containers with the native
+parser and verifies signatures. Data origins carry no system parse/policy flags;
+accepted locations use the parsed inner code path, while rejected candidates
+retain their outer scan path. Invalid volume names, duplicate volumes and
+unmapped/unreadable directories reject explicitly. Missing directories are
+empty inventories. Parser descent propagates directory-entry errors and rejects
+lossy guest path conversion (#817). All nine original-APK scan-input tests pass
+(5.78s), including unchanged signed GSF code in data and private-volume fixtures,
+container descent, stage filtering, parse rejection without deletion, missing
+roots and directory failures. The 301 units pass (3.06s); the final APEX-origin
+validation passes both focused image tests. A non-UTF8 filesystem fixture could
+not be created because host APFS rejects that name; no such runtime test is
+claimed. Known-package validation, invalid-code removal and factory fallback in
+the data iteration, non-system promotion/removal, publication and failure
+persistence remain pending (#707/#702/#816/#798).
 Filesystem tests cover directory order, parent/cache cleanup, app
 data preservation and partial installer failure/retry; the directory backend
 in those tests deletes disposable files, not the original installd daemon.

@@ -300,12 +300,15 @@ fn descend(host: &Path, path: &str) -> Result<(std::path::PathBuf, String)> {
     if host.is_dir() {
         let entries: Vec<_> = std::fs::read_dir(host)
             .map_err(|e| Error::Parse(format!("{}: {e}", host.display())))?
-            .filter_map(|e| e.ok())
-            .collect();
+            .map(|entry| entry.map_err(|e| Error::Parse(format!("{}: {e}", host.display()))))
+            .collect::<Result<_>>()?;
         if let [one] = entries.as_slice()
             && one.path().is_dir()
         {
-            let name = one.file_name().to_string_lossy().into_owned();
+            let name = one
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::Parse(format!("{}: non-UTF8 package path", host.display())))?;
             return descend(&one.path(), &format!("{path}/{name}"));
         }
     }

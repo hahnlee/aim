@@ -16,6 +16,7 @@ pub enum Partition {
     Oem,
     Product,
     SystemExt,
+    Data,
 }
 
 impl Partition {
@@ -27,6 +28,7 @@ impl Partition {
             Self::Oem => "oem",
             Self::Product => "product",
             Self::SystemExt => "system_ext",
+            Self::Data => "data",
         }
     }
 }
@@ -59,6 +61,9 @@ pub struct Location {
 
 impl Location {
     pub fn parse_flags(&self) -> i32 {
+        if self.partition == Partition::Data {
+            return 0;
+        }
         parse::PARSE_IS_SYSTEM_DIR
             | if self.apex.is_some() {
                 parse::PARSE_APK_IN_APEX
@@ -81,8 +86,8 @@ pub struct Code {
     pub signing: sign::SigningDetails,
 }
 
-/// Invalid system-directory candidates remain visible to the owner, as
-/// the original records parse failures without deleting system code.
+/// Invalid candidates remain visible to the owner. System code is preserved;
+/// the data scan owner removes invalid data code after inspecting failures.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Rejected {
     pub location: Location,
@@ -101,8 +106,12 @@ impl Image {
     /// Native parsing and full signature verification. No package feed,
     /// parser cache, settings, UID allocation or filesystem writes.
     pub fn load(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
+        Self::load_directories(apks, directories(apexes)?)
+    }
+
+    fn load_directories(apks: &Apks, directories: Vec<Location>) -> Result<Self, Error> {
         let mut image = Self::default();
-        for directory in directories(apexes)? {
+        for directory in directories {
             let fail = |path: &str, phase, message| Error {
                 package: String::new(),
                 path: path.into(),
@@ -151,7 +160,7 @@ impl Image {
             // collisions are still reconciled by the owner, not here.
             candidates.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, host) in candidates {
-                let location = Location {
+                let mut location = Location {
                     path: format!("{}/{name}", directory.path),
                     ..directory.clone()
                 };
@@ -182,9 +191,23 @@ impl Image {
                             format!("native parcel does not read: {e}"),
                         )
                     })?;
-                let signing = apks
-                    .signing_details(&parsed)
-                    .map_err(|e| fail(&location.path, "signatures", e))?;
+                let signing = match apks.signing_details(&parsed) {
+                    Ok(signing) => signing,
+                    Err(reason) if location.partition == Partition::Data => {
+                        image.rejected.push(Rejected { location, reason });
+                        continue;
+                    }
+                    Err(reason) => return Err(fail(&location.path, "signatures", reason)),
+                };
+                if location.partition == Partition::Data {
+                    location.path = parsed.path.clone().ok_or_else(|| {
+                        fail(
+                            &location.path,
+                            "parse",
+                            "parsed package has no code path".into(),
+                        )
+                    })?;
+                }
                 image.packages.push(Code {
                     location,
                     parsed,
@@ -208,6 +231,61 @@ impl Image {
     }
 }
 
+/// Physical data APK inventory before known-package validation or reconciliation.
+/// Rejections retain the outer scan path for the removal owner.
+#[derive(Debug, Default)]
+pub struct DataImage {
+    pub packages: Vec<Code>,
+    pub rejected: Vec<Rejected>,
+}
+
+impl DataImage {
+    /// Scan /data/app, then explicitly supplied mounted private volumes.
+    /// Does not allocate UIDs, mutate settings or remove rejected candidates.
+    pub fn load(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
+        let mut roots = vec!["/data/app".to_owned()];
+        for volume in volumes {
+            if volume.is_empty()
+                || volume.contains(['/', '\0'])
+                || matches!(volume.as_str(), "." | "..")
+            {
+                return Err(Error {
+                    package: String::new(),
+                    path: volume.clone(),
+                    phase: "location",
+                    message: "invalid private volume name".into(),
+                });
+            }
+            let root = format!("/mnt/expand/{volume}/app");
+            if roots.contains(&root) {
+                return Err(Error {
+                    package: String::new(),
+                    path: root,
+                    phase: "location",
+                    message: "duplicate private volume".into(),
+                });
+            }
+            roots.push(root);
+        }
+        let image = Image::load_directories(
+            apks,
+            roots
+                .into_iter()
+                .map(|path| Location {
+                    path,
+                    partition: Partition::Data,
+                    kind: Kind::App,
+                    apex: None,
+                })
+                .collect(),
+        )?;
+        Ok(Self {
+            packages: image.packages,
+            rejected: image.rejected,
+        })
+    }
+}
+
 fn directories(apexes: &[Apex]) -> Result<Vec<Location>, Error> {
     let mut partitions: Vec<_> = [
         Partition::System,
@@ -221,6 +299,14 @@ fn directories(apexes: &[Apex]) -> Result<Vec<Location>, Error> {
     .map(|partition| (format!("/{}", partition.name()), partition, None))
     .collect();
     for apex in apexes {
+        if apex.partition == Partition::Data {
+            return Err(Error {
+                package: String::new(),
+                path: apex.mount_path.clone(),
+                phase: "location",
+                message: "active APEX has no preinstalled partition".into(),
+            });
+        }
         let name = apex.mount_path.strip_prefix("/apex/").unwrap_or_default();
         if name.is_empty() || name.contains(['/', '@']) || matches!(name, "." | "..") {
             return Err(Error {
@@ -316,7 +402,14 @@ mod tests {
             dirs.last().unwrap().parse_flags(),
             parse::PARSE_IS_SYSTEM_DIR | parse::PARSE_APK_IN_APEX
         );
-        assert!(directories(&[apex.clone(), apex]).is_err());
+        assert!(directories(&[apex.clone(), apex.clone()]).is_err());
+        assert!(
+            directories(&[Apex {
+                partition: Partition::Data,
+                ..apex
+            }])
+            .is_err()
+        );
     }
 
     #[test]

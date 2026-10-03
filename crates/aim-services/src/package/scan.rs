@@ -33,16 +33,18 @@ mod boot;
 mod completion;
 mod disabled;
 mod updated_boot;
-pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
-pub use boot::{FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan};
+pub use boot::{
+    FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,
+};
 pub use disabled::{DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
+pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
 mod setting;
 mod signing;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 mod uids;
 mod validate;
 pub use identity::Identity;
-pub use image::{Apex, Code, Image, Kind, Location, Partition, Rejected};
+pub use image::{Apex, Code, DataImage, Image, Kind, Location, Partition, Rejected};
 pub use setting::{NewSetting, SettingMetadata, SettingUpdate, User, UserPolicy};
 pub use signing::{
     NewPackageOutcome, SharedUidMigration, SigningError, SigningOutcome, SigningScan,

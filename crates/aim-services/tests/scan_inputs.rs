@@ -3,7 +3,7 @@
 use aim_services::package::{
     State,
     parse::Platform,
-    scan::{Image, Inputs, Kind, Partition},
+    scan::{DataImage, Image, Inputs, Kind, Partition, ScanPolicy},
     settings,
     write::Apks,
 };
@@ -1854,4 +1854,79 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
     );
     assert_eq!(snapshot.libraries.entries().count(), 1);
     assert_eq!(scan.libraries.entries().count(), 2);
+}
+
+#[test]
+#[ignore = "requires the pinned original image; run explicitly"]
+fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
+    let original = aim_paths::original_image();
+    let dir = std::env::temp_dir().join(format!("aim-data-inventory-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let fixture = Fixture(dir);
+    let gsf =
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk");
+    assert!(gsf.is_file(), "missing original signed APK");
+    for path in [
+        "data/app/~~container/gsf",
+        "mnt/expand/volume/app/other",
+        "data/app/vmdl1.tmp",
+        "data/app/smdl2tmp12",
+        "data/app/empty",
+    ] {
+        std::fs::create_dir_all(fixture.0.join(path)).unwrap();
+    }
+    for path in [
+        "data/app/~~container/gsf/base.apk",
+        "mnt/expand/volume/app/other/base.apk",
+        "data/app/vmdl1.tmp/base.apk",
+        "data/app/smdl2tmp12/base.apk",
+    ] {
+        std::os::unix::fs::symlink(&gsf, fixture.0.join(path)).unwrap();
+    }
+    std::fs::write(fixture.0.join("data/app/unrelated.txt"), b"not an APK").unwrap();
+    let root = fixture.0.clone();
+    let apks = Apks {
+        files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let image = DataImage::load(&apks, &["volume".into()]).unwrap();
+    assert_eq!(image.packages.len(), 2);
+    assert_eq!(image.packages[0].location.path, "/data/app/~~container/gsf");
+    assert_eq!(
+        image.packages[1].location.path,
+        "/mnt/expand/volume/app/other"
+    );
+    for code in &image.packages {
+        assert_eq!(
+            code.parsed.path.as_deref(),
+            Some(code.location.path.as_str())
+        );
+        assert_eq!(code.location.partition, Partition::Data);
+        assert_eq!(code.location.parse_flags(), 0);
+        assert_eq!(
+            ScanPolicy::for_location(&code.location),
+            ScanPolicy::default()
+        );
+        assert!(!code.location.privileged());
+        assert_eq!(code.parsed.package_name, "com.google.android.gsf");
+    }
+    assert_eq!(image.packages[0].signing, image.packages[1].signing);
+    assert_eq!(image.rejected.len(), 1);
+    assert_eq!(image.rejected[0].location.path, "/data/app/empty");
+    assert!(fixture.0.join("data/app/empty").exists());
+    for volumes in [
+        vec!["../bad".into()],
+        vec![".".into()],
+        vec!["".into()],
+        vec!["volume".into(), "volume".into()],
+    ] {
+        assert_eq!(
+            DataImage::load(&apks, &volumes).unwrap_err().phase,
+            "location"
+        );
+    }
+    std::fs::remove_dir_all(fixture.0.join("data/app")).unwrap();
+    assert!(DataImage::load(&apks, &[]).unwrap().packages.is_empty());
+    std::fs::write(fixture.0.join("data/app"), b"not a directory").unwrap();
+    assert_eq!(DataImage::load(&apks, &[]).unwrap_err().phase, "directory");
 }
