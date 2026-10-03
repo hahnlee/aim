@@ -6,6 +6,7 @@ use super::{
 };
 pub mod endpoint;
 pub mod user_record;
+pub mod setting_record;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},

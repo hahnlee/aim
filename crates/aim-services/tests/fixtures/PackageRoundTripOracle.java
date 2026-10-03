@@ -121,6 +121,8 @@ public final class PackageRoundTripOracle {
         var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user").toPath());
         stale.userState = owner.userState;
+        owner.setting = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".setting").toPath());
+        stale.setting = owner.setting;
         owner.user10 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-10").toPath());
         owner.user11 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-11").toPath());
         owner.user12 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-12").toPath());
@@ -129,6 +131,7 @@ public final class PackageRoundTripOracle {
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
+            try { bad.getSetting(name, false); throw new AssertionError("wrong setting version accepted"); } catch (java.io.IOException expected) {}
             try {
                 bad.getUserState(name, false, 0);
                 throw new AssertionError("wrong user-state version accepted");
@@ -274,6 +277,35 @@ public final class PackageRoundTripOracle {
         var setting = new com.android.server.pm.PackageSetting(name, null,
                 new java.io.File("/data/app/fixture"), 0, 0, new java.util.UUID(1, 1));
         setting.setAppId(uid);
+        owner.fail = true;
+        try { lease.getSetting(name, false); throw new AssertionError("setting failure swallowed"); } catch (android.os.RemoteException expected) {}
+        owner.fail = false; owner.shortChunk = true;
+        try { lease.getSetting(name, false); throw new AssertionError("short setting chunk accepted"); } catch (java.io.IOException expected) {}
+        owner.shortChunk = false;
+        var settingBytes = owner.setting;
+        owner.setting = java.util.Arrays.copyOf(settingBytes, settingBytes.length + 4);
+        try { lease.getSetting(name, false); throw new AssertionError("setting trailing bytes accepted"); } catch (java.io.IOException expected) {}
+        owner.setting = settingBytes;
+        owner.factorySetting = settingBytes;
+        try { lease.getSetting(name, true); throw new AssertionError("setting scope mismatch accepted"); } catch (java.io.IOException expected) {}
+        owner.factorySetting = null;
+        var metadata = lease.getSetting(name, false);
+        if (metadata != lease.getSetting(name, false) || metadata.appId != uid || metadata.getVersion() != 1
+                || !metadata.getPackageName().equals(name) || metadata.isFactory()
+                || metadata.loadingProgress != .5f || !metadata.isLoading() || metadata.loadingCompletedTime != 17
+                || metadata.getOldPaths().size() != 3 || metadata.getOldPaths().get(1) != null
+                || metadata.getOldPaths().get(2).length() != 100000) throw new AssertionError("captured setting metadata differs");
+        metadata.getRestrictUpdateHash()[0] = 99;
+        if (metadata.getRestrictUpdateHash()[0] != 1) throw new AssertionError("mutable setting hash escaped capture");
+        try { metadata.getOldPaths().clear(); throw new AssertionError("mutable old paths capture"); } catch (UnsupportedOperationException expected) {}
+        if (lease.getSetting("missing", false) != null || lease.getSetting(name, true) != null) throw new AssertionError("unknown/factory setting mismatch");
+        var restoredSetting = new com.android.server.pm.PackageSetting(name, null, new java.io.File(metadata.path), metadata.flags, metadata.privateFlags, new java.util.UUID(1, 1));
+        restoredSetting.setLoadingProgress(metadata.loadingProgress); restoredSetting.setLoadingCompletedTime(metadata.loadingCompletedTime);
+        for (String path : metadata.getOldPaths()) restoredSetting.addOldPath(path == null ? null : new java.io.File(path));
+        if (!new java.util.ArrayList<>(restoredSetting.getOldPaths()).equals(metadata.getOldPaths().stream().map(path -> path == null ? null : new java.io.File(path)).toList())
+                || restoredSetting.isLoading() != metadata.isLoading() || restoredSetting.getLoadingProgress() != metadata.loadingProgress
+                || restoredSetting.getLoadingCompletedTime() != metadata.loadingCompletedTime) throw new AssertionError("original setting getters disagree");
+
         verifySettingRuntime(setting, file);
         verifyLoadingXml(file);
         owner.fail = true;
@@ -504,6 +536,7 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
         try { lease.getSeInfo(name); throw new AssertionError("closed seInfo lease accepted"); }
         catch (IllegalStateException expected) {}
+        try { lease.getSetting(name, false); throw new AssertionError("closed setting lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
     }
@@ -742,7 +775,7 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
-        byte[] userState, user10, user11, user12, user13, user14;
+        byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting;
         int userReads;
         boolean signingTail;
         byte[] signingOverride;
@@ -765,6 +798,12 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override public int getSettingLength(String candidate, boolean disabled) { return name.equals(candidate) && (!disabled || factorySetting != null) ? (disabled ? factorySetting.length : setting.length) : -1; }
+        @Override public byte[] getSettingChunk(String candidate, boolean disabled, int offset, int length) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            byte[] value = disabled ? factorySetting : setting;
+            return java.util.Arrays.copyOfRange(value, offset, Math.min(value.length, offset + length) - (shortChunk ? 1 : 0));
+        }
         private byte[] userBytes(int userId) {
             return switch (userId) { case 0 -> userState; case 10 -> user10; case 11 -> user11; case 12 -> user12; case 13 -> user13; case 14 -> user14; default -> null; };
         }

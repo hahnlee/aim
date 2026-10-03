@@ -18,6 +18,8 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageSeInfoState> seinfo = new HashMap<>();
     private final Map<String, PackageSigningState> signing = new HashMap<>();
     private final Map<String, PackageSigningState> factorySigning = new HashMap<>();
+    private record SettingKey(String name, boolean factory) {}
+    private final Map<SettingKey, PackageSettingData> settings = new HashMap<>();
     private record UserKey(String name, boolean factory, int user) {}
     private final Map<UserKey, PackageUserStateData> users = new HashMap<>();
     private record ReplicaKey(UserKey user, boolean crossUserSuspensions) {}
@@ -105,6 +107,7 @@ public final class PackageScanLease implements AutoCloseable {
         signing.clear();
         factorySigning.clear();
         users.clear();
+        settings.clear();
         userReplicas.clear();
     }
 
@@ -156,6 +159,35 @@ public final class PackageScanLease implements AutoCloseable {
         } finally { parcel.recycle(); }
     }
 
+    public synchronized PackageSettingData getSetting(String name, boolean factory)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(name);
+        SettingKey key = new SettingKey(name, factory);
+        if (settings.containsKey(key)) return settings.get(key);
+        int length = endpoint.getSettingLength(name, factory);
+        if (length == -1) { settings.put(key, null); return null; }
+        if (length <= 0) throw new IOException("invalid package setting length");
+        byte[] bytes = new byte[length];
+        for (int offset = 0; offset < length;) {
+            int requested = Math.min(CHUNK, length - offset);
+            byte[] chunk = endpoint.getSettingChunk(name, factory, offset, requested);
+            if (chunk == null || chunk.length != requested) throw new IOException("incomplete package setting chunk");
+            System.arraycopy(chunk, 0, bytes, offset, requested);
+            offset += requested;
+        }
+        Parcel in = Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            PackageSettingData state = PackageSettingData.read(in);
+            if (in.dataAvail() != 0 || state.getVersion() != version || !state.getPackageName().equals(name)
+                    || state.isFactory() != factory) {
+                throw new IOException("package setting capture mismatch");
+            }
+            settings.put(key, state);
+            return state;
+        } finally { in.recycle(); }
+    }
     public synchronized PackageUserStateData getUserState(String name, boolean factory, int user)
             throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");

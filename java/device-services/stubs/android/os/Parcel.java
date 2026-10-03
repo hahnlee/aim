@@ -13,6 +13,7 @@ public final class Parcel {
     public final void writeString(String val) { throw new RuntimeException("stub"); }
     public final String readString() { throw new RuntimeException("stub"); }
     public final void writeInt(int val) { throw new RuntimeException("stub"); }
+    public final float readFloat() { throw new RuntimeException("stub"); }
     public final int readInt() { throw new RuntimeException("stub"); }
     public final void writeLong(long val) { throw new RuntimeException("stub"); }
     public final long readLong() { throw new RuntimeException("stub"); }

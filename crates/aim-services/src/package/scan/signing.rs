@@ -1439,6 +1439,7 @@ mod tests {
             .unwrap();
         owner.settings.packages[0].add_old_path(Some("/data/old"));
         owner.settings.packages[0].set_loading_progress(0.5);
+        owner.settings.packages[0].add_old_path(Some(&"x".repeat(150_000)));
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let mut stale = owner.clone();
@@ -1453,6 +1454,11 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(captured_user.len() > MAX_CHUNK * 2);
+        let captured_setting =
+            crate::package::scan_snapshot::setting_record::captured(&base, "fixture", false)
+                .unwrap()
+                .unwrap();
+        assert!(captured_setting.len() > MAX_CHUNK * 2);
         let old = Arc::downgrade(&base);
         let endpoint = Arc::new(Endpoint::new(base.clone()));
         let mut changed_usage = base.usage().clone();
@@ -1488,10 +1494,11 @@ mod tests {
         owner.set_user_state("fixture", 10, state).unwrap();
         owner.settings.packages[0].remove_old_path(Some("/data/old"));
         owner.settings.packages[0].set_loading_progress(1.0);
+        owner.settings.packages[0].remove_old_path(Some(&"x".repeat(150_000)));
         let current = store.publish(&base, owner, changed_usage).unwrap();
         assert_eq!(
             base.owner().settings.packages[0].old_paths,
-            Some(vec![Some("/data/old".into())])
+            Some(vec![Some("/data/old".into()), Some("x".repeat(150_000))])
         );
         assert_eq!(current.owner().settings.packages[0].old_paths, Some(vec![]));
         assert!(base.owner().settings.packages[0].is_loading());
@@ -1793,6 +1800,83 @@ mod tests {
                 -3
             );
         }
+        let setting_request = |name: Option<&str>, factory: bool| {
+            let mut p = request();
+            p.write_string16(name);
+            p.write_bool(factory);
+            p
+        };
+        let reply = remote
+            .transact(
+                api::GET_SETTING_LENGTH,
+                &setting_request(Some("fixture"), false),
+                false,
+            )
+            .unwrap();
+        let mut r = reply.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap() as usize, captured_setting.len());
+        let mut setting_bytes = Vec::new();
+        while setting_bytes.len() < captured_setting.len() {
+            let mut p = setting_request(Some("fixture"), false);
+            p.write_i32(setting_bytes.len() as i32);
+            p.write_i32(MAX_CHUNK as i32);
+            let reply = remote.transact(api::GET_SETTING_CHUNK, &p, false).unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let chunk = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+            assert!(!chunk.is_empty() && chunk.len() <= MAX_CHUNK);
+            assert_eq!(r.remaining(), 0);
+            setting_bytes.extend(chunk);
+        }
+        assert_eq!(setting_bytes, captured_setting);
+        assert_ne!(
+            setting_bytes,
+            crate::package::scan_snapshot::setting_record::captured(&current, "fixture", false)
+                .unwrap()
+                .unwrap()
+        );
+        for (name, factory) in [(Some("absent"), false), (Some("fixture"), true)] {
+            let reply = remote
+                .transact(
+                    api::GET_SETTING_LENGTH,
+                    &setting_request(name, factory),
+                    false,
+                )
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            assert_eq!(r.read_i32().unwrap(), -1);
+        }
+        let reply = remote
+            .transact(
+                api::GET_SETTING_LENGTH,
+                &setting_request(None, false),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -3
+        );
+        for (offset, count) in [
+            (-1, 1),
+            (0, 0),
+            (0, MAX_CHUNK as i32 + 1),
+            (captured_setting.len() as i32 + 1, 1),
+        ] {
+            let mut p = setting_request(Some("fixture"), false);
+            p.write_i32(offset);
+            p.write_i32(count);
+            let reply = remote.transact(api::GET_SETTING_CHUNK, &p, false).unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
+        let mut p = setting_request(Some("fixture"), false);
+        p.write_i32(1);
+        assert!(remote.transact(api::GET_SETTING_LENGTH, &p, false).is_err());
         let user_request = |name: Option<&str>, factory: bool, user: i32| {
             let mut p = request();
             p.write_string16(name);
@@ -1899,6 +1983,18 @@ mod tests {
             reply.reader().read_exception().unwrap().unwrap();
         }
         assert!(old.upgrade().is_none());
+        let reply = remote
+            .transact(
+                api::GET_SETTING_LENGTH,
+                &setting_request(Some("fixture"), false),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -5
+        );
+
         let reply = remote
             .transact(
                 api::GET_USER_STATE_LENGTH,

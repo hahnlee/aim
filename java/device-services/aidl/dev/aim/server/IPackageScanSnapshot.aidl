@@ -16,4 +16,7 @@ interface IPackageScanSnapshot {
     /** Persisted user state from this capture, paged to include large extras. */
     int getUserStateLength(String packageName, boolean disabled, int userId);
     byte[] getUserStateChunk(String packageName, boolean disabled, int userId, int offset, int length);
+    /** Captured PackageSetting scalar owners, including nullable runtime old paths. */
+    int getSettingLength(String packageName, boolean disabled);
+    byte[] getSettingChunk(String packageName, boolean disabled, int offset, int length);
 }
