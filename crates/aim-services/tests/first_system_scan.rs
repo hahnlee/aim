@@ -157,7 +157,12 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .collect();
     let mut scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
     assert!(scan.rejected.is_empty());
-    let captures = aim_services::package::scan_snapshot::Store::new(scan.owner.clone()).unwrap();
+    let mut usage = aim_services::package::owner::usage::Usage::new(
+        scan.owner.settings.packages.iter().map(|p| p.name.as_str()),
+    );
+    usage.notify("android", 0, 17);
+    let captures =
+        aim_services::package::scan_snapshot::Store::new(scan.owner.clone(), usage).unwrap();
     let original_capture = captures.capture();
     assert_eq!(original_capture.version(), 1);
     let mut invalid_capture = scan.owner.clone();
@@ -165,7 +170,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .code_path
         .push_str("/different");
     assert!(
-        matches!(captures.publish(&original_capture, invalid_capture),
+        matches!(captures.publish(&original_capture, invalid_capture, original_capture.usage().clone()),
         Err(aim_services::package::scan_snapshot::Error::Invalid(ref message))
             if message == "loaded code differs from its owner")
     );
@@ -950,7 +955,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .unwrap();
     let before_finalization = mismatched_owner.clone();
     assert!(
-        matches!(captures.publish(&original_capture, mismatched_owner.clone()),
+        matches!(captures.publish(&original_capture, mismatched_owner.clone(), original_capture.usage().clone()),
         Err(aim_services::package::scan_snapshot::Error::Invalid(ref message))
             if message == "scan metadata is not finalized")
     );
@@ -978,10 +983,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     );
     assert_eq!(retained.candidate.record.settings.app_id, saved.app_id);
     assert_eq!(retained.candidate.users, saved_users[&saved.name]);
+    let mut next_usage = original_capture.usage().clone();
+    next_usage.notify("android", 0, 29);
     let next_capture = captures
-        .publish(&original_capture, scan.owner.clone())
+        .publish(&original_capture, scan.owner.clone(), next_usage)
         .unwrap();
     assert_eq!(next_capture.version(), 2);
+    assert_eq!(original_capture.usage().latest("android"), Some(17));
+    assert_eq!(next_capture.usage().latest("android"), Some(29));
     assert_eq!(original_capture.owner(), &before);
     assert_eq!(next_capture.owner(), &scan.owner);
     assert_eq!(scan.owner.identities, before.identities);

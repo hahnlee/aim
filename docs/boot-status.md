@@ -270,8 +270,15 @@ The disposable original-runtime snapshot/usage oracle passes (14.39s): original
 PackageUsage reads native v1 bytes and legacy/malformed/missing inputs, then its
 v1 output is read natively with exact timestamp equality. The oracle overrides
 only its file location with a disposable file; it does not write PMS's live
-usage file. This owner is not yet loaded into the captured facade replica or
-wired to live notifyPackageUse/persistence scheduling (#836/#798).
+usage file. Native scan captures now require this usage owner at construction
+and publication, validate exact active package membership and retain the same
+version for scan/code and timestamps. Caller mutations cannot alter old captures;
+stale or invalid usage publication preserves the current graph. The original
+first-system scan passes (43.24s), including old/new timestamp isolation; all
+350 units pass, and all integration tests compile. The saved-scan fixture now
+loads its real disposable usage file before capture; that updated fixture has
+not been run in this change. Java replica transport/adapters and live
+notifyPackageUse/persistence scheduling remain #836/#798.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

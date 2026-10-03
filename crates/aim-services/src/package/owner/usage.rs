@@ -22,6 +22,10 @@ impl Usage {
         }
     }
 
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.times.keys().map(String::as_str)
+    }
+
     pub fn historical_available(&self) -> bool {
         self.historical
     }

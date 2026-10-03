@@ -390,7 +390,10 @@ fn native_scan_objects(
         objects.iter().map(|p| p.package.uid).collect::<Vec<_>>(),
         [1000, 10000]
     );
-    aim_services::package::scan_snapshot::Store::new(scan.owner)
+    let usage = aim_services::package::owner::usage::Usage::new(
+        scan.owner.settings.packages.iter().map(|p| p.name.as_str()),
+    );
+    aim_services::package::scan_snapshot::Store::new(scan.owner, usage)
         .unwrap()
         .capture()
 }

@@ -1202,11 +1202,15 @@ mod tests {
         owner
             .scanned_users
             .insert(package.name.clone(), BTreeMap::new());
-        let store = Store::new(owner.clone()).unwrap();
+        let store = Store::new(
+            owner.clone(),
+            crate::package::owner::usage::Usage::new(["fixture"]),
+        )
+        .unwrap();
         let base = store.capture();
         let old = Arc::downgrade(&base);
         let endpoint = Arc::new(Endpoint::new(base.clone()));
-        store.publish(&base, owner).unwrap();
+        store.publish(&base, owner, base.usage().clone()).unwrap();
         drop(base);
         let driver = Driver::new();
         let open = |pid, euid| {

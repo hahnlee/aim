@@ -1,6 +1,9 @@
 //! Captured native scan owners for the C facade's replica builder (#836).
 //! This is not the complete PackageState replica or its visibility policy.
-use super::{owner::app_ids::Owner, scan::SigningScan};
+use super::{
+    owner::{app_ids::Owner, usage::Usage},
+    scan::SigningScan,
+};
 pub mod endpoint;
 use std::{
     collections::BTreeSet,
@@ -14,17 +17,21 @@ pub enum Error {
     VersionExhausted,
 }
 
-/// All scan-owned values belong to this version, including shared UID signing,
+/// Scan state and usage belong to this version, including shared UID signing,
 /// keysets, libraries, user state and active/factory collected code.
 #[derive(Debug)]
 pub struct Snapshot {
     version: u64,
     owner: SigningScan,
+    usage: Usage,
 }
 
 impl Snapshot {
     pub fn version(&self) -> u64 {
         self.version
+    }
+    pub fn usage(&self) -> &Usage {
+        &self.usage
     }
     pub fn owner(&self) -> &SigningScan {
         &self.owner
@@ -36,10 +43,14 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new(owner: SigningScan) -> Result<Self, Error> {
-        validate(&owner)?;
+    pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
+        validate(&owner, &usage)?;
         Ok(Self {
-            current: Mutex::new(Arc::new(Snapshot { version: 1, owner })),
+            current: Mutex::new(Arc::new(Snapshot {
+                version: 1,
+                owner,
+                usage,
+            })),
         })
     }
 
@@ -54,6 +65,7 @@ impl Store {
         &self,
         base: &Arc<Snapshot>,
         owner: SigningScan,
+        usage: Usage,
     ) -> Result<Arc<Snapshot>, Error> {
         let mut current = self.current.lock().unwrap();
         if !Arc::ptr_eq(&current, base) {
@@ -63,17 +75,30 @@ impl Store {
             .version
             .checked_add(1)
             .ok_or(Error::VersionExhausted)?;
-        validate(&owner)?;
-        let next = Arc::new(Snapshot { version, owner });
+        validate(&owner, &usage)?;
+        let next = Arc::new(Snapshot {
+            version,
+            owner,
+            usage,
+        });
         *current = next.clone();
         Ok(next)
     }
 }
 
-fn validate(owner: &SigningScan) -> Result<(), Error> {
+fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
     let fail = |message: &str| Error::Invalid(message.into());
     if !owner.capture_ready() {
         return Err(fail("scan metadata is not finalized"));
+    }
+    let package_names: BTreeSet<_> = owner
+        .settings
+        .packages
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    if usage.names().collect::<BTreeSet<_>>() != package_names {
+        return Err(fail("usage package membership differs"));
     }
     for (settings, loaded, active) in [
         (&owner.settings.packages, owner.loaded_packages(), true),
@@ -174,34 +199,79 @@ mod tests {
     }
 
     #[test]
+    fn usage_is_mandatory_matches_membership_and_isolated_between_versions() {
+        assert!(matches!(
+            Store::new(owner(), Usage::new([])),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            Store::new(owner(), Usage::new(["fixture", "foreign"])),
+            Err(Error::Invalid(_))
+        ));
+        let mut usage = Usage::new(["fixture"]);
+        usage.apply(b"fixture 17\n").unwrap();
+        let store = Store::new(owner(), usage).unwrap();
+        let old = store.capture();
+        assert!(matches!(
+            store.publish(&old, owner(), Usage::new(["foreign"])),
+            Err(Error::Invalid(_))
+        ));
+        assert!(Arc::ptr_eq(&old, &store.capture()));
+        assert_eq!(old.usage().times("fixture"), Some(&[17; 8]));
+        let mut next = old.usage().clone();
+        next.notify("fixture", 2, 29);
+        let current = store.publish(&old, owner(), next.clone()).unwrap();
+        next.notify("fixture", 2, 44);
+        assert_eq!(old.usage().latest_foreground("fixture"), Some(17));
+        assert_eq!(current.usage().latest_foreground("fixture"), Some(29));
+        assert_eq!(current.usage().latest("foreign"), None);
+        assert_eq!(
+            store.publish(&old, owner(), next).unwrap_err(),
+            Error::Stale
+        );
+        assert!(Arc::ptr_eq(&current, &store.capture()));
+    }
+
+    #[test]
     fn capture_survives_updates_and_stale_foreign_or_invalid_commits() {
-        let store = Store::new(owner()).unwrap();
+        let store = Store::new(owner(), Usage::new(["fixture"])).unwrap();
         let original = store.capture();
-        let foreign = Store::new(owner()).unwrap().capture();
-        assert_eq!(store.publish(&foreign, owner()).unwrap_err(), Error::Stale);
+        let foreign = Store::new(owner(), Usage::new(["fixture"]))
+            .unwrap()
+            .capture();
+        assert_eq!(
+            store
+                .publish(&foreign, owner(), Usage::new(["fixture"]))
+                .unwrap_err(),
+            Error::Stale
+        );
         let mut invalid = owner();
         invalid.settings.packages[0].app_id += 1;
         assert!(matches!(
-            store.publish(&original, invalid),
+            store.publish(&original, invalid, original.usage().clone()),
             Err(Error::Invalid(_))
         ));
         assert!(Arc::ptr_eq(&store.capture(), &original));
         let mut candidate = original.owner().clone();
         candidate.settings.packages[0].version_code = 2;
-        let next = store.publish(&original, candidate.clone()).unwrap();
+        let next = store
+            .publish(&original, candidate.clone(), original.usage().clone())
+            .unwrap();
         candidate.settings.packages[0].version_code = 3;
         assert_eq!(original.owner().settings.packages[0].version_code, 0);
         assert_eq!(next.owner().settings.packages[0].version_code, 2);
         assert_eq!(next.version(), 2);
         assert_eq!(
-            store.publish(&original, candidate).unwrap_err(),
+            store
+                .publish(&original, candidate, original.usage().clone())
+                .unwrap_err(),
             Error::Stale
         );
     }
 
     #[test]
     fn concurrent_commits_from_one_capture_have_one_winner_and_overflow_preserves_state() {
-        let store = Arc::new(Store::new(owner()).unwrap());
+        let store = Arc::new(Store::new(owner(), Usage::new(["fixture"])).unwrap());
         let base = store.capture();
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let mut handles = vec![];
@@ -211,7 +281,7 @@ mod tests {
                 let mut candidate = base.owner().clone();
                 candidate.settings.packages[0].version_code = version;
                 barrier.wait();
-                store.publish(&base, candidate)
+                store.publish(&base, candidate, base.usage().clone())
             }));
         }
         barrier.wait();
@@ -227,10 +297,13 @@ mod tests {
         let exhausted = Arc::new(Snapshot {
             version: u64::MAX,
             owner: owner(),
+            usage: Usage::new(["fixture"]),
         });
         *store.current.lock().unwrap() = exhausted.clone();
         assert_eq!(
-            store.publish(&exhausted, owner()).unwrap_err(),
+            store
+                .publish(&exhausted, owner(), exhausted.usage().clone())
+                .unwrap_err(),
             Error::VersionExhausted
         );
         assert!(Arc::ptr_eq(&store.capture(), &exhausted));

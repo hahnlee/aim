@@ -595,9 +595,17 @@ fn saved_scan_libraries_match_original_pms() {
         )
         .unwrap();
     assert_eq!(resumed_data.packages.len(), 3);
-    let captures = aim_services::package::scan_snapshot::Store::new(resumed.clone()).unwrap();
+    let mut usage = aim_services::package::owner::usage::Usage::new(
+        resumed.settings.packages.iter().map(|p| p.name.as_str()),
+    );
+    usage
+        .read(&boot.data.join("data/system/package-usage.list"))
+        .unwrap();
+    let captures =
+        aim_services::package::scan_snapshot::Store::new(resumed.clone(), usage.clone()).unwrap();
     let capture = captures.capture();
     assert_eq!(capture.owner(), &resumed);
+    assert_eq!(capture.usage(), &usage);
     assert_eq!(resumed.loaded_packages().len(), 243);
     assert_eq!(resumed.disabled_loaded_packages().len(), 3);
     for completed in resumed_packages
