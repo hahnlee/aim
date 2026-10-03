@@ -167,7 +167,9 @@ in this image, that is the `package_info_cache` nonce in
 `PropertyInvalidatedCache.query` does: keyed by permission and uid
 (`checkPermission`; the pid decides nothing) or by permission and
 package (`IPermissionManager.checkPermission`), stored with the nonce
-read before asking, and dropped once the nonce differs. While the nonce
+read before asking, and dropped once the nonce or its mapped owner differs.
+An old in-flight reply cannot fill a replacement owner's cache, even if both
+stores contain the same numeric nonce (#840). While the nonce
 is unset or reserved, or before the bridge is attached, every check is
 asked (`crates/aim-services/src/system.rs`).
 
@@ -366,7 +368,11 @@ service's own CTS stays the gate.
 **Nonces (#497).** `IBridge.getApplicationSharedMemory` returns a
 read-only fd of ActivityManager's `ApplicationSharedMemory`
 (`getReadOnlyFileDescriptor`, what `bindApplication` hands an app). The
-host maps it (`crates/aim-services/src/nonces.rs`) and finds a nonce's
+host retains the bridge Binder with its mapped memory as one source. A death
+notification removes only that source; a previous bridge cannot erase a newer
+mapping, and repeated attachment of the same endpoint keeps one death
+registration (#835/#841). The host maps it (`crates/aim-services/src/nonces.rs`)
+and finds a nonce's
 handle in the store's name block, read when its hash (`Arrays.hashCode`)
 matches, as `NonceStore.getHandleForName` does. Permission checks
 (`IActivityManager.checkPermission`, `IPermissionManager.checkPermission`)

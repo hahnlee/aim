@@ -374,3 +374,170 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     until(|| system.package_bootstrap().is_err());
     assert!(!late.load(Ordering::SeqCst));
 }
+
+struct NonceOwner {
+    file: File,
+    reject: AtomicBool,
+    trailing: AtomicBool,
+}
+impl Service for NonceOwner {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::dev_aim_server_ibridge::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::dev_aim_server_ibridge as bridge;
+        assert_eq!(call.sender_euid, 1000);
+        call.data.enforce_interface(bridge::DESCRIPTOR)?;
+        assert_eq!(call.code, bridge::GET_APPLICATION_SHARED_MEMORY);
+        assert_eq!(call.data.remaining(), 0);
+        let mut reply = Parcel::new();
+        if self.reject.load(Ordering::SeqCst) {
+            reply.write_exception(&Exception::security("shared memory denied"));
+        } else {
+            reply.write_no_exception();
+            reply.write_i32(1); // nullable ParcelFileDescriptor presence
+            reply.write_i32(0); // no comm channel
+            reply.write_file(self.file.clone());
+            if self.trailing.load(Ordering::SeqCst) {
+                reply.write_i32(99);
+            }
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+fn late_bridge_death_preserves_replacement_nonce_mapping() {
+    use std::os::fd::AsFd;
+    let driver = Driver::new();
+    let open = |pid| {
+        LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid,
+                euid: 1000,
+                security_context: None,
+            },
+        )
+    };
+    let manager = open(96001);
+    let native = open(96002);
+    let first = open(96003);
+    let second = open(96004);
+    let invalid = open(96005);
+    let observer = open(96007);
+    let _processes = Processes {
+        driver: driver.clone(),
+        processes: vec![
+            manager.clone(),
+            native.clone(),
+            first.clone(),
+            second.clone(),
+            invalid.clone(),
+            observer.clone(),
+        ],
+    };
+    let registry = Arc::new(Registry {
+        process: Arc::downgrade(&manager),
+        nodes: Mutex::new(BTreeMap::new()),
+    });
+    let Binder::Local(ptr) = manager.add_service(registry) else {
+        unreachable!()
+    };
+    let mut object = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: 0,
+        binder: ptr,
+        cookie: ptr,
+    }
+    .encode();
+    driver
+        .ioctl(
+            manager.proc_handle(),
+            96006,
+            BINDER_SET_CONTEXT_MGR_EXT,
+            &mut object,
+            &mut NoMemory,
+        )
+        .unwrap();
+    for process in &_processes.processes {
+        process.start();
+    }
+    let system = System::new(native.clone(), &[]);
+    let attaches = Arc::new(AtomicUsize::new(0));
+    let observed = attaches.clone();
+    system.add_bridge_listener(Box::new(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+    }));
+    let owner = |nonce| {
+        let fd = crate::nonces::tests::nonce_file(nonce);
+        Arc::new(NonceOwner {
+            file: aim_binder_host::server::file_from_fd(fd.as_fd()).unwrap(),
+            reject: AtomicBool::new(false),
+            trailing: AtomicBool::new(false),
+        })
+    };
+    let old = owner(41);
+    let new = owner(42);
+    register(&first, "late-old", first.add_service(old));
+    register(&second, "late-new", second.add_service(new.clone()));
+    register(
+        &invalid,
+        "late-invalid",
+        invalid.add_service(Arc::new(NonceOwner {
+            file: Arc::new(()),
+            reject: AtomicBool::new(false),
+            trailing: AtomicBool::new(false),
+        })),
+    );
+    let old = find(&native, "late-old");
+    let new_node = find(&native, "late-new");
+    let invalid_node = find(&native, "late-invalid");
+    let handle = |node: &Strong| {
+        let Binder::Handle(handle) = node.binder() else {
+            unreachable!()
+        };
+        handle
+    };
+    system.attach_bridge(handle(&old)).unwrap();
+    assert_eq!(system.package_info_nonce(), Some(41));
+    new.reject.store(true, Ordering::SeqCst);
+    assert!(system.attach_bridge(handle(&new_node)).is_err());
+    new.reject.store(false, Ordering::SeqCst);
+    new.trailing.store(true, Ordering::SeqCst);
+    assert!(system.attach_bridge(handle(&new_node)).is_err());
+    new.trailing.store(false, Ordering::SeqCst);
+    assert!(system.attach_bridge(handle(&invalid_node)).is_err());
+    assert_eq!(system.package_info_nonce(), Some(41));
+    assert_eq!(attaches.load(Ordering::SeqCst), 1);
+    system.attach_bridge(handle(&new_node)).unwrap();
+    assert_eq!(system.package_info_nonce(), Some(42));
+    assert_eq!(attaches.load(Ordering::SeqCst), 2);
+    system.attach_bridge(handle(&new_node)).unwrap();
+    assert_eq!(system.package_info_nonce(), Some(42));
+    assert_eq!(attaches.load(Ordering::SeqCst), 3);
+    // The active source must keep its own Binder reference, independently of
+    // this caller's temporary lookup handle and received parcel.
+    drop(new_node);
+    let old_died = Arc::new(AtomicBool::new(false));
+    let observed = old_died.clone();
+    // Binder permits one death registration per process/node reference. Observe
+    // from another process, independently of the native owner's registration.
+    let watched_old = find(&observer, "late-old");
+    observer.link_to_death(
+        &watched_old,
+        Box::new(move || {
+            observed.store(true, Ordering::SeqCst);
+        }),
+    );
+    driver.release(first.proc_handle());
+    until(|| old_died.load(Ordering::SeqCst));
+    until(|| old.transact(0, &Parcel::new(), false).is_err());
+    assert_eq!(system.package_info_nonce(), Some(42));
+    // A failed replacement never registers a cleanup that owns the current map.
+    driver.release(invalid.proc_handle());
+    assert_eq!(system.package_info_nonce(), Some(42));
+    driver.release(second.proc_handle());
+    until(|| system.package_info_nonce().is_none());
+}

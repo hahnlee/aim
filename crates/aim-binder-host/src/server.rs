@@ -30,6 +30,13 @@ impl Drop for FilePort {
     }
 }
 
+/// Retain a host file descriptor as a Binder file without taking the caller's
+/// fd. The returned fileport keeps the file alive while it crosses Binder.
+pub fn file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
+    use std::os::fd::AsRawFd;
+    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port)) as File)
+}
+
 /// A new host fd for a file a guest sent (a fileport), which a binder
 /// process on the host received.
 pub fn file_fd(file: &File) -> Option<std::os::fd::OwnedFd> {

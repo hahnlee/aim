@@ -162,8 +162,45 @@ fn names(block: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn nonce_file(nonce: i64) -> std::fs::File {
+        use std::io::Write;
+        use std::sync::atomic::AtomicU64;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "aim-nonce-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        // Unlink the fixture immediately; only owned fds/fileports keep it alive.
+        std::fs::remove_file(path).unwrap();
+        let names = b"\x12package_info_cache\x00";
+        let mut bytes = vec![0; STORE + HEADER + 8 + names.len()];
+        for (index, value) in [
+            1,
+            names.len() as i32,
+            HEADER as i32,
+            (HEADER + 8) as i32,
+            java_hash(names),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            bytes[STORE + index * 4..STORE + index * 4 + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+        bytes[STORE + HEADER..STORE + HEADER + 8].copy_from_slice(&nonce.to_ne_bytes());
+        bytes[STORE + HEADER + 8..].copy_from_slice(names);
+        file.write_all(&bytes).unwrap();
+        file
+    }
 
     #[test]
     fn hash_and_names() {

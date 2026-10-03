@@ -194,8 +194,26 @@ resource-client tests pass (0.01s); AIDL generation and image API linkage pass
 (14.2s combined). These protocol/linkage checks supplement the verified early
 original-PMS handoff. Native facade boot ordering,
 other booted owner transactions and callback delivery remain unverified, and
-original PMS remains active. The full late bridge's nonce mapping separately
-needs matching-owner death cleanup (#835).
+original PMS remains active. The full late bridge now retains its Binder and
+nonce mapping as one owned source (#835/#841). Death only clears the current
+source when its retained Binder identity matches; old deaths cannot erase a
+replacement. Reattaching the same endpoint reuses its single Binder death
+registration while replacing the mapped source. Invalid mappings, owner errors
+and trailing shared-memory replies leave the current source/listeners unchanged.
+Permission caches match both mapping identity and numeric nonce (#840), so equal
+nonces across system_server generations cannot reuse an old answer; an in-flight
+old query cannot insert into a newer source's cache. Without a map every check
+still queries its owner. Real fileport/mapped-store and Binder-release tests
+verify replacement, same-endpoint reattach, old/current death and retaining the
+current endpoint after the caller drops its temporary handle. Controlled mapped
+cache tests verify equal-nonce replacement and a blocked old reply. Regression
+controls using the previous unconditional cleanup and nonce-only cache both fail
+on these tests. All 358 regular units pass (3.39s). The full host/image build
+passes (19.0s; template cached), followed by the explicitly run disposable
+original-PMS snapshot/usage/shared-UID runtime oracle (11.59s) with the rebuilt
+guest-init; original boot completion and owned process/mount cleanup pass.
+This verifies the restart/cache infrastructure and original boot, not native PMS
+facade activation or its CTS/app/template/rollback gates.
 The facade now has Java PackageManagerLocal unfiltered/filtered snapshot scopes
 (#836), constructed from captured immutable replica records and a native owner
 bound to that version. Maps are copied and immutable; package objects retain

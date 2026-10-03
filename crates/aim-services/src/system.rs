@@ -107,7 +107,7 @@ pub struct System {
     /// `AppOpsManager.sAppOpsToNote`: whether an op's notes are collected.
     collected_ops: Mutex<HashMap<i32, bool>>,
     /// The nonces in system_server's shared memory, from the bridge.
-    nonces: Mutex<Option<Arc<Nonces>>>,
+    nonces: Mutex<Option<Arc<NonceSource>>>,
     permissions: Mutex<Permissions>,
     /// Told of each bridge system_server hands over (a handle held for
     /// the call).
@@ -118,11 +118,18 @@ pub struct System {
 /// Told of a bridge attached, with its handle.
 type BridgeListener = Box<dyn Fn(u32) + Send + Sync>;
 
+/// One system_server generation owns both its Binder and nonce mapping.
+struct NonceSource {
+    bridge: Arc<Strong>,
+    nonces: Nonces,
+}
+
 /// Permission checks kept with the nonce they were asked at, as
 /// `PermissionManager`'s `sPermissionCache` (by permission and uid; the
 /// pid does not decide) and `sPackageNamePermissionCache` keep them.
 #[derive(Default)]
 struct Permissions {
+    source: Weak<NonceSource>,
     nonce: i64,
     uids: HashMap<(String, i32), bool>,
     packages: HashMap<(String, String), bool>,
@@ -356,13 +363,17 @@ impl System {
         ask: impl FnOnce() -> Result<bool>,
     ) -> Result<bool> {
         let nonces = self.nonces.lock().unwrap().clone();
-        let Some(nonce) = nonces.and_then(|n| n.get(PACKAGE_INFO_NONCE)) else {
+        let Some(source) = nonces else {
+            return ask();
+        };
+        let Some(nonce) = source.nonces.get(PACKAGE_INFO_NONCE) else {
             return ask();
         };
         {
             let mut kept = self.permissions.lock().unwrap();
-            if kept.nonce != nonce {
+            if kept.nonce != nonce || !kept.source.ptr_eq(&Arc::downgrade(&source)) {
                 *kept = Permissions {
+                    source: Arc::downgrade(&source),
                     nonce,
                     ..Permissions::default()
                 };
@@ -373,7 +384,7 @@ impl System {
         }
         let granted = ask()?;
         let mut kept = self.permissions.lock().unwrap();
-        if kept.nonce == nonce {
+        if kept.nonce == nonce && kept.source.ptr_eq(&Arc::downgrade(&source)) {
             table(&mut kept).insert(key, granted);
         }
         Ok(granted)
@@ -428,11 +439,14 @@ impl System {
         let reply = strong
             .transact(bridge::GET_APPLICATION_SHARED_MEMORY, &data, false)
             .map_err(failed)?;
-        let fd = bridge::read_get_application_shared_memory_reply::<ParcelFileDescriptor>(
-            &mut reply.reader(),
-        )
-        .map_err(failed)??
-        .ok_or_else(|| failed(aim_binder_host::parcel::BAD_VALUE))?;
+        let mut reader = reply.reader();
+        let fd =
+            bridge::read_get_application_shared_memory_reply::<ParcelFileDescriptor>(&mut reader)
+                .map_err(failed)??
+                .ok_or_else(|| failed(aim_binder_host::parcel::BAD_VALUE))?;
+        if reader.remaining() != 0 {
+            return Err(failed(aim_binder_host::parcel::BAD_VALUE));
+        }
         let nonces = self
             .process
             .file(fd.0)
@@ -444,16 +458,38 @@ impl System {
                 )
             })?;
         drop(reply);
-        *self.nonces.lock().unwrap() = Some(Arc::new(nonces));
-        let this = Arc::downgrade(self);
-        self.process.link_to_death(
-            &strong,
-            Box::new(move || {
-                if let Some(system) = this.upgrade() {
-                    system.nonces.lock().unwrap().take();
-                }
-            }),
-        );
+        let mut current = self.nonces.lock().unwrap();
+        // Binder accepts one death registration per node reference. Reattaching
+        // that endpoint reuses its retained identity and existing registration.
+        let retained = current
+            .as_ref()
+            .filter(|source| source.bridge.handle == handle)
+            .map(|source| source.bridge.clone());
+        let newly_attached = retained.is_none();
+        let owner = retained.unwrap_or_else(|| Arc::new(strong));
+        *current = Some(Arc::new(NonceSource {
+            bridge: owner.clone(),
+            nonces,
+        }));
+        drop(current);
+        if newly_attached {
+            let attached = Arc::downgrade(&owner);
+            let this = Arc::downgrade(self);
+            self.process.link_to_death(
+                &owner,
+                Box::new(move || {
+                    if let (Some(system), Some(attached)) = (this.upgrade(), attached.upgrade()) {
+                        let mut current = system.nonces.lock().unwrap();
+                        if current
+                            .as_ref()
+                            .is_some_and(|source| Arc::ptr_eq(&source.bridge, &attached))
+                        {
+                            current.take();
+                        }
+                    }
+                }),
+            );
+        }
         for listener in self.bridge_listeners.lock().unwrap().iter() {
             listener(handle);
         }
@@ -464,7 +500,7 @@ impl System {
     /// while it is unset.
     pub(crate) fn package_info_nonce(&self) -> Option<i64> {
         let nonces = self.nonces.lock().unwrap().clone();
-        nonces.and_then(|n| n.get(PACKAGE_INFO_NONCE))
+        nonces.and_then(|n| n.nonces.get(PACKAGE_INFO_NONCE))
     }
 
     /// Tells `listener` of each bridge attached from now on, with its
@@ -1147,6 +1183,84 @@ impl Service for Listener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_cache_is_bound_to_nonce_mapping_identity() {
+        use aim_binder_driver::{Credentials, Device, Driver};
+        use std::os::fd::AsFd;
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 97001,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let system = System::new(process.clone(), &[]);
+        let mapped = || {
+            let file = crate::nonces::tests::nonce_file(42);
+            let retained = aim_binder_host::server::file_from_fd(file.as_fd()).unwrap();
+            Arc::new(NonceSource {
+                bridge: Arc::new(process.strong(0)),
+                nonces: Nonces::map(&retained).unwrap(),
+            })
+        };
+        let table: fn(&mut Permissions) -> &mut HashMap<(String, i32), bool> = |p| &mut p.uids;
+        let key = ("permission".to_string(), 19001);
+        *system.nonces.lock().unwrap() = Some(mapped());
+        assert!(system.cached(table, key.clone(), || Ok(true)).unwrap());
+        assert!(
+            system
+                .cached(table, key.clone(), || panic!(
+                    "unchanged owner must hit cache"
+                ))
+                .unwrap()
+        );
+        // Two system_server generations may carry equal numeric nonces.
+        *system.nonces.lock().unwrap() = Some(mapped());
+        assert!(!system.cached(table, key.clone(), || Ok(false)).unwrap());
+        assert!(
+            !system
+                .cached(table, key.clone(), || panic!(
+                    "replacement result must be cached"
+                ))
+                .unwrap()
+        );
+
+        let old = mapped();
+        *system.nonces.lock().unwrap() = Some(old.clone());
+        let (started, waiting) = mpsc::channel();
+        let (finish, released) = mpsc::channel();
+        let querying = system.clone();
+        let old_key = key.clone();
+        let in_flight = std::thread::spawn(move || {
+            querying.cached(table, old_key, || {
+                started.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(true)
+            })
+        });
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        *system.nonces.lock().unwrap() = Some(mapped());
+        assert!(!system.cached(table, key.clone(), || Ok(false)).unwrap());
+        finish.send(()).unwrap();
+        assert!(in_flight.join().unwrap().unwrap());
+        assert!(
+            !system
+                .cached(table, key.clone(), || panic!(
+                    "old reply polluted replacement cache"
+                ))
+                .unwrap()
+        );
+        system.nonces.lock().unwrap().take();
+        assert!(system.cached(table, key.clone(), || Ok(true)).unwrap());
+        assert!(!system.cached(table, key, || Ok(false)).unwrap());
+        driver.release(process.proc_handle());
+    }
 
     /// `SyncNotedAppOp.writeToParcel`: the null fields' flags, mode, op,
     /// then the tag and package present.
