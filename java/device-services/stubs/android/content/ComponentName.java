@@ -4,6 +4,8 @@ package android.content;
 
 public final class ComponentName {
     public ComponentName(String pkg, String cls) { throw new RuntimeException("stub"); }
+    public static ComponentName unflattenFromString(String name) { throw new RuntimeException("stub"); }
     public String getPackageName() { throw new RuntimeException("stub"); }
+    public String getClassName() { throw new RuntimeException("stub"); }
     public String flattenToString() { throw new RuntimeException("stub"); }
 }

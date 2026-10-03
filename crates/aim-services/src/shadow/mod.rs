@@ -9,7 +9,12 @@
 //! each copy to the [`ShadowModel`] of its service, after the original
 //! replied and in the driver's order, decodes both replies the same way
 //! and writes one JSON line per call to the log; `differed` lines carry
-//! both replies. `tools/binder-shadow-report.py` summarizes a log per
+//! both replies. A model answers from a state at least as new as the
+//! call, which a change of the original's state can have overtaken: a
+//! reply that differs but equals the model's answer from the state it
+//! held before the call ([`ShadowModel::answer_before`]) is `raced`, a
+//! change between the original's answer and the model's, logged with
+//! both replies and counted apart from the differences. `tools/binder-shadow-report.py` summarizes a log per
 //! method.
 //!
 //! A reply's `ParceledListSlice` hands out a binder the caller fetches
@@ -24,12 +29,14 @@ mod value;
 use std::collections::HashMap;
 use std::io::{LineWriter, Write};
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aim_binder_driver::{Credentials, Device, Driver, File, FileId, ShadowCopy, ShadowSink};
+use aim_binder_driver::{
+    Credentials, Device, Driver, File, FileId, ShadowCopy, ShadowObject, ShadowReply, ShadowSink,
+};
 use aim_binder_host::local::{LocalProcess, Strong};
 use aim_binder_host::parcel::{Binder, Parcel, Reader, Result as ParcelResult, StatusCode};
 use aim_service_aidl::android_os_iservicemanager as sm;
@@ -40,9 +47,13 @@ use crate::system::System;
 use crate::{SYSTEM_SERVER_CONTEXT, SYSTEM_UID};
 use compare::Comparator;
 
-/// Copies waiting for the comparison; more are dropped (and counted)
-/// rather than holding up the driver.
+/// Copies on their way from the driver: the driver never waits for
+/// them, and a thread moves each at once to the comparison's backlog.
 const CAPACITY: usize = 4096;
+/// The bytes of copies the comparison may fall behind by (about a first
+/// boot's); more are dropped (and counted) rather than holding up the
+/// driver.
+const BACKLOG: usize = 512 << 20;
 /// How often a watcher looks for its service until it is published: the
 /// calls before it finds it are not compared.
 const RETRY: Duration = Duration::from_millis(100);
@@ -55,6 +66,14 @@ pub trait ShadowModel: Send + Sync {
     /// Answers `call` as the native service would. Called after the
     /// original replied, in the driver's order, on one thread.
     fn answer(&self, call: &mut ShadowCall<'_>) -> Answer;
+
+    /// Answers `call` again, as `answer` would, from the newest state the
+    /// model held before the call was sent: `None` when it held none or
+    /// does not answer the call that way. Called only when `answer`'s
+    /// reply differs from the original's; it changes nothing.
+    fn answer_before(&self, _call: &mut ShadowCall<'_>) -> Option<Answer> {
+        None
+    }
 
     /// Decodes a reply of `descriptor`'s method `code`, the original's and
     /// the model's alike, with the generated reader ([`decode`]). `None`:
@@ -278,6 +297,15 @@ pub(crate) fn start(
             (n.clone(), m)
         })
         .collect();
+    let (backlog, queued) = mpsc::channel();
+    let bytes = Arc::new(AtomicUsize::new(0));
+    {
+        let (bytes, dropped) = (bytes.clone(), dropped.clone());
+        std::thread::Builder::new()
+            .name("binder-shadow-drain".into())
+            .spawn(move || drain(&received, &backlog, &bytes, &dropped, BACKLOG))
+            .map_err(|e| format!("binder shadow: {e}"))?;
+    }
     let mut comparator = Comparator::new(models, roots, dropped);
     std::thread::Builder::new()
         .name("binder-shadow".into())
@@ -286,8 +314,11 @@ pub(crate) fn start(
                 let wait = comparator
                     .deadline()
                     .map_or(IDLE, |d| d.saturating_duration_since(Instant::now()));
-                let copy: Option<ShadowCopy> = match received.recv_timeout(wait) {
-                    Ok(copy) => Some(copy),
+                let copy: Option<ShadowCopy> = match queued.recv_timeout(wait) {
+                    Ok(copy) => {
+                        bytes.fetch_sub(size(&copy), Ordering::Relaxed);
+                        Some(copy)
+                    }
                     Err(RecvTimeoutError::Timeout) => None,
                     Err(RecvTimeoutError::Disconnected) => return,
                 };
@@ -298,6 +329,40 @@ pub(crate) fn start(
         })
         .map(drop)
         .map_err(|e| format!("binder shadow: {e}"))
+}
+
+/// Moves each copy from the driver's channel to the backlog as it comes,
+/// dropping (and counting) one that would take the backlog's `bytes` past
+/// `limit`; the comparison takes them off.
+fn drain(
+    received: &mpsc::Receiver<ShadowCopy>,
+    backlog: &mpsc::Sender<ShadowCopy>,
+    bytes: &AtomicUsize,
+    dropped: &AtomicU64,
+    limit: usize,
+) {
+    while let Ok(copy) = received.recv() {
+        let size = size(&copy);
+        if bytes.fetch_add(size, Ordering::Relaxed) + size > limit {
+            bytes.fetch_sub(size, Ordering::Relaxed);
+            dropped.fetch_add(1, Ordering::Relaxed);
+        } else if backlog.send(copy).is_err() {
+            return;
+        }
+    }
+}
+
+/// The bytes a copy holds, as the backlog counts them.
+fn size(copy: &ShadowCopy) -> usize {
+    let object = std::mem::size_of::<ShadowObject>();
+    let reply = match &copy.reply {
+        ShadowReply::Reply { parcel, .. } => parcel.data.len() + parcel.objects.len() * object,
+        _ => 0,
+    };
+    std::mem::size_of::<ShadowCopy>()
+        + copy.data.data.len()
+        + copy.data.objects.len() * object
+        + reply
 }
 
 /// Watches one service: whenever it is published, its node is shadowed.
@@ -377,5 +442,49 @@ impl Watcher {
             return None;
         };
         Some(self.process.strong(h))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_binder_driver::ShadowParcel;
+
+    fn copy(seq: u64, len: usize) -> ShadowCopy {
+        ShadowCopy {
+            seq,
+            node: 0,
+            root: 0,
+            follows: None,
+            from_pid: 1,
+            from_euid: 2,
+            from_tid: 3,
+            to_pid: 4,
+            sent: Instant::now(),
+            code: 1,
+            flags: 0,
+            data: ShadowParcel {
+                data: vec![0; len],
+                objects: Vec::new(),
+            },
+            reply: ShadowReply::OneWay,
+        }
+    }
+
+    #[test]
+    fn the_backlog_is_bounded_by_bytes() {
+        let (copies, received) = mpsc::sync_channel(8);
+        let (backlog, queued) = mpsc::channel();
+        let (bytes, dropped) = (AtomicUsize::new(0), AtomicU64::new(0));
+        let limit = 2 * size(&copy(0, 100));
+        for seq in 1..=3 {
+            copies.send(copy(seq, 100)).unwrap();
+        }
+        drop(copies);
+        drain(&received, &backlog, &bytes, &dropped, limit);
+        let taken: Vec<u64> = queued.try_iter().map(|c| c.seq).collect();
+        assert_eq!(taken, [1, 2]);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(bytes.load(Ordering::Relaxed), limit);
     }
 }

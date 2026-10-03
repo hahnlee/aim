@@ -90,8 +90,11 @@ struct Inner {
     /// A record coming in chunks: its key, length and bytes so far.
     partial: Option<(Key, usize, Vec<u8>)>,
     state: Option<Arc<State>>,
-    /// The tokens asked for and the nonce read before each.
-    asked: Vec<(i64, Option<i64>)>,
+    /// The tokens asked for, the nonce read before each, and when.
+    asked: Vec<(i64, Option<i64>, Instant)>,
+    /// When the published state's batch was asked for: its snapshot is
+    /// newer.
+    asked_at: Option<Instant>,
     last_token: i64,
     /// The latest batch's token, and whether its digest matched.
     ended: Option<(i64, bool)>,
@@ -157,13 +160,29 @@ impl Feed {
         }
     }
 
+    /// A state at least as new as the original's at `since`: the last one
+    /// if its batch was asked for after `since`, else as [`Feed::fresh`].
+    /// While a comparison lags behind the calls it compares, one batch
+    /// serves every call taken before it was asked for.
+    pub fn fresh_since(&self, since: Instant, timeout: Duration) -> Option<Arc<State>> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if let (Some(state), Some(asked)) = (&inner.state, inner.asked_at)
+                && asked >= since
+            {
+                return Some(state.clone());
+            }
+        }
+        self.fresh(timeout)
+    }
+
     /// Asks system_server for a batch with a new token (one-way); `nonce`
     /// was read before.
     fn ask(&self, inner: &mut Inner, reset: bool, nonce: Option<i64>) -> Option<i64> {
         let feed = inner.feed.clone()?;
         inner.last_token += 1;
         let token = inner.last_token;
-        inner.asked.push((token, nonce));
+        inner.asked.push((token, nonce, Instant::now()));
         let mut data = Parcel::new();
         feed::Sync { reset, token }.write(&mut data);
         if let Err(s) = feed.transact(feed::SYNC, &data, true) {
@@ -268,18 +287,17 @@ impl Inner {
     /// batch's snapshot was taken after that.
     fn end(&mut self, digest: &[u8], token: i64) -> Result<Arc<State>, Failed> {
         self.ended = Some((token, false));
-        self.asked.retain(|(t, _)| *t >= token);
+        self.asked.retain(|(t, ..)| *t >= token);
         if digest != records_digest(&self.records) {
             return Err(Failed::Drifted);
         }
-        let nonce = self
-            .asked
-            .iter()
-            .find(|(t, _)| *t == token)
-            .and_then(|(_, n)| *n);
+        let asked = self.asked.iter().find(|(t, ..)| *t == token);
+        let nonce = asked.and_then(|(_, n, _)| *n);
+        let asked_at = asked.map(|(.., at)| *at);
         let generation = self.state.as_ref().map_or(1, |s| s.generation + 1);
         let state = Arc::new(build(&self.records, generation, nonce).map_err(Failed::Unreadable)?);
         self.state = Some(state.clone());
+        self.asked_at = asked_at;
         self.ended = Some((token, true));
         Ok(state)
     }

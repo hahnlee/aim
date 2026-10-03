@@ -7,6 +7,7 @@ public final class UserHandle {
     public static final UserHandle CURRENT = null;
     public static final int USER_CURRENT = -2;
 
+    public int getIdentifier() { throw new RuntimeException("stub"); }
     public UserHandle(int userId) { throw new RuntimeException("stub"); }
     public static UserHandle of(int userId) { throw new RuntimeException("stub"); }
     public static int getUserId(int uid) { throw new RuntimeException("stub"); }

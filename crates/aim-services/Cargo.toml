@@ -1,5 +1,5 @@
 [package]
-license.workspace = true
+license = "Apache-2.0 AND (GPL-2.0-only WITH Classpath-exception-2.0)"
 name = "aim-services"
 version = "0.1.0"
 edition = "2024"
@@ -17,7 +17,9 @@ aim-host-location = { path = "../aim-host-location" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
+aim-storage.workspace = true
 android-image-extract = { path = "../../tools/android-image-extract" }
+crc32fast = "1.5"
 dsa = "0.6"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 libc.workspace = true
@@ -31,3 +33,4 @@ sha2 = { workspace = true, features = ["oid"] }
 
 [dev-dependencies]
 aim-paths.workspace = true
+aim-android-image = { path = "../aim-android-image" }

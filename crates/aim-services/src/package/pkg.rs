@@ -8,6 +8,9 @@
 //! `android-16.0.0_r1` are the reference. Every field the parcel holds
 //! is kept, so the package can be written back as it was read (#723).
 
+mod write;
+pub use write::FacadeEntry;
+
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 
 use super::intent::Intent;
@@ -300,6 +303,8 @@ pub struct UsesPermission {
 /// `ParsedProcess`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Process {
+    /// The enclosing PackageImpl process map's key.
+    pub map_key: Option<String>,
     pub use_embedded_dex: bool,
     pub name: Option<String>,
     /// The application class by package (`getAppClassNamesByPackage`).
@@ -688,7 +693,8 @@ impl AndroidPackage {
             volume_uuid: s.string16(r)?,
             signing_details: signing_details(r, s)?,
             path: s.string16(r)?,
-            queries_intents: typed_array(r, |r| Intent::read(r, s))?.unwrap_or_default(),
+            queries_intents: typed_array(r, |r| Intent::read_package_query(r, s))?
+                .unwrap_or_default(),
             queries_packages: string_list(r, s)?,
             queries_providers: string_list(r, s)?,
             app_component_factory: s.string16(r)?,
@@ -739,7 +745,7 @@ impl AndroidPackage {
             native_heap_zero_initialized: r.read_i32()?,
             request_raw_external_storage_access: for_boolean(r)?,
             locale_config_res: r.read_i32()?,
-            known_activity_embedding_certs: string_array(r, s)?,
+            known_activity_embedding_certs: string_set(r, s)?,
             manifest_package_name: s.string16(r)?,
             native_library_dir: s.string16(r)?,
             native_library_root_dir: s.string16(r)?,
@@ -840,7 +846,7 @@ impl Activity {
                 affinity: s.string8(r)?,
             });
         }
-        a.known_activity_embedding_certs = string_array(r, s)?;
+        a.known_activity_embedding_certs = string_set(r, s)?;
         a.required_display_category = s.string8(r)?;
         a.require_content_uri_permission_from_caller = r.read_i32()?;
         Ok(a)
@@ -901,7 +907,7 @@ impl Permission {
                 Some(_) => Some(PermissionGroup::read(r, s)?),
                 None => None,
             },
-            known_certs: string_array(r, s)?,
+            known_certs: string_set(r, s)?,
         })
     }
 }
@@ -995,6 +1001,23 @@ fn feature_info(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<FeatureInfo> 
         req_gl_es_version: r.read_i32()?,
         flags: r.read_i32()?,
     })
+}
+
+/// Parcelling.ForStringSet returns an empty ArraySet for a null parcel.
+fn string_set(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Option<String>>>> {
+    let mut set = Vec::new();
+    for value in string_array(r, s)?.unwrap_or_default() {
+        if !set.contains(&value) {
+            set.push(value);
+        }
+    }
+    set.sort_by_key(|value| {
+        value
+            .as_deref()
+            .map(super::parse::parcel::java_hash)
+            .unwrap_or(0)
+    });
+    Ok(Some(set))
 }
 
 /// `readSerializable`: its class (null for none), then its bytes.
@@ -1135,10 +1158,11 @@ fn sparse_int_arrays(r: &mut Reader<'_>) -> Result<Option<SplitDependencies>> {
 /// The processes (`writeMap` of `ParsedProcessImpl`s by name).
 fn processes(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Process>>> {
     array(r, |r| {
-        string_value(r, s)?;
+        let map_key = string_value(r, s)?;
         parcelable(r, s, |r, s| {
             let flags = r.read_i32()?;
             Ok(Process {
+                map_key,
                 use_embedded_dex: flags & 0x40 != 0,
                 name: s.string16(r)?,
                 app_class_names_by_package: array(r, |r| {
@@ -1186,6 +1210,32 @@ mod tests {
     use aim_binder_host::parcel::Parcel;
 
     use super::*;
+
+    #[test]
+    fn certificate_sets_normalize_null_duplicates_and_hash_collisions() {
+        use super::super::intent_filter::Plain;
+        let mut p = Parcel::new();
+        p.write_i32(-1);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(string_set(&mut r, &mut Plain).unwrap(), Some(vec![]));
+
+        let mut p = Parcel::new();
+        p.write_i32(5);
+        for value in [Some("BB"), Some("Aa"), None, Some("BB"), Some("a")] {
+            p.write_string16(value);
+        }
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(
+            string_set(&mut r, &mut Plain).unwrap(),
+            Some(vec![
+                None,
+                Some("a".into()),
+                Some("BB".into()),
+                Some("Aa".into())
+            ])
+        );
+        assert_eq!(r.remaining(), 0);
+    }
 
     /// A parcel written as `PackageCacher.toCacheEntryStatic` writes one:
     /// every string an index into the pool at its end.
@@ -1393,6 +1443,30 @@ mod tests {
         c.p.write_i64(0);
         c.i(1).i(0).i(-1).i(-1).i(0);
         c.finish()
+    }
+
+    #[test]
+    fn writes_loaded_metadata_and_preserves_independently_encoded_components() {
+        let mut pkg = AndroidPackage::read_cache_entry(&package()).unwrap();
+        pkg.uid = 10234;
+        pkg.native_library_root_dir = Some("/data/app/a/lib".into());
+        pkg.secondary_cpu_abi = Some("armeabi-v7a".into());
+        pkg.booleans |= booleans::SYSTEM;
+        pkg.page_size_app_compat_flags = 8;
+        pkg.processes = Some(vec![Process {
+            map_key: Some("map-key".into()),
+            name: Some("process-name".into()),
+            ..Default::default()
+        }]);
+        let bytes = pkg.to_cache_entry().unwrap().bytes;
+        let read = AndroidPackage::read_cache_entry(&bytes).unwrap();
+        assert_eq!(read, pkg);
+        assert_eq!(read.to_cache_entry().unwrap().bytes, bytes);
+        let mut refused = pkg.clone();
+        let mut filter = ParsedIntentInfo::default();
+        filter.filter.extras = Some(vec![1, 2, 3, 4]);
+        refused.activities[0].main.component.intents.push(filter);
+        assert!(refused.to_cache_entry().is_err());
     }
 
     #[test]

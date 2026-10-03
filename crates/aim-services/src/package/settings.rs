@@ -4,15 +4,16 @@
 //! legacy permission definitions and the settings' versions, as
 //! `Settings.readSettingsLPw` reads them (`writeLPr` writes them).
 //!
-//! Not modelled yet: domain verification state (`<domain-verifications>`,
-//! `DomainVerificationPersistence`, #705) and what only older platforms
-//! write (per-package `<perms>`, `<enabled-components>` and
-//! `<disabled-components>`, `<domain-verification>`, the single-user
+//! Legacy `<perms>` restore lives in owner::legacy_permissions.
+//! Not modelled yet: what only older platforms write (per-package
+//! `<enabled-components>`, `<disabled-components>`,
+//! `<domain-verification>`, the single-user
 //! preferred activities, `last-platform-version`, the pre-M `flags`), which
 //! the original reads only to migrate.
 
 use aim_android_xml::Element;
 
+use super::domain_verification;
 use super::{children, string};
 
 /// `ApplicationInfo.FLAG_SYSTEM`.
@@ -41,6 +42,7 @@ pub struct Settings {
     /// `mRenamedPackages`: new name, old name.
     pub renamed_packages: Vec<(String, String)>,
     pub key_sets: KeySets,
+    pub domain_verification: domain_verification::State,
 }
 
 /// `Settings.VersionInfo`.
@@ -100,7 +102,11 @@ pub struct Package {
     pub force_queryable: bool,
     pub pending_restore: bool,
     pub debuggable: bool,
-    pub loading: bool,
+    /// Current PackageSetting bit; None means an imported owner is unresolved.
+    /// This is not persisted in packages.xml or inferred from UID membership.
+    pub leaving_shared_user: Option<bool>,
+    /// Runtime LinkedHashSet<File>; null and allocated-empty are distinct.
+    pub old_paths: Option<Vec<Option<String>>>,
     pub base_revision_code: i32,
     pub page_size_compat: i32,
     pub loading_progress: f32,
@@ -116,10 +122,100 @@ pub struct Package {
     pub signatures: Option<Signatures>,
     pub key_set_data: KeySetData,
     /// MIME groups and their types.
-    pub mime_groups: Vec<(String, Vec<String>)>,
+    pub mime_groups: Vec<(Option<String>, Vec<Option<String>>)>,
     /// Split names and revision codes, kept for a package without code
     /// (archived, or deleted keeping its data).
     pub split_versions: Vec<(String, i32)>,
+}
+
+impl Package {
+    /// PackageSetting.addMimeTypes: existing groups accumulate distinct types.
+    pub fn add_mime_types(&mut self, name: String, values: impl IntoIterator<Item = String>) {
+        self.add_nullable_mime_types(Some(name), values.into_iter().map(Some));
+    }
+
+    pub fn add_nullable_mime_types(
+        &mut self,
+        name: Option<String>,
+        values: impl IntoIterator<Item = Option<String>>,
+    ) {
+        let at = match self
+            .mime_groups
+            .iter()
+            .position(|(group, _)| group == &name)
+        {
+            Some(at) => at,
+            None => {
+                self.mime_groups.push((name, Vec::new()));
+                self.mime_groups.len() - 1
+            }
+        };
+        let types = &mut self.mime_groups[at].1;
+        for value in values {
+            if !types.contains(&value) {
+                types.push(value);
+            }
+        }
+        types.sort_by_key(|value| value.as_deref().map_or(0, string_hash));
+        self.mime_groups
+            .sort_by_key(|(name, _)| name.as_deref().map_or(0, string_hash));
+    }
+
+    pub fn is_loading(&self) -> bool {
+        (1.0f32 - self.loading_progress).abs() >= 0.00000001f32
+    }
+
+    /// PackageSetting only accepts increases; NaN comparisons do not update.
+    pub fn set_loading_progress(&mut self, progress: f32) {
+        if self.loading_progress < progress {
+            self.loading_progress = progress;
+        }
+    }
+
+    pub fn add_old_path(&mut self, path: Option<&str>) {
+        let path = path.map(file_path);
+        let paths = self.old_paths.get_or_insert_with(Vec::new);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    pub fn remove_old_path(&mut self, path: Option<&str>) {
+        if let Some(path) = path
+            && let Some(paths) = &mut self.old_paths
+        {
+            let path = Some(file_path(path));
+            paths.retain(|value| value != &path);
+        }
+    }
+
+    /// PackageSetting.setPageSizeAppCompatFlags at android-16.0.0_r1 (#810).
+    pub fn set_page_size_compat(&mut self, mode: i32) -> Result<(), String> {
+        if !(0..128).contains(&mode) {
+            return Err("Invalid page size compat mode specified".into());
+        }
+        self.page_size_compat |= mode;
+        if mode == 8 {
+            self.page_size_compat &= !16;
+        } else if mode == 16 {
+            self.page_size_compat &= !8;
+        }
+        Ok(())
+    }
+}
+
+// java.io.File's Unix normalization retains dot segments and relative paths.
+fn file_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c != '/' || !out.ends_with('/') {
+            out.push(c);
+        }
+    }
+    if out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
 }
 
 /// `InstallSource`.
@@ -136,6 +232,29 @@ pub struct InstallSource {
     pub initiating_package_uninstalled: bool,
     pub initiating_package_signatures: Option<Signatures>,
     pub originating_package: Option<String>,
+}
+
+impl InstallSource {
+    /// Pinned InstallSource.createInternal's empty-owner normalization.
+    pub fn normalized(self) -> Result<Self, String> {
+        if self.initiating_package.is_none() && self.initiating_package_signatures.is_some() {
+            return Err("install signing owner has no initiating package".into());
+        }
+        if self.initiating_package.is_none()
+            && self.originating_package.is_none()
+            && self.installer.is_none()
+            && self.update_owner.is_none()
+            && self.initiating_package_signatures.is_none()
+            && !self.initiating_package_uninstalled
+            && self.package_source == 0
+        {
+            return Ok(Self {
+                is_orphaned: self.is_orphaned,
+                ..Self::default()
+            });
+        }
+        Ok(self)
+    }
 }
 
 impl Default for InstallSource {
@@ -169,16 +288,53 @@ pub struct UsesSdkLibrary {
 pub struct Signatures {
     pub scheme_version: i32,
     pub signatures: Vec<Vec<u8>>,
+    /// Java-serialized public keys from the feed or native verified SPKI.
+    pub public_keys: Option<Vec<Option<super::pkg::Serialized>>>,
     pub past_signatures: Option<Vec<(Vec<u8>, i32)>>,
 }
 
 /// `PackageKeySetData`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeySetData {
     pub proper_signing_key_set: i64,
     pub upgrade_key_sets: Vec<i64>,
     /// Key sets the package defines: alias, id.
-    pub defined_key_sets: Vec<(String, i64)>,
+    pub defined_key_sets: Vec<(Option<String>, i64)>,
+}
+
+impl KeySetData {
+    pub fn add_upgrade_key_set(&mut self, id: i64) {
+        if !self.upgrade_key_sets.contains(&id) {
+            self.upgrade_key_sets.push(id);
+        }
+    }
+    pub fn add_defined_key_set(&mut self, id: i64, alias: Option<String>) {
+        match self
+            .defined_key_sets
+            .iter_mut()
+            .find(|(name, _)| name == &alias)
+        {
+            Some((_, value)) => *value = id,
+            None => self.defined_key_sets.push((alias, id)),
+        }
+        // ArrayMap keeps signed UTF-16 String hashes; null hashes to zero.
+        self.defined_key_sets.sort_by_key(|(name, _)| {
+            name.as_ref().map_or(0, |name| {
+                name.encode_utf16()
+                    .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
+            })
+        });
+    }
+}
+
+impl Default for KeySetData {
+    fn default() -> Self {
+        Self {
+            proper_signing_key_set: -1,
+            upgrade_key_sets: Vec::new(),
+            defined_key_sets: Vec::new(),
+        }
+    }
 }
 
 /// `SharedUserSetting`.
@@ -199,6 +355,8 @@ pub struct KeySets {
     pub key_sets: Vec<(i64, Vec<i64>)>,
     pub last_issued_key_id: i64,
     pub last_issued_key_set_id: i64,
+    /// Runtime references; saved XML counts each role before alias replacement.
+    pub reference_counts: Option<std::collections::BTreeMap<i64, i32>>,
 }
 
 /// `PermissionInfo.fixProtectionLevel`.
@@ -223,12 +381,30 @@ type Certificates = Vec<Option<Vec<u8>>>;
 impl Settings {
     /// The settings in the document whose root is `root`.
     pub fn parse(root: &Element) -> Result<Settings, String> {
+        Self::parse_with_config(root, &Default::default())
+    }
+
+    /// Settings already has platform/OEM shared UID owners before reading XML.
+    pub fn parse_with_config(
+        root: &Element,
+        config: &super::system_config::SystemConfig,
+    ) -> Result<Settings, String> {
         let mut s = Settings::default();
         let mut certificates = Certificates::new();
-        for e in root.children() {
+        let mut key_set_refs = std::collections::BTreeMap::<i64, i32>::new();
+        for e in records(root) {
             match e.name.as_str() {
                 "package" => {
                     if let Some(p) = package(e, &mut certificates)? {
+                        for child in key_set_entries(e).into_iter().filter(|child| {
+                            matches!(
+                                child.name.as_str(),
+                                "proper-signing-keyset" | "defined-keyset"
+                            )
+                        }) {
+                            let count = key_set_refs.entry(identifier(child)?).or_default();
+                            *count = count.wrapping_add(1);
+                        }
                         s.packages.push(p);
                     }
                 }
@@ -246,7 +422,25 @@ impl Settings {
                     }
                 }
                 "verifier" => s.verifier = string(e, "device"),
-                "keyset-settings" => s.key_sets = key_sets(e)?,
+                "keyset-settings" => {
+                    s.key_sets = key_sets(e)?;
+                    if s.key_sets.version.is_some() {
+                        s.key_sets.reference_counts = Some(
+                            s.key_sets
+                                .key_sets
+                                .iter()
+                                .map(|(id, _)| (*id, key_set_refs.get(id).copied().unwrap_or(0)))
+                                .collect(),
+                        );
+                    }
+                    if s.key_sets.version.is_none() {
+                        for package in &mut s.packages {
+                            package.key_set_data = KeySetData::default();
+                        }
+                    }
+                }
+                "domain-verifications" => s.domain_verification.read(e)?,
+                "domain-verifications-legacy" => s.domain_verification.read_legacy(e)?,
                 "version" => {
                     let volume_uuid = string(e, "volumeUuid");
                     s.versions.retain(|v| v.volume_uuid != volume_uuid);
@@ -267,7 +461,13 @@ impl Settings {
         }
         // `readLPw`: a package of an unknown shared user is dropped, an
         // updated system package of a shared user's app id belongs to it.
-        let shared: Vec<i32> = s.shared_users.iter().map(|u| u.app_id).collect();
+        let seeded = super::owner::shared_users::Bootstrap::new(config);
+        let shared: Vec<i32> = s
+            .shared_users
+            .iter()
+            .map(|u| u.app_id)
+            .chain(seeded.shared_users.values().map(|group| group.app_id))
+            .collect();
         s.packages
             .retain(|p| !p.shared_user || shared.contains(&p.app_id));
         for p in &mut s.disabled_system_packages {
@@ -275,6 +475,28 @@ impl Settings {
         }
         Ok(s)
     }
+}
+
+/// The original event loop leaves attribute-only/deprecated tags unconsumed.
+/// Helper-owned and unknown subtrees are skipped as a whole.
+pub(in crate::package) fn records(root: &Element) -> Vec<&Element> {
+    let mut out = Vec::new();
+    for entry in root.children() {
+        out.push(entry);
+        if matches!(
+            entry.name.as_str(),
+            "version"
+                | "renamed-package"
+                | "verifier"
+                | "last-platform-version"
+                | "database-version"
+                | "preferred-packages"
+                | "read-external-storage"
+        ) {
+            out.extend(records(entry));
+        }
+    }
+    out
 }
 
 /// `getAttributeInt(null, name)` without a default: the attribute must be
@@ -327,11 +549,11 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
             ft => ft,
         },
         last_update_time: e.long_hex("ut")?.unwrap_or(0),
-        loading_progress: e.float("loadingProgress")?.unwrap_or(0.0),
-        loading_completed_time: e.long_hex("loadingCompletedTime")?.unwrap_or(0),
         app_metadata_file_path: string(e, "appMetadataFilePath"),
         app_metadata_source: e.int("appMetadataSource")?.unwrap_or(0),
         category_hint: CATEGORY_UNDEFINED,
+        // readPackageLPw/readDisabledSysPackageLPw construct a fresh setting.
+        leaving_shared_user: Some(false),
         ..Package::default()
     };
     // `userId` and `sharedUserId` are the app id's historical names.
@@ -391,9 +613,17 @@ fn updated_package(e: &Element) -> Result<Package, String> {
 /// `readPackageLPw`: `None` for an entry the original drops (no name, code
 /// path or app id).
 fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Package>, String> {
+    // The pinned Settings DEX compiles out disallowSdkLibsToBeApps:
+    // SDK libraries still need a positive app/shared-user ID (#802).
     let Some(mut p) = package_attributes(e)?.filter(|p| p.app_id > 0) else {
         return Ok(None);
     };
+    p.set_loading_progress(e.float("loadingProgress").ok().flatten().unwrap_or(0.0));
+    p.loading_completed_time = e
+        .long_hex("loadingCompletedTime")
+        .ok()
+        .flatten()
+        .unwrap_or(0);
     p.is_sdk_library = e.bool("isSdkLibrary")?.unwrap_or(false);
     p.flags = e.int("publicFlags")?.unwrap_or(FLAG_SYSTEM);
     p.private_flags = e.int("privateFlags")?.unwrap_or(0);
@@ -410,40 +640,31 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
         initiating_package_signatures: None,
         originating_package: string(e, "installOriginator"),
     };
+    p.install_source = p.install_source.normalized()?;
     p.volume_uuid = string(e, "volumeUuid");
     p.category_hint = e.int("categoryHint")?.unwrap_or(CATEGORY_UNDEFINED);
     p.update_available = e.bool("updateAvailable")?.unwrap_or(false);
     p.force_queryable = e.bool("forceQueryable")?.unwrap_or(false);
     p.pending_restore = e.bool("pendingRestore")?.unwrap_or(false);
     p.debuggable = e.bool("debuggable")?.unwrap_or(false);
-    p.loading = e.bool("isLoading")?.unwrap_or(false);
+
     p.base_revision_code = e.int("baseRevisionCode")?.unwrap_or(0);
-    p.page_size_compat = e.int("pageSizeCompat")?.unwrap_or(0);
+    p.set_page_size_compat(e.int("pageSizeCompat")?.unwrap_or(0))?;
     p.domain_set_id = string(e, "domainSetId").filter(|id| !id.is_empty());
     for child in e.children() {
         if libraries(&mut p, child)? {
             continue;
         }
-        let data = &mut p.key_set_data;
         match child.name.as_str() {
             "sigs" => p.signatures = signatures(child, certificates)?,
             "install-initiator-sigs" => {
                 p.install_source.initiating_package_signatures = signatures(child, certificates)?
             }
-            "proper-signing-keyset" => {
-                data.proper_signing_key_set = identifier(child)?;
-            }
-            "upgrade-keyset" => data.upgrade_key_sets.push(identifier(child)?),
-            "defined-keyset" => {
-                let alias = string(child, "alias").unwrap_or_default();
-                data.defined_key_sets.push((alias, identifier(child)?));
-            }
             "mime-group" => {
                 if let Some(group) = string(child, "name") {
-                    let types = children(child, "mime-type")
-                        .filter_map(|t| string(t, "value"))
-                        .collect();
-                    p.mime_groups.push((group, types));
+                    let mut types = Vec::new();
+                    read_mime_types(child, &mut types);
+                    p.add_mime_types(group, types);
                 }
             }
             "split-version" => {
@@ -458,7 +679,49 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
             _ => {}
         }
     }
+    for child in key_set_entries(e) {
+        match child.name.as_str() {
+            "proper-signing-keyset" => p.key_set_data.proper_signing_key_set = identifier(child)?,
+            "upgrade-keyset" => p.key_set_data.add_upgrade_key_set(identifier(child)?),
+            "defined-keyset" => p
+                .key_set_data
+                .add_defined_key_set(identifier(child)?, string(child, "alias")),
+            _ => {}
+        }
+    }
+    p.install_source = p.install_source.normalized()?;
     Ok(Some(p))
+}
+
+// These Settings branches leave the parser inside the tag, so nested keyset
+// entries are visited too. Unknown package children consume their subtree.
+fn key_set_entries(e: &Element) -> Vec<&Element> {
+    let mut entries = Vec::new();
+    for child in e.children() {
+        if matches!(
+            child.name.as_str(),
+            "proper-signing-keyset" | "defined-keyset" | "upgrade-keyset" | "signing-keyset"
+        ) {
+            entries.push(child);
+            entries.extend(key_set_entries(child));
+        }
+    }
+    entries
+}
+
+fn string_hash(value: &str) -> i32 {
+    value.encode_utf16().fold(0i32, |hash, unit| {
+        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
+    })
+}
+
+fn read_mime_types(e: &Element, types: &mut Vec<String>) {
+    for child in e.children().filter(|child| child.name == "mime-type") {
+        if let Some(value) = string(child, "value") {
+            types.push(value);
+        }
+        read_mime_types(child, types);
+    }
 }
 
 fn identifier(e: &Element) -> Result<i64, String> {
@@ -585,4 +848,59 @@ fn key_sets(e: &Element) -> Result<KeySets, String> {
         }
     }
     Ok(k)
+}
+
+#[cfg(test)]
+mod install_source_tests {
+    use super::*;
+    #[test]
+    fn empty_owner_normalizes_attributes_and_signing_requires_initiator() {
+        for orphan in [false, true] {
+            for input in [
+                "installerUid='123' installerAttributionTag='tag' packageSource='0'",
+                "",
+            ] {
+                let xml = format!(
+                    "<packages><package name='p' codePath='/data/p' userId='10001' isOrphaned='{orphan}' {input}/></packages>"
+                );
+                let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+                for root in [
+                    root.clone(),
+                    aim_android_xml::read(&aim_android_xml::abx::write(&root).unwrap()).unwrap(),
+                ] {
+                    let p = Settings::parse(&root).unwrap().packages.remove(0);
+                    assert_eq!(
+                        p.install_source,
+                        InstallSource {
+                            is_orphaned: orphan,
+                            ..Default::default()
+                        }
+                    );
+                }
+            }
+        }
+        let invalid = InstallSource {
+            initiating_package_signatures: Some(Signatures::default()),
+            ..Default::default()
+        };
+        assert!(invalid.normalized().is_err());
+        let retained = InstallSource {
+            initiating_package: Some("".into()),
+            installer_uid: 123,
+            installer_attribution_tag: Some("tag".into()),
+            package_source: 3,
+            ..Default::default()
+        };
+        assert_eq!(retained.clone().normalized().unwrap(), retained);
+        let unspecified_names = InstallSource {
+            installer_uid: 123,
+            installer_attribution_tag: Some("tag".into()),
+            package_source: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            unspecified_names.clone().normalized().unwrap(),
+            unspecified_names
+        );
+    }
 }

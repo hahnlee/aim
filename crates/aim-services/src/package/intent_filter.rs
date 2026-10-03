@@ -114,6 +114,12 @@ impl PatternMatcher {
         })
     }
 
+    pub(crate) fn write_cache(&self, writer: &mut super::parse::parcel::Writer) {
+        writer.string(Some(&self.pattern));
+        writer.int(self.kind);
+        writer.ints(self.parsed.as_deref());
+    }
+
     /// `writeToParcel`.
     pub fn write(&self, p: &mut Parcel) {
         p.write_string16(Some(&self.pattern));
@@ -950,7 +956,10 @@ impl IntentFilter {
 
     /// `matchRelRefGroups`: the first group that matches decides.
     fn match_rel_ref_groups(&self, data: &Uri) -> bool {
-        let groups = self.uri_relative_filter_groups.as_deref().unwrap_or_default();
+        let groups = self
+            .uri_relative_filter_groups
+            .as_deref()
+            .unwrap_or_default();
         UriRelativeFilterGroup::match_groups(groups, data)
     }
 

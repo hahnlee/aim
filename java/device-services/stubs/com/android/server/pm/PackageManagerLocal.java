@@ -11,9 +11,16 @@ public interface PackageManagerLocal {
     UnfilteredSnapshot withUnfilteredSnapshot();
 
     interface UnfilteredSnapshot extends AutoCloseable {
+        FilteredSnapshot filtered(int callingUid, android.os.UserHandle user);
         Map<String, PackageState> getPackageStates();
         Map<String, PackageState> getDisabledSystemPackageStates();
         Map<String, SharedUserApi> getSharedUsers();
+        @Override
+        void close();
+    }
+    interface FilteredSnapshot extends AutoCloseable {
+        PackageState getPackageState(String packageName);
+        Map<String, PackageState> getPackageStates();
         @Override
         void close();
     }

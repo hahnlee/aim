@@ -7,7 +7,7 @@
 use std::sync::{Arc, Weak};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
-use aim_binder_host::parcel::{Binder, Parcel, UNKNOWN_TRANSACTION};
+use aim_binder_host::parcel::{Binder, EX_ILLEGAL_STATE, Exception, Parcel, UNKNOWN_TRANSACTION};
 use aim_service_aidl::{
     dev_aim_server_ibridge as bridge, dev_aim_server_inotificationpermissioncallback as callback,
     dev_aim_server_iservicehost as host,
@@ -28,6 +28,26 @@ impl ServiceHost {
             process,
             system: Arc::downgrade(system),
         }
+    }
+
+    fn attach_package_bootstrap(&self, call: &mut Call<'_>) -> Reply {
+        let args = host::AttachPackageBootstrapBridge::read(&mut call.data)?;
+        let result = match (args.bridge, self.system.upgrade()) {
+            (Some(Binder::Handle(handle)), Some(system)) => system.attach_package_bootstrap(handle),
+            (None, _) | (Some(Binder::Local(_)), _) => Err(Exception::illegal_argument(
+                "package bootstrap requires a remote bridge",
+            )),
+            (_, None) => Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "native system owner is unavailable",
+            )),
+        };
+        let mut reply = Parcel::new();
+        match result {
+            Ok(()) => reply.write_no_exception(),
+            Err(error) => reply.write_exception(&error),
+        }
+        Ok(reply)
     }
 
     fn attach_bridge(&self, call: &mut Call<'_>) -> Reply {
@@ -96,22 +116,37 @@ impl Service for ServiceHost {
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
-        if call.code != host::ATTACH_BRIDGE && call.code != host::REQUEST_NOTIFICATION_PERMISSION {
+        if call.code != host::ATTACH_BRIDGE
+            && call.code != host::REQUEST_NOTIFICATION_PERMISSION
+            && call.code != host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
+        {
             return Err(UNKNOWN_TRANSACTION);
         }
         // Only system_server's side calls it; the system uid is the one it
         // runs as.
         if call.sender_euid != SYSTEM_UID {
+            if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {
+                let mut reply = Parcel::new();
+                reply.write_exception(&Exception::security(
+                    "package bootstrap serves the system uid only",
+                ));
+                return Ok(reply);
+            }
             eprintln!(
                 "services: call {} from uid {} refused",
                 call.code, call.sender_euid
             );
             return Ok(Parcel::new());
         }
-        if call.code == host::ATTACH_BRIDGE {
+        if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {
+            self.attach_package_bootstrap(call)
+        } else if call.code == host::ATTACH_BRIDGE {
             self.attach_bridge(call)
         } else {
             self.request_notification_permission(call)
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

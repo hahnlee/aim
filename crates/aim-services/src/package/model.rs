@@ -80,7 +80,7 @@ pub struct PackageState {
     pub restrict_update_hash: Option<Vec<u8>>,
     pub apex_module_name: Option<String>,
     /// MIME groups and their types.
-    pub mime_groups: Vec<(String, Vec<String>)>,
+    pub mime_groups: Vec<(Option<String>, Vec<Option<String>>)>,
     /// Static shared libraries used: name and version.
     pub uses_static_libraries: Vec<(String, i64)>,
     pub uses_sdk_libraries: Vec<UsesSdkLibrary>,
@@ -181,7 +181,7 @@ impl Default for InstallSource {
 pub struct SharedLibrary {
     pub path: Option<String>,
     pub package_name: Option<String>,
-    pub code_paths: Option<Vec<String>>,
+    pub code_paths: Option<Vec<Option<String>>>,
     pub name: Option<String>,
     pub version: i64,
     /// `SharedLibraryInfo.TYPE_*`.
@@ -189,8 +189,15 @@ pub struct SharedLibrary {
     pub native: bool,
     /// The declaring package: name and version code.
     pub declaring: (String, i64),
-    pub dependents: Vec<(String, i64)>,
-    pub dependencies: Vec<SharedLibrary>,
+    /// SDK dependency placeholders have no declaring package.
+    pub declaring_absent: bool,
+    pub dependents: Vec<Option<(String, i64)>>,
+    pub dependencies: Vec<Option<SharedLibrary>>,
+    pub dependents_initialized: bool,
+    pub dependencies_initialized: bool,
+    /// Raw Parcelable list and string list; null and allocated-empty are distinct.
+    pub optional_dependents: Option<Vec<Option<(String, i64)>>>,
+    pub cert_digests: Option<Vec<Option<String>>>,
 }
 
 /// `PackageUserState`: one package's state for one user.
@@ -319,6 +326,8 @@ pub struct User {
 /// SystemConfig and the device's constants the info generators read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct System {
+    /// Native AppsFilter interaction grants, carried with each query snapshot.
+    pub implicit_access: super::apps_filter::ImplicitAccess,
     /// `mAvailableFeatures`: name and version.
     pub features: Vec<(String, i32)>,
     /// `ro.opengles.version`, the `reqGlEsVersion` feature.

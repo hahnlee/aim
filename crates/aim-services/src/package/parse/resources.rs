@@ -562,17 +562,21 @@ impl Table {
         self.strings.get(i)
     }
 
-    /// `FindEntry` within this table: resource `id`'s best entry for
-    /// `config`, the type spec's flags for it, and the entry's
-    /// configuration. A shared library's package (id 0) answers for the id
-    /// the parser's `AssetManager` assigns it.
-    fn find(&self, id: u32, config: &Config) -> Option<(&Entry, u32, Config)> {
+    fn group(&self, id: u32) -> Option<&TypeGroup> {
         let pid = (id >> 24) as u8;
         let p = self
             .packages
             .iter()
             .find(|p| p.id == pid || (p.id == 0 && pid == SHARED_LIBRARY_ID))?;
-        let group = p.types.get(&((id >> 16) as u8))?;
+        p.types.get(&((id >> 16) as u8))
+    }
+
+    /// `FindEntry` within this table: resource `id`'s best entry for
+    /// `config`, the type spec's flags for it, and the entry's
+    /// configuration. A shared library's package (id 0) answers for the id
+    /// the parser's `AssetManager` assigns it.
+    fn find(&self, id: u32, config: &Config) -> Option<(&Entry, u32, Config)> {
+        let group = self.group(id)?;
         let entry = (id & 0xffff) as u16;
         let flags = group.spec_flags.get(entry as usize).copied().unwrap_or(0);
         let mut best: Option<(&Entry, &Config)> = None;
@@ -806,11 +810,26 @@ impl Resources<'_> {
     /// `FindEntry`: resource `id`'s value, the table it is in, and its
     /// flags; a framework resource as its overlays leave it.
     fn find(&self, id: u32) -> Option<(usize, &Entry, u32)> {
-        let (mut t, (mut entry, flags, mut config)) = self
-            .tables
-            .iter()
-            .enumerate()
-            .find_map(|(i, table)| Some((i, table.find(id, &self.config)?)))?;
+        let mut flags = 0;
+        let mut best: Option<(usize, &Entry, Config)> = None;
+        for (i, table) in self.tables.iter().enumerate() {
+            // AssetManager2 accumulates type-spec flags even when this
+            // APK has no configuration matching the requested value.
+            if let Some(group) = table.group(id) {
+                flags |= group
+                    .spec_flags
+                    .get((id & 0xffff) as usize)
+                    .copied()
+                    .unwrap_or(0);
+            }
+            let Some((entry, _, config)) = table.find(id, &self.config) else {
+                continue;
+            };
+            if best.is_none_or(|(_, _, previous)| config.better_than(&previous, &self.config)) {
+                best = Some((i, entry, config));
+            }
+        }
+        let (mut t, mut entry, mut config) = best?;
         if t == 0 {
             for (i, o) in self.overlays.iter().enumerate() {
                 let Some(&oid) = o.map.get(&id) else { continue };
@@ -894,6 +913,12 @@ impl Resources<'_> {
 
     /// `getString`: a string resource's string.
     pub fn resource_string(&self, id: u32) -> Option<String> {
+        self.resource_string_source(id).map(|(_, s)| s.to_owned())
+    }
+
+    /// The selected asset table and string, including XML file references.
+    /// File callers must open this table's APK, not guess from the resource ID.
+    pub fn resource_string_source(&self, id: u32) -> Option<(usize, &str)> {
         let mut v = Selected {
             kind: TYPE_REFERENCE,
             data: id,
@@ -903,7 +928,7 @@ impl Resources<'_> {
         };
         self.resolve(&mut v);
         match (v.kind, v.table) {
-            (TYPE_STRING, Some(t)) => self.string(t, v.data).map(str::to_owned),
+            (TYPE_STRING, Some(t)) => self.string(t, v.data).map(|s| (t, s)),
             _ => None,
         }
     }
@@ -917,6 +942,78 @@ impl Resources<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn table(config: Config, value: u32, flags: u32) -> Table {
+        Table {
+            strings: Strings::parse(&[0; 28]).unwrap(),
+            packages: vec![Package {
+                id: 0x7f,
+                types: [(
+                    1,
+                    TypeGroup {
+                        spec_flags: vec![flags],
+                        types: vec![Type {
+                            config,
+                            entries: [(0, Entry::Value(TYPE_INT_HEX, value))].into(),
+                        }],
+                    },
+                )]
+                .into(),
+                overlayables: Vec::new(),
+                type_names: HashMap::new(),
+                ids: HashMap::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn split_tables_supply_better_configurations_and_all_change_flags() {
+        let base = table(Config::default(), 1, 1);
+        let english = table(
+            Config {
+                language: *b"en",
+                ..Default::default()
+            },
+            2,
+            2,
+        );
+        let french = table(
+            Config {
+                language: *b"fr",
+                ..Default::default()
+            },
+            3,
+            4,
+        );
+        let res = Resources {
+            tables: vec![&base, &english, &french],
+            overlays: &[],
+            config: Config {
+                language: *b"en",
+                ..Default::default()
+            },
+        };
+        let (cookie, entry, flags) = res.find(0x7f010000).unwrap();
+        assert_eq!(cookie, 1);
+        assert!(matches!(entry, Entry::Value(TYPE_INT_HEX, 2)));
+        assert_eq!(
+            flags, 7,
+            "even the nonmatching split contributes type-spec flags"
+        );
+        let same = table(Config::default(), 4, 8);
+        let res = Resources {
+            tables: vec![&base, &same],
+            overlays: &[],
+            config: Config::default(),
+        };
+        let (cookie, entry, flags) = res.find(0x7f010000).unwrap();
+        assert_eq!(
+            cookie, 0,
+            "ordinary APKs do not override an equal configuration"
+        );
+        assert!(matches!(entry, Entry::Value(TYPE_INT_HEX, 1)));
+        assert_eq!(flags, 9);
+    }
 
     #[test]
     fn chooses_configurations_as_the_original() {

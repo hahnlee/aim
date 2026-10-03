@@ -9,6 +9,7 @@ import java.util.List;
 
 public class ArchiveState {
     public ArchiveState(List<ArchiveActivityInfo> activityInfos, String installerTitle) { throw new RuntimeException("stub"); }
+    public ArchiveState(List<ArchiveActivityInfo> activityInfos, String installerTitle, long time) { throw new RuntimeException("stub"); }
     public List<ArchiveActivityInfo> getActivityInfos() { throw new RuntimeException("stub"); }
     public String getInstallerTitle() { throw new RuntimeException("stub"); }
     public long getArchiveTimeMillis() { throw new RuntimeException("stub"); }

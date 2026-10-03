@@ -3,7 +3,15 @@
 package android.content.pm;
 
 public class ApplicationInfo extends PackageItemInfo {
+    public static final android.os.Parcelable.Creator<ApplicationInfo> CREATOR = null;
     public boolean enabled;
     public int targetSdkVersion;
     public int uid;
+    public String sourceDir;
+    public String[] splitSourceDirs;
+    public String[] resourceDirs;
+    public String[] overlayPaths;
+    public String[] sharedLibraryFiles;
+    public java.util.List<SharedLibraryInfo> sharedLibraryInfos;
+    public java.util.List<SharedLibraryInfo> optionalSharedLibraryInfos;
 }

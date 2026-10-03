@@ -21,6 +21,55 @@ pub struct Entry {
     pub installer: String,
 }
 
+/// Settings' ten-field wire format. Preserve GID order and duplicates from the
+/// permission owner; tokens cannot contain whitespace or inject another row.
+pub fn serialize(entries: &[Entry]) -> Result<String, String> {
+    use std::fmt::Write;
+    let mut output = String::new();
+    let mut names = std::collections::BTreeSet::new();
+    for entry in entries {
+        for token in [
+            &entry.name,
+            &entry.data_dir,
+            &entry.seinfo,
+            &entry.installer,
+        ] {
+            if token.is_empty() || token.bytes().any(|b| b.is_ascii_whitespace()) {
+                return Err("packages.list requires nonempty single-token fields".into());
+            }
+        }
+        if !names.insert(&entry.name) {
+            return Err("duplicate packages.list package".into());
+        }
+        let gids = if entry.gids.is_empty() {
+            "none".into()
+        } else {
+            entry
+                .gids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        writeln!(
+            &mut output,
+            "{} {} {} {} {} {} {} {} {} {}",
+            entry.name,
+            entry.uid,
+            u8::from(entry.debuggable),
+            entry.data_dir,
+            entry.seinfo,
+            gids,
+            u8::from(entry.profileable_from_shell),
+            entry.version_code,
+            u8::from(entry.profileable),
+            entry.installer
+        )
+        .unwrap();
+    }
+    Ok(output)
+}
+
 /// The entries of `text`. The last four fields are optional, as for
 /// libpackagelistparser (which reads up to the version code); a line
 /// without one of the first six is an error.

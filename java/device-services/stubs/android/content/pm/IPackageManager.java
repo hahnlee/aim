@@ -5,6 +5,7 @@ package android.content.pm;
 import android.os.RemoteException;
 
 public interface IPackageManager extends android.os.IInterface {
+    PackageInfo getPackageInfo(String packageName, long flags, int userId) throws RemoteException;
     boolean isFirstBoot() throws RemoteException;
     boolean isDeviceUpgrading() throws RemoteException;
     void registerPackageMonitorCallback(android.os.IRemoteCallback callback, int userId) throws RemoteException;
@@ -14,4 +15,7 @@ public interface IPackageManager extends android.os.IInterface {
     byte[] getPreferredActivityBackup(int userId) throws RemoteException;
     android.content.ComponentName getInstantAppResolverComponent() throws RemoteException;
     android.content.ComponentName getInstantAppInstallerComponent() throws RemoteException;
+    abstract class Stub extends android.os.Binder implements IPackageManager {
+        public static IPackageManager asInterface(android.os.IBinder binder) { throw new RuntimeException("stub"); }
+    }
 }

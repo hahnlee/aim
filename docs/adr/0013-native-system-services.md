@@ -390,7 +390,13 @@ The migration's state and conformance results are in
   checked as the `nop` edit is (each site found as often as listed, the
   target a public static method of that signature) and verified as ART
   opens it, recorded on the `replace` of services.jar in
-  `image/overlay.toml`. The list is empty until a user lands: M4's
+  `image/overlay.toml`. On the M4 C branch, the first entry redirects PMS
+  `main` to the device's package bootstrap entry. It synchronously attaches
+  the original policy bridge after PlatformCompat registration and before
+  calling original PMS `main` (#834). Attachment failure aborts bootstrap;
+  missing policy ownership is not replaced with a default. Original PMS
+  remains until the complete facade and C acceptance gates pass (#798).
+  The remaining planned users are M4's
   slice C (PackageManagerService's `main` and its eleven uses in
   SystemServer, UserManagerService's 15 calls) and a native `power`
   (#668, core milestone). Details in

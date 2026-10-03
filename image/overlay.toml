@@ -470,7 +470,7 @@ reason = "freeform windows: window mode shows each freeform task as a macOS wind
 [[replace]]
 path = "/system/framework/services.jar"
 source = "target/aim/system-server/services.jar"
-reason = "SystemServer does not start the services image/native-services lists (their startService calls are nops), which native implementations replace, and the call sites image/system-server-redirects lists call static methods of aim-services.jar (the dex gets their method ids); nothing else changes (ADR 0013)"
+reason = "SystemServer does not start the services image/native-services lists (their startService calls are nops), which native implementations replace, and the call sites image/system-server-redirects lists call static methods of aim-services.jar (the dex gets their method ids); the M4 C entry attaches the original package-policy bridge before original PMS main, which stays until C gates pass (#834, #798); nothing else changes (ADR 0013)"
 
 [[add]]
 path = "/system/etc/aim/native-services"

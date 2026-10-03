@@ -89,6 +89,50 @@ fn set(class: Option<&str>, package: &str, new_state: i32) -> (u32, Parcel) {
     (code, p)
 }
 
+#[test]
+fn enabled_decoder_preserves_side_effect_flags_and_binder_identity() {
+    for class in [Some(MAIN), None] {
+        let mut p = Parcel::new();
+        p.write_interface_token(pm::DESCRIPTOR);
+        let code = match class {
+            Some(class) => {
+                p.write_i32(1);
+                p.write_string16(Some(APP));
+                p.write_string16(Some(class));
+                pm::SET_COMPONENT_ENABLED_SETTING
+            }
+            None => {
+                p.write_string16(Some(APP));
+                pm::SET_APPLICATION_ENABLED_SETTING
+            }
+        };
+        p.write_i32(2);
+        // DONT_KILL_APP | SYNCHRONOUS; these do not change the enabled
+        // value but must survive decoding for the native service.
+        p.write_i32(3);
+        p.write_i32(10);
+        p.write_string16(None);
+        let setting =
+            enabled::Setting::read(code, 1_010_100, &mut Reader::new(p.data(), &[])).unwrap();
+        assert_eq!(setting.package, APP);
+        assert_eq!(setting.class.as_deref(), class);
+        assert_eq!(setting.new_state, 2);
+        assert_eq!(setting.flags, 3);
+        assert_eq!(setting.user, 10);
+        assert_eq!(setting.calling_package, "1010100");
+        // The last string length is incomplete; a malformed call must
+        // never produce a setting to commit.
+        assert!(
+            enabled::Setting::read(
+                code,
+                1_010_100,
+                &mut Reader::new(&p.data()[..p.data().len() - 1], &[]),
+            )
+            .is_none()
+        );
+    }
+}
+
 fn answer(writes: &Writes, uid: u32, seq: u64, sent: Instant, call: (u32, Parcel)) -> Answer {
     let (code, data) = call;
     writes
@@ -120,7 +164,7 @@ fn exception(a: &Answer) -> Option<(i32, String)> {
 }
 
 fn states(state: Arc<State>) -> States {
-    Box::new(move |_| Some(state.clone()))
+    Box::new(move |_, _| Some(state.clone()))
 }
 
 fn due(writes: &Writes, state: Arc<State>) -> Vec<Check> {
@@ -508,31 +552,28 @@ fn an_install_s_signers_are_verified_from_its_apks() {
     let Some(root) = aim_paths::original_image_with(GSF) else {
         return;
     };
-    let dir = std::env::temp_dir().join(format!("aim-write-apks-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let base = dir.join("base.apk");
-    let _ = std::fs::remove_file(&base);
-    std::os::unix::fs::symlink(root.join(GSF), &base).unwrap();
-    let guest = "/data/app/~~a==/com.google.android.gsf-b==".to_string();
-    let host = dir.clone();
+    let source = root.join(GSF);
+    let guest = "/data/app/example/nonstandard-base.apk";
+    let split = "/data/app/example/nonstandard-feature.apk";
     let apks = apk::Apks {
-        files: Box::new(move |p| (p == guest).then(|| host.clone())),
-        build: crate::package::sign::Build {
-            sdk_int: 36,
-            release: true,
-            always_load_past_certs_v4: true,
-        },
+        files: Box::new(move |p| ([guest, split].contains(&p)).then(|| source.clone())),
+        platform: crate::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
-    let ps = PackageState {
-        path: "/data/app/~~a==/com.google.android.gsf-b==".into(),
-        ..PackageState::default()
-    };
-    let pkg = AndroidPackage {
+    let mut pkg = AndroidPackage {
         target_sdk_version: 36,
+        base_apk_path: Some(guest.into()),
         ..AndroidPackage::default()
     };
-    let signatures = apks.signatures(&ps, &pkg).unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
+    let signatures = apks.signatures(&pkg).unwrap();
+    pkg.split_code_paths = Some(vec![Some(split.into())]);
+    assert_eq!(apks.signatures(&pkg).unwrap(), signatures);
+    pkg.split_code_paths = Some(vec![None]);
+    assert_eq!(
+        apks.signatures(&pkg).unwrap_err(),
+        "null parsed split APK path"
+    );
+    pkg.split_code_paths = Some(vec![Some("/data/app/example/unreadable.apk".into())]);
+    assert!(apks.signatures(&pkg).unwrap_err().contains("not readable"));
     assert_eq!(
         signatures.scheme_version,
         crate::package::sign::SIGNING_BLOCK_V3

@@ -92,7 +92,11 @@ are then verified as ART opens them (the build tools' `dexdump -c`, ART's
 redirects eight calls of SystemServer and UserManagerService in the
 pinned services.jar to a fixture class and compares dexdump's
 disassembly of every dex before and after: only the redirected calls
-differ. The list is empty: its first users are M4's slice C
+differ. The M4 C branch's first entry attaches the synchronous package-policy
+bridge at PMS `main`, after original PlatformCompat registration and before
+original scanning (#834). The wrapper continues into original PMS until the
+complete facade and C acceptance gates pass (#798); attachment failure stops
+bootstrap. Remaining users are M4's slice C
 (m4-packagemanager.md, "The call sites") and a native `power` (#668, in
 the core milestone). services.jar's class loader context does not hold
 aim-services.jar, so the `oat` node compiles a redirected call against an
@@ -163,7 +167,9 @@ in this image, that is the `package_info_cache` nonce in
 `PropertyInvalidatedCache.query` does: keyed by permission and uid
 (`checkPermission`; the pid decides nothing) or by permission and
 package (`IPermissionManager.checkPermission`), stored with the nonce
-read before asking, and dropped once the nonce differs. While the nonce
+read before asking, and dropped once the nonce or its mapped owner differs.
+An old in-flight reply cannot fill a replacement owner's cache, even if both
+stores contain the same numeric nonce (#840). While the nonce
 is unset or reserved, or before the bridge is attached, every check is
 asked (`crates/aim-services/src/system.rs`).
 
@@ -362,7 +368,11 @@ service's own CTS stays the gate.
 **Nonces (#497).** `IBridge.getApplicationSharedMemory` returns a
 read-only fd of ActivityManager's `ApplicationSharedMemory`
 (`getReadOnlyFileDescriptor`, what `bindApplication` hands an app). The
-host maps it (`crates/aim-services/src/nonces.rs`) and finds a nonce's
+host retains the bridge Binder with its mapped memory as one source. A death
+notification removes only that source; a previous bridge cannot erase a newer
+mapping, and repeated attachment of the same endpoint keeps one death
+registration (#835/#841). The host maps it (`crates/aim-services/src/nonces.rs`)
+and finds a nonce's
 handle in the store's name block, read when its hash (`Arrays.hashCode`)
 matches, as `NonceStore.getHandleForName` does. Permission checks
 (`IActivityManager.checkPermission`, `IPermissionManager.checkPermission`)

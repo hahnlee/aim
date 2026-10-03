@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aim_binder_host::parcel::{EX_SECURITY, Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::ReadParcelable;
@@ -90,14 +90,17 @@ type UsedVersion = fn(&PackageState, &str) -> Option<i64>;
 type Source<'a> = Option<&'a PackageState>;
 
 /// Where the model's state comes from: a state at least as new as the
-/// original's when asked (`feed::Feed::fresh`), or none.
-pub type States = Box<dyn Fn(Duration) -> Option<Arc<State>> + Send + Sync>;
+/// original's at the instant given (`feed::Feed::fresh_since`), or none.
+pub type States = Box<dyn Fn(Instant, Duration) -> Option<Arc<State>> + Send + Sync>;
 
 /// `package` and `package_native`, modelled over the feed's state.
 pub struct PackageModel {
     states: States,
     /// Intent resolution, and the apps filter of each state.
     resolver: Resolver,
+    /// The same for the states answered from again, kept apart so that
+    /// they do not evict the latest state's.
+    before: Resolver,
     /// The writes, compared with the original's (slice B).
     writes: Writes,
     /// The not-modelled paths reported so far: native or not, the
@@ -110,6 +113,7 @@ impl PackageModel {
         Arc::new(PackageModel {
             states,
             resolver: Resolver::default(),
+            before: Resolver::default(),
             writes: Writes::default(),
             reported: Mutex::new(HashSet::new()),
         })
@@ -128,7 +132,7 @@ pub fn start(
     dump: PathBuf,
     files: super::write::Files,
 ) -> Result<Arc<PackageModel>, String> {
-    let build = super::sign::Build::of(&super::parse::Platform::load(image, Default::default())?);
+    let platform = super::parse::Platform::load(image, Default::default())?;
     let join = Mutex::new(Join {
         framework: system_config::Framework::load(image)?,
         image: image.to_path_buf(),
@@ -139,12 +143,14 @@ pub fn start(
         parsed: HashMap::new(),
     });
     let feed = Feed::start(system, Some(dump));
-    let model = PackageModel::new(Box::new(move |t| {
-        let fed = feed.fresh(t)?;
+    let model = PackageModel::new(Box::new(move |since, t| {
+        let fed = feed.fresh_since(since, t)?;
         join.lock().unwrap().state(fed)
     }));
     model.writes.watch_sessions(system);
-    model.writes.read_apks(super::write::Apks { files, build });
+    model
+        .writes
+        .read_apks(super::write::Apks { files, platform });
     Ok(model)
 }
 
@@ -189,6 +195,7 @@ impl Join {
         });
         let mut state = (*fed).clone();
         state.system = System {
+            implicit_access: fed.system.implicit_access.clone(),
             force_system_packages_queryable: fed.system.force_system_packages_queryable,
             force_queryable_packages: fed.system.force_queryable_packages.clone(),
             ..device.clone()
@@ -221,39 +228,21 @@ impl Join {
 
 impl ShadowModel for PackageModel {
     fn answer(&self, call: &mut ShadowCall<'_>) -> Answer {
-        let Some(state) = (self.states)(FRESH) else {
+        let Some(state) = (self.states)(call.sent, FRESH) else {
             return Answer::NotModelled;
         };
         self.writes.observe(&state, call.dropped);
         if let Some(answer) = self.writes.answer(call) {
             return answer;
         }
-        if let Some(answer) = self.resolver.answer(&state, call) {
-            return answer;
-        }
-        let resolution = self.resolver.resolution(&state);
-        let q = Query {
-            state: &state,
-            filter: &resolution.apps_filter,
-            calling_uid: call.sender_euid as i32,
-        };
-        let answered = match call.descriptor {
-            pm::DESCRIPTOR => q.package(call.code, &mut call.data),
-            native::DESCRIPTOR => q.native(call.code, &mut call.data),
-            _ => Err(NotModelled("another interface")),
-        };
-        match answered {
-            Ok(reply) => Answer::Reply(reply),
-            Err(NotModelled(reason)) => {
-                let key = (call.descriptor == native::DESCRIPTOR, call.code, reason);
-                if self.reported.lock().unwrap().insert(key) {
-                    eprintln!(
-                        "package shadow: {}#{} not modelled: {reason}",
-                        call.descriptor, call.code
-                    );
-                }
-                Answer::NotModelled
-            }
+        self.query(&self.resolver, &state, call)
+    }
+
+    fn answer_before(&self, call: &mut ShadowCall<'_>) -> Option<Answer> {
+        let state = self.writes.state_before(call.sent)?;
+        match self.query(&self.before, &state, call) {
+            Answer::NotModelled => None,
+            answer => Some(answer),
         }
     }
 
@@ -273,6 +262,38 @@ impl ShadowModel for PackageModel {
 
     fn checks(&self) -> Vec<Check> {
         self.writes.checks(&self.states)
+    }
+}
+
+impl PackageModel {
+    /// Answers a query from `state`, resolving intents with `resolver`.
+    fn query(&self, resolver: &Resolver, state: &Arc<State>, call: &mut ShadowCall<'_>) -> Answer {
+        if let Some(answer) = resolver.answer(state, call) {
+            return answer;
+        }
+        let resolution = match resolver.resolution(state) {
+            Ok(resolution) => resolution,
+            Err(error) => return Answer::Reply(error.reply()),
+        };
+        let q = Query {
+            state,
+            filter: &resolution.apps_filter,
+            calling_uid: call.sender_euid as i32,
+        };
+        let answered = q.answer(call.descriptor, call.code, &mut call.data);
+        match answered {
+            Ok(reply) => Answer::Reply(reply),
+            Err(NotModelled(reason)) => {
+                let key = (call.descriptor == native::DESCRIPTOR, call.code, reason);
+                if self.reported.lock().unwrap().insert(key) {
+                    eprintln!(
+                        "package shadow: {}#{} not modelled: {reason}",
+                        call.descriptor, call.code
+                    );
+                }
+                Answer::NotModelled
+            }
+        }
     }
 }
 
@@ -313,6 +334,17 @@ fn thrown<T>(r: Thrown<T>, write: impl FnOnce(&mut Parcel, T)) -> Answered {
 }
 
 impl Query<'_> {
+    /// Answers a package query with the caller's Binder identity. The
+    /// reader includes the interface token, checked by generated AIDL.
+    /// An unavailable state dependency remains an explicit error.
+    pub fn answer(&self, descriptor: &str, code: u32, data: &mut Reader<'_>) -> Answered {
+        match descriptor {
+            pm::DESCRIPTOR => self.package(code, data),
+            native::DESCRIPTOR => self.native(code, data),
+            _ => Err(NotModelled("another interface")),
+        }
+    }
+
     fn package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
             pm::GET_PACKAGE_INFO => {
@@ -1115,7 +1147,7 @@ impl Query<'_> {
             .map(|s| info::SigningInfo {
                 scheme_version: s.scheme_version,
                 signatures: s.signatures.clone(),
-                public_keys: None,
+                public_keys: s.public_keys.clone(),
                 past_signing_certificates: s
                     .past_signatures
                     .as_ref()

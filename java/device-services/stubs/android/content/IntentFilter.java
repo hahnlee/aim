@@ -5,6 +5,10 @@ package android.content;
 public class IntentFilter {
     public IntentFilter() { throw new RuntimeException("stub"); }
     public IntentFilter(String action) { throw new RuntimeException("stub"); }
+    public static class MalformedMimeTypeException extends android.util.AndroidException {
+        public MalformedMimeTypeException(String type) { throw new RuntimeException("stub"); }
+    }
+    public final void addDynamicDataType(String type) throws MalformedMimeTypeException { throw new RuntimeException("stub"); }
     public final void addAction(String action) { throw new RuntimeException("stub"); }
     public final void addDataScheme(String scheme) { throw new RuntimeException("stub"); }
 }

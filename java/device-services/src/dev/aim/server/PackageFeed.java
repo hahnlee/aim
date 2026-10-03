@@ -14,11 +14,9 @@ import android.content.pm.PackageManager;
 import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
-import android.content.pm.SharedLibraryInfo;
 import android.content.pm.Signature;
 import android.content.pm.SigningDetails;
 import android.content.pm.SigningInfo;
-import android.content.pm.VersionedPackage;
 import android.content.pm.overlay.OverlayPaths;
 import android.content.res.Resources;
 import android.database.ContentObserver;
@@ -43,6 +41,7 @@ import android.util.SparseArray;
 
 import com.android.internal.compat.IPlatformCompat;
 import com.android.internal.pm.parsing.pkg.ParsedPackage;
+import com.android.internal.pm.pkg.component.ParsedPermission;
 import com.android.internal.pm.pkg.component.ParsedProvider;
 import com.android.server.LocalManagerRegistry;
 import com.android.server.pm.PackageManagerLocal;
@@ -51,7 +50,6 @@ import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.ArchiveState;
 import com.android.server.pm.pkg.PackageState;
 import com.android.server.pm.pkg.PackageUserState;
-import com.android.server.pm.pkg.SharedLibrary;
 import com.android.server.pm.pkg.SharedUserApi;
 
 import java.io.File;
@@ -61,6 +59,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.PublicKey;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -122,8 +121,6 @@ final class PackageFeed extends IPackageFeed.Stub {
     private IPackageFeedHost mHost;
     /** What the host holds: each record's SHA-256, by kind and key. */
     private final TreeMap<Key, byte[]> mSent = new TreeMap<>();
-    /** The AndroidPackage each parsed record was made of. */
-    private final HashMap<Key, AndroidPackage> mParsed = new HashMap<>();
     /**
      * Syncable providers' declared authorities, by the AndroidPackage they
      * were read for: this batch's and the previous one's.
@@ -245,7 +242,6 @@ final class PackageFeed extends IPackageFeed.Stub {
             Slog.w(TAG, "the package feed's host died", e);
             mHost = null;
             mSent.clear();
-            mParsed.clear();
         } catch (RuntimeException e) {
             // What the host holds is unknown now: the next batch sends all.
             Slog.e(TAG, "a package feed batch failed", e);
@@ -258,21 +254,19 @@ final class PackageFeed extends IPackageFeed.Stub {
     private void send(IPackageFeedHost host, boolean reset, long token) throws RemoteException {
         if (reset) {
             mSent.clear();
-            mParsed.clear();
         }
         TreeMap<Key, byte[]> records = new TreeMap<>();
-        TreeMap<Key, AndroidPackage> parsed = new TreeMap<>();
         TreeSet<Integer> users = new TreeSet<>();
-        mInstalledPermissions = installedPermissions();
         mDeclaredBefore = mDeclared;
         mDeclared = new IdentityHashMap<>();
         PackageManagerLocal local = LocalManagerRegistry.getManager(PackageManagerLocal.class);
         try (PackageManagerLocal.UnfilteredSnapshot snapshot = local.withUnfilteredSnapshot()) {
+            mInstalledPermissions = installedPermissions(snapshot.getPackageStates().values());
             for (PackageState state : snapshot.getPackageStates().values()) {
-                add(records, parsed, users, PACKAGE, PARSED, state);
+                add(records, users, PACKAGE, PARSED, state);
             }
             for (PackageState state : snapshot.getDisabledSystemPackageStates().values()) {
-                add(records, parsed, users, DISABLED_SYSTEM_PACKAGE, DISABLED_SYSTEM_PARSED,
+                add(records, users, DISABLED_SYSTEM_PACKAGE, DISABLED_SYSTEM_PARSED,
                         state);
             }
             for (SharedUserApi user : snapshot.getSharedUsers().values()) {
@@ -291,31 +285,23 @@ final class PackageFeed extends IPackageFeed.Stub {
                 mSent.put(e.getKey(), hash);
             }
         }
-        for (Map.Entry<Key, AndroidPackage> e : parsed.entrySet()) {
-            if (mParsed.get(e.getKey()) != e.getValue()) {
-                byte[] record = PackageCacher.toCacheEntryStatic((ParsedPackage) e.getValue());
-                put(host, e.getKey(), record);
-                mSent.put(e.getKey(), sha256(record));
-                mParsed.put(e.getKey(), e.getValue());
-            }
-        }
         for (Key key : new ArrayList<>(mSent.keySet())) {
-            if (!records.containsKey(key) && !parsed.containsKey(key)) {
+            if (!records.containsKey(key)) {
                 host.remove(key.kind, key.name);
                 mSent.remove(key);
-                mParsed.remove(key);
             }
         }
         host.end(digest(), token);
     }
 
-    private void add(Map<Key, byte[]> records, Map<Key, AndroidPackage> parsed, Set<Integer> users,
+    private void add(Map<Key, byte[]> records, Set<Integer> users,
             int kind, int parsedKind, PackageState state) {
         String name = state.getPackageName();
         records.put(new Key(kind, name), packageState(state, kind == PACKAGE));
         AndroidPackage pkg = state.getAndroidPackage();
-        if (pkg instanceof ParsedPackage) {
-            parsed.put(new Key(parsedKind, name), pkg);
+        if (pkg instanceof ParsedPackage parsed) {
+            // PackageImpl fields can change while the original retains its identity.
+            records.put(new Key(parsedKind, name), PackageCacher.toCacheEntryStatic(parsed));
         }
         SparseArray<? extends PackageUserState> states = state.getUserStates();
         for (int i = 0; i < states.size(); i++) {
@@ -416,14 +402,7 @@ final class PackageFeed extends IPackageFeed.Stub {
                     s.isPrivileged(), s.isProduct(), s.isRequiredForSystemUser(),
                     s.isScannedAsStoppedSystemApp(), s.isSystem(), s.isSystemExt(),
                     s.isUpdateAvailable(), s.isUpdatedSystemApp(), s.isVendor()));
-            Map<String, Set<String>> mimeGroups = s.getMimeGroups();
-            p.writeInt(mimeGroups == null ? -1 : mimeGroups.size());
-            if (mimeGroups != null) {
-                for (Map.Entry<String, Set<String>> e : new TreeMap<>(mimeGroups).entrySet()) {
-                    p.writeString(e.getKey());
-                    strings(p, e.getValue() == null ? null : new TreeSet<>(e.getValue()));
-                }
-            }
+            PackageMimeGroups.write(p, s.getMimeGroups());
             String[] staticLibraries = s.getUsesStaticLibraries();
             long[] staticVersions = s.getUsesStaticLibrariesVersions();
             p.writeInt(staticLibraries.length);
@@ -441,13 +420,7 @@ final class PackageFeed extends IPackageFeed.Stub {
                 p.writeBoolean(sdkOptional[i]);
             }
             strings(p, s.getUsesLibraryFiles());
-            List<SharedLibrary> libraries = s.getSharedLibraryDependencies();
-            p.writeInt(libraries.size());
-            for (SharedLibrary l : libraries) {
-                sharedLibrary(p, l.getName(), l.getPath(), l.getPackageName(), l.getAllCodePaths(),
-                        l.getVersion(), l.getType(), l.isNative(), l.getDeclaringPackage(),
-                        l.getDependentPackages(), l.getDependencies());
-            }
+            PackageLibraryFeed.write(p, s.getSharedLibraryDependencies());
             strings(p, mInstalledPermissions.get(s.getPackageName()));
             signing(p, s.getSigningInfo());
             installSource(p, installed ? s : null);
@@ -568,37 +541,8 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
     }
 
-    /** A SharedLibrary or SharedLibraryInfo, with its dependencies'. */
-    private static void sharedLibrary(Parcel p, String name, String path, String packageName,
-            List<String> codePaths, long version, int type, boolean isNative,
-            VersionedPackage declaring, List<VersionedPackage> dependents,
-            List<SharedLibraryInfo> dependencies) {
-        p.writeString(name);
-        p.writeString(path);
-        p.writeString(packageName);
-        strings(p, codePaths);
-        p.writeLong(version);
-        p.writeInt(type);
-        p.writeBoolean(isNative);
-        p.writeString(declaring.getPackageName());
-        p.writeLong(declaring.getLongVersionCode());
-        p.writeInt(dependents.size());
-        for (VersionedPackage d : dependents) {
-            p.writeString(d.getPackageName());
-            p.writeLong(d.getLongVersionCode());
-        }
-        p.writeInt(dependencies == null ? -1 : dependencies.size());
-        if (dependencies != null) {
-            for (SharedLibraryInfo l : dependencies) {
-                sharedLibrary(p, l.getName(), l.getPath(), l.getPackageName(),
-                        l.getAllCodePaths(), l.getLongVersion(), l.getType(), l.isNative(),
-                        l.getDeclaringPackage(), l.getDependentPackages(), l.getDependencies());
-            }
-        }
-    }
-
     /** The installed permission definitions, by the package that defines each. */
-    private Map<String, TreeSet<String>> installedPermissions() {
+    private Map<String, TreeSet<String>> installedPermissions(Collection<PackageState> packages) {
         PackageManager pm = mContext.getPackageManager();
         List<String> groups = new ArrayList<>();
         groups.add(null);
@@ -616,6 +560,28 @@ final class PackageFeed extends IPackageFeed.Stub {
             for (PermissionInfo permission : permissions) {
                 installed.computeIfAbsent(permission.packageName, k -> new TreeSet<>())
                         .add(permission.name);
+            }
+        }
+        // Group queries can omit installed definitions.
+        for (PackageState state : packages) {
+            AndroidPackage pkg = state.getAndroidPackage();
+            if (pkg == null) {
+                continue;
+            }
+            for (ParsedPermission permission : pkg.getPermissions()) {
+                String name = permission.getName();
+                TreeSet<String> names = installed.get(state.getPackageName());
+                if (names != null && names.contains(name)) {
+                    continue;
+                }
+                try {
+                    PermissionInfo info = pm.getPermissionInfo(name, 0);
+                    if (state.getPackageName().equals(info.packageName)) {
+                        installed.computeIfAbsent(info.packageName, k -> new TreeSet<>()).add(name);
+                    }
+                } catch (PackageManager.NameNotFoundException e) {
+                    // A declared permission need not be the installed definition.
+                }
             }
         }
         return installed;
@@ -640,7 +606,7 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
     }
 
-    /** SigningDetails: the scheme, the signers, the lineage with its capabilities. */
+    /** SigningDetails: the scheme, signers, keys and lineage. */
     private static void signing(Parcel p, SigningInfo info) {
         signing(p, info == null ? null : info.getSigningDetails());
     }
@@ -652,6 +618,13 @@ final class PackageFeed extends IPackageFeed.Stub {
         }
         p.writeInt(details.getSignatureSchemeVersion());
         signatures(p, details.getSignatures());
+        Set<PublicKey> keys = details.getPublicKeys();
+        p.writeInt(keys == null ? -1 : keys.size());
+        if (keys != null) {
+            for (PublicKey key : keys) {
+                p.writeSerializable(key);
+            }
+        }
         signatures(p, details.getPastSigningCertificates());
     }
 

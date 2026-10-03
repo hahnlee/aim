@@ -101,9 +101,15 @@ impl Platform {
 
     /// A framework `bool` resource for the parser's configuration.
     fn framework_bool(&self, name: &str) -> bool {
-        let Some(id) = self.framework.id("bool", name) else {
-            return false;
-        };
+        self.framework_boolean(name).unwrap_or(false)
+    }
+
+    /// A required image framework boolean after static overlay resolution.
+    pub fn framework_boolean(&self, name: &str) -> Result<bool, String> {
+        let id = self
+            .framework
+            .id("bool", name)
+            .ok_or_else(|| format!("missing framework boolean: {name}"))?;
         let res = Resources {
             tables: vec![&self.framework],
             overlays: &self.framework_overlays,
@@ -117,7 +123,12 @@ impl Platform {
             flags: 0,
         };
         res.resolve(&mut v);
-        v.kind == super::resources::TYPE_INT_BOOLEAN && v.data != 0
+        if v.kind != super::resources::TYPE_INT_BOOLEAN {
+            return Err(format!(
+                "framework resource is not a resolved boolean: {name}"
+            ));
+        }
+        Ok(v.data != 0)
     }
 }
 

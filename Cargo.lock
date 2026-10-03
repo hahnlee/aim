@@ -244,6 +244,7 @@ dependencies = [
 name = "aim-services"
 version = "0.1.0"
 dependencies = [
+ "aim-android-image",
  "aim-android-xml",
  "aim-apps",
  "aim-binder-driver",
@@ -255,7 +256,9 @@ dependencies = [
  "aim-hostcall",
  "aim-paths",
  "aim-service-aidl",
+ "aim-storage",
  "android-image-extract",
+ "crc32fast",
  "dsa",
  "flate2",
  "libc",

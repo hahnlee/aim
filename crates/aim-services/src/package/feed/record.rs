@@ -8,9 +8,10 @@ use aim_service_aidl::{read_byte_array, read_int_array, read_string_list};
 
 use crate::package::intent_filter::UriRelativeFilterGroup;
 use crate::package::model::{
-    InstallSource, OverlayPaths, PackageState, PackageUserState, Platform, SharedLibrary,
-    SharedUser, StateFlags, User,
+    InstallSource, OverlayPaths, PackageState, PackageUserState, Platform, SharedUser, StateFlags,
+    User,
 };
+use crate::package::pkg::Serialized;
 use crate::package::restrictions::{ArchiveActivity, ArchiveState};
 use crate::package::settings::{PRIVATE_FLAG_PRIVILEGED, Signatures, UsesSdkLibrary};
 
@@ -73,11 +74,7 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
         // Only PackageStateInternal has isLoading (#716).
         loading: false,
     };
-    let groups = r.read_i32()?;
-    for _ in 0..groups.max(0) {
-        let name = string(r)?.unwrap_or_default();
-        s.mime_groups.push((name, strings(r)?));
-    }
+    s.mime_groups = mime_groups(r)?;
     for _ in 0..count(r)? {
         s.uses_static_libraries
             .push((string(r)?.unwrap_or_default(), r.read_i64()?));
@@ -91,7 +88,8 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
     }
     s.uses_library_files = strings(r)?;
     for _ in 0..count(r)? {
-        s.uses_library_infos.push(shared_library(r)?);
+        s.uses_library_infos
+            .push(super::super::library_parcel::read_feed(r)?);
     }
     s.installed_permissions = strings(r)?;
     s.signatures = signing(r)?;
@@ -177,7 +175,7 @@ fn user_state(r: &mut Reader<'_>) -> Result<PackageUserState> {
             activities.push(ArchiveActivity {
                 title: string(r)?.unwrap_or_default(),
                 original_component_name: string(r)?.unwrap_or_default(),
-                icon_path: string(r)?.unwrap_or_default(),
+                icon_path: string(r)?,
                 monochrome_icon_path: string(r)?,
             });
         }
@@ -205,29 +203,6 @@ fn user_state(r: &mut Reader<'_>) -> Result<PackageUserState> {
         u.domain_selection = Some((allowed, host_states(r)?));
     }
     Ok(u)
-}
-
-/// A `SharedLibrary` or `SharedLibraryInfo` with its dependencies.
-fn shared_library(r: &mut Reader<'_>) -> Result<SharedLibrary> {
-    let mut l = SharedLibrary {
-        name: string(r)?,
-        path: string(r)?,
-        package_name: string(r)?,
-        code_paths: read_string_list(r)?.map(|v| v.into_iter().flatten().collect()),
-        version: r.read_i64()?,
-        kind: r.read_i32()?,
-        native: r.read_bool()?,
-        declaring: (string(r)?.unwrap_or_default(), r.read_i64()?),
-        ..SharedLibrary::default()
-    };
-    for _ in 0..count(r)? {
-        l.dependents
-            .push((string(r)?.unwrap_or_default(), r.read_i64()?));
-    }
-    for _ in 0..count(r)? {
-        l.dependencies.push(shared_library(r)?);
-    }
-    Ok(l)
 }
 
 /// `SharedUserApi`'s getters.
@@ -287,17 +262,36 @@ pub fn system(bytes: &[u8]) -> Result<(bool, Vec<String>, Platform)> {
     Ok((all, packages, p))
 }
 
-/// `SigningDetails`: the scheme (-1 for none), the signers, then the past
-/// signers with their capabilities.
+/// `SigningDetails`: the scheme (-1 for none), signers, serialized public
+/// keys, then the past signers with their capabilities.
 fn signing(r: &mut Reader<'_>) -> Result<Option<Signatures>> {
     let scheme_version = r.read_i32()?;
     if scheme_version < 0 {
         return Ok(None);
     }
     let current = signatures(r)?.unwrap_or_default();
+    let keys = r.read_i32()?;
+    let public_keys = if keys < 0 {
+        None
+    } else {
+        Some(
+            (0..keys)
+                .map(|_| {
+                    let Some(class) = string(r)? else {
+                        return Ok(None);
+                    };
+                    Ok(Some(Serialized {
+                        class,
+                        bytes: read_byte_array(r)?.unwrap_or_default(),
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )
+    };
     Ok(Some(Signatures {
         scheme_version,
         signatures: current.into_iter().map(|(der, _)| der).collect(),
+        public_keys,
         past_signatures: signatures(r)?,
     }))
 }
@@ -338,4 +332,24 @@ fn strings(r: &mut Reader<'_>) -> Result<Vec<String>> {
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect())
+}
+
+pub(super) fn mime_groups(
+    r: &mut Reader<'_>,
+) -> Result<Vec<(Option<String>, Vec<Option<String>>)>> {
+    let count = r.read_i32()?;
+    if count < 0 {
+        return Err(aim_binder_host::parcel::BAD_VALUE);
+    }
+    let mut groups = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
+    for _ in 0..count {
+        let name = string(r)?;
+        if !names.insert(name.clone()) {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let types = read_string_list(r)?.ok_or(aim_binder_host::parcel::BAD_VALUE)?;
+        groups.push((name, types));
+    }
+    Ok(groups)
 }

@@ -9,14 +9,19 @@
 //! `android-16.0.0_r1`.
 
 pub mod apps_filter;
+pub mod bootstrap;
 pub mod component_resolver;
+pub mod domain_verification;
 pub mod intent;
 pub mod intent_filter;
 pub mod info;
 pub mod intent_resolver;
 pub mod feed;
 pub mod list;
+pub mod libraries;
+mod library_parcel;
 pub mod model;
+pub mod owner;
 pub mod parse;
 pub mod pkg;
 pub mod preferred;
@@ -26,6 +31,9 @@ pub mod permissions;
 pub mod resolve;
 pub mod restrictions;
 pub mod settings;
+pub mod service;
+pub mod scan;
+pub mod scan_snapshot;
 pub mod sign;
 pub mod system_config;
 pub mod uri;
@@ -75,11 +83,20 @@ impl State {
     /// `None` without settings, which makes the original's boot a first
     /// boot.
     pub fn read(data: &Path, users: &[u32]) -> Result<Option<State>, String> {
+        Self::read_with_config(data, users, &Default::default())
+    }
+
+    /// Image SystemConfig supplies OEM UID seeds before Settings restoration.
+    pub fn read_with_config(
+        data: &Path,
+        users: &[u32],
+        config: &system_config::SystemConfig,
+    ) -> Result<Option<State>, String> {
         let system = data.join("system");
         let Some(settings) = resilient(
             &system.join("packages.xml"),
             &system.join("packages-backup.xml"),
-            Settings::parse,
+            |root| Settings::parse_with_config(root, config),
         )?
         else {
             return Ok(None);
@@ -122,7 +139,13 @@ fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String
         .packages
         .iter()
         .map(|p| {
-            let mut state = states.remove(&p.name).unwrap_or_default();
+            let mut state = states.remove(&p.name).unwrap_or_else(|| {
+                if legacy_times {
+                    UserState::default()
+                } else {
+                    UserState::initialized()
+                }
+            });
             if legacy_times && state.first_install_time == 0 {
                 state.first_install_time = p.legacy_first_install_time;
             }
@@ -170,7 +193,7 @@ fn first<T>(
     let mut failed = Vec::new();
     for path in candidates {
         let Some(b) = bytes(path)? else { continue };
-        match aim_android_xml::read(&b).and_then(|root| parse(&root)) {
+        match aim_android_xml::read_next(&b).and_then(|root| parse(&root)) {
             Ok(v) => return Ok(Some(v)),
             Err(e) => failed.push(format!("{}: {e}", path.display())),
         }
@@ -284,6 +307,24 @@ mod tests {
     <lastIssuedKeyId value="1" />
     <lastIssuedKeySetId value="3" />
   </keyset-settings>
+  <domain-verifications>
+    <active>
+      <package-state packageName="android" id="00000000-0000-0000-0000-000000000001" hasAutoVerifyDomains="true" signature="abc">
+        <state><domain name="example.com" state="1" /><domain name="other.com" state="2" /><domain name="example.com" state="4" /></state>
+        <user-states>
+          <user-state userId="0" allowLinkHandling="true"><enabled-hosts><host name="example.com" /><host name="example.com" /><host name="" /></enabled-hosts></user-state>
+          <user-state allowLinkHandling="true" />
+        </user-states>
+        <uri-relative-filter-groups>
+          <domain name="example.com"><uri-relative-filter-group action="1"><uri-relative-filter uri-part="1" pattern-type="0" filter="/path" /></uri-relative-filter-group></domain>
+        </uri-relative-filter-groups>
+      </package-state>
+    </active>
+    <restored><package-state packageName="org.example.app" id="00000000-0000-0000-0000-000000000002" hasAutoVerifyDomains="false" /></restored>
+  </domain-verifications>
+  <domain-verifications-legacy>
+    <user-states packageName="android"><user-state userId="0" state="2" /><user-state userId="10" state="3" /><user-state userId="0" state="4" /></user-states>
+  </domain-verifications-legacy>
 </packages>
 "#;
 
@@ -428,6 +469,29 @@ mod tests {
         }
 
         let s = &state.settings;
+        let domains = &s.domain_verification;
+        assert_eq!(domains.active.len(), 1);
+        assert_eq!(domains.restored.len(), 1);
+        assert_eq!(domains.active[0].name, "android");
+        assert!(domains.active[0].has_auto_verify_domains);
+        assert_eq!(domains.active[0].signature.as_deref(), Some("abc"));
+        assert_eq!(
+            domains.active[0].domains,
+            [
+                (Some("example.com".into()), 4),
+                (Some("other.com".into()), 2)
+            ]
+        );
+        assert_eq!(domains.active[0].users.len(), 1);
+        assert_eq!(domains.active[0].users[0].enabled_hosts, ["example.com"]);
+        assert!(domains.active[0].users[0].allow_link_handling);
+        let group = &domains.active[0].uri_relative_filter_groups[0].1[0];
+        assert_eq!(group.action, 0);
+        assert_eq!(group.filters[0].filter, "/path");
+        assert_eq!(
+            domains.legacy,
+            [(Some("android".into()), vec![(0, 4), (10, 3)])]
+        );
         assert_eq!(s.versions.len(), 2);
         assert_eq!(
             s.versions[1].volume_uuid.as_deref(),
@@ -470,8 +534,14 @@ mod tests {
         let initiator = app.install_source.initiating_package_signatures.as_ref();
         assert_eq!(initiator.unwrap().signatures, [vec![0x30, 0x82, 0xaa]]);
         assert_eq!(s.shared_users[0].signatures, android.signatures);
-        assert_eq!(app.key_set_data.defined_key_sets, [("upgrade".into(), 3)]);
-        assert_eq!(app.mime_groups[0].1, ["image/png", "image/gif"]);
+        assert_eq!(
+            app.key_set_data.defined_key_sets,
+            [(Some("upgrade".into()), 3)]
+        );
+        assert_eq!(
+            app.mime_groups[0].1,
+            [Some("image/gif".into()), Some("image/png".into())]
+        );
         let sys = &s.disabled_system_packages[0];
         assert_eq!((sys.flags, sys.private_flags), (1, 8));
         assert!(sys.shared_user);
@@ -498,7 +568,10 @@ mod tests {
         assert_eq!((app.enabled, app.install_reason), (3, 4));
         assert_eq!(app.last_disable_app_caller.as_deref(), Some("shell:1000"));
         assert_eq!(app.first_install_time, 0x2b);
-        assert_eq!(app.disabled_components, ["org.example.app.B"]);
+        assert_eq!(
+            app.disabled_components.as_deref(),
+            Some(["org.example.app.B".to_string()].as_slice())
+        );
         assert_eq!(r.default_browser.as_deref(), Some("org.example.app"));
         assert_eq!(r.block_uninstall, ["org.example.app"]);
 
@@ -562,7 +635,11 @@ mod tests {
         let state = read().unwrap().unwrap();
         let r = &state.users[0].1.restrictions;
         assert_eq!(r.packages.len(), 2);
-        assert!(r.packages.iter().all(|(_, s)| *s == UserState::default()));
+        assert!(
+            r.packages
+                .iter()
+                .all(|(_, s)| *s == UserState::initialized())
+        );
 
         // A missing access file is missing even with a reserve copy: the
         // original then migrates.

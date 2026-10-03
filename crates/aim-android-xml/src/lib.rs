@@ -9,6 +9,7 @@
 
 pub mod abx;
 mod base64;
+mod double;
 pub mod text;
 
 use std::borrow::Cow;
@@ -16,7 +17,7 @@ use std::borrow::Cow;
 /// An attribute's value, typed as the writer typed it: binary XML keeps the
 /// type of each `TypedXmlSerializer.attribute*` call, text XML has strings
 /// only.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Null,
     String(String),
@@ -31,6 +32,26 @@ pub enum Value {
     Float(f32),
     Double(f64),
     Bool(bool),
+}
+
+// Document identity retains the writer's type and floating-point bits. This
+// also lets persistence owners compare unchanged NaNs and detect signed-zero
+// changes made by another writer.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::String(a), Self::String(b)) | (Self::Interned(a), Self::Interned(b)) => a == b,
+            (Self::BytesHex(a), Self::BytesHex(b))
+            | (Self::BytesBase64(a), Self::BytesBase64(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) | (Self::IntHex(a), Self::IntHex(b)) => a == b,
+            (Self::Long(a), Self::Long(b)) | (Self::LongHex(a), Self::LongHex(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => a.to_bits() == b.to_bits(),
+            (Self::Double(a), Self::Double(b)) => a.to_bits() == b.to_bits(),
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// A node of an element's content: an element, or another token (text,
@@ -62,6 +83,64 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
     } else {
         text::read(bytes)
     }
+}
+
+/// Read a document for owners using `XmlPullParser.next()`. Preserve comments
+/// and other unrelated nodes, but normalize text/CDATA/entity events so a
+/// subsequent ABX write retains their meaning. BinaryXmlPullParser skips a
+/// standalone CDATA/entity token; text XML reports CDATA as text.
+pub fn read_next(bytes: &[u8]) -> Result<Element, String> {
+    fn normalize(e: &mut Element, binary: bool) -> Result<(), String> {
+        let mut pending_text = false;
+        let mut content = Vec::new();
+        for mut node in e.content.drain(..) {
+            match &mut node {
+                Node::Element(child) => {
+                    normalize(child, binary)?;
+                    pending_text = false;
+                }
+                Node::Token(TEXT, _) => pending_text = true,
+                Node::Token(CDSECT, _) if !binary || pending_text => {
+                    let Node::Token(kind, _) = &mut node else {
+                        unreachable!()
+                    };
+                    *kind = TEXT;
+                    pending_text = true;
+                }
+                Node::Token(CDSECT, _) => continue,
+                Node::Token(6, Some(name)) if binary => {
+                    let value = match name.as_str() {
+                        "lt" => "<".into(),
+                        "gt" => ">".into(),
+                        "amp" => "&".into(),
+                        "apos" => "'".into(),
+                        "quot" => "\"".into(),
+                        name if name.starts_with('#') => {
+                            let value: i32 = name[1..]
+                                .parse()
+                                .map_err(|_| format!("invalid entity {name}"))?;
+                            char::from_u32(value as u16 as u32)
+                                .ok_or_else(|| format!("invalid UTF-16 entity {name}"))?
+                                .to_string()
+                        }
+                        _ => return Err(format!("unknown entity {name}")),
+                    };
+                    if !pending_text {
+                        continue;
+                    }
+                    node = Node::Token(TEXT, Some(value));
+                }
+                Node::Token(COMMENT | 8, _) => {}
+                _ => pending_text = false,
+            }
+            content.push(node);
+        }
+        e.content = content;
+        Ok(())
+    }
+    let mut root = read(bytes)?;
+    normalize(&mut root, bytes.starts_with(abx::MAGIC))?;
+    Ok(root)
 }
 
 impl Value {
@@ -176,7 +255,19 @@ impl Element {
             Value::Float(f) => Some(*f),
             _ => None,
         };
-        self.typed(name, float, |s| s.trim().parse().ok())
+        self.typed(name, float, double::parse_float)
+    }
+
+    /// `getAttributeDouble`, including Java's hexadecimal float syntax.
+    pub fn double(&self, name: &str) -> Result<Option<f64>, String> {
+        self.typed(
+            name,
+            |v| match v {
+                Value::Double(value) => Some(*value),
+                _ => None,
+            },
+            double::parse,
+        )
     }
 
     /// `getAttributeBoolean`.

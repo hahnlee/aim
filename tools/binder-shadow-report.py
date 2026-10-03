@@ -5,6 +5,9 @@ method of each shadowed service, the calls and how each ended:
 
 - matched: the model's reply decoded equal to the original's;
 - differed: it did not (both replies are in the log line);
+- raced: it did not, but the model's answer from the state it held before
+  the call equals the original's: the original's state changed between
+  the two answers (both replies are in the log line);
 - not modelled: the model has no answer for the method yet;
 - oneway: a one-way call, answered by the model, nothing to compare;
 - failed: the original sent no reply (the target died, the call failed);
@@ -38,7 +41,7 @@ import importlib.util
 import json
 import os
 
-OUTCOMES = ["matched", "differed", "not_modelled", "oneway", "failed", "undecodable",
+OUTCOMES = ["matched", "differed", "raced", "not_modelled", "oneway", "failed", "undecodable",
             "incomplete"]
 CHECK_OUTCOMES = ["matched", "differed", "not_modelled"]
 
@@ -102,7 +105,7 @@ def main():
             continue
         key = (entry["service"], entry["descriptor"], entry["code"])
         rows[key][entry["outcome"]] += 1
-        if entry["outcome"] in ("differed", "undecodable", "incomplete"):
+        if entry["outcome"] in ("differed", "raced", "undecodable", "incomplete"):
             differences[key].append(entry)
 
     methods = {}

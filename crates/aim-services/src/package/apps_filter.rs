@@ -8,14 +8,18 @@
 //! queries with every protected broadcast known); this model computes
 //! the settled relations from a whole state. Implicit grants (an app
 //! that started, bound or was sent to another, `grantImplicitAccess`)
-//! are the original's runtime state and not in the feed: the model knows
-//! none (#724).
+//! are runtime state and are not in the original feed. Native interaction
+//! grants live in the snapshot's ImplicitAccess;
+//! connecting ActivityManager/WindowManager producers is tracked in #724.
 
 use std::collections::{HashMap, HashSet};
 
 use super::model::{PackageState, SharedUser, State};
 use super::pkg::{AndroidPackage, MainComponent, booleans};
 use super::uri::Uri;
+
+mod implicit;
+pub use implicit::ImplicitAccess;
 
 /// A path of the original that depends on state the model does not
 /// have; the query is reported as not modelled.
@@ -379,9 +383,13 @@ impl AppsFilter {
             // (allow_sdk_sandbox_query_intent_activities is on).
             let target_uid = uid(user, target.app_id);
             return !self.force_queryable.contains(&target.app_id)
+                && !state
+                    .system
+                    .implicit_access
+                    .transient(calling_uid, target_uid)
                 && target_uid != calling_uid - (FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID);
         }
-        self.should_filter_internal(state, calling_app_id, target)
+        self.should_filter_internal(state, calling_uid, target, user)
     }
 
     /// `shouldFilterApplicationInternal`, which the original's cache holds
@@ -389,9 +397,11 @@ impl AppsFilter {
     fn should_filter_internal(
         &self,
         state: &State,
-        calling_app_id: i32,
+        calling_uid: i32,
         target: &PackageState,
+        user: i32,
     ) -> bool {
+        let calling_app_id = app_id(calling_uid);
         // FeatureConfig's DeviceConfig flag. The original's cache keeps
         // what it computed before the flag changed until something
         // recomputes it; the model follows the flag at once.
@@ -434,6 +444,10 @@ impl AppsFilter {
             || self.queries_via_component.contains(&pair)
             || self.queryable_via_uses_library.contains(&pair)
             || self.queryable_via_uses_permission.contains(&pair)
+            || state
+                .system
+                .implicit_access
+                .visible(calling_uid, uid(user, target.app_id))
             || acts_on_target(t))
     }
 }
@@ -557,6 +571,7 @@ mod tests {
         ps.signatures = Some(Signatures {
             scheme_version: 3,
             signatures: vec![vec![key]],
+            public_keys: None,
             past_signatures: None,
         });
     }
@@ -689,6 +704,61 @@ mod tests {
         };
         let f = AppsFilter::new(&s, &all);
         assert!(!filtered(&f, &s, 10002, "settings"));
+    }
+
+    #[test]
+    fn interaction_grants_are_directional_user_scoped_and_snapshot_owned() {
+        let mut s = state();
+        let f = AppsFilter::new(&s, &Config::default());
+        assert!(filtered(&f, &s, 10002, "a"));
+        assert!(!s.system.implicit_access.grant(10002, 10002, false));
+        assert!(s.system.implicit_access.grant(10002, 10001, false));
+        assert!(!s.system.implicit_access.grant(10002, 10001, false));
+        assert!(!filtered(&f, &s, 10002, "a"));
+        assert!(f.should_filter(&s, uid(10, 10002), &s.packages["a"], 10));
+        assert!(f.should_filter(&s, 10002, &s.packages["a"], 10));
+        assert!(s.system.implicit_access.grant(10002, 10001, true));
+        let old = s.clone();
+        s.system
+            .implicit_access
+            .replace_package(10001, &[0, 10], false);
+        assert!(!filtered(&f, &s, 10002, "a"));
+        s.system.implicit_access.remove_package(10001, &[0, 10]);
+        assert!(filtered(&f, &s, 10002, "a"));
+        assert!(!filtered(&f, &old, 10002, "a"));
+        // SDK sandboxes use only ordinary grants, even when retained access
+        // makes the same target visible to an ordinary application UID.
+        assert!(s.system.implicit_access.grant(20002, 10001, true));
+        assert!(filtered(&f, &s, 20002, "a"));
+        assert!(s.system.implicit_access.grant(20002, 10001, false));
+        assert!(!filtered(&f, &s, 20002, "a"));
+    }
+
+    #[test]
+    fn interaction_cleanup_removes_both_directions_for_resolved_users() {
+        let mut grants = ImplicitAccess::default();
+        for user in [0, 10, 11] {
+            for retain in [false, true] {
+                assert!(grants.grant(uid(user, 10001), uid(user, 10002), retain));
+                assert!(grants.grant(uid(user, 10003), uid(user, 10001), retain));
+                assert!(grants.grant(uid(user, 10002), uid(user, 10003), retain));
+            }
+        }
+        let original = grants.clone();
+        grants.replace_package(10001, &[0, 10], true);
+        assert_eq!(grants, original);
+        grants.replace_package(10001, &[0, 10], false);
+        assert!(!grants.transient(10001, 10002));
+        assert!(grants.visible(10001, 10002));
+        assert!(!grants.transient(uid(10, 10003), uid(10, 10001)));
+        grants.remove_package(10001, &[0, 10]);
+        for user in [0, 10] {
+            assert!(!grants.visible(uid(user, 10001), uid(user, 10002)));
+            assert!(!grants.visible(uid(user, 10003), uid(user, 10001)));
+            assert!(grants.visible(uid(user, 10002), uid(user, 10003)));
+        }
+        assert!(grants.transient(uid(11, 10001), uid(11, 10002)));
+        assert!(grants.visible(uid(11, 10003), uid(11, 10001)));
     }
 
     #[test]

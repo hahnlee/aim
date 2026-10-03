@@ -5,7 +5,7 @@
 //! `<preferred-activities>` and package-restrictions.xml's
 //! `<persistent-preferred-activities>`.
 
-use aim_android_xml::Element;
+use aim_android_xml::{Element, Node};
 
 use super::intent::{ComponentName, Intent};
 use super::intent_filter::IntentFilter;
@@ -100,6 +100,39 @@ fn preferred_activity(item: &Element) -> Option<PreferredActivity> {
         always,
         set: (count > 0).then_some(set),
     })
+}
+
+/// Reading a valid preferred activity creates a resolver, even if it is later
+/// emptied. Empty or invalid-only documents do not create one.
+pub(crate) fn has_preferred_resolver(root: &Element) -> bool {
+    items(root, "preferred-activities")
+        .into_iter()
+        .any(|item| preferred_activity(item).is_some())
+}
+
+/// Settings.clearPackagePreferredActivities for one user's saved resolver.
+/// A named package clears only always choices; null clears every choice.
+/// Persistent choices, candidate sets and unrelated XML remain untouched.
+pub(crate) fn clear_package_document(root: &mut Element, package: Option<&str>) -> bool {
+    let mut changed = false;
+    for node in &mut root.content {
+        let Node::Element(list) = node else { continue };
+        if list.name != "preferred-activities" {
+            continue;
+        }
+        list.content.retain(|node| {
+            let Node::Element(item) = node else {
+                return true;
+            };
+            let remove = item.name == "item"
+                && preferred_activity(item).is_some_and(|activity| {
+                    package.is_none_or(|name| activity.always && activity.component.package == name)
+                });
+            changed |= remove;
+            !remove
+        });
+    }
+    changed
 }
 
 fn persistent_preferred_activity(item: &Element) -> Option<PersistentPreferredActivity> {
