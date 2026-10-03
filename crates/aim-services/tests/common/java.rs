@@ -15,6 +15,28 @@ pub fn sources(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Generate the private snapshot interface into this fixture's owned directory.
+pub fn snapshot_aidl(dir: &Path) -> PathBuf {
+    let out = dir.join("aidl");
+    fs::create_dir(&out).unwrap();
+    let input = aim_paths::root().join("java/device-services/aidl");
+    let output = std::process::Command::new(
+        aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"),
+    )
+    .args(["--lang=java", "--min_sdk_version", "36"])
+    .arg(format!("-I{}", input.display()))
+    .arg(format!("-o{}", out.display()))
+    .arg(input.join("dev/aim/server/IPackageScanSnapshot.aidl"))
+    .output()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "snapshot AIDL: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    out.join("dev/aim/server/IPackageScanSnapshot.java")
+}
+
 /// Check the boot classpath plus the client's explicit Java classpath before boot.
 pub fn check_linkage(dex: &Path, classpath: &[&str]) -> Result<(), String> {
     use aim_android_image::classpath::{self, BOOTCLASSPATH};

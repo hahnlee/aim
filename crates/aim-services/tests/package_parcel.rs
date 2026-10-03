@@ -40,9 +40,25 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageRoundTripOracle.java"),
         )
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"),
-        ));
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
+        )
+        .arg(common::java::snapshot_aidl(&data.0)));
+    let mut pending = vec![classes.clone()];
+    let mut class_files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "class") {
+                class_files.push(path);
+            }
+        }
+    }
+    class_files.sort();
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
         .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
@@ -58,8 +74,7 @@ fn native_package_parcels_match_original_read_write() {
         .arg(&stubs)
         .arg("--output")
         .arg(&dex)
-        .arg(classes.join("PackageRoundTripOracle.class"))
-        .arg(classes.join("dev/aim/server/PackageObjects.class")));
+        .args(class_files));
     common::java::check_linkage(
         &dex.join("classes.dex"),
         &["/system/framework/services.jar"],
@@ -149,10 +164,21 @@ fn native_package_parcels_match_original_read_write() {
             expected.push((name, pkg.package_name, entry));
         }
     }
-    for loaded in native_scan_objects(&data.0) {
+    let snapshot = native_scan_objects(&data.0);
+    for loaded in snapshot.owner().loaded_packages().values() {
         let pkg = &loaded.package;
         let name = format!("scan-{}.native", pkg.uid);
         let facade = loaded.facade_entry().unwrap();
+        let code = aim_services::package::scan_snapshot::endpoint::PackageCode::captured(
+            &snapshot,
+            &pkg.package_name,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&code, &mut parcel);
+        fs::write(directory.join(format!("{name}.snapshot")), parcel.data()).unwrap();
         let mut metadata = Vec::new();
         match facade.past_signing_certificates {
             None => metadata.extend_from_slice(&(-1_i32).to_be_bytes()),
@@ -252,7 +278,7 @@ fn normalize_maps(pkg: &mut AndroidPackage) {
 // Scan real original framework and rotated GSF code, without saved settings.
 fn native_scan_objects(
     dir: &std::path::Path,
-) -> Vec<std::sync::Arc<aim_services::package::scan::LoadedPackage>> {
+) -> std::sync::Arc<aim_services::package::scan_snapshot::Snapshot> {
     use aim_services::package::{
         parse::Platform,
         scan::{
@@ -364,5 +390,7 @@ fn native_scan_objects(
         objects.iter().map(|p| p.package.uid).collect::<Vec<_>>(),
         [1000, 10000]
     );
-    objects
+    aim_services::package::scan_snapshot::Store::new(scan.owner)
+        .unwrap()
+        .capture()
 }

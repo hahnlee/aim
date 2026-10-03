@@ -18,6 +18,7 @@ public final class PackageRoundTripOracle {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
             if (file.getName().startsWith("scan-")) {
+                verifySnapshot(file, pkg.getPackageName(), pkg.getUid());
                 int uid = Integer.parseInt(file.getName().substring(5, file.getName().indexOf('.')));
                 var signing = pkg.getSigningDetails();
                 if (pkg.getUid() != uid || signing.getSignatureSchemeVersion() != 3
@@ -108,5 +109,102 @@ public final class PackageRoundTripOracle {
             return;
         }
         throw new AssertionError("inconsistent lineage accepted");
+    }
+
+    private static void verifySnapshot(java.io.File file, String name, int uid) throws Exception {
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
+        var owner = new PageOwner(name, bytes);
+        var stale = new PageOwner(name, bytes);
+        stale.version = 2;
+        try (var bad = new dev.aim.server.PackageScanLease(
+                dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
+            try {
+                bad.getCode(name, false);
+                throw new AssertionError("wrong page version accepted");
+            } catch (java.io.IOException expected) {}
+        }
+        // Force generated Proxy/Stub parcel framing using the original Binder and Parcel.
+        var endpoint = dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner);
+        var lease = new dev.aim.server.PackageScanLease(endpoint);
+        owner.fail = true;
+        try {
+            lease.getCode(name, false);
+            throw new AssertionError("owner failure swallowed");
+        } catch (android.os.RemoteException expected) {}
+        owner.fail = false;
+        owner.shortChunk = true;
+        try {
+            lease.getCode(name, false);
+            throw new AssertionError("short chunk accepted");
+        } catch (java.io.IOException expected) {}
+        owner.shortChunk = false;
+        var code = lease.getCode(name, false);
+        int reads = owner.reads;
+        if (lease.getCode(name, false) != code || owner.reads != reads
+            || lease.getCode(name, true) != null || lease.getCode("missing", false) != null) {
+            throw new AssertionError("capture cache or absent code differs");
+        }
+        var pkg = dev.aim.server.PackageObjects.fromSnapshot(code, 1, name);
+        if (pkg.getUid() != uid || code.getVersion() != 1 || !code.getPackageName().equals(name)) {
+            throw new AssertionError("captured package metadata differs");
+        }
+        if (uid == 10000 && !java.util.Arrays.equals(code.getCapabilities(), new int[] {21, 23})) {
+            throw new AssertionError("transport lost lineage capabilities");
+        }
+        code.getCache()[0] ^= 1;
+        if (code.getCertificates() != null) {
+            code.getCertificates()[0][0] ^= 1;
+            code.getCapabilities()[0] = 0;
+        }
+        var out = android.os.Parcel.obtain();
+        try {
+            code.writeToParcel(out, 0);
+            if (!java.util.Arrays.equals(out.marshall(), bytes)) {
+                throw new AssertionError("native/Java code DTO differs or getter mutation leaked");
+            }
+            java.nio.file.Files.write(new java.io.File(file.getPath() + ".snapshot.original").toPath(), out.marshall());
+        } finally { out.recycle(); }
+        try {
+            dev.aim.server.PackageObjects.fromSnapshot(code, 2, name);
+            throw new AssertionError("wrong capture accepted");
+        } catch (IllegalArgumentException expected) {}
+        try {
+            dev.aim.server.PackageObjects.fromSnapshot(code, 1, "different");
+            throw new AssertionError("wrong name accepted");
+        } catch (IllegalArgumentException expected) {}
+        lease.close();
+        lease.close();
+        if (owner.closes != 1) throw new AssertionError("close is not idempotent");
+        try {
+            lease.getCode(name, false);
+            throw new AssertionError("closed lease accepted");
+        } catch (IllegalStateException expected) {}
+    }
+
+    private static final class PageOwner extends dev.aim.server.IPackageScanSnapshot.Stub {
+        private final String name;
+        private final byte[] bytes;
+        boolean fail;
+        boolean shortChunk;
+        int reads;
+        int closes;
+        long version = 1;
+        PageOwner(String name, byte[] bytes) { this.name = name; this.bytes = bytes; }
+        @Override
+        public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
+        @Override
+        public long getVersion() { return version; }
+        @Override
+        public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
+        @Override
+        public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override
+        public byte[] getCodeChunk(String name, boolean disabled, int offset, int length) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            reads++;
+            return java.util.Arrays.copyOfRange(bytes, offset, offset + length - (shortChunk ? 1 : 0));
+        }
+        @Override
+        public void close() { closes++; }
     }
 }

@@ -1125,6 +1125,237 @@ pub(super) fn selected_shared_user(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn binder_scan_lease_pins_old_code_pages_and_close_releases_capture() {
+        use super::*;
+        use crate::package::scan_snapshot::{
+            Store,
+            endpoint::{Endpoint, MAX_CHUNK},
+        };
+        use aim_binder_driver::{
+            Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*,
+        };
+        use aim_binder_host::{
+            local::LocalProcess,
+            parcel::{Binder, Parcel},
+        };
+        use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+        struct NoMemory;
+        impl GuestProcess for NoMemory {
+            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> {
+                Err(errno::EFAULT)
+            }
+            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> {
+                Err(errno::EFAULT)
+            }
+            fn get_file(&mut self, _: u32) -> Result<File, Errno> {
+                Err(errno::EBADF)
+            }
+            fn install_file(&mut self, _: File) -> Result<u32, Errno> {
+                Err(errno::EBADF)
+            }
+            fn close_fd(&mut self, _: u32) {
+                panic!("unexpected fd")
+            }
+        }
+        struct Processes(Arc<Driver>, Vec<Arc<LocalProcess>>);
+        impl Drop for Processes {
+            fn drop(&mut self) {
+                for p in &self.1 {
+                    self.0.release(p.proc_handle());
+                }
+            }
+        }
+        let package = crate::package::settings::Package {
+            name: "fixture".into(),
+            code_path: "/data/app/fixture".into(),
+            app_id: 10100,
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![package.clone()],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        let signing = SigningDetails {
+            signatures: vec![vec![3]],
+            scheme_version: 3,
+            public_keys: vec![],
+            past_signing_certificates: Some(vec![(vec![1], 21), (vec![3], 23)]),
+        };
+        let parsed = crate::package::pkg::AndroidPackage {
+            package_name: package.name.clone(),
+            path: Some(package.code_path.clone()),
+            uid: package.app_id,
+            signing_details: Some(signing.parcel_details().unwrap()),
+            version_name: Some("x".repeat(150_000)),
+            ..Default::default()
+        };
+        owner.loaded.insert(
+            package.name.clone(),
+            Arc::new(super::super::LoadedPackage::new(parsed, signing).unwrap()),
+        );
+        owner
+            .scanned_users
+            .insert(package.name.clone(), BTreeMap::new());
+        let store = Store::new(owner.clone()).unwrap();
+        let base = store.capture();
+        let old = Arc::downgrade(&base);
+        let endpoint = Arc::new(Endpoint::new(base.clone()));
+        store.publish(&base, owner).unwrap();
+        drop(base);
+        let driver = Driver::new();
+        let open = |pid, euid| {
+            LocalProcess::open(
+                &driver,
+                Device::Binder,
+                Credentials {
+                    pid,
+                    euid,
+                    security_context: None,
+                },
+            )
+        };
+        let server = open(96001, 1000);
+        let client = open(96002, 1000);
+        let foreign = open(96003, 10100);
+        let _processes = Processes(
+            driver.clone(),
+            vec![server.clone(), client.clone(), foreign.clone()],
+        );
+        let Binder::Local(ptr) = server.add_service(endpoint) else {
+            unreachable!()
+        };
+        let mut object = FlatBinderObject {
+            kind: BINDER_TYPE_BINDER,
+            flags: 0,
+            binder: ptr,
+            cookie: ptr,
+        }
+        .encode();
+        driver
+            .ioctl(
+                server.proc_handle(),
+                96001,
+                BINDER_SET_CONTEXT_MGR_EXT,
+                &mut object,
+                &mut NoMemory,
+            )
+            .unwrap();
+        server.start();
+        let remote = client.strong(0);
+        let request = || {
+            let mut p = Parcel::new();
+            p.write_interface_token(api::DESCRIPTOR);
+            p
+        };
+        let version = remote
+            .transact(api::GET_VERSION, &request(), false)
+            .unwrap();
+        let mut r = version.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i64().unwrap(), 1);
+        let denied = foreign
+            .strong(0)
+            .transact(api::CLOSE, &request(), false)
+            .unwrap();
+        assert_eq!(
+            denied.reader().read_exception().unwrap().unwrap_err().code,
+            -1
+        );
+        assert!(old.upgrade().is_some());
+        let mut wrong = Parcel::new();
+        wrong.write_interface_token("different.Interface");
+        assert!(remote.transact(api::GET_VERSION, &wrong, false).is_err());
+        let mut trailing = request();
+        trailing.write_i32(1);
+        assert!(remote.transact(api::CLOSE, &trailing, false).is_err());
+        assert!(remote.transact(0x7777, &request(), false).is_err());
+        assert!(old.upgrade().is_some());
+        let mut p = request();
+        p.write_bool(false);
+        let names = remote.transact(api::GET_PACKAGE_NAMES, &p, false).unwrap();
+        let mut r = names.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+        let mut p = request();
+        p.write_string16(Some("fixture"));
+        p.write_bool(false);
+        let length = remote.transact(api::GET_CODE_LENGTH, &p, false).unwrap();
+        let mut r = length.reader();
+        r.read_exception().unwrap().unwrap();
+        let length = r.read_i32().unwrap() as usize;
+        assert!(length > MAX_CHUNK * 2);
+        let mut bytes = vec![];
+        while bytes.len() < length {
+            let mut p = request();
+            p.write_string16(Some("fixture"));
+            p.write_bool(false);
+            p.write_i32(bytes.len() as i32);
+            p.write_i32(MAX_CHUNK as i32);
+            let reply = remote.transact(api::GET_CODE_CHUNK, &p, false).unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let count = r.read_i32().unwrap() as usize;
+            assert!(count > 0 && count <= MAX_CHUNK);
+            let at = r.position();
+            r.skip(count).unwrap();
+            bytes.extend_from_slice(&r.since(at).0[..count]);
+        }
+        assert_eq!(bytes.len(), length);
+        let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        assert_eq!(r.read_i64().unwrap(), 1);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+        let cache = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+        let decoded = crate::package::pkg::AndroidPackage::read_cache_entry(&cache).unwrap();
+        assert_eq!(decoded.uid, 10100);
+        assert_eq!(decoded.version_name.unwrap().len(), 150_000);
+        assert_eq!(r.read_i32().unwrap(), 2);
+        assert_eq!(
+            aim_service_aidl::read_byte_array(&mut r).unwrap(),
+            Some(vec![1])
+        );
+        assert_eq!(r.read_i32().unwrap(), 21);
+        assert_eq!(
+            aim_service_aidl::read_byte_array(&mut r).unwrap(),
+            Some(vec![3])
+        );
+        assert_eq!(r.read_i32().unwrap(), 23);
+        for (offset, count) in [
+            (-1, 1),
+            (0, 0),
+            (0, MAX_CHUNK as i32 + 1),
+            (length as i32 + 1, 1),
+        ] {
+            let mut p = request();
+            p.write_string16(Some("fixture"));
+            p.write_bool(false);
+            p.write_i32(offset);
+            p.write_i32(count);
+            let reply = remote.transact(api::GET_CODE_CHUNK, &p, false).unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
+        for _ in 0..2 {
+            let reply = remote.transact(api::CLOSE, &request(), false).unwrap();
+            reply.reader().read_exception().unwrap().unwrap();
+        }
+        assert!(old.upgrade().is_none());
+        let reply = remote
+            .transact(api::GET_VERSION, &request(), false)
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -5
+        );
+    }
     use super::selected_shared_user;
 
     #[test]

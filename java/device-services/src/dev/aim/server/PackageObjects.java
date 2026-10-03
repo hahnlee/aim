@@ -12,6 +12,17 @@ import java.util.Objects;
 public final class PackageObjects {
     private PackageObjects() {}
 
+    public static PackageImpl fromSnapshot(PackageCode code, long version, String name) {
+        if (code.getVersion() != version || !code.getPackageName().equals(name)) {
+            throw new IllegalArgumentException("package code capture mismatch");
+        }
+        PackageImpl pkg = fromCache(code.getCache(), code.getCertificates(), code.getCapabilities());
+        if (!name.equals(pkg.getPackageName())) {
+            throw new IllegalArgumentException("package code name mismatch");
+        }
+        return pkg;
+    }
+
     public static PackageImpl fromCache(byte[] cache, byte[][] pastCertificates, int[] capabilities) {
         PackageImpl pkg = (PackageImpl) PackageCacher.fromCacheEntryStatic(cache);
         pkg.setSigningDetails(restoreSigning(pkg.getSigningDetails(), pastCertificates, capabilities));

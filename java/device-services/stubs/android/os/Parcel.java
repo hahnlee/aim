@@ -16,6 +16,7 @@ public final class Parcel {
     public final int readInt() { throw new RuntimeException("stub"); }
     public final void writeLong(long val) { throw new RuntimeException("stub"); }
     public final long readLong() { throw new RuntimeException("stub"); }
+    public final int dataAvail() { throw new RuntimeException("stub"); }
     public final void writeByteArray(byte[] b) { throw new RuntimeException("stub"); }
     public final void writeSerializable(java.io.Serializable value) { throw new RuntimeException("stub"); }
     public final byte[] createByteArray() { throw new RuntimeException("stub"); }

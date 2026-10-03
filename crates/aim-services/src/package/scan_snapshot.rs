@@ -1,6 +1,7 @@
 //! Captured native scan owners for the C facade's replica builder (#836).
 //! This is not the complete PackageState replica or its visibility policy.
 use super::{owner::app_ids::Owner, scan::SigningScan};
+pub mod endpoint;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},

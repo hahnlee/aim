@@ -237,10 +237,29 @@ old/new owner isolation, invalid code paths and unfinished metadata rejection.
 The final disposable original-PMS saved scan passes (373.79s), validating one
 capture over all 243 active packages and three disabled factories, preserving
 their retained Arc identities and checking owned process/mount cleanup.
-These are scan-owner captures, not complete PackageState query replicas. Java
-DTO/adapters, version leases/transport, captured visibility decisions and actual
-permission/ART callbacks remain #836/#837/#833; the native service switch is not
-activated and original PMS remains active.
+A private IPackageScanSnapshot Binder endpoint now leases one such capture,
+serving its version, active/factory names and code envelopes in chunks of at most
+64 KiB. Encoded envelopes are cached per lease; close releases the capture and
+buffers and subsequent reads fail. System UID, interface token, argument tail
+and range checks precede state changes. PackageScanLease reassembles and validates
+length/version/name before caching immutable PackageCode DTOs; owner/transport,
+short-chunk and wrong-version failures do not publish a partial cache entry.
+PackageObjects restores original PackageImpl and collected capability flags from
+the envelope. Native Binder-driver verification passes (0.02s), including a
+150,000-character payload across multiple chunks, old-version pinning after new
+publication, caller/token/range rejection, idempotent close and actual capture
+release. The 572-parcel original-image oracle passes (19.57s), including real
+native framework/GSF envelopes, original Java generated Proxy/Stub framing with
+a controlled page owner, failures/retries, DTO identity/input isolation and exact
+native/Java DTO bytes. All 347 units pass (3.13s); all oracle classes link against
+the original image (2.84s), and device-services builds against original APIs
+(15.6s). Fixtures generate the private Java AIDL into their disposable directory;
+they do not depend on the builder's temporary work directory.
+These tests verify native Binder and original Java transport separately; the
+endpoint is not yet exported by the C bootstrap into SystemServer. Complete
+PackageState DTO/adapters, metadata/visibility pages, lease/snapshot-scope wiring
+and actual permission/ART callbacks remain #836/#837/#833. The native service
+switch is not activated and original PMS remains active.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest
