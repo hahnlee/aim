@@ -13,4 +13,7 @@ interface IPackageScanSnapshot {
     byte[] getSeInfo(String packageName);
     /** Saved package and shared-UID signing owners; collected code remains separate. */
     byte[] getSigningState(String packageName, boolean disabled);
+    /** Persisted user state from this capture, paged to include large extras. */
+    int getUserStateLength(String packageName, boolean disabled, int userId);
+    byte[] getUserStateChunk(String packageName, boolean disabled, int userId, int offset, int length);
 }

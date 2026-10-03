@@ -49,6 +49,10 @@ fn native_package_parcels_match_original_read_write() {
         )
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageUserStateData.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageSeInfoState.java"),
         )
         .arg(
@@ -199,6 +203,15 @@ fn native_package_parcels_match_original_read_write() {
         let mut parcel = aim_binder_host::parcel::Parcel::new();
         aim_service_aidl::WriteParcelable::write_to(&code, &mut parcel);
         fs::write(directory.join(format!("{name}.snapshot")), parcel.data()).unwrap();
+        let user_state = aim_services::package::scan_snapshot::user_record::captured(
+            &snapshot,
+            &pkg.package_name,
+            false,
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        fs::write(directory.join(format!("{name}.user")), user_state).unwrap();
         let saved_signing =
             aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
                 &snapshot,

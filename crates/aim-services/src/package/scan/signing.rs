@@ -1356,9 +1356,15 @@ mod tests {
             package.name.clone(),
             Arc::new(super::super::LoadedPackage::new(parsed, signing).unwrap()),
         );
+        let user = crate::package::restrictions::UserState {
+            stopped: true,
+            harmful_app_warning: Some("warning".repeat(30_000)),
+            enabled_components: vec!["fixture.Activity".into()],
+            ..Default::default()
+        };
         owner
             .scanned_users
-            .insert(package.name.clone(), BTreeMap::new());
+            .insert(package.name.clone(), BTreeMap::from([(10, user)]));
         let mut usage = crate::package::owner::usage::Usage::new(["fixture"]);
         usage.notify("fixture", 0, 17);
         usage.notify("fixture", 2, 29);
@@ -1375,6 +1381,11 @@ mod tests {
             Err(crate::package::scan_snapshot::Error::Invalid(_))
         ));
         assert!(Arc::ptr_eq(&base, &store.capture()));
+        let captured_user =
+            crate::package::scan_snapshot::user_record::captured(&base, "fixture", false, 10)
+                .unwrap()
+                .unwrap();
+        assert!(captured_user.len() > MAX_CHUNK * 2);
         let old = Arc::downgrade(&base);
         let endpoint = Arc::new(Endpoint::new(base.clone()));
         let mut changed_usage = base.usage().clone();
@@ -1382,7 +1393,20 @@ mod tests {
         owner
             .assign_seinfo_at_boot(&policy, &mut |_| Ok(10000))
             .unwrap();
+        owner
+            .scanned_users
+            .get_mut("fixture")
+            .unwrap()
+            .get_mut(&10)
+            .unwrap()
+            .harmful_app_warning = Some("new warning".into());
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_ne!(
+            crate::package::scan_snapshot::user_record::captured(&current, "fixture", false, 10,)
+                .unwrap()
+                .unwrap(),
+            captured_user
+        );
         assert_eq!(
             current.owner().seinfo("fixture").unwrap(),
             Some("default:targetSdkVersion=10000")
@@ -1637,11 +1661,123 @@ mod tests {
                 -3
             );
         }
+        let user_request = |name: Option<&str>, factory: bool, user: i32| {
+            let mut p = request();
+            p.write_string16(name);
+            p.write_bool(factory);
+            p.write_i32(user);
+            p
+        };
+        let reply = remote
+            .transact(
+                api::GET_USER_STATE_LENGTH,
+                &user_request(Some("fixture"), false, 10),
+                false,
+            )
+            .unwrap();
+        let mut r = reply.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap() as usize, captured_user.len());
+        let mut user_bytes = Vec::new();
+        while user_bytes.len() < captured_user.len() {
+            let mut p = user_request(Some("fixture"), false, 10);
+            p.write_i32(user_bytes.len() as i32);
+            p.write_i32(MAX_CHUNK as i32);
+            let reply = remote
+                .transact(api::GET_USER_STATE_CHUNK, &p, false)
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let chunk = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+            assert!(!chunk.is_empty() && chunk.len() <= MAX_CHUNK);
+            assert_eq!(r.remaining(), 0);
+            user_bytes.extend(chunk);
+        }
+        assert_eq!(user_bytes, captured_user);
+        let mut p = user_request(Some("fixture"), false, 0);
+        p.write_i32(0);
+        p.write_i32(MAX_CHUNK as i32);
+        let reply = remote
+            .transact(api::GET_USER_STATE_CHUNK, &p, false)
+            .unwrap();
+        let mut r = reply.reader();
+        r.read_exception().unwrap().unwrap();
+        let default_bytes = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+        let mut r = aim_binder_host::parcel::Reader::new(&default_bytes, &[]);
+        assert_eq!(r.read_i64().unwrap(), 1);
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+        assert_eq!(r.read_i32().unwrap(), 10100);
+        assert!(!r.read_bool().unwrap());
+        assert_eq!(r.read_i32().unwrap(), 0);
+        assert_eq!(r.read_i64().unwrap(), 0);
+        assert_eq!(r.read_i64().unwrap(), 0);
+        assert!(r.read_bool().unwrap());
+        assert!(!r.read_bool().unwrap());
+        for (name, factory) in [("absent", false), ("fixture", true)] {
+            let reply = remote
+                .transact(
+                    api::GET_USER_STATE_LENGTH,
+                    &user_request(Some(name), factory, 10),
+                    false,
+                )
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            assert_eq!(r.read_i32().unwrap(), -1);
+        }
+        for (name, user) in [(None, 10), (Some("fixture"), -1)] {
+            let reply = remote
+                .transact(
+                    api::GET_USER_STATE_LENGTH,
+                    &user_request(name, false, user),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
+        for (offset, count) in [
+            (-1, 1),
+            (0, 0),
+            (0, MAX_CHUNK as i32 + 1),
+            (captured_user.len() as i32 + 1, 1),
+        ] {
+            let mut p = user_request(Some("fixture"), false, 10);
+            p.write_i32(offset);
+            p.write_i32(count);
+            let reply = remote
+                .transact(api::GET_USER_STATE_CHUNK, &p, false)
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
+        let mut p = user_request(Some("fixture"), false, 10);
+        p.write_i32(123);
+        assert!(
+            remote
+                .transact(api::GET_USER_STATE_LENGTH, &p, false)
+                .is_err()
+        );
         for _ in 0..2 {
             let reply = remote.transact(api::CLOSE, &request(), false).unwrap();
             reply.reader().read_exception().unwrap().unwrap();
         }
         assert!(old.upgrade().is_none());
+        let reply = remote
+            .transact(
+                api::GET_USER_STATE_LENGTH,
+                &user_request(Some("fixture"), false, 10),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -5
+        );
         let reply = remote
             .transact(api::GET_VERSION, &request(), false)
             .unwrap();

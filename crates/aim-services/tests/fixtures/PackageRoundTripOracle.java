@@ -118,9 +118,15 @@ public final class PackageRoundTripOracle {
         byte[] signingBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".saved-signing").toPath());
         var owner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+        owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user").toPath());
+        stale.userState = owner.userState;
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
+            try {
+                bad.getUserState(name, false, 0);
+                throw new AssertionError("wrong user-state version accepted");
+            } catch (java.io.IOException expected) {}
             try {
                 bad.getCode(name, false);
                 throw new AssertionError("wrong page version accepted");
@@ -141,6 +147,20 @@ public final class PackageRoundTripOracle {
         // Force generated Proxy/Stub parcel framing using the original Binder and Parcel.
         var endpoint = dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner);
         var lease = new dev.aim.server.PackageScanLease(endpoint);
+        owner.shortChunk = true;
+        try {
+            lease.getUserState(name, false, 0);
+            throw new AssertionError("short user-state chunk accepted");
+        } catch (java.io.IOException expected) {}
+        owner.shortChunk = false;
+        var userState = lease.getUserState(name, false, 0);
+        int userReads = owner.userReads;
+        if (userState.getVersion() != 1 || !userState.getPackageName().equals(name)
+                || userState.getAppId() != uid || userState.getUserId() != 0 || userState.isFactory()
+                || lease.getUserState(name, false, 0) != userState || owner.userReads != userReads
+                || lease.getUserState(name, true, 0) != null || lease.getUserState("missing", false, 0) != null) {
+            throw new AssertionError("captured user state identity or cache differs");
+        }
         owner.fail = true;
         try {
             lease.getCode(name, false);
@@ -447,6 +467,8 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
+        byte[] userState;
+        int userReads;
         boolean signingTail;
         byte[] signingOverride;
         int signingReads;
@@ -468,6 +490,16 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override public int getUserStateLength(String candidate, boolean disabled, int userId) {
+            return !disabled && name.equals(candidate) && userId == 0 ? userState.length : -1;
+        }
+        @Override public byte[] getUserStateChunk(String candidate, boolean disabled, int userId, int offset, int length)
+                throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            userReads++;
+            int end = Math.min(userState.length, offset + length) - (shortChunk ? 1 : 0);
+            return java.util.Arrays.copyOfRange(userState, offset, end);
+        }
         @Override
         public byte[] getCodeChunk(String name, boolean disabled, int offset, int length) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();

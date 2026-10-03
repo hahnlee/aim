@@ -75,8 +75,16 @@ write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 369
 units pass (3.12s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
-unsupported (#843). Facade transport, native suspension operations and native
-PMS activation are not established. The C branch also has Binder query
+unsupported (#843). A private snapshot lease now carries persisted user-state
+inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
+scope and user ID pinned to its captured version. The real Binder test retains
+a large old user state after publication and rejects invalid request ranges.
+An original ART Proxy/Stub oracle (2026-10-04, 27.53s) reads the native user
+records, checks identity/cache reuse and rejects short chunks and mismatched
+versions. These are persisted inputs, not a complete PackageUserStateInternal
+replica: runtime overlays/label overrides remain #836 and nullable component
+set ownership remains #845. Native suspension operations and native PMS
+activation are not established. The C branch also has Binder query
 receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and
 shared snapshot publication (192 package unit tests pass). These are not

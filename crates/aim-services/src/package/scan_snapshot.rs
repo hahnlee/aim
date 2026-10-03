@@ -5,6 +5,7 @@ use super::{
     scan::SigningScan,
 };
 pub mod endpoint;
+pub mod user_record;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},

@@ -222,9 +222,34 @@ impl WriteParcelable for PackageSeInfo {
 struct Lease {
     snapshot: Option<Arc<Snapshot>>,
     code: BTreeMap<(String, bool), Arc<Vec<u8>>>,
+    users: BTreeMap<(String, bool, i32), Arc<Vec<u8>>>,
 }
 
 impl Lease {
+    fn user(
+        &mut self,
+        snapshot: &Snapshot,
+        name: Option<&str>,
+        disabled: bool,
+        user: i32,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        if user < 0 {
+            return Err(Exception::illegal_argument("invalid user id"));
+        }
+        let key = (name.to_owned(), disabled, user);
+        if let Some(bytes) = self.users.get(&key) {
+            return Ok(Some(bytes.clone()));
+        }
+        let bytes = super::user_record::captured(snapshot, name, disabled, user)
+            .map_err(|error| Exception::new(EX_ILLEGAL_STATE, error))?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let bytes = Arc::new(bytes);
+        self.users.insert(key, bytes.clone());
+        Ok(Some(bytes))
+    }
     fn code(
         &mut self,
         snapshot: &Snapshot,
@@ -265,6 +290,7 @@ impl Endpoint {
             lease: Mutex::new(Lease {
                 snapshot: Some(snapshot),
                 code: BTreeMap::new(),
+                users: BTreeMap::new(),
             }),
         }
     }
@@ -297,6 +323,7 @@ impl Service for Endpoint {
             }
             lease.snapshot.take();
             lease.code.clear();
+            lease.users.clear();
             reply.write_no_exception();
             return Ok(reply);
         }
@@ -308,6 +335,57 @@ impl Service for Endpoint {
             return Ok(reply);
         };
         match call.code {
+            api::GET_USER_STATE_LENGTH => {
+                let args = api::GetUserStateLength::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                match lease.user(
+                    &snapshot,
+                    args.package_name.as_deref(),
+                    args.disabled,
+                    args.user_id,
+                ) {
+                    Ok(bytes) => api::write_get_user_state_length_reply(
+                        &mut reply,
+                        bytes.map_or(-1, |p| p.len() as i32),
+                    ),
+                    Err(error) => reply.write_exception(&error),
+                }
+            }
+            api::GET_USER_STATE_CHUNK => {
+                let args = api::GetUserStateChunk::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                if args.offset < 0 || args.length <= 0 || args.length as usize > MAX_CHUNK {
+                    reply.write_exception(&Exception::illegal_argument(
+                        "invalid user state chunk range",
+                    ));
+                } else {
+                    match lease.user(
+                        &snapshot,
+                        args.package_name.as_deref(),
+                        args.disabled,
+                        args.user_id,
+                    ) {
+                        Ok(None) => api::write_get_user_state_chunk_reply(&mut reply, &None),
+                        Ok(Some(bytes)) if args.offset as usize > bytes.len() => reply
+                            .write_exception(&Exception::illegal_argument(
+                                "user state offset exceeds length",
+                            )),
+                        Ok(Some(bytes)) => {
+                            let start = args.offset as usize;
+                            let end = (start + args.length as usize).min(bytes.len());
+                            api::write_get_user_state_chunk_reply(
+                                &mut reply,
+                                &Some(bytes[start..end].to_vec()),
+                            );
+                        }
+                        Err(error) => reply.write_exception(&error),
+                    }
+                }
+            }
             api::GET_SIGNING_STATE => {
                 let args = api::GetSigningState::read(&mut call.data)?;
                 if call.data.remaining() != 0 {

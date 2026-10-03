@@ -18,6 +18,8 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageSeInfoState> seinfo = new HashMap<>();
     private final Map<String, PackageSigningState> signing = new HashMap<>();
     private final Map<String, PackageSigningState> factorySigning = new HashMap<>();
+    private record UserKey(String name, boolean factory, int user) {}
+    private final Map<UserKey, PackageUserStateData> users = new HashMap<>();
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
@@ -100,6 +102,7 @@ public final class PackageScanLease implements AutoCloseable {
         seinfo.clear();
         signing.clear();
         factorySigning.clear();
+        users.clear();
     }
 
     public synchronized PackageSigningState getSigningState(String name, boolean factory)
@@ -148,5 +151,36 @@ public final class PackageScanLease implements AutoCloseable {
             seinfo.put(name, state);
             return state;
         } finally { parcel.recycle(); }
+    }
+
+    public synchronized PackageUserStateData getUserState(String name, boolean factory, int user)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(name);
+        if (user < 0) throw new IllegalArgumentException("invalid user id");
+        UserKey key = new UserKey(name, factory, user);
+        if (users.containsKey(key)) return users.get(key);
+        int length = endpoint.getUserStateLength(name, factory, user);
+        if (length == -1) { users.put(key, null); return null; }
+        if (length <= 0) throw new IOException("invalid user state length");
+        byte[] bytes = new byte[length];
+        for (int offset = 0; offset < length;) {
+            int requested = Math.min(CHUNK, length - offset);
+            byte[] chunk = endpoint.getUserStateChunk(name, factory, user, offset, requested);
+            if (chunk == null || chunk.length != requested) throw new IOException("incomplete user state chunk");
+            System.arraycopy(chunk, 0, bytes, offset, requested);
+            offset += requested;
+        }
+        Parcel in = Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            PackageUserStateData state = PackageUserStateData.read(in);
+            if (in.dataAvail() != 0 || state.getVersion() != version || !state.getPackageName().equals(name)
+                    || state.isFactory() != factory || state.getUserId() != user) {
+                throw new IOException("package user state capture mismatch");
+            }
+            users.put(key, state);
+            return state;
+        } finally { in.recycle(); }
     }
 }
