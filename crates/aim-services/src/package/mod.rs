@@ -32,6 +32,7 @@ pub mod restrictions;
 pub mod settings;
 pub mod service;
 pub mod scan;
+pub mod scan_snapshot;
 pub mod sign;
 pub mod system_config;
 pub mod uri;

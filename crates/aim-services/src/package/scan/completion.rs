@@ -163,6 +163,9 @@ impl SigningScan {
             candidate.record.settings.name.clone(),
             std::sync::Arc::new(loaded),
         );
+        staged
+            .pending_metadata
+            .remove(&candidate.record.settings.name);
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,

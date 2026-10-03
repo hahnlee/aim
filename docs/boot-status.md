@@ -223,6 +223,24 @@ linkage passes (2.92s), and device-services builds against original APIs (13.7s)
 This verifies retained-code reconstruction, not callback delivery. Native query
 replica publication and collected/saved/group owner transports into actual
 permission callbacks remain unimplemented (#837/#833/#836).
+Native scan_snapshot::Store now captures the whole SigningScan owner in a
+versioned Arc, retaining settings, UID/group signing, keysets, libraries,
+scanned user state and active/disabled code together. Capture validates duplicate
+settings, UID membership, saved-group signing, loaded name/path/UID/signing and
+user-state availability. Admitted scans are marked pending until metadata
+finalization; pending candidates cannot be captured. Publication requires the
+exact captured base and increments the version without wraparound. Stale/foreign
+bases, invalid graphs and version exhaustion leave the current capture intact;
+concurrent writers from one base have one winner. The 346 unit tests pass (3.13s),
+and the original first scan passes (43.65s), checking real retained Arc identity,
+old/new owner isolation, invalid code paths and unfinished metadata rejection.
+The final disposable original-PMS saved scan passes (373.79s), validating one
+capture over all 243 active packages and three disabled factories, preserving
+their retained Arc identities and checking owned process/mount cleanup.
+These are scan-owner captures, not complete PackageState query replicas. Java
+DTO/adapters, version leases/transport, captured visibility decisions and actual
+permission/ART callbacks remain #836/#837/#833; the native service switch is not
+activated and original PMS remains active.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

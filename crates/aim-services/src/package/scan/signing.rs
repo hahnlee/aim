@@ -19,7 +19,7 @@ use crate::package::{
     sign::SigningDetails,
     system_config::SystemConfig,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// SharedUidMigration permits only these two strategies in the pinned image.
@@ -42,6 +42,7 @@ pub struct SigningScan {
     pub(super) scanned_users: BTreeMap<String, BTreeMap<i32, UserState>>,
     pub(super) loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
+    pub(super) pending_metadata: BTreeSet<String>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -72,6 +73,9 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    pub(in crate::package) fn capture_ready(&self) -> bool {
+        self.pending_metadata.is_empty()
+    }
     /// Native-parsed active code, admitted only after every scan metadata gate.
     /// Settings and user state remain in their owners; this is not a query replica.
     pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {
@@ -96,6 +100,7 @@ impl SigningScan {
             .retain(|(name, _, _, _)| name != &record.settings.name);
         self.scanned_users.remove(&record.settings.name);
         self.loaded.remove(&record.settings.name);
+        self.pending_metadata.remove(&record.settings.name);
     }
     /// Apply page-size scan policy after ABI/path and installation ownership.
     /// Alignment errors retain existing flags and are returned for reporting.
@@ -405,6 +410,7 @@ impl SigningScan {
             scanned_users: BTreeMap::new(),
             loaded: BTreeMap::new(),
             disabled_loaded: BTreeMap::new(),
+            pending_metadata: BTreeSet::new(),
             first_api_level,
             parsed: Vec::new(),
         })
@@ -1017,6 +1023,7 @@ impl SigningScan {
             record.signing.clone(),
             record.parsed.is(booleans::LEAVING_SHARED_UID),
         ));
+        self.pending_metadata.insert(record.settings.name.clone());
         Ok(SigningOutcome {
             system_signature_mismatch: mismatch,
         })

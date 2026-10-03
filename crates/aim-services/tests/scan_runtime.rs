@@ -595,6 +595,9 @@ fn saved_scan_libraries_match_original_pms() {
         )
         .unwrap();
     assert_eq!(resumed_data.packages.len(), 3);
+    let captures = aim_services::package::scan_snapshot::Store::new(resumed.clone()).unwrap();
+    let capture = captures.capture();
+    assert_eq!(capture.owner(), &resumed);
     assert_eq!(resumed.loaded_packages().len(), 243);
     assert_eq!(resumed.disabled_loaded_packages().len(), 3);
     for completed in resumed_packages
@@ -605,6 +608,10 @@ fn saved_scan_libraries_match_original_pms() {
     {
         let record = &completed.candidate.record;
         let loaded = &resumed.loaded_packages()[&record.settings.name];
+        assert!(std::sync::Arc::ptr_eq(
+            loaded,
+            &capture.owner().loaded_packages()[&record.settings.name]
+        ));
         assert_eq!(loaded.collected_signing, record.signing);
         assert_eq!(
             loaded.facade_entry().unwrap().past_signing_certificates,
@@ -620,6 +627,10 @@ fn saved_scan_libraries_match_original_pms() {
     for factory in &resumed_packages.retained_data {
         let record = &factory.record;
         let loaded = &resumed.disabled_loaded_packages()[&record.settings.name];
+        assert!(std::sync::Arc::ptr_eq(
+            loaded,
+            &capture.owner().disabled_loaded_packages()[&record.settings.name]
+        ));
         assert_eq!(loaded.collected_signing, record.signing);
         assert_eq!(
             loaded.facade_entry().unwrap().past_signing_certificates,

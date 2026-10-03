@@ -157,11 +157,31 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .collect();
     let mut scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
     assert!(scan.rejected.is_empty());
+    let captures = aim_services::package::scan_snapshot::Store::new(scan.owner.clone()).unwrap();
+    let original_capture = captures.capture();
+    assert_eq!(original_capture.version(), 1);
+    let mut invalid_capture = scan.owner.clone();
+    invalid_capture.settings.packages[0]
+        .code_path
+        .push_str("/different");
+    assert!(
+        matches!(captures.publish(&original_capture, invalid_capture),
+        Err(aim_services::package::scan_snapshot::Error::Invalid(ref message))
+            if message == "loaded code differs from its owner")
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &original_capture,
+        &captures.capture()
+    ));
     assert_eq!(scan.owner.loaded_packages().len(), scan.packages.len());
     assert!(scan.owner.disabled_loaded_packages().is_empty());
     for completed in &scan.packages {
         let record = &completed.candidate.record;
         let loaded = &scan.owner.loaded_packages()[&record.settings.name];
+        assert!(std::sync::Arc::ptr_eq(
+            loaded,
+            &original_capture.owner().loaded_packages()[&record.settings.name]
+        ));
         assert_eq!(loaded.collected_signing, record.signing);
         assert_eq!(
             loaded.facade_entry().unwrap().past_signing_certificates,
@@ -929,6 +949,11 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .apply_existing(&code, update(), &saved_users, None, None)
         .unwrap();
     let before_finalization = mismatched_owner.clone();
+    assert!(
+        matches!(captures.publish(&original_capture, mismatched_owner.clone()),
+        Err(aim_services::package::scan_snapshot::Error::Invalid(ref message))
+            if message == "scan metadata is not finalized")
+    );
     mismatched.record.parsed.signing_details = None;
     assert!(matches!(
         mismatched_owner.finish_scan_metadata(mismatched, &apks, completion()),
@@ -953,6 +978,12 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     );
     assert_eq!(retained.candidate.record.settings.app_id, saved.app_id);
     assert_eq!(retained.candidate.users, saved_users[&saved.name]);
+    let next_capture = captures
+        .publish(&original_capture, scan.owner.clone())
+        .unwrap();
+    assert_eq!(next_capture.version(), 2);
+    assert_eq!(original_capture.owner(), &before);
+    assert_eq!(next_capture.owner(), &scan.owner);
     assert_eq!(scan.owner.identities, before.identities);
     assert_eq!(scan.owner.libraries, before.libraries);
     assert!(retained.copies.is_empty());
