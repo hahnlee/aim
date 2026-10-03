@@ -913,6 +913,12 @@ impl Resources<'_> {
 
     /// `getString`: a string resource's string.
     pub fn resource_string(&self, id: u32) -> Option<String> {
+        self.resource_string_source(id).map(|(_, s)| s.to_owned())
+    }
+
+    /// The selected asset table and string, including XML file references.
+    /// File callers must open this table's APK, not guess from the resource ID.
+    pub fn resource_string_source(&self, id: u32) -> Option<(usize, &str)> {
         let mut v = Selected {
             kind: TYPE_REFERENCE,
             data: id,
@@ -922,7 +928,7 @@ impl Resources<'_> {
         };
         self.resolve(&mut v);
         match (v.kind, v.table) {
-            (TYPE_STRING, Some(t)) => self.string(t, v.data).map(str::to_owned),
+            (TYPE_STRING, Some(t)) => self.string(t, v.data).map(|s| (t, s)),
             _ => None,
         }
     }

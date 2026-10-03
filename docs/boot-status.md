@@ -353,8 +353,17 @@ validated contents. The original UpdateOwnershipHelper oracle
 compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
 transitions with the native owner: denied-target and provider/null queries match.
 The combined parser/keyset/update-owner fixture passes (17.89s), and its added
-compile-only APIs pass image linkage (13.4s). Binary XML/resource ingress,
-SystemConfig-conditioned update-owner clearing and asynchronous commit ordering
+compile-only APIs pass image linkage (13.4s). The resource reader now follows
+resource references/configuration to their selected asset table and consumes
+binary XML start/end/text events. It retains raw text, uses Java isBlank and
+ArraySet order, deduplicates entries and stops after the original's 501st distinct
+entry. Compiled APK fixtures compare mixed content, whitespace, hash collisions,
+resource aliases and truncation with the actual original
+UpdateOwnershipHelper.readUpdateOwnerDenyList on disposable boot data; locale
+selection and explicit missing/malformed-input errors are also checked natively.
+This reader takes the caller's complete asset inventory; supplying the boot's
+base/split/shared-library/overlay inputs and completing pending reads at the
+original commit phase, with SystemConfig-conditioned update-owner clearing,
 remain #825. This in-memory component is separate from InstallSource.update_owner
 and is not a complete removal commit. Store.commit_removed_boot_metadata writes just the completed
 domain/keyset stage as resilient ABX, retaining UID/users, unrelated XML and

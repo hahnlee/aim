@@ -5,6 +5,44 @@
 use crate::package::{pkg::AndroidPackage, settings::Package};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Read the selected XML asset from the caller's complete ResourcesManager
+/// asset inventory (tables followed by overlays). A missing asset is an error;
+/// it must not complete a pending provider read with an empty contribution.
+pub fn read_denylist(
+    resources: &crate::package::parse::resources::Resources<'_>,
+    id: u32,
+    file: impl FnOnce(usize, &str) -> aim_apps::res::Result<Vec<u8>>,
+) -> aim_apps::res::Result<Vec<String>> {
+    let (table, path) = resources
+        .resource_string_source(id)
+        .ok_or_else(|| aim_apps::res::bad("update ownership XML resource is unresolved"))?;
+    let bytes = file(table, path)?;
+    let mut events = aim_apps::res::XmlEvents::new(&bytes)?;
+    let mut contents = Vec::new();
+    while let Some(event) = events.next() {
+        if event? == aim_apps::res::XmlEvent::Start("deny-ownership".into()) {
+            if let Some(aim_apps::res::XmlEvent::Text(text)) = events.next().transpose()? {
+                if !text.chars().all(java_whitespace) && !contents.contains(&text) {
+                    contents.push(text);
+                    // The original checks after adding, so it retains 501.
+                    if contents.len() > 500 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(crate::package::info::array_order(contents, |s| s))
+}
+
+// String.isBlank uses Character.isWhitespace, which excludes nonbreaking
+// spaces and includes the four information-separator control characters.
+fn java_whitespace(c: char) -> bool {
+    matches!(c, '\u{0009}'..='\u{000d}' | '\u{001c}'..='\u{0020}'
+        | '\u{1680}' | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200a}'
+        | '\u{2028}' | '\u{2029}' | '\u{205f}' | '\u{3000}')
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UpdateOwnership {
     contributors: BTreeMap<String, BTreeSet<String>>,
@@ -91,6 +129,18 @@ impl UpdateOwnership {
 mod tests {
     use super::*;
     use crate::package::pkg::{Property, PropertyValue, UsesPermission};
+
+    #[test]
+    fn blank_text_uses_java_character_whitespace() {
+        for c in [
+            '\t', '\n', '\u{001c}', ' ', '\u{1680}', '\u{2007}', '\u{202f}', '\u{3000}',
+        ] {
+            assert_eq!(java_whitespace(c), !matches!(c, '\u{2007}' | '\u{202f}'));
+        }
+        for c in ['\u{0085}', '\u{00a0}', '\u{200b}', '\u{feff}', 'a'] {
+            assert!(!java_whitespace(c));
+        }
+    }
 
     #[test]
     fn contributors_overlap_accumulate_and_retire_idempotently() {

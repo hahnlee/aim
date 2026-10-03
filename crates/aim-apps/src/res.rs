@@ -3,6 +3,9 @@
 
 use std::fmt;
 
+mod xml_events;
+pub use xml_events::{XmlEvent, XmlEvents};
+
 #[derive(Debug)]
 pub struct Error(pub String);
 

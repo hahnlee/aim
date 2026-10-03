@@ -51,6 +51,235 @@ fn link(dir: &Path, name: &str, manifest: &str) -> PathBuf {
     apk
 }
 
+#[test]
+#[ignore = "requires pinned image, aimctl, JDK, aapt2 and d8; run explicitly"]
+fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
+    use aim_services::package::{
+        owner::update_ownership::read_denylist,
+        parse::resources::{Config, Resources, Table},
+    };
+    use common::runtime::{Boot, run};
+    use std::fmt::Write;
+    use std::time::{Duration, Instant};
+    let data = Data::new();
+    let res = data.0.join("res");
+    for directory in ["xml", "xml-en", "values"] {
+        fs::create_dir_all(res.join(directory)).unwrap();
+    }
+    fs::write(
+        res.join("xml/denylist.xml"),
+        r#"<list>
+        <deny-ownership> one </deny-ownership>
+        <deny-ownership>one</deny-ownership><deny-ownership>one</deny-ownership>
+        <deny-ownership>BB</deny-ownership><deny-ownership>Aa</deny-ownership>
+        <deny-ownership> </deny-ownership><deny-ownership/>
+        <deny-ownership> </deny-ownership><deny-ownership> </deny-ownership>
+        <deny-ownership> </deny-ownership><deny-ownership>　</deny-ownership>
+        <deny-ownership><deny-ownership>skipped</deny-ownership></deny-ownership>
+        <other><deny-ownership>nested</deny-ownership></other>
+        <deny-ownership>first<other/>last</deny-ownership>
+    </list>"#,
+    )
+    .unwrap();
+    fs::copy(res.join("xml/denylist.xml"), res.join("xml/mixed.xml")).unwrap();
+    fs::write(
+        res.join("xml-en/denylist.xml"),
+        "<list><deny-ownership>english</deny-ownership></list>",
+    )
+    .unwrap();
+    let mut long = String::from("<list>");
+    for i in 0..502 {
+        // Duplicates do not advance the limit.
+        long.push_str(&format!(
+            "<deny-ownership>p{i}</deny-ownership><deny-ownership>p{i}</deny-ownership>"
+        ));
+    }
+    long.push_str("</list>");
+    fs::write(res.join("xml/long.xml"), long).unwrap();
+    fs::write(
+        res.join("values/aliases.xml"),
+        "<resources><item type=\"xml\" name=\"alias\">@xml/mixed</item></resources>",
+    )
+    .unwrap();
+    let aapt = aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aapt2");
+    let compiled = data.0.join("compiled.zip");
+    let result = Command::new(&aapt)
+        .arg("compile")
+        .arg("--dir")
+        .arg(&res)
+        .arg("-o")
+        .arg(&compiled)
+        .output()
+        .expect("pinned aapt2");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let manifest = data.0.join("manifest.xml");
+    let framework_path = aim_paths::derived_image().join("system/framework/framework-res.apk");
+    let mut apks = Vec::new();
+    for name in ["mixed", "alias", "long"] {
+        fs::write(&manifest, format!(r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+            package="org.example.denylist"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/>
+            <uses-permission android:name="android.permission.INSTALL_PACKAGES"/>
+            <application android:hasCode="false"><property android:name="android.app.PROPERTY_LEGACY_UPDATE_OWNERSHIP_DENYLIST"
+            android:resource="@xml/{name}"/></application></manifest>"#)).unwrap();
+        let apk_path = data.0.join(format!("{name}.apk"));
+        let result = Command::new(&aapt)
+            .arg("link")
+            .arg("--manifest")
+            .arg(&manifest)
+            .arg("-I")
+            .arg(&framework_path)
+            .arg("-o")
+            .arg(&apk_path)
+            .arg(&compiled)
+            .output()
+            .expect("pinned aapt2");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        apks.push(apk_path);
+    }
+    let apk = aim_apps::apk::Apk::open(&apks[0]).unwrap();
+    let framework = aim_apps::apk::Apk::open(&framework_path).unwrap();
+    let table = Table::parse(&apk.file("resources.arsc").unwrap()).unwrap();
+    let framework = Table::parse(&framework.file("resources.arsc").unwrap()).unwrap();
+    let mut resources = Resources {
+        tables: vec![&framework, &table],
+        overlays: &[],
+        config: Config::default(),
+    };
+    let file = |cookie, path: &str| {
+        assert_eq!(cookie, 1, "XML must come from the selected app asset");
+        apk.file(path)
+    };
+    let id = table.id("xml", "denylist").unwrap();
+    let expected = aim_services::package::info::array_order(
+        [" one ", "one", "BB", "Aa", " ", " ", " ", "nested", "first"]
+            .map(str::to_owned)
+            .to_vec(),
+        |s| s,
+    );
+    assert_eq!(read_denylist(&resources, id, file).unwrap(), expected);
+    assert_eq!(
+        read_denylist(&resources, table.id("xml", "alias").unwrap(), file).unwrap(),
+        expected
+    );
+    let list = read_denylist(&resources, table.id("xml", "long").unwrap(), file).unwrap();
+    assert_eq!(list.len(), 501);
+    assert!(list.contains(&"p500".into()));
+    assert!(!list.contains(&"p501".into()));
+    resources.config.language = *b"en";
+    assert_eq!(read_denylist(&resources, id, file).unwrap(), ["english"]);
+    assert!(read_denylist(&resources, 0, file).is_err());
+    assert!(
+        read_denylist(&resources, id, |_, _| Err(aim_apps::res::bad(
+            "missing asset"
+        )))
+        .is_err()
+    );
+    let bytes = apk.file("res/xml-en/denylist.xml").unwrap();
+    assert!(read_denylist(&resources, id, |_, _| Ok(bytes[..bytes.len() - 1].to_vec())).is_err());
+    let mut unbalanced = bytes.clone();
+    let last = aim_apps::res::chunks(&bytes).next().unwrap().unwrap();
+    let child_chunks: Vec<_> = aim_apps::res::chunks(&last.data[last.header..])
+        .map(Result::unwrap)
+        .collect();
+    let end_size = child_chunks.last().unwrap().data.len();
+    unbalanced.truncate(unbalanced.len() - end_size);
+    let size = unbalanced.len() as u32;
+    unbalanced[4..8].copy_from_slice(&size.to_le_bytes());
+    assert!(read_denylist(&resources, id, |_, _| Ok(unbalanced)).is_err());
+
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let classes = data.0.join("classes");
+    let stubs = data.0.join("stubs");
+    let dex = data.0.join("dex");
+    for dir in [&classes, &stubs, &dex] {
+        fs::create_dir(dir).unwrap();
+    }
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&stubs)
+        .args(common::java::sources(
+            &aim_paths::root().join("java/device-services/stubs"),
+        )));
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg("-classpath")
+        .arg(&stubs)
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/UpdateOwnershipResourceOracle.java"),
+        ));
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
+        .args([
+            "com.android.tools.r8.D8",
+            "--release",
+            "--min-api",
+            "36",
+            "--lib",
+        ])
+        .arg(&jdk)
+        .arg("--classpath")
+        .arg(&stubs)
+        .arg("--output")
+        .arg(&dex)
+        .args([
+            classes.join("com/android/server/pm/UpdateOwnershipResourceOracle.class"),
+            classes.join("com/android/server/pm/UpdateOwnershipResourceOracle$1.class"),
+        ]));
+    let boot = Boot {
+        ctl: aim_paths::root().join("target/release/aimctl"),
+        data: data.0.join("guest"),
+    };
+    run(boot.command().args(["start", "--windows"]));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let output = boot
+            .command()
+            .args(["shell", "getprop", "sys.boot_completed"])
+            .output()
+            .unwrap();
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "disposable boot did not complete"
+        );
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let guest = boot.data.join("data/local/tmp/update-ownership");
+    fs::create_dir(&guest).unwrap();
+    fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
+    let mut command = boot.command();
+    command.args(["shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/update-ownership/oracle.dex:/system/framework/services.jar", "/system/bin", "com.android.server.pm.UpdateOwnershipResourceOracle"]);
+    let mut native = String::new();
+    for (apk, contents) in apks.iter().zip([&expected, &expected, &list]) {
+        let name = apk.file_name().unwrap().to_str().unwrap();
+        fs::copy(apk, guest.join(name)).unwrap();
+        command.arg(format!("/data/local/tmp/update-ownership/{name}"));
+        write!(&mut native, "{name}").unwrap();
+        for name in contents {
+            native.push(' ');
+            for b in name.as_bytes() {
+                write!(&mut native, "{b:02x}").unwrap();
+            }
+        }
+        native.push('\n');
+    }
+    assert_eq!(String::from_utf8(run(&mut command).stdout).unwrap(), native);
+}
+
 fn base(isolated: bool) -> String {
     format!(
         r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
