@@ -280,9 +280,26 @@ container descent, stage filtering, parse rejection without deletion, missing
 roots and directory failures. The 301 units pass (3.06s); the final APEX-origin
 validation passes both focused image tests. A non-UTF8 filesystem fixture could
 not be created because host APFS rejects that name; no such runtime test is
-claimed. Known-package validation, invalid-code removal and factory fallback in
-the data iteration, non-system promotion/removal, publication and failure
-persistence remain pending (#707/#702/#816/#798).
+claimed. scan_known_data now admits an existing data APK through canonical physical
+location and known-setting/path checks, with InitAppsHelper's explicit
+expectingBetter exception. It inherits system/partition privileges from the
+current refreshed factory record, rejects mismatched factory metadata and
+combines manifest/library policy, signer/UID reconciliation and complete scan
+metadata. ABI saved-setting/system/update inputs are rebound to current
+ownership. Unknown candidates, unexpected paths, wrong signers and stale
+factory records leave candidate settings unchanged. The unchanged signed APK
+fixture passes (40.33s), including the expectingBetter path exception and
+ordinary data scans without system/update flags; all 301 units pass (3.12s).
+The full disposable original-PMS comparison (376.96s) now completes the saved
+system phase's 240 APKs and then all three selected data updates (WebView,
+Chrome and TrichromeLibrary) through physical DataImage inventory and
+scan_known_data. UID, code path, long version, public/private flags, actual code
+file time and user states match the original for all three data candidates;
+no library copies are required. The owned data/image are cleaned after the run.
+This diagnostic does not register native PMS or exercise invalid-data cleanup.
+Invalid-code removal and factory fallback in the complete data iteration,
+non-system promotion/removal, publication and failure persistence remain
+pending (#707/#702/#816/#798).
 Filesystem tests cover directory order, parent/cache cleanup, app
 data preservation and partial installer failure/retry; the directory backend
 in those tests deletes disposable files, not the original installd daemon.
@@ -300,14 +317,13 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 301 units pass (3.04s). The original signed framework/GSF fixture passes
-(38.34s), including saved-image iteration, sequential ABI recalculation,
-integrated source completion, disposable cleanup and scan failures. The full
-saved-image comparison (376.52s) preceded the final stub-state feedback and
-null-oldPkg adjustment; final units and the original-APK fixture cover that
-feedback, with factory oldPkg ownership checked against the pinned source. All eight
-original-APK scan-input tests passed before this settings transition (5.69s). The Java image
-API linkage build passes (13.2s). This is the initial system APK phase, not a
+All 301 units pass (3.12s). The original signed framework/GSF fixture passes
+(40.33s), including saved-image iteration, sequential ABI recalculation,
+integrated source completion, disposable cleanup, known-data admission and
+scan failures. The full saved-system/data comparison passes (376.96s), including
+the final stub-state feedback and null-oldPkg adjustment. The nine original-APK
+scan-input tests pass (5.78s); the Java image API linkage build passes (13.2s).
+This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version
 selection, stub expansion, graph/permission/commit side effects, persistence and
 replica publication remain #707/#702/#798/#810/#812/#813. Original PMS still runs.

@@ -526,9 +526,88 @@ fn saved_scan_libraries_match_original_pms() {
         assert_eq!(candidate.record.settings.version_code, saved.version_code);
         assert_eq!(candidate.users, saved_users[&saved.name]);
     }
-    eprintln!(
-        "saved native image scan completed 240 active system APKs and retained 3 original data sources"
-    );
+    let data_image = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
+    assert!(data_image.rejected.is_empty());
+    assert_eq!(data_image.packages.len(), 3);
+    for code in &data_image.packages {
+        let identity =
+            aim_services::package::scan::Identity::select(&code.parsed, &resumed.settings, true);
+        let factory = resumed_packages
+            .retained_data
+            .iter()
+            .find(|f| f.record.settings.name == identity.internal_name)
+            .expect("selected data APK has refreshed factory metadata");
+        let environment = NativeLibraryEnvironment {
+            preferred_abi: all_abis.first().unwrap(),
+            app_lib32_install_dir: "/data/app-lib",
+            code_is_directory: fs::metadata((apks.files)(&code.location.path).unwrap())
+                .unwrap()
+                .is_dir(),
+            canonical_source: None,
+        };
+        let completed = resumed
+            .scan_known_data(
+                code,
+                &saved_users,
+                None,
+                &apks,
+                aim_services::package::scan::DataScanInputs {
+                    factory: Some(factory),
+                    platform: platform_signing,
+                    vendor_sdk,
+                    compatibility: &compatibility,
+                    remove_test_base: None,
+                    expecting_better: &empty_packages,
+                    new_domain_id: &domain_ids,
+                    completion: ScanMetadataCompletion {
+                        abi_policy: &abi_policy,
+                        native_environment: &environment,
+                        context: AbiScanContext {
+                            mode: AbiScanMode::Existing {
+                                first_boot_or_upgrade: false,
+                                old_was_stub: false,
+                                saved: None,
+                            },
+                            system: false,
+                            updated: false,
+                            override_abi: None,
+                            platform_runtime_64bit: None,
+                        },
+                        install: NativeLibraryInstallPolicy {
+                            page_size: 16384,
+                            extract: false,
+                            debuggable: false,
+                            compat_16kb_disabled: false,
+                            manifest_compat_disabled: false,
+                        },
+                        destination: None,
+                        clock: ScanClock {
+                            current_time: 0,
+                            user_id: 0,
+                            update_time: false,
+                        },
+                        factory_test: false,
+                    },
+                },
+            )
+            .unwrap();
+        let record = &completed.candidate.record;
+        let saved = original
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == record.settings.name)
+            .unwrap();
+        assert_eq!(record.settings.app_id, saved.app_id);
+        assert_eq!(record.settings.code_path, saved.code_path);
+        assert_eq!(record.settings.version_code, saved.version_code);
+        assert_eq!(record.settings.flags, saved.flags);
+        assert_eq!(record.settings.private_flags, saved.private_flags);
+        assert_eq!(record.settings.last_modified_time, saved.last_modified_time);
+        assert_eq!(completed.candidate.users, saved_users[&saved.name]);
+        assert!(completed.copies.is_empty());
+    }
+    eprintln!("saved native scan completed 240 system APKs and all 3 selected data APKs");
     let system_count = system_image.packages.len();
     let first_system = SystemImageScan::first_boot(
         system_image,

@@ -275,6 +275,150 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(batch.retained_data[0].record.settings.name, factory.name);
             assert_eq!(owner.settings.packages[1], active);
             assert!(data_code.exists());
+            let physical_data = fixture.0.join("data/app/fixture-update");
+            std::fs::create_dir_all(&physical_data).unwrap();
+            std::os::unix::fs::symlink(
+                original.join(
+                    "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk",
+                ),
+                physical_data.join("base.apk"),
+            )
+            .unwrap();
+            let inventory = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
+            assert_eq!(inventory.packages.len(), 1);
+            let raw = &inventory.packages[0];
+            let platform = &batch.packages[0].candidate.record.signing;
+            let native_environment = NativeLibraryEnvironment {
+                preferred_abi: "arm64-v8a",
+                app_lib32_install_dir: "/data/app-lib",
+                code_is_directory: true,
+                canonical_source: None,
+            };
+            let data_inputs = || aim_services::package::scan::DataScanInputs {
+                factory: Some(&batch.retained_data[0]),
+                platform,
+                vendor_sdk: 36,
+                compatibility: &compatibility,
+                remove_test_base: None,
+                expecting_better: &empty_packages,
+                new_domain_id: &domain_ids,
+                completion: ScanMetadataCompletion {
+                    abi_policy: &abi_policy,
+                    native_environment: &native_environment,
+                    context: AbiScanContext {
+                        mode: AbiScanMode::Existing {
+                            first_boot_or_upgrade: false,
+                            old_was_stub: false,
+                            saved: None,
+                        },
+                        // The data admission owner replaces these supplied flags.
+                        system: false,
+                        updated: false,
+                        override_abi: None,
+                        platform_runtime_64bit: None,
+                    },
+                    install: inputs(&domain_ids).install,
+                    destination: None,
+                    clock: inputs(&domain_ids).clock,
+                    factory_test: false,
+                },
+            };
+            let before = owner.clone();
+            let copy_code = || aim_services::package::scan::Code {
+                location: raw.location.clone(),
+                parsed: raw.parsed.clone(),
+                signing: raw.signing.clone(),
+            };
+            let mut unknown = copy_code();
+            unknown.parsed.package_name = "unknown.data.package".into();
+            unknown.parsed.manifest_package_name = Some("unknown.data.package".into());
+            assert!(
+                matches!(owner.scan_known_data(&unknown, &full_users, None, &apks, aim_services::package::scan::DataScanInputs { factory: None, ..data_inputs() }), Err(SigningError::Rejected(e)) if e.phase == "require-known")
+            );
+            assert_eq!(owner, before);
+            let mut moved = copy_code();
+            moved.location.path = "/data/app/unexpected".into();
+            moved.parsed.path = Some(moved.location.path.clone());
+            assert!(
+                matches!(owner.scan_known_data(&moved, &full_users, None, &apks, data_inputs()), Err(SigningError::Rejected(e)) if e.phase == "require-known")
+            );
+            assert_eq!(owner, before);
+            let mut wrong_signer = copy_code();
+            wrong_signer.signing = platform.clone();
+            assert!(
+                owner
+                    .scan_known_data(&wrong_signer, &full_users, None, &apks, data_inputs())
+                    .is_err()
+            );
+            assert_eq!(owner, before);
+            let mut stale = owner.clone();
+            stale.settings.disabled_system_packages[0].version_code += 1;
+            let stale_before = stale.clone();
+            assert!(
+                matches!(stale.scan_known_data(raw, &full_users, None, &apks, data_inputs()), Err(SigningError::Rejected(e)) if e.phase == "factory")
+            );
+            assert_eq!(stale, stale_before);
+            let mut expecting = before.clone();
+            expecting
+                .settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == active.name)
+                .unwrap()
+                .code_path = factory.code_path.clone();
+            let expecting_names = std::collections::BTreeSet::from([active.name.clone()]);
+            let relaxed = expecting
+                .scan_known_data(
+                    raw,
+                    &full_users,
+                    None,
+                    &apks,
+                    aim_services::package::scan::DataScanInputs {
+                        expecting_better: &expecting_names,
+                        ..data_inputs()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                relaxed.candidate.record.settings.code_path,
+                raw.location.path
+            );
+            assert_eq!(relaxed.candidate.record.settings.app_id, active.app_id);
+            let mut ordinary = before.clone();
+            ordinary.settings.disabled_system_packages.clear();
+            let ordinary_data = ordinary
+                .scan_known_data(
+                    raw,
+                    &full_users,
+                    None,
+                    &apks,
+                    aim_services::package::scan::DataScanInputs {
+                        factory: None,
+                        ..data_inputs()
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                ordinary_data.candidate.record.settings.flags & (1 | (1 << 7)),
+                0
+            );
+            assert_eq!(ordinary_data.candidate.users, full_users[&active.name]);
+            let accepted = owner
+                .scan_known_data(raw, &full_users, None, &apks, data_inputs())
+                .unwrap();
+            assert_eq!(accepted.candidate.record.settings.app_id, active.app_id);
+            assert_eq!(
+                accepted.candidate.record.settings.code_path,
+                active.code_path
+            );
+            assert_eq!(accepted.candidate.users, full_users[&active.name]);
+            assert_ne!(accepted.candidate.record.settings.flags & 1, 0);
+            assert_ne!(accepted.candidate.record.settings.flags & (1 << 7), 0);
+            assert_ne!(accepted.candidate.record.settings.private_flags & 8, 0);
+            assert_eq!(accepted.candidate.record.signing, raw.signing);
+            assert!(accepted.copies.is_empty());
+            assert!(physical_data.join("base.apk").exists());
+            std::fs::remove_dir_all(physical_data).unwrap();
             std::fs::remove_file(data_code).unwrap();
         } else {
             assert_eq!(batch.packages.len(), 2);

@@ -31,7 +31,9 @@ pub use abi::{
 };
 mod boot;
 mod completion;
+mod data;
 mod disabled;
+pub use data::DataScanInputs;
 mod updated_boot;
 pub use boot::{
     FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,
