@@ -20,6 +20,8 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageSigningState> factorySigning = new HashMap<>();
     private record UserKey(String name, boolean factory, int user) {}
     private final Map<UserKey, PackageUserStateData> users = new HashMap<>();
+    private record ReplicaKey(UserKey user, boolean crossUserSuspensions) {}
+    private final Map<ReplicaKey, PackageUserStateReplica> userReplicas = new HashMap<>();
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
@@ -103,6 +105,7 @@ public final class PackageScanLease implements AutoCloseable {
         signing.clear();
         factorySigning.clear();
         users.clear();
+        userReplicas.clear();
     }
 
     public synchronized PackageSigningState getSigningState(String name, boolean factory)
@@ -183,4 +186,15 @@ public final class PackageScanLease implements AutoCloseable {
             return state;
         } finally { in.recycle(); }
     }
+    public synchronized PackageUserStateReplica getUserStateReplica(String name, boolean factory, int user,
+            boolean crossUserSuspensions) throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        ReplicaKey key = new ReplicaKey(new UserKey(Objects.requireNonNull(name), factory, user), crossUserSuspensions);
+        if (userReplicas.containsKey(key)) return userReplicas.get(key);
+        PackageUserStateData data = getUserState(name, factory, user);
+        PackageUserStateReplica replica = data == null ? null : new PackageUserStateReplica(data, crossUserSuspensions);
+        userReplicas.put(key, replica);
+        return replica;
+    }
+
 }

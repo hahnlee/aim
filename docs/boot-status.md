@@ -73,13 +73,13 @@ nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 373
-units pass (3.17s), as do 11 XML units; the ignored
+units pass (3.13s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 15.93s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 26.48s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -88,9 +88,20 @@ ordering and null/empty-label/zero-icon distinctions; active runtime changes
 update only the disabled setting's existing user aliases. The original
 PackageUserStateImpl agrees with 15 mutation states, and ART reads actual native
 runtime DTOs with immutable lists. The real Binder capture retains old runtime
-state after a newer version changes its overrides. These are owned inputs, not
-a complete PackageUserStateInternal replica: the full Java adapter, live overlay
-and component producers and original-state import remain #836. Component ownership
+state after a newer version changes its overrides. PackageUserStateReplica now
+implements every pinned PackageUserStateInternal method and the inherited
+framework Set-returning interface, with one cached object per captured user and
+explicit image suspension policy. Original ART exercises populated scalar,
+component, suspend, archive and runtime getters; the adapter recreates detached
+original return objects, seals watched sets/maps and retains saved archive time.
+Suspension maps distinguish null from allocated-empty owners (#847), and
+cross-user owner keys/last duplicate/quarantine aggregation use the supplied
+pinned policy. Native owner updates refresh existing disabled-user aliases.
+Live overlay/component producers, original-state import and full PackageState
+metadata/callback wiring remain #836. Explicit null runtime SuspendParams
+values remain unsupported (#848), and archive XML descendant/component
+validation remains #849. Native PMS activation and its acceptance gates remain
+unestablished. Component ownership
 now distinguishes original default null sets from Settings-initialized empty
 sets (#845), including missing-file initialization and third-party new settings.
 The original ART oracle confirms that the ArraySet setter overloads initialize

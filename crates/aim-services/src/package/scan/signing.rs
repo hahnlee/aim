@@ -109,26 +109,42 @@ impl SigningScan {
         self.loaded.contains_key(name) || self.parsed.iter().any(|(n, _, _, _)| n == name)
     }
 
-    /// Commit the runtime user owner supplied by overlay/component producers.
-    /// Publication still requires the captured Store base; factory aliases share
-    /// only the users that the original disabled setting aliases.
+    /// Apply the captured per-user state supplied by its commit owner.
+    /// Store publication still requires the captured base. Disabled settings
+    /// share only the users that the original setting aliases.
+    pub fn set_user_state(
+        &mut self,
+        name: &str,
+        user: i32,
+        state: UserState,
+    ) -> Result<(), String> {
+        if user < 0 {
+            return Err("package user id is negative".into());
+        }
+        let users = self
+            .scanned_users
+            .get_mut(name)
+            .ok_or_else(|| "package user owner is not captured".to_string())?;
+        users.insert(user, state);
+        let users = users.clone();
+        self.update_disabled_user_aliases(name, &users);
+        Ok(())
+    }
     pub fn set_user_runtime(
         &mut self,
         name: &str,
         user: i32,
         runtime: crate::package::owner::user_runtime::State,
     ) -> Result<(), String> {
-        if user < 0 {
-            return Err("runtime user id is negative".into());
-        }
-        let users = self
+        let mut state = self
             .scanned_users
-            .get_mut(name)
-            .ok_or_else(|| "runtime package user owner is not captured".to_string())?;
-        users.entry(user).or_default().runtime = runtime;
-        let users = users.clone();
-        self.update_disabled_user_aliases(name, &users);
-        Ok(())
+            .get(name)
+            .ok_or_else(|| "runtime package user owner is not captured".to_string())?
+            .get(&user)
+            .cloned()
+            .unwrap_or_default();
+        state.runtime = runtime;
+        self.set_user_state(name, user, state)
     }
 
     /// Withdraw the scan's loaded package and declarations while retaining its

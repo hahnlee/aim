@@ -121,6 +121,8 @@ public final class PackageRoundTripOracle {
         var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user").toPath());
         stale.userState = owner.userState;
+        owner.user10 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-10").toPath());
+        owner.user11 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-11").toPath());
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
@@ -186,6 +188,12 @@ public final class PackageRoundTripOracle {
         catch (UnsupportedOperationException expected) {}
         try { userState.getLabelIcons().clear(); throw new AssertionError("mutable captured label icons"); }
         catch (UnsupportedOperationException expected) {}
+        verifyUserReplica(lease, name);
+        if (originalDefault.getSuspendParams() != null) throw new AssertionError("default suspension map is not null");
+        originalDefault.setSuspendParams(new android.util.ArrayMap<android.content.pm.UserPackage, com.android.server.pm.pkg.SuspendParams>());
+        if (originalDefault.getSuspendParams() == null || originalDefault.getSuspendParams().size() != 0) {
+            throw new AssertionError("initialized empty suspension map differs");
+        }
         int userReads = owner.userReads;
         if (userState.getVersion() != 1 || !userState.getPackageName().equals(name)
                 || userState.getAppId() != uid || userState.getUserId() != 0 || userState.isFactory()
@@ -491,6 +499,68 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
         try { lease.getSeInfo(name); throw new AssertionError("closed seInfo lease accepted"); }
         catch (IllegalStateException expected) {}
+        try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
+        catch (IllegalStateException expected) {}
+    }
+
+    private static void verifyUserReplica(dev.aim.server.PackageScanLease lease, String name) throws Exception {
+        var state = lease.getUserStateReplica(name, false, 10, true);
+        if (lease.getUserStateReplica(name, false, 10, true) != state) throw new AssertionError("replica identity differs");
+        com.android.server.pm.pkg.PackageUserStateInternal internal = state;
+        android.content.pm.pkg.FrameworkPackageUserState framework = state;
+        if (internal.getCeDataInode() != 17 || internal.getDeDataInode() != 19 || !internal.dataExists()
+                || internal.isInstalled() || !internal.isStopped() || !internal.isNotLaunched() || !internal.isHidden()
+                || !internal.isInstantApp() || !internal.isVirtualPreload() || internal.getDistractionFlags() != 3
+                || internal.getEnabledState() != 3 || internal.getInstallReason() != 4 || internal.getUninstallReason() != 5
+                || internal.getFirstInstallTimeMillis() != 43 || internal.getMinAspectRatio() != 2
+                || !internal.getLastDisableAppCaller().equals("caller") || !internal.getHarmfulAppWarning().equals("warning")
+                || !internal.getSplashScreenTheme().equals("theme") || !internal.isSuspended() || !internal.isQuarantined()
+                || !internal.isComponentEnabled("fixture.Enabled") || !internal.isComponentDisabled("fixture.Disabled")
+                || internal.getEnabledComponentsNoCopy().size() != 1 || internal.getDisabledComponentsNoCopy().size() != 1
+                || !framework.getEnabledComponents().contains("fixture.Enabled") || !framework.getDisabledComponents().contains("fixture.Disabled")) {
+            throw new AssertionError("full user-state interface fields differ");
+        }
+        try { internal.getEnabledComponentsNoCopy().add("mutated"); throw new AssertionError("unsealed enabled component owner"); }
+        catch (IllegalStateException expected) {}
+        internal.getEnabledComponents().clear();
+        if (!internal.isComponentEnabled("fixture.Enabled")) throw new AssertionError("mutated captured components");
+        var map = internal.getSuspendParams();
+        if (map.size() != 2) throw new AssertionError("cross-user suspension lost");
+        var params = map.get(android.content.pm.UserPackage.of(0, "android"));
+        if (!params.isQuarantined() || !params.getDialogInfo().getTitle().equals("title")
+                || !params.getDialogInfo().getDialogMessage().equals("message")
+                || !params.getDialogInfo().getNeutralButtonText().equals("button")
+                || params.getDialogInfo().getNeutralButtonAction() != 1) throw new AssertionError("suspend parameters differ");
+        ((int[]) params.getAppExtras().get("values"))[0] = 99;
+        if (((int[]) internal.getSuspendParams().get(android.content.pm.UserPackage.of(0, "android")).getAppExtras().get("values"))[0] != 7) {
+            throw new AssertionError("mutable suspension extras escaped capture");
+        }
+        try { map.put(android.content.pm.UserPackage.of(1, "mutated"), params); throw new AssertionError("unsealed suspension map"); }
+        catch (IllegalStateException expected) {}
+        var perUser = lease.getUserStateReplica(name, false, 10, false);
+        if (perUser.getSuspendParams().size() != 1 || perUser.isQuarantined()) throw new AssertionError("per-user duplicate replacement differs");
+        if (!internal.getAllOverlayPaths().getOverlayPaths().equals(java.util.List.of("base", "base", "base-apk", "two", "one", "three"))) {
+            throw new AssertionError("merged overlays differ");
+        }
+        internal.getOverlayPaths().getOverlayPaths().clear();
+        internal.getSharedLibraryOverlayPaths().get("B").getOverlayPaths().clear();
+        if (internal.getAllOverlayPaths().getOverlayPaths().size() != 6) throw new AssertionError("mutated overlay capture");
+        var pair = internal.getOverrideLabelIconForComponent(new android.content.ComponentName("fixture", "Activity"));
+        if (!pair.first.equals("") || pair.second != 0 || internal.getOverrideLabelIconForComponent(new android.content.ComponentName("fixture", "Absent")) != null) {
+            throw new AssertionError("label/icon lookup differs");
+        }
+        var archive = internal.getArchiveState();
+        var activity = archive.getActivityInfos().get(0);
+        if (!archive.getInstallerTitle().equals("installer") || archive.getArchiveTimeMillis() != 85
+                || !activity.getTitle().equals("archived") || !activity.getOriginalComponentName().getClassName().equals("fixture.Archive")
+                || !activity.getIconBitmap().toString().equals("/data/icon") || !activity.getMonochromeIconBitmap().toString().equals("/data/mono")) {
+            throw new AssertionError("archive captured timestamp/component differs");
+        }
+        if (lease.getUserStateReplica(name, false, 0, true).getSuspendParams() != null
+                || lease.getUserStateReplica(name, false, 11, true).getSuspendParams() == null
+                || lease.getUserStateReplica(name, false, 11, true).getSuspendParams().size() != 0) {
+            throw new AssertionError("nullable/empty suspension owners differ");
+        }
     }
 
     private static void runtimeText(java.io.DataOutputStream out, String value) throws Exception {
@@ -546,7 +616,7 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
-        byte[] userState;
+        byte[] userState, user10, user11;
         int userReads;
         boolean signingTail;
         byte[] signingOverride;
@@ -570,14 +640,16 @@ public final class PackageRoundTripOracle {
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return !disabled && name.equals(candidate) ? bytes.length : -1; }
         @Override public int getUserStateLength(String candidate, boolean disabled, int userId) {
-            return !disabled && name.equals(candidate) && userId == 0 ? userState.length : -1;
+            return !disabled && name.equals(candidate) && (userId == 0 || userId == 10 || userId == 11)
+                ? (userId == 0 ? userState : userId == 10 ? user10 : user11).length : -1;
         }
         @Override public byte[] getUserStateChunk(String candidate, boolean disabled, int userId, int offset, int length)
                 throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
             userReads++;
-            int end = Math.min(userState.length, offset + length) - (shortChunk ? 1 : 0);
-            return java.util.Arrays.copyOfRange(userState, offset, end);
+            byte[] state = userId == 0 ? userState : userId == 10 ? user10 : user11;
+            int end = Math.min(state.length, offset + length) - (shortChunk ? 1 : 0);
+            return java.util.Arrays.copyOfRange(state, offset, end);
         }
         @Override
         public byte[] getCodeChunk(String name, boolean disabled, int offset, int length) throws android.os.RemoteException {

@@ -39,10 +39,11 @@ public final class PackageUserStateData {
         installReason = in.readInt(); uninstallReason = in.readInt();
         harmfulWarning = in.readString(); splashTheme = in.readString();
         firstInstallTime = in.readLong(); minAspectRatio = in.readInt(); legacyDomainStatus = in.readInt();
-        int count = count(in);
-        var records = new ArrayList<Suspension>(count);
+        int count = in.readInt();
+        if (count < -1 || count > in.dataAvail() / 4) throw new IllegalArgumentException("invalid suspension count");
+        var records = new ArrayList<Suspension>(Math.max(0, count));
         for (int i = 0; i < count; i++) records.add(new Suspension(in));
-        suspensions = List.copyOf(records);
+        suspensions = count == -1 ? null : List.copyOf(records);
         archive = in.readBoolean() ? new Archive(in) : null;
         overlayPaths = in.readBoolean() ? new Paths(in) : null;
         if (in.readBoolean()) {

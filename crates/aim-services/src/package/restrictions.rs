@@ -41,7 +41,7 @@ pub struct UserState {
     pub distraction_flags: i32,
     /// Suspension owners in file order. User IDs remain unresolved until
     /// the reader has the image's cross-user suspension policy.
-    pub suspensions: Vec<Suspension>,
+    pub suspensions: Option<Vec<Suspension>>,
     pub instant_app: bool,
     pub virtual_preload: bool,
     /// `COMPONENT_ENABLED_STATE_*`.
@@ -78,7 +78,7 @@ impl Default for UserState {
             not_launched: false,
             hidden: false,
             distraction_flags: 0,
-            suspensions: Vec::new(),
+            suspensions: None,
             instant_app: false,
             virtual_preload: false,
             enabled: COMPONENT_ENABLED_STATE_DEFAULT,
@@ -172,7 +172,7 @@ impl UserState {
     /// ownership with the image policy, then let the last duplicate win.
     pub fn resolved_suspensions(&self, user: i32, cross_user: bool) -> Vec<(i32, &Suspension)> {
         let mut resolved: Vec<(i32, &Suspension)> = Vec::new();
-        for suspension in &self.suspensions {
+        for suspension in self.suspensions.iter().flatten() {
             let owner = match suspension.user {
                 SuspendingUser::Current => user,
                 SuspendingUser::Persisted(_) if !cross_user => user,
@@ -298,7 +298,9 @@ fn user_state(e: &Element) -> Result<UserState, String> {
             }
             "suspend-params" => {
                 if let Some(by) = string(child, "suspending-package") {
-                    s.suspensions.push(Suspension::read(&mut cursor, by)?);
+                    s.suspensions
+                        .get_or_insert_with(Vec::new)
+                        .push(Suspension::read(&mut cursor, by)?);
                 }
             }
             "suspended-dialog-info" => legacy_dialog = Some(dialog::DialogInfo::restore(child)),
@@ -317,7 +319,7 @@ fn user_state(e: &Element) -> Result<UserState, String> {
             _ => {}
         }
     }
-    if suspended && s.suspensions.is_empty() {
+    if suspended && s.suspensions.as_ref().is_none_or(Vec::is_empty) {
         let by = string(e, "suspending-package").unwrap_or_else(|| "android".into());
         if legacy_dialog.is_none() {
             legacy_dialog = string(e, "suspend_dialog_message")
@@ -327,7 +329,7 @@ fn user_state(e: &Element) -> Result<UserState, String> {
                     ..dialog::DialogInfo::default()
                 });
         }
-        s.suspensions.push(Suspension {
+        s.suspensions.get_or_insert_with(Vec::new).push(Suspension {
             package: by,
             user: SuspendingUser::Current,
             dialog: legacy_dialog,
@@ -408,9 +410,9 @@ mod tests {
             <suspend-params><dialog-info title='no owner'/></suspend-params>
         </pkg>"#,
         );
-        assert_eq!(s.suspensions.len(), 2);
-        assert!(s.suspensions[0].app_extras.is_some());
-        assert!(s.suspensions[1].launcher_extras.is_some());
+        assert_eq!(s.suspensions.as_ref().unwrap().len(), 2);
+        assert!(s.suspensions.as_ref().unwrap()[0].app_extras.is_some());
+        assert!(s.suspensions.as_ref().unwrap()[1].launcher_extras.is_some());
         assert_eq!(
             s.resolved_suspensions(10, true)
                 .iter()
@@ -449,7 +451,7 @@ mod tests {
         assert!(!s.is_quarantined(10, true));
         let fallback = state(b"<pkg suspended='true' suspend_dialog_message='fallback'/>");
         assert_eq!(
-            fallback.suspensions[0]
+            fallback.suspensions.as_ref().unwrap()[0]
                 .dialog
                 .as_ref()
                 .unwrap()
@@ -460,7 +462,7 @@ mod tests {
         assert!(
             state(b"<pkg suspended='false' suspend_dialog_message='ignored'/>")
                 .suspensions
-                .is_empty()
+                .is_none()
         );
     }
 

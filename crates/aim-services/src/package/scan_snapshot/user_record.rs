@@ -88,8 +88,12 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
     p.write_i64(state.first_install_time);
     p.write_i32(state.min_aspect_ratio);
     p.write_i32(state.domain_verification_status);
-    count(p, state.suspensions.len())?;
-    for suspension in &state.suspensions {
+    if let Some(suspensions) = &state.suspensions {
+        count(p, suspensions.len())?;
+    } else {
+        p.write_i32(-1);
+    }
+    for suspension in state.suspensions.iter().flatten() {
         p.write_string16(Some(&suspension.package));
         p.write_bool(matches!(suspension.user, SuspendingUser::Current));
         let user = match suspension.user {
@@ -178,6 +182,14 @@ mod tests {
         let default = UserState::default();
         let initialized = UserState::initialized();
         assert_ne!(default, initialized);
+        let mut empty_suspensions = default.clone();
+        empty_suspensions.suspensions = Some(vec![]);
+        assert!(!empty_suspensions.is_quarantined(0, true));
+        let mut absent = Parcel::new();
+        let mut allocated = Parcel::new();
+        write(&mut absent, &default).unwrap();
+        write(&mut allocated, &empty_suspensions).unwrap();
+        assert_ne!(absent.data(), allocated.data());
         for (values, expected) in [
             (None, -1),
             (Some(vec![]), 0),

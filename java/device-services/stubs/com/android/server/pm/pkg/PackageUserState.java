@@ -19,6 +19,10 @@ public interface PackageUserState {
     String getLastDisableAppCaller();
     int getMinAspectRatio();
     OverlayPaths getAllOverlayPaths();
+    OverlayPaths getOverlayPaths();
+    java.util.Map<String, OverlayPaths> getSharedLibraryOverlayPaths();
+    boolean isComponentEnabled(String componentName);
+    boolean isComponentDisabled(String componentName);
     boolean dataExists();
     String getSplashScreenTheme();
     int getUninstallReason();

@@ -41,7 +41,9 @@ fn enabled_write_preserves_typed_suspension_and_text_cdata_meaning() {
     let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     let suspension = store.state().users[0].1.restrictions.packages[0]
         .1
-        .suspensions[0]
+        .suspensions
+        .as_ref()
+        .unwrap()[0]
         .clone();
     assert_eq!(
         suspension.app_extras,
@@ -70,7 +72,11 @@ fn enabled_write_preserves_typed_suspension_and_text_cdata_meaning() {
     let reread = State::read(&data.0, &[0]).unwrap().unwrap();
     assert_eq!(reread, *store.state());
     assert_eq!(
-        reread.users[0].1.restrictions.packages[0].1.suspensions[0],
+        reread.users[0].1.restrictions.packages[0]
+            .1
+            .suspensions
+            .as_ref()
+            .unwrap()[0],
         suspension
     );
     assert!(fs::read(path).unwrap().starts_with(abx::MAGIC));
