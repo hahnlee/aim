@@ -43,9 +43,14 @@ impl Bridge {
             .owner
             .transact(bridge::GET_SE_INFO_TARGET_SDK_VERSION, &data, false)
             .map_err(SeInfoError::Transport)?;
-        bridge::read_get_se_info_target_sdk_version_reply(&mut reply.reader())
+        let mut reader = reply.reader();
+        let target = bridge::read_get_se_info_target_sdk_version_reply(&mut reader)
             .map_err(SeInfoError::Transport)?
-            .map_err(SeInfoError::Owner)
+            .map_err(SeInfoError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(SeInfoError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        Ok(target)
     }
 
     pub(crate) fn new(owner: Strong) -> Result<Self, Exception> {

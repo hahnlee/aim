@@ -1,5 +1,9 @@
 //! First native system scan with integrity-verified original APKs. No original
 //! image, parser feed or persisted PackageSettings is changed or consulted.
+mod common {
+    pub mod seinfo;
+}
+
 use aim_services::package::{
     parse::Platform,
     scan::{
@@ -76,6 +80,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let domain_ids = || Ok([next_id.fetch_add(1, Ordering::SeqCst); 16]);
     let apex_settings = Default::default();
     let inputs = |new_domain_id| FirstBootSystemInputs {
+        seinfo: common::seinfo::scan(),
         apex_settings: &apex_settings,
         first_api_level: 36,
         vendor_sdk: 36,
@@ -428,6 +433,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 expecting_better: &empty_packages,
                 new_domain_id: &domain_ids,
                 completion: ScanMetadataCompletion {
+                    seinfo: common::seinfo::scan(),
                     abi_policy: &abi_policy,
                     native_environment: &native_environment,
                     context: AbiScanContext {
@@ -612,6 +618,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             let non_incremental = |_: &str| Ok(false);
             let remove_test_base = |_: &aim_services::package::pkg::AndroidPackage| Ok(None);
             let loop_inputs = || DataImageScanInputs {
+                seinfo: common::seinfo::scan(),
                 factories: &batch,
                 platform,
                 vendor_sdk: 36,
@@ -934,6 +941,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         canonical_source: None,
     };
     let completion = || ScanMetadataCompletion {
+        seinfo: common::seinfo::scan(),
         abi_policy: &abi_policy,
         native_environment: &environment,
         context: AbiScanContext {
@@ -962,6 +970,56 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         Err(SigningError::Rejected(ref error)) if error.phase == "code-time"
     ));
     assert_eq!(scan.owner, before);
+    let mut independent_code = code.clone();
+    independent_code.parsed.shared_user_id = None;
+    let mut independent_settings = scan.owner.settings.clone();
+    let independent_setting = independent_settings
+        .packages
+        .iter_mut()
+        .find(|package| package.name == saved.name)
+        .unwrap();
+    independent_setting.shared_user = false;
+    independent_setting.app_id = 19001;
+    let mut independent =
+        aim_services::package::scan::SigningScan::new(&config, &independent_settings, 36).unwrap();
+    independent
+        .scan_existing(
+            &independent_code,
+            update(),
+            &saved_users,
+            None,
+            None,
+            &apks,
+            completion(),
+        )
+        .unwrap();
+    let independent_before = independent.clone();
+    let queried = std::cell::Cell::new(0);
+    let unavailable = |package: &aim_services::package::pkg::AndroidPackage| {
+        assert_eq!(package.package_name, saved.name);
+        queried.set(queried.get() + 1);
+        Err("original compatibility owner unavailable".into())
+    };
+    let mut denied = completion();
+    denied.seinfo.compatibility = &unavailable;
+    assert!(matches!(
+        independent.scan_existing(&independent_code, update(), &saved_users, None, None, &apks, denied),
+        Err(SigningError::Rejected(ref error)) if error.phase == "seinfo"
+            && error.message == "original compatibility owner unavailable"
+    ));
+    assert_eq!(queried.get(), 1);
+    assert_eq!(independent, independent_before);
+    assert_eq!(scan.owner, before);
+    for name in scan.owner.loaded_packages().keys() {
+        assert!(
+            scan.owner
+                .seinfo_state(name)
+                .unwrap()
+                .unwrap()
+                .base
+                .is_some()
+        );
+    }
     let mut mismatched_owner = scan.owner.clone();
     let mut mismatched = mismatched_owner
         .apply_existing(&code, update(), &saved_users, None, None)

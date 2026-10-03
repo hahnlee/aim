@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Boot/image owners' inputs, resolved before starting the package scan.
 pub struct FirstBootSystemInputs<'a> {
+    pub seinfo: super::SeInfoScan<'a>,
     /// Settings/UIDs prepared by the preceding APEX scan, not saved APK state.
     pub apex_settings: &'a crate::package::settings::Settings,
     pub first_api_level: i32,
@@ -309,6 +310,7 @@ fn scan_system_image(
         users.stopped_system_app =
             initial_stopped(&code.parsed, config, should_stop_system_packages);
         let completion = ScanMetadataCompletion {
+            seinfo: inputs.seinfo,
             abi_policy: inputs.abi_policy,
             native_environment: &native_environment,
             context: AbiScanContext {
@@ -363,6 +365,7 @@ fn scan_system_image(
                 completion,
             )?;
             let completion = ScanMetadataCompletion {
+                seinfo: inputs.seinfo,
                 abi_policy: inputs.abi_policy,
                 native_environment: &native_environment,
                 context: AbiScanContext {

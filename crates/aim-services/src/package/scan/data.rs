@@ -34,6 +34,7 @@ pub enum DataCandidateOutcome {
 
 /// The boot owners for data iteration and missing-update factory recovery.
 pub struct DataImageScanInputs<'a> {
+    pub seinfo: super::SeInfoScan<'a>,
     pub factories: &'a super::SystemImagePackages,
     pub platform: &'a SigningDetails,
     pub vendor_sdk: i32,
@@ -203,6 +204,7 @@ impl SigningScan {
                     expecting_better: &expecting_better,
                     new_domain_id: inputs.new_domain_id,
                     completion: ScanMetadataCompletion {
+                        seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,
                         native_environment: &environment,
                         context: AbiScanContext {
@@ -326,6 +328,7 @@ impl SigningScan {
                     expecting_better: &expecting_better,
                     new_domain_id: inputs.new_domain_id,
                     completion: ScanMetadataCompletion {
+                        seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,
                         native_environment: &environment,
                         context: AbiScanContext {
@@ -451,6 +454,7 @@ impl SigningScan {
                 apks,
                 super::UpdatedSystemBootInputs {
                     completion: ScanMetadataCompletion {
+                        seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,
                         native_environment: &environment,
                         context: AbiScanContext {

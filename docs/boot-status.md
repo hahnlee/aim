@@ -423,9 +423,33 @@ All 356 units pass (3.14s), including runtime lower-SDK update, retained overrid
 fresh replacement, subsequent boot minimum, owner-error atomicity and captured
 value isolation. Original PackageSetting copy/base/override/effective getter
 behavior passes in the shared-UID runtime oracle (14.83s with snapshot/usage
-oracles). Actual scan/installation owners must still supply transient-state
-provenance and invoke this phase. Bootstrap export and complete Java
-PackageState replica construction remain unwired
+oracles). The accepted scan completion now requires explicit seInfo policy and
+compatibility owners and assigns the base before publishing loaded code. System,
+saved and data-image inputs propagate these owners. Retained UID/shared ownership
+preserves the transient override; fresh/disk-restored settings start without it.
+A previously loaded object missing its assignment rejects completion instead of
+being treated as fresh state. Only the target must have finished metadata during
+an individual scan; capture and boot finalization still reject any pending scans.
+The actual original-image first-system scan passes (43.91s), including a
+nonshared retained re-scan whose compatibility query fails exactly once and
+leaves all owner state unchanged, plus complete base assignments for loaded code.
+The original runtime round-trip passes (15.67s), comparing all 288 discovered
+cache entries and enriched variants plus two native scan objects (578 parcels).
+Boot-generated cache counts no longer impose a stale 285-entry assumption;
+framework/GSF coverage and exact returned count/decoded-field checks remain (#839).
+The parcel fixture now obtains base labels from the real scan completion, using
+its explicit compatibility target SDK 36, before shared boot overrides. Native
+Bridge implements the scan compatibility interface and rejects trailing SDK
+reply data. The protocol test checks this owner adapter and malformed responses.
+All 356 regular native units pass (3.14s). The disposable original-PMS saved
+scan passes (374.26s): all 243 active APKs and three disabled factories retain
+their accepted code; every active scan owns an assigned base without premature
+boot overrides, and the captured version preserves those fields. Saved system,
+data update and first-system selection paths complete; owned processes/mounts
+are cleaned. All integration targets compile.
+These fixtures use controlled compatibility inputs and do not prove live
+PlatformCompat decisions. Actual native boot orchestration, bootstrap export and
+complete Java PackageState replica construction remain unwired
 (#838/#836/#798).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An

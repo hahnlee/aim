@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 mod common {
     pub mod java;
     pub mod runtime;
+    pub mod seinfo;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -2178,6 +2179,7 @@ fn new_settings_match_the_original_runtime() {
         // completion transaction retains all accepted metadata; copied files
         // remain the installation cleanup owner's responsibility.
         let inputs = || ScanMetadataCompletion {
+            seinfo: common::seinfo::scan(),
             factory_test: false,
             abi_policy: &abi_policy,
             native_environment: &install_env,
@@ -2404,6 +2406,7 @@ fn new_settings_match_the_original_runtime() {
         ..context
     };
     let inputs = || ScanMetadataCompletion {
+        seinfo: common::seinfo::scan(),
         factory_test: false,
         abi_policy: &abi_policy,
         native_environment: &abi_environment,

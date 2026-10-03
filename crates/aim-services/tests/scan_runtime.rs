@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 mod common {
     pub mod java;
     pub mod runtime;
+    pub mod seinfo;
 }
 use common::runtime::{Boot, Data, run};
 
@@ -404,6 +405,7 @@ fn saved_scan_libraries_match_original_pms() {
                 &config,
                 &apks,
                 ScanMetadataCompletion {
+                    seinfo: common::seinfo::scan(),
                     abi_policy: &abi_policy,
                     native_environment: &environment,
                     context: AbiScanContext {
@@ -489,6 +491,7 @@ fn saved_scan_libraries_match_original_pms() {
             &apks,
             &config,
             FirstBootSystemInputs {
+                seinfo: common::seinfo::scan(),
                 apex_settings: &Default::default(),
                 first_api_level: first_api,
                 vendor_sdk,
@@ -561,6 +564,7 @@ fn saved_scan_libraries_match_original_pms() {
             data_image,
             &apks,
             aim_services::package::scan::DataImageScanInputs {
+                seinfo: common::seinfo::scan(),
                 factories: &resumed_packages,
                 platform: platform_signing,
                 vendor_sdk,
@@ -608,6 +612,15 @@ fn saved_scan_libraries_match_original_pms() {
     assert_eq!(capture.usage(), &usage);
     assert_eq!(resumed.loaded_packages().len(), 243);
     assert_eq!(resumed.disabled_loaded_packages().len(), 3);
+    for name in resumed.loaded_packages().keys() {
+        let state = resumed.seinfo_state(name).unwrap().unwrap();
+        assert!(state.base.is_some(), "unfinished scan seInfo: {name}");
+        assert!(
+            state.override_label.is_none(),
+            "boot override ran during scan: {name}"
+        );
+        assert_eq!(capture.owner().seinfo_state(name).unwrap(), Some(state));
+    }
     for completed in resumed_packages
         .packages
         .iter()
@@ -687,6 +700,7 @@ fn saved_scan_libraries_match_original_pms() {
         &apks,
         &config,
         FirstBootSystemInputs {
+            seinfo: common::seinfo::scan(),
             apex_settings: &Default::default(),
             first_api_level: first_api,
             vendor_sdk,

@@ -46,6 +46,31 @@ pub enum SeInfoSetting {
     New,
 }
 
+/// Original PlatformCompat decisions for packages without a shared UID.
+pub trait SeInfoCompatibility {
+    fn target_sdk(&self, package: &AndroidPackage) -> Result<i32, String>;
+}
+
+impl<F: Fn(&AndroidPackage) -> Result<i32, String>> SeInfoCompatibility for F {
+    fn target_sdk(&self, package: &AndroidPackage) -> Result<i32, String> {
+        self(package)
+    }
+}
+
+impl SeInfoCompatibility for crate::package::bootstrap::Bridge {
+    fn target_sdk(&self, package: &AndroidPackage) -> Result<i32, String> {
+        self.seinfo_target_sdk(package)
+            .map_err(|error| format!("original seInfo compatibility: {error:?}"))
+    }
+}
+
+/// Required policy and compatibility owners for accepted scan metadata.
+#[derive(Clone, Copy)]
+pub struct SeInfoScan<'a> {
+    pub policy: &'a Policy,
+    pub compatibility: &'a dyn SeInfoCompatibility,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Assignments {
     inputs: BTreeMap<String, Input>,
@@ -56,6 +81,10 @@ fn inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String> {
     if !owner.capture_ready() {
         return Err("scan metadata is not finalized".into());
     }
+    active_inputs(owner)
+}
+
+fn active_inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String> {
     owner
         .loaded
         .iter()
@@ -209,7 +238,10 @@ impl SigningScan {
         policy: &Policy,
         compatibility: &mut dyn FnMut(&AndroidPackage) -> Result<i32, String>,
     ) -> Result<(), String> {
-        let current = inputs(self)?;
+        if self.pending_metadata.contains(name) {
+            return Err("scan metadata is not finalized".into());
+        }
+        let current = active_inputs(self)?;
         let input = current
             .get(name)
             .ok_or_else(|| "seInfo scan has no active code".to_string())?;
@@ -256,6 +288,34 @@ impl SigningScan {
         );
         self.seinfo = Some(next);
         Ok(())
+    }
+}
+
+impl SigningScan {
+    pub(super) fn has_seinfo_assignment(&self, name: &str) -> bool {
+        self.seinfo
+            .as_ref()
+            .is_some_and(|state| state.inputs.contains_key(name) && state.labels.contains_key(name))
+    }
+
+    pub(super) fn seinfo_setting_for_scan(&self, name: &str) -> Result<SeInfoSetting, String> {
+        let current = active_inputs(self)?;
+        let input = current
+            .get(name)
+            .ok_or_else(|| "seInfo scan has no active code".to_string())?;
+        let previous = self
+            .seinfo
+            .as_ref()
+            .and_then(|state| state.inputs.get(name));
+        Ok(match previous {
+            Some(previous)
+                if previous.app_id == input.app_id
+                    && shared_name(previous) == shared_name(input) =>
+            {
+                SeInfoSetting::Retained
+            }
+            _ => SeInfoSetting::New,
+        })
     }
 }
 

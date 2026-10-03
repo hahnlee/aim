@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 /// Image, filesystem, VM and clock inputs from the corresponding owners.
 pub struct ScanMetadataCompletion<'a> {
+    pub seinfo: super::SeInfoScan<'a>,
     pub abi_policy: &'a AbiPolicy,
     pub native_environment: &'a NativeLibraryEnvironment<'a>,
     pub context: AbiScanContext<'a>,
@@ -84,7 +85,7 @@ impl SigningScan {
         Ok(completed)
     }
 
-    /// Complete ABI/copy, page-size, code and final application metadata.
+    /// Complete ABI/copy, page-size, code, application and seInfo metadata.
     /// Only the finished candidate becomes accepted state. Files copied before
     /// a later error require cleanup by the install owner; this does not persist
     /// settings, publish a query replica or make filesystem rollback implicit.
@@ -159,13 +160,40 @@ impl SigningScan {
         staged
             .update_ownership
             .queue(&candidate.record.settings, &candidate.record.parsed);
+        let name = &candidate.record.settings.name;
+        if self.loaded.contains_key(name) && !self.has_seinfo_assignment(name) {
+            return Err(SigningError::Rejected(super::Error {
+                package: name.clone(),
+                path: candidate.record.settings.code_path.clone(),
+                phase: "seinfo",
+                message: "retained loaded package has no seInfo assignment".into(),
+            }));
+        }
         staged.loaded.insert(
             candidate.record.settings.name.clone(),
             std::sync::Arc::new(loaded),
         );
+        staged.pending_metadata.remove(name);
+        let setting = staged.seinfo_setting_for_scan(name).map_err(|message| {
+            SigningError::Rejected(super::Error {
+                package: name.clone(),
+                path: candidate.record.settings.code_path.clone(),
+                phase: "seinfo",
+                message,
+            })
+        })?;
         staged
-            .pending_metadata
-            .remove(&candidate.record.settings.name);
+            .assign_seinfo_for_scan(name, setting, inputs.seinfo.policy, &mut |package| {
+                inputs.seinfo.compatibility.target_sdk(package)
+            })
+            .map_err(|message| {
+                SigningError::Rejected(super::Error {
+                    package: name.clone(),
+                    path: candidate.record.settings.code_path.clone(),
+                    phase: "seinfo",
+                    message,
+                })
+            })?;
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,

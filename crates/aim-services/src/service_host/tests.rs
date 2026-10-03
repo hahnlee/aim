@@ -86,6 +86,7 @@ struct Owner {
     reject: AtomicBool,
     bcp_reads: AtomicUsize,
     malformed_bcp: AtomicBool,
+    malformed_seinfo: AtomicBool,
     gid: i32,
 }
 impl Service for Owner {
@@ -132,6 +133,9 @@ impl Service for Owner {
                 assert_eq!(parsed.package_name, "fixture.package");
                 assert_eq!(parsed.target_sdk_version, 29);
                 reply.write_i32(30);
+                if self.malformed_seinfo.load(Ordering::SeqCst) {
+                    reply.write_i32(99);
+                }
             }
             _ => return Err(UNKNOWN_TRANSACTION),
         }
@@ -239,6 +243,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     let owner = Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
+        malformed_seinfo: AtomicBool::new(false),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -248,6 +253,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     let foreign_node = foreign.add_service(Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
+        malformed_seinfo: AtomicBool::new(false),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -300,6 +306,19 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert_eq!(*owner.calls.lock().unwrap(), [1019001, 19001]);
     parsed.target_sdk_version = 29;
     assert_eq!(old.seinfo_target_sdk(&parsed).unwrap(), 30);
+    assert_eq!(
+        crate::package::scan::SeInfoCompatibility::target_sdk(old.as_ref(), &parsed).unwrap(),
+        30
+    );
+    owner.malformed_seinfo.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        old.seinfo_target_sdk(&parsed),
+        Err(crate::package::bootstrap::SeInfoError::Transport(
+            aim_binder_host::parcel::BAD_VALUE
+        ))
+    ));
+    assert!(crate::package::scan::SeInfoCompatibility::target_sdk(old.as_ref(), &parsed).is_err());
+    owner.malformed_seinfo.store(false, Ordering::SeqCst);
     assert!(old.permission_gids(19001, &[0, 0]).is_err());
     owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
@@ -333,6 +352,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     let replacement = second.add_service(Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
+        malformed_seinfo: AtomicBool::new(false),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,

@@ -1,5 +1,9 @@
 //! Exercise scan inputs with original signed code. Explicit runs require
 //! the pinned image; no parser cache, feed or writable guest data is used.
+mod common {
+    pub mod seinfo;
+}
+
 use aim_services::package::{
     State,
     parse::Platform,
@@ -949,6 +953,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         canonical_source: None,
     };
     let completion = || ScanMetadataCompletion {
+        seinfo: common::seinfo::scan(),
         abi_policy: &abi_policy,
         native_environment: &environment,
         context: AbiScanContext {
