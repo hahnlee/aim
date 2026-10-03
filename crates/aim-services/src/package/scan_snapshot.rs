@@ -122,6 +122,14 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
                 return Err(fail("install source is not normalized"));
             }
 
+            let mut mime_names = BTreeSet::new();
+            if setting
+                .mime_groups
+                .iter()
+                .any(|(name, _)| !mime_names.insert(name))
+            {
+                return Err(fail("duplicate MIME group owner"));
+            }
             if !names.insert(setting.name.as_str()) {
                 return Err(fail("duplicate package setting"));
             }

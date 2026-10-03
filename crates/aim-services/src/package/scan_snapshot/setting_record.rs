@@ -88,6 +88,31 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
         p.write_string16(alias.as_deref());
         p.write_i64(*id);
     }
+    p.write_i32(i32::try_from(s.uses_sdk_libraries.len()).map_err(|_| "too many SDK libraries")?);
+    for library in &s.uses_sdk_libraries {
+        p.write_string16(Some(&library.name));
+        p.write_i64(library.version_major);
+        p.write_bool(library.optional);
+    }
+    p.write_i32(
+        i32::try_from(s.uses_static_libraries.len()).map_err(|_| "too many static libraries")?,
+    );
+    for (name, version) in &s.uses_static_libraries {
+        p.write_string16(Some(name));
+        p.write_i64(*version);
+    }
+    p.write_i32(i32::try_from(s.mime_groups.len()).map_err(|_| "too many MIME groups")?);
+    let mut groups = std::collections::BTreeSet::new();
+    for (name, types) in &s.mime_groups {
+        if !groups.insert(name) {
+            return Err("duplicate MIME group owner".into());
+        }
+        p.write_string16(Some(name));
+        p.write_i32(i32::try_from(types.len()).map_err(|_| "too many MIME types")?);
+        for value in types {
+            p.write_string16(Some(value));
+        }
+    }
     if p.data().len() > i32::MAX as usize {
         return Err("package setting exceeds transport size".into());
     }

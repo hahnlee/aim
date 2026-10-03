@@ -15,6 +15,10 @@ public final class PackageSettingData {
     private final List<String> oldPaths;
     public final InstallSourceData installSource;
     public final KeySetData keySets;
+    private final String[] sdkLibraries, staticLibraries;
+    private final long[] sdkVersions, staticVersions;
+    private final boolean[] sdkOptional;
+    private final java.util.Map<String, java.util.Set<String>> mimeGroups;
     public final String realName;
     public final String path;
     public final String legacyNativeLibraryPath;
@@ -89,7 +93,35 @@ public final class PackageSettingData {
         }
         installSource = new InstallSourceData(in);
         keySets = new KeySetData(in);
+        int sdkCount = count(in, 16);
+        sdkLibraries = new String[sdkCount]; sdkVersions = new long[sdkCount]; sdkOptional = new boolean[sdkCount];
+        for (int i = 0; i < sdkCount; i++) { sdkLibraries[i] = Objects.requireNonNull(in.readString()); sdkVersions[i] = in.readLong(); sdkOptional[i] = in.readBoolean(); }
+        int staticCount = count(in, 12);
+        staticLibraries = new String[staticCount]; staticVersions = new long[staticCount];
+        for (int i = 0; i < staticCount; i++) { staticLibraries[i] = Objects.requireNonNull(in.readString()); staticVersions[i] = in.readLong(); }
+        int groups = count(in, 8);
+        var map = new android.util.ArrayMap<String, java.util.Set<String>>();
+        for (int i = 0; i < groups; i++) {
+            String group = Objects.requireNonNull(in.readString());
+            if (map.containsKey(group)) throw new IllegalArgumentException("duplicate captured MIME group");
+            String[] values = Objects.requireNonNull(in.createStringArray());
+            var types = new android.util.ArraySet<String>();
+            for (String value : values) types.add(Objects.requireNonNull(value));
+            map.put(group, Collections.unmodifiableSet(types));
+        }
+        mimeGroups = Collections.unmodifiableMap(map);
     }
+    private static int count(Parcel in, int minimum) {
+        int value = in.readInt();
+        if (value < 0 || value > in.dataAvail() / minimum) throw new IllegalArgumentException("invalid setting collection count");
+        return value;
+    }
+    public String[] getUsesSdkLibraries() { return sdkLibraries.clone(); }
+    public long[] getUsesSdkLibrariesVersionsMajor() { return sdkVersions.clone(); }
+    public boolean[] getUsesSdkLibrariesOptional() { return sdkOptional.clone(); }
+    public String[] getUsesStaticLibraries() { return staticLibraries.clone(); }
+    public long[] getUsesStaticLibrariesVersions() { return staticVersions.clone(); }
+    public java.util.Map<String, java.util.Set<String>> getMimeGroups() { return mimeGroups; }
     public static PackageSettingData read(Parcel in) { return new PackageSettingData(in); }
     public long getVersion() { return version; }
     public String getPackageName() { return name; }

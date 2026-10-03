@@ -15,6 +15,17 @@ public class PackageSetting extends SettingBase {
     public String getLegacyNativeLibraryPath() { throw new RuntimeException("stub"); }
     public String getPrimaryCpuAbiLegacy() { throw new RuntimeException("stub"); }
     public long getVersionCode() { throw new RuntimeException("stub"); }
+    public PackageSetting addMimeTypes(String name, java.util.Set<String> values) { throw new RuntimeException("stub"); }
+    public PackageSetting setUsesSdkLibraries(String[] values) { throw new RuntimeException("stub"); }
+    public PackageSetting setUsesSdkLibrariesVersionsMajor(long[] values) { throw new RuntimeException("stub"); }
+    public PackageSetting setUsesSdkLibrariesOptional(boolean[] values) { throw new RuntimeException("stub"); }
+    public PackageSetting setUsesStaticLibraries(String[] values) { throw new RuntimeException("stub"); }
+    public PackageSetting setUsesStaticLibrariesVersions(long[] values) { throw new RuntimeException("stub"); }
+    public String[] getUsesSdkLibraries() { throw new RuntimeException("stub"); }
+    public long[] getUsesSdkLibrariesVersionsMajor() { throw new RuntimeException("stub"); }
+    public boolean[] getUsesSdkLibrariesOptional() { throw new RuntimeException("stub"); }
+    public String[] getUsesStaticLibraries() { throw new RuntimeException("stub"); }
+    public long[] getUsesStaticLibrariesVersions() { throw new RuntimeException("stub"); }
     public java.util.Map<String, java.util.Set<String>> getMimeGroups() { throw new RuntimeException("stub"); }
     public PackageSetting(String name, String realName, java.io.File path, int flags, int privateFlags, java.util.UUID domainSetId) {
         super(flags, privateFlags);

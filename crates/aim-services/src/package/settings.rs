@@ -125,6 +125,29 @@ pub struct Package {
 }
 
 impl Package {
+    /// PackageSetting.addMimeTypes: existing groups accumulate distinct types.
+    pub fn add_mime_types(&mut self, name: String, values: impl IntoIterator<Item = String>) {
+        let at = match self
+            .mime_groups
+            .iter()
+            .position(|(group, _)| group == &name)
+        {
+            Some(at) => at,
+            None => {
+                self.mime_groups.push((name, Vec::new()));
+                self.mime_groups.len() - 1
+            }
+        };
+        let types = &mut self.mime_groups[at].1;
+        for value in values {
+            if !types.contains(&value) {
+                types.push(value);
+            }
+        }
+        types.sort_by_key(|value| string_hash(value));
+        self.mime_groups.sort_by_key(|(name, _)| string_hash(name));
+    }
+
     pub fn is_loading(&self) -> bool {
         (1.0f32 - self.loading_progress).abs() >= 0.00000001f32
     }
@@ -588,10 +611,9 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
             }
             "mime-group" => {
                 if let Some(group) = string(child, "name") {
-                    let types = children(child, "mime-type")
-                        .filter_map(|t| string(t, "value"))
-                        .collect();
-                    p.mime_groups.push((group, types));
+                    let mut types = Vec::new();
+                    read_mime_types(child, &mut types);
+                    p.add_mime_types(group, types);
                 }
             }
             "split-version" => {
@@ -634,6 +656,21 @@ fn key_set_entries(e: &Element) -> Vec<&Element> {
         }
     }
     entries
+}
+
+fn string_hash(value: &str) -> i32 {
+    value.encode_utf16().fold(0i32, |hash, unit| {
+        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
+    })
+}
+
+fn read_mime_types(e: &Element, types: &mut Vec<String>) {
+    for child in e.children().filter(|child| child.name == "mime-type") {
+        if let Some(value) = string(child, "value") {
+            types.push(value);
+        }
+        read_mime_types(child, types);
+    }
 }
 
 fn identifier(e: &Element) -> Result<i64, String> {

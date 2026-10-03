@@ -242,6 +242,11 @@ fn native_package_parcels_match_original_read_write() {
         )
         .unwrap();
 
+        fs::write(
+            directory.join(format!("{name}.mime-native")),
+            mime_xml_expected(&directory, &name),
+        )
+        .unwrap();
         let setting_bytes = aim_services::package::scan_snapshot::setting_record::captured(
             &snapshot,
             &pkg.package_name,
@@ -433,6 +438,10 @@ fn native_package_parcels_match_original_read_write() {
     );
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            assert_eq!(
+                fs::read(directory.join(format!("{name}.mime-original"))).unwrap(),
+                fs::read(directory.join(format!("{name}.mime-native"))).unwrap()
+            );
             assert_eq!(
                 fs::read(directory.join(format!("{name}.keysets-original"))).unwrap(),
                 fs::read(directory.join(format!("{name}.keysets-native"))).unwrap()
@@ -683,6 +692,19 @@ fn native_scan_objects(
         setting.add_old_path(None);
         setting.add_old_path(Some(&"x".repeat(100_000)));
         setting.restrict_update_hash = Some(vec![1, 2, 3]);
+        if name == "com.google.android.gsf" {
+            setting.uses_sdk_libraries = vec![aim_services::package::settings::UsesSdkLibrary {
+                name: "sdk".into(),
+                version_major: i64::MAX,
+                optional: false,
+            }];
+            setting.uses_static_libraries = vec![("static".into(), 17)];
+            setting.add_mime_types(
+                "BB".into(),
+                ["text/plain".into(), "image/png".into(), "text/plain".into()],
+            );
+            setting.add_mime_types("Aa".into(), ["".into()]);
+        }
         if name == "com.google.android.gsf" {
             let keys = &mut setting.key_set_data;
             let id = keys.proper_signing_key_set;
@@ -1039,6 +1061,56 @@ fn loading_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
         }
     }
     expected
+}
+
+fn mime_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let cases = [
+        "",
+        "<mime-group name='empty'/>",
+        "<mime-group name='same'><mime-type value='text/plain'/><mime-type value='text/plain'/></mime-group><mime-group name='same'><mime-type value='image/png'/></mime-group>",
+        "<mime-group name='BB'><mime-type value='BB'/><mime-type value='Aa'/></mime-group><mime-group name='Aa'><mime-type value=''/></mime-group>",
+        "<mime-group name='zzzzzz'><mime-type value='😀'/><mime-type/></mime-group><mime-group name='😀'/>",
+        "<mime-group><mime-type value='ignored'/></mime-group><mime-group name='nested'><mime-type value='outer'><mime-type value='inner'/></mime-type><unknown><mime-type value='ignored'/></unknown></mime-group>",
+    ];
+    for (i, content) in cases.iter().enumerate() {
+        let xml =
+            format!("<package name='p' codePath='/data/p' userId='10001'>{content}</package>");
+        let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        for (j, bytes) in [
+            xml.into_bytes(),
+            aim_android_xml::abx::write(&root).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let document = aim_android_xml::Element {
+                name: "packages".into(),
+                attrs: vec![],
+                content: vec![aim_android_xml::Node::Element(
+                    aim_android_xml::read(&bytes).unwrap(),
+                )],
+            };
+            let parsed = aim_services::package::settings::Settings::parse(&document).unwrap();
+            let groups = &parsed.packages[0].mime_groups;
+            out.extend_from_slice(&(groups.len() as i32).to_be_bytes());
+            for (name, types) in groups {
+                out.extend_from_slice(&(name.len() as i32).to_be_bytes());
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(&(types.len() as i32).to_be_bytes());
+                for value in types {
+                    out.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                    out.extend_from_slice(value.as_bytes());
+                }
+            }
+            fs::write(
+                directory.join(format!("{name}.mime-{}.xml", i * 2 + j)),
+                bytes,
+            )
+            .unwrap();
+        }
+    }
+    out
 }
 
 fn keysets_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {

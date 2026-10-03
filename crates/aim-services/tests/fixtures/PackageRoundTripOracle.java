@@ -301,6 +301,37 @@ public final class PackageRoundTripOracle {
         try { metadata.getOldPaths().clear(); throw new AssertionError("mutable old paths capture"); } catch (UnsupportedOperationException expected) {}
         if (lease.getSetting("missing", false) != null || lease.getSetting(name, true) != null) throw new AssertionError("unknown/factory setting mismatch");
         var restoredSetting = new com.android.server.pm.PackageSetting(name, null, new java.io.File(metadata.path), metadata.flags, metadata.privateFlags, new java.util.UUID(1, 1));
+        restoredSetting.setUsesSdkLibraries(metadata.getUsesSdkLibraries());
+        restoredSetting.setUsesSdkLibrariesVersionsMajor(metadata.getUsesSdkLibrariesVersionsMajor());
+        restoredSetting.setUsesSdkLibrariesOptional(metadata.getUsesSdkLibrariesOptional());
+        restoredSetting.setUsesStaticLibraries(metadata.getUsesStaticLibraries());
+        restoredSetting.setUsesStaticLibrariesVersions(metadata.getUsesStaticLibrariesVersions());
+        for (var group : metadata.getMimeGroups().entrySet()) restoredSetting.addMimeTypes(group.getKey(), group.getValue());
+        if (!java.util.Arrays.equals(restoredSetting.getUsesSdkLibraries(), metadata.getUsesSdkLibraries())
+                || !java.util.Arrays.equals(restoredSetting.getUsesSdkLibrariesVersionsMajor(), metadata.getUsesSdkLibrariesVersionsMajor())
+                || !java.util.Arrays.equals(restoredSetting.getUsesSdkLibrariesOptional(), metadata.getUsesSdkLibrariesOptional())
+                || !java.util.Arrays.equals(restoredSetting.getUsesStaticLibraries(), metadata.getUsesStaticLibraries())
+                || !java.util.Arrays.equals(restoredSetting.getUsesStaticLibrariesVersions(), metadata.getUsesStaticLibrariesVersions())
+                || !restoredSetting.getMimeGroups().equals(metadata.getMimeGroups())) throw new AssertionError("captured collections differ from original getters");
+        if (name.equals("com.google.android.gsf")) {
+            if (!metadata.getUsesSdkLibraries()[0].equals("sdk") || metadata.getUsesSdkLibrariesVersionsMajor()[0] != Long.MAX_VALUE
+                    || metadata.getUsesSdkLibrariesOptional()[0] || !metadata.getUsesStaticLibraries()[0].equals("static")
+                    || metadata.getUsesStaticLibrariesVersions()[0] != 17 || metadata.getMimeGroups().get("BB").size() != 2) throw new AssertionError("populated captured collections differ");
+            restoredSetting.getUsesSdkLibraries()[0] = "changed"; metadata.getUsesSdkLibraries()[0] = "changed";
+            restoredSetting.getUsesSdkLibrariesVersionsMajor()[0] = 0; metadata.getUsesSdkLibrariesVersionsMajor()[0] = 0;
+            restoredSetting.getUsesSdkLibrariesOptional()[0] = true; metadata.getUsesSdkLibrariesOptional()[0] = true;
+            restoredSetting.getUsesStaticLibraries()[0] = "changed"; metadata.getUsesStaticLibraries()[0] = "changed";
+            restoredSetting.getUsesStaticLibrariesVersions()[0] = 0; metadata.getUsesStaticLibrariesVersions()[0] = 0;
+            restoredSetting.getMimeGroups().get("BB").clear();
+            if (!metadata.getUsesSdkLibraries()[0].equals("sdk") || metadata.getUsesSdkLibrariesVersionsMajor()[0] != Long.MAX_VALUE
+                    || metadata.getUsesSdkLibrariesOptional()[0] || !metadata.getUsesStaticLibraries()[0].equals("static")
+                    || metadata.getUsesStaticLibrariesVersions()[0] != 17 || metadata.getMimeGroups().get("BB").size() != 2) throw new AssertionError("mutable original collection escaped capture");
+            try { metadata.getMimeGroups().get("BB").clear(); throw new AssertionError("mutable captured MIME types"); } catch (UnsupportedOperationException expected) {}
+        }
+        try { metadata.getMimeGroups().clear(); throw new AssertionError("mutable captured MIME groups"); } catch (UnsupportedOperationException expected) {}
+        var nullableTypes = new android.util.ArraySet<String>(); nullableTypes.add(null);
+        restoredSetting.addMimeTypes("nullable", nullableTypes);
+        if (!restoredSetting.getMimeGroups().get("nullable").contains(null)) throw new AssertionError("original nullable MIME type owner differs");
         restoredSetting.setLoadingProgress(metadata.loadingProgress); restoredSetting.setLoadingCompletedTime(metadata.loadingCompletedTime);
         for (String path : metadata.getOldPaths()) restoredSetting.addOldPath(path == null ? null : new java.io.File(path));
         if (!new java.util.ArrayList<>(restoredSetting.getOldPaths()).equals(metadata.getOldPaths().stream().map(path -> path == null ? null : new java.io.File(path)).toList())
@@ -310,6 +341,7 @@ public final class PackageRoundTripOracle {
         verifySettingRuntime(setting, file);
         verifyLoadingXml(file);
         com.android.server.pm.CapturedKeySetOracle.verify(file);
+        verifyMimeXml(file);
         owner.fail = true;
         try { lease.getSigningState(name, false); throw new AssertionError("signing owner failure swallowed"); }
         catch (android.os.RemoteException expected) {}
@@ -853,4 +885,45 @@ public final class PackageRoundTripOracle {
             return seinfoTail ? java.util.Arrays.copyOf(seinfo, seinfo.length + 4) : seinfo.clone();
         }
     }
+    private static void skip(org.xmlpull.v1.XmlPullParser parser) throws Exception {
+        int depth = parser.getDepth(), event;
+        while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {}
+    }
+    private static void writeMimeString(java.io.DataOutputStream out, String value) throws Exception {
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        out.writeInt(bytes.length); out.write(bytes);
+    }
+    private static void verifyMimeXml(java.io.File file) throws Exception {
+        try (var out = new java.io.DataOutputStream(new java.io.FileOutputStream(file.getPath() + ".mime-original"))) {
+            for (int i = 0; i < 12; i++) {
+                var setting = new com.android.server.pm.PackageSetting("p", null, new java.io.File("/data/p"), 0, 0, new java.util.UUID(1, 1));
+                try (var stream = new java.io.FileInputStream(file.getPath() + ".mime-" + i + ".xml")) {
+                    var parser = android.util.Xml.resolvePullParser(stream);
+                    while (parser.next() != 2) {}
+                    int depth = parser.getDepth(), event;
+                    while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {
+                        if (event != 2) continue;
+                        if (!parser.getName().equals("mime-group")) { skip(parser); continue; }
+                        String name = parser.getAttributeValue(null, "name");
+                        if (name == null) { skip(parser); continue; }
+                        var types = new android.util.ArraySet<String>();
+                        int groupDepth = parser.getDepth();
+                        while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > groupDepth)) {
+                            if (event != 2) continue;
+                            if (parser.getName().equals("mime-type")) {
+                                String value = parser.getAttributeValue(null, "value"); if (value != null) types.add(value);
+                            } else skip(parser);
+                        }
+                        setting.addMimeTypes(name, types);
+                    }
+                }
+                var groups = setting.getMimeGroups(); out.writeInt(groups.size());
+                for (var group : groups.entrySet()) {
+                    writeMimeString(out, group.getKey()); out.writeInt(group.getValue().size());
+                    for (String value : group.getValue()) writeMimeString(out, value);
+                }
+            }
+        }
+    }
+
 }
