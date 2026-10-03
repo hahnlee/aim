@@ -8,8 +8,8 @@ use aim_service_aidl::{read_byte_array, read_int_array, read_string_list};
 
 use crate::package::intent_filter::UriRelativeFilterGroup;
 use crate::package::model::{
-    InstallSource, OverlayPaths, PackageState, PackageUserState, Platform, SharedLibrary,
-    SharedUser, StateFlags, User,
+    InstallSource, OverlayPaths, PackageState, PackageUserState, Platform, SharedUser, StateFlags,
+    User,
 };
 use crate::package::pkg::Serialized;
 use crate::package::restrictions::{ArchiveActivity, ArchiveState};
@@ -88,7 +88,8 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
     }
     s.uses_library_files = strings(r)?;
     for _ in 0..count(r)? {
-        s.uses_library_infos.push(shared_library(r)?);
+        s.uses_library_infos
+            .push(super::super::library_parcel::read_feed(r)?);
     }
     s.installed_permissions = strings(r)?;
     s.signatures = signing(r)?;
@@ -202,29 +203,6 @@ fn user_state(r: &mut Reader<'_>) -> Result<PackageUserState> {
         u.domain_selection = Some((allowed, host_states(r)?));
     }
     Ok(u)
-}
-
-/// A `SharedLibrary` or `SharedLibraryInfo` with its dependencies.
-fn shared_library(r: &mut Reader<'_>) -> Result<SharedLibrary> {
-    let mut l = SharedLibrary {
-        name: string(r)?,
-        path: string(r)?,
-        package_name: string(r)?,
-        code_paths: read_string_list(r)?.map(|v| v.into_iter().flatten().collect()),
-        version: r.read_i64()?,
-        kind: r.read_i32()?,
-        native: r.read_bool()?,
-        declaring: (string(r)?.unwrap_or_default(), r.read_i64()?),
-        ..SharedLibrary::default()
-    };
-    for _ in 0..count(r)? {
-        l.dependents
-            .push((string(r)?.unwrap_or_default(), r.read_i64()?));
-    }
-    for _ in 0..count(r)? {
-        l.dependencies.push(shared_library(r)?);
-    }
-    Ok(l)
 }
 
 /// `SharedUserApi`'s getters.

@@ -14,11 +14,9 @@ import android.content.pm.PackageManager;
 import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
 import android.content.pm.ProviderInfo;
-import android.content.pm.SharedLibraryInfo;
 import android.content.pm.Signature;
 import android.content.pm.SigningDetails;
 import android.content.pm.SigningInfo;
-import android.content.pm.VersionedPackage;
 import android.content.pm.overlay.OverlayPaths;
 import android.content.res.Resources;
 import android.database.ContentObserver;
@@ -52,7 +50,6 @@ import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.ArchiveState;
 import com.android.server.pm.pkg.PackageState;
 import com.android.server.pm.pkg.PackageUserState;
-import com.android.server.pm.pkg.SharedLibrary;
 import com.android.server.pm.pkg.SharedUserApi;
 
 import java.io.File;
@@ -436,13 +433,7 @@ final class PackageFeed extends IPackageFeed.Stub {
                 p.writeBoolean(sdkOptional[i]);
             }
             strings(p, s.getUsesLibraryFiles());
-            List<SharedLibrary> libraries = s.getSharedLibraryDependencies();
-            p.writeInt(libraries.size());
-            for (SharedLibrary l : libraries) {
-                sharedLibrary(p, l.getName(), l.getPath(), l.getPackageName(), l.getAllCodePaths(),
-                        l.getVersion(), l.getType(), l.isNative(), l.getDeclaringPackage(),
-                        l.getDependentPackages(), l.getDependencies());
-            }
+            PackageLibraryFeed.write(p, s.getSharedLibraryDependencies());
             strings(p, mInstalledPermissions.get(s.getPackageName()));
             signing(p, s.getSigningInfo());
             installSource(p, installed ? s : null);
@@ -560,35 +551,6 @@ final class PackageFeed extends IPackageFeed.Stub {
                     .getAppConfig(info).isChangeEnabled(FILTER_APPLICATION_QUERY);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
-        }
-    }
-
-    /** A SharedLibrary or SharedLibraryInfo, with its dependencies'. */
-    private static void sharedLibrary(Parcel p, String name, String path, String packageName,
-            List<String> codePaths, long version, int type, boolean isNative,
-            VersionedPackage declaring, List<VersionedPackage> dependents,
-            List<SharedLibraryInfo> dependencies) {
-        p.writeString(name);
-        p.writeString(path);
-        p.writeString(packageName);
-        strings(p, codePaths);
-        p.writeLong(version);
-        p.writeInt(type);
-        p.writeBoolean(isNative);
-        p.writeString(declaring.getPackageName());
-        p.writeLong(declaring.getLongVersionCode());
-        p.writeInt(dependents.size());
-        for (VersionedPackage d : dependents) {
-            p.writeString(d.getPackageName());
-            p.writeLong(d.getLongVersionCode());
-        }
-        p.writeInt(dependencies == null ? -1 : dependencies.size());
-        if (dependencies != null) {
-            for (SharedLibraryInfo l : dependencies) {
-                sharedLibrary(p, l.getName(), l.getPath(), l.getPackageName(),
-                        l.getAllCodePaths(), l.getLongVersion(), l.getType(), l.isNative(),
-                        l.getDeclaringPackage(), l.getDependentPackages(), l.getDependencies());
-            }
         }
     }
 

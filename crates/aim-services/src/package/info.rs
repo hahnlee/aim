@@ -1244,16 +1244,16 @@ pub(in crate::package) fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibr
 }
 
 /// `SharedLibraryInfo.writeToParcel`. The library's own code paths are
-/// there only for a library without a path (a static or dynamic one's
-/// package; `getAllCodePaths` is the path otherwise); its dependents and
+/// retained exactly from the owner (`getAllCodePaths` alone cannot distinguish
+/// an absent code-path array); its dependents and
 /// dependencies are null until one is added. Optional dependent and certificate
 /// list owners retain their null/empty distinction.
-fn write_library(p: &mut Parcel, l: &SharedLibrary) {
+pub(in crate::package) fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     const VERSIONED_PACKAGE: &str = "android.content.pm.VersionedPackage";
     p.write_string8(l.path.as_deref());
     p.write_string8(l.package_name.as_deref());
     match &l.code_paths {
-        Some(paths) if l.path.is_none() => {
+        Some(paths) => {
             p.write_i32(1);
             write_strings8(p, Some(paths));
         }
@@ -1262,11 +1262,15 @@ fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     p.write_string8(l.name.as_deref());
     p.write_i64(l.version);
     p.write_i32(l.kind);
-    p.write_string16(Some(VERSIONED_PACKAGE));
-    p.write_string8(Some(&l.declaring.0));
-    p.write_i64(l.declaring.1);
+    if l.declaring_absent {
+        p.write_string16(None);
+    } else {
+        p.write_string16(Some(VERSIONED_PACKAGE));
+        p.write_string8(Some(&l.declaring.0));
+        p.write_i64(l.declaring.1);
+    }
     // writeList of VersionedPackages: each a length-prefixed parcelable.
-    if l.dependents.is_empty() {
+    if l.dependents.is_empty() && !l.dependents_initialized {
         p.write_i32(-1);
     } else {
         p.write_i32(l.dependents.len() as i32);
@@ -1284,7 +1288,7 @@ fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     }
     write_libraries(
         p,
-        (!l.dependencies.is_empty()).then_some(&l.dependencies[..]),
+        (l.dependencies_initialized || !l.dependencies.is_empty()).then_some(&l.dependencies[..]),
     );
     p.write_bool(l.native);
     match &l.optional_dependents {

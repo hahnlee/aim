@@ -32,28 +32,27 @@ fn signing(p: &mut Parcel, scheme: i32, signers: &[&[u8]], past: Option<&[(&[u8]
     }
 }
 
-/// A shared library without dependencies, as `PackageFeed.sharedLibrary`
-/// writes it; `dependency` adds one.
+/// Original SharedLibraryInfo bytes inside the feed's byte-array envelope.
 fn library(p: &mut Parcel, name: &str, dependency: Option<&str>) {
-    p.write_string16(Some(name));
-    p.write_string16(Some("/system/framework/lib.jar"));
-    p.write_string16(None);
-    p.write_i32(-1);
-    p.write_i64(-1);
-    p.write_i32(0);
-    p.write_bool(false);
-    p.write_string16(Some("android"));
-    p.write_i64(0);
-    p.write_i32(1);
-    p.write_string16(Some("com.example.app"));
-    p.write_i64(7);
-    match dependency {
-        None => p.write_i32(-1),
-        Some(d) => {
-            p.write_i32(1);
-            library(p, d, None);
-        }
+    use crate::package::model::SharedLibrary;
+    let new = |name: &str| SharedLibrary {
+        name: Some(name.into()),
+        path: Some("/system/framework/lib.jar".into()),
+        version: -1,
+        declaring: ("android".into(), 0),
+        dependents: vec![("com.example.app".into(), 7)],
+        optional_dependents: Some(vec![None, Some(("optional.consumer".into(), 19))]),
+        cert_digests: Some(vec![None, Some("certificate.digest".into())]),
+        ..Default::default()
+    };
+    let mut library = new(name);
+    if let Some(name) = dependency {
+        library.dependencies.push(new(name));
     }
+    let mut parcel = Parcel::new();
+    crate::package::info::write_libraries(&mut parcel, Some(&[library]));
+    // Strip writeTypedList's count and present marker.
+    write_byte_array(p, Some(&parcel.data()[8..]));
 }
 
 /// A package record in `PackageFeed.packageState`'s layout.
@@ -230,6 +229,19 @@ fn keys_are_in_javas_order() {
 #[test]
 fn reads_a_package_record() {
     let (p, shared) = record::package(&package_record("com.example.app", Some(1000))).unwrap();
+    for library in [
+        &p.uses_library_infos[0],
+        &p.uses_library_infos[0].dependencies[0],
+    ] {
+        assert_eq!(
+            library.optional_dependents,
+            Some(vec![None, Some(("optional.consumer".into(), 19))])
+        );
+        assert_eq!(
+            library.cert_digests,
+            Some(vec![None, Some("certificate.digest".into())])
+        );
+    }
     assert_eq!(shared, Some(1000));
     assert_eq!(p.name, "com.example.app");
     assert_eq!(p.app_id, 10_100);

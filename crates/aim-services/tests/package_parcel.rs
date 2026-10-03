@@ -70,6 +70,10 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageLibraryState.java"),
         )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageLibraryFeed.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()
@@ -753,6 +757,59 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    let library_feed = fs::read(directory.join("library-feed-original.parcel")).unwrap();
+    let mut reader = aim_binder_host::parcel::Reader::new(&library_feed, &[]);
+    assert_eq!(reader.read_i32().unwrap(), 6);
+    for index in 0..6 {
+        let bytes = aim_service_aidl::read_byte_array(&mut reader)
+            .unwrap()
+            .unwrap();
+        let library = aim_services::package::model::SharedLibrary::read_parcel(&bytes).unwrap();
+        assert_eq!(
+            library.write_parcel(),
+            bytes,
+            "original library owner {index}"
+        );
+        if index == 0 {
+            assert!(!library.dependents_initialized && !library.dependencies_initialized);
+            assert_eq!(library.optional_dependents, None);
+            assert_eq!(library.cert_digests, None);
+        } else if index == 1 {
+            assert!(library.dependents_initialized && library.dependencies_initialized);
+            assert_eq!(library.code_paths, Some(vec!["/explicit/code.jar".into()]));
+        } else if index == 4 {
+            assert_eq!(library.dependents, vec![("dependent.consumer".into(), 41)]);
+            assert_eq!(
+                library.optional_dependents,
+                Some(vec![None, Some(("consumer".into(), i64::MAX))])
+            );
+            assert_eq!(
+                library.cert_digests,
+                Some(vec![None, Some("digest".into())])
+            );
+            assert_eq!(
+                library.dependencies[0].cert_digests,
+                Some(vec![Some("nested.digest".into())])
+            );
+        }
+        if index == 5 {
+            assert!(library.declaring_absent);
+            assert_eq!(
+                library.cert_digests,
+                Some(vec![Some("sdk.certificate".into())])
+            );
+        }
+        for end in 0..bytes.len() {
+            assert!(
+                aim_services::package::model::SharedLibrary::read_parcel(&bytes[..end]).is_err(),
+                "truncated library {index} at {end}"
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.extend_from_slice(&[0; 4]);
+        assert!(aim_services::package::model::SharedLibrary::read_parcel(&trailing).is_err());
+    }
+    assert_eq!(reader.remaining(), 0);
     for index in 0..16 {
         let original =
             fs::read(directory.join(format!("legacy-migration-{index}.original"))).unwrap();
@@ -1601,6 +1658,7 @@ fn write_library_owner_fixture(directory: &std::path::Path) {
         Some(vec![None, Some(("consumer".into(), i64::MAX))]),
         Some(vec![None, Some("digest".into())]),
     );
+    populated.dependents.push(("dependent.consumer".into(), 41));
     populated.dependencies.push(nested);
     let info = ApplicationInfo {
         shared_library_infos: Some(vec![

@@ -291,9 +291,23 @@ including allocated-empty and null elements. Original ART accepts both ordinary
 and optional ApplicationInfo library records, nested values and full 64-bit
 versions (16.89s complete package oracle); original Java linkage passes (3.72s)
 and device-services builds (13.8s). All 393 units pass (3.16s; one ignored/not run),
-including raw null/empty distinction checks. The shadow feed still does not export these
-owners, and declaration-only Java restoration deliberately rejects them; full
-original-state import/assembly remains #740. Live policy
+including raw null/empty distinction checks. The shadow feed now exports each
+original SharedLibraryWrapper owner as its original SharedLibraryInfo parcel,
+rather than inferring hidden fields from interface getters. Native import retains
+optional/certificate owners, null/empty dependent and dependency lists, raw code
+paths (including a path-backed owner's explicit array) and absent declaring
+packages for SDK dependency placeholders. Imported records reproduce their source
+bytes exactly. Negative/oversized counts, wrong Parcelable classes/value lengths,
+missing required list elements, truncation and trailing bytes reject.
+Original ART exports six controlled owner forms through the production helper;
+native import/re-encoding matches every byte, including nested optional/certificate
+values and the SDK certificate constructor (16.78s complete package oracle).
+All 394 units pass (3.15s; one ignored/not run), original Java linkage passes
+(3.97s), and device-services builds (16.4s). The changed live full-PMS feed batch
+has not been exercised. Nullable raw code-path/dependent/dependency elements still
+reject (#864), and declaration-only captured Java restoration still rejects
+arbitrary optional/certificate owners; full import/assembly remains #740.
+Live policy
 delivery, overlay effects and factory graph handling remain #707/#808/#836.
 The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target

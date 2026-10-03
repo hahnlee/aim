@@ -24,6 +24,22 @@ public final class PackageRoundTripOracle {
             }
             verifyPopulatedLibrary(info.sharedLibraryInfos.get(2));
             verifyPopulatedLibrary(info.optionalSharedLibraryInfos.get(0));
+            var owners = new java.util.ArrayList<com.android.server.pm.pkg.SharedLibrary>();
+            owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(new android.content.pm.SharedLibraryInfo(
+                null, "owner", java.util.List.of("/system/owner.apk"), "original.null", 1, 3,
+                new android.content.pm.VersionedPackage("owner", 7L), null, null, false)));
+            owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(new android.content.pm.SharedLibraryInfo(
+                "/system/framework/owner.jar", null, java.util.List.of("/explicit/code.jar"), "original.empty", 2, 0,
+                new android.content.pm.VersionedPackage("android", 0L), java.util.List.of(), java.util.List.of(), false)));
+            for (var library : info.sharedLibraryInfos) owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(library));
+            owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(new android.content.pm.SharedLibraryInfo(
+                "sdk.placeholder", 37L, 3, java.util.List.of("sdk.certificate"))));
+            var feed = android.os.Parcel.obtain();
+            try {
+                dev.aim.server.PackageLibraryFeed.write(feed, owners);
+                java.nio.file.Files.write(new java.io.File(file.getParentFile(), "library-feed-original.parcel").toPath(), feed.marshall());
+            } finally { feed.recycle(); }
+
         } finally { in.recycle(); }
     }
     private static void verifyPopulatedLibrary(android.content.pm.SharedLibraryInfo library) {

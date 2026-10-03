@@ -189,8 +189,12 @@ pub struct SharedLibrary {
     pub native: bool,
     /// The declaring package: name and version code.
     pub declaring: (String, i64),
+    /// SDK dependency placeholders have no declaring package.
+    pub declaring_absent: bool,
     pub dependents: Vec<(String, i64)>,
     pub dependencies: Vec<SharedLibrary>,
+    pub dependents_initialized: bool,
+    pub dependencies_initialized: bool,
     /// Raw Parcelable list and string list; null and allocated-empty are distinct.
     pub optional_dependents: Option<Vec<Option<(String, i64)>>>,
     pub cert_digests: Option<Vec<Option<String>>>,
