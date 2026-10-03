@@ -429,6 +429,26 @@ mod tests {
             },
         };
         let collected = code.collected_package().unwrap();
+        let loaded =
+            super::super::LoadedPackage::new(collected.clone(), code.signing.clone()).unwrap();
+        let mut detached = loaded.clone();
+        detached
+            .collected_signing
+            .past_signing_certificates
+            .as_mut()
+            .unwrap()[0]
+            .1 = 0;
+        assert_eq!(
+            loaded.facade_entry().unwrap().past_signing_certificates,
+            code.signing.past_signing_certificates
+        );
+        assert_ne!(
+            detached.facade_entry().unwrap().past_signing_certificates,
+            loaded.facade_entry().unwrap().past_signing_certificates
+        );
+        let mut mismatched = collected.clone();
+        mismatched.signing_details = None;
+        assert!(super::super::LoadedPackage::new(mismatched, code.signing.clone()).is_err());
         let facade = collected.to_facade_entry(&code.signing).unwrap();
         assert_eq!(
             facade.past_signing_certificates,

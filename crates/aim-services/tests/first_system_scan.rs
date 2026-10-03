@@ -161,6 +161,12 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert!(scan.owner.disabled_loaded_packages().is_empty());
     for completed in &scan.packages {
         let record = &completed.candidate.record;
+        let loaded = &scan.owner.loaded_packages()[&record.settings.name];
+        assert_eq!(loaded.collected_signing, record.signing);
+        assert_eq!(
+            loaded.facade_entry().unwrap().past_signing_certificates,
+            record.signing.past_signing_certificates
+        );
         assert_eq!(record.parsed.uid, record.settings.app_id);
         assert_eq!(
             record.parsed.signing_details,
@@ -172,7 +178,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 == record.parsed
         );
         assert_eq!(
-            *scan.owner.loaded_packages()[&record.settings.name],
+            scan.owner.loaded_packages()[&record.settings.name].package,
             record.parsed
         );
     }
@@ -918,6 +924,17 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         Err(SigningError::Rejected(ref error)) if error.phase == "code-time"
     ));
     assert_eq!(scan.owner, before);
+    let mut mismatched_owner = scan.owner.clone();
+    let mut mismatched = mismatched_owner
+        .apply_existing(&code, update(), &saved_users, None, None)
+        .unwrap();
+    let before_finalization = mismatched_owner.clone();
+    mismatched.record.parsed.signing_details = None;
+    assert!(matches!(
+        mismatched_owner.finish_scan_metadata(mismatched, &apks, completion()),
+        Err(SigningError::Rejected(ref error)) if error.phase == "package-finalization"
+    ));
+    assert_eq!(mismatched_owner, before_finalization);
     let mut retained = scan
         .owner
         .scan_existing(
@@ -940,11 +957,11 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert_eq!(scan.owner.libraries, before.libraries);
     assert!(retained.copies.is_empty());
     assert_eq!(
-        *scan.owner.loaded_packages()[&saved.name],
+        scan.owner.loaded_packages()[&saved.name].package,
         retained.candidate.record.parsed
     );
     assert_eq!(
-        *before.loaded_packages()[&saved.name],
+        before.loaded_packages()[&saved.name].package,
         scan.packages[1].candidate.record.parsed
     );
 
@@ -988,7 +1005,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     );
     assert_eq!(factory.record.settings.signatures, saved.signatures);
     assert_eq!(
-        *factory_owner.disabled_loaded_packages()[&saved.name],
+        factory_owner.disabled_loaded_packages()[&saved.name].package,
         factory.record.parsed
     );
     assert_eq!(
@@ -1026,14 +1043,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let original_version = retained.candidate.record.parsed.version_name.clone();
     retained.candidate.record.parsed.version_name = Some("detached-stale-copy".into());
     assert_eq!(
-        *hot_owner.loaded_packages()[&saved.name],
-        *frozen.loaded_packages()[&saved.name]
+        hot_owner.loaded_packages()[&saved.name].package,
+        frozen.loaded_packages()[&saved.name].package
     );
     assert!(hot_owner.copy_disabled_user_states(&retained).is_err());
     assert_eq!(hot_owner, frozen);
     retained.candidate.record.parsed.version_name = original_version;
     assert_eq!(
-        *hot_owner.disabled_loaded_packages()[&saved.name],
+        hot_owner.disabled_loaded_packages()[&saved.name].package,
         retained.candidate.record.parsed
     );
     assert_eq!(

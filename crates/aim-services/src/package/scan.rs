@@ -59,9 +59,36 @@ pub use uids::{Uid, UidScan};
 pub struct Record {
     pub settings: settings::Package,
     pub parsed: AndroidPackage,
+    /// Integrity-verified collected code, before saved/shared-UID reconciliation.
     pub signing: sign::SigningDetails,
     pub identity: Identity,
     pub origin: ScanOrigin,
+}
+
+/// Final code and collected signing retained together for facade reconstruction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedPackage {
+    pub package: AndroidPackage,
+    pub collected_signing: sign::SigningDetails,
+}
+
+impl LoadedPackage {
+    fn new(
+        package: AndroidPackage,
+        collected_signing: sign::SigningDetails,
+    ) -> Result<Self, String> {
+        if package.signing_details.as_ref() != Some(&collected_signing.parcel_details()?) {
+            return Err("loaded package and collected signing differ".into());
+        }
+        Ok(Self {
+            package,
+            collected_signing,
+        })
+    }
+
+    pub fn facade_entry(&self) -> Result<super::pkg::FacadeEntry, String> {
+        self.package.to_facade_entry(&self.collected_signing)
+    }
 }
 
 #[derive(Debug, Default)]

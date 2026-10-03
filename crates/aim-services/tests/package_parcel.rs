@@ -149,9 +149,10 @@ fn native_package_parcels_match_original_read_write() {
             expected.push((name, pkg.package_name, entry));
         }
     }
-    for (pkg, collected) in native_scan_objects(&data.0) {
+    for loaded in native_scan_objects(&data.0) {
+        let pkg = &loaded.package;
         let name = format!("scan-{}.native", pkg.uid);
-        let facade = pkg.to_facade_entry(&collected).unwrap();
+        let facade = loaded.facade_entry().unwrap();
         let mut metadata = Vec::new();
         match facade.past_signing_certificates {
             None => metadata.extend_from_slice(&(-1_i32).to_be_bytes()),
@@ -167,7 +168,7 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(directory.join(format!("{name}.signing")), metadata).unwrap();
         let entry = facade.cache;
         fs::write(directory.join(&name), &entry.bytes).unwrap();
-        expected.push((name, pkg.package_name, entry));
+        expected.push((name, pkg.package_name.clone(), entry));
     }
     let original = boot.command().args([
         "shell", "/system/bin/app_process",
@@ -251,7 +252,7 @@ fn normalize_maps(pkg: &mut AndroidPackage) {
 // Scan real original framework and rotated GSF code, without saved settings.
 fn native_scan_objects(
     dir: &std::path::Path,
-) -> Vec<(AndroidPackage, aim_services::package::sign::SigningDetails)> {
+) -> Vec<std::sync::Arc<aim_services::package::scan::LoadedPackage>> {
     use aim_services::package::{
         parse::Platform,
         scan::{
@@ -344,19 +345,23 @@ fn native_scan_objects(
     assert!(scan.rejected.is_empty());
     let objects: Vec<_> = scan
         .packages
-        .into_iter()
+        .iter()
         .map(|p| {
-            let record = p.candidate.record;
+            let record = &p.candidate.record;
             assert_eq!(record.parsed.uid, record.settings.app_id);
             assert!(
                 record.parsed.signing_details == Some(record.signing.parcel_details().unwrap())
             );
-            let signing = collected.get(&record.parsed.package_name).unwrap().clone();
-            (record.parsed, signing)
+            let loaded = &scan.owner.loaded_packages()[&record.settings.name];
+            assert_eq!(
+                &loaded.collected_signing,
+                &collected[&record.parsed.package_name]
+            );
+            std::sync::Arc::clone(loaded)
         })
         .collect();
     assert_eq!(
-        objects.iter().map(|(p, _)| p.uid).collect::<Vec<_>>(),
+        objects.iter().map(|p| p.package.uid).collect::<Vec<_>>(),
         [1000, 10000]
     );
     objects

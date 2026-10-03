@@ -269,10 +269,10 @@ impl SigningScan {
         self.accepted_slot(&candidate.record, "disabled-users")?;
         let package = &candidate.record.settings;
         if self.scanned_users.get(&package.name) != Some(&candidate.users)
-            || self
-                .loaded
-                .get(&package.name)
-                .is_none_or(|pkg| pkg.as_ref() != &candidate.record.parsed)
+            || self.loaded.get(&package.name).is_none_or(|pkg| {
+                pkg.package != candidate.record.parsed
+                    || pkg.collected_signing != candidate.record.signing
+            })
             || candidate.record.origin != ScanOrigin::SystemDirectory
             || !self
                 .settings
@@ -553,13 +553,13 @@ impl SigningScan {
             inputs.factory_test,
             updated,
         );
+        let loaded = super::LoadedPackage::new(parsed.clone(), code.signing.clone())
+            .map_err(|message| reject("package-finalization", message))?;
         // scanPackageOnly preserves saved signatures. Strict recollection for
         // selected updated-system packages belongs to the version selector.
         self.settings.disabled_system_packages[at] = setting.package.clone();
-        self.disabled_loaded.insert(
-            setting.package.name.clone(),
-            std::sync::Arc::new(parsed.clone()),
-        );
+        self.disabled_loaded
+            .insert(setting.package.name.clone(), std::sync::Arc::new(loaded));
         self.disabled_users
             .get_mut(&setting.package.name)
             .expect("disabled user setting was validated")

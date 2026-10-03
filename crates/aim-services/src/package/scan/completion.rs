@@ -144,12 +144,24 @@ impl SigningScan {
         // commitReconciledScanResultLocked sets the assigned appId only after
         // setting/UID creation. The object is retained before query publication.
         candidate.record.parsed.uid = candidate.record.settings.app_id;
+        let loaded = super::LoadedPackage::new(
+            candidate.record.parsed.clone(),
+            candidate.record.signing.clone(),
+        )
+        .map_err(|message| {
+            SigningError::Rejected(super::Error {
+                package: candidate.record.settings.name.clone(),
+                path: candidate.record.settings.code_path.clone(),
+                phase: "package-finalization",
+                message,
+            })
+        })?;
         staged
             .update_ownership
             .queue(&candidate.record.settings, &candidate.record.parsed);
         staged.loaded.insert(
             candidate.record.settings.name.clone(),
-            std::sync::Arc::new(candidate.record.parsed.clone()),
+            std::sync::Arc::new(loaded),
         );
         *self = staged;
         Ok(CompletedScanMetadata {

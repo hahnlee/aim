@@ -201,16 +201,28 @@ now pairs the cache with collected certificate/capability metadata, rejecting a
 package/signing mismatch. PackageObjects reconstructs original PackageImpl and
 restores a new SigningDetails after checking lineage presence, lengths and each
 certificate. Signature arrays and the key set are detached from decoded inputs.
-The 572-parcel original-image oracle passes (19.86s), including two native
-first-scan objects. The collected GSF lineage flags are 21/23; original
+SigningScan's active and disabled inventories now retain a single
+Arc<LoadedPackage> containing final AndroidPackage and complete collected
+SigningDetails. Record.signing is collected code; saved package and shared-UID
+signing remain in their separate owners. Final metadata registration rejects a
+package/signing mismatch before changing retained state. Active-to-disabled
+copy shares the entire Arc, and withdrawal removes both fields together while
+older snapshots retain both. Detached candidate changes do not alter them.
+The 572-parcel original-image oracle reads these retained entries directly and
+passes (19.29s), including two native first-scan objects after their scan owner
+is dropped. The collected GSF lineage flags are 21/23; original
 checkCapability confirms individual/combined grant and denial masks, and a
 revoked copy denies installed-data access. Malformed metadata rejects and input
 mutation does not change restored flags or decoded objects. All 344 units pass
-(3.07s), all oracle DEX linkage passes (2.92s), and device-services builds against
-original APIs (13.7s). This verifies supplied-object restoration, not callback
-delivery. The replica publisher must retain collected signing separately from
-reconciled saved/group signing and wire both through their owner transports;
-actual permission callbacks remain unimplemented (#837/#833/#836).
+(3.15s); the first-system scan passes (43.64s), including real metadata-gate
+rejection and unchanged retained state for mismatched signing. The disposable
+original-PMS saved-scan also passes, retaining collected signing/capabilities for
+all 243 active packages and three disabled factories, with owned process/mount
+cleanup. All oracle DEX
+linkage passes (2.92s), and device-services builds against original APIs (13.7s).
+This verifies retained-code reconstruction, not callback delivery. Native query
+replica publication and collected/saved/group owner transports into actual
+permission callbacks remain unimplemented (#837/#833/#836).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

@@ -604,22 +604,36 @@ fn saved_scan_libraries_match_original_pms() {
         .chain(&resumed_data.recovered)
     {
         let record = &completed.candidate.record;
+        let loaded = &resumed.loaded_packages()[&record.settings.name];
+        assert_eq!(loaded.collected_signing, record.signing);
+        assert_eq!(
+            loaded.facade_entry().unwrap().past_signing_certificates,
+            record.signing.past_signing_certificates
+        );
         assert_eq!(record.parsed.uid, record.settings.app_id);
         assert!(record.parsed.signing_details == Some(record.signing.parcel_details().unwrap()));
         assert_eq!(
-            *resumed.loaded_packages()[&record.settings.name],
+            resumed.loaded_packages()[&record.settings.name].package,
             record.parsed
         );
     }
     for factory in &resumed_packages.retained_data {
         let record = &factory.record;
+        let loaded = &resumed.disabled_loaded_packages()[&record.settings.name];
+        assert_eq!(loaded.collected_signing, record.signing);
+        assert_eq!(
+            loaded.facade_entry().unwrap().past_signing_certificates,
+            record.signing.past_signing_certificates
+        );
         assert!(record.parsed.signing_details == Some(record.signing.parcel_details().unwrap()));
         assert_eq!(
-            *resumed.disabled_loaded_packages()[&record.settings.name],
+            resumed.disabled_loaded_packages()[&record.settings.name].package,
             record.parsed
         );
         assert_ne!(
-            resumed.loaded_packages()[&record.settings.name].path,
+            resumed.loaded_packages()[&record.settings.name]
+                .package
+                .path,
             record.parsed.path
         );
     }

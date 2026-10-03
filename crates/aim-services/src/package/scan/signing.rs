@@ -40,8 +40,8 @@ pub struct SigningScan {
     pub installers: crate::package::owner::install_sources::Installers,
     pub(super) disabled_users: BTreeMap<String, super::disabled::DisabledUserStates>,
     pub(super) scanned_users: BTreeMap<String, BTreeMap<i32, UserState>>,
-    pub(super) loaded: BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>>,
-    pub(super) disabled_loaded: BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>>,
+    pub(super) loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
+    pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -74,14 +74,12 @@ pub struct NewPackageOutcome {
 impl SigningScan {
     /// Native-parsed active code, admitted only after every scan metadata gate.
     /// Settings and user state remain in their owners; this is not a query replica.
-    pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>> {
+    pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {
         &self.loaded
     }
 
     /// Verified disabled factory code, kept apart from active UID membership.
-    pub fn disabled_loaded_packages(
-        &self,
-    ) -> &BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>> {
+    pub fn disabled_loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {
         &self.disabled_loaded
     }
 
@@ -1155,17 +1153,22 @@ mod tests {
             ..Default::default()
         };
         let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let signing = SigningDetails {
+            signatures: vec![vec![3]],
+            scheme_version: 3,
+            public_keys: vec![],
+            past_signing_certificates: Some(vec![(vec![1], 21), (vec![3], 23)]),
+        };
         let parsed = crate::package::pkg::AndroidPackage {
             package_name: package.name.clone(),
             path: Some(package.code_path.clone()),
+            signing_details: Some(signing.parcel_details().unwrap()),
             ..Default::default()
         };
-        owner
-            .loaded
-            .insert(package.name.clone(), Arc::new(parsed.clone()));
-        owner
-            .disabled_loaded
-            .insert(package.name.clone(), Arc::new(parsed.clone()));
+        let loaded =
+            Arc::new(super::super::LoadedPackage::new(parsed.clone(), signing.clone()).unwrap());
+        owner.loaded.insert(package.name.clone(), loaded.clone());
+        owner.disabled_loaded.insert(package.name.clone(), loaded);
         owner
             .scanned_users
             .insert(package.name.clone(), BTreeMap::new());
@@ -1173,12 +1176,7 @@ mod tests {
         let record = Record {
             settings: package.clone(),
             parsed,
-            signing: SigningDetails {
-                signatures: vec![],
-                scheme_version: 0,
-                public_keys: vec![],
-                past_signing_certificates: None,
-            },
+            signing,
             identity: Identity {
                 manifest_name: package.name.clone(),
                 internal_name: package.name.clone(),
@@ -1186,6 +1184,13 @@ mod tests {
             },
             origin: ScanOrigin::SystemDirectory,
         };
+        assert_eq!(
+            frozen.loaded_packages()[&package.name]
+                .facade_entry()
+                .unwrap()
+                .past_signing_certificates,
+            record.signing.past_signing_certificates
+        );
         assert!(owner.remove_package_setting(&package.name).is_err());
         assert_eq!(owner, frozen);
         owner.withdraw_scanned_package(&record);
@@ -1198,11 +1203,17 @@ mod tests {
             owner.disabled_loaded_packages(),
             frozen.disabled_loaded_packages()
         );
-        assert_eq!(*frozen.loaded_packages()[&package.name], record.parsed);
+        assert_eq!(
+            frozen.loaded_packages()[&package.name].package,
+            record.parsed
+        );
         owner
             .remove_package_setting(&package.name)
             .unwrap()
             .unwrap();
-        assert_eq!(*frozen.loaded_packages()[&package.name], record.parsed);
+        assert_eq!(
+            frozen.loaded_packages()[&package.name].package,
+            record.parsed
+        );
     }
 }
