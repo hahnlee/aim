@@ -23,6 +23,9 @@ public class PackageSetting extends SettingBase {
         throw new RuntimeException("stub");
     }
     public PackageSetting setAppId(int id) { throw new RuntimeException("stub"); }
+    public PackageSetting setSharedUserAppId(int id) { throw new RuntimeException("stub"); }
+    public PackageSetting setInstallSource(InstallSource source) { throw new RuntimeException("stub"); }
+    public InstallSource getInstallSource() { throw new RuntimeException("stub"); }
     public PackageSetting setFirstInstallTime(long time, int user) { throw new RuntimeException("stub"); }
     public PackageSetting(PackageSetting original, boolean sealedSnapshot) { super(0, 0); }
     public int getAppId() { throw new RuntimeException("stub"); }

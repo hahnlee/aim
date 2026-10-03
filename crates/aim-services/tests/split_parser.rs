@@ -890,8 +890,9 @@ fn manifest_keysets_match_original_parser() {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PreferredClearingOracle.java"),
         )
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ImplicitAccessOracle.java"))
         .arg(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ImplicitAccessOracle.java"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/SettingRemovalOracle.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -916,6 +917,7 @@ fn manifest_keysets_match_original_parser() {
             classes.join("com/android/server/pm/UpdateOwnershipOracle.class"),
             classes.join("com/android/server/pm/PreferredClearingOracle.class"),
             classes.join("com/android/server/pm/ImplicitAccessOracle.class"),
+            classes.join("com/android/server/pm/SettingRemovalOracle.class"),
         ]));
     let key = |scalar| {
         let mut der = vec![
@@ -1319,5 +1321,64 @@ fn manifest_keysets_match_original_parser() {
         String::from_utf8_lossy(&output.stderr)
     );
     let original = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(original, expected);
+    let setting_owner = |xml: &str| {
+        let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        let settings = aim_services::package::settings::Settings::parse(&root).unwrap();
+        aim_services::package::scan::SigningScan::new(&Default::default(), &settings, 36).unwrap()
+    };
+    let mut expected = String::new();
+    for kind in 0..3 {
+        let mut scan = if kind == 0 {
+            setting_owner(
+                "<packages><package name='a' codePath='/data/app/a' userId='10100'/><package name='b' codePath='/data/app/b' userId='10101'/></packages>",
+            )
+        } else {
+            setting_owner(&format!(
+                "<packages><shared-user name='group' userId='10100'/><package name='a' codePath='/data/app/a' sharedUserId='10100'/><package name='b' codePath='/data/app/b' sharedUserId='10100'/>{}</packages>",
+                if kind == 2 {
+                    "<updated-package name='a' codePath='/system/app/a' sharedUserId='10100'/>"
+                } else {
+                    ""
+                }
+            ))
+        };
+        for name in ["a", "b", "missing"] {
+            let removed = scan
+                .remove_package_setting(name)
+                .unwrap()
+                .is_some_and(|r| r.app_id_removed);
+            writeln!(
+                &mut expected,
+                "{kind} {name} {removed} {}",
+                scan.identities.ids.get(10100).is_some()
+            )
+            .unwrap();
+        }
+    }
+    let mut scan = setting_owner(
+        "<packages><package name='store' codePath='/data/app/store' userId='10100'/><package name='app' codePath='/data/app/app' userId='10101' installer='store' installerUid='10100' updateOwner='store' installInitiator='store' installOriginator='store' installerAttributionTag='tag' packageSource='2'/></packages>",
+    );
+    scan.remove_package_setting("store").unwrap();
+    let source = &scan.settings.packages[0].install_source;
+    let name = |s: &Option<String>| s.as_deref().unwrap_or("null").to_owned();
+    writeln!(
+        &mut expected,
+        "source {} {} {} {} {} {} {} {} {}",
+        name(&source.initiating_package),
+        source.initiating_package_uninstalled,
+        name(&source.originating_package),
+        name(&source.installer),
+        source.installer_uid,
+        name(&source.update_owner),
+        name(&source.installer_attribution_tag),
+        source.is_orphaned,
+        source.package_source
+    )
+    .unwrap();
+    let original = String::from_utf8(run(boot.command().args([
+        "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.SettingRemovalOracle",
+    ])).stdout).unwrap();
     assert_eq!(original, expected);
 }

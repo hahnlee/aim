@@ -54,6 +54,9 @@ pub(in crate::package) fn saved_signatures(details: &SigningDetails) -> Result<S
 }
 
 impl SharedUser {
+    pub(in crate::package) fn has_package(&self, name: &str) -> bool {
+        self.packages.contains_key(name)
+    }
     pub fn new(app_id: i32, flags: i32, private_flags: i32) -> Self {
         Self {
             app_id,

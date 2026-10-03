@@ -10,6 +10,12 @@ public final class Settings {
         throw new RuntimeException("stub");
     }
     public Settings(java.util.Map<String, PackageSetting> packages) { throw new RuntimeException("stub"); }
+    boolean removePackageAndAppIdLPw(String name) { throw new RuntimeException("stub"); }
+    boolean registerAppIdLPw(PackageSetting setting, boolean forceNew) throws Exception { throw new RuntimeException("stub"); }
+    SharedUserSetting addSharedUserLPw(String name, int uid, int flags, int privateFlags) { throw new RuntimeException("stub"); }
+    boolean disableSystemPackageLPw(String name, boolean replaced) { throw new RuntimeException("stub"); }
+    public SettingBase getSettingLPr(int id) { throw new RuntimeException("stub"); }
+    void addInstallerPackageNames(InstallSource source) { throw new RuntimeException("stub"); }
     void readPreferredActivitiesLPw(com.android.modules.utils.TypedXmlPullParser parser, int userId)
         throws java.io.IOException { throw new RuntimeException("stub"); }
     void writePreferredActivitiesLPr(com.android.modules.utils.TypedXmlSerializer serializer, int userId, boolean full)

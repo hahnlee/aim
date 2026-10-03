@@ -40,9 +40,11 @@ pub use boot::{
 };
 pub use disabled::{DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
 pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
+mod removal;
 mod setting;
 mod signing;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
+pub use removal::RemovedSetting;
 mod uids;
 mod validate;
 pub use identity::Identity;

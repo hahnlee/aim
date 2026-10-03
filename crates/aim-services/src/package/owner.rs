@@ -23,6 +23,7 @@ use super::write::Enabled;
 use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
+pub mod install_sources;
 pub mod key_sets;
 mod native_libraries;
 pub mod resources;

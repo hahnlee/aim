@@ -362,6 +362,21 @@ denylisted/provider queries fail explicitly until the resource owner supplies
 validated contents. The original UpdateOwnershipHelper oracle
 compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
 transitions with the native owner: denied-target and provider/null queries match.
+The scan's native setting owner now implements removePackageAndAppIdLPw's
+setting/UID stage (#822): it rejects removal while code is still loaded or UID
+ownership disagrees, then removes the active setting and installer status.
+Independent UIDs are released; shared members are removed with their flag
+recomputation, and the shared group/UID survives any active or disabled factory
+member. Unrelated UID owners and disabled settings remain intact. Installer names
+are restored from installer/initiator/originator roles, excluding update-owner-only
+references. Removing a registered installer clears remaining active packages'
+installer/originator/update-owner references and attribution, retaining the
+initiator name/signatures with its uninstalled flag and marking installer
+orphans. Original Settings compares independent/shared/disabled-reserved UID
+removal, repeated missing removal and installer source effects (18.11s). All 331
+units pass (3.09s), and image API linkage passes (15.0s). This in-memory stage is
+not yet called by boot cleanup: full side-owner ordering, permission uninstall
+reconciliation, persistence and publication remain #822/#798.
 Native query snapshots now own AppsFilter's ordinary and update-retained
 interaction grants (#724). Full recipient/visible UIDs preserve direction and
 user scope; duplicate grants and self-grants follow original return values.
@@ -371,7 +386,7 @@ including shared app IDs. Replacement retains the retained class and preserves
 ordinary grants only when requested. Snapshot clones retain their prior grants.
 The original AppsFilterImpl grant oracle, with its own original mutable
 ApplicationSharedMemory for cache invalidation, passes in the combined fixture
-(17.27s). All 327 units pass (3.09s), and added image APIs link (13.2s).
+(18.11s). All 331 units pass (3.09s), and added image APIs link (15.0s).
 ActivityManager/WindowManager producers and boot removal/query publication are
 not connected to this owner yet (#724/#822).
 The native settings store now clears one user's saved preferred activities under
