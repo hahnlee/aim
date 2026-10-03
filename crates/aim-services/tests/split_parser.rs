@@ -352,7 +352,10 @@ fn manifest_keysets_match_original_parser() {
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ManifestKeySetsOracle.java"),
         )
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/KeySetOwnerOracle.java")));
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/KeySetOwnerOracle.java"))
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/UpdateOwnershipOracle.java"),
+        ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
         .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
@@ -373,6 +376,7 @@ fn manifest_keysets_match_original_parser() {
             classes.join("ManifestKeySetsOracle$1.class"),
             classes.join("com/android/server/pm/KeySetOwnerOracle.class"),
             classes.join("com/android/server/pm/KeySetOwnerOracle$1.class"),
+            classes.join("com/android/server/pm/UpdateOwnershipOracle.class"),
         ]));
     let key = |scalar| {
         let mut der = vec![
@@ -578,4 +582,36 @@ fn manifest_keysets_match_original_parser() {
         assert_eq!(original.key_sets, state.key_sets, "{name}");
     }
     assert!(lines.next().is_none());
+    use aim_services::package::owner::update_ownership::UpdateOwnership;
+    let mut ownership = UpdateOwnership::default();
+    let mut expected = String::new();
+    let mut snapshot = |name: &str, owner: &UpdateOwnership| {
+        write!(&mut expected, "{name}").unwrap();
+        for target in ["one", "two", "shared", "missing"] {
+            write!(&mut expected, " {}", owner.is_denylisted(target).unwrap()).unwrap();
+        }
+        for provider in [Some("a"), Some("b"), None] {
+            write!(&mut expected, " {}", owner.is_provider(provider).unwrap()).unwrap();
+        }
+        expected.push('\n');
+    };
+    ownership.add("a", &["one".into(), "shared".into(), "shared".into()]);
+    snapshot("first", &ownership);
+    ownership.add("b", &["shared".into()]);
+    snapshot("overlap", &ownership);
+    ownership.add("a", &["two".into()]);
+    snapshot("accumulate", &ownership);
+    ownership.add("a", &[]);
+    snapshot("empty", &ownership);
+    ownership.remove("a");
+    snapshot("remove-a", &ownership);
+    ownership.remove("a");
+    snapshot("repeat-remove", &ownership);
+    ownership.remove("b");
+    snapshot("remove-last", &ownership);
+    let original = String::from_utf8(run(boot.command().args([
+        "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.UpdateOwnershipOracle",
+    ])).stdout).unwrap();
+    assert_eq!(original, expected);
 }

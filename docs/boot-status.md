@@ -349,7 +349,11 @@ UpdateOwnershipHelper; empty additions do not withdraw old contributions. Accept
 metadata queues eligible system/update providers by the pinned property and
 INSTALL_PACKAGES/INSTALL_PACKAGE_UPDATES declaration. Pending provider reads make
 denylisted/provider queries fail explicitly until the resource owner supplies
-validated contents. Binary XML/resource ingress, original-owner conformance,
+validated contents. The original UpdateOwnershipHelper oracle
+compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
+transitions with the native owner: denied-target and provider/null queries match.
+The combined parser/keyset/update-owner fixture passes (17.89s), and its added
+compile-only APIs pass image linkage (13.4s). Binary XML/resource ingress,
 SystemConfig-conditioned update-owner clearing and asynchronous commit ordering
 remain #825. This in-memory component is separate from InstallSource.update_owner
 and is not a complete removal commit. Store.commit_removed_boot_metadata writes just the completed
@@ -382,14 +386,14 @@ Android Base64.DEFAULT skipping/padding are modeled. Defined aliases/public-key
 sets serialize in Java collection order and roundtrip through AndroidPackage.
 A compiled disposable APK fixture (0.95s) verifies the real TypedArray path,
 reused keys, alias/upgrade output, missing first values, name collisions and
-invalid-key omission. A disposable original PackageParser2/KeySetManagerService oracle (17.02s)
+invalid-key omission. A disposable original PackageParser2/KeySetManagerService oracle (17.89s)
 compares eleven identical compiled APKs: key reuse, nullable public names,
 conflicts, key/set name collisions, invalid keys, first-use errors, empty upgrade
 sets, repeated set names, multiple keyset sections, Base64 skipped characters
 and multiple public keys. Parse acceptance, alias/key iteration, canonical SPKI,
 Java serialization bytes and upgrade output all match. Owned processes and mounts
 are cleaned. Added compile-only parser APIs link against the original image
-(device-services build, 14.9s). Unsupported EC curves fail explicitly; broader
+(device-services build, 13.4s). Unsupported EC curves fail explicitly; broader
 key-factory and template/app-install API conformance remain #824. The same oracle
 compares six global-owner transitions: signing/upgrade alias registration, shared
 signing keys, rotation to the alias key with alias release, shared-owner removal,
