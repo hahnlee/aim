@@ -43,6 +43,10 @@ fn suspension_parameters_match_original_xml_owners() {
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PersistableBundleOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ComponentOwnerOracle.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -60,7 +64,8 @@ fn suspension_parameters_match_original_xml_owners() {
         .arg("--output")
         .arg(&dex)
         .arg(classes.join("SuspensionDialogOracle.class"))
-        .arg(classes.join("PersistableBundleOracle.class")));
+        .arg(classes.join("PersistableBundleOracle.class"))
+        .arg(classes.join("ComponentOwnerOracle.class")));
     common::java::check_linkage(
         &dex.join("classes.dex"),
         &["/system/framework/services.jar"],
@@ -173,6 +178,7 @@ fn suspension_parameters_match_original_xml_owners() {
         assert_eq!(native, original, "case {index}");
     }
     check_extras(&boot, &directory);
+    check_components(&boot, &directory);
 }
 
 fn check_extras(boot: &Boot, directory: &std::path::Path) {
@@ -524,4 +530,68 @@ fn native_extras(root: &Element) -> Vec<u8> {
         }
     }
     out
+}
+
+fn check_components(boot: &Boot, directory: &std::path::Path) {
+    let cases = [
+        "",
+        "<item/><other name='ignored'/>",
+        "<item name=''/><item name='z'/><item name='a'/><item name='z'/>",
+        "<unknown><item name='nested'/><item name='outer'><item name='inner'/></item></unknown>",
+        "<item name='BB'/><item name='Aa'/><item name='BB'/><item name='zzzzzz'/><item name='😀'/>",
+        "<item name='Aa'/><item name='BB'/><other><item name='Aa'/></other>",
+        "<item name='AaAa'/><item name='BBBB'/><item name='AaBB'/><item name='BBAa'/>",
+    ];
+    let mut expected = Vec::new();
+    for (i, content) in cases.iter().enumerate() {
+        let xml = format!("<enabled-components>{content}</enabled-components>");
+        let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        let wrapper = aim_android_xml::read(
+            format!("<package-restrictions><pkg name='fixture'>{xml}</pkg></package-restrictions>")
+                .as_bytes(),
+        )
+        .unwrap();
+        let state = aim_services::package::restrictions::Restrictions::parse(&wrapper).unwrap();
+        let components = state.packages[0].1.enabled_components.as_ref().unwrap();
+        let mut bytes = (components.len() as i32).to_be_bytes().to_vec();
+        for name in components {
+            bytes.extend_from_slice(&(name.len() as i32).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        for (j, input) in [
+            xml.into_bytes(),
+            aim_android_xml::abx::write(&root).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fs::write(
+                directory.join(format!("component-{}.xml", i * 2 + j)),
+                input,
+            )
+            .unwrap();
+            expected.push(bytes.clone());
+        }
+    }
+    let count = expected.len().to_string();
+    let result = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/suspension-dialogs/oracle.dex",
+        "/system/bin",
+        "ComponentOwnerOracle",
+        "/data/local/tmp/suspension-dialogs",
+        &count,
+    ]));
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        format!("COMPONENTS {count}\n")
+    );
+    for (i, bytes) in expected.iter().enumerate() {
+        assert_eq!(
+            &fs::read(directory.join(format!("component-{i}.original"))).unwrap(),
+            bytes,
+            "original parser/ArraySet component case {i}"
+        );
+    }
 }

@@ -514,7 +514,7 @@ impl Store {
                 entry.content.push(Node::Element(list));
             }
         }
-        Restrictions::parse(&root).map_err(WriteError::before)?;
+        let restrictions = Restrictions::parse(&root).map_err(WriteError::before)?;
         let bytes = abx::write(&root).map_err(WriteError::before)?;
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
@@ -523,25 +523,29 @@ impl Store {
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.restrictions.insert(user, root);
-            let current = &mut self
+            let parsed = restrictions
+                .packages
+                .into_iter()
+                .find(|(name, _)| name == package)
+                .expect("written package")
+                .1;
+            let updated = &mut self
                 .state
                 .users
                 .iter_mut()
                 .find(|(id, _)| *id == user)
                 .expect("opened user")
                 .1
-                .restrictions;
-            let updated = &mut current
+                .restrictions
                 .packages
                 .iter_mut()
                 .find(|(name, _)| name == package)
                 .expect("known package")
                 .1;
-            updated.enabled = enabled.enabled;
-            updated.last_disable_app_caller = enabled.last_disable_app_caller.clone();
-            updated.enabled_components = Some(enabled.enabled_components.iter().cloned().collect());
-            updated.disabled_components =
-                Some(enabled.disabled_components.iter().cloned().collect());
+            updated.enabled = parsed.enabled;
+            updated.last_disable_app_caller = parsed.last_disable_app_caller;
+            updated.enabled_components = parsed.enabled_components;
+            updated.disabled_components = parsed.disabled_components;
         }
         result
     }

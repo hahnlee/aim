@@ -336,13 +336,25 @@ fn user_state(e: &Element) -> Result<UserState, String> {
     Ok(s)
 }
 
+// Settings.readComponentsLPr, Android 16.0.0_r1.
+// Copyright (C) The Android Open Source Project, Apache License 2.0.
 fn components(e: &Element) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for name in children(e, "item").filter_map(|i| string(i, "name")) {
-        if !out.contains(&name) {
+    let mut cursor = persistable::Cursor::new(e);
+    while let Some(event) = cursor.next() {
+        if let persistable::Event::Start(item, _) = event
+            && item.name == "item"
+            && let Some(name) = string(item, "name")
+            && !out.contains(&name)
+        {
             out.push(name);
         }
     }
+    // ArraySet inserts after equal hashes, preserving collision insertion order.
+    out.sort_by_key(|s| {
+        s.encode_utf16()
+            .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)))
+    });
     out
 }
 
@@ -465,6 +477,20 @@ mod tests {
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
             [0, 12, 0, 0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::*;
+    #[test]
+    fn descendant_items_follow_signed_java_hash_and_collision_order() {
+        let root = aim_android_xml::read(b"<package-restrictions><pkg name='fixture'><enabled-components><item name='BB'/><unknown><item name='Aa'/><item name='B'><item name='zzzzzz'/></item></unknown><item name='BB'/><item/><item name=''/></enabled-components></pkg></package-restrictions>").unwrap();
+        let state = Restrictions::parse(&root).unwrap();
+        assert_eq!(
+            state.packages[0].1.enabled_components.as_deref(),
+            Some(["zzzzzz", "", "B", "BB", "Aa"].map(String::from).as_slice())
         );
     }
 }

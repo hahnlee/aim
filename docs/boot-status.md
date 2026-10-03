@@ -72,8 +72,8 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 370
-units pass (3.14s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 371
+units pass (3.18s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
@@ -87,7 +87,14 @@ now distinguishes original default null sets from Settings-initialized empty
 sets (#845), including missing-file initialization and third-party new settings.
 The original ART oracle confirms that the ArraySet setter overloads initialize
 empty owners even for null inputs; native tests verify nullable transport and
-empty-set persistence/reread. Native suspension operations and native PMS
+empty-set persistence/reread. Component XML owners traverse descendant items,
+ignore missing names, deduplicate and retain signed Java UTF-16 hash order
+with stable collision insertion order (#846). A Settings reader-loop port using
+the original ART XML parser and ArraySet agrees for 14 text/ABX inputs, including
+nested/unknown nodes, empty names, negative hashes, supplementary characters
+and collisions (2026-10-04, shared suspension oracle 11.16s). Enabled-state
+publication takes the written component fields from the parsed owner, preserving
+other captured fields and matching reread order. Native suspension operations and native PMS
 activation are not established. The C branch also has Binder query
 receivers for `package` and
 `package_native`, tested for caller visibility, interface tokens and

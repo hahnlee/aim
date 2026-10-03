@@ -864,7 +864,7 @@ fn writes_enabled_state_and_preserves_unmodelled_fields() {
     let enabled = Enabled {
         enabled: 2,
         last_disable_app_caller: Some("shell:2000".into()),
-        enabled_components: ["example.app.Enabled".into()].into(),
+        enabled_components: ["B".into(), "Aa".into(), "BB".into()].into(),
         disabled_components: ["example.app.Disabled".into()].into(),
     };
     store.commit_enabled("example.app", 0, &enabled).unwrap();
@@ -872,6 +872,10 @@ fn writes_enabled_state_and_preserves_unmodelled_fields() {
     assert_eq!(store.state(), &reread);
     let user = &reread.users[0].1.restrictions.packages[0].1;
     assert!(user.stopped && user.installed);
+    assert_eq!(
+        user.enabled_components.as_deref(),
+        Some(["B".to_string(), "Aa".to_string(), "BB".to_string()].as_slice())
+    );
     assert_eq!(user.first_install_time, 0x12);
     assert_eq!(user.enabled, 2);
     assert_eq!(
