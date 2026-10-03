@@ -1,12 +1,65 @@
 package com.android.server.pm;
 
 import dev.aim.server.PackageSettingData;
+import dev.aim.server.PackageUserStateData;
+import dev.aim.server.PackageUserStateReplica;
 import java.io.File;
+import java.util.List;
 import java.util.UUID;
 
-/** Original concrete metadata owner; code, users and transient owners attach separately. */
+/** Original concrete metadata and sparse user owners; code/transient owners attach separately. */
 public final class CapturedPackageSetting {
     private CapturedPackageSetting() {}
+
+    public static PackageSetting withUsers(PackageSettingData data, List<PackageUserStateData> users,
+            long version, boolean factory, boolean crossUserSuspensions) {
+        int previous = -1;
+        for (var user : users) {
+            if (user.getVersion() != version || user.isFactory() != factory
+                    || !user.getPackageName().equals(data.getPackageName()) || user.getAppId() != data.appId
+                    || user.getUserId() <= previous) throw new IllegalArgumentException("package user capture mismatch");
+            previous = user.getUserId();
+        }
+        var setting = from(data, version, factory);
+        for (var user : users) {
+            var source = new PackageUserStateReplica(user, crossUserSuspensions);
+            var target = setting.getOrCreateUserState(user.getUserId());
+            target.setCeDataInode(user.ceDataInode).setDeDataInode(user.deDataInode)
+                .setEnabledState(user.enabled).setInstalled(user.installed).setStopped(user.stopped)
+                .setNotLaunched(user.notLaunched).setHidden(user.hidden).setDistractionFlags(user.distractionFlags)
+                .setInstantApp(user.instantApp).setVirtualPreload(user.virtualPreload)
+                .setLastDisableAppCaller(user.lastDisableCaller).setInstallReason(user.installReason)
+                .setUninstallReason(user.uninstallReason).setHarmfulAppWarning(user.harmfulWarning)
+                .setSplashScreenTheme(user.splashTheme).setFirstInstallTimeMillis(user.firstInstallTime)
+                .setMinAspectRatio(user.minAspectRatio).setArchiveState(source.getArchiveState());
+            // Null components retain the fresh original unallocated owners.
+            if (user.getEnabledComponents() != null) target.setEnabledComponents(source.getEnabledComponents());
+            if (user.getDisabledComponents() != null) target.setDisabledComponents(source.getDisabledComponents());
+            var suspensions = source.getSuspendParams();
+            if (suspensions != null) target.setSuspendParams(suspensions.untrackedStorage());
+            if (user.overlayPaths != null) {
+                target.setOverlayPaths(source.getOverlayPaths());
+                if (target.getOverlayPaths() == null) throw new IllegalArgumentException("captured overlay cannot be reproduced");
+            }
+            if (user.getLibraryOverlays() != null) {
+                var overlays = source.getSharedLibraryOverlayPaths();
+                // Removing an absent library allocates the original empty map.
+                if (overlays.isEmpty()) target.setSharedLibraryOverlayPaths("", null);
+                for (var entry : overlays.entrySet()) target.setSharedLibraryOverlayPaths(entry.getKey(), entry.getValue());
+                if (!new java.util.LinkedHashMap<>(target.getSharedLibraryOverlayPaths()).equals(overlays)) throw new IllegalArgumentException("captured library overlay cannot be reproduced");
+            }
+            if (user.getLabelIcons() != null) {
+                if (user.getLabelIcons().isEmpty()) throw new IllegalArgumentException("allocated-empty label owner cannot be reproduced");
+                for (var label : user.getLabelIcons()) {
+                    var component = new android.content.ComponentName(label.packageName, label.className);
+                    target.overrideLabelAndIcon(component, label.label, label.icon);
+                    if (!java.util.Objects.equals(target.getOverrideLabelIconForComponent(component),
+                            new android.util.Pair<>(label.label, label.icon))) throw new IllegalArgumentException("captured label cannot be reproduced");
+                }
+            }
+        }
+        return setting;
+    }
 
     public static PackageSetting from(PackageSettingData data, long version, boolean factory) {
         if (data.getVersion() != version || data.isFactory() != factory) {

@@ -1,6 +1,8 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
+    public com.android.server.pm.pkg.PackageUserStateImpl getOrCreateUserState(int id) { throw new RuntimeException("stub"); }
+    public android.util.SparseArray<? extends com.android.server.pm.pkg.PackageUserStateInternal> getUserStates() { throw new RuntimeException("stub"); }
     public String getRealName() { throw new RuntimeException("stub"); }
     public String getSecondaryCpuAbiLegacy() { throw new RuntimeException("stub"); }
     public String getAppMetadataFilePath() { throw new RuntimeException("stub"); }

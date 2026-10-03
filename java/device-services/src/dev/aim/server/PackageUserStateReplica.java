@@ -118,9 +118,10 @@ public final class PackageUserStateReplica implements PackageUserStateInternal {
     }
     @Override public OverlayPaths getOverlayPaths() { return paths(data.overlayPaths); }
     @Override public Map<String, OverlayPaths> getSharedLibraryOverlayPaths() {
-        var result = new LinkedHashMap<String, OverlayPaths>();
-        if (data.getLibraryOverlays() != null) for (var library : data.getLibraryOverlays()) result.put(library.library, paths(library.paths));
-        return Collections.unmodifiableMap(result);
+        if (data.getLibraryOverlays() == null) return Collections.emptyMap();
+        var result = new WatchedArrayMap<String, OverlayPaths>();
+        for (var library : data.getLibraryOverlays()) result.put(library.library, paths(library.paths));
+        return result.snapshot();
     }
     @Override public OverlayPaths getAllOverlayPaths() {
         if (data.overlayPaths == null && data.getLibraryOverlays() == null) return null;

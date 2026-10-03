@@ -566,10 +566,32 @@ object with the already validated pinned methods. Original ART compares concrete
 getters, independent mutable replicas, active/factory metadata, legacy
 permissions, null/empty paths and version/scope/unresolved rejection (18.72s
 with the complete package oracle); full original Java oracle linkage passes
-(3.72s), and device-services builds against original APIs (13.6s). This assembles
-metadata inputs, not a complete facade: code, per-user state, transient/library
-owners and the current leaving-shared-UID bit (#861) are not assembled by this
-constructor. Original-state import,
+(3.72s), and device-services builds against original APIs (13.6s).
+The captured scan AIDL now enumerates explicit sparse PackageSetting user IDs
+(method 13). Unknown settings return null, initialized empty owners return an
+empty array, and unresolved owners reject. Native Binder tests retain the old
+inventory after publication, distinguish empty/unknown state, reject invalid
+requests and refuse publication with missing loaded user ownership. A lease
+fetches all explicit records, validates sorted distinct IDs and each
+version/name/appId/user/scope, then constructs detached original
+PackageUserStateImpl objects with scalar, nullable component/suspension, archive,
+overlay and label/icon inputs. Absent users use the original default without
+adding sparse entries. Original ART validates concrete getters, sparse ordering,
+mutable replica isolation, duplicate/missing/foreign inventories, transport
+failure and closed leases (16.36s with the complete package oracle). Units pass
+389 (3.16s; one ignored/not run), all integration targets compile, all original
+Java oracle linkage passes (4.19s) and device-services builds (14.4s).
+Original library overlay getters return initialized WatchedArrayMap owners,
+whose equality and sealed mutation contracts differ from ordinary Java maps;
+the user replica now returns detached original snapshots for initialized maps,
+including allocated-empty, and the original empty getter for uninitialized maps
+(#863). ART compares original class/equality and sealed mutation rejection while
+values remain detached. The pinned image removes bulk library/label setters;
+assembly uses retained original mutations. Captured raw states that those APIs
+cannot reproduce (including allocated-empty label owners) reject and remain
+#862. This assembles metadata and sparse user inputs, not a complete facade:
+code, transient/library dependency owners and the current leaving-shared-UID bit
+(#861) are not assembled by this constructor. Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

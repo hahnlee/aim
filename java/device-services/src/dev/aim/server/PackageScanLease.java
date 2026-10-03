@@ -188,6 +188,25 @@ public final class PackageScanLease implements AutoCloseable {
             return state;
         } finally { in.recycle(); }
     }
+    /** Detached original metadata and every explicit sparse user entry in this capture. */
+    public synchronized com.android.server.pm.PackageSetting newSettingWithUsers(String name, boolean factory,
+            boolean crossUserSuspensions) throws RemoteException, IOException {
+        PackageSettingData data = getSetting(name, factory);
+        if (data == null) return null;
+        int[] ids = endpoint.getUserStateIds(name, factory);
+        if (ids == null) throw new IOException("missing package user inventory");
+        var inputs = new java.util.ArrayList<PackageUserStateData>(ids.length);
+        int previous = -1;
+        for (int id : ids) {
+            if (id <= previous) throw new IOException("invalid sparse user inventory");
+            previous = id;
+            PackageUserStateData user = getUserState(name, factory, id);
+            if (user == null) throw new IOException("missing explicit package user state");
+            inputs.add(user);
+        }
+        return com.android.server.pm.CapturedPackageSetting.withUsers(data, inputs, version, factory, crossUserSuspensions);
+    }
+
     public synchronized PackageUserStateData getUserState(String name, boolean factory, int user)
             throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");

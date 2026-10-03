@@ -1582,7 +1582,36 @@ mod tests {
         owner
             .set_install_permissions_fixed("fixture", false, false)
             .unwrap();
+        owner
+            .set_user_state(
+                "fixture",
+                11,
+                crate::package::restrictions::UserState::default(),
+            )
+            .unwrap();
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_eq!(
+            crate::package::scan_snapshot::user_record::ids(&base, "fixture", false).unwrap(),
+            Some(vec![10])
+        );
+        assert_eq!(
+            crate::package::scan_snapshot::user_record::ids(&current, "fixture", false).unwrap(),
+            Some(vec![10, 11])
+        );
+        assert_eq!(
+            crate::package::scan_snapshot::user_record::ids(&base, "missing", false).unwrap(),
+            None
+        );
+        let mut sparse = base.owner().clone();
+        sparse.scanned_users.get_mut("fixture").unwrap().clear();
+        let sparse = Store::new(sparse, base.usage().clone()).unwrap().capture();
+        assert_eq!(
+            crate::package::scan_snapshot::user_record::ids(&sparse, "fixture", false).unwrap(),
+            Some(vec![])
+        );
+        let mut unresolved = base.owner().clone();
+        unresolved.scanned_users.remove("fixture");
+        assert!(Store::new(unresolved, base.usage().clone()).is_err());
         assert_eq!(
             base.owner()
                 .install_permissions_fixed("fixture", false)
@@ -1955,6 +1984,39 @@ mod tests {
                 -3
             );
         }
+        for (name, factory, expected) in [
+            (Some("fixture"), false, Some(vec![10])),
+            (Some("fixture"), true, None),
+            (Some("missing"), false, None),
+        ] {
+            let mut p = request();
+            p.write_string16(name);
+            p.write_bool(factory);
+            let reply = remote.transact(api::GET_USER_STATE_IDS, &p, false).unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            assert_eq!(aim_service_aidl::read_int_array(&mut r).unwrap(), expected);
+            assert_eq!(r.remaining(), 0);
+        }
+        let mut p = request();
+        p.write_string16(None);
+        p.write_bool(false);
+        assert_eq!(
+            remote
+                .transact(api::GET_USER_STATE_IDS, &p, false)
+                .unwrap()
+                .reader()
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            -3
+        );
+        let mut p = request();
+        p.write_string16(Some("fixture"));
+        p.write_bool(false);
+        p.write_i32(1);
+        assert!(remote.transact(api::GET_USER_STATE_IDS, &p, false).is_err());
         let setting_request = |name: Option<&str>, factory: bool| {
             let mut p = request();
             p.write_string16(name);

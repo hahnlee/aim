@@ -1054,6 +1054,7 @@ fn native_scan_objects(
         owner.set_user_state(name, 10, state).unwrap();
         let mut empty = aim_services::package::restrictions::UserState::initialized();
         empty.suspensions = Some(vec![]);
+        empty.runtime.set_library_overlay_paths("absent".into(), None);
         owner.set_user_state(name, 11, empty).unwrap();
         use aim_services::package::restrictions::{
             ArchiveActivity, ArchiveState, SuspendParams, UserState,

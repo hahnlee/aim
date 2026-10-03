@@ -1,6 +1,24 @@
 // Compile-only pinned image API; checked by the device-services build node.
 package com.android.server.pm.pkg;
 public class PackageUserStateImpl extends com.android.server.utils.WatchableImpl {
+    public PackageUserStateImpl setCeDataInode(long value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setDeDataInode(long value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setEnabledState(int value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setInstalled(boolean value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setStopped(boolean value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setNotLaunched(boolean value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setHidden(boolean value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setDistractionFlags(int value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setInstantApp(boolean value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setVirtualPreload(boolean value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setLastDisableAppCaller(String value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setInstallReason(int value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setUninstallReason(int value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setHarmfulAppWarning(String value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setSplashScreenTheme(String value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setFirstInstallTimeMillis(long value) { throw new RuntimeException("stub"); }
+    public PackageUserStateImpl setMinAspectRatio(int value) { throw new RuntimeException("stub"); }
+
     public PackageUserStateImpl(com.android.server.utils.Watchable watchable) { throw new RuntimeException("stub"); }
     public com.android.server.utils.WatchedArrayMap<android.content.pm.UserPackage, SuspendParams> getSuspendParams() { throw new RuntimeException("stub"); }
     public PackageUserStateImpl setSuspendParams(android.util.ArrayMap<android.content.pm.UserPackage, SuspendParams> value) { throw new RuntimeException("stub"); }

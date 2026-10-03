@@ -352,6 +352,59 @@ public final class PackageRoundTripOracle {
         if (metadata.getRestrictUpdateHash()[0] != 1) throw new AssertionError("mutable setting hash escaped capture");
         try { metadata.getOldPaths().clear(); throw new AssertionError("mutable old paths capture"); } catch (UnsupportedOperationException expected) {}
         if (lease.getSetting("missing", false) != null || lease.getSetting(name, true) != null) throw new AssertionError("unknown/factory setting mismatch");
+        var withUsers = lease.newSettingWithUsers(name, false, true);
+        var userIds = new int[] {0, 10, 11, 12, 13, 14};
+        if (withUsers.getUserStates().size() != userIds.length) throw new AssertionError("sparse inventory differs");
+        for (int i = 0; i < userIds.length; i++) {
+            int id = userIds[i];
+            if (withUsers.getUserStates().keyAt(i) != id) throw new AssertionError("sparse ordering differs");
+            var source = lease.getUserStateReplica(name, false, id, true);
+            var target = withUsers.readUserState(id);
+            if (target.getSharedLibraryOverlayPaths().getClass() != source.getSharedLibraryOverlayPaths().getClass()
+                    || !target.getSharedLibraryOverlayPaths().equals(source.getSharedLibraryOverlayPaths())) throw new AssertionError("original watched overlay map differs: " + id);
+            if (target.getCeDataInode() != source.getCeDataInode() || target.getDeDataInode() != source.getDeDataInode()
+                    || target.getEnabledState() != source.getEnabledState() || target.isInstalled() != source.isInstalled()
+                    || target.isStopped() != source.isStopped() || target.isNotLaunched() != source.isNotLaunched()
+                    || target.isHidden() != source.isHidden() || target.getDistractionFlags() != source.getDistractionFlags()
+                    || target.isInstantApp() != source.isInstantApp() || target.isVirtualPreload() != source.isVirtualPreload()
+                    || target.getInstallReason() != source.getInstallReason() || target.getUninstallReason() != source.getUninstallReason()
+                    || target.getFirstInstallTimeMillis() != source.getFirstInstallTimeMillis() || target.getMinAspectRatio() != source.getMinAspectRatio()
+                    || !java.util.Objects.equals(target.getLastDisableAppCaller(), source.getLastDisableAppCaller())
+                    || !java.util.Objects.equals(target.getHarmfulAppWarning(), source.getHarmfulAppWarning())
+                    || !java.util.Objects.equals(target.getSplashScreenTheme(), source.getSplashScreenTheme())
+                    || !target.getEnabledComponents().equals(source.getEnabledComponents()) || !target.getDisabledComponents().equals(source.getDisabledComponents())
+                    || (target.getEnabledComponentsNoCopy() == null) != (source.getEnabledComponentsNoCopy() == null)
+                    || (target.getDisabledComponentsNoCopy() == null) != (source.getDisabledComponentsNoCopy() == null)
+                    || !java.util.Objects.equals(target.getOverlayPaths(), source.getOverlayPaths())
+                    || !new java.util.LinkedHashMap<>(target.getSharedLibraryOverlayPaths()).equals(source.getSharedLibraryOverlayPaths())
+                    || !java.util.Objects.equals(target.getAllOverlayPaths(), source.getAllOverlayPaths())
+                    || (target.getSuspendParams() == null) != (source.getSuspendParams() == null)
+                    || (target.getSuspendParams() != null && target.getSuspendParams().size() != source.getSuspendParams().size())
+                    || (target.getArchiveState() == null) != (source.getArchiveState() == null)) throw new AssertionError("original assembled user differs: " + id);
+        }
+        var sealedLibraryMap = lease.getUserStateReplica(name, false, 10, true).getSharedLibraryOverlayPaths();
+        try { sealedLibraryMap.clear(); throw new AssertionError("captured watched map is mutable"); } catch (IllegalStateException expected) {}
+        var freshUsers = lease.newSettingWithUsers(name, false, true);
+        withUsers.getOrCreateUserState(10).setStopped(false);
+        withUsers.readUserState(10).getEnabledComponents().clear();
+        withUsers.readUserState(10).getOverlayPaths().getOverlayPaths().clear();
+        ((int[]) withUsers.readUserState(10).getSuspendParams().get(android.content.pm.UserPackage.of(0, "android")).getAppExtras().get("values"))[0] = 99;
+        if (!freshUsers.readUserState(10).isStopped() || freshUsers.readUserState(10).getEnabledComponents().isEmpty()
+                || freshUsers.readUserState(10).getOverlayPaths().getOverlayPaths().isEmpty()
+                || ((int[]) freshUsers.readUserState(10).getSuspendParams().get(android.content.pm.UserPackage.of(0, "android")).getAppExtras().get("values"))[0] != 7) throw new AssertionError("assembled users share mutable state");
+        if (!freshUsers.readUserState(999).isInstalled() || freshUsers.getUserStates().size() != 6
+                || lease.newSettingWithUsers("missing", false, true) != null) throw new AssertionError("sparse original default differs");
+
+        for (int[] ids : new int[][] {null, {-1}, {10, 10}, {10, 0}, {999}}) {
+            owner.userInventory = ids;
+            try { lease.newSettingWithUsers(name, false, true); throw new AssertionError("invalid sparse inventory accepted"); } catch (java.io.IOException expected) {}
+        }
+        owner.userInventory = new int[] {0, 10, 11, 12, 13, 14};
+        owner.fail = true;
+        try { lease.newSettingWithUsers(name, false, true); throw new AssertionError("inventory transport failure swallowed"); } catch (android.os.RemoteException expected) {}
+        owner.fail = false;
+        try { com.android.server.pm.CapturedPackageSetting.withUsers(metadata, java.util.List.of(userState, userState), 1, false, true); throw new AssertionError("duplicate user input accepted"); } catch (IllegalArgumentException expected) {}
+        try { com.android.server.pm.CapturedPackageSetting.withUsers(metadata, java.util.List.of(userState), 2, false, true); throw new AssertionError("foreign user version accepted"); } catch (IllegalArgumentException expected) {}
         var restoredSetting = com.android.server.pm.CapturedPackageSetting.from(metadata, 1, false);
         var originalState = (com.android.server.pm.pkg.PackageState) restoredSetting;
         if (!java.util.Objects.equals(restoredSetting.getRealName(), metadata.realName)
@@ -684,6 +737,7 @@ public final class PackageRoundTripOracle {
         try { lease.getSeInfo(name); throw new AssertionError("closed seInfo lease accepted"); }
         catch (IllegalStateException expected) {}
         try { lease.getSetting(name, false); throw new AssertionError("closed setting lease accepted"); } catch (IllegalStateException expected) {}
+        try { lease.newSettingWithUsers(name, false, true); throw new AssertionError("closed assembly lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
     }
@@ -923,6 +977,7 @@ public final class PackageRoundTripOracle {
         private final byte[] seinfo;
         private final byte[] signing;
         byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting;
+        int[] userInventory = {0, 10, 11, 12, 13, 14};
         int userReads;
         boolean signingTail;
         byte[] signingOverride;
@@ -953,6 +1008,10 @@ public final class PackageRoundTripOracle {
         }
         private byte[] userBytes(int userId) {
             return switch (userId) { case 0 -> userState; case 10 -> user10; case 11 -> user11; case 12 -> user12; case 13 -> user13; case 14 -> user14; default -> null; };
+        }
+        @Override public int[] getUserStateIds(String candidate, boolean disabled) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            return !disabled && name.equals(candidate) && userInventory != null ? userInventory.clone() : null;
         }
         @Override public int getUserStateLength(String candidate, boolean disabled, int userId) {
             return !disabled && name.equals(candidate) && (userId == 0 || (userId >= 10 && userId <= 14))

@@ -5,6 +5,28 @@ use crate::package::restrictions::{SuspendingUser, UserState};
 use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::write_byte_array;
 
+pub fn ids(snapshot: &Snapshot, name: &str, disabled: bool) -> Result<Option<Vec<i32>>, String> {
+    let owner = snapshot.owner();
+    let settings = if disabled {
+        &owner.settings.disabled_system_packages
+    } else {
+        &owner.settings.packages
+    };
+    if !settings.iter().any(|p| p.name == name) {
+        return Ok(None);
+    }
+    let users = if disabled {
+        owner.disabled_user_states(name)
+    } else {
+        owner.scanned_user_states(name)
+    }
+    .ok_or("package user-state owner is not captured")?;
+    if users.keys().any(|id| *id < 0) {
+        return Err("invalid captured user id".into());
+    }
+    Ok(Some(users.keys().copied().collect()))
+}
+
 pub fn captured(
     snapshot: &Snapshot,
     name: &str,

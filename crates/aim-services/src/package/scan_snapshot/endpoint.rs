@@ -402,6 +402,23 @@ impl Service for Endpoint {
                     }
                 }
             }
+            api::GET_USER_STATE_IDS => {
+                let args = api::GetUserStateIds::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                match args.package_name.as_deref() {
+                    None => {
+                        reply.write_exception(&Exception::illegal_argument("package name is null"))
+                    }
+                    Some(name) => match super::user_record::ids(&snapshot, name, args.disabled) {
+                        Ok(ids) => api::write_get_user_state_ids_reply(&mut reply, &ids),
+                        Err(error) => {
+                            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, error))
+                        }
+                    },
+                }
+            }
             api::GET_USER_STATE_LENGTH => {
                 let args = api::GetUserStateLength::read(&mut call.data)?;
                 if call.data.remaining() != 0 {

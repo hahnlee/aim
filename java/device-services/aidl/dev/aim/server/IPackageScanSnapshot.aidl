@@ -19,4 +19,6 @@ interface IPackageScanSnapshot {
     /** Captured PackageSetting scalar owners, including nullable runtime old paths. */
     int getSettingLength(String packageName, boolean disabled);
     byte[] getSettingChunk(String packageName, boolean disabled, int offset, int length);
+    /** Explicit sparse PackageSetting user entries; null only for an unknown setting. */
+    int[] getUserStateIds(String packageName, boolean disabled);
 }
