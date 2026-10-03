@@ -17,6 +17,13 @@ public final class Parcel {
     public final int readInt() { throw new RuntimeException("stub"); }
     public final void writeLong(long val) { throw new RuntimeException("stub"); }
     public final long readLong() { throw new RuntimeException("stub"); }
+    public final int dataPosition() { throw new RuntimeException("stub"); }
+    public final String readString8() { throw new RuntimeException("stub"); }
+    public final String[] createString8Array() { throw new RuntimeException("stub"); }
+    public final java.util.ArrayList<String> createStringArrayList() { throw new RuntimeException("stub"); }
+    public final <T> T readParcelable(ClassLoader loader, Class<T> clazz) { throw new RuntimeException("stub"); }
+    public final <T> java.util.ArrayList<T> readArrayList(ClassLoader loader, Class<? extends T> clazz) { throw new RuntimeException("stub"); }
+    public final <T extends Parcelable> java.util.List<T> readParcelableList(java.util.List<T> list, ClassLoader loader, Class<T> clazz) { throw new RuntimeException("stub"); }
     public final int dataAvail() { throw new RuntimeException("stub"); }
     public final void writeByteArray(byte[] b) { throw new RuntimeException("stub"); }
     public final void writeSerializable(java.io.Serializable value) { throw new RuntimeException("stub"); }

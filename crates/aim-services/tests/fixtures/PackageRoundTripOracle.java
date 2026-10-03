@@ -52,6 +52,28 @@ public final class PackageRoundTripOracle {
             owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(new android.content.pm.SharedLibraryInfo(
                 "sdk.placeholder", 37L, 3, java.util.List.of("sdk.certificate"))));
             owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(nullableLibrary()));
+            info.sharedLibraryInfos.get(2).getDependencies().add(nullableLibrary());
+            var ownerInfos = new java.util.ArrayList<android.content.pm.SharedLibraryInfo>();
+            for (var owner : owners) ownerInfos.add(((com.android.server.pm.pkg.SharedLibraryWrapper)owner).getInfo());
+            var state = libraryState("library.fixture", 19001, ownerInfos);
+            var restored = state.getLibraries();
+            if (restored.size() != 7) throw new AssertionError("restored original owner count differs");
+            for (int i = 0; i < restored.size(); i++) verifyLibraryBytes(ownerInfos.get(i), restored.get(i));
+            verifyPopulatedLibrary(restored.get(4));
+            verifyNullableLibrary(restored.get(4).getDependencies().get(1));
+            verifyNullableLibrary(restored.get(6));
+            var setting = new com.android.server.pm.PackageSetting("library.fixture", null,
+                new java.io.File("/system/library-fixture"), 0, 0, new java.util.UUID(1, 2));
+            setting.setAppId(19001);
+            dev.aim.server.PackageObjects.restoreLibraries(setting, state, 1);
+            var settingInfos = ((com.android.server.pm.pkg.PackageState)setting).getSharedLibraryDependencies();
+            for (int i = 0; i < settingInfos.size(); i++) verifyLibraryBytes(ownerInfos.get(i),
+                ((com.android.server.pm.pkg.SharedLibraryWrapper)settingInfos.get(i)).getInfo());
+            restored.get(4).getOptionalDependentPackages().clear(); restored.get(4).getCertDigests().clear();
+            restored.get(4).getDependencies().clear();
+            verifyPopulatedLibrary(state.getLibraries().get(4));
+            var freshStateInfos = state.getLibraries();
+            for (int i = 0; i < freshStateInfos.size(); i++) verifyLibraryBytes(ownerInfos.get(i), freshStateInfos.get(i));
             var feed = android.os.Parcel.obtain();
             try {
                 dev.aim.server.PackageLibraryFeed.write(feed, owners);
@@ -60,6 +82,27 @@ public final class PackageRoundTripOracle {
 
         } finally { in.recycle(); }
     }
+    private static dev.aim.server.PackageLibraryState libraryState(String name, int uid,
+            java.util.List<android.content.pm.SharedLibraryInfo> infos) {
+        var libraries = android.os.Parcel.obtain(); var envelope = android.os.Parcel.obtain();
+        try {
+            libraries.writeInt(infos.size());
+            for (var library : infos) { libraries.writeInt(1); library.writeToParcel(libraries, 0); }
+            envelope.writeLong(1); envelope.writeString(name); envelope.writeInt(uid);
+            envelope.writeStringArray(new String[0]); envelope.writeByteArray(libraries.marshall());
+            envelope.setDataPosition(0);
+            return dev.aim.server.PackageLibraryState.read(envelope);
+        } finally { libraries.recycle(); envelope.recycle(); }
+    }
+    private static void verifyLibraryBytes(android.content.pm.SharedLibraryInfo expected,
+            android.content.pm.SharedLibraryInfo actual) {
+        var input = android.os.Parcel.obtain(); var output = android.os.Parcel.obtain();
+        try {
+            expected.writeToParcel(input, 0); actual.writeToParcel(output, 0);
+            if (!java.util.Arrays.equals(input.marshall(), output.marshall())) throw new AssertionError("restored original library parcel differs");
+        } finally { input.recycle(); output.recycle(); }
+    }
+
     private static void verifyPopulatedLibrary(android.content.pm.SharedLibraryInfo library) {
         var optional = library.getOptionalDependentPackages();
         var digests = library.getCertDigests();
@@ -863,14 +906,15 @@ public final class PackageRoundTripOracle {
             for (var library : decodedLibraries) { libraryOutput.writeInt(1); library.writeToParcel(libraryOutput, 0); }
             if (!java.util.Arrays.equals(expectedLibraries, libraryOutput.marshall())) throw new AssertionError("native/original library Parcelable differs");
             byte[] unreproducible = expectedLibraries.clone();
-            java.util.Arrays.fill(unreproducible, unreproducible.length - 8, unreproducible.length - 4, (byte) 0);
+            java.util.Arrays.fill(unreproducible, unreproducible.length - 8, unreproducible.length - 4, (byte) 0xff);
+            unreproducible[unreproducible.length - 8] = (byte)0xfe;
             libraryOutput.setDataPosition(0);
             var invalidLibraryEnvelope = android.os.Parcel.obtain();
             try {
                 invalidLibraryEnvelope.writeLong(1); invalidLibraryEnvelope.writeString(name); invalidLibraryEnvelope.writeInt(uid);
                 invalidLibraryEnvelope.writeStringArray(libraryState.getFiles().toArray(new String[0])); invalidLibraryEnvelope.writeByteArray(unreproducible);
                 invalidLibraryEnvelope.setDataPosition(0);
-                try { dev.aim.server.PackageLibraryState.read(invalidLibraryEnvelope); throw new AssertionError("unreproducible optional owner normalized"); } catch (IllegalArgumentException expected) {}
+                try { dev.aim.server.PackageLibraryState.read(invalidLibraryEnvelope); throw new AssertionError("malformed optional owner normalized"); } catch (IllegalArgumentException expected) {}
             } finally { invalidLibraryEnvelope.recycle(); }
         } finally { libraryInput.recycle(); libraryOutput.recycle(); }
         var badLibraryOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);

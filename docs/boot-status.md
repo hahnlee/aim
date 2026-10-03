@@ -282,43 +282,35 @@ Unknown packages remain distinct from unresolved owners; version/name/UID checks
 strict ranges and closed-lease checks guard transport and restoration. Native Binder
 checks retained captures after publication. A controlled declaration/path fixture
 exceeding 64 KiB exercises original generated Java Binder paging and concrete
-PackageSetting restoration under original ART. Declaration reconstruction preserves
-original constructor null optional fields and requires exact parcel reproduction;
-unsupported optional dependent/certificate states reject (#740). The native
-SharedLibrary query model and original ApplicationInfo writer now also retain
-nullable optional-dependent Parcelable lists and nullable certificate string lists,
-including allocated-empty and null elements. Original ART accepts both ordinary
-and optional ApplicationInfo library records, nested values and full 64-bit
-versions (16.89s complete package oracle); original Java linkage passes (3.72s)
-and device-services builds (13.8s). All 393 units pass (3.16s; one ignored/not run),
-including raw null/empty distinction checks. The shadow feed now exports each
-original SharedLibraryWrapper owner as its original SharedLibraryInfo parcel,
-rather than inferring hidden fields from interface getters. Native import retains
-optional/certificate owners, null/empty dependent and dependency lists, raw code
-paths (including a path-backed owner's explicit array) and absent declaring
-packages for SDK dependency placeholders. Imported records reproduce their source
-bytes exactly. Negative/oversized counts, wrong Parcelable classes/value lengths,
-missing required list elements, truncation and trailing bytes reject.
-Original ART exports six controlled owner forms through the production helper;
-native import/re-encoding matches every byte, including nested optional/certificate
-values and the SDK certificate constructor (16.78s complete package oracle).
-All 394 units pass (3.15s; one ignored/not run), original Java linkage passes
-(3.97s), and device-services builds (16.4s). The changed live full-PMS feed batch
-has not been exercised. Raw code-path/dependent/dependency elements now retain
-null values natively and in original response parcels. Native declaration producers
+PackageSetting restoration under original ART. The native SharedLibrary query
+model and original ApplicationInfo writer retain nullable optional-dependent,
+certificate, raw code-path, dependent and nested-library owners, including
+allocated-empty lists and null elements. The shadow feed exports original
+SharedLibraryWrapper.getInfo() parcels rather than inferring hidden fields from
+interface getters. Native import/re-encoding preserves exact source bytes,
+including a path-backed owner's explicit code array and SDK certificate
+placeholders without a declaring package. Strict count/class/value-length checks,
+truncation and trailing-byte rejection protect import. Native declaration producers
 write present elements; graph expansion retains nullable nested records. File
-resolution still requires its actual provider/code owner and reports missing inputs,
-without replacing a missing path with raw nullable metadata. Java declaration
-assembly preserves null nested libraries. The complete original package ART oracle
-passes (28.11s), adding a seventh original owner with all three nullable element
-forms, exact original/native bytes, original concrete setting restoration and
-mutation isolation. All 395 units pass (3.15s; one ignored/not run), and the actual
-first-system scan passes (42.57s) with the existing controlled enforcement policy.
-Original Java linkage passes (3.92s); device-services builds (14.4s).
-Captured Java restoration still rejects arbitrary
-optional/certificate owners; full import/assembly remains #740.
-Live policy
-delivery, overlay effects and factory graph handling remain #707/#808/#836.
+resolution requires the actual provider/code owner instead of guessing paths from
+nullable metadata. All 395 units pass (3.15s; one ignored/not run), all integration
+targets compile, and the actual first-system scan passes (42.57s) with the existing
+controlled enforcement policy.
+Java PackageLibraryState now restores original optional/certificate owners as well
+as declaration owners. It keeps byte-identical original CREATOR objects where
+possible, restores fresh nested dependency owners through their original list,
+and reconstructs original full/SDK certificate constructor owners when the Parcel
+constructor normalizes null optional lists. Raw code paths and null/empty dependent
+lists are read from the captured parcel, not inferred from convenience getters.
+Every returned original object must reproduce its complete captured bytes;
+non-reproducible input rejects. The complete original package ART oracle passes
+(17.60s): seven original owner forms, nested nullable constructor owners inside
+populated optional/certificate records, exact bytes, original concrete setting
+restoration, mutation isolation and malformed-owner rejection. Original Java
+linkage passes (3.95s); device-services builds (14.5s). The changed live full-PMS
+feed batch has not been exercised (#740); native-to-SystemServer lease bootstrap
+and complete facade import remain #836. Live policy delivery, overlay effects and
+factory graph handling remain #707/#808/#836.
 The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target
 SDK, without PMS lookup). On a disposable original-PMS boot (2026-10-02,
@@ -672,7 +664,7 @@ original Java linkage passes (4.02s), device-services builds (16.6s), and the
 actual first-system image scan checks every accepted setting's enriched bit
 (42.90s). Live original-state export/import wiring remains #861/#836.
 Factory transient/dependency assembly and remaining transient scalar owners remain
-#836; arbitrary original library optional/certificate import remains #740.
+#836; live full-PMS library feed validation remains #740.
 Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
