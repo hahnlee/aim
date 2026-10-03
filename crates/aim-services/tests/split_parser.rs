@@ -51,6 +51,73 @@ fn link(dir: &Path, name: &str, manifest: &str) -> PathBuf {
     apk
 }
 
+// Construct disposable malformed ZIPs from inputs, without editing any APK.
+fn resource_apk(manifest: &[u8], resource: Option<(u16, u32, &[u8])>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    let mut entries = vec![(
+        "AndroidManifest.xml",
+        0,
+        manifest.len() as u32,
+        crc32fast::hash(manifest),
+        manifest,
+    )];
+    if let Some((method, size, payload)) = resource {
+        entries.push((
+            "resources.arsc",
+            method,
+            size,
+            crc32fast::hash(payload) ^ 1,
+            payload,
+        ));
+    }
+    let count = entries.len() as u16;
+    for (name, method, size, crc, payload) in entries {
+        let offset = out.len() as u32;
+        let padding = (4 - ((out.len() + 30 + name.len() + 4) % 4)) % 4;
+        out.extend_from_slice(&0x04034b50u32.to_le_bytes());
+        for value in [20u16, 0, method, 0, 0] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, payload.len() as u32, size] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [name.len() as u16, padding as u16 + 4] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&0xffffu16.to_le_bytes());
+        out.extend_from_slice(&(padding as u16).to_le_bytes());
+        out.extend(std::iter::repeat_n(0, padding));
+        out.extend_from_slice(payload);
+        central.extend_from_slice(&0x02014b50u32.to_le_bytes());
+        for value in [20u16, 20, 0, method, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, payload.len() as u32, size] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [name.len() as u16, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [0u32, offset] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        central.extend_from_slice(name.as_bytes());
+    }
+    let offset = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x06054b50u32.to_le_bytes());
+    for value in [0u16, 0, count, count] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [central.len() as u32, offset] {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
 #[test]
 #[ignore = "requires pinned image, aimctl, JDK, aapt2 and d8; run explicitly"]
 fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
@@ -910,6 +977,75 @@ fn manifest_keysets_match_original_parser() {
             }
             Err(error) => panic!("native parser gap for {name}: {error}"),
         }
+        apks.push(apk);
+    }
+    let seed = link(
+        &data.0.join("apks"),
+        "resource-seed",
+        r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="org.example.noresources"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/>
+        <application android:hasCode="false"/></manifest>"#,
+    );
+    let manifest_bytes = aim_apps::apk::Apk::open(&seed)
+        .unwrap()
+        .file("AndroidManifest.xml")
+        .unwrap();
+    let code_only = data.0.join("apks/code-only.apk");
+    fs::write(&code_only, resource_apk(&manifest_bytes, None)).unwrap();
+    let code_only_apk = aim_apps::apk::Apk::open(&code_only).unwrap();
+    assert!(
+        code_only_apk
+            .file_if_present("resources.arsc")
+            .unwrap()
+            .is_none()
+    );
+    assert!(code_only_apk.file("resources.arsc").is_err());
+    assert!(parse(&code_only, "/data/app/empty/base.apk", 0, &platform).is_ok());
+    writeln!(&mut expected, "CASE code-only.apk OK").unwrap();
+    apks.push(code_only);
+    for (name, method, size, payload, diagnostic, original_result) in [
+        (
+            "bad-resource-crc",
+            0,
+            8,
+            b"invalid!".as_slice(),
+            "CRC",
+            "ERROR",
+        ),
+        (
+            "bad-resource-deflate",
+            8,
+            8,
+            b"\x07".as_slice(),
+            "deflate",
+            "ERROR",
+        ),
+        (
+            "oversize-resource",
+            0,
+            (512 << 20) + 1,
+            b"invalid!".as_slice(),
+            "limit",
+            "OK",
+        ),
+    ] {
+        let apk = data.0.join("apks").join(format!("{name}.apk"));
+        fs::write(
+            &apk,
+            resource_apk(&manifest_bytes, Some((method, size, payload))),
+        )
+        .unwrap();
+        let error = aim_apps::apk::Apk::open(&apk)
+            .err()
+            .expect("present unreadable table was treated as absent");
+        assert!(error.to_string().contains(diagnostic), "{name}: {error}");
+        assert!(matches!(
+            parse(&apk, "/data/app/bad/base.apk", 0, &platform),
+            Err(Error::Parse(_))
+        ));
+        // The original accepts this inconsistent stored entry size; native
+        // reading reaches its existing entry bound. Compatibility is #828.
+        writeln!(&mut expected, "CASE {name}.apk {original_result}").unwrap();
         apks.push(apk);
     }
     let boot = Boot {

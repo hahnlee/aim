@@ -362,6 +362,12 @@ denylisted/provider queries fail explicitly until the resource owner supplies
 validated contents. The original UpdateOwnershipHelper oracle
 compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
 transitions with the native owner: denied-target and provider/null queries match.
+APK and cluster parsing now distinguish an absent resources.arsc from a present
+entry failing archive reads (#826). Disposable code-only, bad-CRC and invalid
+deflate inputs verify absence acceptance and explicit read-error rejection.
+The original PackageParser2 accepts the fixture whose stored resource entry
+claims 512 MiB + 1 for an eight-byte payload; native reading rejects it at its
+existing entry bound. This classification difference remains tracked in #828.
 The combined parser/keyset/update-owner fixture passes (17.89s), and its added
 compile-only APIs pass image linkage (13.4s). The resource reader now follows
 resource references/configuration to their selected asset table and consumes

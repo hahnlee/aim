@@ -56,8 +56,8 @@ pub(super) fn load(host: &Path, path: &str) -> Result<Vec<Part>> {
         }
         identity = Some((package, version));
         let table = apk
-            .file("resources.arsc")
-            .ok()
+            .file_if_present("resources.arsc")
+            .map_err(|e| Error::Parse(e.to_string()))?
             .map(|bytes| Table::parse(&bytes))
             .transpose()
             .map_err(|e| Error::Parse(e.to_string()))?;
