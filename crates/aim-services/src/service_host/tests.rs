@@ -87,6 +87,7 @@ struct Owner {
     bcp_reads: AtomicUsize,
     malformed_bcp: AtomicBool,
     malformed_seinfo: AtomicBool,
+    legacy_reply: AtomicUsize,
     gid: i32,
 }
 impl Service for Owner {
@@ -125,6 +126,33 @@ impl Service for Owner {
                 reply.write_i32(2);
                 reply.write_i32(self.gid);
                 reply.write_i32(self.gid);
+            }
+            bootstrap::GET_LEGACY_PERMISSION_STATE => {
+                let app_id = call.data.read_i32()?;
+                let users = aim_service_aidl::read_int_array(&mut call.data)?.unwrap();
+                let mode = self.legacy_reply.load(Ordering::SeqCst);
+                let mut payload = Parcel::new();
+                payload.write_i32(app_id);
+                payload.write_i32(users.len() as i32);
+                for user in users {
+                    payload.write_i32(user);
+                    payload.write_bool(user == 10);
+                    payload.write_i32(1);
+                    payload.write_string16(None);
+                    payload.write_bool(true);
+                    payload.write_bool(false);
+                    payload.write_i32(self.gid);
+                }
+                if mode == 2 {
+                    payload.write_i32(99);
+                }
+                aim_service_aidl::write_byte_array(
+                    &mut reply,
+                    (mode != 1).then_some(payload.data()),
+                );
+                if mode == 3 {
+                    reply.write_i32(99);
+                }
             }
             bootstrap::GET_SE_INFO_TARGET_SDK_VERSION => {
                 let cache = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
@@ -244,6 +272,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         bcp_reads: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
+        legacy_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -254,6 +283,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         bcp_reads: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
+        legacy_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -304,6 +334,25 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         [3003, 3003, 3003, 3003]
     );
     assert_eq!(*owner.calls.lock().unwrap(), [1019001, 19001]);
+    let captured_permissions = old.legacy_permissions(19001, &[10, 0]).unwrap();
+    assert_eq!(captured_permissions.app_id(), 19001);
+    assert!(captured_permissions.user(10).unwrap().missing);
+    assert!(!captured_permissions.user(0).unwrap().missing);
+    assert_eq!(captured_permissions.user(11), None);
+    assert_eq!(
+        captured_permissions.user(10).unwrap().permissions[0].name,
+        None
+    );
+    assert_eq!(
+        captured_permissions.user(10).unwrap().permissions[0].flags,
+        3003
+    );
+    assert!(old.legacy_permissions(19001, &[0, 0]).is_err());
+    for mode in 1..=3 {
+        owner.legacy_reply.store(mode, Ordering::SeqCst);
+        assert!(old.legacy_permissions(19001, &[10, 0]).is_err());
+    }
+    owner.legacy_reply.store(0, Ordering::SeqCst);
     parsed.target_sdk_version = 29;
     assert_eq!(old.seinfo_target_sdk(&parsed).unwrap(), 30);
     assert_eq!(
@@ -324,6 +373,10 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert!(matches!(
         old.seinfo_target_sdk(&parsed),
         Err(crate::package::bootstrap::SeInfoError::Owner(_))
+    ));
+    assert!(matches!(
+        old.legacy_permissions(19001, &[10, 0]),
+        Err(crate::package::owner::legacy_permissions::Error::Owner(_))
     ));
     assert!(old.library_compatibility(&config, &|_| None).is_ok());
     assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
@@ -353,6 +406,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         bcp_reads: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
+        legacy_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,
@@ -369,6 +423,26 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         )
     });
     assert!(Arc::ptr_eq(&current, &system.package_bootstrap().unwrap()));
+    assert!(matches!(
+        old.legacy_permissions(19001, &[10, 0]),
+        Err(crate::package::owner::legacy_permissions::Error::Transport(
+            _
+        ))
+    ));
+    assert_eq!(
+        current
+            .legacy_permissions(19001, &[10, 0])
+            .unwrap()
+            .user(10)
+            .unwrap()
+            .permissions[0]
+            .flags,
+        3004
+    );
+    assert_eq!(
+        captured_permissions.user(10).unwrap().permissions[0].flags,
+        3003
+    );
     assert_eq!(current.permission_gids(19001, &[0]).unwrap(), [3004, 3004]);
     driver.release(second.proc_handle());
     until(|| system.package_bootstrap().is_err());

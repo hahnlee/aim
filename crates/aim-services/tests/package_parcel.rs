@@ -49,6 +49,14 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedKeySetOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/LegacyPermissionOracle.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
@@ -446,6 +454,44 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(directory.join(&name), &entry.bytes).unwrap();
         expected.push((name, pkg.package_name.clone(), entry));
     }
+    let mut legacy = aim_binder_host::parcel::Parcel::new();
+    legacy.write_i32(10042);
+    legacy.write_i32(3);
+    legacy.write_i32(10);
+    legacy.write_bool(true);
+    legacy.write_i32(4);
+    for (name, runtime, granted, flags) in [
+        (None, false, false, i32::MIN),
+        (Some(""), true, true, -1),
+        (Some("BB"), true, false, 17),
+        (Some("Aa"), false, true, i32::MAX),
+    ] {
+        legacy.write_string16(name);
+        legacy.write_bool(runtime);
+        legacy.write_bool(granted);
+        legacy.write_i32(flags);
+    }
+    legacy.write_i32(0);
+    legacy.write_bool(false);
+    legacy.write_i32(1);
+    legacy.write_string16(Some("android.permission.CAMERA"));
+    legacy.write_bool(true);
+    legacy.write_bool(true);
+    legacy.write_i32(0x408030);
+    legacy.write_i32(11);
+    legacy.write_bool(false);
+    legacy.write_i32(0);
+    let permissions = aim_services::package::owner::legacy_permissions::State::read(
+        legacy.data(),
+        10042,
+        &[10, 0, 11],
+    )
+    .unwrap();
+    fs::write(
+        directory.join("legacy-permissions.input"),
+        permissions.bytes(),
+    )
+    .unwrap();
     let original = boot.command().args([
         "shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
@@ -461,6 +507,17 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    let original_permissions = fs::read(directory.join("legacy-permissions.original")).unwrap();
+    assert_eq!(
+        aim_services::package::owner::legacy_permissions::State::read(
+            &original_permissions,
+            10042,
+            &[10, 0, 11]
+        )
+        .unwrap(),
+        permissions
+    );
+    assert_eq!(original_permissions, permissions.bytes());
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
             assert_eq!(

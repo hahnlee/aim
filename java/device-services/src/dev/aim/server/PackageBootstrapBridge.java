@@ -84,6 +84,16 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return permissions.getGidsForUid(uid);
     }
 
+    @Override
+    public byte[] getLegacyPermissionState(int appId, int[] userIds) {
+        enforceSystemUid();
+        PackageLegacyPermissions.validate(appId, userIds);
+        PermissionManagerServiceInternal permissions = LocalServices.getService(
+                PermissionManagerServiceInternal.class);
+        if (permissions == null) throw new IllegalStateException("permission owner is unavailable");
+        return PackageLegacyPermissions.capture(appId, userIds, permissions.getLegacyPermissionState(appId));
+    }
+
     private static void enforceSystemUid() {
         if (Binder.getCallingUid() != Process.SYSTEM_UID) {
             throw new SecurityException("the package bridge serves the system uid only");

@@ -29,6 +29,7 @@ pub mod keystore;
 mod native_libraries;
 mod package_list;
 pub mod permission_gids;
+pub mod legacy_permissions;
 mod removal;
 pub mod resources;
 pub mod seinfo;

@@ -11,6 +11,7 @@ public final class PackageRoundTripOracle {
     }
 
     private static void verify(String[] args) throws Exception {
+        LegacyPermissionOracle.verify(new java.io.File(args[0]));
         var files = new java.io.File(args[0]).listFiles((dir, name) -> name.endsWith(".native"));
         if (files == null) throw new java.io.IOException("missing parcel inputs");
         java.util.Arrays.sort(files);

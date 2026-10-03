@@ -942,7 +942,18 @@ reads both.
   state then moves after the switch, through the seam permissions.md
   describes, with no second package feed: the facade's replica is the
   feed. This amends #616's order: the access state follows M4's switch
-  rather than landing in it.
+  rather than landing in it. The private bootstrap bridge now exposes the
+  original `LegacyPermissionDataProvider.getLegacyPermissionState(appId)` over
+  an explicitly resolved user inventory, including pre-created users. Its
+  detached native projection and original-object reconstruction preserve
+  missing state, nullable names, original hash/collision order, runtime/grant
+  bits and signed API flags. Native Binder tests cover failure/replacement/death;
+  an explicit original ART codec/copy oracle verifies transport and isolation.
+  These are separate checks, not a live SystemServer query. This exporter is
+  distinct from `SettingBase`'s legacy migration input: on this image the original
+  AccessCheckingService's `writeLegacyPermissionStateTEMP` is empty. Resolving
+  boot order, full user/shared UID ownership and capturing the correct legacy
+  state with the facade's package versions remain #858/#836.
 - **Users.** UserManagerService is built by PMS's injector (D2).
 - **The original keeps running until parity.** Slices A and B change no
   answer an app or system_server gets. Slice C replaces the original

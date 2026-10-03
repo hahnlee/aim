@@ -72,14 +72,14 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 381
-units pass (3.22s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 383
+units pass (3.16s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 28.44s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.07s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -491,7 +491,21 @@ they do not depend on the builder's temporary work directory.
 These tests verify native Binder and original Java transport separately; the
 endpoint is not yet exported by the C bootstrap into SystemServer. Complete
 PackageState DTO/adapters, metadata/visibility pages, lease/snapshot-scope wiring
-and actual permission/ART callbacks remain #836/#837/#833. The native service
+and actual permission/ART callbacks remain #836/#837/#833. The private bootstrap
+AIDL now queries the original LegacyPermissionDataProvider for an appId over an
+explicit user inventory, including pre-created users. Native immutable inputs
+retain each user's missing marker, nullable/empty permission names, original
+ArrayMap hash/collision order, runtime/grant bits and signed API flags. Null,
+malformed, truncated, noncanonical and owner/transport failures reject; they do
+not become empty state. The native Binder-driver test covers endpoint replacement,
+owner rejection/death, malformed replies and retained earlier inputs. The actual
+original ART LegacyPermissionState codec/copy oracle passes (16.07s with the
+complete package oracle), including all truncated lengths and detached mutable
+replicas; device-services links against original APIs. This validates the
+transport and original objects separately, not a live SystemServer permission
+query. The live exporter differs from SettingBase's legacy migration state;
+permission boot order, complete user inventory, shared UID ownership and captured
+PackageState/SharedUserApi lifecycle integration remain #858. The native service
 switch is not activated and original PMS remains active.
 The native usage owner now reads PackageUsage's original v0/v1
 package-usage.list formats for known package settings, preserving each of the
