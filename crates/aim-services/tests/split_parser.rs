@@ -351,7 +351,8 @@ fn manifest_keysets_match_original_parser() {
         .arg(&stubs)
         .arg(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ManifestKeySetsOracle.java"),
-        ));
+        )
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/KeySetOwnerOracle.java")));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
         .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
@@ -367,12 +368,12 @@ fn manifest_keysets_match_original_parser() {
         .arg(&stubs)
         .arg("--output")
         .arg(&dex)
-        .args(
-            fs::read_dir(&classes)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<Vec<_>>(),
-        ));
+        .args([
+            classes.join("ManifestKeySetsOracle.class"),
+            classes.join("ManifestKeySetsOracle$1.class"),
+            classes.join("com/android/server/pm/KeySetOwnerOracle.class"),
+            classes.join("com/android/server/pm/KeySetOwnerOracle$1.class"),
+        ]));
     let key = |scalar| {
         let mut der = vec![
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1, 0x06, 8, 0x2a,
@@ -380,17 +381,21 @@ fn manifest_keysets_match_original_parser() {
         ];
         let secret = p256::SecretKey::from_slice(&[scalar; 32]).unwrap();
         der.extend_from_slice(secret.public_key().to_encoded_point(false).as_bytes());
-        aim_android_xml::Element {
+        let text = aim_android_xml::Element {
             name: "key".into(),
-            attrs: vec![("value".into(), aim_android_xml::Value::BytesBase64(der))],
+            attrs: vec![(
+                "value".into(),
+                aim_android_xml::Value::BytesBase64(der.clone()),
+            )],
             content: vec![],
         }
         .string("value")
         .unwrap()
-        .into_owned()
+        .into_owned();
+        (der, text)
     };
-    let one = key(1);
-    let two = key(2);
+    let (one_der, one) = key(1);
+    let (two_der, two) = key(2);
     let cases = [
         ("reuse", format!(r#"<key-set android:name="z"><public-key android:name="one" android:value="{one}"/></key-set><key-set android:name="a"><public-key android:name="one"/></key-set><upgrade-key-set android:name="a"/>"#)),
         ("nullable", format!(r#"<key-set android:name="a"><public-key android:value="{one}"/></key-set>"#)),
@@ -476,4 +481,82 @@ fn manifest_keysets_match_original_parser() {
     }
     let original = String::from_utf8(run(&mut command).stdout).unwrap();
     assert_eq!(original, expected);
+    // Compare the original global owner independently of the parser contract.
+    use aim_services::package::{
+        owner::key_sets,
+        settings::{Package, Settings},
+    };
+    let mut settings = Settings {
+        packages: vec![
+            Package {
+                name: "a".into(),
+                ..Package::default()
+            },
+            Package {
+                name: "b".into(),
+                ..Package::default()
+            },
+        ],
+        ..Settings::default()
+    };
+    let mut states = Vec::new();
+    key_sets::register(
+        &mut settings,
+        "a",
+        &[one_der.clone()],
+        Some(&[("next".into(), vec![two_der.clone()])]),
+        &["next".into()],
+    )
+    .unwrap();
+    states.push(("first", settings.clone()));
+    key_sets::register(&mut settings, "b", &[one_der.clone()], Some(&[]), &[]).unwrap();
+    states.push(("shared", settings.clone()));
+    key_sets::register(&mut settings, "a", &[two_der], Some(&[]), &[]).unwrap();
+    states.push(("rotate", settings.clone()));
+    key_sets::clear_package(&mut settings, "b").unwrap();
+    states.push(("remove-shared", settings.clone()));
+    key_sets::clear_package(&mut settings, "a").unwrap();
+    states.push(("remove-last", settings.clone()));
+    key_sets::register(&mut settings, "a", &[one_der], None, &[]).unwrap();
+    states.push(("reallocate", settings));
+    let output = String::from_utf8(run(boot.command().args([
+        "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.KeySetOwnerOracle", "/data/local/tmp/manifest-keysets/reuse.apk", "/data/local/tmp/manifest-keysets/repeat-set.apk",
+    ])).stdout).unwrap();
+    let mut lines = output.lines();
+    for (name, state) in states {
+        assert_eq!(lines.next(), Some(format!("STATE {name}").as_str()));
+        for package in &state.packages {
+            assert_eq!(
+                lines.next(),
+                Some(
+                    format!(
+                        "PACKAGE {} {}",
+                        package.name, package.key_set_data.proper_signing_key_set
+                    )
+                    .as_str()
+                )
+            );
+            for (alias, id) in &package.key_set_data.defined_key_sets {
+                assert_eq!(
+                    lines.next(),
+                    Some(format!("ALIAS {} {alias} {id}", package.name).as_str())
+                );
+            }
+            for id in &package.key_set_data.upgrade_key_sets {
+                assert_eq!(
+                    lines.next(),
+                    Some(format!("UPGRADE {} {id}", package.name).as_str())
+                );
+            }
+        }
+        let global = lines.next().unwrap().strip_prefix("GLOBAL ").unwrap();
+        let bytes: Vec<_> = (0..global.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&global[i..i + 2], 16).unwrap())
+            .collect();
+        let original = Settings::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+        assert_eq!(original.key_sets, state.key_sets, "{name}");
+    }
+    assert!(lines.next().is_none());
 }
