@@ -347,7 +347,17 @@ the deleted provider from native update-ownership denylist relations, preserving
 other providers for overlapping targets. Repeated additions accumulate, matching
 UpdateOwnershipHelper; empty additions do not withdraw old contributions. Accepted
 metadata queues eligible system/update providers by the pinned property and
-INSTALL_PACKAGES/INSTALL_PACKAGE_UPDATES declaration. Pending provider reads make
+INSTALL_PACKAGES/INSTALL_PACKAGE_UPDATES declaration. The queue retains commit
+order and repeated provider posts, capturing each post's parsed package rather
+than looking it up after later scans. complete_next_apk_read consumes only the
+captured head; out-of-order reads are rejected before resource access, and
+failed reads keep that head and all later posts intact. A completed empty read
+retires one post without withdrawing prior contributions. The compiled resource
+oracle now posts all reads through the actual original HandlerThread before
+releasing its queue, verifying FIFO output and worker shutdown (16.19s); native
+fixtures retain both repeated provider posts and their accumulating contents.
+The added compile-only HandlerThread API passes image linkage (13.6s).
+Pending provider reads make
 denylisted/provider queries fail explicitly until the resource owner supplies
 validated contents. The original UpdateOwnershipHelper oracle
 compares seven add/overlap/accumulate/empty/remove/repeated-remove/last-remove
@@ -387,7 +397,7 @@ retained active packages as resilient ABX, removing only the updateOwner
 attribute. Assigning a new owner, changing disabled records or other metadata,
 removing a package or another writer changing the document is rejected before
 writes. Unknown XML, installer fields, UID/users and reserve copies are checked;
-all 323 service units pass (3.07s). A disposable original-PMS install requests
+all 324 service units pass (3.06s). A disposable original-PMS install requests
 com.android.shell as update owner and verifies it in the live package dump;
 after native persistence clears it, original PMS reboots, reports no update owner
 and retains installer/signing/keysets/shared UID state (18.44s). Executing pending

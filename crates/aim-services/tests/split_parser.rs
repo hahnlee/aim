@@ -295,6 +295,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     };
     let mut owner = UpdateOwnership::default();
     owner.queue(&provider, &parsed);
+    owner.queue(&provider, &parsed);
     let mut settings = Settings {
         packages: vec![provider],
         ..Settings::default()
@@ -306,13 +307,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     let before = (owner.clone(), settings.clone());
     assert!(
         owner
-            .complete_apk_read(
-                &parsed,
-                &mut settings,
-                &config,
-                &bad_reader,
-                Config::default()
-            )
+            .complete_next_apk_read(&mut settings, &config, &bad_reader, Config::default())
             .is_err()
     );
     assert_eq!((owner.clone(), settings.clone()), before);
@@ -329,29 +324,21 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     });
     assert!(
         owner
-            .complete_apk_read(
-                &parsed,
-                &mut settings,
-                &config,
-                &bad_reader,
-                Config::default()
-            )
+            .complete_next_apk_read(&mut settings, &config, &bad_reader, Config::default())
             .is_err()
     );
     assert_eq!((owner.clone(), settings.clone()), before);
     let mut null_split = parsed.clone();
     null_split.split_code_paths = Some(vec![None]);
+    let mut null_owner = UpdateOwnership::default();
+    null_owner.queue(&settings.packages[0], &null_split);
+    let null_before = (null_owner.clone(), settings.clone());
     assert!(
-        owner
-            .complete_apk_read(
-                &null_split,
-                &mut settings,
-                &config,
-                &apks_reader,
-                Config::default()
-            )
+        null_owner
+            .complete_next_apk_read(&mut settings, &config, &apks_reader, Config::default())
             .is_err()
     );
+    assert_eq!((null_owner, settings.clone()), null_before);
     assert_eq!((owner.clone(), settings.clone()), before);
     let resource_config = Config {
         language: *b"en",
@@ -360,18 +347,21 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     };
     assert!(
         owner
-            .complete_apk_read(
-                &parsed,
-                &mut settings,
-                &config,
-                &apks_reader,
-                resource_config
-            )
+            .complete_next_apk_read(&mut settings, &config, &apks_reader, resource_config)
             .unwrap()
             .is_empty()
     );
+    assert_eq!(owner.next_provider(), Some(parsed.package_name.as_str()));
+    assert!(owner.is_denylisted("english").is_err());
+    assert!(
+        owner
+            .complete_next_apk_read(&mut settings, &config, &apks_reader, Config::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(owner.next_provider(), None);
     assert_eq!(owner.is_denylisted("english"), Ok(true));
-    assert_eq!(owner.is_denylisted("one"), Ok(false));
+    assert_eq!(owner.is_denylisted("one"), Ok(true));
     resources.config.language = *b"en";
     assert_eq!(read_denylist(&resources, id, file).unwrap(), ["english"]);
     assert!(read_denylist(&resources, 0, file).is_err());

@@ -15,10 +15,28 @@ use android_image_extract::{source::FileSource, zip::Archive};
 const MAX_ENTRY: u64 = 512 << 20;
 
 impl UpdateOwnership {
+    /// Run the captured next post, retaining the package associated with that
+    /// commit instead of looking it up by name after later commits.
+    pub fn complete_next_apk_read(
+        &mut self,
+        settings: &mut Settings,
+        system_config: &SystemConfig,
+        apks: &Apks,
+        config: Config,
+    ) -> Result<Vec<String>> {
+        let parsed = self
+            .pending
+            .front()
+            .ok_or_else(|| bad("no queued update ownership read"))?
+            .package
+            .clone();
+        self.complete_apk_read(&parsed, settings, system_config, apks, config)
+    }
+
     /// Execute a queued post-commit read through guest file ownership. The
     /// resource configuration is the boot owner's ResourcesManager config,
     /// not the manifest parser's reduced configuration.
-    pub fn complete_apk_read(
+    fn complete_apk_read(
         &mut self,
         parsed: &AndroidPackage,
         settings: &mut Settings,
@@ -26,9 +44,7 @@ impl UpdateOwnership {
         apks: &Apks,
         config: Config,
     ) -> Result<Vec<String>> {
-        if !self.pending.contains(&parsed.package_name) {
-            return Err(bad("update ownership provider read is not queued"));
-        }
+        self.check_next(&parsed.package_name)?;
         let id = parsed
             .properties
             .as_ref()

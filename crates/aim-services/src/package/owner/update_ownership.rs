@@ -3,7 +3,7 @@
 //! The resource loader supplies validated list contents; pending eligible
 //! providers prevent reads from treating an incomplete boot index as empty.
 use crate::package::{pkg::AndroidPackage, settings::Package};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod assets;
 pub(super) mod persistence;
@@ -49,10 +49,31 @@ fn java_whitespace(c: char) -> bool {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UpdateOwnership {
     contributors: BTreeMap<String, BTreeSet<String>>,
-    pending: BTreeSet<String>,
+    pending: VecDeque<ProviderRead>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ProviderRead {
+    name: String,
+    package: AndroidPackage,
 }
 
 impl UpdateOwnership {
+    /// Handler posts retain commit order, including repeated scans of a name.
+    pub fn next_provider(&self) -> Option<&str> {
+        self.pending.front().map(|read| read.name.as_str())
+    }
+
+    fn check_next(&self, provider: &str) -> aim_apps::res::Result<()> {
+        if self.next_provider() == Some(provider) {
+            Ok(())
+        } else {
+            Err(aim_apps::res::bad(
+                "update ownership provider is not the next queued read",
+            ))
+        }
+    }
+
     /// The posted InstallPackageHelper read, after package settings commit.
     /// A failed read preserves both the pending provider and saved ownership.
     /// The caller must serialize this with removals and publish changed records.
@@ -65,11 +86,7 @@ impl UpdateOwnership {
         id: u32,
         file: impl FnOnce(usize, &str) -> aim_apps::res::Result<Vec<u8>>,
     ) -> aim_apps::res::Result<Vec<String>> {
-        if !self.pending.contains(provider) {
-            return Err(aim_apps::res::bad(
-                "update ownership provider read is not queued",
-            ));
-        }
+        self.check_next(provider)?;
         let contents = read_denylist(resources, id, file)?;
         Ok(self.apply_contents(provider, &contents, settings, config))
     }
@@ -119,7 +136,10 @@ impl UpdateOwnership {
                 )
             })
         {
-            self.pending.insert(package.name.clone());
+            self.pending.push_back(ProviderRead {
+                name: package.name.clone(),
+                package: parsed.clone(),
+            });
         }
     }
 
@@ -132,7 +152,9 @@ impl UpdateOwnership {
                 .or_default()
                 .insert(provider.into());
         }
-        self.pending.remove(provider);
+        if self.next_provider() == Some(provider) {
+            self.pending.pop_front();
+        }
     }
 
     /// Remove this provider's contributions; other providers keep the opt-out.
@@ -143,7 +165,7 @@ impl UpdateOwnership {
             providers.remove(provider);
             !providers.is_empty()
         });
-        self.pending.remove(provider);
+        self.pending.retain(|read| read.name != provider);
     }
 
     pub fn is_denylisted(&self, package: &str) -> Result<bool, &'static str> {
@@ -177,6 +199,117 @@ mod tests {
     use crate::package::pkg::{Property, PropertyValue, UsesPermission};
 
     #[test]
+    fn posted_reads_keep_commit_order_and_repeated_provider_work() {
+        use crate::package::{
+            parse::resources::{Config, Resources},
+            settings::Settings,
+            system_config::SystemConfig,
+        };
+        let parsed = AndroidPackage {
+            properties: Some(vec![(
+                "android.app.PROPERTY_LEGACY_UPDATE_OWNERSHIP_DENYLIST".into(),
+                Property {
+                    name: None,
+                    package_name: None,
+                    class_name: None,
+                    value: PropertyValue::Resource(1),
+                },
+            )]),
+            uses_permissions: vec![UsesPermission {
+                name: Some("android.permission.INSTALL_PACKAGES".into()),
+                flags: 0,
+            }],
+            ..AndroidPackage::default()
+        };
+        let mut owner = UpdateOwnership::default();
+        for (index, name) in ["z", "a", "z"].into_iter().enumerate() {
+            let mut captured = parsed.clone();
+            captured.package_name = name.into();
+            captured.base_apk_path = Some(format!("/{name}/{index}.apk"));
+            owner.queue(
+                &Package {
+                    name: name.into(),
+                    flags: crate::package::settings::FLAG_SYSTEM,
+                    ..Package::default()
+                },
+                &captured,
+            );
+            captured.base_apk_path = None;
+        }
+        let mut settings = Settings::default();
+        let config = SystemConfig::default();
+        let resources = Resources {
+            tables: vec![],
+            overlays: &[],
+            config: Config::default(),
+        };
+        let before = owner.clone();
+        assert!(
+            owner
+                .complete_resource_read("a", &mut settings, &config, &resources, 0, |_, _| panic!(
+                    "out-of-order read opened an asset"
+                ))
+                .is_err()
+        );
+        assert_eq!(owner, before);
+        assert_eq!(owner.next_provider(), Some("z"));
+        assert_eq!(
+            owner
+                .pending
+                .front()
+                .unwrap()
+                .package
+                .base_apk_path
+                .as_deref(),
+            Some("/z/0.apk")
+        );
+        owner.add("z", &["one".into()]);
+        assert_eq!(owner.next_provider(), Some("a"));
+        assert_eq!(
+            owner
+                .pending
+                .front()
+                .unwrap()
+                .package
+                .base_apk_path
+                .as_deref(),
+            Some("/a/1.apk")
+        );
+        assert!(owner.is_denylisted("one").is_err());
+        owner.add("a", &[]);
+        assert_eq!(owner.next_provider(), Some("z"));
+        assert_eq!(
+            owner
+                .pending
+                .front()
+                .unwrap()
+                .package
+                .base_apk_path
+                .as_deref(),
+            Some("/z/2.apk")
+        );
+        assert!(owner.is_provider(Some("z")).is_err());
+        owner.add("z", &["two".into()]);
+        assert_eq!(owner.next_provider(), None);
+        assert_eq!(owner.is_denylisted("one"), Ok(true));
+        assert_eq!(owner.is_denylisted("two"), Ok(true));
+        for name in ["z", "a", "z"] {
+            owner.queue(
+                &Package {
+                    name: name.into(),
+                    flags: crate::package::settings::FLAG_SYSTEM,
+                    ..Package::default()
+                },
+                &parsed,
+            );
+        }
+        owner.remove("z");
+        assert_eq!(owner.next_provider(), Some("a"));
+        owner.add("a", &[]);
+        assert_eq!(owner.is_provider(Some("z")), Ok(false));
+    }
+
+    #[test]
     fn completed_lists_clear_only_active_targets_without_system_config_owner() {
         use crate::package::{settings::Settings, system_config::SystemConfig};
         let package = |name: &str| {
@@ -200,7 +333,10 @@ mod tests {
             .system_app_update_owners
             .insert("fixed".into(), "different.installer".into());
         let mut owner = UpdateOwnership::default();
-        owner.pending.insert("same-as-provider".into());
+        owner.pending.push_back(ProviderRead {
+            name: "same-as-provider".into(),
+            package: AndroidPackage::default(),
+        });
         assert_eq!(
             owner.apply_contents(
                 "same-as-provider",

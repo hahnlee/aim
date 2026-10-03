@@ -16,6 +16,16 @@ public final class UpdateOwnershipResourceOracle {
                 System.out.printf("%02x", b & 255);
         }
         System.out.println();
+        var thread = new android.os.HandlerThread("AIM disposable resource oracle");
+        thread.start();
+        var handler = thread.getThreadHandler();
+        var gate = new java.util.concurrent.CountDownLatch(1);
+        var completed = new java.util.concurrent.CountDownLatch(args.length - 1);
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        if (!handler.post(() -> {
+            try { gate.await(); }
+            catch (InterruptedException error) { failure.set(error); }
+        })) throw new IllegalStateException("handler gate post rejected");
         try (var parser = new PackageParser2(null, null, null, new PackageParser2.Callback() {
             public boolean hasFeature(String feature) { return false; }
             public java.util.Set<String> getHiddenApiWhitelistedApps() { return java.util.Set.of(); }
@@ -41,16 +51,30 @@ public final class UpdateOwnershipResourceOracle {
                     throw new IllegalStateException("without-state resources lost a split");
                 var setting = new PackageSetting(pkg.getPackageName(), null, file, 1, 0,
                         java.util.UUID.randomUUID()).setPkg(pkg);
-                var contents = owner.readUpdateOwnerDenyList(setting);
-                if (contents == null) throw new IllegalStateException("original resource read failed: " + path);
-                System.out.print(file.getName());
-                for (String name : contents) {
-                    System.out.print(" ");
-                    for (byte b : name.getBytes(java.nio.charset.StandardCharsets.UTF_8))
-                        System.out.printf("%02x", b & 255);
-                }
-                System.out.println();
+                if (!handler.post(() -> {
+                    try {
+                        var contents = owner.readUpdateOwnerDenyList(setting);
+                        if (contents == null) throw new IllegalStateException("original resource read failed: " + path);
+                        System.out.print(file.getName());
+                        for (String name : contents) {
+                            System.out.print(" ");
+                            for (byte b : name.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                                System.out.printf("%02x", b & 255);
+                        }
+                        System.out.println();
+                    } catch (Throwable error) { failure.compareAndSet(null, error); }
+                    finally { completed.countDown(); }
+                })) throw new IllegalStateException("handler resource post rejected");
             }
+            gate.countDown();
+            if (!completed.await(30, java.util.concurrent.TimeUnit.SECONDS))
+                throw new IllegalStateException("original posted resource reads did not complete");
+            if (failure.get() != null) throw new IllegalStateException("original posted resource read failed", failure.get());
+        } finally {
+            gate.countDown();
+            thread.quitSafely();
+            thread.join(5000);
+            if (thread.isAlive()) throw new IllegalStateException("resource oracle thread remains alive");
         }
     }
 }
