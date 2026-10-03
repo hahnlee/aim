@@ -271,7 +271,10 @@ impl PackageModel {
         if let Some(answer) = resolver.answer(state, call) {
             return answer;
         }
-        let resolution = resolver.resolution(state);
+        let resolution = match resolver.resolution(state) {
+            Ok(resolution) => resolution,
+            Err(error) => return Answer::Reply(error.reply()),
+        };
         let q = Query {
             state,
             filter: &resolution.apps_filter,

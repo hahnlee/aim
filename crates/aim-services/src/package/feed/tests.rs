@@ -58,6 +58,18 @@ fn library(p: &mut Parcel, name: &str, dependency: Option<&str>) {
 
 /// A package record in `PackageFeed.packageState`'s layout.
 fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
+    package_record_with_mime(
+        name,
+        shared_user_app_id,
+        &[(Some("images".into()), vec![Some("image/png".into())])],
+    )
+}
+
+fn package_record_with_mime(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+) -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_string16(Some(name));
     p.write_i32(10_100);
@@ -79,9 +91,14 @@ fn package_record(name: &str, shared_user_app_id: Option<i32>) -> Vec<u8> {
     // hasSharedUser, isDebuggable, isPrivileged, isSystem.
     let shared = u32::from(shared_user_app_id.is_some());
     p.write_i32((shared | 1 << 3 | 1 << 15 | 1 << 19) as i32);
-    p.write_i32(1);
-    p.write_string16(Some("images"));
-    strings(&mut p, &["image/png"]);
+    p.write_i32(groups.len() as i32);
+    for (name, types) in groups {
+        p.write_string16(name.as_deref());
+        p.write_i32(types.len() as i32);
+        for value in types {
+            p.write_string16(value.as_deref());
+        }
+    }
     p.write_i32(1);
     p.write_string16(Some("com.google.android.trichromelibrary"));
     p.write_i64(7);
@@ -221,7 +238,10 @@ fn reads_a_package_record() {
     assert_eq!(p.version_code, 42);
     assert_eq!(p.hidden_api_enforcement_policy, 2);
     assert!(p.is.system && p.is.privileged && p.is.debuggable && !p.is.vendor);
-    assert_eq!(p.mime_groups, [("images".into(), vec!["image/png".into()])]);
+    assert_eq!(
+        p.mime_groups,
+        [(Some("images".into()), vec![Some("image/png".into())])]
+    );
     assert_eq!(
         p.uses_static_libraries,
         [("com.google.android.trichromelibrary".into(), 7)]
@@ -437,4 +457,41 @@ fn dumps_as_dumpsys_package() {
     assert!(text.contains("      disabledComponents:\n        com.example.app.Main\n"));
     // Arrays.hashCode([1, 2]) = 31 * (31 + 1) + 2.
     assert!(text.contains("signatures=version:3, signatures:[3e2], past signatures:[22 flags: 8]"));
+}
+
+#[test]
+fn package_records_retain_null_and_empty_mime_names_and_types() {
+    let groups = vec![
+        (None, vec![None, Some(String::new())]),
+        (Some(String::new()), vec![None]),
+        (Some("images".into()), vec![Some("image/png".into()), None]),
+    ];
+    let (package, _) = record::package(&package_record_with_mime("app", None, &groups)).unwrap();
+    assert_eq!(package.mime_groups, groups);
+}
+
+#[test]
+fn mime_feed_rejects_absent_collection_owners_and_duplicate_names() {
+    let mut missing_map = Parcel::new();
+    missing_map.write_i32(-1);
+    assert!(
+        record::mime_groups(&mut aim_binder_host::parcel::Reader::new(
+            missing_map.data(),
+            &[]
+        ))
+        .is_err()
+    );
+    let mut missing_types = Parcel::new();
+    missing_types.write_i32(1);
+    missing_types.write_string16(None);
+    missing_types.write_i32(-1);
+    assert!(
+        record::mime_groups(&mut aim_binder_host::parcel::Reader::new(
+            missing_types.data(),
+            &[]
+        ))
+        .is_err()
+    );
+    let groups = vec![(None, Vec::new()), (None, Vec::new())];
+    assert!(record::package(&package_record_with_mime("app", None, &groups)).is_err());
 }

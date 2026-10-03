@@ -70,7 +70,10 @@ impl Service for PackageQueries {
             .then(|| self.resolver.query(&state, call.code, uid, &mut call.data))
             .flatten();
         let answer = resolved.unwrap_or_else(|| {
-            let resolution = self.resolver.resolution(&state);
+            let resolution = match self.resolver.resolution(&state) {
+                Ok(resolution) => resolution,
+                Err(error) => return Ok(error.reply()),
+            };
             Query {
                 state: &state,
                 filter: &resolution.apps_filter,

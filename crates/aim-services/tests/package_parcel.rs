@@ -65,6 +65,10 @@ fn native_package_parcels_match_original_read_write() {
         )
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageMimeGroups.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/CapturedInstallSource.java"),
         )
         .arg(
@@ -245,6 +249,27 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(
             directory.join(format!("{name}.mime-native")),
             mime_xml_expected(&directory, &name),
+        )
+        .unwrap();
+        let mut mime_feed = aim_binder_host::parcel::Parcel::new();
+        let captured_setting = snapshot
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == pkg.package_name)
+            .unwrap();
+        mime_feed.write_i32(captured_setting.mime_groups.len() as i32);
+        for (name, types) in &captured_setting.mime_groups {
+            mime_feed.write_string16(name.as_deref());
+            mime_feed.write_i32(types.len() as i32);
+            for value in types {
+                mime_feed.write_string16(value.as_deref());
+            }
+        }
+        fs::write(
+            directory.join(format!("{name}.mime-feed-native")),
+            mime_feed.data(),
         )
         .unwrap();
         let setting_bytes = aim_services::package::scan_snapshot::setting_record::captured(
@@ -438,6 +463,10 @@ fn native_package_parcels_match_original_read_write() {
     );
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            assert_eq!(
+                fs::read(directory.join(format!("{name}.mime-feed-original"))).unwrap(),
+                fs::read(directory.join(format!("{name}.mime-feed-native"))).unwrap()
+            );
             assert_eq!(
                 fs::read(directory.join(format!("{name}.mime-original"))).unwrap(),
                 fs::read(directory.join(format!("{name}.mime-native"))).unwrap()

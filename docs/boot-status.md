@@ -72,14 +72,14 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 378
-units pass (3.13s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 381
+units pass (3.22s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 16.67s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 28.44s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -134,8 +134,8 @@ keeps signed UTF-16 Java hash/collision order (#855). A pinned reader-loop port
 using actual original PackageSetting.addMimeTypes agrees on 12 text/ABX cases,
 including known-tag nesting, ignored unknown subtrees, missing names/values,
 empty strings and negative/colliding hashes. The complete package ART oracle
-passes (16.67s); all integration targets compile and device-services builds
-against original APIs (13.8s). Native PackageSetting runtime MIME ownership and
+passes (28.44s); all integration targets compile and device-services builds
+against original APIs (15.6s). Native PackageSetting runtime MIME ownership and
 capture now preserve nullable group names and type members, distinct from empty
 strings, with signed Java hash/collision ordering and duplicate suppression
 (#856). Original ART agrees with actual native populated captures, original
@@ -143,12 +143,21 @@ PackageSetting copy isolation and immutable Java map/set values. Known XML
 restoration continues to ignore missing names/values; original text/ABX MIME
 writer loops throw on null names or members. The native Binder fixture keeps
 prior null owners after a newer publication removes them, and setting updates
-retain null members of preserved declared groups. The existing original-state
-feed still fails on null group/member sorting and its native read model cannot
-preserve these values (#857), both independently demonstrated from the feed
-code and actual original TreeMap/TreeSet exceptions in ART. Resolved library
-graphs, transient/legacy-permission inputs and full facade assembly/import/live
-producers remain #836/#834/#837.
+retain null members of preserved declared groups. The original-state feed now writes MIME maps/sets in their original iteration
+order through the production PackageMimeGroups serializer, preserving nullable
+names and members without TreeMap/TreeSet sorting (#857). ART serializes actual
+original PackageSetting maps through this helper and matches native Parcel
+bytes exactly. Full native package-record reads keep null distinct from empty;
+absent collection owners and duplicate names reject before publishing records.
+Component registration now rejects a referenced missing group or null type,
+matching the pinned applyMimeGroups loop and original IntentFilter exceptions;
+malformed nonnull types remain ignored and unused nullable groups remain valid.
+Failed builds do not replace the cached resolver, and query endpoints report a
+null-pointer exception for this owner failure. This is component validation;
+full native mutation/notification/bootstrap ordering and C acceptance remain
+unproved. Resolved library graphs, transient/legacy-permission inputs and full
+facade assembly/import/live producers remain #836/#834/#837; #856 remains open
+for complete facade integration.
 Native keyset owners now deduplicate upgrade IDs in insertion order and retain
 nullable aliases separately from empty names, replacing duplicate aliases in
 signed Java hash order (#852). Native registration uses those same owner

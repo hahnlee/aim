@@ -74,11 +74,7 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
         // Only PackageStateInternal has isLoading (#716).
         loading: false,
     };
-    let groups = r.read_i32()?;
-    for _ in 0..groups.max(0) {
-        let name = string(r)?.unwrap_or_default();
-        s.mime_groups.push((name, strings(r)?));
-    }
+    s.mime_groups = mime_groups(r)?;
     for _ in 0..count(r)? {
         s.uses_static_libraries
             .push((string(r)?.unwrap_or_default(), r.read_i64()?));
@@ -358,4 +354,24 @@ fn strings(r: &mut Reader<'_>) -> Result<Vec<String>> {
         .into_iter()
         .map(Option::unwrap_or_default)
         .collect())
+}
+
+pub(super) fn mime_groups(
+    r: &mut Reader<'_>,
+) -> Result<Vec<(Option<String>, Vec<Option<String>>)>> {
+    let count = r.read_i32()?;
+    if count < 0 {
+        return Err(aim_binder_host::parcel::BAD_VALUE);
+    }
+    let mut groups = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
+    for _ in 0..count {
+        let name = string(r)?;
+        if !names.insert(name.clone()) {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let types = read_string_list(r)?.ok_or(aim_binder_host::parcel::BAD_VALUE)?;
+        groups.push((name, types));
+    }
+    Ok(groups)
 }

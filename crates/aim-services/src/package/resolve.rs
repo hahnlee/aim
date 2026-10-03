@@ -24,7 +24,8 @@ use super::apps_filter::{
 };
 use super::component_resolver::{
     ComponentResolver, Info, Kind, MATCH_DEFAULT_ONLY, MATCH_EXPLICITLY_VISIBLE_ONLY,
-    MATCH_INSTANT, MATCH_VISIBLE_TO_INSTANT_APP_ONLY, ResolveInfo, Results, resolve_priority_order,
+    MATCH_INSTANT, MATCH_VISIBLE_TO_INSTANT_APP_ONLY, MimeGroupError, ResolveInfo, Results,
+    resolve_priority_order,
 };
 use super::info::{
     ActivityInfo, ProviderInfo, Target, generate_application_info, generate_provider_info,
@@ -72,7 +73,10 @@ pub struct Resolution {
 }
 
 impl Resolution {
-    pub fn new(state: Arc<State>, config: &apps_filter::Config) -> Resolution {
+    pub fn new(
+        state: Arc<State>,
+        config: &apps_filter::Config,
+    ) -> std::result::Result<Resolution, MimeGroupError> {
         let preferred = state
             .users
             .iter()
@@ -87,14 +91,14 @@ impl Resolution {
             .iter()
             .map(|(&id, u)| (id, domains::legacy_domain_states(u)))
             .collect();
-        Resolution {
-            components: ComponentResolver::new(&state),
+        Ok(Resolution {
+            components: ComponentResolver::new(&state)?,
             apps_filter: AppsFilter::new(&state, config),
             state,
             preferred,
             setup_wizard: OnceLock::new(),
             legacy,
-        }
+        })
     }
 
     /// m4model's queries over this state, for the caller.
@@ -1212,18 +1216,21 @@ pub struct Resolver {
 
 impl Resolver {
     /// The resolution of `state`, built once per state.
-    pub fn resolution(&self, state: &Arc<State>) -> Arc<Resolution> {
+    pub fn resolution(
+        &self,
+        state: &Arc<State>,
+    ) -> std::result::Result<Arc<Resolution>, MimeGroupError> {
         let mut latest = self.latest.lock().unwrap();
         match &*latest {
-            Some(r) if Arc::ptr_eq(&r.state, state) => r.clone(),
+            Some(r) if Arc::ptr_eq(&r.state, state) => Ok(r.clone()),
             _ => {
                 let config = apps_filter::Config {
                     force_system_packages_queryable: state.system.force_system_packages_queryable,
                     force_queryable_packages: state.system.force_queryable_packages.clone(),
                 };
-                let r = Arc::new(Resolution::new(state.clone(), &config));
+                let r = Arc::new(Resolution::new(state.clone(), &config)?);
                 *latest = Some(r.clone());
-                r
+                Ok(r)
             }
         }
     }
@@ -1251,7 +1258,22 @@ impl Resolver {
         uid: i32,
         data: &mut Reader<'_>,
     ) -> Option<Result<Parcel>> {
-        let r = self.resolution(state);
+        if !matches!(
+            code,
+            pm::QUERY_INTENT_ACTIVITIES
+                | pm::QUERY_INTENT_SERVICES
+                | pm::QUERY_INTENT_RECEIVERS
+                | pm::QUERY_INTENT_CONTENT_PROVIDERS
+                | pm::RESOLVE_INTENT
+                | pm::RESOLVE_SERVICE
+                | pm::RESOLVE_CONTENT_PROVIDER
+        ) {
+            return None;
+        }
+        let r = match self.resolution(state) {
+            Ok(r) => r,
+            Err(error) => return Some(Ok(error.reply())),
+        };
         let mut p = Parcel::new();
         let slice = |items| ListSlice {
             creator: "android.content.pm.ResolveInfo".into(),

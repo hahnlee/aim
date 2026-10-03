@@ -249,9 +249,29 @@ fn main_of(pkg: &AndroidPackage, kind: Kind, index: usize) -> &MainComponent {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MimeGroupError {
+    MissingGroup,
+    NullType,
+}
+
+impl MimeGroupError {
+    pub fn reply(self) -> Parcel {
+        let mut reply = Parcel::new();
+        reply.write_exception(&aim_binder_host::parcel::Exception::new(
+            aim_binder_host::parcel::EX_NULL_POINTER,
+            match self {
+                Self::MissingGroup => "missing MIME group during component registration",
+                Self::NullType => "null MIME type during component registration",
+            },
+        ));
+        reply
+    }
+}
+
 impl ComponentResolver {
     /// `addAllComponents` of every package with code.
-    pub fn new(state: &State) -> ComponentResolver {
+    pub fn new(state: &State) -> std::result::Result<ComponentResolver, MimeGroupError> {
         let mut r = ComponentResolver::default();
         for ps in state.packages.values() {
             let Some(pkg) = ps.pkg.as_deref() else {
@@ -264,7 +284,7 @@ impl ComponentResolver {
                 (Kind::Service, pkg.services.len()),
             ] {
                 for component in 0..count {
-                    r.add(ps, pkg, kind, component);
+                    r.add(ps, pkg, kind, component)?;
                 }
             }
             for (i, p) in pkg.providers.iter().enumerate() {
@@ -284,7 +304,7 @@ impl ComponentResolver {
                 r.add_copies(ps, pkg);
             }
         }
-        r
+        Ok(r)
     }
 
     /// `addProvidersLocked`'s copies: a syncable provider keeps its first
@@ -320,13 +340,24 @@ impl ComponentResolver {
         }
     }
 
-    fn add(&mut self, ps: &PackageState, pkg: &AndroidPackage, kind: Kind, component: usize) {
+    fn add(
+        &mut self,
+        ps: &PackageState,
+        pkg: &AndroidPackage,
+        kind: Kind,
+        component: usize,
+    ) -> std::result::Result<(), MimeGroupError> {
         let main = main_of(pkg, kind, component);
         for (intent, info) in main.component.intents.iter().enumerate() {
             let mut filter = info.filter.clone();
             for group in filter.mime_groups.clone().iter().flatten().rev() {
-                let types = ps.mime_groups.iter().find(|(g, _)| g == group);
-                for ty in types.iter().flat_map(|(_, t)| t) {
+                let (_, types) = ps
+                    .mime_groups
+                    .iter()
+                    .find(|(g, _)| g.as_deref() == Some(group.as_str()))
+                    .ok_or(MimeGroupError::MissingGroup)?;
+                for ty in types {
+                    let ty = ty.as_deref().ok_or(MimeGroupError::NullType)?;
                     // A malformed type is skipped, as the original skips it.
                     let _ = filter.add_dynamic_data_type(ty);
                 }
@@ -345,6 +376,7 @@ impl ComponentResolver {
                 Kind::Provider => self.providers.add(entry),
             }
         }
+        Ok(())
     }
 
     /// `mProvidersByAuthority.get`.

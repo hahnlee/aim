@@ -178,7 +178,7 @@ fn view(ty: Option<&str>, data: Option<&str>) -> Intent {
 
 #[test]
 fn orders_by_priority_then_system_then_package() {
-    let r = Resolution::new(state(), &Default::default());
+    let r = Resolution::new(state(), &Default::default()).unwrap();
     let list = r
         .query_intent_activities(
             &view(None, None),
@@ -201,7 +201,7 @@ fn orders_by_priority_then_system_then_package() {
 #[test]
 fn filters_by_visibility_package_and_state() {
     let s = state();
-    let r = Resolution::new(s.clone(), &Default::default());
+    let r = Resolution::new(s.clone(), &Default::default()).unwrap();
     let q = |r: &Resolution, uid: i32, intent: &Intent| {
         names(
             &r.query_intent_activities(intent, Some("image/png"), 0, 0, uid)
@@ -221,7 +221,7 @@ fn filters_by_visibility_package_and_state() {
     let all = ["c.high.Open", "a.viewer.Image", "b.gallery.Open"];
     assert_eq!(
         q(
-            &Resolution::new(Arc::new(compat), &Default::default()),
+            &Resolution::new(Arc::new(compat), &Default::default()).unwrap(),
             10004,
             &view(None, None)
         ),
@@ -231,7 +231,7 @@ fn filters_by_visibility_package_and_state() {
     off.platform.query_filtering_disabled = true;
     assert_eq!(
         q(
-            &Resolution::new(Arc::new(off), &Default::default()),
+            &Resolution::new(Arc::new(off), &Default::default()).unwrap(),
             10004,
             &view(None, None)
         ),
@@ -253,7 +253,7 @@ fn filters_by_visibility_package_and_state() {
         .get_mut(&0)
         .unwrap()
         .stopped = true;
-    let r2 = Resolution::new(Arc::new(stopped), &Default::default());
+    let r2 = Resolution::new(Arc::new(stopped), &Default::default()).unwrap();
     let mut i = view(None, None);
     i.flags = FLAG_EXCLUDE_STOPPED_PACKAGES;
     assert_eq!(q(&r2, SYSTEM_UID, &i), ["c.high.Open", "a.viewer.Image"]);
@@ -267,7 +267,7 @@ fn filters_by_visibility_package_and_state() {
         .get_mut(&0)
         .unwrap();
     us.disabled_components = vec!["c.high.Open".into()];
-    let r3 = Resolution::new(Arc::new(disabled), &Default::default());
+    let r3 = Resolution::new(Arc::new(disabled), &Default::default()).unwrap();
     assert_eq!(
         q(&r3, SYSTEM_UID, &view(None, None)),
         ["a.viewer.Image", "b.gallery.Open"]
@@ -275,7 +275,7 @@ fn filters_by_visibility_package_and_state() {
     // A locked user matches direct boot aware components only.
     let mut locked = (*s).clone();
     locked.users.get_mut(&0).unwrap().unlocking_or_unlocked = false;
-    let r4 = Resolution::new(Arc::new(locked), &Default::default());
+    let r4 = Resolution::new(Arc::new(locked), &Default::default()).unwrap();
     assert!(q(&r4, SYSTEM_UID, &view(None, None)).is_empty());
 }
 
@@ -300,7 +300,7 @@ fn overlay_actors_see_their_targets_and_overlays() {
     });
     s.packages.insert(overlay.name.clone(), overlay);
     let q = |s: &State| {
-        let r = Resolution::new(Arc::new(s.clone()), &Default::default());
+        let r = Resolution::new(Arc::new(s.clone()), &Default::default()).unwrap();
         names(
             &r.query_intent_activities(&view(None, None), Some("image/png"), 0, 0, 10004)
                 .unwrap(),
@@ -326,7 +326,7 @@ fn registers_a_syncable_providers_later_authorities_to_a_copy() {
             syncable: true,
             ..Provider::default()
         });
-    let r = Resolution::new(Arc::new(s), &Default::default());
+    let r = Resolution::new(Arc::new(s), &Default::default()).unwrap();
     let get = |name| {
         let pi = r
             .resolve_content_provider(name, 0, 0, SYSTEM_UID)
@@ -342,7 +342,7 @@ fn registers_a_syncable_providers_later_authorities_to_a_copy() {
 
 #[test]
 fn resolves_explicit_services_and_providers() {
-    let r = Resolution::new(state(), &Default::default());
+    let r = Resolution::new(state(), &Default::default()).unwrap();
     let mut i = view(None, None);
     i.component = Some(ComponentName {
         package: "b.gallery".into(),
@@ -396,7 +396,7 @@ fn resolves_explicit_services_and_providers() {
 
 #[test]
 fn reports_what_is_not_modelled() {
-    let r = Resolution::new(state(), &Default::default());
+    let r = Resolution::new(state(), &Default::default()).unwrap();
     let web = view(None, Some("https://example.com/"));
     // Without an instant app resolver, a web link is answered.
     let list = r
@@ -408,7 +408,7 @@ fn reports_what_is_not_modelled() {
     let mut s = (*state()).clone();
     s.platform.instant_app_resolver = Some("g/.Resolver".into());
     s.platform.instant_app_installer = Some("g/.Installer".into());
-    let r2 = Resolution::new(Arc::new(s), &Default::default());
+    let r2 = Resolution::new(Arc::new(s), &Default::default()).unwrap();
     assert!(
         r2.query_intent_activities(&web, None, 0, 0, SYSTEM_UID)
             .is_err()
@@ -428,7 +428,7 @@ fn reports_what_is_not_modelled() {
 /// A reply decodes field by field, every byte read.
 #[test]
 fn decodes_its_replies() {
-    let r = Resolution::new(state(), &Default::default());
+    let r = Resolution::new(state(), &Default::default()).unwrap();
     let list = r
         .query_intent_activities(&view(None, None), Some("image/png"), 0x40, 0, SYSTEM_UID)
         .unwrap();
@@ -467,7 +467,7 @@ fn with_preferred(backup: Option<&str>, restrictions: Option<&str>) -> Arc<State
 }
 
 fn chosen(s: Arc<State>, ty: &str) -> ResolveInfo {
-    let r = Resolution::new(s, &Default::default());
+    let r = Resolution::new(s, &Default::default()).unwrap();
     r.resolve_intent(&view(None, None), Some(ty), 0, 0, SYSTEM_UID)
         .unwrap()
         .unwrap()
@@ -503,7 +503,7 @@ fn chooses_preferred_persistent_or_the_resolver() {
     );
     assert_eq!(ri.component().1, "f.jpeg.Show");
     // A set that no longer covers the results: ask again.
-    let r = Resolution::new(with_preferred(Some(&pa("x/.Y")), None), &Default::default());
+    let r = Resolution::new(with_preferred(Some(&pa("x/.Y")), None), &Default::default()).unwrap();
     let got = r
         .resolve_intent(&view(None, None), Some("image/jpeg"), 0, 0, SYSTEM_UID)
         .unwrap();
@@ -576,7 +576,7 @@ fn web_state(edit: impl FnOnce(&mut State)) -> Arc<State> {
 }
 
 fn web_names(s: Arc<State>, flags: i64, categories: &[&str]) -> Vec<String> {
-    let r = Resolution::new(s, &Default::default());
+    let r = Resolution::new(s, &Default::default()).unwrap();
     let mut i = view(None, Some("https:"));
     // A host would also ask the instant app resolver (#725): resolve
     // with one through the domain filter alone.
@@ -651,4 +651,79 @@ fn web_links_go_to_approved_apps_or_browsers() {
         web_names(web_state(selected), MATCH_DEFAULT_ONLY, &browsable),
         ["app.one.Web"]
     );
+}
+
+#[test]
+fn mime_owner_failures_do_not_publish_partial_resolvers() {
+    let mut ps = package("app", 10001, false, |pkg| {
+        let mut intent = filter(VIEW, None, None, 0);
+        intent.filter.add_mime_group("images");
+        pkg.activities = vec![Activity {
+            main: main("app", "app.Image", vec![intent]),
+            ..Default::default()
+        }];
+    });
+    ps.mime_groups = vec![
+        (
+            Some("images".into()),
+            vec![Some("image/png".into()), Some(String::new())],
+        ),
+        (None, vec![None]),
+    ];
+    let valid = Arc::new(State {
+        packages: [("app".into(), ps)].into_iter().collect(),
+        ..Default::default()
+    });
+    let resolver = Resolver::default();
+    let first = resolver.resolution(&valid).unwrap();
+    let mut invalid = (*valid).clone();
+    invalid.packages.get_mut("app").unwrap().mime_groups[0]
+        .1
+        .push(None);
+    let invalid = Arc::new(invalid);
+    assert!(matches!(
+        resolver.resolution(&invalid),
+        Err(MimeGroupError::NullType)
+    ));
+    assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
+    let request = Parcel::new();
+    let reply = resolver
+        .query(
+            &invalid,
+            pm::QUERY_INTENT_ACTIVITIES,
+            1000,
+            &mut aim_binder_host::parcel::Reader::new(request.data(), &[]),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        aim_binder_host::parcel::Reader::new(reply.data(), &[])
+            .read_exception()
+            .unwrap()
+            .unwrap_err()
+            .code,
+        aim_binder_host::parcel::EX_NULL_POINTER
+    );
+    assert!(
+        resolver
+            .query(
+                &invalid,
+                u32::MAX,
+                1000,
+                &mut aim_binder_host::parcel::Reader::new(request.data(), &[])
+            )
+            .is_none()
+    );
+    let mut missing = (*valid).clone();
+    missing
+        .packages
+        .get_mut("app")
+        .unwrap()
+        .mime_groups
+        .remove(0);
+    assert!(matches!(
+        resolver.resolution(&Arc::new(missing)),
+        Err(MimeGroupError::MissingGroup)
+    ));
+    assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
 }

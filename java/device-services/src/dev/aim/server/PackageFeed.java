@@ -418,14 +418,7 @@ final class PackageFeed extends IPackageFeed.Stub {
                     s.isPrivileged(), s.isProduct(), s.isRequiredForSystemUser(),
                     s.isScannedAsStoppedSystemApp(), s.isSystem(), s.isSystemExt(),
                     s.isUpdateAvailable(), s.isUpdatedSystemApp(), s.isVendor()));
-            Map<String, Set<String>> mimeGroups = s.getMimeGroups();
-            p.writeInt(mimeGroups == null ? -1 : mimeGroups.size());
-            if (mimeGroups != null) {
-                for (Map.Entry<String, Set<String>> e : new TreeMap<>(mimeGroups).entrySet()) {
-                    p.writeString(e.getKey());
-                    strings(p, e.getValue() == null ? null : new TreeSet<>(e.getValue()));
-                }
-            }
+            PackageMimeGroups.write(p, s.getMimeGroups());
             String[] staticLibraries = s.getUsesStaticLibraries();
             long[] staticVersions = s.getUsesStaticLibrariesVersions();
             p.writeInt(staticLibraries.length);

@@ -313,6 +313,11 @@ public final class PackageRoundTripOracle {
                 || !java.util.Arrays.equals(restoredSetting.getUsesStaticLibraries(), metadata.getUsesStaticLibraries())
                 || !java.util.Arrays.equals(restoredSetting.getUsesStaticLibrariesVersions(), metadata.getUsesStaticLibrariesVersions())
                 || !restoredSetting.getMimeGroups().equals(metadata.getMimeGroups())) throw new AssertionError("captured collections differ from original getters");
+        var mimeFeed = android.os.Parcel.obtain();
+        try {
+            dev.aim.server.PackageMimeGroups.write(mimeFeed, restoredSetting.getMimeGroups());
+            try (var mimeOutput = new java.io.FileOutputStream(file.getPath() + ".mime-feed-original")) { mimeOutput.write(mimeFeed.marshall()); }
+        } finally { mimeFeed.recycle(); }
         if (name.equals("com.google.android.gsf")) {
             if (!metadata.getUsesSdkLibraries()[0].equals("sdk") || metadata.getUsesSdkLibrariesVersionsMajor()[0] != Long.MAX_VALUE
                     || metadata.getUsesSdkLibrariesOptional()[0] || !metadata.getUsesStaticLibraries()[0].equals("static")
@@ -358,6 +363,9 @@ public final class PackageRoundTripOracle {
         com.android.server.pm.CapturedKeySetOracle.verify(file);
         verifyMimeXml(file);
         verifyNullableMimeWriter();
+        var dynamic = new android.content.IntentFilter();
+        try { dynamic.addDynamicDataType(null); throw new AssertionError("original dynamic MIME accepted null"); } catch (NullPointerException expected) {}
+        try { dynamic.addDynamicDataType(""); throw new AssertionError("original dynamic MIME accepted empty"); } catch (android.content.IntentFilter.MalformedMimeTypeException expected) {}
         owner.fail = true;
         try { lease.getSigningState(name, false); throw new AssertionError("signing owner failure swallowed"); }
         catch (android.os.RemoteException expected) {}

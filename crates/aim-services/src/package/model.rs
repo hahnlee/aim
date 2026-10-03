@@ -80,7 +80,7 @@ pub struct PackageState {
     pub restrict_update_hash: Option<Vec<u8>>,
     pub apex_module_name: Option<String>,
     /// MIME groups and their types.
-    pub mime_groups: Vec<(String, Vec<String>)>,
+    pub mime_groups: Vec<(Option<String>, Vec<Option<String>>)>,
     /// Static shared libraries used: name and version.
     pub uses_static_libraries: Vec<(String, i64)>,
     pub uses_sdk_libraries: Vec<UsesSdkLibrary>,
