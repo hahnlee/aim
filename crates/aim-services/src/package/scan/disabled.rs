@@ -477,7 +477,9 @@ impl SigningScan {
             )
         })?;
         let mut setting = NewSetting::update(saved, &users.users, update, all_users, false);
-        let mut parsed = code.parsed.clone();
+        let mut parsed = code
+            .collected_package()
+            .map_err(|e| reject("signatures", e))?;
         identity.apply(&mut parsed);
         let native_error = |error| SigningError::NativeLibrary {
             package: saved.name.clone(),

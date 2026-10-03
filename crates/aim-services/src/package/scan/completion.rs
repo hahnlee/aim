@@ -139,7 +139,11 @@ impl SigningScan {
             inputs.factory_test,
             inputs.context.updated,
         )?;
-        let candidate = staged.finish_key_set_metadata(candidate)?;
+        let mut candidate = staged.finish_key_set_metadata(candidate)?;
+        staged.accepted_slot(&candidate.record, "package-finalization")?;
+        // commitReconciledScanResultLocked sets the assigned appId only after
+        // setting/UID creation. The object is retained before query publication.
+        candidate.record.parsed.uid = candidate.record.settings.app_id;
         staged
             .update_ownership
             .queue(&candidate.record.settings, &candidate.record.parsed);

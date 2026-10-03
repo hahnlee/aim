@@ -104,6 +104,26 @@ pub struct SigningDetails {
 }
 
 impl SigningDetails {
+    /// Original PackageImpl's SigningDetails parcel representation. Keep the
+    /// collected package lineage separate from reconciled settings signatures.
+    pub fn parcel_details(&self) -> Result<super::pkg::SigningDetails, String> {
+        Ok(super::pkg::SigningDetails {
+            signatures: Some(self.signatures.clone()),
+            scheme_version: self.scheme_version,
+            public_keys: Some(
+                serialize_public_keys(&self.public_keys)?
+                    .into_iter()
+                    .map(Some)
+                    .collect(),
+            ),
+            past_signing_certificates: self.past_signing_certificates.as_ref().map(|past| {
+                past.iter()
+                    .map(|(certificate, _)| certificate.clone())
+                    .collect()
+            }),
+        })
+    }
+
     fn new(
         signatures: Vec<Vec<u8>>,
         scheme_version: i32,

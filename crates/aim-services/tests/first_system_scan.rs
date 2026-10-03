@@ -161,6 +161,16 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert!(scan.owner.disabled_loaded_packages().is_empty());
     for completed in &scan.packages {
         let record = &completed.candidate.record;
+        assert_eq!(record.parsed.uid, record.settings.app_id);
+        assert_eq!(
+            record.parsed.signing_details,
+            Some(record.signing.parcel_details().unwrap())
+        );
+        let parcel = record.parsed.to_cache_entry().unwrap();
+        assert!(
+            aim_services::package::pkg::AndroidPackage::read_cache_entry(&parcel.bytes).unwrap()
+                == record.parsed
+        );
         assert_eq!(
             *scan.owner.loaded_packages()[&record.settings.name],
             record.parsed

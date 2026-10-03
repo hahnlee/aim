@@ -117,7 +117,6 @@ fn native_package_parcels_match_original_read_write() {
         .as_ref()
         .unwrap();
     let signer = aim_services::package::sign::SigningDetails::from_saved(saved).unwrap();
-    let keys = aim_services::package::sign::serialize_public_keys(&signer.public_keys).unwrap();
     let mut expected = Vec::new();
     for (index, file) in files.iter().enumerate() {
         let pkg = AndroidPackage::read_cache_entry(&fs::read(file).unwrap()).unwrap();
@@ -131,15 +130,7 @@ fn native_package_parcels_match_original_read_write() {
                 pkg.native_library_root_requires_isa = true;
                 pkg.version_name = Some("native-owner".into());
                 pkg.page_size_app_compat_flags = 8;
-                pkg.signing_details = Some(aim_services::package::pkg::SigningDetails {
-                    signatures: Some(signer.signatures.clone()),
-                    scheme_version: signer.scheme_version,
-                    public_keys: Some(keys.iter().cloned().map(Some).collect()),
-                    past_signing_certificates: signer
-                        .past_signing_certificates
-                        .as_ref()
-                        .map(|lineage| lineage.iter().map(|(cert, _)| cert.clone()).collect()),
-                });
+                pkg.signing_details = Some(signer.parcel_details().unwrap());
             }
             let entry = pkg.to_cache_entry().unwrap();
             let decoded = AndroidPackage::read_cache_entry(&entry.bytes).unwrap();
@@ -153,6 +144,12 @@ fn native_package_parcels_match_original_read_write() {
             fs::write(directory.join(&name), &entry.bytes).unwrap();
             expected.push((name, pkg.package_name, entry));
         }
+    }
+    for pkg in native_scan_objects(&data.0) {
+        let name = format!("scan-{}.native", pkg.uid);
+        let entry = pkg.to_cache_entry().unwrap();
+        fs::write(directory.join(&name), &entry.bytes).unwrap();
+        expected.push((name, pkg.package_name, entry));
     }
     let original = run(boot.command().args([
         "shell", "/system/bin/app_process",
@@ -225,4 +222,109 @@ fn normalize_maps(pkg: &mut AndroidPackage) {
     for value in &mut pkg.instrumentations {
         component(&mut value.component);
     }
+}
+
+// Scan real original framework and rotated GSF code, without saved settings.
+fn native_scan_objects(dir: &std::path::Path) -> Vec<AndroidPackage> {
+    use aim_services::package::{
+        parse::Platform,
+        scan::{
+            AbiPolicy, FirstBootSystemInputs, Image, LibraryCompatibility,
+            NativeLibraryInstallPolicy, ScanClock, SystemImageScan, UserPolicy,
+        },
+        system_config::SystemConfig,
+        write::Apks,
+    };
+    let original = aim_paths::original_image();
+    let root = dir.join("scan-inputs");
+    let framework = root.join("system/framework");
+    let app = root.join("product/priv-app/GSF");
+    fs::create_dir_all(&framework).unwrap();
+    fs::create_dir_all(&app).unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system/framework/framework-res.apk"),
+        framework.join("framework-res.apk"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"),
+        app.join("GSF.apk"),
+    )
+    .unwrap();
+    let apks = Apks {
+        files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let config = SystemConfig::default();
+    let compatibility = LibraryCompatibility::new(&config, &|_| None, true).unwrap();
+    let abi = AbiPolicy {
+        all: vec!["arm64-v8a".into()],
+        bit32: vec![],
+        bit64: vec!["arm64-v8a".into()],
+        native32: vec![],
+        native64: vec!["arm64-v8a".into()],
+        force_multi_arch_match: false,
+    };
+    let next = std::cell::Cell::new(1_u8);
+    let domain = || {
+        let id = next.get();
+        next.set(id + 1);
+        Ok([id; 16])
+    };
+    let scan = SystemImageScan::first_boot(
+        Image::load(&apks, &[]).unwrap(),
+        &apks,
+        &config,
+        FirstBootSystemInputs {
+            apex_settings: &Default::default(),
+            first_api_level: 36,
+            vendor_sdk: 36,
+            abi_policy: &abi,
+            compatibility: &compatibility,
+            preferred_abi: "arm64-v8a",
+            app_lib32_install_dir: "/data/app-lib",
+            platform_runtime_64bit: true,
+            install: NativeLibraryInstallPolicy {
+                page_size: 4096,
+                extract: false,
+                debuggable: false,
+                compat_16kb_disabled: false,
+                manifest_compat_disabled: false,
+            },
+            clock: ScanClock {
+                current_time: 0,
+                user_id: 0,
+                update_time: false,
+            },
+            factory_test: false,
+            users: UserPolicy {
+                install_user: Some(0),
+                users: None,
+                allow_install: true,
+                instant_app: false,
+                virtual_preload: false,
+                stopped_system_app: false,
+            },
+            new_domain_id: &domain,
+        },
+    )
+    .unwrap();
+    assert!(scan.rejected.is_empty());
+    let objects: Vec<_> = scan
+        .packages
+        .into_iter()
+        .map(|p| {
+            let record = p.candidate.record;
+            assert_eq!(record.parsed.uid, record.settings.app_id);
+            assert!(
+                record.parsed.signing_details == Some(record.signing.parcel_details().unwrap())
+            );
+            record.parsed
+        })
+        .collect();
+    assert_eq!(
+        objects.iter().map(|p| p.uid).collect::<Vec<_>>(),
+        [1000, 10000]
+    );
+    objects
 }

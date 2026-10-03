@@ -8,6 +8,15 @@ public final class PackageRoundTripOracle {
         for (var file : files) {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
+            if (file.getName().startsWith("scan-")) {
+                int uid = Integer.parseInt(file.getName().substring(5, file.getName().indexOf('.')));
+                var signing = pkg.getSigningDetails();
+                if (pkg.getUid() != uid || signing.getSignatureSchemeVersion() != 3
+                    || signing.getSignatures().length != 1 || signing.getPublicKeys().size() != 1
+                    || (uid == 10000 && signing.getPastSigningCertificates().length != 2)) {
+                    throw new AssertionError("native scan UID/signing was not finalized: " + file.getName());
+                }
+            }
             if (file.getName().contains("-true.native") && (pkg.getUid() != 19001
                 || !"arm64-v8a".equals(pkg.getPrimaryCpuAbi())
                 || !"/data/app/fixture/lib".equals(pkg.getNativeLibraryRootDir())

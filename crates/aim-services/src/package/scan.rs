@@ -138,6 +138,11 @@ impl Inputs {
                 let signing = apks
                     .signing_details(&parsed)
                     .map_err(|e| fail("signatures", e))?;
+                parsed.signing_details = Some(
+                    signing
+                        .parcel_details()
+                        .map_err(|e| fail("signatures", e))?,
+                );
                 identity.apply(&mut parsed);
                 let records = if disabled {
                     &mut inputs.disabled

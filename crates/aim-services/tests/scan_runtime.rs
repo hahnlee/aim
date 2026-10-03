@@ -604,6 +604,8 @@ fn saved_scan_libraries_match_original_pms() {
         .chain(&resumed_data.recovered)
     {
         let record = &completed.candidate.record;
+        assert_eq!(record.parsed.uid, record.settings.app_id);
+        assert!(record.parsed.signing_details == Some(record.signing.parcel_details().unwrap()));
         assert_eq!(
             *resumed.loaded_packages()[&record.settings.name],
             record.parsed
@@ -611,6 +613,7 @@ fn saved_scan_libraries_match_original_pms() {
     }
     for factory in &resumed_packages.retained_data {
         let record = &factory.record;
+        assert!(record.parsed.signing_details == Some(record.signing.parcel_details().unwrap()));
         assert_eq!(
             *resumed.disabled_loaded_packages()[&record.settings.name],
             record.parsed

@@ -501,7 +501,9 @@ impl SigningScan {
                 .iter()
                 .any(|p| p.name == original.name),
         );
-        let mut parsed = code.parsed.clone();
+        let mut parsed = code
+            .collected_package()
+            .map_err(|e| reject("signatures", &e))?;
         identity.apply(&mut parsed);
         let mut record = Record {
             settings: setting.package,
@@ -614,7 +616,9 @@ impl SigningScan {
             internal_name: original.name.clone(),
             real_name: setting.package.real_name.clone(),
         };
-        let mut parsed = code.parsed.clone();
+        let mut parsed = code
+            .collected_package()
+            .map_err(|e| reject("signatures", &e))?;
         identity.apply(&mut parsed);
         let mut record = Record {
             settings: setting.package,
@@ -733,7 +737,9 @@ impl SigningScan {
                 });
             }
         }
-        let mut parsed = code.parsed.clone();
+        let mut parsed = code
+            .collected_package()
+            .map_err(|e| reject("signatures", &e))?;
         identity.apply(&mut parsed);
         let mut record = Record {
             settings: setting.package,

@@ -91,6 +91,16 @@ pub struct Code {
     pub signing: sign::SigningDetails,
 }
 
+impl Code {
+    /// collectCertificates sets the parsed package's collected SigningDetails
+    /// before scan reconciliation can merge the saved setting's lineage.
+    pub(super) fn collected_package(&self) -> Result<AndroidPackage, String> {
+        let mut parsed = self.parsed.clone();
+        parsed.signing_details = Some(self.signing.parcel_details()?);
+        Ok(parsed)
+    }
+}
+
 /// Invalid candidates remain visible to the owner. System code is preserved;
 /// the data scan owner removes invalid data code after inspecting failures.
 #[derive(Debug, PartialEq, Eq)]
@@ -396,6 +406,44 @@ fn stage(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collected_signing_replaces_parser_details_without_mutating_code() {
+        let mut code = Code {
+            location: Location {
+                path: "/product/app/p".into(),
+                partition: Partition::Product,
+                kind: Kind::App,
+                apex: None,
+            },
+            parsed: AndroidPackage {
+                uid: -1,
+                signing_details: Some(Default::default()),
+                ..Default::default()
+            },
+            signing: sign::SigningDetails {
+                signatures: vec![vec![3]],
+                scheme_version: 3,
+                public_keys: vec![],
+                past_signing_certificates: Some(vec![(vec![1], 15), (vec![3], 31)]),
+            },
+        };
+        let collected = code.collected_package().unwrap();
+        let details = collected.signing_details.unwrap();
+        assert_eq!(details.signatures, Some(vec![vec![3]]));
+        assert_eq!(
+            details.past_signing_certificates,
+            Some(vec![vec![1], vec![3]])
+        );
+        assert_eq!(details.scheme_version, 3);
+        assert_eq!(collected.uid, -1);
+        assert_eq!(code.parsed.signing_details, Some(Default::default()));
+
+        code.signing.public_keys.push(vec![0]);
+        let before = code.parsed.clone();
+        assert!(code.collected_package().is_err());
+        assert_eq!(code.parsed, before);
+    }
 
     #[test]
     fn partition_order_capabilities_and_apex_origin_are_preserved() {

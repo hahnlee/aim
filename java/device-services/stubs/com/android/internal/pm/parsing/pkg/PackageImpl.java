@@ -21,6 +21,7 @@ public abstract class PackageImpl implements ParsedPackage {
     public PackageImpl addImplicitPermission(String permission) { throw new RuntimeException("stub"); }
     public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
     public int getUid() { throw new RuntimeException("stub"); }
+    public android.content.pm.SigningDetails getSigningDetails() { throw new RuntimeException("stub"); }
     public String getPrimaryCpuAbi() { throw new RuntimeException("stub"); }
     public int getPageSizeAppCompatFlags() { throw new RuntimeException("stub"); }
     public String getNativeLibraryRootDir() { throw new RuntimeException("stub"); }

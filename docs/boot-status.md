@@ -119,29 +119,39 @@ factory refresh enters only after its metadata succeeds. Scan withdrawal drops
 active code while retaining saved UID/settings and disabled code; saved-setting
 removal rejects still-loaded objects. Disabled copies share the accepted active
 object, and stale/reenabled disabled settings retire that factory object. Old
-scan snapshots retain their objects through later changes. All 342 units pass
-(3.17s), and the original-image first-system-scan integration passes (43.41s),
+scan snapshots retain their objects through later changes. All 343 units pass
+(3.16s), and the original-image first-system-scan integration passes (42.94s),
 including exact completed-object contents, failed re-scan preservation and
 active/factory separation and rejection of a detached mutated completion object.
-The disposable original-PMS saved scan also passes (378.09s): all 243 active APK
-objects and three disabled factories equal their completed native scan records,
+The disposable original-PMS saved scan also passes (388.74s): all 243 active APK
+objects and three disabled factories equal their completed native scan records;
+active UID and collected signing fields and factory collected signing are checked,
 with distinct active/factory code paths and owned process/mount cleanup verified.
 This inventory is not yet a published query replica:
 permission/overlay/platform inputs and facade transport still require their
 owners (#798). Native AndroidPackage now writes the pinned PackageImpl cache
 format, preserving enriched metadata, pooled strings, nullable collections,
 component/process map keys, properties, keysets and SigningDetails (#723).
-A disposable original-PMS oracle passes (15.77s): all 285 cache entries from
-the current template and 285 enriched variants are read and written by original
-PackageImpl, with every decoded field compared. Only unordered map iteration
+A disposable original-PMS oracle passes (19.23s): all 285 cache entries from
+the current template, 285 enriched variants and two actual native first-system
+scan objects are read and written by original PackageImpl, with every decoded
+field compared. Only unordered map iteration
 is normalized; list/array order and values remain exact. Original getters also
 verify the supplied UID, ABI, native root and page flags. Variants carry an
 actual original saved signer and serialized public keys. Null certificate sets
 normalize to empty, with duplicate removal and Java hash ordering (#832).
 Unsupported pooled IntentFilter PersistableBundle values and unmodeled manifest
 query context reject explicitly; the parser/read models still need unification
-(#723). This proves serialization of supplied objects, not actual scan UID/signing
-finalization or facade callback delivery (#833). The new oracle checks image
+(#723). Verified certificate collection now populates parsed SigningDetails before
+identity/signing reconciliation; the collected package lineage stays distinct
+from the reconciled saved setting's lineage. Active scan completion sets the
+assigned appId as PackageImpl.uid after all metadata/keyset gates, before
+retaining the immutable object. Disabled factory scans keep collected signing
+without active UID finalization. Original Java getters verify actual first-scan
+UIDs 1000/10000, v3 signers/public keys and GSF's two-certificate history.
+Failed rescans retain prior objects/state; malformed serialized keys reject
+without mutating the raw input. Facade callback delivery and publication remain
+incomplete (#833). The new oracle checks image
 linkage before boot, and its owned processes and mount are cleaned on completion.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
