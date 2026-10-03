@@ -9,11 +9,16 @@ import android.os.ServiceManager;
 import com.android.server.LocalServices;
 import com.android.server.compat.PlatformCompat;
 import com.android.server.pm.parsing.library.PackageBackwardCompatibility;
+import com.android.server.pm.parsing.PackageCacher;
+import com.android.server.pm.parsing.pkg.AndroidPackageUtils;
+import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.permission.PermissionManagerServiceInternal;
 
 /** Original package-policy owners, available independently of late services. */
 public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     private static final long ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES = 142191088L;
+    private static final long SELINUX_LATEST_CHANGES = 143539591L;
+    private static final long SELINUX_R_CHANGES = 168782947L;
 
     /** Called by the C facade before native scanning, after PlatformCompat starts. */
     public static void attach() throws RemoteException {
@@ -36,6 +41,24 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     public boolean isTestBaseOnBootclasspath() {
         enforceSystemUid();
         return PackageBackwardCompatibility.bootClassPathContainsATB();
+    }
+
+    @Override
+    public int getSeInfoTargetSdkVersion(byte[] packageCache) {
+        enforceSystemUid();
+        if (packageCache == null) throw new IllegalArgumentException("missing parsed package");
+        AndroidPackage pkg = (AndroidPackage) PackageCacher.fromCacheEntryStatic(packageCache);
+        android.content.pm.ApplicationInfo appInfo = AndroidPackageUtils.generateAppInfoWithoutState(pkg);
+        PlatformCompat compat = (PlatformCompat) ServiceManager.getService(
+                Context.PLATFORM_COMPAT_SERVICE);
+        if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
+        if (compat.isChangeEnabledInternal(SELINUX_LATEST_CHANGES, appInfo)) {
+            return Math.max(android.os.Build.VERSION_CODES.CUR_DEVELOPMENT, pkg.getTargetSdkVersion());
+        }
+        if (compat.isChangeEnabledInternal(SELINUX_R_CHANGES, appInfo)) {
+            return Math.max(android.os.Build.VERSION_CODES.R, pkg.getTargetSdkVersion());
+        }
+        return pkg.getTargetSdkVersion();
     }
 
     @Override

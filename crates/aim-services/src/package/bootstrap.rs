@@ -15,7 +15,38 @@ pub struct Bridge {
     pub(crate) owner: Strong,
 }
 
+#[derive(Debug)]
+pub enum SeInfoError {
+    Code(String),
+    Transport(i32),
+    Owner(Exception),
+}
+
 impl Bridge {
+    /// SELinuxMMAC's non-shared decision uses the original ApplicationInfo
+    /// generated from parsed code, including flags rather than name/SDK alone.
+    /// A nonempty shared UID uses its own boot-fixed SDK instead (#838).
+    pub fn seinfo_target_sdk(
+        &self,
+        package: &super::pkg::AndroidPackage,
+    ) -> Result<i32, SeInfoError> {
+        let cache = package
+            .to_cache_entry()
+            .map_err(|error| SeInfoError::Code(format!("{error:?}")))?;
+        let mut data = Parcel::new();
+        bridge::GetSeInfoTargetSdkVersion {
+            package_cache: Some(cache.bytes),
+        }
+        .write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::GET_SE_INFO_TARGET_SDK_VERSION, &data, false)
+            .map_err(SeInfoError::Transport)?;
+        bridge::read_get_se_info_target_sdk_version_reply(&mut reply.reader())
+            .map_err(SeInfoError::Transport)?
+            .map_err(SeInfoError::Owner)
+    }
+
     pub(crate) fn new(owner: Strong) -> Result<Self, Exception> {
         // Binder's standard descriptor handshake, before retaining an endpoint.
         let reply = owner

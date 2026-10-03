@@ -6,4 +6,7 @@ public abstract class PlatformCompat extends com.android.internal.compat.IPlatfo
     public boolean isChangeEnabledInternal(long changeId, String packageName, int targetSdk) {
         throw new RuntimeException("stub");
     }
+    public boolean isChangeEnabledInternal(long changeId, android.content.pm.ApplicationInfo appInfo) {
+        throw new RuntimeException("stub");
+    }
 }

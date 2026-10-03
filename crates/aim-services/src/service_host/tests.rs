@@ -115,6 +115,14 @@ impl Service for Owner {
                 reply.write_i32(self.gid);
                 reply.write_i32(self.gid);
             }
+            bootstrap::GET_SE_INFO_TARGET_SDK_VERSION => {
+                let cache = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
+                let parsed = crate::package::pkg::AndroidPackage::read_cache_entry(&cache)
+                    .expect("original parsed package cache");
+                assert_eq!(parsed.package_name, "fixture.package");
+                assert_eq!(parsed.target_sdk_version, 29);
+                reply.write_i32(30);
+            }
             _ => return Err(UNKNOWN_TRANSACTION),
         }
         assert_eq!(call.data.remaining(), 0);
@@ -245,6 +253,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert!(!late.load(Ordering::SeqCst));
     let config = SystemConfig::default();
     let mut parsed = crate::package::pkg::AndroidPackage {
+        package_name: "fixture.package".into(),
         target_sdk_version: 36,
         uses_libraries: vec!["android.test.base".into()],
         ..Default::default()
@@ -274,8 +283,14 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         [3003, 3003, 3003, 3003]
     );
     assert_eq!(*owner.calls.lock().unwrap(), [1019001, 19001]);
+    parsed.target_sdk_version = 29;
+    assert_eq!(old.seinfo_target_sdk(&parsed).unwrap(), 30);
     assert!(old.permission_gids(19001, &[0, 0]).is_err());
     owner.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        old.seinfo_target_sdk(&parsed),
+        Err(crate::package::bootstrap::SeInfoError::Owner(_))
+    ));
     assert!(matches!(
         old.library_compatibility(&config, &|_| None),
         Err(crate::package::scan::PolicyBridgeError::Owner(_))

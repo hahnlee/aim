@@ -331,8 +331,18 @@ and reboot behavior (25.52s with the snapshot/usage oracles). The actual first
 system scan verifies every group's active-code minimum (42.66s), and
 device-services builds with the original API declarations (14.6s). Full boot
 orchestration must call finalization after data selection as well as system
-scanning; PlatformCompat inputs, label assignment and replica publication
-remain #838/#836/#798.
+scanning. The synchronous package bootstrap bridge now exposes non-shared
+seInfo target-SDK decisions as appended AIDL method 4. It reconstructs original
+parsed code from the native cache, generates original ApplicationInfo without
+state, and asks original PlatformCompat for latest/R changes in original order;
+shared UID callers retain their own boot-fixed SDK. The native client reports
+cache encoding, transport and original-owner failures separately. Its driver
+test verifies cache framing, the returned SDK and owner-denial propagation
+(0.03s); all 355 regular units pass (3.12s), all oracle references link (2.86s),
+and device-services passes production image API checking (13.8s). This new
+method has not been called by actual SystemServer bootstrap, nor compared with
+live original compatibility decisions. Bootstrap invocation, label assignment
+and replica publication remain #838/#836/#798.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest
