@@ -109,6 +109,61 @@ fn preferred_clearings_preserve_last_choices_persistent_filters_and_other_users(
 }
 
 #[test]
+fn all_user_preferred_cleanup_reports_committed_users_on_later_writer_conflict() {
+    let data = Data::new();
+    data.settings();
+    let input = b"<package-restrictions><preferred-activities><item name='removed/.Main' set='0'><filter/></item></preferred-activities></package-restrictions>";
+    let path = |user| {
+        data.0
+            .join(format!("system/users/{user}/package-restrictions.xml"))
+    };
+    for user in [0, 10, 20] {
+        fs::create_dir_all(path(user).parent().unwrap()).unwrap();
+        fs::write(path(user), input).unwrap();
+    }
+    let mut store = Store::open(&data.0, &[0, 10, 20]).unwrap().unwrap();
+    let mut external = aim_android_xml::read(input).unwrap();
+    external
+        .attrs
+        .push(("external".into(), Value::String("writer".into())));
+    fs::write(path(10), abx::write(&external).unwrap()).unwrap();
+    let error = store
+        .clear_all_package_preferred_activities(Some("removed"))
+        .unwrap_err();
+    assert_eq!(error.changed_users, [0]);
+    assert!(!error.error.committed);
+    let first = aim_android_xml::read(&fs::read(path(0)).unwrap()).unwrap();
+    assert!(!super::super::preferred::has_preferred_resolver(&first));
+    assert_eq!(
+        aim_android_xml::read(&fs::read(path(10)).unwrap()).unwrap(),
+        external
+    );
+    assert_eq!(fs::read(path(20)).unwrap(), input);
+    // Retry continues after the successful user; no stale changed-user flags.
+    fs::write(path(10), input).unwrap();
+    assert_eq!(
+        store
+            .clear_all_package_preferred_activities(Some("removed"))
+            .unwrap(),
+        [10, 20]
+    );
+    assert!(
+        store
+            .clear_all_package_preferred_activities(Some("removed"))
+            .unwrap()
+            .is_empty()
+    );
+    // In-process empty resolvers remain known, but reopening empty XML does not
+    // create a resolver, exactly as original Settings.readPreferredActivities.
+    assert_eq!(
+        store.preferred_users.iter().copied().collect::<Vec<_>>(),
+        [0, 10, 20]
+    );
+    let reopened = Store::open(&data.0, &[0, 10, 20]).unwrap().unwrap();
+    assert!(reopened.preferred_users.is_empty());
+}
+
+#[test]
 fn update_owner_clearings_preserve_other_records_and_reject_unrelated_writes() {
     let data = Data::new();
     let restrictions = data.settings();

@@ -102,6 +102,14 @@ fn preferred_activity(item: &Element) -> Option<PreferredActivity> {
     })
 }
 
+/// Reading a valid preferred activity creates a resolver, even if it is later
+/// emptied. Empty or invalid-only documents do not create one.
+pub(crate) fn has_preferred_resolver(root: &Element) -> bool {
+    items(root, "preferred-activities")
+        .into_iter()
+        .any(|item| preferred_activity(item).is_some())
+}
+
 /// Settings.clearPackagePreferredActivities for one user's saved resolver.
 /// A named package clears only always choices; null clears every choice.
 /// Persistent choices, candidate sets and unrelated XML remain untouched.

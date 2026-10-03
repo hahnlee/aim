@@ -9,7 +9,7 @@
 //! Native inode metadata replaces Linux chmod/chown on Darwin; fs-verity
 //! is not available on APFS.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -57,6 +57,22 @@ impl WriteError {
     }
 }
 
+/// Users whose preferred state already changed before a persistence failure.
+/// These users still require home/query publication and change notifications.
+#[derive(Debug)]
+pub struct PreferredClearError {
+    pub changed_users: Vec<u32>,
+    pub error: WriteError,
+}
+
+impl fmt::Display for PreferredClearError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for PreferredClearError {}
+
 /// The persisted state and its complete restriction documents. Access
 /// checks and broadcasts belong to the service using the owner.
 pub struct Store {
@@ -64,6 +80,7 @@ pub struct Store {
     state: State,
     restrictions: BTreeMap<u32, Element>,
     settings_document: Element,
+    preferred_users: BTreeSet<u32>,
 }
 
 impl Store {
@@ -91,11 +108,18 @@ impl Store {
             .unwrap_or_else(|| element("package-restrictions"));
             restrictions.insert(user, document);
         }
+        let preferred_users = restrictions
+            .iter()
+            .filter_map(|(&user, root)| {
+                super::preferred::has_preferred_resolver(root).then_some(user)
+            })
+            .collect();
         Ok(Some(Self {
             data: data.to_owned(),
             state,
             restrictions,
             settings_document,
+            preferred_users,
         }))
     }
 
@@ -104,7 +128,7 @@ impl Store {
     }
 
     /// Clear one user's preferred activities under the original Settings rules
-    /// (#822). The caller owns the all-user iteration, home update and broadcast.
+    /// (#822). The caller owns the home update and broadcast.
     /// An error with committed=true requires publication even on reserve failure.
     pub fn clear_package_preferred_activities(
         &mut self,
@@ -130,6 +154,40 @@ impl Store {
             self.restrictions.insert(user, root);
         }
         result.map(|()| true)
+    }
+
+    /// USER_ALL preferred cleanup, in SparseArray's ascending user order.
+    /// The pinned Settings method retains its removal list across resolvers:
+    /// after the first removal, later existing resolvers are reported changed
+    /// even if no choice was removed there. Home updates/broadcasts use this
+    /// exact user inventory; they remain the service owner's responsibility.
+    pub fn clear_all_package_preferred_activities(
+        &mut self,
+        package: Option<&str>,
+    ) -> Result<Vec<u32>, PreferredClearError> {
+        let users: Vec<_> = self.preferred_users.iter().copied().collect();
+        let mut changed_users = Vec::new();
+        let mut removed = false;
+        for user in users {
+            match self.clear_package_preferred_activities(user, package) {
+                Ok(changed) => {
+                    removed |= changed;
+                    if removed {
+                        changed_users.push(user);
+                    }
+                }
+                Err(error) => {
+                    if error.committed {
+                        changed_users.push(user);
+                    }
+                    return Err(PreferredClearError {
+                        changed_users,
+                        error,
+                    });
+                }
+            }
+        }
+        Ok(changed_users)
     }
 
     /// Persist an owner-authorized signing scan. This changes signature

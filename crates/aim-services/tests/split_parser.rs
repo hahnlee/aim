@@ -1254,9 +1254,42 @@ fn manifest_keysets_match_original_parser() {
         names.sort();
         writeln!(&mut expected, "{changed} {}", names.join(",")).unwrap();
     }
+    let kept = b"<package-restrictions><preferred-activities><item name='kept/.Main' always='true' set='0'><filter><action name='kept'/></filter></item></preferred-activities></package-restrictions>";
+    let empty = b"<package-restrictions><preferred-activities/></package-restrictions>";
+    fs::write(guest.join("preferred-kept.xml"), kept).unwrap();
+    fs::write(guest.join("preferred-empty.xml"), empty).unwrap();
+    for (user, contents) in [
+        (0, kept.as_slice()),
+        (10, input.as_slice()),
+        (20, kept.as_slice()),
+        (30, empty.as_slice()),
+    ] {
+        let path = native_data.join(format!("system/users/{user}/package-restrictions.xml"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let mut store = aim_services::package::owner::Store::open(&native_data, &[0, 10, 20, 30])
+        .unwrap()
+        .unwrap();
+    for package in [Some("removed"), Some("removed"), None, None] {
+        let users = store
+            .clear_all_package_preferred_activities(package)
+            .unwrap();
+        writeln!(
+            &mut expected,
+            "all {}",
+            users
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+    }
     let original = String::from_utf8(run(boot.command().args([
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.PreferredClearingOracle", "/data/local/tmp/manifest-keysets/preferred.xml",
+        "/data/local/tmp/manifest-keysets/preferred-kept.xml", "/data/local/tmp/manifest-keysets/preferred-empty.xml",
     ])).stdout).unwrap();
     assert_eq!(original, expected);
     use aim_services::package::{
