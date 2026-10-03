@@ -26,7 +26,19 @@ public final class UpdateOwnershipResourceOracle {
             for (int i = 1; i < args.length; i++) {
                 String path = args[i];
                 var file = new java.io.File(path);
+                if (file.isDirectory()) {
+                    var configuration = new android.content.res.Configuration();
+                    configuration.seq = 1;
+                    configuration.setLocale(java.util.Locale.ENGLISH);
+                    if (!android.app.ResourcesManager.getInstance().applyConfigurationToResources(configuration, null))
+                        throw new IllegalStateException("resource locale change was rejected");
+                }
                 var pkg = (PackageImpl) parser.parsePackage(file, 0, false);
+                var appInfo = com.android.server.pm.parsing.pkg.AndroidPackageUtils.generateAppInfoWithoutState(pkg);
+                if (appInfo.resourceDirs != null || appInfo.overlayPaths != null || appInfo.sharedLibraryFiles != null)
+                    throw new IllegalStateException("without-state resources contain app-state assets");
+                if (file.isDirectory() && (appInfo.splitSourceDirs == null || appInfo.splitSourceDirs.length != 2))
+                    throw new IllegalStateException("without-state resources lost a split");
                 var setting = new PackageSetting(pkg.getPackageName(), null, file, 1, 0,
                         java.util.UUID.randomUUID()).setPkg(pkg);
                 var contents = owner.readUpdateOwnerDenyList(setting);

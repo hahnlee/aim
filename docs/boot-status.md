@@ -369,9 +369,20 @@ SystemConfig reader (15.04s); its added compile-only API passes image linkage
 targets' saved update owners unless SystemConfig names an owner; disabled factory
 records and unrelated install-source fields stay intact. Failed resource reads
 preserve the pending provider and settings, and unqueued completions are rejected.
-All 322 service units pass (3.03s). This reader takes the caller's complete asset
-inventory; supplying the boot's base/split/shared-library/overlay inputs,
-executing pending reads at the original asynchronous commit phase and publishing
+All 322 service units pass (3.05s). Queued providers now resolve their manifest
+property directly through guest-owned base/all split APK files and the framework's
+system assets. The original uses PackageImpl.toAppInfoWithoutState: app-state
+resourceDirs, overlayPaths and sharedLibraryFiles are null on this path. The
+native reader likewise does not import those state-derived inputs. It uses the
+boot owner's full ResourcesManager resource configuration; resource-less splits
+must still be readable ZIP archives and do not shift the chosen XML asset source.
+The compiled split/config/code-only cluster matches the actual original helper
+after an explicit original ResourcesManager language update (17.42s). A direct
+original generateAppInfoWithoutState call also verifies null app-state assets
+and both parsed split resource paths. Missing
+APK sources, corrupt code-only splits and null split paths preserve pending
+providers and settings. The new compile-only APIs pass image linkage (15.1s).
+Executing pending reads at the original asynchronous commit phase and publishing
 the changed records remain #825. This in-memory component is separate from InstallSource.update_owner
 and is not a complete removal commit. Store.commit_removed_boot_metadata writes just the completed
 domain/keyset stage as resilient ABX, retaining UID/users, unrelated XML and

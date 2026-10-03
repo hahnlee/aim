@@ -119,14 +119,21 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     let manifest = data.0.join("manifest.xml");
     let framework_path = aim_paths::derived_image().join("system/framework/framework-res.apk");
     let mut apks = Vec::new();
-    for name in ["mixed", "alias", "long"] {
+    let cluster = data.0.join("split-cluster");
+    fs::create_dir(&cluster).unwrap();
+    for name in ["mixed", "alias", "long", "denylist"] {
         fs::write(&manifest, format!(r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
             package="org.example.denylist"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/>
             <uses-permission android:name="android.permission.INSTALL_PACKAGES"/>
             <application android:hasCode="false"><property android:name="android.app.PROPERTY_LEGACY_UPDATE_OWNERSHIP_DENYLIST"
             android:resource="@xml/{name}"/></application></manifest>"#)).unwrap();
-        let apk_path = data.0.join(format!("{name}.apk"));
-        let result = Command::new(&aapt)
+        let apk_path = if name == "denylist" {
+            cluster.join("base.apk")
+        } else {
+            data.0.join(format!("{name}.apk"))
+        };
+        let mut command = Command::new(&aapt);
+        command
             .arg("link")
             .arg("--manifest")
             .arg(&manifest)
@@ -134,16 +141,30 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
             .arg(&framework_path)
             .arg("-o")
             .arg(&apk_path)
-            .arg(&compiled)
-            .output()
-            .expect("pinned aapt2");
+            .arg(&compiled);
+        if name == "denylist" {
+            command
+                .arg("--split")
+                .arg(format!("{}:en", cluster.join("config.en.apk").display()));
+        }
+        let result = command.output().expect("pinned aapt2");
         assert!(
             result.status.success(),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        apks.push(apk_path);
+        apks.push(if name == "denylist" {
+            cluster.clone()
+        } else {
+            apk_path
+        });
     }
+    link(
+        &cluster,
+        "config.code",
+        r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+        package="org.example.denylist" split="config.code"><application android:hasCode="false"/></manifest>"#,
+    );
     let apk = aim_apps::apk::Apk::open(&apks[0]).unwrap();
     let framework = aim_apps::apk::Apk::open(&framework_path).unwrap();
     let table = Table::parse(&apk.file("resources.arsc").unwrap()).unwrap();
@@ -249,6 +270,108 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
             .is_err()
     );
     assert_eq!((owner, settings), before);
+    // Drive the guest path reader with a parsed split cluster, including a
+    // code-only APK whose absent table must not shift the XML source cookie.
+    use aim_services::package::write::Apks;
+    let cluster_root = cluster.clone();
+    let image_root = aim_paths::derived_image();
+    let apks_reader = Apks {
+        files: Box::new(move |path| {
+            if path == "/data/app/provider" {
+                return Some(cluster_root.clone());
+            }
+            if let Some(name) = path.strip_prefix("/data/app/provider/") {
+                return Some(cluster_root.join(name));
+            }
+            Some(image_root.join(path.trim_start_matches('/')))
+        }),
+        platform: Platform::load(&aim_paths::derived_image(), Default::default()).unwrap(),
+    };
+    let parsed = apks_reader.parsed_path("/data/app/provider", 0).unwrap();
+    let provider = Package {
+        name: parsed.package_name.clone(),
+        flags: FLAG_SYSTEM,
+        ..Package::default()
+    };
+    let mut owner = UpdateOwnership::default();
+    owner.queue(&provider, &parsed);
+    let mut settings = Settings {
+        packages: vec![provider],
+        ..Settings::default()
+    };
+    let mut bad_reader = Apks {
+        files: Box::new(|_| None),
+        platform: Platform::load(&aim_paths::derived_image(), Default::default()).unwrap(),
+    };
+    let before = (owner.clone(), settings.clone());
+    assert!(
+        owner
+            .complete_apk_read(
+                &parsed,
+                &mut settings,
+                &config,
+                &bad_reader,
+                Config::default()
+            )
+            .is_err()
+    );
+    assert_eq!((owner.clone(), settings.clone()), before);
+    let corrupt = data.0.join("corrupt-split.apk");
+    fs::write(&corrupt, b"not a ZIP archive").unwrap();
+    let cluster_root = cluster.clone();
+    bad_reader.files = Box::new(move |path| {
+        if path.ends_with("/config.code.apk") {
+            Some(corrupt.clone())
+        } else {
+            path.strip_prefix("/data/app/provider/")
+                .map(|name| cluster_root.join(name))
+        }
+    });
+    assert!(
+        owner
+            .complete_apk_read(
+                &parsed,
+                &mut settings,
+                &config,
+                &bad_reader,
+                Config::default()
+            )
+            .is_err()
+    );
+    assert_eq!((owner.clone(), settings.clone()), before);
+    let mut null_split = parsed.clone();
+    null_split.split_code_paths = Some(vec![None]);
+    assert!(
+        owner
+            .complete_apk_read(
+                &null_split,
+                &mut settings,
+                &config,
+                &apks_reader,
+                Config::default()
+            )
+            .is_err()
+    );
+    assert_eq!((owner.clone(), settings.clone()), before);
+    let resource_config = Config {
+        language: *b"en",
+        sdk_version: apks_reader.platform.sdk as u16,
+        ..Config::default()
+    };
+    assert!(
+        owner
+            .complete_apk_read(
+                &parsed,
+                &mut settings,
+                &config,
+                &apks_reader,
+                resource_config
+            )
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(owner.is_denylisted("english"), Ok(true));
+    assert_eq!(owner.is_denylisted("one"), Ok(false));
     resources.config.language = *b"en";
     assert_eq!(read_denylist(&resources, id, file).unwrap(), ["english"]);
     assert!(read_denylist(&resources, 0, file).is_err());
@@ -376,9 +499,18 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
         }
     }
     native.push('\n');
-    for (apk, contents) in apks.iter().zip([&expected, &expected, &list]) {
+    let english = vec!["english".to_owned()];
+    for (apk, contents) in apks.iter().zip([&expected, &expected, &list, &english]) {
         let name = apk.file_name().unwrap().to_str().unwrap();
-        fs::copy(apk, guest.join(name)).unwrap();
+        if apk.is_dir() {
+            fs::create_dir(guest.join(name)).unwrap();
+            for entry in fs::read_dir(apk).unwrap() {
+                let entry = entry.unwrap();
+                fs::copy(entry.path(), guest.join(name).join(entry.file_name())).unwrap();
+            }
+        } else {
+            fs::copy(apk, guest.join(name)).unwrap();
+        }
         command.arg(format!("/data/local/tmp/update-ownership/{name}"));
         write!(&mut native, "{name}").unwrap();
         for name in contents {

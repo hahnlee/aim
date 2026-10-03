@@ -7,4 +7,9 @@ public class ApplicationInfo extends PackageItemInfo {
     public boolean enabled;
     public int targetSdkVersion;
     public int uid;
+    public String sourceDir;
+    public String[] splitSourceDirs;
+    public String[] resourceDirs;
+    public String[] overlayPaths;
+    public String[] sharedLibraryFiles;
 }

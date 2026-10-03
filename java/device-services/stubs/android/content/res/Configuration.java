@@ -8,8 +8,10 @@ public final class Configuration {
 
     public int uiMode;
     public int densityDpi;
+    public int seq;
     public final android.app.WindowConfiguration windowConfiguration = null;
 
     public Configuration() { throw new RuntimeException("stub"); }
     public void setToDefaults() { throw new RuntimeException("stub"); }
+    public void setLocale(java.util.Locale locale) { throw new RuntimeException("stub"); }
 }
