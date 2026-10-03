@@ -19,6 +19,7 @@ public class PackageSetting extends SettingBase {
     public PackageSetting(String name, String realName, java.io.File path, int flags, int privateFlags, java.util.UUID domainSetId) {
         super(flags, privateFlags);
     }
+    public android.content.pm.SigningDetails getSigningDetails() { throw new RuntimeException("stub"); }
     public PackageSetting setSigningDetails(android.content.pm.SigningDetails details) {
         throw new RuntimeException("stub");
     }

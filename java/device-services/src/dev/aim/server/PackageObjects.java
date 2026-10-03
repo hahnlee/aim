@@ -23,6 +23,18 @@ public final class PackageObjects {
         return pkg;
     }
 
+    public static void restoreSavedSigning(com.android.server.pm.PackageSetting setting,
+            PackageSigningState state, long version, boolean factory) {
+        if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())
+                || state.getAppId() != setting.getAppId() || state.isDisabled() != factory
+                || (state.getSharedGroupName() != null) != setting.hasSharedUser()
+                || (setting.hasSharedUser() && ((com.android.server.pm.pkg.PackageState)setting)
+                        .getSharedUserAppId() != state.getAppId())) {
+            throw new IllegalArgumentException("saved signing capture mismatch");
+        }
+        setting.setSigningDetails(state.getPackageSigningDetails());
+    }
+
     public static void restoreUsage(com.android.server.pm.PackageSetting setting,
             PackageUsageState usage, long version) {
         if (usage.getVersion() != version || !usage.getPackageName().equals(setting.getPackageName())) {

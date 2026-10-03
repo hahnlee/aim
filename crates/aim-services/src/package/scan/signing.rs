@@ -1460,6 +1460,46 @@ mod tests {
         assert!(remote.transact(api::CLOSE, &trailing, false).is_err());
         assert!(remote.transact(0x7777, &request(), false).is_err());
         assert!(old.upgrade().is_some());
+        for (name, disabled, present) in [
+            (Some("fixture"), false, true),
+            (Some("fixture"), true, false),
+            (Some("missing"), false, false),
+        ] {
+            let mut p = request();
+            p.write_string16(name);
+            p.write_bool(disabled);
+            let reply = remote.transact(api::GET_SIGNING_STATE, &p, false).unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let bytes = aim_service_aidl::read_byte_array(&mut r).unwrap();
+            assert_eq!(r.remaining(), 0);
+            assert_eq!(bytes.is_some(), present);
+            if let Some(bytes) = bytes {
+                let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+                assert_eq!(r.read_i64().unwrap(), 1);
+                assert_eq!(r.read_string16().unwrap().as_deref(), name);
+                assert_eq!(r.read_i32().unwrap(), 10100);
+                assert!(!r.read_bool().unwrap());
+                assert!(r.read_string16().unwrap().is_none());
+                // Saved UNKNOWN is not substituted with the collected code's signer.
+                assert!(!r.read_bool().unwrap());
+                assert!(!r.read_bool().unwrap());
+                assert_eq!(r.remaining(), 0);
+            }
+        }
+        let mut p = request();
+        p.write_string16(None);
+        p.write_bool(false);
+        let reply = remote.transact(api::GET_SIGNING_STATE, &p, false).unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -3
+        );
+        let mut p = request();
+        p.write_string16(Some("fixture"));
+        p.write_bool(false);
+        p.write_i32(1);
+        assert!(remote.transact(api::GET_SIGNING_STATE, &p, false).is_err());
         for (name, expected) in [
             (Some("fixture"), Some("default:targetSdkVersion=30")),
             (Some("missing"), None),

@@ -45,6 +45,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageSigningState.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageSeInfoState.java"),
         )
         .arg(
@@ -195,6 +199,90 @@ fn native_package_parcels_match_original_read_write() {
         let mut parcel = aim_binder_host::parcel::Parcel::new();
         aim_service_aidl::WriteParcelable::write_to(&code, &mut parcel);
         fs::write(directory.join(format!("{name}.snapshot")), parcel.data()).unwrap();
+        let saved_signing =
+            aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
+                &snapshot,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        let mut signing_parcel = aim_binder_host::parcel::Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&saved_signing, &mut signing_parcel);
+        fs::write(
+            directory.join(format!("{name}.saved-signing")),
+            signing_parcel.data(),
+        )
+        .unwrap();
+        let signing_store = aim_services::package::scan_snapshot::Store::new(
+            snapshot.owner().clone(),
+            snapshot.usage().clone(),
+        )
+        .unwrap();
+        let signing_base = signing_store.capture();
+        let mut changed_signing = snapshot.owner().clone();
+        let setting = changed_signing
+            .settings
+            .packages
+            .iter_mut()
+            .find(|setting| setting.name == pkg.package_name)
+            .unwrap();
+        if let Some(past) = setting
+            .signatures
+            .as_mut()
+            .and_then(|s| s.past_signatures.as_mut())
+        {
+            if let Some((_, flags)) = past.first_mut() {
+                *flags &= !1;
+            }
+        }
+        if setting.shared_user {
+            let aim_services::package::owner::app_ids::Owner::SharedUser(group_name) =
+                changed_signing.identities.ids.get(setting.app_id).unwrap()
+            else {
+                panic!("shared owner")
+            };
+            let group = changed_signing
+                .identities
+                .shared_users
+                .get_mut(group_name)
+                .unwrap();
+            if let Some(past) = group
+                .signatures
+                .as_mut()
+                .and_then(|s| s.past_signatures.as_mut())
+            {
+                if let Some((_, flags)) = past.first_mut() {
+                    *flags &= !4;
+                }
+            }
+            if let Some(saved) = changed_signing
+                .settings
+                .shared_users
+                .iter_mut()
+                .find(|g| &g.name == group_name)
+            {
+                saved.signatures = group.signatures.clone();
+            }
+        }
+        let changed = signing_store
+            .publish(&signing_base, changed_signing, snapshot.usage().clone())
+            .unwrap();
+        let changed_state =
+            aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
+                &changed,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        let mut changed_parcel = aim_binder_host::parcel::Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&changed_state, &mut changed_parcel);
+        fs::write(
+            directory.join(format!("{name}.saved-signing.changed")),
+            changed_parcel.data(),
+        )
+        .unwrap();
         let usage = aim_services::package::scan_snapshot::endpoint::PackageUsage::captured(
             &snapshot,
             &pkg.package_name,

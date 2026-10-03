@@ -262,8 +262,33 @@ all 243 active packages and three disabled factories, with owned process/mount
 cleanup. All oracle DEX
 linkage passes (2.92s), and device-services builds against original APIs (13.7s).
 This verifies retained-code reconstruction, not callback delivery. Native query
-replica publication and collected/saved/group owner transports into actual
-permission callbacks remain unimplemented (#837/#833/#836).
+replica publication and actual permission callbacks remain unimplemented
+(#837/#833/#836). The private captured lease now adds method 8 for saved package
+and shared-UID signing, separate from the collected PackageCode envelope. It
+reads the captured active/disabled setting and actual shared UID owner, retaining
+scheme, all current certificates and nullable historical certificates with exact
+capability flags. Unknown saved signing remains original UNKNOWN, not a collected
+code fallback. Native certificate/public-key reconstruction failures are explicit.
+Java PackageSigningState is immutable and reconstructs detached original
+SigningDetails through the checked original constructor, including its derived
+public-key set. Lease reads validate version/name/active-or-factory scope and
+certificates before caching; rejected and remote-failed reads can retry. Saved
+setting restoration verifies version/name/UID/shared UID/scope before changing
+its signing. This restoration never overwrites PackageImpl's collected signing.
+All 358 regular units pass (3.11s), including native method-8 unknown/absent/null/
+trailing framing and old captured version retention. The explicitly run original
+runtime oracle passes (15.68s): all 288 cache entries and enriched variants plus
+two native scan objects (578 parcels), with exact native/Java saved-signing bytes,
+generated Proxy/Stub framing, original public-key reconstruction, unknown handling,
+invalid-certificate retry, closed leases, and rejected restore isolation. Controlled
+native versions change GSF's saved package historical capability from 21 to 20
+and its shared UID to 17 while retaining the older 21 and unchanged collected
+code. Original checkCapability verifies the independent grant/denial; mutation of
+returned original Signature arrays does not mutate the DTO. All oracle references
+link (3.20s); device-services image API checking passes (13.7s). Owned runtime
+process/mount cleanup completes. These native and original-Java transport tests
+remain separate; full PackageState/SharedUserApi construction, bootstrap export,
+permission callbacks and native PMS activation are still incomplete.
 Native scan_snapshot::Store now captures the whole SigningScan owner in a
 versioned Arc, retaining settings, UID/group signing, keysets, libraries,
 scanned user state and active/disabled code together. Capture validates duplicate

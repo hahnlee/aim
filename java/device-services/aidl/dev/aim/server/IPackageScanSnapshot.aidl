@@ -11,4 +11,6 @@ interface IPackageScanSnapshot {
     byte[] getUsage(String packageName);
     /** Captured active seInfo base/override fields; unfinished phase is an error. */
     byte[] getSeInfo(String packageName);
+    /** Saved package and shared-UID signing owners; collected code remains separate. */
+    byte[] getSigningState(String packageName, boolean disabled);
 }

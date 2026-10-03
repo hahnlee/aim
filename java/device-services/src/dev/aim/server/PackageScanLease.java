@@ -16,6 +16,8 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageCode> disabled = new HashMap<>();
     private final Map<String, PackageUsageState> usage = new HashMap<>();
     private final Map<String, PackageSeInfoState> seinfo = new HashMap<>();
+    private final Map<String, PackageSigningState> signing = new HashMap<>();
+    private final Map<String, PackageSigningState> factorySigning = new HashMap<>();
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
@@ -96,6 +98,33 @@ public final class PackageScanLease implements AutoCloseable {
         disabled.clear();
         usage.clear();
         seinfo.clear();
+        signing.clear();
+        factorySigning.clear();
+    }
+
+    public synchronized PackageSigningState getSigningState(String name, boolean factory)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(name);
+        Map<String, PackageSigningState> cache = factory ? factorySigning : signing;
+        if (cache.containsKey(name)) return cache.get(name);
+        byte[] bytes = endpoint.getSigningState(name, factory);
+        if (bytes == null) { cache.put(name, null); return null; }
+        Parcel parcel = Parcel.obtain();
+        try {
+            parcel.unmarshall(bytes, 0, bytes.length);
+            parcel.setDataPosition(0);
+            PackageSigningState state = PackageSigningState.CREATOR.createFromParcel(parcel);
+            if (parcel.dataAvail() != 0 || state.getVersion() != version
+                    || !state.getPackageName().equals(name) || state.isDisabled() != factory) {
+                throw new IOException("package signing capture mismatch");
+            }
+            // Reject invalid certificates before they can become a cached replica input.
+            state.getPackageSigningDetails();
+            state.getSharedSigningDetails();
+            cache.put(name, state);
+            return state;
+        } finally { parcel.recycle(); }
     }
 
     public synchronized PackageSeInfoState getSeInfo(String name) throws RemoteException, IOException {

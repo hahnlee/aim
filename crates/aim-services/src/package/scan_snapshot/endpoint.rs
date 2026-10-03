@@ -87,6 +87,103 @@ impl WriteParcelable for PackageUsage {
     }
 }
 
+pub struct PackageSigningState {
+    version: u64,
+    name: String,
+    app_id: i32,
+    disabled: bool,
+    shared_group: Option<String>,
+    package: Option<crate::package::sign::SigningDetails>,
+    shared: Option<crate::package::sign::SigningDetails>,
+}
+
+impl PackageSigningState {
+    pub fn captured(
+        snapshot: &Snapshot,
+        name: &str,
+        disabled: bool,
+    ) -> Result<Option<Self>, String> {
+        use crate::package::{owner::app_ids::Owner, sign::SigningDetails};
+        let owner = snapshot.owner();
+        let settings = if disabled {
+            &owner.settings.disabled_system_packages
+        } else {
+            &owner.settings.packages
+        };
+        let Some(setting) = settings.iter().find(|setting| setting.name == name) else {
+            return Ok(None);
+        };
+        let (shared_group, shared) = if setting.shared_user {
+            let Some(Owner::SharedUser(group_name)) = owner.identities.ids.get(setting.app_id)
+            else {
+                return Err("signing shared UID owner differs".into());
+            };
+            let group = owner
+                .identities
+                .shared_users
+                .get(group_name)
+                .filter(|group| group.app_id == setting.app_id)
+                .ok_or("signing shared UID group is missing")?;
+            (
+                Some(group_name.clone()),
+                group
+                    .signatures
+                    .as_ref()
+                    .map(SigningDetails::from_saved)
+                    .transpose()?,
+            )
+        } else {
+            (None, None)
+        };
+        Ok(Some(Self {
+            version: snapshot.version(),
+            name: name.into(),
+            app_id: setting.app_id,
+            disabled,
+            shared_group,
+            package: setting
+                .signatures
+                .as_ref()
+                .map(SigningDetails::from_saved)
+                .transpose()?,
+            shared,
+        }))
+    }
+}
+
+fn write_signing(p: &mut Parcel, signing: Option<&crate::package::sign::SigningDetails>) {
+    p.write_bool(signing.is_some());
+    if let Some(signing) = signing {
+        p.write_i32(signing.scheme_version);
+        p.write_i32(signing.signatures.len() as i32);
+        for certificate in &signing.signatures {
+            write_byte_array(p, Some(certificate));
+        }
+        match &signing.past_signing_certificates {
+            None => p.write_i32(-1),
+            Some(past) => {
+                p.write_i32(past.len() as i32);
+                for (certificate, flags) in past {
+                    write_byte_array(p, Some(certificate));
+                    p.write_i32(*flags);
+                }
+            }
+        }
+    }
+}
+
+impl WriteParcelable for PackageSigningState {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(self.version as i64);
+        p.write_string16(Some(&self.name));
+        p.write_i32(self.app_id);
+        p.write_bool(self.disabled);
+        p.write_string16(self.shared_group.as_deref());
+        write_signing(p, self.package.as_ref());
+        write_signing(p, self.shared.as_ref());
+    }
+}
+
 pub const MAX_CHUNK: usize = 64 * 1024;
 
 pub struct PackageSeInfo {
@@ -211,6 +308,32 @@ impl Service for Endpoint {
             return Ok(reply);
         };
         match call.code {
+            api::GET_SIGNING_STATE => {
+                let args = api::GetSigningState::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                match args.package_name.as_deref() {
+                    None => {
+                        reply.write_exception(&Exception::illegal_argument("package name is null"))
+                    }
+                    Some(name) => {
+                        match PackageSigningState::captured(&snapshot, name, args.disabled) {
+                            Err(error) => {
+                                reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, error))
+                            }
+                            Ok(state) => {
+                                let bytes = state.map(|state| {
+                                    let mut parcel = Parcel::new();
+                                    state.write_to(&mut parcel);
+                                    parcel.data().to_vec()
+                                });
+                                api::write_get_signing_state_reply(&mut reply, &bytes);
+                            }
+                        }
+                    }
+                }
+            }
             api::GET_SE_INFO => {
                 let args = api::GetSeInfo::read(&mut call.data)?;
                 if call.data.remaining() != 0 {

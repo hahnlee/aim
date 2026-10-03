@@ -115,8 +115,9 @@ public final class PackageRoundTripOracle {
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
         byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
         byte[] seinfoBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".boot-seinfo").toPath());
-        var owner = new PageOwner(name, bytes, usageBytes, seinfoBytes);
-        var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes);
+        byte[] signingBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".saved-signing").toPath());
+        var owner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+        var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
@@ -127,6 +128,10 @@ public final class PackageRoundTripOracle {
             try {
                 bad.getUsage(name);
                 throw new AssertionError("wrong usage version accepted");
+            } catch (java.io.IOException expected) {}
+            try {
+                bad.getSigningState(name, false);
+                throw new AssertionError("wrong signing version accepted");
             } catch (java.io.IOException expected) {}
             try {
                 bad.getSeInfo(name);
@@ -205,6 +210,112 @@ public final class PackageRoundTripOracle {
         usage.getLastPackageUsageTimeInMills()[0] = 99;
         var setting = new com.android.server.pm.PackageSetting(name, null,
                 new java.io.File("/data/app/fixture"), 0, 0, new java.util.UUID(1, 1));
+        setting.setAppId(uid);
+        owner.fail = true;
+        try { lease.getSigningState(name, false); throw new AssertionError("signing owner failure swallowed"); }
+        catch (android.os.RemoteException expected) {}
+        owner.fail = false;
+        owner.signingTail = true;
+        try { lease.getSigningState(name, false); throw new AssertionError("signing trailing bytes accepted"); }
+        catch (java.io.IOException expected) {}
+        owner.signingTail = false;
+        try { lease.getSigningState("alias", false); throw new AssertionError("signing name mismatch accepted"); }
+        catch (java.io.IOException expected) {}
+        try { lease.getSigningState(name, true); throw new AssertionError("signing scope mismatch accepted"); }
+        catch (java.io.IOException expected) {}
+        var malformedSigning = android.os.Parcel.obtain();
+        try {
+            malformedSigning.writeLong(1); malformedSigning.writeString(name); malformedSigning.writeInt(uid);
+            malformedSigning.writeBoolean(false); malformedSigning.writeString(null);
+            malformedSigning.writeBoolean(true); malformedSigning.writeInt(3); malformedSigning.writeInt(1);
+            malformedSigning.writeByteArray(new byte[]{3}); malformedSigning.writeInt(-1);
+            malformedSigning.writeBoolean(false);
+            owner.signingOverride = malformedSigning.marshall();
+        } finally { malformedSigning.recycle(); }
+        try { lease.getSigningState(name, false); throw new AssertionError("invalid signing certificate accepted"); }
+        catch (IllegalArgumentException expected) {}
+        owner.signingOverride = null;
+        var savedSigning = lease.getSigningState(name, false);
+        int signingReads = owner.signingReads;
+        if (lease.getSigningState(name, false) != savedSigning || owner.signingReads != signingReads
+                || lease.getSigningState("missing", false) != null || savedSigning.getAppId() != uid) {
+            throw new AssertionError("saved signing lease identity");
+        }
+        var savedDetails = savedSigning.getPackageSigningDetails();
+        var codeDetails = pkg.getSigningDetails();
+        if (savedDetails.getSignatureSchemeVersion() != codeDetails.getSignatureSchemeVersion()
+                || !java.util.Arrays.equals(savedDetails.getSignatures(), codeDetails.getSignatures())
+                || !savedDetails.getPublicKeys().equals(codeDetails.getPublicKeys())) {
+            throw new AssertionError("saved signing or derived public keys differ");
+        }
+        if (savedSigning.getSharedGroupName() != null) setting.setSharedUserAppId(uid);
+        dev.aim.server.PackageObjects.restoreSavedSigning(setting, savedSigning, 1, false);
+        var restored = setting.getSigningDetails();
+        try {
+            dev.aim.server.PackageObjects.restoreSavedSigning(setting, savedSigning, 2, false);
+            throw new AssertionError("saved signing wrong version accepted");
+        } catch (IllegalArgumentException expected) {}
+        try {
+            dev.aim.server.PackageObjects.restoreSavedSigning(setting, savedSigning, 1, true);
+            throw new AssertionError("saved signing wrong scope accepted");
+        } catch (IllegalArgumentException expected) {}
+        setting.setAppId(uid + 1);
+        try {
+            dev.aim.server.PackageObjects.restoreSavedSigning(setting, savedSigning, 1, false);
+            throw new AssertionError("saved signing wrong UID accepted");
+        } catch (IllegalArgumentException expected) {}
+        setting.setAppId(uid);
+        if (savedSigning.getSharedGroupName() != null) {
+            setting.setSharedUserAppId(uid + 1);
+            try {
+                dev.aim.server.PackageObjects.restoreSavedSigning(setting, savedSigning, 1, false);
+                throw new AssertionError("saved signing wrong shared UID accepted");
+            } catch (IllegalArgumentException expected) {}
+            setting.setSharedUserAppId(uid);
+        }
+        if (setting.getSigningDetails() != restored) throw new AssertionError("rejected signing restore mutated setting");
+        var unknownParcel = android.os.Parcel.obtain();
+        try {
+            unknownParcel.writeLong(1); unknownParcel.writeString(name); unknownParcel.writeInt(uid);
+            unknownParcel.writeBoolean(false); unknownParcel.writeString(null);
+            unknownParcel.writeBoolean(false); unknownParcel.writeBoolean(false);
+            unknownParcel.setDataPosition(0);
+            var unknown = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(unknownParcel);
+            if (unknown.getPackageSigningDetails() != android.content.pm.SigningDetails.UNKNOWN
+                    || unknown.getSharedSigningDetails() != null) throw new AssertionError("unknown signing became known");
+        } finally { unknownParcel.recycle(); }
+        var signingOut = android.os.Parcel.obtain();
+        try {
+            savedSigning.writeToParcel(signingOut, 0);
+            if (!java.util.Arrays.equals(signingOut.marshall(), signingBytes)) throw new AssertionError("native/Java saved signing DTO differs");
+        } finally { signingOut.recycle(); }
+        byte[] changedSigningBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".saved-signing.changed").toPath());
+        var changedOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, changedSigningBytes);
+        changedOwner.version = 2;
+        try (var changedLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(changedOwner))) {
+            var changed = changedLease.getSigningState(name, false);
+            if (uid == 10000) {
+                var original = savedSigning.getPackageSigningDetails();
+                var group = changed.getSharedSigningDetails();
+                var current = changed.getPackageSigningDetails();
+                if (original.getPastSigningCertificates()[0].getFlags() != 21
+                        || current.getPastSigningCertificates()[0].getFlags() != 20
+                        || group.getPastSigningCertificates()[0].getFlags() != 17
+                        || !group.getPublicKeys().equals(current.getPublicKeys())) {
+                    throw new AssertionError("package/group signing owners were conflated");
+                }
+                var ancestor = new android.content.pm.SigningDetails(
+                    new android.content.pm.Signature[]{new android.content.pm.Signature(original.getPastSigningCertificates()[0])}, 3);
+                if (current.checkCapability(ancestor, 1) || !original.checkCapability(ancestor, 1)) {
+                    throw new AssertionError("saved signing capabilities lost");
+                }
+                original.getPastSigningCertificates()[0].setFlags(0);
+                if (savedSigning.getPackageSigningDetails().getPastSigningCertificates()[0].getFlags() != 21) {
+                    throw new AssertionError("saved signing DTO is mutable through original getters");
+                }
+            }
+            dev.aim.server.PackageObjects.restoreSavedSigning(setting, changed, 2, false);
+        }
         owner.fail = true;
         try { lease.getSeInfo(name); throw new AssertionError("seInfo owner failure swallowed"); }
         catch (android.os.RemoteException expected) {}
@@ -324,6 +435,8 @@ public final class PackageRoundTripOracle {
         } catch (IllegalStateException expected) {}
         try { lease.getUsage(name); throw new AssertionError("closed usage lease accepted"); }
         catch (IllegalStateException expected) {}
+        try { lease.getSigningState(name, false); throw new AssertionError("closed signing lease accepted"); }
+        catch (IllegalStateException expected) {}
         try { lease.getSeInfo(name); throw new AssertionError("closed seInfo lease accepted"); }
         catch (IllegalStateException expected) {}
     }
@@ -333,6 +446,10 @@ public final class PackageRoundTripOracle {
         private final byte[] bytes;
         private final byte[] usage;
         private final byte[] seinfo;
+        private final byte[] signing;
+        boolean signingTail;
+        byte[] signingOverride;
+        int signingReads;
         boolean seinfoTail;
         int seinfoReads;
         boolean usageTail;
@@ -342,7 +459,7 @@ public final class PackageRoundTripOracle {
         int reads;
         int closes;
         long version = 1;
-        PageOwner(String name, byte[] bytes, byte[] usage, byte[] seinfo) { this.name = name; this.bytes = bytes; this.usage = usage; this.seinfo = seinfo; }
+        PageOwner(String name, byte[] bytes, byte[] usage, byte[] seinfo, byte[] signing) { this.name = name; this.bytes = bytes; this.usage = usage; this.seinfo = seinfo; this.signing = signing; }
         @Override
         public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
         @Override
@@ -365,6 +482,14 @@ public final class PackageRoundTripOracle {
             usageReads++;
             if (candidate.equals("missing")) return null;
             return usageTail ? java.util.Arrays.copyOf(usage, usage.length + 4) : usage.clone();
+        }
+        @Override
+        public byte[] getSigningState(String candidate, boolean disabled) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            signingReads++;
+            if (candidate.equals("missing")) return null;
+            byte[] state = signingOverride == null ? signing : signingOverride;
+            return signingTail ? java.util.Arrays.copyOf(state, state.length + 4) : state.clone();
         }
         @Override
         public byte[] getSeInfo(String candidate) throws android.os.RemoteException {
