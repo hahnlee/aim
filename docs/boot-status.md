@@ -260,6 +260,18 @@ endpoint is not yet exported by the C bootstrap into SystemServer. Complete
 PackageState DTO/adapters, metadata/visibility pages, lease/snapshot-scope wiring
 and actual permission/ART callbacks remain #836/#837/#833. The native service
 switch is not activated and original PMS remains active.
+The native usage owner now reads PackageUsage's original v0/v1
+package-usage.list formats for known package settings, preserving each of the
+8 reason timestamps and the original partial-update behavior on malformed rows.
+Missing files mark historical usage unavailable; an empty file does not, and
+legacy AtomicFile backups take precedence. Latest/foreground time, invalid reason
+handling and omission of zero/nonpositive-only usage rows match the original.
+The disposable original-runtime snapshot/usage oracle passes (14.39s): original
+PackageUsage reads native v1 bytes and legacy/malformed/missing inputs, then its
+v1 output is read natively with exact timestamp equality. The oracle overrides
+only its file location with a disposable file; it does not write PMS's live
+usage file. This owner is not yet loaded into the captured facade replica or
+wired to live notifyPackageUse/persistence scheduling (#836/#798).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

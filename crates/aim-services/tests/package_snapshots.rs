@@ -40,6 +40,10 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
                 .join("tests/fixtures/PackageSnapshotsOracle.java"),
         )
         .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/PackageUsageOracle.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         ));
     let mut pending = vec![classes.clone()];
@@ -114,4 +118,45 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
         String::from_utf8(result.stdout).unwrap(),
         "SNAPSHOTS scopes identity immutability version visibility uncommitted errors\n"
     );
+    let directory = boot.data.join("data/local/tmp/usage-oracle");
+    fs::create_dir(&directory).unwrap();
+    let mut usage = aim_services::package::owner::usage::Usage::new(["a", "b"]);
+    usage.apply(b"a +7\nb -4\nunknown invalid\n").unwrap();
+    assert!(
+        usage
+            .apply(b"PACKAGE_USAGE__VERSION_1\na 9 10 invalid 4 5 6 7 8\n")
+            .is_err()
+    );
+    usage.notify("a", 2, 44);
+    // Seed the remaining slots to distinguish each usage reason in the original runtime.
+    for reason in 3..8 {
+        usage.notify("a", reason, i64::from(reason) + 1);
+    }
+    fs::write(directory.join("native.list"), usage.encode()).unwrap();
+    fs::write(
+        directory.join("legacy.list"),
+        b"a +7\nb -4\nunknown invalid\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("partial.list"),
+        b"PACKAGE_USAGE__VERSION_1\na 9 10 invalid 4 5 6 7 8\n",
+    )
+    .unwrap();
+    let result = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.PackageUsageOracle",
+        "/data/local/tmp/usage-oracle",
+    ]));
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        "USAGE native original versions reasons prefix historical\n"
+    );
+    let mut original = aim_services::package::owner::usage::Usage::new(["a", "b"]);
+    original.read(&directory.join("usage.list")).unwrap();
+    assert_eq!(original.times("a"), Some(&[9, 10, 44, 4, 5, 6, 7, 55]));
+    assert_eq!(original.times("b"), Some(&[0; 8]));
 }
