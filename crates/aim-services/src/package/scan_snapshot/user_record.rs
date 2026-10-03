@@ -1,5 +1,5 @@
-//! Persisted PackageUserState inputs; runtime overlays/label overrides have
-//! separate owners and are not invented by this transport (#836).
+//! Captured PackageUserState inputs from persisted and runtime owners.
+//! The complete interface adapter and live producers remain under #836.
 use super::Snapshot;
 use crate::package::restrictions::{SuspendingUser, UserState};
 use aim_binder_host::parcel::Parcel;
@@ -127,6 +127,44 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
             p.write_string16(Some(&activity.original_component_name));
             p.write_string16(Some(&activity.icon_path));
             p.write_string16(activity.monochrome_icon_path.as_deref());
+        }
+    }
+    let runtime = &state.runtime;
+    paths(p, runtime.overlays())?;
+    p.write_bool(runtime.libraries().is_some());
+    if let Some(libraries) = runtime.libraries() {
+        count(p, libraries.len())?;
+        for (name, overlay) in libraries {
+            p.write_string16(Some(name));
+            paths(p, Some(overlay))?;
+        }
+    }
+    p.write_bool(runtime.overrides().is_some());
+    if let Some(overrides) = runtime.overrides() {
+        count(p, overrides.len())?;
+        for (component, value) in overrides {
+            p.write_string16(Some(&component.package));
+            p.write_string16(Some(&component.class));
+            p.write_string16(value.label.as_deref());
+            p.write_bool(value.icon.is_some());
+            if let Some(icon) = value.icon {
+                p.write_i32(icon);
+            }
+        }
+    }
+    Ok(())
+}
+fn paths(
+    p: &mut Parcel,
+    paths: Option<&crate::package::model::OverlayPaths>,
+) -> Result<(), String> {
+    p.write_bool(paths.is_some());
+    if let Some(paths) = paths {
+        for values in [&paths.resource_dirs, &paths.overlay_paths] {
+            count(p, values.len())?;
+            for value in values {
+                p.write_string16(Some(value));
+            }
         }
     }
     Ok(())

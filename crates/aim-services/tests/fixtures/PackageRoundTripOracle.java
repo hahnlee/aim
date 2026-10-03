@@ -116,6 +116,7 @@ public final class PackageRoundTripOracle {
         byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
         byte[] seinfoBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".boot-seinfo").toPath());
         byte[] signingBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".saved-signing").toPath());
+        verifyRuntime(file);
         var owner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user").toPath());
@@ -168,6 +169,23 @@ public final class PackageRoundTripOracle {
                 || originalDefault.getDisabledComponentsNoCopy().size() != 0) {
             throw new AssertionError("Settings null setters must initialize empty component owners");
         }
+        if (userState.overlayPaths == null
+                || !userState.overlayPaths.resourceDirs.equals(java.util.List.of("base-apk"))
+                || !userState.overlayPaths.overlayPaths.equals(java.util.List.of("base", "base", "base-apk"))
+                || userState.getLibraryOverlays().size() != 3
+                || !userState.getLibraryOverlays().get(0).library.equals("B")
+                || !userState.getLibraryOverlays().get(1).library.equals("Aa")
+                || !userState.getLibraryOverlays().get(2).library.equals("BB")
+                || !userState.getLabelIcons().get(0).label.equals("")
+                || userState.getLabelIcons().get(0).icon != 0) {
+            throw new AssertionError("captured runtime user inputs differ");
+        }
+        try { userState.overlayPaths.overlayPaths.add("mutated"); throw new AssertionError("mutable captured overlay paths"); }
+        catch (UnsupportedOperationException expected) {}
+        try { userState.getLibraryOverlays().clear(); throw new AssertionError("mutable captured libraries"); }
+        catch (UnsupportedOperationException expected) {}
+        try { userState.getLabelIcons().clear(); throw new AssertionError("mutable captured label icons"); }
+        catch (UnsupportedOperationException expected) {}
         int userReads = owner.userReads;
         if (userState.getVersion() != 1 || !userState.getPackageName().equals(name)
                 || userState.getAppId() != uid || userState.getUserId() != 0 || userState.isFactory()
@@ -473,6 +491,53 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
         try { lease.getSeInfo(name); throw new AssertionError("closed seInfo lease accepted"); }
         catch (IllegalStateException expected) {}
+    }
+
+    private static void runtimeText(java.io.DataOutputStream out, String value) throws Exception {
+        byte[] bytes = value == null ? null : value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        out.writeInt(bytes == null ? -1 : bytes.length); if (bytes != null) out.write(bytes);
+    }
+    private static void runtimePaths(java.io.DataOutputStream out, android.content.pm.overlay.OverlayPaths paths) throws Exception {
+        out.writeBoolean(paths != null); if (paths == null) return;
+        for (var list : java.util.List.of(paths.getResourceDirs(), paths.getOverlayPaths())) {
+            out.writeInt(list.size()); for (String value : list) runtimeText(out, value);
+        }
+    }
+    private static void runtimeRecord(java.io.DataOutputStream out, com.android.server.pm.pkg.PackageUserStateImpl state, boolean changed) throws Exception {
+        out.writeBoolean(changed); runtimePaths(out, state.getOverlayPaths()); runtimePaths(out, state.getAllOverlayPaths());
+        var libraries = state.getSharedLibraryOverlayPaths(); out.writeInt(libraries.size());
+        for (var entry : libraries.entrySet()) { runtimeText(out, entry.getKey()); runtimePaths(out, entry.getValue()); }
+        var value = state.getOverrideLabelIconForComponent(new android.content.ComponentName("fixture", "Activity"));
+        out.writeBoolean(value != null);
+        if (value != null) { runtimeText(out, value.first); out.writeBoolean(value.second != null); if (value.second != null) out.writeInt(value.second); }
+    }
+    private static android.content.pm.overlay.OverlayPaths runtimeApk(String... names) {
+        var builder = new android.content.pm.overlay.OverlayPaths.Builder();
+        for (String name : names) builder.addApkPath(name); return builder.build();
+    }
+    private static void verifyRuntime(java.io.File file) throws Exception {
+        var state = new com.android.server.pm.pkg.PackageUserStateImpl(new com.android.server.utils.WatchableImpl());
+        var bytes = new java.io.ByteArrayOutputStream(); var out = new java.io.DataOutputStream(bytes);
+        runtimeRecord(out, state, false);
+        runtimeRecord(out, state, state.setOverlayPaths(runtimeApk()));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("missing", null));
+        var base = new android.content.pm.overlay.OverlayPaths.Builder().addNonApkPath("base").addNonApkPath("base").addApkPath("base-apk").build();
+        runtimeRecord(out, state, state.setOverlayPaths(base));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("Aa", runtimeApk("one", "base-apk")));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("B", runtimeApk("two")));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("BB", runtimeApk("three")));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("Aa", runtimeApk("one", "base-apk")));
+        var component = new android.content.ComponentName("fixture", "Activity");
+        runtimeRecord(out, state, state.overrideLabelAndIcon(component, "", 0));
+        runtimeRecord(out, state, state.overrideLabelAndIcon(component, "", 0));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("B", null));
+        runtimeRecord(out, state, state.setOverlayPaths(null));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("Aa", null));
+        runtimeRecord(out, state, state.setSharedLibraryOverlayPaths("BB", null));
+        runtimeRecord(out, state, state.overrideLabelAndIcon(component, null, null));
+        if (!java.util.Arrays.equals(bytes.toByteArray(), java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".runtime").toPath()))) {
+            throw new AssertionError("native runtime user owner differs from original mutations");
+        }
     }
 
     private static final class PageOwner extends dev.aim.server.IPackageScanSnapshot.Stub {

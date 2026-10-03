@@ -72,17 +72,25 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 371
-units pass (3.18s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 373
+units pass (3.17s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
-unsupported (#843). A private snapshot lease now carries persisted user-state
+unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 15.40s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 15.93s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
-versions. These are persisted inputs, not a complete PackageUserStateInternal
-replica: runtime overlays/label overrides remain #836. Component ownership
+versions. Native runtime owners retain package overlay paths, shared-library
+paths and component label/icon overrides in the captured user state. Mutations
+preserve original empty-map allocation, merge order/deduplication, collision
+ordering and null/empty-label/zero-icon distinctions; active runtime changes
+update only the disabled setting's existing user aliases. The original
+PackageUserStateImpl agrees with 15 mutation states, and ART reads actual native
+runtime DTOs with immutable lists. The real Binder capture retains old runtime
+state after a newer version changes its overrides. These are owned inputs, not
+a complete PackageUserStateInternal replica: the full Java adapter, live overlay
+and component producers and original-state import remain #836. Component ownership
 now distinguishes original default null sets from Settings-initialized empty
 sets (#845), including missing-file initialization and third-party new settings.
 The original ART oracle confirms that the ArraySet setter overloads initialize

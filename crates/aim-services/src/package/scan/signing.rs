@@ -109,6 +109,28 @@ impl SigningScan {
         self.loaded.contains_key(name) || self.parsed.iter().any(|(n, _, _, _)| n == name)
     }
 
+    /// Commit the runtime user owner supplied by overlay/component producers.
+    /// Publication still requires the captured Store base; factory aliases share
+    /// only the users that the original disabled setting aliases.
+    pub fn set_user_runtime(
+        &mut self,
+        name: &str,
+        user: i32,
+        runtime: crate::package::owner::user_runtime::State,
+    ) -> Result<(), String> {
+        if user < 0 {
+            return Err("runtime user id is negative".into());
+        }
+        let users = self
+            .scanned_users
+            .get_mut(name)
+            .ok_or_else(|| "runtime package user owner is not captured".to_string())?;
+        users.entry(user).or_default().runtime = runtime;
+        let users = users.clone();
+        self.update_disabled_user_aliases(name, &users);
+        Ok(())
+    }
+
     /// Withdraw the scan's loaded package and declarations while retaining its
     /// saved setting, UID membership and user state for an ex-system rescan.
     /// Component/permission/property publication belongs to the commit owner.
@@ -1356,12 +1378,29 @@ mod tests {
             package.name.clone(),
             Arc::new(super::super::LoadedPackage::new(parsed, signing).unwrap()),
         );
-        let user = crate::package::restrictions::UserState {
+        let mut user = crate::package::restrictions::UserState {
             stopped: true,
             harmful_app_warning: Some("warning".repeat(30_000)),
             enabled_components: Some(vec!["fixture.Activity".into()]),
             ..Default::default()
         };
+        user.runtime.set_library_overlay_paths(
+            "library".into(),
+            Some(crate::package::model::OverlayPaths {
+                resource_dirs: vec!["/overlay.apk".into()],
+                overlay_paths: vec!["/overlay.apk".into()],
+            }),
+        );
+        user.runtime.override_label_icon(
+            crate::package::owner::user_runtime::Component {
+                package: "fixture".into(),
+                class: "Activity".into(),
+            },
+            crate::package::owner::user_runtime::LabelIcon {
+                label: Some("old label".into()),
+                icon: Some(17),
+            },
+        );
         owner
             .scanned_users
             .insert(package.name.clone(), BTreeMap::from([(10, user)]));
@@ -1400,7 +1439,38 @@ mod tests {
             .get_mut(&10)
             .unwrap()
             .harmful_app_warning = Some("new warning".into());
+        let mut runtime = owner.scanned_user_states("fixture").unwrap()[&10]
+            .runtime
+            .clone();
+        runtime.reset_label_icons();
+        owner.set_user_runtime("fixture", 10, runtime).unwrap();
+        assert!(
+            owner
+                .set_user_runtime("absent", 10, Default::default())
+                .is_err()
+        );
+        assert!(
+            owner
+                .set_user_runtime("fixture", -1, Default::default())
+                .is_err()
+        );
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert!(
+            current.owner().scanned_user_states("fixture").unwrap()[&10]
+                .runtime
+                .overrides()
+                .is_none()
+        );
+        assert_eq!(
+            base.owner().scanned_user_states("fixture").unwrap()[&10]
+                .runtime
+                .overrides()
+                .unwrap()[0]
+                .1
+                .label
+                .as_deref(),
+            Some("old label")
+        );
         assert_ne!(
             crate::package::scan_snapshot::user_record::captured(&current, "fixture", false, 10,)
                 .unwrap()

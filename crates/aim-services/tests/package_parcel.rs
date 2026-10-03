@@ -212,6 +212,11 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.user")), user_state).unwrap();
+        fs::write(
+            directory.join(format!("{name}.runtime")),
+            runtime_expected(),
+        )
+        .unwrap();
         let saved_signing =
             aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
                 &snapshot,
@@ -564,10 +569,137 @@ fn native_scan_objects(
         }
     }
     let mut owner = scan.owner;
+    for name in ["android", "com.google.android.gsf"] {
+        owner.set_user_runtime(name, 0, runtime_capture()).unwrap();
+    }
     owner
         .assign_seinfo_at_boot(&policy, &mut |_| Ok(36))
         .unwrap();
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()
+}
+
+fn runtime_expected() -> Vec<u8> {
+    use aim_services::package::{
+        model::OverlayPaths,
+        owner::user_runtime::{Component, LabelIcon, State},
+    };
+    fn text(out: &mut Vec<u8>, value: Option<&str>) {
+        out.extend_from_slice(&value.map_or(-1, |s| s.len() as i32).to_be_bytes());
+        if let Some(value) = value {
+            out.extend_from_slice(value.as_bytes());
+        }
+    }
+    fn paths(out: &mut Vec<u8>, value: Option<&OverlayPaths>) {
+        out.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            for strings in [&value.resource_dirs, &value.overlay_paths] {
+                out.extend_from_slice(&(strings.len() as i32).to_be_bytes());
+                for s in strings {
+                    text(out, Some(s));
+                }
+            }
+        }
+    }
+    fn record(out: &mut Vec<u8>, state: &State, changed: bool) {
+        out.push(u8::from(changed));
+        paths(out, state.overlays());
+        paths(out, state.all_overlay_paths().as_ref());
+        let libraries = state.libraries().unwrap_or(&[]);
+        out.extend_from_slice(&(libraries.len() as i32).to_be_bytes());
+        for (name, value) in libraries {
+            text(out, Some(name));
+            paths(out, Some(value));
+        }
+        let value = state
+            .overrides()
+            .and_then(|entries| entries.iter().find(|(c, _)| c.class == "Activity"))
+            .map(|(_, v)| v);
+        out.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            text(out, value.label.as_deref());
+            out.push(u8::from(value.icon.is_some()));
+            if let Some(icon) = value.icon {
+                out.extend_from_slice(&icon.to_be_bytes());
+            }
+        }
+    }
+    fn apk(names: &[&str]) -> OverlayPaths {
+        OverlayPaths {
+            resource_dirs: names.iter().map(|s| s.to_string()).collect(),
+            overlay_paths: names.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+    let mut state = State::default();
+    let mut out = Vec::new();
+    macro_rules! step {
+        ($change:expr) => {{
+            let changed = $change;
+            record(&mut out, &state, changed);
+        }};
+    }
+    record(&mut out, &state, false);
+    step!(state.set_overlay_paths(Some(OverlayPaths::default())));
+    step!(state.set_library_overlay_paths("missing".into(), None));
+    step!(state.set_overlay_paths(Some(OverlayPaths {
+        resource_dirs: vec!["base-apk".into()],
+        overlay_paths: vec!["base".into(), "base".into(), "base-apk".into()]
+    })));
+    step!(state.set_library_overlay_paths("Aa".into(), Some(apk(&["one", "base-apk"]))));
+    step!(state.set_library_overlay_paths("B".into(), Some(apk(&["two"]))));
+    step!(state.set_library_overlay_paths("BB".into(), Some(apk(&["three"]))));
+    step!(state.set_library_overlay_paths("Aa".into(), Some(apk(&["one", "base-apk"]))));
+    let c = Component {
+        package: "fixture".into(),
+        class: "Activity".into(),
+    };
+    let value = LabelIcon {
+        label: Some(String::new()),
+        icon: Some(0),
+    };
+    step!(state.override_label_icon(c.clone(), value.clone()));
+    step!(state.override_label_icon(c.clone(), value));
+    step!(state.set_library_overlay_paths("B".into(), None));
+    step!(state.set_overlay_paths(None));
+    step!(state.set_library_overlay_paths("Aa".into(), None));
+    step!(state.set_library_overlay_paths("BB".into(), None));
+    step!(state.override_label_icon(c, LabelIcon::default()));
+    out
+}
+
+fn runtime_capture() -> aim_services::package::owner::user_runtime::State {
+    use aim_services::package::{
+        model::OverlayPaths,
+        owner::user_runtime::{Component, LabelIcon, State},
+    };
+    let mut state = State::default();
+    state.set_overlay_paths(Some(OverlayPaths {
+        resource_dirs: vec!["base-apk".into()],
+        overlay_paths: vec!["base".into(), "base".into(), "base-apk".into()],
+    }));
+    for (library, names) in [
+        ("Aa", vec!["one", "base-apk"]),
+        ("B", vec!["two"]),
+        ("BB", vec!["three"]),
+    ] {
+        state.set_library_overlay_paths(
+            library.into(),
+            Some(OverlayPaths {
+                resource_dirs: names.iter().map(|s| s.to_string()).collect(),
+                overlay_paths: names.iter().map(|s| s.to_string()).collect(),
+            }),
+        );
+    }
+    state.override_label_icon(
+        Component {
+            package: "fixture".into(),
+            class: "Activity".into(),
+        },
+        LabelIcon {
+            label: Some(String::new()),
+            icon: Some(0),
+        },
+    );
+    state
 }

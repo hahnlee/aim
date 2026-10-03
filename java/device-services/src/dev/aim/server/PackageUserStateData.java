@@ -6,7 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-/** Immutable persisted user inputs. Runtime overlay/label owners are separate. */
+/** Immutable captured user inputs, including native runtime owners. */
 public final class PackageUserStateData {
     private final long version;
     private final String name;
@@ -19,6 +19,9 @@ public final class PackageUserStateData {
     private final String[] enabledComponents, disabledComponents;
     private final List<Suspension> suspensions;
     public final Archive archive;
+    public final Paths overlayPaths;
+    private final List<LibraryOverlay> libraryOverlays;
+    private final List<LabelIcon> labelIcons;
 
     static PackageUserStateData read(Parcel in) {
         return new PackageUserStateData(in);
@@ -41,6 +44,19 @@ public final class PackageUserStateData {
         for (int i = 0; i < count; i++) records.add(new Suspension(in));
         suspensions = List.copyOf(records);
         archive = in.readBoolean() ? new Archive(in) : null;
+        overlayPaths = in.readBoolean() ? new Paths(in) : null;
+        if (in.readBoolean()) {
+            int size = count(in);
+            var values = new ArrayList<LibraryOverlay>(size);
+            for (int i = 0; i < size; i++) values.add(new LibraryOverlay(in));
+            libraryOverlays = List.copyOf(values);
+        } else libraryOverlays = null;
+        if (in.readBoolean()) {
+            int size = count(in);
+            var values = new ArrayList<LabelIcon>(size);
+            for (int i = 0; i < size; i++) values.add(new LabelIcon(in));
+            labelIcons = List.copyOf(values);
+        } else labelIcons = null;
     }
     private static int count(Parcel in) {
         int count = in.readInt();
@@ -63,6 +79,35 @@ public final class PackageUserStateData {
     public String[] getEnabledComponents() { return enabledComponents == null ? null : enabledComponents.clone(); }
     public String[] getDisabledComponents() { return disabledComponents == null ? null : disabledComponents.clone(); }
     public List<Suspension> getSuspensions() { return suspensions; }
+
+    public List<LibraryOverlay> getLibraryOverlays() { return libraryOverlays; }
+    public List<LabelIcon> getLabelIcons() { return labelIcons; }
+    public static final class Paths {
+        public final List<String> resourceDirs, overlayPaths;
+        private Paths(Parcel in) {
+            resourceDirs = List.copyOf(java.util.Arrays.asList(Objects.requireNonNull(strings(in))));
+            overlayPaths = List.copyOf(java.util.Arrays.asList(Objects.requireNonNull(strings(in))));
+        }
+    }
+    public static final class LibraryOverlay {
+        public final String library;
+        public final Paths paths;
+        private LibraryOverlay(Parcel in) {
+            library = Objects.requireNonNull(in.readString());
+            if (!in.readBoolean()) throw new IllegalArgumentException("null library overlay");
+            paths = new Paths(in);
+        }
+    }
+    public static final class LabelIcon {
+        public final String packageName, className, label;
+        public final Integer icon;
+        private LabelIcon(Parcel in) {
+            packageName = Objects.requireNonNull(in.readString());
+            className = Objects.requireNonNull(in.readString());
+            label = in.readString(); icon = in.readBoolean() ? in.readInt() : null;
+            if (label == null && icon == null) throw new IllegalArgumentException("empty label/icon override");
+        }
+    }
 
     public static final class Suspension {
         public final String packageName;

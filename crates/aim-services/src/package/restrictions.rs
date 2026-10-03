@@ -30,6 +30,8 @@ pub struct Restrictions {
 /// `PackageUserStateImpl`: one package's state for the user.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UserState {
+    /// Runtime fields initialized by the original user-state constructor.
+    pub runtime: super::owner::user_runtime::State,
     pub ce_data_inode: i64,
     pub de_data_inode: i64,
     pub installed: bool,
@@ -68,6 +70,7 @@ impl Default for UserState {
     /// The original default user state, before Settings initializes its sets.
     fn default() -> Self {
         UserState {
+            runtime: Default::default(),
             ce_data_inode: 0,
             de_data_inode: 0,
             installed: true,
