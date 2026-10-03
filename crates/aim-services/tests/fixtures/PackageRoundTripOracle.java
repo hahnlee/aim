@@ -115,6 +115,19 @@ public final class PackageRoundTripOracle {
                 || !nested.getCertDigests().equals(java.util.List.of("nested.digest"))) throw new AssertionError("nested library owners lost");
     }
 
+    private static void verifyMutableCode(byte[] bytes) throws Exception {
+        var owner = (com.android.internal.pm.parsing.pkg.PackageImpl)PackageCacher.fromCacheEntryStatic(bytes);
+        int category = owner.getCategory();
+        byte[] before = PackageCacher.toCacheEntryStatic(owner);
+        int changedCategory = category == 7 ? -1 : 7;
+        owner.setCategory(changedCategory);
+        byte[] changed = PackageCacher.toCacheEntryStatic(owner);
+        var captured = (com.android.internal.pm.parsing.pkg.PackageImpl)PackageCacher.fromCacheEntryStatic(changed);
+        if (java.util.Arrays.equals(before, changed) || captured.getCategory() != changedCategory) throw new AssertionError("same-owner category mutation was not captured");
+        owner.setCategory(category);
+        if (!java.util.Arrays.equals(before, PackageCacher.toCacheEntryStatic(owner))) throw new AssertionError("original category restoration changed other code owners");
+    }
+
     private static void verify(String[] args) throws Exception {
         verifyLibraryOwners(new java.io.File(args[0], "library-owners.parcel"));
         LegacyPermissionOracle.verify(new java.io.File(args[0]));
@@ -125,6 +138,7 @@ public final class PackageRoundTripOracle {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
             if (file.getName().startsWith("scan-")) {
+                verifyMutableCode(java.nio.file.Files.readAllBytes(file.toPath()));
                 verifySnapshot(file, pkg.getPackageName(), pkg.getUid());
                 int uid = Integer.parseInt(file.getName().substring(5, file.getName().indexOf('.')));
                 var signing = pkg.getSigningDetails();

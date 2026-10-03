@@ -121,8 +121,6 @@ final class PackageFeed extends IPackageFeed.Stub {
     private IPackageFeedHost mHost;
     /** What the host holds: each record's SHA-256, by kind and key. */
     private final TreeMap<Key, byte[]> mSent = new TreeMap<>();
-    /** The AndroidPackage each parsed record was made of. */
-    private final HashMap<Key, AndroidPackage> mParsed = new HashMap<>();
     /**
      * Syncable providers' declared authorities, by the AndroidPackage they
      * were read for: this batch's and the previous one's.
@@ -244,7 +242,6 @@ final class PackageFeed extends IPackageFeed.Stub {
             Slog.w(TAG, "the package feed's host died", e);
             mHost = null;
             mSent.clear();
-            mParsed.clear();
         } catch (RuntimeException e) {
             // What the host holds is unknown now: the next batch sends all.
             Slog.e(TAG, "a package feed batch failed", e);
@@ -257,10 +254,8 @@ final class PackageFeed extends IPackageFeed.Stub {
     private void send(IPackageFeedHost host, boolean reset, long token) throws RemoteException {
         if (reset) {
             mSent.clear();
-            mParsed.clear();
         }
         TreeMap<Key, byte[]> records = new TreeMap<>();
-        TreeMap<Key, AndroidPackage> parsed = new TreeMap<>();
         TreeSet<Integer> users = new TreeSet<>();
         mDeclaredBefore = mDeclared;
         mDeclared = new IdentityHashMap<>();
@@ -268,10 +263,10 @@ final class PackageFeed extends IPackageFeed.Stub {
         try (PackageManagerLocal.UnfilteredSnapshot snapshot = local.withUnfilteredSnapshot()) {
             mInstalledPermissions = installedPermissions(snapshot.getPackageStates().values());
             for (PackageState state : snapshot.getPackageStates().values()) {
-                add(records, parsed, users, PACKAGE, PARSED, state);
+                add(records, users, PACKAGE, PARSED, state);
             }
             for (PackageState state : snapshot.getDisabledSystemPackageStates().values()) {
-                add(records, parsed, users, DISABLED_SYSTEM_PACKAGE, DISABLED_SYSTEM_PARSED,
+                add(records, users, DISABLED_SYSTEM_PACKAGE, DISABLED_SYSTEM_PARSED,
                         state);
             }
             for (SharedUserApi user : snapshot.getSharedUsers().values()) {
@@ -290,31 +285,23 @@ final class PackageFeed extends IPackageFeed.Stub {
                 mSent.put(e.getKey(), hash);
             }
         }
-        for (Map.Entry<Key, AndroidPackage> e : parsed.entrySet()) {
-            if (mParsed.get(e.getKey()) != e.getValue()) {
-                byte[] record = PackageCacher.toCacheEntryStatic((ParsedPackage) e.getValue());
-                put(host, e.getKey(), record);
-                mSent.put(e.getKey(), sha256(record));
-                mParsed.put(e.getKey(), e.getValue());
-            }
-        }
         for (Key key : new ArrayList<>(mSent.keySet())) {
-            if (!records.containsKey(key) && !parsed.containsKey(key)) {
+            if (!records.containsKey(key)) {
                 host.remove(key.kind, key.name);
                 mSent.remove(key);
-                mParsed.remove(key);
             }
         }
         host.end(digest(), token);
     }
 
-    private void add(Map<Key, byte[]> records, Map<Key, AndroidPackage> parsed, Set<Integer> users,
+    private void add(Map<Key, byte[]> records, Set<Integer> users,
             int kind, int parsedKind, PackageState state) {
         String name = state.getPackageName();
         records.put(new Key(kind, name), packageState(state, kind == PACKAGE));
         AndroidPackage pkg = state.getAndroidPackage();
-        if (pkg instanceof ParsedPackage) {
-            parsed.put(new Key(parsedKind, name), pkg);
+        if (pkg instanceof ParsedPackage parsed) {
+            // PackageImpl fields can change while the original retains its identity.
+            records.put(new Key(parsedKind, name), PackageCacher.toCacheEntryStatic(parsed));
         }
         SparseArray<? extends PackageUserState> states = state.getUserStates();
         for (int i = 0; i < states.size(); i++) {

@@ -995,8 +995,9 @@ nothing.
   `PackageUserState` getters, signing, the install source of
   `getInstallSourceInfo`, the domain verification state, the installed
   permission definitions, gids and granted permissions), each parsed
-  package as `PackageCacher.toCacheEntryStatic` writes it (sent again only
-  when the original holds another `AndroidPackage`), each shared user,
+  package as `PackageCacher.toCacheEntryStatic` writes it inside that same
+  snapshot (sent again when its content hash changes, even if the original
+  retains the same mutable object), each shared user,
   each user's preferred activities (`getPreferredActivityBackup`, in
   full) and AppsFilter's configuration, a large record in chunks. A batch
   sends what differs from what the host holds and ends with the SHA-256

@@ -20,6 +20,8 @@ public abstract class PackageImpl implements ParsedPackage {
     public java.util.Set<String> getRequestedPermissions() { throw new RuntimeException("stub"); }
     public PackageImpl addImplicitPermission(String permission) { throw new RuntimeException("stub"); }
     public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
+    public int getCategory() { throw new RuntimeException("stub"); }
+    public PackageImpl setCategory(int value) { throw new RuntimeException("stub"); }
     public int getUid() { throw new RuntimeException("stub"); }
     public android.content.pm.SigningDetails getSigningDetails() { throw new RuntimeException("stub"); }
     public PackageImpl setSigningDetails(android.content.pm.SigningDetails value) { throw new RuntimeException("stub"); }

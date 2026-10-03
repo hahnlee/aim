@@ -304,19 +304,27 @@ constructor normalizes null optional lists. Raw code paths and null/empty depend
 lists are read from the captured parcel, not inferred from convenience getters.
 Every returned original object must reproduce its complete captured bytes;
 non-reproducible input rejects. The complete original package ART oracle passes
-(17.60s): seven original owner forms, nested nullable constructor owners inside
+(18.15s): seven original owner forms, nested nullable constructor owners inside
 populated optional/certificate records, exact bytes, original concrete setting
-restoration, mutation isolation and malformed-owner rejection. Original Java
-linkage passes (3.95s); device-services builds (14.5s). The complete boot build
-passes (57.3s), rebuilding the native host, derived bridge image/translation cache
-and original-PMS userdata template. A disposable 90-second original-PMS shadow
-then publishes the changed live feed without read/publication errors: final
-generation 73 contains 285 active packages and five disabled factories. It exits
-successfully and leaves no owned processes or mounted data. Its 23,347 shadow
-calls include 21,965 matches, 539 classified races, 13 differences and 830 not
-modelled; five write checks also differ. Category differences are #865,
-enabled-state/eligibility/write differences #866, provider eligibility #867 and
-install-parse lifecycle comparison #868. No library-field differences were
+restoration, mutation isolation and malformed-owner rejection. It also verifies
+that changing category on the same detached original PackageImpl changes its
+cache bytes and restoring the category restores the complete original bytes.
+The feed now serializes parsed code inside the unfiltered snapshot and uses
+content hashes for all records: retaining an AndroidPackage object's identity
+cannot suppress a changed code record. Original Java linkage passes (5.06s);
+device-services builds (14.0s). The complete boot build passes (44.3s), including
+the original-PMS userdata template. A disposable 90-second original-PMS shadow
+publishes the changed live feed without read/publication errors: final generation
+74 contains 285 active packages and five disabled factories. It exits successfully
+and leaves no owned processes or mounted data. Its 22,074 shadow calls include
+20,707 matches, 498 classified races, 16 differences and 853 not modelled; four
+write checks also differ. Category differences still reproduce (#865): this run
+has six category mismatches, so code-record freshness alone does not resolve them.
+Enabled-state/eligibility/write differences are #866, provider eligibility #867
+and install-parse lifecycle comparison #868. The fallback-category parser's
+property, duplicate and malformed-line semantics also differ from the original
+(#869); the live image's single fallback entry does not explain these category
+mismatches. No library-field differences were
 observed in this boot workload; targeted original owner fixtures prove nullable
 optional/certificate reproduction. This is original-PMS feed validation, not
 native PMS conformance. Native-to-SystemServer lease bootstrap and complete
