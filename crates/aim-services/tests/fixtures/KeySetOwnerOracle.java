@@ -11,8 +11,12 @@ public final class KeySetOwnerOracle {
         for (var pkg : packages) {
             var data = pkg.getKeySetData();
             System.out.println("PACKAGE " + pkg.getPackageName() + " " + data.getProperSigningKeySet());
-            for (var alias : data.getAliases().entrySet())
+            if (data.getProperSigningKeySet() != -1)
+                System.out.println("REF " + data.getProperSigningKeySet() + " " + owner.getSigningKeySetByPackageNameLPr(pkg.getPackageName()).getRefCountLPr());
+            for (var alias : data.getAliases().entrySet()) {
                 System.out.println("ALIAS " + pkg.getPackageName() + " " + alias.getKey() + " " + alias.getValue());
+                System.out.println("REF " + alias.getValue() + " " + owner.getKeySetByAliasAndPackageNameLPr(pkg.getPackageName(), alias.getKey()).getRefCountLPr());
+            }
             if (data.getUpgradeKeySets() != null) for (long id : data.getUpgradeKeySets())
                 System.out.println("UPGRADE " + pkg.getPackageName() + " " + id);
         }
@@ -83,6 +87,41 @@ public final class KeySetOwnerOracle {
             owner = new KeySetManagerService(map);
             owner.readKeySetsLPw(input, refs);
             snapshot("restore-orphan", owner, packages);
+            // Settings increments every persisted role before replacing aliases.
+            refs.clear();
+            for (var pkg : packages) pkg.getKeySetData().removeAllDefinedKeySets();
+            packages[0].getKeySetData().setProperSigningKeySet(-1);
+            try (var stream = new java.io.FileInputStream("/data/local/tmp/manifest-keysets/refs.xml")) {
+                input = android.util.Xml.resolvePullParser(stream);
+                owner = new KeySetManagerService(map);
+                int event;
+                while ((event = input.next()) != 1) {
+                    if (event != 2) continue;
+                    String tag = input.getName();
+                    if (tag.equals("proper-signing-keyset") || tag.equals("defined-keyset")) {
+                        long id = input.getAttributeLong(null, "identifier");
+                        Integer count = refs.get(id);
+                        refs.put(id, count == null ? 1 : count + 1);
+                        if (tag.equals("proper-signing-keyset")) packages[0].getKeySetData().setProperSigningKeySet(id);
+                        else packages[0].getKeySetData().addDefinedKeySet(id, input.getAttributeValue(null, "alias"));
+                    } else if (tag.equals("keyset-settings")) owner.readKeySetsLPw(input, refs);
+                }
+            }
+            snapshot("import-replaced", owner, packages);
+            owner.addSigningKeySetToPackageLPw(packages[0], one);
+            owner.addDefinedKeySetsToPackageLPw(packages[0], java.util.Map.of("new", two));
+            snapshot("replace-imported", owner, packages);
+            var signingHandle = owner.getSigningKeySetByPackageNameLPr("a");
+            var aliasHandle = owner.getKeySetByAliasAndPackageNameLPr("a", "new");
+            owner.removeAppKeySetDataLPw("a");
+            if (signingHandle.getRefCountLPr() != 2 || aliasHandle.getRefCountLPr() != 1) throw new AssertionError("imported residual references differ");
+            snapshot("remove-imported", owner, packages);
+            refs.clear();
+            input = android.util.Xml.resolvePullParser(new java.io.ByteArrayInputStream(document.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            while (!"keyset-settings".equals(input.getName())) input.next();
+            owner = new KeySetManagerService(map);
+            owner.readKeySetsLPw(input, refs);
+            snapshot("restart-imported", owner, packages);
         }
     }
 }

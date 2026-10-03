@@ -5,6 +5,8 @@ public class KeySetManagerService {
     void addSigningKeySetToPackageLPw(PackageSetting setting, android.util.ArraySet<java.security.PublicKey> keys) { throw new RuntimeException("stub"); }
     void addDefinedKeySetsToPackageLPw(PackageSetting setting, java.util.Map<String, android.util.ArraySet<java.security.PublicKey>> keys) { throw new RuntimeException("stub"); }
     void addUpgradeKeySetsToPackageLPw(PackageSetting setting, java.util.Set<String> aliases) { throw new RuntimeException("stub"); }
+    public KeySetHandle getSigningKeySetByPackageNameLPr(String name) { throw new RuntimeException("stub"); }
+    public KeySetHandle getKeySetByAliasAndPackageNameLPr(String name, String alias) { throw new RuntimeException("stub"); }
     public void removeAppKeySetDataLPw(String name) { throw new RuntimeException("stub"); }
     void writeKeySetManagerServiceLPr(com.android.modules.utils.TypedXmlSerializer serializer) throws java.io.IOException { throw new RuntimeException("stub"); }
     void readKeySetsLPw(com.android.modules.utils.TypedXmlPullParser parser, android.util.ArrayMap<Long, Integer> refs) throws java.io.IOException { throw new RuntimeException("stub"); }

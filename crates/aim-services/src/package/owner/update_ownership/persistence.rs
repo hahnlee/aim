@@ -60,7 +60,7 @@ pub(in crate::package::owner) fn replace_clearings(
             attribute(owner, "updateOwner", None);
         }
     }
-    if Settings::parse(&root)? != persisted(desired.clone()) {
+    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
         return Err("update ownership document did not preserve desired settings".into());
     }
     Ok(root)

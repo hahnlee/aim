@@ -810,6 +810,7 @@ mod tests {
             36,
         )
         .unwrap();
+        let restored_key_sets = owner.settings.key_sets.clone();
         owner.settings.packages[0].key_set_data = package.key_set_data.clone();
         owner
             .update_ownership
@@ -820,7 +821,7 @@ mod tests {
         );
         assert!(owner.settings.domain_verification.active.is_empty());
         assert_eq!(owner.settings.packages, settings.packages);
-        assert_eq!(owner.settings.key_sets, settings.key_sets);
+        assert_eq!(owner.settings.key_sets, restored_key_sets);
         assert_eq!(owner.update_ownership.is_provider(Some("a")), Ok(true));
         assert_eq!(owner.update_ownership.is_denylisted("only-a"), Ok(true));
         owner.settings.packages[0].key_set_data = Default::default();

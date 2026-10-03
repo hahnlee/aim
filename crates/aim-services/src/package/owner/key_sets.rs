@@ -18,42 +18,22 @@ pub fn clear_package(settings: &mut Settings, name: &str) -> Result<(), String> 
         .iter()
         .position(|p| p.name == name)
         .ok_or_else(|| format!("unknown keyset package {name}"))?;
-    let sets = validated_sets(settings)?;
-    let mut remaining = BTreeSet::new();
-    let mut retired = BTreeSet::new();
-    for (index, package) in settings.packages.iter().enumerate() {
-        let data = &package.key_set_data;
-        for id in std::iter::once(&data.proper_signing_key_set)
-            .chain(data.defined_key_sets.iter().map(|(_, id)| id))
-        {
-            if *id == -1 {
-                continue;
-            }
-            if index == at {
-                retired.insert(*id);
-            } else {
-                remaining.insert(*id);
-            }
+    validated_sets(settings)?;
+    let ids: Vec<_> = std::iter::once(settings.packages[at].key_set_data.proper_signing_key_set)
+        .chain(
+            settings.packages[at]
+                .key_set_data
+                .defined_key_sets
+                .iter()
+                .map(|(_, id)| *id),
+        )
+        .collect();
+    if ids.iter().any(|id| *id != -1) {
+        registration::initialize_references(settings);
+        for id in ids {
+            registration::release(settings, id);
         }
     }
-    retired.retain(|id| !remaining.contains(id));
-    let retired_keys: BTreeSet<_> = retired
-        .iter()
-        .flat_map(|id| sets[id].iter().copied())
-        .collect();
-    let kept_keys: BTreeSet<_> = sets
-        .iter()
-        .filter(|(id, _)| !retired.contains(id))
-        .flat_map(|(_, keys)| keys.iter().copied())
-        .collect();
-    settings
-        .key_sets
-        .key_sets
-        .retain(|(id, _)| !retired.contains(id));
-    settings
-        .key_sets
-        .public_keys
-        .retain(|(id, _)| !retired_keys.contains(id) || kept_keys.contains(id));
     settings.packages[at].key_set_data = KeySetData::default();
     Ok(())
 }
@@ -63,6 +43,11 @@ fn validated_sets(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, Strin
     for (id, keys) in &settings.key_sets.key_sets {
         if *id <= 0 || sets.insert(*id, keys).is_some() {
             return Err("invalid or duplicate keyset identity".into());
+        }
+    }
+    if let Some(counts) = &settings.key_sets.reference_counts {
+        if counts.len() != sets.len() || counts.keys().any(|id| !sets.contains_key(id)) {
+            return Err("keyset reference owner does not match its pool".into());
         }
     }
     let mut public = BTreeSet::new();
@@ -101,10 +86,11 @@ fn validated_sets(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, Strin
     Ok(sets)
 }
 
-pub(super) fn replace(original: &Element, name: &str) -> Result<Element, String> {
-    let mut desired = Settings::parse(original)?;
-    desired.domain_verification.clear_package(name);
-    clear_package(&mut desired, name)?;
+pub(super) fn replace(
+    original: &Element,
+    desired: &Settings,
+    name: &str,
+) -> Result<Element, String> {
     let sets: BTreeSet<_> = desired
         .key_sets
         .key_sets
@@ -178,7 +164,9 @@ pub(super) fn replace(original: &Element, name: &str) -> Result<Element, String>
             _ => {}
         }
     }
-    if Settings::parse(&root)? != desired {
+    if super::signing::persisted(Settings::parse(&root)?)
+        != super::signing::persisted(desired.clone())
+    {
         return Err("boot removal metadata did not preserve desired settings".into());
     }
     Ok(root)
@@ -216,6 +204,7 @@ mod tests {
                 key_sets: vec![(1, vec![1]), (2, vec![1, 2])],
                 last_issued_key_id: 2,
                 last_issued_key_set_id: 2,
+                ..Default::default()
             },
             ..Default::default()
         };

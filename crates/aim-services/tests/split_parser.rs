@@ -1153,6 +1153,7 @@ fn manifest_keysets_match_original_parser() {
     settings.key_sets.key_sets.push((4, vec![3, 4]));
     settings.key_sets.last_issued_key_id = 20;
     settings.key_sets.last_issued_key_set_id = 30;
+    settings.key_sets.reference_counts = None;
     key_sets::restore(&mut settings).unwrap();
     assert_eq!(
         settings
@@ -1164,7 +1165,45 @@ fn manifest_keysets_match_original_parser() {
         [3, 5]
     );
     assert_eq!(settings.key_sets.key_sets, [(3, vec![3])]);
-    states.push(("restore-orphan", settings));
+    states.push(("restore-orphan", settings.clone()));
+    let first = aim_android_xml::Value::BytesBase64(key(1).0)
+        .string()
+        .unwrap()
+        .into_owned();
+    let second = aim_android_xml::Value::BytesBase64(key(2).0)
+        .string()
+        .unwrap()
+        .into_owned();
+    let document = format!(
+        "<packages><package name='a' codePath='/data/app/a' userId='10100'><proper-signing-keyset identifier='3'><proper-signing-keyset identifier='3'/></proper-signing-keyset><defined-keyset alias='common' identifier='3'><defined-keyset alias='common' identifier='3'/></defined-keyset><defined-keyset alias='replace' identifier='4'/><defined-keyset alias='replace' identifier='3'/><defined-keyset alias='other' identifier='3'/></package><package name='b' codePath='/data/app/b' userId='10101'/><keyset-settings version='1'><keys><public-key identifier='3' value='{first}'/><public-key identifier='4' value='{second}'/><public-key identifier='5' value='{first}'/></keys><keysets><keyset identifier='3'><key-id identifier='3'/></keyset><keyset identifier='4'><key-id identifier='4'/></keyset></keysets><lastIssuedKeyId value='20'/><lastIssuedKeySetId value='30'/></keyset-settings></packages>"
+    );
+    fs::write(guest.join("refs.xml"), &document).unwrap();
+    let mut imported =
+        Settings::parse(&aim_android_xml::read(document.as_bytes()).unwrap()).unwrap();
+    key_sets::restore(&mut imported).unwrap();
+    assert_eq!(
+        imported.key_sets.reference_counts.as_ref().unwrap(),
+        &std::collections::BTreeMap::from([(3, 6), (4, 1)])
+    );
+    states.push(("import-replaced", imported.clone()));
+    key_sets::register(
+        &mut imported,
+        "a",
+        &[key(1).0],
+        Some(&[("new".into(), vec![key(2).0])]),
+        &[],
+    )
+    .unwrap();
+    states.push(("replace-imported", imported.clone()));
+    key_sets::clear_package(&mut imported, "a").unwrap();
+    assert_eq!(
+        imported.key_sets.reference_counts.as_ref().unwrap(),
+        &std::collections::BTreeMap::from([(3, 2), (4, 1)])
+    );
+    states.push(("remove-imported", imported.clone()));
+    imported.key_sets.reference_counts = None;
+    key_sets::restore(&mut imported).unwrap();
+    states.push(("restart-imported", imported));
     let output = String::from_utf8(run(boot.command().args([
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.KeySetOwnerOracle", "/data/local/tmp/manifest-keysets/reuse.apk", "/data/local/tmp/manifest-keysets/repeat-set.apk",
@@ -1183,6 +1222,14 @@ fn manifest_keysets_match_original_parser() {
                     .as_str()
                 )
             );
+            let counts = state.key_sets.reference_counts.as_ref().unwrap();
+            let proper = package.key_set_data.proper_signing_key_set;
+            if proper != -1 {
+                assert_eq!(
+                    lines.next(),
+                    Some(format!("REF {proper} {}", counts[&proper]).as_str())
+                );
+            }
             for (alias, id) in &package.key_set_data.defined_key_sets {
                 assert_eq!(
                     lines.next(),
@@ -1194,6 +1241,10 @@ fn manifest_keysets_match_original_parser() {
                         )
                         .as_str()
                     )
+                );
+                assert_eq!(
+                    lines.next(),
+                    Some(format!("REF {id} {}", counts[id]).as_str())
                 );
             }
             for id in &package.key_set_data.upgrade_key_sets {
@@ -1208,8 +1259,12 @@ fn manifest_keysets_match_original_parser() {
             .step_by(2)
             .map(|i| u8::from_str_radix(&global[i..i + 2], 16).unwrap())
             .collect();
-        let original = Settings::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
-        assert_eq!(original.key_sets, state.key_sets, "{name}");
+        let mut original = Settings::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+        let mut expected = state.key_sets;
+        // The global serializer omits runtime reference counts.
+        original.key_sets.reference_counts = None;
+        expected.reference_counts = None;
+        assert_eq!(original.key_sets, expected, "{name}");
     }
     assert!(lines.next().is_none());
     use aim_services::package::owner::update_ownership::UpdateOwnership;

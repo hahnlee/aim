@@ -1256,3 +1256,40 @@ fn shared_uid_writer_rejects_multi_member_and_empty_group_deletion() {
         assert_eq!(fs::read(&path).unwrap(), document.as_bytes());
     }
 }
+
+#[test]
+fn imported_keyset_references_survive_commits_until_restart() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    let input = b"<packages><package name='a' codePath='/data/app/a' userId='10100'><proper-signing-keyset identifier='1'/><proper-signing-keyset identifier='1'/><defined-keyset alias='same' identifier='1'/><defined-keyset alias='same' identifier='1'/><defined-keyset alias='replace' identifier='2'/><defined-keyset alias='replace' identifier='1'/></package><keyset-settings version='1'><keys><public-key identifier='1' value='AQ=='/><public-key identifier='2' value='Ag=='/></keys><keysets><keyset identifier='1'><key-id identifier='1'/></keyset><keyset identifier='2'><key-id identifier='2'/></keyset></keysets><lastIssuedKeyId value='2'/><lastIssuedKeySetId value='2'/></keyset-settings></packages>";
+    fs::write(&path, input).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(
+        store.state.settings.key_sets.reference_counts,
+        Some(BTreeMap::from([(1, 5), (2, 1)]))
+    );
+    store.commit_removed_boot_metadata("a").unwrap();
+    let live = store.state.settings.clone();
+    assert_eq!(
+        live.key_sets.reference_counts,
+        Some(BTreeMap::from([(1, 2), (2, 1)]))
+    );
+    assert_eq!(live.key_sets.key_sets.len(), 2);
+    store.commit_update_owner_clearings(&live).unwrap();
+    assert_eq!(store.state.settings, live);
+    let mut reopened = Store::open(&data.0, &[0])
+        .unwrap()
+        .unwrap()
+        .state
+        .settings
+        .clone();
+    assert_eq!(
+        reopened.key_sets.reference_counts,
+        Some(BTreeMap::from([(1, 0), (2, 0)]))
+    );
+    key_sets::restore(&mut reopened).unwrap();
+    assert!(reopened.key_sets.key_sets.is_empty());
+    assert!(reopened.key_sets.public_keys.is_empty());
+    assert_eq!(reopened.key_sets.last_issued_key_set_id, 2);
+}

@@ -401,7 +401,7 @@ impl Store {
     ) -> Result<(), WriteError> {
         let root = key_sets::replace_registered(&self.settings_document, settings)
             .map_err(WriteError::before)?;
-        self.commit_package_document(root)
+        self.commit_package_document_with_key_sets(root, Some(settings.key_sets.clone()))
     }
 
     /// Persist completed denylist effects on retained active packages. This
@@ -420,13 +420,30 @@ impl Store {
     /// Persist the domain/keyset stage of an owner-authorized boot removal.
     /// Package settings, UID/user state and permission deletion follow later.
     pub fn commit_removed_boot_metadata(&mut self, package: &str) -> Result<(), WriteError> {
-        let root =
-            key_sets::replace(&self.settings_document, package).map_err(WriteError::before)?;
-        self.commit_package_document(root)
+        let mut desired = self.state.settings.clone();
+        desired.domain_verification.clear_package(package);
+        key_sets::clear_package(&mut desired, package).map_err(WriteError::before)?;
+        let root = key_sets::replace(&self.settings_document, &desired, package)
+            .map_err(WriteError::before)?;
+        self.commit_package_document_with_key_sets(root, Some(desired.key_sets))
     }
 
     fn commit_package_document(&mut self, root: Element) -> Result<(), WriteError> {
-        let persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
+        self.commit_package_document_with_key_sets(root, None)
+    }
+
+    fn commit_package_document_with_key_sets(
+        &mut self,
+        root: Element,
+        key_sets: Option<super::settings::KeySets>,
+    ) -> Result<(), WriteError> {
+        let mut persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
+        if let Some(key_sets) = key_sets {
+            persisted.key_sets.reference_counts = key_sets.reference_counts;
+        } else if persisted.key_sets.key_sets == self.state.settings.key_sets.key_sets {
+            persisted.key_sets.reference_counts =
+                self.state.settings.key_sets.reference_counts.clone();
+        }
         let bytes = abx::write(&root).map_err(WriteError::before)?;
         let path = self.data.join("system/packages.xml");
         let backup = self.data.join("system/packages-backup.xml");

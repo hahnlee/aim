@@ -140,7 +140,7 @@ pub(in crate::package::owner) fn replace_registered(
     root.content
         .retain(|n| !matches!(n, Node::Element(e) if e.name == "keyset-settings"));
     root.content.push(Node::Element(global));
-    if Settings::parse(&root)? != persisted(desired.clone()) {
+    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
         return Err("keyset document did not preserve desired settings".into());
     }
     Ok(root)

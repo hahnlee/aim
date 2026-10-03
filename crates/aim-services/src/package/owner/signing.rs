@@ -19,6 +19,7 @@ fn without_signatures(mut settings: Settings) -> Settings {
     settings
 }
 pub(super) fn persisted(mut settings: Settings) -> Settings {
+    settings.key_sets.reference_counts = None;
     for signatures in settings
         .packages
         .iter_mut()
@@ -242,7 +243,7 @@ fn replace_scan(
             );
         }
     }
-    if Settings::parse(&root)? != persisted(desired.clone()) {
+    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
         return Err("signature document did not preserve desired settings".into());
     }
     Ok(root)

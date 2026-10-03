@@ -319,6 +319,8 @@ pub struct KeySets {
     pub key_sets: Vec<(i64, Vec<i64>)>,
     pub last_issued_key_id: i64,
     pub last_issued_key_set_id: i64,
+    /// Runtime references; saved XML counts each role before alias replacement.
+    pub reference_counts: Option<std::collections::BTreeMap<i64, i32>>,
 }
 
 /// `PermissionInfo.fixProtectionLevel`.
@@ -345,10 +347,20 @@ impl Settings {
     pub fn parse(root: &Element) -> Result<Settings, String> {
         let mut s = Settings::default();
         let mut certificates = Certificates::new();
+        let mut key_set_refs = std::collections::BTreeMap::<i64, i32>::new();
         for e in root.children() {
             match e.name.as_str() {
                 "package" => {
                     if let Some(p) = package(e, &mut certificates)? {
+                        for child in key_set_entries(e).into_iter().filter(|child| {
+                            matches!(
+                                child.name.as_str(),
+                                "proper-signing-keyset" | "defined-keyset"
+                            )
+                        }) {
+                            let count = key_set_refs.entry(identifier(child)?).or_default();
+                            *count = count.wrapping_add(1);
+                        }
                         s.packages.push(p);
                     }
                 }
@@ -368,6 +380,15 @@ impl Settings {
                 "verifier" => s.verifier = string(e, "device"),
                 "keyset-settings" => {
                     s.key_sets = key_sets(e)?;
+                    if s.key_sets.version.is_some() {
+                        s.key_sets.reference_counts = Some(
+                            s.key_sets
+                                .key_sets
+                                .iter()
+                                .map(|(id, _)| (*id, key_set_refs.get(id).copied().unwrap_or(0)))
+                                .collect(),
+                        );
+                    }
                     if s.key_sets.version.is_none() {
                         for package in &mut s.packages {
                             package.key_set_data = KeySetData::default();
@@ -560,19 +581,10 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
         if libraries(&mut p, child)? {
             continue;
         }
-        let data = &mut p.key_set_data;
         match child.name.as_str() {
             "sigs" => p.signatures = signatures(child, certificates)?,
             "install-initiator-sigs" => {
                 p.install_source.initiating_package_signatures = signatures(child, certificates)?
-            }
-            "proper-signing-keyset" => {
-                data.proper_signing_key_set = identifier(child)?;
-            }
-            "upgrade-keyset" => data.add_upgrade_key_set(identifier(child)?),
-            "defined-keyset" => {
-                let alias = string(child, "alias");
-                data.add_defined_key_set(identifier(child)?, alias);
             }
             "mime-group" => {
                 if let Some(group) = string(child, "name") {
@@ -594,8 +606,34 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
             _ => {}
         }
     }
+    for child in key_set_entries(e) {
+        match child.name.as_str() {
+            "proper-signing-keyset" => p.key_set_data.proper_signing_key_set = identifier(child)?,
+            "upgrade-keyset" => p.key_set_data.add_upgrade_key_set(identifier(child)?),
+            "defined-keyset" => p
+                .key_set_data
+                .add_defined_key_set(identifier(child)?, string(child, "alias")),
+            _ => {}
+        }
+    }
     p.install_source = p.install_source.normalized()?;
     Ok(Some(p))
+}
+
+// These Settings branches leave the parser inside the tag, so nested keyset
+// entries are visited too. Unknown package children consume their subtree.
+fn key_set_entries(e: &Element) -> Vec<&Element> {
+    let mut entries = Vec::new();
+    for child in e.children() {
+        if matches!(
+            child.name.as_str(),
+            "proper-signing-keyset" | "defined-keyset" | "upgrade-keyset" | "signing-keyset"
+        ) {
+            entries.push(child);
+            entries.extend(key_set_entries(child));
+        }
+    }
+    entries
 }
 
 fn identifier(e: &Element) -> Result<i64, String> {

@@ -73,7 +73,7 @@ pub(super) fn replace(original: &Element, desired: &Settings) -> Result<Element,
             );
         }
     }
-    if Settings::parse(&root)? != persisted(desired.clone()) {
+    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
         return Err("native-library settings did not round trip (#798)".into());
     }
     Ok(root)

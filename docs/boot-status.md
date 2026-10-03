@@ -72,8 +72,8 @@ This includes Java hash order/collisions, null/empty keys, nullable array slots,
 nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 377
-units pass (3.16s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 378
+units pass (3.85s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
@@ -131,8 +131,22 @@ arrays for default/cleared owners. Original ART agrees on 12 text/ABX keyset
 reader cases and actual native captured getters; returned arrays/maps can change
 without affecting the capture. Original text/ABX serializers fail on null alias
 writes; native commits reject them before changing files or published state.
-Persisted keyset reference-count import/cleanup remains #854. Complete
-PackageState adapters and live producer/import wiring remain #836.
+Keyset import retains a runtime reference owner (#854): each proper/defined
+XML occurrence increments before replacement, including nested known keyset
+entries. Upgrade IDs and disabled factories hold no refs. Registration acquires
+new alias refs before releasing every prior alias role; signing replacement and
+package removal decrement actual counts. Overwritten XML roles can leave sets
+and keys alive after removal, matching the original manager. Counts are not
+serialized: native commits preserve the live owner, while restart derives counts
+from saved roles and prunes newly orphaned sets/keys without rewinding IDs.
+The original parser/keyset/update-owner ART fixture passes (15.08s), including
+11 exact owner states and original KeySetHandle reference counts, shared roles,
+replacement, removal, orphan pruning and restart. Disposable resilient ABX store
+tests verify residual refs survive removal and unrelated commits until restart.
+All integration targets compile; device-services links against original APIs
+(14.2s). This is component ownership evidence; full PackageState adapters and
+live producer/import wiring remain #836. Native PMS activation and all native
+CTS/app/template/APEX/rollback acceptance gates remain incomplete.
 Live overlay/component producers, original-state import and full PackageState
 metadata/callback wiring remain #836. Native suspension records now distinguish
 explicit null parameter values from missing keys/maps (#848); runtime put/remove

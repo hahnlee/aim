@@ -112,7 +112,7 @@ pub(super) fn replace(
                 .then_some(Value::Bool(true)),
         );
     }
-    if Settings::parse(&root)? != persisted(desired.clone()) {
+    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
         return Err("removed setting document did not preserve desired settings".into());
     }
     Ok(root)

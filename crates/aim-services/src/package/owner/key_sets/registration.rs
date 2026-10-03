@@ -5,32 +5,60 @@ use super::{Settings, validated_sets};
 use crate::package::sign::canonical_public_keys;
 use std::collections::BTreeSet;
 
-fn references(settings: &Settings) -> BTreeSet<i64> {
-    settings
-        .packages
+pub(super) fn initialize_references(settings: &mut Settings) {
+    if settings.key_sets.reference_counts.is_some() {
+        return;
+    }
+    let mut counts = settings
+        .key_sets
+        .key_sets
         .iter()
-        .flat_map(|p| {
-            std::iter::once(p.key_set_data.proper_signing_key_set)
-                .chain(p.key_set_data.defined_key_sets.iter().map(|(_, id)| *id))
-        })
-        .filter(|id| *id != -1)
-        .collect()
+        .map(|(id, _)| (*id, 0i32))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for package in &settings.packages {
+        for id in std::iter::once(package.key_set_data.proper_signing_key_set).chain(
+            package
+                .key_set_data
+                .defined_key_sets
+                .iter()
+                .map(|(_, id)| *id),
+        ) {
+            if let Some(count) = counts.get_mut(&id) {
+                *count = count.wrapping_add(1);
+            }
+        }
+    }
+    settings.key_sets.reference_counts = Some(counts);
 }
 
-fn retire(settings: &mut Settings, candidates: &BTreeSet<i64>) {
-    let referenced = references(settings);
-    let removed: BTreeSet<_> = candidates.difference(&referenced).copied().collect();
+pub(super) fn release(settings: &mut Settings, id: i64) {
+    let Some(count) = settings
+        .key_sets
+        .reference_counts
+        .as_mut()
+        .unwrap()
+        .get_mut(&id)
+    else {
+        return;
+    };
+    *count = count.wrapping_sub(1);
+    if *count > 0 {
+        return;
+    }
+    settings
+        .key_sets
+        .reference_counts
+        .as_mut()
+        .unwrap()
+        .remove(&id);
     let removed_keys: BTreeSet<_> = settings
         .key_sets
         .key_sets
         .iter()
-        .filter(|(id, _)| removed.contains(id))
+        .filter(|(set, _)| *set == id)
         .flat_map(|(_, keys)| keys.iter().copied())
         .collect();
-    settings
-        .key_sets
-        .key_sets
-        .retain(|(id, _)| !removed.contains(id));
+    settings.key_sets.key_sets.retain(|(set, _)| *set != id);
     let live_keys: BTreeSet<_> = settings
         .key_sets
         .key_sets
@@ -40,16 +68,27 @@ fn retire(settings: &mut Settings, candidates: &BTreeSet<i64>) {
     settings
         .key_sets
         .public_keys
-        .retain(|(id, _)| !removed_keys.contains(id) || live_keys.contains(id));
+        .retain(|(key, _)| !removed_keys.contains(key) || live_keys.contains(key));
 }
 
 /// Load the owner and prune unreferenced key sets, as the original reader does.
 /// Public keys not referenced by any removed set are retained. Invalid owner
 /// input leaves settings unchanged; disabled factories hold no separate refs.
 pub fn restore(settings: &mut Settings) -> Result<(), String> {
-    let sets = validated_sets(settings)?;
-    let candidates = sets.keys().copied().collect();
-    retire(settings, &candidates);
+    validated_sets(settings)?;
+    initialize_references(settings);
+    let orphans: Vec<_> = settings
+        .key_sets
+        .reference_counts
+        .as_ref()
+        .unwrap()
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in orphans {
+        release(settings, id);
+    }
     settings.key_sets.key_sets.sort_by_key(|(id, _)| *id);
     for (_, keys) in &mut settings.key_sets.key_sets {
         let mut distinct = Vec::new();
@@ -106,6 +145,7 @@ pub fn register(
         return Err("upgrade keyset has no corresponding definition".into());
     }
     let mut staged = settings.clone();
+    initialize_references(&mut staged);
     let old = staged.packages[at].key_set_data.proper_signing_key_set;
     let unchanged = staged
         .key_sets
@@ -128,12 +168,12 @@ pub fn register(
         });
     if !unchanged {
         staged.packages[at].key_set_data.proper_signing_key_set = -1;
-        retire(&mut staged, &BTreeSet::from([old]));
+        release(&mut staged, old);
         let id = add_set(&mut staged, &signing)?;
         staged.packages[at].key_set_data.proper_signing_key_set = id;
     }
     if defined.is_some() {
-        let old: BTreeSet<_> = staged.packages[at]
+        let old: Vec<_> = staged.packages[at]
             .key_set_data
             .defined_key_sets
             .iter()
@@ -166,7 +206,9 @@ pub fn register(
                 staged.packages[at].key_set_data.upgrade_key_sets.push(id);
             }
         }
-        retire(&mut staged, &old);
+        for id in old {
+            release(&mut staged, id);
+        }
     }
     staged.key_sets.version = Some(1);
     *settings = staged;
@@ -221,6 +263,13 @@ fn add_set(settings: &mut Settings, keys: &[Vec<u8>]) -> Result<i64, String> {
         .map(|(id, _)| *id)
         .min()
     {
+        let count = owner
+            .reference_counts
+            .as_mut()
+            .unwrap()
+            .get_mut(&id)
+            .ok_or("keyset has no reference owner")?;
+        *count = count.wrapping_add(1);
         return Ok(id);
     }
     let id = next(
@@ -228,6 +277,7 @@ fn add_set(settings: &mut Settings, keys: &[Vec<u8>]) -> Result<i64, String> {
         owner.key_sets.iter().map(|(id, _)| *id).max().unwrap_or(0),
     )?;
     owner.key_sets.push((id, ids));
+    owner.reference_counts.as_mut().unwrap().insert(id, 1);
     Ok(id)
 }
 
@@ -337,6 +387,7 @@ mod tests {
             public_keys: vec![(1, key(1)), (2, key(2)), (3, key(3))],
             last_issued_key_id: 3,
             last_issued_key_set_id: 2,
+            ..Default::default()
         };
         restore(&mut settings).unwrap();
         assert_eq!(settings.key_sets.key_sets, [(1, vec![1])]);
