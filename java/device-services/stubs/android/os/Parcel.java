@@ -38,4 +38,6 @@ public final class Parcel {
     public final <T> T readTypedObject(Parcelable.Creator<T> c) { throw new RuntimeException("stub"); }
     public long[] createLongArray() { throw new RuntimeException("stub"); }
     public void writeLongArray(long[] value) { throw new RuntimeException("stub"); }
+    public final PersistableBundle readPersistableBundle() { throw new RuntimeException("stub"); }
+    public final void writePersistableBundle(PersistableBundle value) { throw new RuntimeException("stub"); }
 }

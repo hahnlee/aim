@@ -190,6 +190,7 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
         "<pbundle_as_map name='nested'><int name='x' value='2'/><pbundle_as_map name='deep'><string name='v'>yes</string></pbundle_as_map></pbundle_as_map>",
         "<map name='nested'><float name='drop' value='2'/><boolean name='keep' value='false'/></map>",
         "<int value='3'/><int value='4'/>",
+        "<string name='BB'>first collision</string><string name='Aa'>second collision</string><int name='' value='1'/><int value='2'/><boolean name='negative-hash-key' value='true'/><string name='😀'>utf16 hash</string>",
         "<unknown name='x'/>",
         "<int name='bad'/>",
         "<int name='bad' value='bad'/>",
@@ -284,6 +285,7 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
         cases.push(format!("<suspend-params suspending-package='android' quarantined='true'>{content}</suspend-params>"));
     }
     let mut expected = Vec::new();
+    let mut parcels = Vec::new();
     // Run both text and ABX parsers on every fixture.
     for case in &cases {
         let root = aim_android_xml::read(case.as_bytes()).unwrap();
@@ -293,7 +295,15 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
         ] {
             let index = expected.len();
             fs::write(directory.join(format!("extras-{index}.xml")), &bytes).unwrap();
-            expected.push(native_extras(&aim_android_xml::read_next(&bytes).unwrap()));
+            let root = aim_android_xml::read_next(&bytes).unwrap();
+            expected.push(native_extras(&root));
+            if root.name == "app-extras" {
+                if let Ok(value) =
+                    aim_services::package::restrictions::persistable::Bundle::restore(&root)
+                {
+                    parcels.push(value);
+                }
+            }
         }
     }
     // Typed ABX conversions differ from text even when getAttributeValue looks alike.
@@ -322,12 +332,30 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
         )
         .unwrap();
         expected.push(native_extras(&root));
+        if let Ok(value) = aim_services::package::restrictions::persistable::Bundle::restore(&root)
+        {
+            parcels.push(value);
+        }
     }
     let count = expected.len().to_string();
-    let output = run(boot.command().args(["shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/suspension-dialogs/oracle.dex:/system/framework/services.jar", "/system/bin", "PersistableBundleOracle", "/data/local/tmp/suspension-dialogs", &count]));
+    let mut parcel_expected = Vec::new();
+    for (index, value) in parcels.iter().enumerate() {
+        let mut parcel = value.parcel().unwrap();
+        parcel.write_i32(0x11ddee55);
+        fs::write(
+            directory.join(format!("parcel-{index}.native")),
+            parcel.data(),
+        )
+        .unwrap();
+        let mut semantic = Vec::new();
+        bundle(&mut semantic, Some(value));
+        parcel_expected.push((parcel.data().to_vec(), semantic));
+    }
+    let parcel_count = parcels.len().to_string();
+    let output = run(boot.command().args(["shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/suspension-dialogs/oracle.dex:/system/framework/services.jar", "/system/bin", "PersistableBundleOracle", "/data/local/tmp/suspension-dialogs", &count, &parcel_count]));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("EXTRAS {count}\n")
+        format!("EXTRAS {count}\nBUNDLES {parcel_count}\n")
     );
     for (index, bytes) in expected.into_iter().enumerate() {
         assert_eq!(
@@ -341,6 +369,19 @@ fn check_extras(boot: &Boot, directory: &std::path::Path) {
         );
     }
     eprintln!("verified {count} original extras/parameter cases");
+    for (index, (bytes, semantic)) in parcel_expected.into_iter().enumerate() {
+        assert_eq!(
+            semantic,
+            fs::read(directory.join(format!("parcel-{index}.semantic"))).unwrap(),
+            "native bundle values {index}"
+        );
+        assert_eq!(
+            bytes,
+            fs::read(directory.join(format!("parcel-{index}.original"))).unwrap(),
+            "native bundle bytes {index}"
+        );
+    }
+    eprintln!("verified {parcel_count} native bundles through original Parcel read/write");
 }
 
 fn text(out: &mut Vec<u8>, value: Option<&str>) {

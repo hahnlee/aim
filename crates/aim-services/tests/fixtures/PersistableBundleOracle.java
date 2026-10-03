@@ -1,4 +1,5 @@
 import android.os.PersistableBundle;
+import android.os.Parcel;
 import android.util.Xml;
 import com.android.server.pm.pkg.SuspendParams;
 import java.io.*;
@@ -76,5 +77,29 @@ public final class PersistableBundleOracle {
             }
         }
         System.out.println("EXTRAS " + count);
+        int parcels = Integer.parseInt(args[2]);
+        for (int i = 0; i < parcels; i++) {
+            byte[] nativeBytes = java.nio.file.Files.readAllBytes(
+                    java.nio.file.Path.of(args[0], "parcel-" + i + ".native"));
+            Parcel input = Parcel.obtain();
+            Parcel output = Parcel.obtain();
+            try {
+                input.unmarshall(nativeBytes, 0, nativeBytes.length);
+                input.setDataPosition(0);
+                PersistableBundle value = input.readPersistableBundle();
+                var bytes = new ByteArrayOutputStream();
+                bundle(new DataOutputStream(bytes), value);
+                if (input.readInt() != 0x11ddee55 || input.dataAvail() != 0) {
+                    throw new AssertionError("native bundle consumed the wrong byte range");
+                }
+                java.nio.file.Files.write(java.nio.file.Path.of(args[0], "parcel-" + i + ".semantic"), bytes.toByteArray());
+                output.writePersistableBundle(value);
+                output.writeInt(0x11ddee55);
+                java.nio.file.Files.write(java.nio.file.Path.of(args[0], "parcel-" + i + ".original"), output.marshall());
+            } finally {
+                input.recycle(); output.recycle();
+            }
+        }
+        System.out.println("BUNDLES " + parcels);
     }
 }

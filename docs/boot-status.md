@@ -62,13 +62,18 @@ nullable keys/string-array slots and raw double bits. XML errors preserve
 previously read SuspendParams fields; runtime errors escape. User ownership
 is resolved with an explicit cross-user image policy before duplicate
 replacement and quarantine aggregation. A disposable original-PMS oracle
-(2026-10-03, 9.84s) verifies 66 dialog restore/save cases and 246 extras/parameter
+(2026-10-04, 11.16s) verifies 66 dialog restore/save cases and 248 extras/parameter
 cases across text/ABX parsers, including malformed inputs, partial arrays,
 defused types, CDATA, NaN payloads and Java floating-point syntax/rounding.
+The native PersistableBundle Parcel writer also passes 130 original ART
+read/write roundtrips, checking every decoded value, the exact consumed byte
+range and byte-identical reserialization after forcing original unparceling.
+This includes Java hash order/collisions, null/empty keys, nullable array slots,
+nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly.
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
-allowing unchanged NaNs and rejecting external signed-zero changes. All 368
-units pass (3.24s), as do 11 XML units; the ignored
+allowing unchanged NaNs and rejecting external signed-zero changes. All 369
+units pass (3.12s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). Facade transport, native suspension operations and native
 PMS activation are not established. The C branch also has Binder query

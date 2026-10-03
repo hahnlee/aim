@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use aim_android_xml::{Element, Node};
 use std::borrow::Cow;
+mod parcel;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bundle {
