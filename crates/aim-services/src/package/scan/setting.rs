@@ -1,7 +1,7 @@
 //! PackageSetting construction and initial updates, ported from android-16.0.0_r1
 //! Settings.createNewSetting/updatePackageSetting and PackageSetting constructors.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{Identity, Uid};
+use super::{Identity, SigningScan, Uid};
 use crate::package::{restrictions::UserState, settings};
 use std::collections::BTreeMap;
 
@@ -71,6 +71,44 @@ pub struct NewSetting {
     pub package: settings::Package,
     /// Explicit user states; an absent entry uses UserState::default.
     pub users: BTreeMap<i32, UserState>,
+}
+
+impl SigningScan {
+    /// Import current active/factory PackageSetting bits as one complete input.
+    pub fn capture_leaving_shared_users(
+        &mut self,
+        values: BTreeMap<(String, bool), bool>,
+    ) -> Result<(), String> {
+        let expected: std::collections::BTreeSet<_> = self
+            .settings
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), false))
+            .chain(
+                self.settings
+                    .disabled_system_packages
+                    .iter()
+                    .map(|p| (p.name.clone(), true)),
+            )
+            .collect();
+        if values
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+        {
+            return Err("leaving shared user inventory differs".into());
+        }
+        for (packages, factory) in [
+            (&mut self.settings.packages, false),
+            (&mut self.settings.disabled_system_packages, true),
+        ] {
+            for setting in packages {
+                setting.leaving_shared_user = Some(values[&(setting.name.clone(), factory)]);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl NewSetting {
@@ -227,6 +265,7 @@ impl NewSetting {
                 restrict_update_hash: m.restrict_update_hash,
                 app_id: uid.app_id,
                 shared_user: uid.shared_user.is_some(),
+                leaving_shared_user: Some(false),
                 scanned_as_stopped_system_app: system && p.stopped_system_app,
                 category_hint: -1,
                 key_set_data: settings::KeySetData {
@@ -256,6 +295,83 @@ pub(super) fn domain_id(id: [u8; 16]) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn current_leaving_bits_import_atomically_and_remain_in_their_capture() {
+        let package = settings::Package {
+            name: "fixture".into(),
+            app_id: 10043,
+            ..Default::default()
+        };
+        let saved = settings::Settings {
+            packages: vec![package.clone()],
+            disabled_system_packages: vec![package],
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(&Default::default(), &saved, 36).unwrap();
+        owner
+            .assign_seinfo_at_boot(
+                &crate::package::owner::seinfo::Policy::unread(),
+                &mut |_| Ok(30),
+            )
+            .unwrap();
+        assert_eq!(owner.settings.packages[0].leaving_shared_user, None);
+        let before = owner.clone();
+        assert!(
+            owner
+                .capture_leaving_shared_users(BTreeMap::from([(("fixture".into(), false), true)]))
+                .is_err()
+        );
+        assert_eq!(owner, before);
+        let mut inputs = BTreeMap::from([
+            (("fixture".into(), false), true),
+            (("fixture".into(), true), false),
+        ]);
+        inputs.insert(("foreign".into(), false), false);
+        assert!(owner.capture_leaving_shared_users(inputs).is_err());
+        assert_eq!(owner, before);
+        owner
+            .capture_leaving_shared_users(BTreeMap::from([
+                (("fixture".into(), false), true),
+                (("fixture".into(), true), false),
+            ]))
+            .unwrap();
+        let store = crate::package::scan_snapshot::Store::new(
+            owner.clone(),
+            crate::package::owner::usage::Usage::new(["fixture"]),
+        )
+        .unwrap();
+        let base = store.capture();
+        owner
+            .capture_leaving_shared_users(BTreeMap::from([
+                (("fixture".into(), false), false),
+                (("fixture".into(), true), true),
+            ]))
+            .unwrap();
+        let current = store.publish(&base, owner, base.usage().clone()).unwrap();
+        assert_eq!(
+            base.owner().settings.packages[0].leaving_shared_user,
+            Some(true)
+        );
+        assert_eq!(
+            base.owner().settings.disabled_system_packages[0].leaving_shared_user,
+            Some(false)
+        );
+        assert_eq!(
+            current.owner().settings.packages[0].leaving_shared_user,
+            Some(false)
+        );
+        assert_eq!(
+            current.owner().settings.disabled_system_packages[0].leaving_shared_user,
+            Some(true)
+        );
+        for (capture, value) in [(&base, 1_i32), (&current, 0_i32)] {
+            let bytes =
+                crate::package::scan_snapshot::setting_record::captured(capture, "fixture", false)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&bytes[bytes.len() - 4..], &value.to_le_bytes());
+        }
+    }
+    #[test]
     fn updates_preserve_mime_values_and_only_promote_users_on_new_system_paths() {
         let original = settings::Package {
             code_path: "/data/app/old/base.apk".into(),
@@ -264,6 +380,7 @@ mod tests {
             app_id: 10000,
             version_code: 7,
             last_modified_time: 99,
+            leaving_shared_user: Some(true),
             legacy_native_library_path: Some("old.lib".into()),
             mime_groups: vec![
                 (Some("keep".into()), vec![Some("text/plain".into()), None]),
@@ -336,6 +453,7 @@ mod tests {
                     assert_eq!(result.package.version_code, 7);
                     assert_eq!(result.package.last_modified_time, 99);
                     assert_eq!(result.package.app_id, 10000);
+                    assert_eq!(result.package.leaving_shared_user, Some(true));
                     assert_eq!(
                         result.package.legacy_native_library_path.as_deref(),
                         Some(if changed { "new.lib" } else { "old.lib" })

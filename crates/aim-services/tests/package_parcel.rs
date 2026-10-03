@@ -296,6 +296,36 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.setting")), setting_bytes).unwrap();
+        for (suffix, leaving) in [
+            ("true", Some(true)),
+            ("false", Some(false)),
+            ("unknown", None),
+        ] {
+            let mut owner = snapshot.owner().clone();
+            owner
+                .settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == pkg.package_name)
+                .unwrap()
+                .leaving_shared_user = leaving;
+            let changed =
+                aim_services::package::scan_snapshot::Store::new(owner, snapshot.usage().clone())
+                    .unwrap()
+                    .capture();
+            let bytes = aim_services::package::scan_snapshot::setting_record::captured(
+                &changed,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            fs::write(
+                directory.join(format!("{name}.setting-leaving-{suffix}")),
+                bytes,
+            )
+            .unwrap();
+        }
         for (suffix, paths) in [("null", None), ("empty", Some(vec![]))] {
             let mut changed = snapshot.owner().clone();
             changed
@@ -1054,7 +1084,9 @@ fn native_scan_objects(
         owner.set_user_state(name, 10, state).unwrap();
         let mut empty = aim_services::package::restrictions::UserState::initialized();
         empty.suspensions = Some(vec![]);
-        empty.runtime.set_library_overlay_paths("absent".into(), None);
+        empty
+            .runtime
+            .set_library_overlay_paths("absent".into(), None);
         owner.set_user_state(name, 11, empty).unwrap();
         use aim_services::package::restrictions::{
             ArchiveActivity, ArchiveState, SuspendParams, UserState,

@@ -132,5 +132,6 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
             .install_permissions_fixed(name, factory)?
             .map_or(-1, i32::from),
     );
+    p.write_i32(s.leaving_shared_user.map_or(-1, i32::from));
     Ok(Some(p.data().to_vec()))
 }

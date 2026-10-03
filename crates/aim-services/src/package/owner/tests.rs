@@ -1,6 +1,29 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[test]
+fn current_leaving_bits_are_not_persisted_or_invented_by_disk_readers() {
+    let root = aim_android_xml::read(b"<packages><package name='fixture' codePath='/data/app/fixture' userId='10100' leavingSharedUser='true'/><updated-package name='fixture' codePath='/system/app/fixture' userId='10100'/></packages>").unwrap();
+    let saved = crate::package::settings::Settings::parse(&root).unwrap();
+    assert_eq!(saved.packages[0].leaving_shared_user, Some(false));
+    assert_eq!(
+        saved.disabled_system_packages[0].leaving_shared_user,
+        Some(false)
+    );
+    let mut current = saved.clone();
+    current.packages[0].leaving_shared_user = Some(true);
+    current.disabled_system_packages[0].leaving_shared_user = None;
+    let output = native_libraries::replace(&root, &current).unwrap();
+    assert_eq!(
+        crate::package::settings::Settings::parse(&output).unwrap(),
+        saved
+    );
+    assert_eq!(current.packages[0].leaving_shared_user, Some(true));
+    assert_eq!(
+        current.disabled_system_packages[0].leaving_shared_user,
+        None
+    );
+}
 pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {

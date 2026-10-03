@@ -70,6 +70,7 @@ public final class CapturedPackageSetting {
         if (domain == null) throw new IllegalStateException("active domain owner is not assigned");
         // Resolve permission inputs before constructing any original owner.
         boolean fixed = data.isInstallPermissionsFixed();
+        boolean leaving = data.isLeavingSharedUser();
         var legacy = data.getLegacyPermissionState();
         var setting = new PackageSetting(data.getPackageName(), data.realName,
             new File(data.path), data.flags, data.privateFlags, domain);
@@ -90,6 +91,7 @@ public final class CapturedPackageSetting {
         setting.setForceQueryableOverride(data.forceQueryable);
         setting.setPendingRestore(data.pendingRestore);
         setting.setDebuggable(data.debuggable);
+        setting.setLeavingSharedUser(leaving);
         setting.setScannedAsStoppedSystemApp(data.scannedAsStoppedSystemApp);
         setting.setBaseRevisionCode(data.baseRevisionCode);
         setting.setPageSizeAppCompatFlags(data.pageSizeAppCompatFlags);

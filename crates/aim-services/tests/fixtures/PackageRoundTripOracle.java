@@ -298,20 +298,47 @@ public final class PackageRoundTripOracle {
         var copiedFixed = new com.android.server.pm.PackageSetting(setting, false);
         setting.setInstallPermissionsFixed(!setting.isInstallPermissionsFixed());
         if (copiedFixed.isInstallPermissionsFixed() != metadata.isInstallPermissionsFixed()) throw new AssertionError("install permissions fixed copy shares state");
-        var truncatedFixed = java.util.Arrays.copyOf(settingBytes, settingBytes.length - 4);
+        var truncatedFixed = java.util.Arrays.copyOf(settingBytes, settingBytes.length - 8);
         var truncatedParcel = android.os.Parcel.obtain();
         try {
             truncatedParcel.unmarshall(truncatedFixed, 0, truncatedFixed.length); truncatedParcel.setDataPosition(0);
             try { dev.aim.server.PackageSettingData.read(truncatedParcel); throw new AssertionError("missing fixed marker became false"); } catch (IllegalArgumentException expected) {}
         } finally { truncatedParcel.recycle(); }
         var invalidFixed = settingBytes.clone();
-        java.util.Arrays.fill(invalidFixed, invalidFixed.length - 4, invalidFixed.length, (byte) 0);
-        invalidFixed[invalidFixed.length - 4] = 2;
+        java.util.Arrays.fill(invalidFixed, invalidFixed.length - 8, invalidFixed.length - 4, (byte) 0);
+        invalidFixed[invalidFixed.length - 8] = 2;
         var invalidParcel = android.os.Parcel.obtain();
         try {
             invalidParcel.unmarshall(invalidFixed, 0, invalidFixed.length); invalidParcel.setDataPosition(0);
             try { dev.aim.server.PackageSettingData.read(invalidParcel); throw new AssertionError("invalid fixed marker accepted"); } catch (IllegalArgumentException expected) {}
         } finally { invalidParcel.recycle(); }
+        for (String suffix : new String[] {"true", "false", "unknown"}) {
+            byte[] leavingBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".setting-leaving-" + suffix).toPath());
+            var leavingParcel = android.os.Parcel.obtain();
+            try {
+                leavingParcel.unmarshall(leavingBytes, 0, leavingBytes.length); leavingParcel.setDataPosition(0);
+                var leavingData = dev.aim.server.PackageSettingData.read(leavingParcel);
+                if (suffix.equals("unknown")) {
+                    if (leavingData.hasLeavingSharedUser()) throw new AssertionError("unknown leaving bit became known");
+                    try { com.android.server.pm.CapturedPackageSetting.from(leavingData, 1, false); throw new AssertionError("unknown leaving bit became false"); } catch (IllegalStateException expected) {}
+                } else {
+                    var restoredLeaving = com.android.server.pm.CapturedPackageSetting.from(leavingData, 1, false);
+                    if (restoredLeaving.isLeavingSharedUser() != suffix.equals("true")) throw new AssertionError("original leaving getter differs");
+                    var copiedLeaving = new com.android.server.pm.PackageSetting(restoredLeaving, false);
+                    restoredLeaving.setLeavingSharedUser(!restoredLeaving.isLeavingSharedUser());
+                    if (copiedLeaving.isLeavingSharedUser() != leavingData.isLeavingSharedUser()) throw new AssertionError("original leaving copy shares state");
+                }
+            } finally { leavingParcel.recycle(); }
+        }
+        for (boolean truncated : new boolean[] {true, false}) {
+            byte[] malformed = java.util.Arrays.copyOf(settingBytes, settingBytes.length - (truncated ? 4 : 0));
+            if (!truncated) { java.util.Arrays.fill(malformed, malformed.length - 4, malformed.length, (byte) 0); malformed[malformed.length - 4] = 2; }
+            var malformedParcel = android.os.Parcel.obtain();
+            try {
+                malformedParcel.unmarshall(malformed, 0, malformed.length); malformedParcel.setDataPosition(0);
+                try { dev.aim.server.PackageSettingData.read(malformedParcel); throw new AssertionError("malformed leaving marker accepted"); } catch (IllegalArgumentException expected) {}
+            } finally { malformedParcel.recycle(); }
+        }
         var legacy = metadata.getLegacyPermissionState();
         boolean populatedLegacy = name.equals("com.google.android.gsf");
         if (legacy.isMissing(10) != populatedLegacy || !legacy.getPermissionStates(0).isEmpty()
@@ -325,10 +352,11 @@ public final class PackageRoundTripOracle {
             legacySuffix.writeBoolean(true); legacySuffix.writeIntArray(new int[] {10, 0, 11});
             legacySuffix.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(uid, new int[] {10, 0, 11}, legacy));
             legacySuffix.writeInt(metadata.isInstallPermissionsFixed() ? 1 : 0);
+            legacySuffix.writeInt(metadata.isLeavingSharedUser() ? 1 : 0);
             int suffixLength = legacySuffix.marshall().length;
-            unresolvedSetting = java.util.Arrays.copyOf(settingBytes, settingBytes.length - suffixLength + 8);
-            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 8, unresolvedSetting.length - 4, (byte) 0);
-            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 4, unresolvedSetting.length, (byte) -1);
+            unresolvedSetting = java.util.Arrays.copyOf(settingBytes, settingBytes.length - suffixLength + 12);
+            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 12, unresolvedSetting.length - 8, (byte) 0);
+            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 8, unresolvedSetting.length, (byte) -1);
         } finally { legacySuffix.recycle(); }
         var unresolvedParcel = android.os.Parcel.obtain();
         try {

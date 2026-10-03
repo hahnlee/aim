@@ -1478,6 +1478,9 @@ mod tests {
         owner
             .capture_install_permissions_fixed(BTreeMap::from([(("fixture".into(), false), true)]))
             .unwrap();
+        owner
+            .capture_leaving_shared_users(BTreeMap::from([(("fixture".into(), false), true)]))
+            .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let mut invalid = owner.clone();
@@ -1581,6 +1584,9 @@ mod tests {
             .unwrap();
         owner
             .set_install_permissions_fixed("fixture", false, false)
+            .unwrap();
+        owner
+            .capture_leaving_shared_users(BTreeMap::from([(("fixture".into(), false), false)]))
             .unwrap();
         owner
             .set_user_state(
@@ -2047,6 +2053,18 @@ mod tests {
             setting_bytes.extend(chunk);
         }
         assert_eq!(setting_bytes, captured_setting);
+        assert_eq!(
+            &setting_bytes[setting_bytes.len() - 4..],
+            &1_i32.to_le_bytes()
+        );
+        let current_setting =
+            crate::package::scan_snapshot::setting_record::captured(&current, "fixture", false)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            &current_setting[current_setting.len() - 4..],
+            &0_i32.to_le_bytes()
+        );
         assert_ne!(
             setting_bytes,
             crate::package::scan_snapshot::setting_record::captured(&current, "fixture", false)

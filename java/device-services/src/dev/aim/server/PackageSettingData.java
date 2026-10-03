@@ -16,6 +16,7 @@ public final class PackageSettingData {
     private final int[] legacyUsers;
     private final byte[] legacyPermissions;
     private final int installPermissionsFixed;
+    private final int leavingSharedUser;
     public final InstallSourceData installSource;
     public final KeySetData keySets;
     private final String[] sdkLibraries, staticLibraries;
@@ -121,6 +122,9 @@ public final class PackageSettingData {
         if (in.dataAvail() < 4) throw new IllegalArgumentException("missing install permissions fixed marker");
         installPermissionsFixed = in.readInt();
         if (installPermissionsFixed < -1 || installPermissionsFixed > 1) throw new IllegalArgumentException("invalid install permissions fixed marker");
+        if (in.dataAvail() < 4) throw new IllegalArgumentException("missing leaving shared user marker");
+        leavingSharedUser = in.readInt();
+        if (leavingSharedUser < -1 || leavingSharedUser > 1) throw new IllegalArgumentException("invalid leaving shared user marker");
     }
     private static int count(Parcel in, int minimum) {
         int value = in.readInt();
@@ -133,6 +137,11 @@ public final class PackageSettingData {
     }
     public boolean hasLegacyPermissionState() { return legacyPermissions != null; }
     public boolean hasInstallPermissionsFixed() { return installPermissionsFixed != -1; }
+    public boolean hasLeavingSharedUser() { return leavingSharedUser != -1; }
+    public boolean isLeavingSharedUser() {
+        if (!hasLeavingSharedUser()) throw new IllegalStateException("leaving shared user owner is not captured");
+        return leavingSharedUser == 1;
+    }
     public boolean isInstallPermissionsFixed() {
         if (!hasInstallPermissionsFixed()) throw new IllegalStateException("install permissions fixed owner is not captured");
         return installPermissionsFixed == 1;

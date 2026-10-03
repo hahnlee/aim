@@ -20,6 +20,14 @@ fn without_signatures(mut settings: Settings) -> Settings {
 }
 pub(super) fn persisted(mut settings: Settings) -> Settings {
     settings.key_sets.reference_counts = None;
+    // A fresh disk reader has no current scan's leaving-shared-UID bit.
+    for package in settings
+        .packages
+        .iter_mut()
+        .chain(&mut settings.disabled_system_packages)
+    {
+        package.leaving_shared_user = Some(false);
+    }
     for signatures in settings
         .packages
         .iter_mut()

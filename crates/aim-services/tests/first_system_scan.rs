@@ -212,6 +212,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         );
         assert_eq!(record.parsed.uid, record.settings.app_id);
         assert_eq!(
+            record.settings.leaving_shared_user,
+            Some(
+                record
+                    .parsed
+                    .is(aim_services::package::pkg::booleans::LEAVING_SHARED_UID)
+            )
+        );
+        assert_eq!(
             record.parsed.signing_details,
             Some(record.signing.parcel_details().unwrap())
         );

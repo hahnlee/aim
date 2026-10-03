@@ -102,6 +102,9 @@ pub struct Package {
     pub force_queryable: bool,
     pub pending_restore: bool,
     pub debuggable: bool,
+    /// Current PackageSetting bit; None means an imported owner is unresolved.
+    /// This is not persisted in packages.xml or inferred from UID membership.
+    pub leaving_shared_user: Option<bool>,
     /// Runtime LinkedHashSet<File>; null and allocated-empty are distinct.
     pub old_paths: Option<Vec<Option<String>>>,
     pub base_revision_code: i32,
@@ -549,6 +552,8 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
         app_metadata_file_path: string(e, "appMetadataFilePath"),
         app_metadata_source: e.int("appMetadataSource")?.unwrap_or(0),
         category_hint: CATEGORY_UNDEFINED,
+        // readPackageLPw/readDisabledSysPackageLPw construct a fresh setting.
+        leaving_shared_user: Some(false),
         ..Package::default()
     };
     // `userId` and `sharedUserId` are the app id's historical names.

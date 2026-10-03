@@ -58,6 +58,8 @@ pub(super) fn apply(
     package.version_code =
         (i64::from(parsed.version_code_major) << 32) | i64::from(parsed.version_code as u32);
     package.volume_uuid.clone_from(&parsed.volume_uuid);
+    // ScanPackageUtils sets the current setting bit at scan enrichment.
+    package.leaving_shared_user = Some(parsed.is(booleans::LEAVING_SHARED_UID));
     package.debuggable = parsed.is(booleans::DEBUGGABLE);
     package.base_revision_code = parsed.base_revision_code;
     if package.flags & settings::FLAG_SYSTEM != 0 {
@@ -96,6 +98,39 @@ pub(super) fn application(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scan_enrichment_sets_current_leaving_bit_including_clearing_it() {
+        for previous in [None, Some(false), Some(true)] {
+            for leaving in [false, true] {
+                let mut setting = settings::Package {
+                    leaving_shared_user: previous,
+                    shared_user: !leaving,
+                    ..Default::default()
+                };
+                let parsed = AndroidPackage {
+                    booleans: if leaving {
+                        booleans::LEAVING_SHARED_UID
+                    } else {
+                        0
+                    },
+                    ..Default::default()
+                };
+                apply(
+                    &mut setting,
+                    &parsed,
+                    &mut BTreeMap::new(),
+                    ScanTime {
+                        current_time: 0,
+                        file_time: 17,
+                        user_id: 0,
+                        update_time: false,
+                    },
+                    false,
+                );
+                assert_eq!(setting.leaving_shared_user, Some(leaving));
+            }
+        }
+    }
     #[test]
     fn final_flags_replace_saved_bits_and_gate_factory_mode_by_requested_permission() {
         for factory in [false, true] {

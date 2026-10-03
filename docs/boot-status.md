@@ -599,8 +599,22 @@ checks combined concrete getters, detached mutable code/usage/user state,
 missing code/signing/usage/seInfo, UID/path/version mismatches and closed leases
 (17.08s with the complete package oracle). All original Java oracle linkage
 passes (4.22s), and device-services builds against original APIs (14.5s).
-This is not a complete facade: factory transient assembly, library dependency
-owners and the current leaving-shared-UID bit (#861) remain #836. Original-state import,
+The current PackageSetting leaving-shared-user bit now has a separate nullable
+native owner (#861). Original disk-reader/new-setting construction initializes
+false, copies retain the current value, and ScanPackageUtils enrichment explicitly
+sets or clears it from accepted parsed code. Complete active/factory import
+validates the owner inventory before mutation; unknown input remains unresolved.
+It is transported as -1/0/1 and restored with the original setter; unresolved,
+truncated and invalid markers reject. Disk persistence excludes this runtime bit
+and does not alter the current owner. Native Binder pages retain the old true
+value after a false publication. Original ART checks true/false concrete getters,
+copied mutable owners and unknown/malformed rejection (16.71s full package oracle).
+Units pass 392 (3.14s; one ignored/not run), all integration targets compile,
+original Java linkage passes (4.02s), device-services builds (16.6s), and the
+actual first-system image scan checks every accepted setting's enriched bit
+(42.90s). Live original-state export/import wiring remains #861/#836.
+This is not a complete facade: factory transient assembly and library dependency
+owners remain #836. Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.
