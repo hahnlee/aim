@@ -1214,6 +1214,54 @@ mod tests {
             owner.seinfo("active").unwrap(),
             Some("default:privapp:targetSdkVersion=35")
         );
+        owner.settings.packages[0].private_flags |= 1 << 18;
+        owner.loaded.insert("active".into(), code(19));
+        owner
+            .assign_seinfo_for_scan(
+                "active",
+                super::super::SeInfoSetting::Retained,
+                &policy,
+                &mut |_| panic!("shared runtime SDK"),
+            )
+            .unwrap();
+        let state = owner.seinfo_state("active").unwrap().unwrap();
+        assert_eq!(
+            owner.identities.shared_users["android.uid.system"].seinfo_target_sdk(),
+            35
+        );
+        assert_eq!(
+            state.base.as_deref(),
+            Some("default:privapp:targetSdkVersion=35:partition=vendor")
+        );
+        assert_eq!(
+            state.override_label.as_deref(),
+            Some("default:privapp:targetSdkVersion=35")
+        );
+        let retained = owner.clone();
+        owner
+            .assign_seinfo_for_scan(
+                "active",
+                super::super::SeInfoSetting::New,
+                &policy,
+                &mut |_| panic!("shared runtime SDK"),
+            )
+            .unwrap();
+        assert!(
+            owner
+                .seinfo_state("active")
+                .unwrap()
+                .unwrap()
+                .override_label
+                .is_none()
+        );
+        assert_eq!(
+            owner.seinfo("active").unwrap(),
+            Some("default:privapp:targetSdkVersion=35:partition=vendor")
+        );
+        assert_eq!(
+            retained.seinfo("active").unwrap(),
+            Some("default:privapp:targetSdkVersion=35")
+        );
         assert_eq!(owner.seinfo("absent").unwrap(), None);
         let captured = owner.clone();
         owner.settings.packages[0].private_flags = 8;
@@ -1223,14 +1271,14 @@ mod tests {
         );
         assert_eq!(
             captured.seinfo("active").unwrap(),
-            Some("default:privapp:targetSdkVersion=35")
+            Some("default:privapp:targetSdkVersion=35:partition=vendor")
         );
         owner
             .assign_seinfo_at_boot(&policy, &mut |_| panic!("shared UID"))
             .unwrap();
         assert_eq!(
             owner.seinfo("active").unwrap(),
-            Some("default:privapp:targetSdkVersion=35")
+            Some("default:privapp:targetSdkVersion=19")
         );
     }
 

@@ -356,8 +356,8 @@ shared compatibility precedence, partition precedence, missing assignments,
 stale-input rejection and capture isolation. The original SharedUserSetting
 oracle also verifies boot label agreement and the lower-SDK adjustment
 (15.64s with snapshot/usage oracles). These are boot assignments only:
-runtime per-package base/override lifetime, live compatibility invocation and
-complete boot orchestration remain #838/#836/#798. Captures without this phase
+live compatibility invocation and complete boot orchestration remain
+#838/#836/#798. Captures without this phase
 remain incomplete C state. The private snapshot AIDL now appends method 7 for
 the captured boot label, version/name and original base/override destination.
 Missing assignments return an explicit exception, unknown active code returns
@@ -375,8 +375,25 @@ That oracle uses explicit target SDK 36 for its compatibility input; it does
 not prove live PlatformCompat decisions. All oracle references link (3.17s),
 and device-services builds with checked original setters/getters (14.4s).
 These remain separate native-driver and controlled original-Java endpoint
-tests. Actual bootstrap export and full Java PackageState replica construction
-are not wired; runtime base/override lifetime remains unimplemented.
+tests. Native seInfo state now separates nullable base and override fields.
+The per-scan assignment API copies a retained transient state's override while
+recomputing its base, or explicitly starts fresh transient state for a new
+setting/initial disk restore. It does not run the shared boot SDK minimum or
+relabel other members. UID ownership changes cannot masquerade as a retained
+state. Group privilege/SDK changes alone do not invalidate an old package's
+owned labels; code, package flags and membership still require the owning scan
+phase. Compatibility failure retains previous state. Boot finalization preserves
+an already assigned base and sets shared overrides. A boot-only override's
+missing base remains explicit. The transport destination now follows the actual
+override field rather than assuming every shared package has an override.
+All 356 units pass (3.14s), including runtime lower-SDK update, retained override,
+fresh replacement, subsequent boot minimum, owner-error atomicity and captured
+value isolation. Original PackageSetting copy/base/override/effective getter
+behavior passes in the shared-UID runtime oracle (14.83s with snapshot/usage
+oracles). Actual scan/installation owners must still supply transient-state
+provenance and invoke this phase. Full base-plus-override transport, bootstrap
+export and complete Java PackageState replica construction remain unwired
+(#838/#836/#798).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

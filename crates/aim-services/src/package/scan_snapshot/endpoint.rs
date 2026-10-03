@@ -98,21 +98,20 @@ pub struct PackageSeInfo {
 
 impl PackageSeInfo {
     pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Self>, String> {
-        let Some(label) = snapshot.owner().seinfo(name)? else {
+        let Some(state) = snapshot.owner().seinfo_state(name)? else {
             return Ok(None);
         };
-        let setting = snapshot
-            .owner()
-            .settings
-            .packages
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| "seInfo has no active setting".to_string())?;
+        let label = state
+            .effective()
+            .ok_or_else(|| "seInfo label is missing".to_string())?;
         Ok(Some(Self {
             version: snapshot.version(),
             name: name.into(),
             label: label.into(),
-            override_label: setting.shared_user,
+            override_label: state
+                .override_label
+                .as_deref()
+                .is_some_and(|label| !label.is_empty()),
         }))
     }
 }

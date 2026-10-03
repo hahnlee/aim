@@ -17,13 +17,39 @@ struct Input {
     flags: i32,
     private_flags: i32,
     app_id: i32,
-    shared: Option<(i32, bool)>,
+    shared: Option<(String, i32, bool)>,
+}
+
+/// Transient PackageStateUnserialized fields. A boot-only shared override may
+/// precede base restoration; that missing base is explicit, never invented.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeInfoState {
+    pub base: Option<String>,
+    pub override_label: Option<String>,
+}
+
+impl SeInfoState {
+    pub fn effective(&self) -> Option<&str> {
+        self.override_label
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(self.base.as_deref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeInfoSetting {
+    /// Copy existing in-memory PackageStateUnserialized fields.
+    Retained,
+    /// Fresh transient state from a new setting or an initial disk restore;
+    /// neither seInfo field is persisted by Settings.
+    New,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Assignments {
     inputs: BTreeMap<String, Input>,
-    labels: BTreeMap<String, String>,
+    labels: BTreeMap<String, SeInfoState>,
 }
 
 fn inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String> {
@@ -52,6 +78,7 @@ fn inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String> {
                     .filter(|group| group.app_id == setting.app_id && group.has_package(name))
                     .ok_or_else(|| format!("seInfo shared UID membership differs: {name}"))?;
                 Some((
+                    group_name.clone(),
                     group.seinfo_target_sdk(),
                     group.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
                 ))
@@ -106,20 +133,35 @@ impl SigningScan {
         let inputs = inputs(&candidate)?;
         let mut labels = BTreeMap::new();
         for (name, input) in &inputs {
-            let (target, shared_privileged) = match input.shared {
-                Some(shared) => shared,
+            let (target, shared_privileged) = match &input.shared {
+                Some((_, target, privileged)) => (*target, *privileged),
                 None => (compatibility(&input.code.package)?, false),
             };
-            labels.insert(
-                name.clone(),
-                policy.label(
-                    &input.code.package.package_name,
-                    Signing::Known(&input.code.collected_signing),
-                    shared_privileged || input.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
-                    target,
-                    partition(input),
-                ),
+            let label = policy.label(
+                &input.code.package.package_name,
+                Signing::Known(&input.code.collected_signing),
+                shared_privileged || input.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
+                target,
+                partition(input),
             );
+            let state = if input.shared.is_some() {
+                SeInfoState {
+                    base: self.seinfo.as_ref().and_then(|old| {
+                        old.inputs
+                            .get(name)
+                            .filter(|previous| same_setting(previous, input))
+                            .and_then(|_| old.labels.get(name))
+                            .and_then(|state| state.base.clone())
+                    }),
+                    override_label: Some(label),
+                }
+            } else {
+                SeInfoState {
+                    base: Some(label),
+                    override_label: None,
+                }
+            };
+            labels.insert(name.clone(), state);
         }
         self.identities.shared_users = candidate.identities.shared_users;
         self.seinfo = Some(Assignments { inputs, labels });
@@ -128,7 +170,14 @@ impl SigningScan {
 
     pub(in crate::package) fn validate_seinfo(&self) -> Result<(), String> {
         if let Some(assignments) = &self.seinfo {
-            if assignments.inputs != inputs(self)? {
+            let current = inputs(self)?;
+            if assignments.inputs.len() != current.len()
+                || !assignments.inputs.iter().all(|(name, previous)| {
+                    current
+                        .get(name)
+                        .is_some_and(|input| same_setting(previous, input))
+                })
+            {
                 return Err("seInfo inputs changed since assignment".into());
             }
         }
@@ -138,13 +187,88 @@ impl SigningScan {
     /// Missing assignment is an unfinished scan phase, not the original
     /// explicit policy-unread state. Unknown/unloaded names return None.
     pub fn seinfo(&self, name: &str) -> Result<Option<&str>, String> {
+        Ok(self.seinfo_state(name)?.and_then(SeInfoState::effective))
+    }
+
+    pub fn seinfo_state(&self, name: &str) -> Result<Option<&SeInfoState>, String> {
         self.validate_seinfo()?;
         let assignments = self
             .seinfo
             .as_ref()
             .ok_or_else(|| "seInfo is not assigned".to_string())?;
-        Ok(assignments.labels.get(name).map(String::as_str))
+        Ok(assignments.labels.get(name))
     }
+
+    /// ScanPackageUtils copies a retained setting, updates its base label, and
+    /// leaves the copied override intact. A replacement setting starts fresh.
+    /// This does not run boot's shared-SDK minimum or relabel other members.
+    pub fn assign_seinfo_for_scan(
+        &mut self,
+        name: &str,
+        setting: SeInfoSetting,
+        policy: &Policy,
+        compatibility: &mut dyn FnMut(&AndroidPackage) -> Result<i32, String>,
+    ) -> Result<(), String> {
+        let current = inputs(self)?;
+        let input = current
+            .get(name)
+            .ok_or_else(|| "seInfo scan has no active code".to_string())?;
+        let old = self.seinfo.as_ref();
+        let override_label = match setting {
+            SeInfoSetting::New => None,
+            SeInfoSetting::Retained => {
+                let previous = old
+                    .and_then(|old| old.inputs.get(name))
+                    .ok_or_else(|| "retained seInfo setting is missing".to_string())?;
+                if previous.app_id != input.app_id || shared_name(previous) != shared_name(input) {
+                    return Err("retained seInfo UID ownership changed".into());
+                }
+                old.unwrap()
+                    .labels
+                    .get(name)
+                    .unwrap()
+                    .override_label
+                    .clone()
+            }
+        };
+        let (target, shared_privileged) = match &input.shared {
+            Some((_, target, privileged)) => (*target, *privileged),
+            None => (compatibility(&input.code.package)?, false),
+        };
+        let base = policy.label(
+            &input.code.package.package_name,
+            Signing::Known(&input.code.collected_signing),
+            shared_privileged || input.private_flags & PRIVATE_FLAG_PRIVILEGED != 0,
+            target,
+            partition(input),
+        );
+        let mut next = old.cloned().unwrap_or(Assignments {
+            inputs: BTreeMap::new(),
+            labels: BTreeMap::new(),
+        });
+        next.inputs.insert(name.into(), input.clone());
+        next.labels.insert(
+            name.into(),
+            SeInfoState {
+                base: Some(base),
+                override_label,
+            },
+        );
+        self.seinfo = Some(next);
+        Ok(())
+    }
+}
+
+fn shared_name(input: &Input) -> Option<&str> {
+    input.shared.as_ref().map(|(name, _, _)| name.as_str())
+}
+
+fn same_setting(previous: &Input, current: &Input) -> bool {
+    previous.code == current.code
+        && previous.flags == current.flags
+        && previous.private_flags == current.private_flags
+        && previous.app_id == current.app_id
+        && shared_name(previous) == shared_name(current)
 }
 
 #[cfg(test)]
@@ -228,6 +352,25 @@ mod tests {
             owner.seinfo("b").unwrap(),
             Some("default:targetSdkVersion=30")
         );
+        let before = owner.clone();
+        assert_eq!(
+            owner.assign_seinfo_for_scan("b", SeInfoSetting::Retained, &policy, &mut |_| Err(
+                "runtime compat denied".into()
+            )),
+            Err("runtime compat denied".into())
+        );
+        assert_eq!(owner, before);
+        owner
+            .assign_seinfo_for_scan("b", SeInfoSetting::Retained, &policy, &mut |_| Ok(10000))
+            .unwrap();
+        assert_eq!(
+            owner.seinfo("b").unwrap(),
+            Some("default:targetSdkVersion=10000")
+        );
+        assert_eq!(
+            before.seinfo("b").unwrap(),
+            Some("default:targetSdkVersion=30")
+        );
         let capture = owner.clone();
         owner.pending_metadata.insert("b".into());
         let before = owner.clone();
@@ -238,7 +381,7 @@ mod tests {
         assert_eq!(owner, before);
         assert_eq!(
             capture.seinfo("b").unwrap(),
-            Some("default:targetSdkVersion=30")
+            Some("default:targetSdkVersion=10000")
         );
         owner.pending_metadata.clear();
         owner.loaded.remove("b");

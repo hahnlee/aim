@@ -38,6 +38,19 @@ public final class SharedSeInfoOracle {
                 || !((com.android.server.pm.pkg.PackageState)a).getSeInfo().equals(((com.android.server.pm.pkg.PackageState)b).getSeInfo())) {
             throw new AssertionError("original shared boot label agreement");
         }
+        var retained = new PackageSetting(a, false);
+        retained.getPkgState().setSeInfo("runtime-base");
+        if (!"runtime-base".equals(retained.getPkgState().getSeInfo())
+                || !"default:targetSdkVersion=28".equals(retained.getPkgState().getOverrideSeInfo())
+                || !"default:targetSdkVersion=28".equals(((com.android.server.pm.pkg.PackageState)retained).getSeInfo())) {
+            throw new AssertionError("original retained-setting override lifetime");
+        }
+        var replacement = member("a", 19);
+        replacement.getPkgState().setSeInfo("new-runtime-base");
+        if (replacement.getPkgState().getOverrideSeInfo() != null
+                || !"new-runtime-base".equals(((com.android.server.pm.pkg.PackageState)replacement).getSeInfo())) {
+            throw new AssertionError("original replacement-setting override lifetime");
+        }
         group.addPackage(c); check(group, 28);
         group.removePackage(b); check(group, 28);
         group.removePackage(a); group.removePackage(absent); group.removePackage(c); check(group, 28);
