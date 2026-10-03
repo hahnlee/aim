@@ -1255,7 +1255,7 @@ pub(in crate::package) fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     match &l.code_paths {
         Some(paths) => {
             p.write_i32(1);
-            write_strings8(p, Some(paths));
+            write_string8_array(p, Some(paths));
         }
         _ => p.write_i32(0),
     }
@@ -1274,7 +1274,11 @@ pub(in crate::package) fn write_library(p: &mut Parcel, l: &SharedLibrary) {
         p.write_i32(-1);
     } else {
         p.write_i32(l.dependents.len() as i32);
-        for (name, version) in &l.dependents {
+        for dependent in &l.dependents {
+            let Some((name, version)) = dependent else {
+                p.write_i32(-1);
+                continue;
+            };
             p.write_i32(4);
             let length = p.position();
             p.write_i32(-1);
@@ -1286,10 +1290,17 @@ pub(in crate::package) fn write_library(p: &mut Parcel, l: &SharedLibrary) {
             p.set_i32_at(length, (end - start) as i32);
         }
     }
-    write_libraries(
-        p,
-        (l.dependencies_initialized || !l.dependencies.is_empty()).then_some(&l.dependencies[..]),
-    );
+    if l.dependencies_initialized || !l.dependencies.is_empty() {
+        p.write_i32(l.dependencies.len() as i32);
+        for dependency in &l.dependencies {
+            p.write_i32(i32::from(dependency.is_some()));
+            if let Some(dependency) = dependency {
+                write_library(p, dependency);
+            }
+        }
+    } else {
+        p.write_i32(-1);
+    }
     p.write_bool(l.native);
     match &l.optional_dependents {
         None => p.write_i32(-1),

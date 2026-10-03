@@ -1850,7 +1850,7 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
     assert_eq!(allowed.package_name.as_deref(), Some("provider"));
     assert_eq!(
         allowed.code_paths.as_ref().unwrap(),
-        &vec!["/data/app/provider/base.apk".to_string()]
+        &vec![Some("/data/app/provider/base.apk".to_string())]
     );
     assert!(scan.libraries.get("added.by.update", -1).is_none());
     assert_eq!(

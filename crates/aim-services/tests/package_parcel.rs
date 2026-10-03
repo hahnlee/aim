@@ -759,8 +759,8 @@ fn native_package_parcels_match_original_read_write() {
     );
     let library_feed = fs::read(directory.join("library-feed-original.parcel")).unwrap();
     let mut reader = aim_binder_host::parcel::Reader::new(&library_feed, &[]);
-    assert_eq!(reader.read_i32().unwrap(), 6);
-    for index in 0..6 {
+    assert_eq!(reader.read_i32().unwrap(), 7);
+    for index in 0..7 {
         let bytes = aim_service_aidl::read_byte_array(&mut reader)
             .unwrap()
             .unwrap();
@@ -776,9 +776,15 @@ fn native_package_parcels_match_original_read_write() {
             assert_eq!(library.cert_digests, None);
         } else if index == 1 {
             assert!(library.dependents_initialized && library.dependencies_initialized);
-            assert_eq!(library.code_paths, Some(vec!["/explicit/code.jar".into()]));
+            assert_eq!(
+                library.code_paths,
+                Some(vec![Some("/explicit/code.jar".into())])
+            );
         } else if index == 4 {
-            assert_eq!(library.dependents, vec![("dependent.consumer".into(), 41)]);
+            assert_eq!(
+                library.dependents,
+                vec![Some(("dependent.consumer".into(), 41))]
+            );
             assert_eq!(
                 library.optional_dependents,
                 Some(vec![None, Some(("consumer".into(), i64::MAX))])
@@ -788,7 +794,7 @@ fn native_package_parcels_match_original_read_write() {
                 Some(vec![None, Some("digest".into())])
             );
             assert_eq!(
-                library.dependencies[0].cert_digests,
+                library.dependencies[0].as_ref().unwrap().cert_digests,
                 Some(vec![Some("nested.digest".into())])
             );
         }
@@ -797,6 +803,21 @@ fn native_package_parcels_match_original_read_write() {
             assert_eq!(
                 library.cert_digests,
                 Some(vec![Some("sdk.certificate".into())])
+            );
+        }
+        if index == 6 {
+            assert_eq!(
+                library.code_paths,
+                Some(vec![None, Some("/system/nullable.apk".into())])
+            );
+            assert_eq!(
+                library.dependents,
+                vec![None, Some(("nullable.consumer".into(), 59))]
+            );
+            assert_eq!(library.dependencies[0], None);
+            assert_eq!(
+                library.dependencies[1].as_ref().unwrap().name.as_deref(),
+                Some("nullable.nested")
             );
         }
         for end in 0..bytes.len() {
@@ -1658,8 +1679,10 @@ fn write_library_owner_fixture(directory: &std::path::Path) {
         Some(vec![None, Some(("consumer".into(), i64::MAX))]),
         Some(vec![None, Some("digest".into())]),
     );
-    populated.dependents.push(("dependent.consumer".into(), 41));
-    populated.dependencies.push(nested);
+    populated
+        .dependents
+        .push(Some(("dependent.consumer".into(), 41)));
+    populated.dependencies.push(Some(nested));
     let info = ApplicationInfo {
         shared_library_infos: Some(vec![
             library("null", None, None),

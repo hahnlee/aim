@@ -304,9 +304,19 @@ native import/re-encoding matches every byte, including nested optional/certific
 values and the SDK certificate constructor (16.78s complete package oracle).
 All 394 units pass (3.15s; one ignored/not run), original Java linkage passes
 (3.97s), and device-services builds (16.4s). The changed live full-PMS feed batch
-has not been exercised. Nullable raw code-path/dependent/dependency elements still
-reject (#864), and declaration-only captured Java restoration still rejects
-arbitrary optional/certificate owners; full import/assembly remains #740.
+has not been exercised. Raw code-path/dependent/dependency elements now retain
+null values natively and in original response parcels. Native declaration producers
+write present elements; graph expansion retains nullable nested records. File
+resolution still requires its actual provider/code owner and reports missing inputs,
+without replacing a missing path with raw nullable metadata. Java declaration
+assembly preserves null nested libraries. The complete original package ART oracle
+passes (28.11s), adding a seventh original owner with all three nullable element
+forms, exact original/native bytes, original concrete setting restoration and
+mutation isolation. All 395 units pass (3.15s; one ignored/not run), and the actual
+first-system scan passes (42.57s) with the existing controlled enforcement policy.
+Original Java linkage passes (3.92s); device-services builds (14.4s).
+Captured Java restoration still rejects arbitrary
+optional/certificate owners; full import/assembly remains #740.
 Live policy
 delivery, overlay effects and factory graph handling remain #707/#808/#836.
 The original PlatformCompat install-time native-library policy

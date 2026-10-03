@@ -181,7 +181,7 @@ impl Default for InstallSource {
 pub struct SharedLibrary {
     pub path: Option<String>,
     pub package_name: Option<String>,
-    pub code_paths: Option<Vec<String>>,
+    pub code_paths: Option<Vec<Option<String>>>,
     pub name: Option<String>,
     pub version: i64,
     /// `SharedLibraryInfo.TYPE_*`.
@@ -191,8 +191,8 @@ pub struct SharedLibrary {
     pub declaring: (String, i64),
     /// SDK dependency placeholders have no declaring package.
     pub declaring_absent: bool,
-    pub dependents: Vec<(String, i64)>,
-    pub dependencies: Vec<SharedLibrary>,
+    pub dependents: Vec<Option<(String, i64)>>,
+    pub dependencies: Vec<Option<SharedLibrary>>,
     pub dependents_initialized: bool,
     pub dependencies_initialized: bool,
     /// Raw Parcelable list and string list; null and allocated-empty are distinct.

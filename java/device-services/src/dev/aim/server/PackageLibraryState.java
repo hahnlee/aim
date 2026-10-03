@@ -52,6 +52,7 @@ public final class PackageLibraryState {
     // Native declaration owners use the original constructor's null optional/
     // certificate fields; reconstruct them instead of importing that normalization.
     private static SharedLibraryInfo declaration(SharedLibraryInfo decoded) {
+        if (decoded == null) return null;
         List<SharedLibraryInfo> dependencies = null;
         if (decoded.getDependencies() != null) {
             dependencies = new ArrayList<>();

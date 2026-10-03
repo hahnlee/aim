@@ -91,7 +91,7 @@ impl Registry {
                                     error(provider, ResolveError::Incomplete("dependency provider"))
                                 })?;
                             if ps.code().is_some() {
-                                library.dependencies.push(dependency.clone());
+                                library.dependencies.push(Some(dependency.clone()));
                             }
                         }
                     }
@@ -182,12 +182,14 @@ fn expand(library: &SharedLibrary, registry: &Registry) -> SharedLibrary {
         .dependencies
         .iter()
         .map(|dependency| {
-            expand(
-                registry
-                    .get(dependency.name.as_ref().unwrap(), dependency.version)
-                    .unwrap(),
-                registry,
-            )
+            dependency.as_ref().map(|dependency| {
+                expand(
+                    registry
+                        .get(dependency.name.as_ref().unwrap(), dependency.version)
+                        .unwrap(),
+                    registry,
+                )
+            })
         })
         .collect();
     out

@@ -49,11 +49,7 @@ fn read(r: &mut Reader<'_>) -> Result<SharedLibrary> {
         0 => None,
         1 => {
             let n = count(r)?.ok_or(BAD_VALUE)?;
-            Some(
-                (0..n)
-                    .map(|_| r.read_string8()?.ok_or(BAD_VALUE))
-                    .collect::<Result<_>>()?,
-            )
+            Some((0..n).map(|_| r.read_string8()).collect::<Result<_>>()?)
         }
         _ => return Err(BAD_VALUE),
     };
@@ -73,15 +69,22 @@ fn read(r: &mut Reader<'_>) -> Result<SharedLibrary> {
     if let Some(n) = count(r)? {
         library.dependents_initialized = true;
         for _ in 0..n {
-            if r.read_i32()? != 4 {
-                return Err(BAD_VALUE);
+            match r.read_i32()? {
+                -1 => {
+                    library.dependents.push(None);
+                    continue;
+                }
+                4 => {}
+                _ => return Err(BAD_VALUE),
             }
             let length = r.read_i32()?;
             if length < 0 || length as usize > r.remaining() {
                 return Err(BAD_VALUE);
             }
             let start = r.position();
-            library.dependents.push(versioned(r)?.ok_or(BAD_VALUE)?);
+            library
+                .dependents
+                .push(Some(versioned(r)?.ok_or(BAD_VALUE)?));
             if r.position() - start != length as usize {
                 return Err(BAD_VALUE);
             }
@@ -90,10 +93,11 @@ fn read(r: &mut Reader<'_>) -> Result<SharedLibrary> {
     if let Some(n) = count(r)? {
         library.dependencies_initialized = true;
         for _ in 0..n {
-            if r.read_i32()? != 1 {
-                return Err(BAD_VALUE);
-            }
-            library.dependencies.push(read(r)?);
+            library.dependencies.push(match r.read_i32()? {
+                0 => None,
+                1 => Some(read(r)?),
+                _ => return Err(BAD_VALUE),
+            });
         }
     }
     library.native = r.read_bool()?;

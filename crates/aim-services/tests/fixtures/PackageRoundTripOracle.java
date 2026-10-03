@@ -10,6 +10,23 @@ public final class PackageRoundTripOracle {
         }
     }
 
+    private static android.content.pm.SharedLibraryInfo nullableLibrary() {
+        return new android.content.pm.SharedLibraryInfo(null, "nullable.owner",
+            java.util.Arrays.asList(null, "/system/nullable.apk"), "nullable.library", 51L, 1,
+            new android.content.pm.VersionedPackage("nullable.owner", 53L),
+            java.util.Arrays.asList(null, new android.content.pm.VersionedPackage("nullable.consumer", 59L)),
+            java.util.Arrays.asList(null, new android.content.pm.SharedLibraryInfo(
+                "/system/framework/nested.jar", null, null, "nullable.nested", -1L, 0,
+                new android.content.pm.VersionedPackage("android", 0L), null, null, false)), false);
+    }
+    private static void verifyNullableLibrary(android.content.pm.SharedLibraryInfo library) {
+        if (!library.getAllCodePaths().equals(java.util.Arrays.asList(null, "/system/nullable.apk"))
+                || library.getDependentPackages().get(0) != null
+                || !library.getDependentPackages().get(1).getPackageName().equals("nullable.consumer")
+                || library.getDependencies().get(0) != null
+                || !library.getDependencies().get(1).getName().equals("nullable.nested")) throw new AssertionError("nullable library elements differ");
+    }
+
     private static void verifyLibraryOwners(java.io.File file) throws Exception {
         byte[] bytes = java.nio.file.Files.readAllBytes(file.toPath());
         var in = android.os.Parcel.obtain();
@@ -34,6 +51,7 @@ public final class PackageRoundTripOracle {
             for (var library : info.sharedLibraryInfos) owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(library));
             owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(new android.content.pm.SharedLibraryInfo(
                 "sdk.placeholder", 37L, 3, java.util.List.of("sdk.certificate"))));
+            owners.add(new com.android.server.pm.pkg.SharedLibraryWrapper(nullableLibrary()));
             var feed = android.os.Parcel.obtain();
             try {
                 dev.aim.server.PackageLibraryFeed.write(feed, owners);
@@ -881,6 +899,23 @@ public final class PackageRoundTripOracle {
         libraryState.getLibraries().clear();
         var freshLibrarySetting = lease.newScannedSetting(name, true);
         if (((com.android.server.pm.pkg.PackageState)freshLibrarySetting).getSharedLibraryDependencies().size() != 1) throw new AssertionError("dependency getter mutation escaped input");
+        var nullableEnvelope = android.os.Parcel.obtain();
+        var nullableParcel = android.os.Parcel.obtain();
+        try {
+            nullableParcel.writeInt(1); nullableParcel.writeInt(1); nullableLibrary().writeToParcel(nullableParcel, 0);
+            nullableEnvelope.writeLong(1); nullableEnvelope.writeString(name); nullableEnvelope.writeInt(uid);
+            nullableEnvelope.writeStringArray(new String[0]); nullableEnvelope.writeByteArray(nullableParcel.marshall());
+            nullableEnvelope.setDataPosition(0);
+            var nullableState = dev.aim.server.PackageLibraryState.read(nullableEnvelope);
+            verifyNullableLibrary(nullableState.getLibraries().get(0));
+            var nullableSetting = com.android.server.pm.CapturedPackageSetting.from(metadata, 1, false);
+            dev.aim.server.PackageObjects.restoreLibraries(nullableSetting, nullableState, 1);
+            var restoredNullable = ((com.android.server.pm.pkg.SharedLibraryWrapper)
+                ((com.android.server.pm.pkg.PackageState)nullableSetting).getSharedLibraryDependencies().get(0)).getInfo();
+            verifyNullableLibrary(restoredNullable);
+            restoredNullable.getAllCodePaths().set(0, "changed"); restoredNullable.getDependencies().clear();
+            verifyNullableLibrary(nullableState.getLibraries().get(0));
+        } finally { nullableEnvelope.recycle(); nullableParcel.recycle(); }
         var emptyLibraries = android.os.Parcel.obtain();
         try {
             emptyLibraries.writeLong(1); emptyLibraries.writeString(name); emptyLibraries.writeInt(uid);

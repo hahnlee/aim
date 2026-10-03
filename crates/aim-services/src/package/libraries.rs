@@ -307,7 +307,7 @@ impl Registry {
         for name in names {
             self.insert(SharedLibrary {
                 package_name: Some(package_name.to_owned()),
-                code_paths: Some(paths.clone()),
+                code_paths: Some(paths.iter().cloned().map(Some).collect()),
                 name: Some(name),
                 version,
                 kind,

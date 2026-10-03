@@ -137,8 +137,18 @@ fn graph_resolves_multihop_paths_and_nested_apk_dependencies() {
     );
     let a = resolved.registry.get("a", VERSION_UNDEFINED).unwrap();
     assert_eq!(a.dependencies.len(), 1);
-    assert_eq!(a.dependencies[0].name.as_deref(), Some("b"));
-    assert_eq!(a.dependencies[0].dependencies[0].name.as_deref(), Some("c"));
+    assert_eq!(
+        a.dependencies[0].as_ref().unwrap().name.as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        a.dependencies[0].as_ref().unwrap().dependencies[0]
+            .as_ref()
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("c")
+    );
     assert_eq!(resolved.packages["app"].uses_library_infos[0], *a);
     assert!(available["app"].uses_library_files.is_empty());
     let inputs = scan_inputs(&available);
@@ -525,8 +535,8 @@ fn static_and_sdk_libraries_keep_versions_internal_names_and_code_paths() {
     assert_eq!(
         static_lib.code_paths.as_ref().unwrap(),
         &[
-            "/data/app/manifest/base.apk",
-            "/data/app/manifest/split.apk"
+            Some("/data/app/manifest/base.apk".into()),
+            Some("/data/app/manifest/split.apk".into())
         ]
     );
     let sdk = package("sdk.app", |p| {
@@ -619,5 +629,25 @@ fn static_signer_selection_uses_the_greatest_strictly_older_nonnegative_version(
         registry
             .latest_static_setting(&incoming, &settings)
             .is_none()
+    );
+}
+
+#[test]
+fn raw_nullable_metadata_does_not_replace_a_missing_file_owner() {
+    let mut selection = Selection {
+        libraries: vec![SharedLibrary {
+            code_paths: Some(vec![None]),
+            dependencies: vec![None],
+            ..Default::default()
+        }],
+    };
+    assert_eq!(
+        selection.files(&BTreeMap::new()),
+        Err(ResolveError::Incomplete("library provider snapshot"))
+    );
+    selection.libraries[0].path = Some("/system/framework/owner.jar".into());
+    assert_eq!(
+        selection.files(&BTreeMap::new()),
+        Ok(vec!["/system/framework/owner.jar".into()])
     );
 }

@@ -40,14 +40,14 @@ fn library(p: &mut Parcel, name: &str, dependency: Option<&str>) {
         path: Some("/system/framework/lib.jar".into()),
         version: -1,
         declaring: ("android".into(), 0),
-        dependents: vec![("com.example.app".into(), 7)],
+        dependents: vec![Some(("com.example.app".into(), 7))],
         optional_dependents: Some(vec![None, Some(("optional.consumer".into(), 19))]),
         cert_digests: Some(vec![None, Some("certificate.digest".into())]),
         ..Default::default()
     };
     let mut library = new(name);
     if let Some(name) = dependency {
-        library.dependencies.push(new(name));
+        library.dependencies.push(Some(new(name)));
     }
     let mut parcel = Parcel::new();
     crate::package::info::write_libraries(&mut parcel, Some(&[library]));
@@ -231,7 +231,7 @@ fn reads_a_package_record() {
     let (p, shared) = record::package(&package_record("com.example.app", Some(1000))).unwrap();
     for library in [
         &p.uses_library_infos[0],
-        &p.uses_library_infos[0].dependencies[0],
+        p.uses_library_infos[0].dependencies[0].as_ref().unwrap(),
     ] {
         assert_eq!(
             library.optional_dependents,
@@ -261,8 +261,11 @@ fn reads_a_package_record() {
     let lib = &p.uses_library_infos[0];
     assert_eq!(lib.name.as_deref(), Some("lib"));
     assert_eq!(lib.code_paths, None);
-    assert_eq!(lib.dependents, [("com.example.app".into(), 7)]);
-    assert_eq!(lib.dependencies[0].name.as_deref(), Some("dep"));
+    assert_eq!(lib.dependents, [Some(("com.example.app".into(), 7))]);
+    assert_eq!(
+        lib.dependencies[0].as_ref().unwrap().name.as_deref(),
+        Some("dep")
+    );
     assert_eq!(p.installed_permissions, ["com.example.app.PERMISSION"]);
     let signatures = p.signatures.as_ref().unwrap();
     assert_eq!(signatures.scheme_version, 3);

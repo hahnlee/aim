@@ -453,7 +453,9 @@ fn library_optional_owners_preserve_raw_null_empty_and_nested_values() {
             ..Default::default()
         },
         SharedLibrary {
-            dependencies: vec![populated.clone()],
+            dependencies: vec![None, Some(populated.clone())],
+            dependents: vec![None, Some(("dependent".into(), 5))],
+            code_paths: Some(vec![None, Some("/system/raw.jar".into())]),
             ..populated
         },
     ];
@@ -473,6 +475,17 @@ fn library_optional_owners_preserve_raw_null_empty_and_nested_values() {
         assert_eq!(field(&libraries[0], name), &Value::Null);
         assert_eq!(field(&libraries[1], name), &Value::List(vec![]));
     }
+    assert_eq!(
+        field(&libraries[2], "codePaths"),
+        &Value::List(vec![Value::Null, Value::Str("/system/raw.jar".into())])
+    );
+    assert_eq!(
+        field(&libraries[2], "dependentPackages"),
+        &Value::List(vec![
+            Value::Null,
+            Value::List(vec![Value::Str("dependent".into()), Value::Long(5)])
+        ])
+    );
     let optional = Value::List(vec![
         Value::Null,
         Value::List(vec![Value::Str("consumer".into()), Value::Long(i64::MAX)]),
@@ -483,9 +496,10 @@ fn library_optional_owners_preserve_raw_null_empty_and_nested_values() {
     let Value::List(dependencies) = field(&libraries[2], "dependencies") else {
         panic!("missing nested dependency")
     };
+    assert_eq!(dependencies[0], Value::Null);
     assert_eq!(
-        field(&dependencies[0], "optionalDependentPackages"),
+        field(&dependencies[1], "optionalDependentPackages"),
         &optional
     );
-    assert_eq!(field(&dependencies[0], "certDigests"), &certificates);
+    assert_eq!(field(&dependencies[1], "certDigests"), &certificates);
 }
