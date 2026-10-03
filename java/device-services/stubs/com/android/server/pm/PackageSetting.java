@@ -43,4 +43,10 @@ public class PackageSetting extends SettingBase {
     boolean getInstalled(int user) { throw new RuntimeException("stub"); }
     public boolean getInstantApp(int user) { throw new RuntimeException("stub"); }
     boolean getVirtualPreload(int user) { throw new RuntimeException("stub"); }
+    public PackageSetting setLoadingProgress(float value) { throw new RuntimeException("stub"); }
+    public PackageSetting setLoadingCompletedTime(long value) { throw new RuntimeException("stub"); }
+    public long getLoadingCompletedTime() { throw new RuntimeException("stub"); }
+    public PackageSetting addOldPath(java.io.File value) { throw new RuntimeException("stub"); }
+    public PackageSetting removeOldPath(java.io.File value) { throw new RuntimeException("stub"); }
+    public java.util.LinkedHashSet<java.io.File> getOldPaths() { throw new RuntimeException("stub"); }
 }

@@ -1437,6 +1437,8 @@ mod tests {
         owner
             .assign_seinfo_at_boot(&policy, &mut |_| Ok(30))
             .unwrap();
+        owner.settings.packages[0].add_old_path(Some("/data/old"));
+        owner.settings.packages[0].set_loading_progress(0.5);
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let mut stale = owner.clone();
@@ -1484,7 +1486,17 @@ mod tests {
         state.archive_state.as_mut().unwrap().activities[0].icon_path =
             Some("/data/new-icon".into());
         owner.set_user_state("fixture", 10, state).unwrap();
+        owner.settings.packages[0].remove_old_path(Some("/data/old"));
+        owner.settings.packages[0].set_loading_progress(1.0);
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_eq!(
+            base.owner().settings.packages[0].old_paths,
+            Some(vec![Some("/data/old".into())])
+        );
+        assert_eq!(current.owner().settings.packages[0].old_paths, Some(vec![]));
+        assert!(base.owner().settings.packages[0].is_loading());
+        assert!(!current.owner().settings.packages[0].is_loading());
+
         assert_eq!(
             base.owner().scanned_user_states("fixture").unwrap()[&10]
                 .archive_state

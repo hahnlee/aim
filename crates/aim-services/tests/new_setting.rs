@@ -264,7 +264,7 @@ fn new_settings_match_the_original_runtime() {
                         p.category_hint,
                         p.page_size_compat,
                         p.key_set_data.proper_signing_key_set,
-                        p.loading,
+                        p.is_loading(),
                         p.loading_progress,
                         p.domain_set_id.as_ref().unwrap(),
                         p.scanned_as_stopped_system_app

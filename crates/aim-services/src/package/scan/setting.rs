@@ -233,8 +233,6 @@ impl NewSetting {
                     proper_signing_key_set: -1,
                     ..Default::default()
                 },
-                // The constructor starts at progress 0, so isLoading() is true.
-                loading: true,
                 ..settings::Package::default()
             },
             users,

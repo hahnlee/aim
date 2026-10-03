@@ -216,6 +216,12 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.user")), user_state).unwrap();
+        fs::write(
+            directory.join(format!("{name}.loading-native")),
+            loading_xml_expected(&directory, &name),
+        )
+        .unwrap();
+
         for user in [10, 11, 12, 13, 14] {
             let bytes = aim_services::package::scan_snapshot::user_record::captured(
                 &snapshot,
@@ -392,6 +398,16 @@ fn native_package_parcels_match_original_read_write() {
     );
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            assert_eq!(
+                fs::read(directory.join(format!("{name}.loading-original"))).unwrap(),
+                fs::read(directory.join(format!("{name}.loading-native"))).unwrap()
+            );
+
+            assert_eq!(
+                fs::read(directory.join(format!("{name}.setting-runtime.original"))).unwrap(),
+                setting_runtime_expected()
+            );
+
             let xml = fs::read(directory.join(format!("{name}.null-icon.xml"))).unwrap();
             let restored = aim_services::package::restrictions::Restrictions::parse(
                 &aim_android_xml::read(&xml).unwrap(),
@@ -812,4 +828,135 @@ fn runtime_capture() -> aim_services::package::owner::user_runtime::State {
         },
     );
     state
+}
+
+fn setting_runtime_expected() -> Vec<u8> {
+    use aim_services::package::settings::Package;
+    fn state(out: &mut Vec<u8>, p: &Package) {
+        out.extend_from_slice(&p.loading_progress.to_bits().to_be_bytes());
+        out.push(u8::from(p.is_loading()));
+        out.extend_from_slice(&p.loading_completed_time.to_be_bytes());
+        out.extend_from_slice(
+            &p.old_paths
+                .as_ref()
+                .map_or(-1, |v| v.len() as i32)
+                .to_be_bytes(),
+        );
+        if let Some(paths) = &p.old_paths {
+            for path in paths {
+                out.extend_from_slice(&path.as_ref().map_or(-1, |v| v.len() as i32).to_be_bytes());
+                if let Some(path) = path {
+                    out.extend_from_slice(path.as_bytes());
+                }
+            }
+        }
+    }
+    let mut p = Package::default();
+    let mut out = Vec::new();
+    state(&mut out, &p);
+    for value in [
+        -1.0,
+        -0.0,
+        0.0,
+        f32::NAN,
+        0.25,
+        0.1,
+        f32::from_bits(1.0f32.to_bits() - 1),
+        1.0,
+        f32::NAN,
+        f32::from_bits(1.0f32.to_bits() + 1),
+        2.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ] {
+        p.set_loading_progress(value);
+        state(&mut out, &p);
+    }
+    for time in [-1, i64::MIN, 123, i64::MAX] {
+        p.loading_completed_time = time;
+        state(&mut out, &p);
+    }
+    p.remove_old_path(None);
+    state(&mut out, &p);
+    p.add_old_path(Some("/data/sole"));
+    state(&mut out, &p);
+    p.remove_old_path(Some("/data/sole"));
+    state(&mut out, &p);
+    for path in [
+        Some("//data//B/"),
+        Some("/data/B"),
+        Some("a/../b"),
+        Some(""),
+        None,
+        Some("Aa"),
+        Some("BB"),
+    ] {
+        p.add_old_path(path);
+        state(&mut out, &p);
+    }
+    let copy = p.clone();
+    for path in [
+        None,
+        Some("missing"),
+        Some("/data/B/"),
+        Some("a/../b"),
+        Some(""),
+        Some("Aa"),
+        Some("BB"),
+    ] {
+        p.remove_old_path(path);
+        state(&mut out, &p);
+    }
+    state(&mut out, &copy);
+    out
+}
+
+fn loading_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
+    let mut expected = Vec::new();
+    let mut index = 0;
+    for disabled in [false, true] {
+        for attrs in [
+            "",
+            "loadingProgress='-1'",
+            "loadingProgress='NaN'",
+            "loadingProgress='Infinity'",
+            "loadingProgress='0.5' loadingCompletedTime='-1'",
+            "loadingProgress='1' isLoading='true'",
+            "loadingProgress='bad' loadingCompletedTime='bad-value'",
+            "loadingProgress='0.25' isLoading='false' loadingCompletedTime='1234'",
+        ] {
+            let tag = if disabled {
+                "updated-package"
+            } else {
+                "package"
+            };
+            let xml = format!(
+                "<{tag} name='fixture' codePath='/data/app/fixture' userId='10001' {attrs}/>"
+            );
+            let root = aim_android_xml::read(xml.as_bytes()).unwrap();
+            for bytes in [
+                xml.into_bytes(),
+                aim_android_xml::abx::write(&root).unwrap(),
+            ] {
+                let e = aim_android_xml::read(&bytes).unwrap();
+                let document = aim_android_xml::Element {
+                    name: "packages".into(),
+                    attrs: vec![],
+                    content: vec![aim_android_xml::Node::Element(e)],
+                };
+                let parsed = aim_services::package::settings::Settings::parse(&document).unwrap();
+                let p = if disabled {
+                    &parsed.disabled_system_packages[0]
+                } else {
+                    &parsed.packages[0]
+                };
+                expected.extend_from_slice(&p.loading_progress.to_bits().to_be_bytes());
+                expected.push(u8::from(p.is_loading()));
+                expected.extend_from_slice(&p.loading_completed_time.to_be_bytes());
+                fs::write(directory.join(format!("{name}.loading-{index}.xml")), bytes).unwrap();
+                index += 1;
+            }
+        }
+    }
+    expected
 }

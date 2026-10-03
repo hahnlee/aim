@@ -274,6 +274,8 @@ public final class PackageRoundTripOracle {
         var setting = new com.android.server.pm.PackageSetting(name, null,
                 new java.io.File("/data/app/fixture"), 0, 0, new java.util.UUID(1, 1));
         setting.setAppId(uid);
+        verifySettingRuntime(setting, file);
+        verifyLoadingXml(file);
         owner.fail = true;
         try { lease.getSigningState(name, false); throw new AssertionError("signing owner failure swallowed"); }
         catch (android.os.RemoteException expected) {}
@@ -504,6 +506,54 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
+    }
+
+    private static void settingRuntime(java.io.DataOutputStream out, com.android.server.pm.PackageSetting setting) throws Exception {
+        out.writeInt(Float.floatToRawIntBits(setting.getLoadingProgress()));
+        out.writeBoolean(setting.isLoading()); out.writeLong(setting.getLoadingCompletedTime());
+        var paths = setting.getOldPaths(); out.writeInt(paths == null ? -1 : paths.size());
+        if (paths != null) for (var path : paths) runtimeText(out, path == null ? null : path.toString());
+    }
+    private static void verifySettingRuntime(com.android.server.pm.PackageSetting setting, java.io.File file) throws Exception {
+        try (var out = new java.io.DataOutputStream(new java.io.FileOutputStream(file.getPath() + ".setting-runtime.original"))) {
+            settingRuntime(out, setting);
+            for (float value : new float[] {-1f, -0f, 0f, Float.NaN, .25f, .1f, Math.nextDown(1f), 1f, Float.NaN, Math.nextUp(1f), 2f, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY}) {
+                setting.setLoadingProgress(value); settingRuntime(out, setting);
+            }
+            for (long time : new long[] {-1, Long.MIN_VALUE, 123, Long.MAX_VALUE}) {
+                setting.setLoadingCompletedTime(time); settingRuntime(out, setting);
+            }
+            setting.removeOldPath(null); settingRuntime(out, setting);
+            setting.addOldPath(new java.io.File("/data/sole")); settingRuntime(out, setting);
+            setting.removeOldPath(new java.io.File("/data/sole")); settingRuntime(out, setting);
+            for (String path : new String[] {"//data//B/", "/data/B", "a/../b", "", null, "Aa", "BB"}) {
+                setting.addOldPath(path == null ? null : new java.io.File(path)); settingRuntime(out, setting);
+            }
+            var copy = new com.android.server.pm.PackageSetting(setting, false);
+            for (String path : new String[] {null, "missing", "/data/B/", "a/../b", "", "Aa", "BB"}) {
+                setting.removeOldPath(path == null ? null : new java.io.File(path)); settingRuntime(out, setting);
+            }
+            settingRuntime(out, copy);
+        }
+    }
+
+    private static void verifyLoadingXml(java.io.File file) throws Exception {
+        try (var out = new java.io.DataOutputStream(new java.io.FileOutputStream(file.getPath() + ".loading-original"))) {
+            for (int i = 0; i < 32; i++) {
+                var setting = new com.android.server.pm.PackageSetting("fixture", null, new java.io.File("/data/app/fixture"), 0, 0, new java.util.UUID(1, 1));
+                try (var input = new java.io.FileInputStream(file.getPath() + ".loading-" + i + ".xml")) {
+                    var parser = android.util.Xml.resolvePullParser(input);
+                    while (parser.next() != 2) {}
+                    // Pinned Settings.readPackageLPw default getter and setter restoration.
+                    if (i < 16) {
+                        setting.setLoadingProgress(parser.getAttributeFloat(null, "loadingProgress", 0));
+                        setting.setLoadingCompletedTime(parser.getAttributeLongHex(null, "loadingCompletedTime", 0));
+                    } // readDisabledSysPackageLPw leaves constructor loading fields unchanged.
+                }
+                out.writeInt(Float.floatToRawIntBits(setting.getLoadingProgress()));
+                out.writeBoolean(setting.isLoading()); out.writeLong(setting.getLoadingCompletedTime());
+            }
+        }
     }
 
     private static void verifyUserReplica(dev.aim.server.PackageScanLease lease, String name, java.io.File file) throws Exception {

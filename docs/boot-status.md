@@ -73,13 +73,13 @@ nested bundles and raw NaN payloads. Caller-built duplicate keys fail explicitly
 Native enabled-state persistence preserves text CDATA extras across an ABX
 write and reread. XML document identity compares floating-point payload bits,
 allowing unchanged NaNs and rejecting external signed-zero changes. All 375
-units pass (3.13s), as do 11 XML units; the ignored
+units pass (3.16s), as do 11 XML units; the ignored
 integration test was not run. Unpaired UTF-16 string code units remain
 unsupported (#843). A private snapshot lease now carries persisted and runtime user-state
 inputs through generated AIDL methods 9/10 in 64 KiB chunks, with active/factory
 scope and user ID pinned to its captured version. The real Binder test retains
 a large old user state after publication and rejects invalid request ranges.
-An original ART Proxy/Stub oracle (2026-10-04, 15.98s) reads the native user
+An original ART Proxy/Stub oracle (2026-10-04, 16.14s) reads the native user
 records, checks identity/cache reuse and rejects short chunks and mismatched
 versions. Native runtime owners retain package overlay paths, shared-library
 paths and component label/icon overrides in the captured user state. Mutations
@@ -97,6 +97,15 @@ original return objects, seals watched sets/maps and retains saved archive time.
 Suspension maps distinguish null from allocated-empty owners (#847), and
 cross-user owner keys/last duplicate/quarantine aggregation use the supplied
 pinned policy. Native owner updates refresh existing disabled-user aliases.
+Native PackageSetting owners now retain nullable old-path sets with ordered,
+deduplicated Java File normalization and detached copies; removal preserves
+allocated-empty sets. Loading is derived from monotonic progress rather than
+an independent XML boolean (#851). Native restoration applies the original
+setter/default getters to active settings and retains constructor loading
+fields for disabled factories. Original ART agrees on 36 runtime owner states
+and 32 active/factory text/ABX restoration cases. Captured scan versions retain
+old paths and loading progress after a newer publication changes them. These
+fields still need facade transport and live producer/import wiring under #836.
 Live overlay/component producers, original-state import and full PackageState
 metadata/callback wiring remain #836. Native suspension records now distinguish
 explicit null parameter values from missing keys/maps (#848); runtime put/remove
@@ -398,7 +407,7 @@ publication, caller/token/range rejection, idempotent close and actual capture
 release. The 572-parcel original-image oracle passes (19.57s), including real
 native framework/GSF envelopes, original Java generated Proxy/Stub framing with
 a controlled page owner, failures/retries, DTO identity/input isolation and exact
-native/Java DTO bytes. All 347 units pass (3.13s); all oracle classes link against
+native/Java DTO bytes. All 347 units pass (3.16s); all oracle classes link against
 the original image (2.84s), and device-services builds against original APIs
 (15.6s). Fixtures generate the private Java AIDL into their disposable directory;
 they do not depend on the builder's temporary work directory.
@@ -453,7 +462,7 @@ comparison sequence, including run-stack collapse, low/high merges and adaptive
 galloping. Duplicate detection occurs on compared pairs, matching the original
 rather than rejecting every repeated selector pair. The prior 32-rule limit is
 removed; large policy sets preserve specificity and acceptance. All 353 regular
-units pass (3.13s), with the input-dependent TimSort oracle separately executed:
+units pass (3.16s), with the input-dependent TimSort oracle separately executed:
 it passes (12.59s), comparing exact sorted indices and every comparator pair for
 128 original-libcore inputs of 0–4096 elements, using binary policy keys and
 17-way keys. Shared fixture cleanup confirms owned process/mount release. The
@@ -498,7 +507,7 @@ return an explicit unfinished-phase error; only the caller's explicit unread
 policy uses the original default label. Assignments retain their input graph;
 changed code, UID membership or setting flags reject reads/publication until
 the owning phase resolves them. Old captures retain their labels after a new
-version is published. All 356 units pass (3.13s), checking failure atomicity,
+version is published. All 356 units pass (3.16s), checking failure atomicity,
 shared compatibility precedence, partition precedence, missing assignments,
 stale-input rejection and capture isolation. The original SharedUserSetting
 oracle also verifies boot label agreement and the lower-SDK adjustment
@@ -543,7 +552,7 @@ both fields on rejected name/version restoration. The fixture scans establish
 base assignments before boot overrides, using explicit compatibility target
 SDK 36; this still does not prove live compatibility decisions. Final oracle
 linkage passes (3.29s).
-All 356 units pass (3.13s), including runtime lower-SDK update, retained override,
+All 356 units pass (3.16s), including runtime lower-SDK update, retained override,
 fresh replacement, subsequent boot minimum, owner-error atomicity and captured
 value isolation. Original PackageSetting copy/base/override/effective getter
 behavior passes in the shared-UID runtime oracle (14.83s with snapshot/usage
@@ -565,7 +574,7 @@ The parcel fixture now obtains base labels from the real scan completion, using
 its explicit compatibility target SDK 36, before shared boot overrides. Native
 Bridge implements the scan compatibility interface and rejects trailing SDK
 reply data. The protocol test checks this owner adapter and malformed responses.
-All 356 regular native units pass (3.13s). The disposable original-PMS saved
+All 356 regular native units pass (3.16s). The disposable original-PMS saved
 scan passes (374.26s): all 243 active APKs and three disabled factories retain
 their accepted code; every active scan owns an assigned base without premature
 boot overrides, and the captured version preserves those fields. Saved system,
@@ -837,7 +846,7 @@ installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
 removal, repeated missing removal and installer source effects (19.35s). All 338
-units pass (3.13s), and image API linkage passes (13.1s). This in-memory stage is
+units pass (3.16s), and image API linkage passes (13.1s). This in-memory stage is
 not yet called by boot cleanup: full side-owner ordering, permission uninstall
 reconciliation and publication remain #822/#798. The native store now persists
 that completed setting removal and its installer-source effects, rejecting
@@ -852,7 +861,7 @@ permissions and preferred choices remain with their respective owners.
 Unit tests cover reopening, reserve copies, shared UID reservation, external
 writer rejection and unrelated-state rejection. Original PackageSignatures
 reads native-written current/past/initiator certificates in the combined fixture
-(19.35s). All 338 service units pass (3.13s). This verifies saved-setting deletion
+(19.35s). All 338 service units pass (3.16s). This verifies saved-setting deletion
 and original signature parsing, not a full native uninstall or original-PMS
 reboot after deletion; full package-list/permission integration and graph
 publication remain #798/#822. Store.commit_package_list now writes the final
@@ -883,7 +892,7 @@ verified (#798/#808/#822). The scan/store also remove only a
 renamed-package real-name key, preserving mappings whose values name the same
 old package, after permission uninstall/shared-UID conversion. Named, absent,
 null and repeated map removals match original Settings; disk reopening preserves
-the native change and unrelated XML. All 338 units pass (3.13s), the combined
+the native change and unrelated XML. All 338 units pass (3.16s), the combined
 original fixture passes (19.35s), and new image APIs link (14.0s). These stages
 are not yet orchestrated by boot deletion (#798/#822). All eight Java-oracle DEX
 build paths now check references against the original boot classpath and the
@@ -905,7 +914,7 @@ including shared app IDs. Replacement retains the retained class and preserves
 ordinary grants only when requested. Snapshot clones retain their prior grants.
 The original AppsFilterImpl grant oracle, with its own original mutable
 ApplicationSharedMemory for cache invalidation, passes in the combined fixture
-(19.35s). All 338 units pass (3.13s), and added image APIs link (13.1s).
+(19.35s). All 338 units pass (3.16s), and added image APIs link (13.1s).
 ActivityManager/WindowManager producers and boot removal/query publication are
 not connected to this owner yet (#724/#822).
 The native keystore cleanup owner captures full per-user UIDs when requests
@@ -921,7 +930,7 @@ original maintenance wrapper acknowledges empty namespaces 19001 and 1019001
 with success in the disposable combined fixture (19.35s), after checking no
 package owns app ID 19001 and user 10 has no saved state. This does not prove
 existing-key deletion; the native queue has no boot deletion executor yet
-(#822). All 31 build-generator tests pass, all 338 service units pass (3.13s),
+(#822). All 31 build-generator tests pass, all 338 service units pass (3.16s),
 and compile-only image API linkage passes (13.1s).
 The native settings store now clears one user's saved preferred activities under
 Settings.clearPackagePreferredActivities rules (#822): a named package removes
@@ -940,7 +949,7 @@ this propagation and an absent empty resolver (combined fixture 19.35s).
 The persistence failure test proves that earlier user writes remain committed,
 a conflicting external writer is preserved, later users remain untouched and
 the returned error identifies users requiring publication. All 338 service
-units pass (3.13s). This owner is not yet connected to the boot removal
+units pass (3.16s). This owner is not yet connected to the boot removal
 transaction; home updates and broadcasts remain with that integration (#822).
 APK and cluster parsing now distinguish an absent resources.arsc from a present
 entry failing archive reads (#826). Disposable code-only, bad-CRC and invalid
@@ -965,7 +974,7 @@ SystemConfig reader (15.04s); its added compile-only API passes image linkage
 targets' saved update owners unless SystemConfig names an owner; disabled factory
 records and unrelated install-source fields stay intact. Failed resource reads
 preserve the pending provider and settings, and unqueued completions are rejected.
-All 322 service units pass (3.13s). Queued providers now resolve their manifest
+All 322 service units pass (3.16s). Queued providers now resolve their manifest
 property directly through guest-owned base/all split APK files and the framework's
 system assets. The original uses PackageImpl.toAppInfoWithoutState: app-state
 resourceDirs, overlayPaths and sharedLibraryFiles are null on this path. The
@@ -1070,7 +1079,7 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 319 units pass (3.13s), including keyset rule, nullable-name, Base64 and
+All 319 units pass (3.16s), including keyset rule, nullable-name, Base64 and
 Parcel roundtrip tests. The original signed framework/GSF fixture passes
 (42.49s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
@@ -1475,7 +1484,7 @@ are removed when cleared, including the old `requiredCpuAbi` fallback. The write
 rejects package additions/removals, UID/signer/code-path and unrelated changes,
 invalid page flags, duplicate owners and concurrent document changes before
 writing. Unit tests verify typed values, cleared attributes, retained unknown
-nodes and no mutation on rejection; all 288 aim-services units pass (3.13s).
+nodes and no mutation on rejection; all 288 aim-services units pass (3.16s).
 An explicit stopped-volume write and original-PMS reboot passes (17.85s): an
 actual arm64 package retains its ABI/library paths and native-written page-size
 settings; its install-only ABI override is cleared by the original ordinary-boot

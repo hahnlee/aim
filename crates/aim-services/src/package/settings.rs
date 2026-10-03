@@ -101,7 +101,8 @@ pub struct Package {
     pub force_queryable: bool,
     pub pending_restore: bool,
     pub debuggable: bool,
-    pub loading: bool,
+    /// Runtime LinkedHashSet<File>; null and allocated-empty are distinct.
+    pub old_paths: Option<Vec<Option<String>>>,
     pub base_revision_code: i32,
     pub page_size_compat: i32,
     pub loading_progress: f32,
@@ -124,6 +125,34 @@ pub struct Package {
 }
 
 impl Package {
+    pub fn is_loading(&self) -> bool {
+        (1.0f32 - self.loading_progress).abs() >= 0.00000001f32
+    }
+
+    /// PackageSetting only accepts increases; NaN comparisons do not update.
+    pub fn set_loading_progress(&mut self, progress: f32) {
+        if self.loading_progress < progress {
+            self.loading_progress = progress;
+        }
+    }
+
+    pub fn add_old_path(&mut self, path: Option<&str>) {
+        let path = path.map(file_path);
+        let paths = self.old_paths.get_or_insert_with(Vec::new);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    pub fn remove_old_path(&mut self, path: Option<&str>) {
+        if let Some(path) = path
+            && let Some(paths) = &mut self.old_paths
+        {
+            let path = Some(file_path(path));
+            paths.retain(|value| value != &path);
+        }
+    }
+
     /// PackageSetting.setPageSizeAppCompatFlags at android-16.0.0_r1 (#810).
     pub fn set_page_size_compat(&mut self, mode: i32) -> Result<(), String> {
         if !(0..128).contains(&mode) {
@@ -137,6 +166,20 @@ impl Package {
         }
         Ok(())
     }
+}
+
+// java.io.File's Unix normalization retains dot segments and relative paths.
+fn file_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c != '/' || !out.ends_with('/') {
+            out.push(c);
+        }
+    }
+    if out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
 }
 
 /// `InstallSource`.
@@ -365,8 +408,6 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
             ft => ft,
         },
         last_update_time: e.long_hex("ut")?.unwrap_or(0),
-        loading_progress: e.float("loadingProgress")?.unwrap_or(0.0),
-        loading_completed_time: e.long_hex("loadingCompletedTime")?.unwrap_or(0),
         app_metadata_file_path: string(e, "appMetadataFilePath"),
         app_metadata_source: e.int("appMetadataSource")?.unwrap_or(0),
         category_hint: CATEGORY_UNDEFINED,
@@ -434,6 +475,12 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
     let Some(mut p) = package_attributes(e)?.filter(|p| p.app_id > 0) else {
         return Ok(None);
     };
+    p.set_loading_progress(e.float("loadingProgress").ok().flatten().unwrap_or(0.0));
+    p.loading_completed_time = e
+        .long_hex("loadingCompletedTime")
+        .ok()
+        .flatten()
+        .unwrap_or(0);
     p.is_sdk_library = e.bool("isSdkLibrary")?.unwrap_or(false);
     p.flags = e.int("publicFlags")?.unwrap_or(FLAG_SYSTEM);
     p.private_flags = e.int("privateFlags")?.unwrap_or(0);
@@ -456,7 +503,7 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
     p.force_queryable = e.bool("forceQueryable")?.unwrap_or(false);
     p.pending_restore = e.bool("pendingRestore")?.unwrap_or(false);
     p.debuggable = e.bool("debuggable")?.unwrap_or(false);
-    p.loading = e.bool("isLoading")?.unwrap_or(false);
+
     p.base_revision_code = e.int("baseRevisionCode")?.unwrap_or(0);
     p.set_page_size_compat(e.int("pageSizeCompat")?.unwrap_or(0))?;
     p.domain_set_id = string(e, "domainSetId").filter(|id| !id.is_empty());

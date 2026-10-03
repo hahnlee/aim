@@ -222,7 +222,6 @@ impl SigningScan {
                     private_flags: factory.private_flags,
                     domain_set_id: Some(super::setting::domain_id(domain_set_id)),
                     category_hint: -1,
-                    loading: true,
                     key_set_data: settings::KeySetData {
                         proper_signing_key_set: -1,
                         ..Default::default()
@@ -687,7 +686,7 @@ mod tests {
         assert_eq!(p.last_update_time, 0);
         assert!(!p.shared_user);
         assert_eq!(p.category_hint, -1);
-        assert!(p.loading);
+        assert!(p.is_loading());
         assert_eq!(
             fresh.identities.ids.get(10001),
             Some(&Owner::Package("p".into()))
