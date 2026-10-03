@@ -9,6 +9,7 @@ pub(super) struct Assignments {
     packages: BTreeMap<(String, bool), (i32, bool, Migration)>,
     shared_users: BTreeMap<String, (i32, Migration)>,
     restoration: Option<crate::package::owner::legacy_permissions::Metadata>,
+    install_fixed: Option<BTreeMap<(String, bool), bool>>,
 }
 
 impl SigningScan {
@@ -56,6 +57,7 @@ impl SigningScan {
             packages: captured,
             shared_users: groups,
             restoration: None,
+            install_fixed: None,
         });
         Ok(())
     }
@@ -100,6 +102,55 @@ impl SigningScan {
         {
             return Err("legacy shared owner inventory differs".into());
         }
+        Ok(())
+    }
+
+    /// The original import/restoration owner supplies every PackageSetting bit.
+    pub fn capture_install_permissions_fixed(
+        &mut self,
+        values: BTreeMap<(String, bool), bool>,
+    ) -> Result<(), String> {
+        self.validate_legacy_permissions()?;
+        let owners = self
+            .legacy_permissions
+            .as_mut()
+            .ok_or("legacy migration owner is not captured")?;
+        if values.keys().ne(owners.packages.keys()) {
+            return Err("install permissions fixed owner inventory differs".into());
+        }
+        owners.install_fixed = Some(values);
+        Ok(())
+    }
+
+    pub fn install_permissions_fixed(
+        &self,
+        name: &str,
+        factory: bool,
+    ) -> Result<Option<bool>, String> {
+        self.validate_legacy_permissions()?;
+        Ok(self
+            .legacy_permissions
+            .as_ref()
+            .and_then(|owners| owners.install_fixed.as_ref())
+            .and_then(|values| values.get(&(name.into(), factory)))
+            .copied())
+    }
+
+    /// PackageSetting.setInstallPermissionsFixed after the owner was resolved.
+    pub fn set_install_permissions_fixed(
+        &mut self,
+        name: &str,
+        factory: bool,
+        fixed: bool,
+    ) -> Result<(), String> {
+        self.validate_legacy_permissions()?;
+        let value = self
+            .legacy_permissions
+            .as_mut()
+            .and_then(|owners| owners.install_fixed.as_mut())
+            .and_then(|values| values.get_mut(&(name.into(), factory)))
+            .ok_or("install permissions fixed owner is not captured")?;
+        *value = fixed;
         Ok(())
     }
 
@@ -167,6 +218,20 @@ impl SigningScan {
             restored.packages,
             restored.shared_users,
         )?;
+        let fixed = candidate
+            .legacy_permissions
+            .as_ref()
+            .unwrap()
+            .packages
+            .keys()
+            .map(|(name, factory)| {
+                (
+                    (name.clone(), *factory),
+                    !factory && restored.metadata.install_permissions_fixed.contains(name),
+                )
+            })
+            .collect();
+        candidate.capture_install_permissions_fixed(fixed)?;
         candidate.legacy_permissions.as_mut().unwrap().restoration = Some(restored.metadata);
         self.legacy_permissions = candidate.legacy_permissions;
         Ok(())
@@ -297,6 +362,36 @@ mod tests {
                 .flags,
             19
         );
+        assert_eq!(
+            owner.install_permissions_fixed("fixture", false).unwrap(),
+            None
+        );
+        assert!(
+            owner
+                .set_install_permissions_fixed("fixture", false, true)
+                .is_err()
+        );
+        let unknown = owner.clone();
+        assert!(
+            owner
+                .capture_install_permissions_fixed(BTreeMap::from([(
+                    ("fixture".into(), false),
+                    true
+                )]))
+                .is_err()
+        );
+        assert_eq!(owner, unknown);
+        owner
+            .capture_install_permissions_fixed(BTreeMap::from([
+                (("fixture".into(), false), true),
+                (("fixture".into(), true), false),
+            ]))
+            .unwrap();
+        assert!(
+            owner
+                .set_install_permissions_fixed("absent", false, true)
+                .is_err()
+        );
         let store = Store::new(owner.clone(), Usage::new(["fixture"])).unwrap();
         let base = store.capture();
         let mut invalid = owner.clone();
@@ -310,7 +405,50 @@ mod tests {
         owner
             .capture_legacy_permissions(&[10, 0, 11], next_packages, groups)
             .unwrap();
+        // A fresh migration import invalidates bits until supplied by that owner.
+        assert_eq!(
+            owner.install_permissions_fixed("fixture", false).unwrap(),
+            None
+        );
+        owner
+            .capture_install_permissions_fixed(BTreeMap::from([
+                (("fixture".into(), false), true),
+                (("fixture".into(), true), false),
+            ]))
+            .unwrap();
+        owner
+            .set_install_permissions_fixed("fixture", false, false)
+            .unwrap();
+        owner
+            .set_install_permissions_fixed("fixture", true, true)
+            .unwrap();
         let current = store.publish(&base, owner, base.usage().clone()).unwrap();
+        assert_eq!(
+            base.owner()
+                .install_permissions_fixed("fixture", false)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            base.owner()
+                .install_permissions_fixed("fixture", true)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            current
+                .owner()
+                .install_permissions_fixed("fixture", false)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            current
+                .owner()
+                .install_permissions_fixed("fixture", true)
+                .unwrap(),
+            Some(true)
+        );
         assert_eq!(
             base.owner()
                 .legacy_permissions("fixture", false)

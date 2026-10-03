@@ -126,5 +126,11 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
         aim_service_aidl::write_int_array(&mut p, Some(&users));
         write_byte_array(&mut p, Some(&legacy.bytes()));
     }
+    p.write_i32(
+        snapshot
+            .owner()
+            .install_permissions_fixed(name, factory)?
+            .map_or(-1, i32::from),
+    );
     Ok(Some(p.data().to_vec()))
 }

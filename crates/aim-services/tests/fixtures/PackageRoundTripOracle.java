@@ -292,6 +292,26 @@ public final class PackageRoundTripOracle {
         owner.factorySetting = null;
         var metadata = lease.getSetting(name, false);
         if (!metadata.hasLegacyPermissionState()) throw new AssertionError("missing captured legacy migration owner");
+        if (!metadata.hasInstallPermissionsFixed() || metadata.isInstallPermissionsFixed() != name.equals("com.google.android.gsf")) throw new AssertionError("captured install permissions fixed differs");
+        setting.setInstallPermissionsFixed(metadata.isInstallPermissionsFixed());
+        if (setting.isInstallPermissionsFixed() != metadata.isInstallPermissionsFixed()) throw new AssertionError("original install permissions fixed getter differs");
+        var copiedFixed = new com.android.server.pm.PackageSetting(setting, false);
+        setting.setInstallPermissionsFixed(!setting.isInstallPermissionsFixed());
+        if (copiedFixed.isInstallPermissionsFixed() != metadata.isInstallPermissionsFixed()) throw new AssertionError("install permissions fixed copy shares state");
+        var truncatedFixed = java.util.Arrays.copyOf(settingBytes, settingBytes.length - 4);
+        var truncatedParcel = android.os.Parcel.obtain();
+        try {
+            truncatedParcel.unmarshall(truncatedFixed, 0, truncatedFixed.length); truncatedParcel.setDataPosition(0);
+            try { dev.aim.server.PackageSettingData.read(truncatedParcel); throw new AssertionError("missing fixed marker became false"); } catch (IllegalArgumentException expected) {}
+        } finally { truncatedParcel.recycle(); }
+        var invalidFixed = settingBytes.clone();
+        java.util.Arrays.fill(invalidFixed, invalidFixed.length - 4, invalidFixed.length, (byte) 0);
+        invalidFixed[invalidFixed.length - 4] = 2;
+        var invalidParcel = android.os.Parcel.obtain();
+        try {
+            invalidParcel.unmarshall(invalidFixed, 0, invalidFixed.length); invalidParcel.setDataPosition(0);
+            try { dev.aim.server.PackageSettingData.read(invalidParcel); throw new AssertionError("invalid fixed marker accepted"); } catch (IllegalArgumentException expected) {}
+        } finally { invalidParcel.recycle(); }
         var legacy = metadata.getLegacyPermissionState();
         boolean populatedLegacy = name.equals("com.google.android.gsf");
         if (legacy.isMissing(10) != populatedLegacy || !legacy.getPermissionStates(0).isEmpty()
@@ -304,15 +324,19 @@ public final class PackageRoundTripOracle {
         try {
             legacySuffix.writeBoolean(true); legacySuffix.writeIntArray(new int[] {10, 0, 11});
             legacySuffix.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(uid, new int[] {10, 0, 11}, legacy));
+            legacySuffix.writeInt(metadata.isInstallPermissionsFixed() ? 1 : 0);
             int suffixLength = legacySuffix.marshall().length;
-            unresolvedSetting = java.util.Arrays.copyOf(settingBytes, settingBytes.length - suffixLength + 4);
-            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 4, unresolvedSetting.length, (byte) 0);
+            unresolvedSetting = java.util.Arrays.copyOf(settingBytes, settingBytes.length - suffixLength + 8);
+            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 8, unresolvedSetting.length - 4, (byte) 0);
+            java.util.Arrays.fill(unresolvedSetting, unresolvedSetting.length - 4, unresolvedSetting.length, (byte) -1);
         } finally { legacySuffix.recycle(); }
         var unresolvedParcel = android.os.Parcel.obtain();
         try {
             unresolvedParcel.unmarshall(unresolvedSetting, 0, unresolvedSetting.length); unresolvedParcel.setDataPosition(0);
             var unresolved = dev.aim.server.PackageSettingData.read(unresolvedParcel);
             if (unresolved.hasLegacyPermissionState() || unresolvedParcel.dataAvail() != 0) throw new AssertionError("unresolved legacy marker lost");
+            if (unresolved.hasInstallPermissionsFixed()) throw new AssertionError("unresolved fixed marker lost");
+            try { unresolved.isInstallPermissionsFixed(); throw new AssertionError("unresolved fixed became false"); } catch (IllegalStateException expected) {}
             try { unresolved.getLegacyPermissionState(); throw new AssertionError("unresolved legacy became empty state"); } catch (IllegalStateException expected) {}
         } finally { unresolvedParcel.recycle(); }
         legacy.reset();

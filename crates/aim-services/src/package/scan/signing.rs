@@ -1475,6 +1475,9 @@ mod tests {
                     .collect(),
             )
             .unwrap();
+        owner
+            .capture_install_permissions_fixed(BTreeMap::from([(("fixture".into(), false), true)]))
+            .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let mut invalid = owner.clone();
@@ -1573,7 +1576,26 @@ mod tests {
                     .collect(),
             )
             .unwrap();
+        owner
+            .capture_install_permissions_fixed(BTreeMap::from([(("fixture".into(), false), true)]))
+            .unwrap();
+        owner
+            .set_install_permissions_fixed("fixture", false, false)
+            .unwrap();
         let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_eq!(
+            base.owner()
+                .install_permissions_fixed("fixture", false)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            current
+                .owner()
+                .install_permissions_fixed("fixture", false)
+                .unwrap(),
+            Some(false)
+        );
         assert_eq!(
             base.owner()
                 .legacy_permissions("fixture", false)

@@ -15,6 +15,7 @@ public final class PackageSettingData {
     private final List<String> oldPaths;
     private final int[] legacyUsers;
     private final byte[] legacyPermissions;
+    private final int installPermissionsFixed;
     public final InstallSourceData installSource;
     public final KeySetData keySets;
     private final String[] sdkLibraries, staticLibraries;
@@ -117,6 +118,9 @@ public final class PackageSettingData {
             legacyPermissions = Objects.requireNonNull(in.createByteArray());
             PackageLegacyPermissions.restore(appId, legacyUsers, legacyPermissions);
         } else { legacyUsers = null; legacyPermissions = null; }
+        if (in.dataAvail() < 4) throw new IllegalArgumentException("missing install permissions fixed marker");
+        installPermissionsFixed = in.readInt();
+        if (installPermissionsFixed < -1 || installPermissionsFixed > 1) throw new IllegalArgumentException("invalid install permissions fixed marker");
     }
     private static int count(Parcel in, int minimum) {
         int value = in.readInt();
@@ -128,6 +132,11 @@ public final class PackageSettingData {
         return PackageLegacyPermissions.restore(appId, legacyUsers, legacyPermissions);
     }
     public boolean hasLegacyPermissionState() { return legacyPermissions != null; }
+    public boolean hasInstallPermissionsFixed() { return installPermissionsFixed != -1; }
+    public boolean isInstallPermissionsFixed() {
+        if (!hasInstallPermissionsFixed()) throw new IllegalStateException("install permissions fixed owner is not captured");
+        return installPermissionsFixed == 1;
+    }
     public String[] getUsesSdkLibraries() { return sdkLibraries.clone(); }
     public long[] getUsesSdkLibrariesVersionsMajor() { return sdkVersions.clone(); }
     public boolean[] getUsesSdkLibrariesOptional() { return sdkOptional.clone(); }

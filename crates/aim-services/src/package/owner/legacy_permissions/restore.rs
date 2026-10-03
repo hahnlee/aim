@@ -357,6 +357,18 @@ mod tests {
         assert_eq!(metadata.users[&0].fingerprint.as_deref(), Some("fp"));
         assert!(!metadata.users[&0].rewrite_requested);
         assert!(metadata.users[&10].rewrite_requested);
+        assert_eq!(
+            scan.install_permissions_fixed("early", false).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            scan.install_permissions_fixed("late", false).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            scan.install_permissions_fixed("late", true).unwrap(),
+            Some(false)
+        );
         let before = scan.clone();
         fs::write(data.0.join("system/packages.xml"), "<packages/>").unwrap();
         assert!(

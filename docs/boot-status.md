@@ -539,7 +539,20 @@ original APIs (13.8s). The explicit saved-scan diagnostic boots original PMS on
 disposable data, freezes it, restores migration owners using the actual image
 SystemConfig, rescans 243 active/3 disabled packages and publishes the captured
 Store successfully (393.16s). These are pinned reader-loop ports,
-not direct calls of private original Settings methods. Original-state import,
+not direct calls of private original Settings methods.
+Install-permissions-fixed now has a separate native current-state owner for each
+active/factory setting. Saved restoration supplies the original consumed marker;
+explicit imports must supply the whole setting inventory, and a new migration
+import invalidates old bits until supplied again. Updates preserve older Store
+captures and do not alter restoration provenance. Existing setting pages carry
+known true/false or an unresolved marker; Java rejects missing/invalid markers
+and its original-named getter rejects unresolved state. Original ART validates
+both boolean values, original PackageSetting getter/copy semantics and absent,
+invalid and unresolved transport markers (19.25s with the complete package
+oracle); the real native Binder-driver capture test retains its old true value
+across changed publication. Units pass 389 (3.16s; one ignored/not run), all
+integration targets compile and device-services original API build passes
+(18.7s). Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

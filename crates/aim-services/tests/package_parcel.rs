@@ -1103,6 +1103,18 @@ fn native_scan_objects(
     owner
         .capture_legacy_permissions(&[10, 0, 11], legacy_packages, legacy_groups)
         .unwrap();
+    let fixed = owner
+        .settings
+        .packages
+        .iter()
+        .map(|setting| {
+            (
+                (setting.name.clone(), false),
+                setting.name == "com.google.android.gsf",
+            )
+        })
+        .collect();
+    owner.capture_install_permissions_fixed(fixed).unwrap();
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()
