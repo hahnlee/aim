@@ -31,7 +31,321 @@ pub enum DataCandidateOutcome {
     Removed(SigningError),
 }
 
+/// The boot owners for data iteration and missing-update factory recovery.
+pub struct DataImageScanInputs<'a> {
+    pub factories: &'a super::SystemImagePackages,
+    pub platform: &'a SigningDetails,
+    pub vendor_sdk: i32,
+    pub abi_policy: &'a super::AbiPolicy,
+    pub compatibility: &'a LibraryCompatibility,
+    pub preferred_abi: &'a str,
+    pub app_lib32_install_dir: &'a str,
+    pub install: super::NativeLibraryInstallPolicy,
+    pub clock: super::ScanClock,
+    pub factory_test: bool,
+    pub users: &'a BTreeMap<String, BTreeMap<i32, UserState>>,
+    pub all_users: Option<&'a [User]>,
+    pub first_boot_or_upgrade: bool,
+    pub old_stub_packages: &'a BTreeSet<String>,
+    pub expecting_better: &'a BTreeSet<String>,
+    pub is_incremental: &'a dyn Fn(&str) -> Result<bool, String>,
+    pub remove_test_base:
+        &'a dyn Fn(&crate::package::pkg::AndroidPackage) -> Result<Option<bool>, String>,
+    pub destinations: &'a BTreeMap<String, super::NativeLibraryDestination<'a>>,
+    pub resources: &'a crate::package::owner::resources::CodeResources,
+    pub new_domain_id: &'a dyn Fn() -> Result<[u8; 16], String>,
+}
+
+#[derive(Debug)]
+pub struct DataImagePackages {
+    pub packages: Vec<CompletedScanMetadata>,
+    pub recovered: Vec<CompletedScanMetadata>,
+    pub rejected: Vec<super::Rejected>,
+    pub removed: Vec<(String, SigningError)>,
+}
+
 impl SigningScan {
+    /// Iterate verified data candidates, then recover selected factories whose
+    /// data code was absent or rejected. Earlier package/resource effects remain
+    /// authoritative on a later error. This does not persist or publish a replica.
+    pub fn scan_data_image(
+        &mut self,
+        image: super::DataImage,
+        apks: &Apks,
+        inputs: DataImageScanInputs<'_>,
+    ) -> Result<DataImagePackages, SigningError> {
+        let fatal = |package: String, path: String, phase, message| {
+            SigningError::Fatal(Error {
+                package,
+                path,
+                phase,
+                message,
+            })
+        };
+        if inputs.factories.retained_data.len() != inputs.factories.retained_code.len() {
+            return Err(fatal(
+                String::new(),
+                String::new(),
+                "factory",
+                "retained factory code inventory disagrees with metadata".into(),
+            ));
+        }
+        let mut expecting_better = inputs.expecting_better.clone();
+        expecting_better.extend(
+            inputs
+                .factories
+                .retained_data
+                .iter()
+                .map(|f| f.record.settings.name.clone()),
+        );
+        let mut packages = Vec::new();
+        let mut recovered = Vec::new();
+        let mut removed = Vec::new();
+        let mut incremental = BTreeSet::new();
+        for rejected in &image.rejected {
+            if (inputs.is_incremental)(&rejected.location.path).map_err(|e| {
+                fatal(
+                    String::new(),
+                    rejected.location.path.clone(),
+                    "incremental",
+                    e,
+                )
+            })? {
+                incremental.insert(rejected.location.path.clone());
+            }
+        }
+        Self::clean_invalid_data_inputs(&image, inputs.resources, &incremental)?;
+        for entry in image.packages {
+            let code = &entry.code;
+            let identity = Identity::select(&code.parsed, &self.settings, true);
+            let factory = inputs
+                .factories
+                .retained_data
+                .iter()
+                .rev()
+                .find(|f| f.record.settings.name == identity.internal_name);
+            let host = (apks.files)(&code.location.path).ok_or_else(|| {
+                fatal(
+                    identity.internal_name.clone(),
+                    code.location.path.clone(),
+                    "location",
+                    "data code path not mapped".into(),
+                )
+            })?;
+            let environment = super::NativeLibraryEnvironment {
+                preferred_abi: inputs.preferred_abi,
+                app_lib32_install_dir: inputs.app_lib32_install_dir,
+                code_is_directory: std::fs::metadata(host)
+                    .map_err(|e| {
+                        fatal(
+                            identity.internal_name.clone(),
+                            code.location.path.clone(),
+                            "location",
+                            e.to_string(),
+                        )
+                    })?
+                    .is_dir(),
+                canonical_source: None,
+            };
+            let incremental = (inputs.is_incremental)(&entry.scan_path).map_err(|e| {
+                fatal(
+                    identity.internal_name.clone(),
+                    entry.scan_path.clone(),
+                    "incremental",
+                    e,
+                )
+            })?;
+            let remove_test_base = (inputs.remove_test_base)(&code.parsed).map_err(|e| {
+                fatal(
+                    identity.internal_name.clone(),
+                    code.location.path.clone(),
+                    "policy",
+                    e,
+                )
+            })?;
+            let completed = self.scan_data_candidate(
+                &entry,
+                inputs.users,
+                inputs.all_users,
+                apks,
+                DataScanInputs {
+                    factory,
+                    platform: inputs.platform,
+                    vendor_sdk: inputs.vendor_sdk,
+                    compatibility: inputs.compatibility,
+                    remove_test_base,
+                    expecting_better: &expecting_better,
+                    new_domain_id: inputs.new_domain_id,
+                    completion: ScanMetadataCompletion {
+                        abi_policy: inputs.abi_policy,
+                        native_environment: &environment,
+                        context: AbiScanContext {
+                            mode: AbiScanMode::Existing {
+                                first_boot_or_upgrade: inputs.first_boot_or_upgrade,
+                                old_was_stub: inputs
+                                    .old_stub_packages
+                                    .contains(&identity.internal_name),
+                                saved: None,
+                            },
+                            system: false,
+                            updated: false,
+                            override_abi: None,
+                            platform_runtime_64bit: None,
+                        },
+                        install: inputs.install,
+                        destination: inputs.destinations.get(&identity.internal_name),
+                        clock: inputs.clock,
+                        factory_test: inputs.factory_test,
+                    },
+                },
+                inputs.resources,
+                incremental,
+            )?;
+            match completed {
+                DataCandidateOutcome::Accepted(completed) => packages.push(completed),
+                DataCandidateOutcome::Removed(error) => removed.push((entry.scan_path, error)),
+            }
+        }
+        for (index, (factory, code)) in inputs
+            .factories
+            .retained_data
+            .iter()
+            .zip(&inputs.factories.retained_code)
+            .enumerate()
+        {
+            let setting = &factory.record.settings;
+            if inputs.factories.retained_data[index + 1..]
+                .iter()
+                .any(|f| f.record.settings.name == setting.name)
+            {
+                continue;
+            }
+            if self.has_scanned_package(&setting.name) {
+                continue;
+            }
+            if self
+                .settings
+                .disabled_system_packages
+                .iter()
+                .find(|p| p.name == setting.name)
+                != Some(setting)
+            {
+                return Err(fatal(
+                    setting.name.clone(),
+                    code.location.path.clone(),
+                    "factory",
+                    "fallback factory is no longer current".into(),
+                ));
+            }
+            let version = (i64::from(code.parsed.version_code_major) << 32)
+                | i64::from(code.parsed.version_code as u32);
+            if Identity::select(&code.parsed, &self.settings, true) != factory.record.identity
+                || code.location.path != setting.code_path
+                || version != setting.version_code
+                || code.signing != factory.record.signing
+            {
+                return Err(fatal(
+                    setting.name.clone(),
+                    code.location.path.clone(),
+                    "factory",
+                    "fallback requires original raw factory code".into(),
+                ));
+            }
+            let domain_id = (inputs.new_domain_id)().map_err(|e| {
+                fatal(
+                    setting.name.clone(),
+                    code.location.path.clone(),
+                    "domain",
+                    e,
+                )
+            })?;
+            let enabled = self
+                .enable_system_setting(&setting.name, domain_id)
+                .ok_or_else(|| {
+                    fatal(
+                        setting.name.clone(),
+                        code.location.path.clone(),
+                        "factory",
+                        "factory setting could not be enabled".into(),
+                    )
+                })?;
+            let host = (apks.files)(&code.location.path).ok_or_else(|| {
+                fatal(
+                    setting.name.clone(),
+                    code.location.path.clone(),
+                    "location",
+                    "factory code path not mapped".into(),
+                )
+            })?;
+            let environment = super::NativeLibraryEnvironment {
+                preferred_abi: inputs.preferred_abi,
+                app_lib32_install_dir: inputs.app_lib32_install_dir,
+                code_is_directory: std::fs::metadata(host)
+                    .map_err(|e| {
+                        fatal(
+                            setting.name.clone(),
+                            code.location.path.clone(),
+                            "location",
+                            e.to_string(),
+                        )
+                    })?
+                    .is_dir(),
+                canonical_source: None,
+            };
+            let remove_test_base = (inputs.remove_test_base)(&code.parsed).map_err(|e| {
+                fatal(
+                    setting.name.clone(),
+                    code.location.path.clone(),
+                    "policy",
+                    e,
+                )
+            })?;
+            let completed = self.scan_enabled_factory(
+                &factory.record,
+                code,
+                enabled,
+                inputs.users,
+                inputs.all_users,
+                apks,
+                super::UpdatedSystemBootInputs {
+                    completion: ScanMetadataCompletion {
+                        abi_policy: inputs.abi_policy,
+                        native_environment: &environment,
+                        context: AbiScanContext {
+                            mode: AbiScanMode::Existing {
+                                first_boot_or_upgrade: inputs.first_boot_or_upgrade,
+                                old_was_stub: false,
+                                saved: None,
+                            },
+                            system: true,
+                            updated: false,
+                            override_abi: None,
+                            platform_runtime_64bit: None,
+                        },
+                        install: inputs.install,
+                        destination: inputs.destinations.get(&setting.name),
+                        clock: inputs.clock,
+                        factory_test: inputs.factory_test,
+                    },
+                    compatibility: inputs.compatibility,
+                    platform: Some(inputs.platform),
+                    vendor_sdk: inputs.vendor_sdk,
+                    remove_test_base,
+                    resources: inputs.resources,
+                    incremental: false,
+                    new_domain_id: inputs.new_domain_id,
+                },
+            )?;
+            recovered.push(completed);
+        }
+        Ok(DataImagePackages {
+            packages,
+            recovered,
+            rejected: image.rejected,
+            removed,
+        })
+    }
+
     /// Remove rejected parse/signature inputs using their original scan paths.
     /// Earlier deletions and pending resource retries survive a later failure.
     pub fn clean_invalid_data_inputs(
@@ -177,6 +491,15 @@ impl SigningScan {
         let previous = self.settings.packages.iter()
             .find(|p| p.name == identity.internal_name).cloned()
             .ok_or_else(|| fail("require-known", "Application package not found; ignoring (INSTALL_FAILED_INVALID_INSTALL_LOCATION)".into()))?;
+        if self.has_scanned_package(&identity.internal_name) {
+            return Err(fail(
+                "validation",
+                format!(
+                    "Application package {} already installed; skipping duplicate (INSTALL_FAILED_DUPLICATE_PACKAGE)",
+                    identity.internal_name
+                ),
+            ));
+        }
         if !inputs.expecting_better.contains(&identity.internal_name)
             && previous.code_path != raw.location.path
         {

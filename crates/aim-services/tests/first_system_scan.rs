@@ -228,7 +228,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             saved_inputs(),
         )
         .unwrap();
-    assert_eq!(duplicate.packages.len(), 3);
+    assert_eq!(duplicate.packages.len(), 2);
+    assert_eq!(duplicate.rejected.len(), 1);
+    assert!(
+        duplicate.rejected[0]
+            .reason
+            .contains("INSTALL_FAILED_DUPLICATE_PACKAGE")
+    );
     assert_eq!(
         duplicate.packages[1]
             .candidate
@@ -239,12 +245,11 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         Some("arm64-v8a")
     );
     assert!(
-        duplicate.packages[2]
+        duplicate.packages[1]
             .candidate
             .record
-            .settings
-            .primary_cpu_abi
-            .is_none()
+            .parsed
+            .is2(aim_services::package::pkg::booleans2::STUB)
     );
     std::fs::remove_dir_all(stub).unwrap();
     std::fs::remove_file(app.join("GSF.gz")).unwrap();
@@ -482,6 +487,181 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(accepted.candidate.record.signing, raw.signing);
             assert!(accepted.copies.is_empty());
             assert!(physical_data.join("base.apk").exists());
+            use aim_services::package::scan::{DataImage, DataImageScanInputs};
+            let destinations = std::collections::BTreeMap::new();
+            let non_incremental = |_: &str| Ok(false);
+            let remove_test_base = |_: &aim_services::package::pkg::AndroidPackage| Ok(None);
+            let loop_inputs = || DataImageScanInputs {
+                factories: &batch,
+                platform,
+                vendor_sdk: 36,
+                abi_policy: &abi_policy,
+                compatibility: &compatibility,
+                preferred_abi: "arm64-v8a",
+                app_lib32_install_dir: "/data/app-lib",
+                install: inputs(&domain_ids).install,
+                clock: inputs(&domain_ids).clock,
+                factory_test: false,
+                users: &full_users,
+                all_users: None,
+                first_boot_or_upgrade: false,
+                old_stub_packages: &empty_packages,
+                expecting_better: &empty_packages,
+                is_incremental: &non_incremental,
+                remove_test_base: &remove_test_base,
+                destinations: &destinations,
+                resources: &resources,
+                new_domain_id: &domain_ids,
+            };
+            let mut data_loop = before.clone();
+            let complete = data_loop
+                .scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks, loop_inputs())
+                .unwrap();
+            assert_eq!(complete.packages.len(), 1);
+            assert!(complete.recovered.is_empty());
+            assert!(complete.removed.is_empty());
+            assert!(data_code.exists());
+            let changed_path = fixture.0.join("data/app/other-path");
+            std::fs::create_dir_all(&changed_path).unwrap();
+            std::os::unix::fs::symlink(
+                original.join(
+                    "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk",
+                ),
+                changed_path.join("base.apk"),
+            )
+            .unwrap();
+            let mut changed_inventory = DataImage::load(&apks, &[]).unwrap();
+            changed_inventory
+                .packages
+                .retain(|e| e.code.location.path == "/data/app/other-path");
+            let mut changed = before.clone();
+            let accepted_changed = changed
+                .scan_data_image(changed_inventory, &apks, loop_inputs())
+                .unwrap();
+            assert_eq!(accepted_changed.packages.len(), 1);
+            assert_eq!(
+                accepted_changed.packages[0]
+                    .candidate
+                    .record
+                    .settings
+                    .code_path,
+                "/data/app/other-path"
+            );
+            assert_eq!(
+                accepted_changed.packages[0]
+                    .candidate
+                    .record
+                    .settings
+                    .app_id,
+                active.app_id
+            );
+            assert_eq!(
+                accepted_changed.packages[0].candidate.users,
+                full_users[&active.name]
+            );
+            let duplicate_file = writable.join("app/other-path");
+            std::fs::write(&duplicate_file, b"disposable duplicate code").unwrap();
+            let mut duplicate_data = before.clone();
+            let duplicate_result = duplicate_data
+                .scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks, loop_inputs())
+                .unwrap();
+            assert_eq!(duplicate_result.packages.len(), 1);
+            assert_eq!(duplicate_result.removed.len(), 1);
+            assert!(
+                matches!(&duplicate_result.removed[0].1, SigningError::Rejected(e) if e.phase == "validation" && e.message.contains("INSTALL_FAILED_DUPLICATE_PACKAGE"))
+            );
+            assert!(!duplicate_file.exists());
+            assert!(data_code.exists());
+            assert_eq!(
+                duplicate_data
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == active.name)
+                    .unwrap()
+                    .code_path,
+                active.code_path
+            );
+            std::fs::remove_dir_all(changed_path).unwrap();
+            let mut absent = before.clone();
+            let recovered = absent
+                .scan_data_image(DataImage::default(), &apks, loop_inputs())
+                .unwrap();
+            assert!(recovered.packages.is_empty());
+            assert_eq!(recovered.recovered.len(), 1);
+            assert_eq!(
+                recovered.recovered[0].candidate.record.settings.code_path,
+                factory.code_path
+            );
+            assert_eq!(
+                recovered.recovered[0].candidate.record.settings.app_id,
+                active.app_id
+            );
+            assert_eq!(
+                recovered.recovered[0].candidate.record.settings.flags & (1 << 7),
+                0
+            );
+            assert_eq!(
+                recovered.recovered[0].candidate.users,
+                full_users[&active.name]
+            );
+            assert!(absent.settings.disabled_system_packages.is_empty());
+            // checkExistingBetterPackages enables/rescans; it performs no additional data code removal.
+            assert!(data_code.exists());
+            let attempt = std::cell::Cell::new(0);
+            let fail_later = |_: &aim_services::package::pkg::AndroidPackage| {
+                attempt.set(attempt.get() + 1);
+                if attempt.get() == 2 {
+                    Err("policy owner unavailable".to_owned())
+                } else {
+                    Ok(None)
+                }
+            };
+            let repeated = DataImage {
+                packages: vec![
+                    DataCode {
+                        scan_path: valid_candidate.scan_path.clone(),
+                        code: raw.clone(),
+                    },
+                    DataCode {
+                        scan_path: valid_candidate.scan_path.clone(),
+                        code: raw.clone(),
+                    },
+                ],
+                rejected: Vec::new(),
+            };
+            let mut partial = before.clone();
+            assert!(
+                matches!(partial.scan_data_image(repeated, &apks, DataImageScanInputs { remove_test_base: &fail_later, ..loop_inputs() }), Err(SigningError::Fatal(e)) if e.phase == "policy")
+            );
+            assert!(partial.scanned_user_states(&active.name).is_some());
+            assert_eq!(
+                partial.scanned_user_states(&active.name),
+                Some(&full_users[&active.name])
+            );
+            assert_ne!(partial, before);
+            assert!(data_code.exists());
+            // An unchanged original signed APK with the wrong identity at this data
+            // location is rejected, removed, then the selected GSF factory recovers.
+            std::fs::remove_file(physical_data.join("base.apk")).unwrap();
+            std::os::unix::fs::symlink(
+                original.join("system/framework/framework-res.apk"),
+                physical_data.join("base.apk"),
+            )
+            .unwrap();
+            let mut invalid = before.clone();
+            let recovered = invalid
+                .scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks, loop_inputs())
+                .unwrap();
+            assert!(recovered.packages.is_empty());
+            assert_eq!(recovered.removed.len(), 1);
+            assert_eq!(recovered.recovered.len(), 1);
+            assert!(!data_code.exists());
+            assert_eq!(
+                recovered.recovered[0].candidate.record.settings.code_path,
+                factory.code_path
+            );
+            std::fs::write(&data_code, b"disposable retained code").unwrap();
             std::fs::remove_dir_all(physical_data).unwrap();
             std::fs::remove_file(data_code).unwrap();
         } else {

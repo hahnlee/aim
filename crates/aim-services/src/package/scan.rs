@@ -33,7 +33,7 @@ mod boot;
 mod completion;
 mod data;
 mod disabled;
-pub use data::{DataCandidateOutcome, DataScanInputs};
+pub use data::{DataCandidateOutcome, DataImagePackages, DataImageScanInputs, DataScanInputs};
 mod updated_boot;
 pub use boot::{
     FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,

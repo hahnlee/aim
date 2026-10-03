@@ -79,24 +79,49 @@ impl SigningScan {
         if selected.source == UpdatedSystemSource::KeepData {
             return Ok(UpdatedSystemBootOutcome::KeepData);
         }
-        let (first_boot_or_upgrade, old_was_stub) = match inputs.completion.context.mode {
-            AbiScanMode::Existing {
-                first_boot_or_upgrade,
-                old_was_stub,
-                ..
-            } => (first_boot_or_upgrade, old_was_stub),
-            _ => {
-                return Err(reject(
-                    "factory boot restoration requires initial-scan ABI ownership".into(),
-                ));
-            }
-        };
+        if !matches!(inputs.completion.context.mode, AbiScanMode::Existing { .. }) {
+            return Err(reject(
+                "factory boot restoration requires initial-scan ABI ownership".into(),
+            ));
+        }
         let enabled = self.restore_updated_system_setting_with_id(
             selected,
             inputs.resources,
             inputs.incremental,
             inputs.new_domain_id,
         )?;
+        self.scan_enabled_factory(factory, code, enabled, saved_users, all_users, apks, inputs)
+            .map(UpdatedSystemBootOutcome::Factory)
+    }
+
+    pub(super) fn scan_enabled_factory(
+        &mut self,
+        factory: &super::Record,
+        code: &Code,
+        enabled: crate::package::settings::Package,
+        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        all_users: Option<&[User]>,
+        apks: &crate::package::write::Apks,
+        inputs: UpdatedSystemBootInputs<'_>,
+    ) -> Result<CompletedScanMetadata, SigningError> {
+        let reject = |message: String| {
+            SigningError::Rejected(Error {
+                package: factory.settings.name.clone(),
+                path: code.location.path.clone(),
+                phase: "updated-system-boot",
+                message,
+            })
+        };
+        let AbiScanMode::Existing {
+            first_boot_or_upgrade,
+            old_was_stub,
+            ..
+        } = inputs.completion.context.mode
+        else {
+            return Err(reject(
+                "factory boot restoration requires initial-scan ABI ownership".into(),
+            ));
+        };
         let mut parsed = code.parsed.clone();
         let mut policy = ScanPolicy::for_location(&code.location);
         if let Some(platform) = inputs.platform {
@@ -169,6 +194,6 @@ impl SigningScan {
             apks,
             completion,
         )?;
-        Ok(UpdatedSystemBootOutcome::Factory(completed))
+        Ok(completed)
     }
 }

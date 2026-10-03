@@ -82,7 +82,7 @@ impl Location {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 /// Parsed and integrity-verified code before scan identity is applied.
 /// Record.parsed has already been renamed and must not be reused here.
 pub struct Code {

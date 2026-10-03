@@ -529,69 +529,50 @@ fn saved_scan_libraries_match_original_pms() {
     let data_image = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
     assert!(data_image.rejected.is_empty());
     assert_eq!(data_image.packages.len(), 3);
-    for entry in &data_image.packages {
-        let code = &entry.code;
-        let identity =
-            aim_services::package::scan::Identity::select(&code.parsed, &resumed.settings, true);
-        let factory = resumed_packages
-            .retained_data
-            .iter()
-            .find(|f| f.record.settings.name == identity.internal_name)
-            .expect("selected data APK has refreshed factory metadata");
-        let environment = NativeLibraryEnvironment {
-            preferred_abi: all_abis.first().unwrap(),
-            app_lib32_install_dir: "/data/app-lib",
-            code_is_directory: fs::metadata((apks.files)(&code.location.path).unwrap())
-                .unwrap()
-                .is_dir(),
-            canonical_source: None,
-        };
-        let completed = resumed
-            .scan_known_data(
-                code,
-                &saved_users,
-                None,
-                &apks,
-                aim_services::package::scan::DataScanInputs {
-                    factory: Some(factory),
-                    platform: platform_signing,
-                    vendor_sdk,
-                    compatibility: &compatibility,
-                    remove_test_base: None,
-                    expecting_better: &empty_packages,
-                    new_domain_id: &domain_ids,
-                    completion: ScanMetadataCompletion {
-                        abi_policy: &abi_policy,
-                        native_environment: &environment,
-                        context: AbiScanContext {
-                            mode: AbiScanMode::Existing {
-                                first_boot_or_upgrade: false,
-                                old_was_stub: false,
-                                saved: None,
-                            },
-                            system: false,
-                            updated: false,
-                            override_abi: None,
-                            platform_runtime_64bit: None,
-                        },
-                        install: NativeLibraryInstallPolicy {
-                            page_size: 16384,
-                            extract: false,
-                            debuggable: false,
-                            compat_16kb_disabled: false,
-                            manifest_compat_disabled: false,
-                        },
-                        destination: None,
-                        clock: ScanClock {
-                            current_time: 0,
-                            user_id: 0,
-                            update_time: false,
-                        },
-                        factory_test: false,
-                    },
+    let destinations = BTreeMap::new();
+    let resumed_data = resumed
+        .scan_data_image(
+            data_image,
+            &apks,
+            aim_services::package::scan::DataImageScanInputs {
+                factories: &resumed_packages,
+                platform: platform_signing,
+                vendor_sdk,
+                abi_policy: &abi_policy,
+                compatibility: &compatibility,
+                preferred_abi: all_abis.first().unwrap(),
+                app_lib32_install_dir: "/data/app-lib",
+                install: NativeLibraryInstallPolicy {
+                    page_size: 16384,
+                    extract: false,
+                    debuggable: false,
+                    compat_16kb_disabled: false,
+                    manifest_compat_disabled: false,
                 },
-            )
-            .unwrap();
+                clock: ScanClock {
+                    current_time: 0,
+                    user_id: 0,
+                    update_time: false,
+                },
+                factory_test: false,
+                users: &saved_users,
+                all_users: None,
+                first_boot_or_upgrade: false,
+                old_stub_packages: &empty_packages,
+                expecting_better: &empty_packages,
+                is_incremental: &|_| Ok(false),
+                remove_test_base: &|_| Ok(None),
+                destinations: &destinations,
+                resources: &resources,
+                new_domain_id: &domain_ids,
+            },
+        )
+        .unwrap();
+    assert_eq!(resumed_data.packages.len(), 3);
+    assert!(resumed_data.recovered.is_empty());
+    assert!(resumed_data.rejected.is_empty());
+    assert!(resumed_data.removed.is_empty());
+    for completed in &resumed_data.packages {
         let record = &completed.candidate.record;
         let saved = original
             .settings
@@ -608,7 +589,9 @@ fn saved_scan_libraries_match_original_pms() {
         assert_eq!(completed.candidate.users, saved_users[&saved.name]);
         assert!(completed.copies.is_empty());
     }
-    eprintln!("saved native scan completed 240 system APKs and all 3 selected data APKs");
+    eprintln!(
+        "saved native system/data loops completed 240 system APKs and all 3 selected data APKs"
+    );
     let system_count = system_image.packages.len();
     let first_system = SystemImageScan::first_boot(
         system_image,

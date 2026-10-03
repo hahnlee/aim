@@ -48,6 +48,8 @@ pub struct SystemImagePackages {
     pub packages: Vec<CompletedScanMetadata>,
     /// Refreshed factories whose selected data code must be scanned next.
     pub retained_data: Vec<DisabledSystemMetadata>,
+    /// Raw code remains available for checkExistingBetterPackages fallback.
+    pub retained_code: Vec<Code>,
     pub rejected: Vec<super::Rejected>,
 }
 
@@ -160,8 +162,10 @@ fn scan_system_image(
         .platform
         .framework_boolean("config_stopSystemPackagesByDefault")
         .map_err(|message| fail(String::new(), String::new(), "image-policy", message))?;
+    let mut rejected = image.rejected;
     let mut packages = Vec::new();
     let mut retained_data = Vec::new();
+    let mut retained_code = Vec::new();
     let mut old_stub_packages = saved
         .as_ref()
         .map(|s| s.old_stub_packages.clone())
@@ -201,6 +205,13 @@ fn scan_system_image(
             ));
         }
         let updated = active.is_some() && factory.is_some();
+        if !updated && owner.has_scanned_package(&identity.internal_name) {
+            rejected.push(super::Rejected {
+                location: code.location.clone(),
+                reason: format!("Application package {} already installed; skipping duplicate (INSTALL_FAILED_DUPLICATE_PACKAGE)", identity.internal_name),
+            });
+            continue;
+        }
         let raw = updated.then(|| Code {
             location: code.location.clone(),
             parsed: code.parsed.clone(),
@@ -393,6 +404,7 @@ fn scan_system_image(
             )? {
                 UpdatedSystemBootOutcome::KeepData => {
                     retained_data.push(selected.factory);
+                    retained_code.push(raw.unwrap());
                     continue;
                 }
                 UpdatedSystemBootOutcome::Factory(completed) => completed,
@@ -440,7 +452,8 @@ fn scan_system_image(
     Ok(SystemImagePackages {
         packages,
         retained_data,
-        rejected: image.rejected,
+        retained_code,
+        rejected,
     })
 }
 
