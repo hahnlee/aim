@@ -372,20 +372,23 @@ Android Base64.DEFAULT skipping/padding are modeled. Defined aliases/public-key
 sets serialize in Java collection order and roundtrip through AndroidPackage.
 A compiled disposable APK fixture (0.95s) verifies the real TypedArray path,
 reused keys, alias/upgrade output, missing first values, name collisions and
-invalid-key omission. A disposable original PackageParser2/KeySetManagerService oracle (15.50s)
+invalid-key omission. A disposable original PackageParser2/KeySetManagerService oracle (17.02s)
 compares eleven identical compiled APKs: key reuse, nullable public names,
 conflicts, key/set name collisions, invalid keys, first-use errors, empty upgrade
 sets, repeated set names, multiple keyset sections, Base64 skipped characters
 and multiple public keys. Parse acceptance, alias/key iteration, canonical SPKI,
 Java serialization bytes and upgrade output all match. Owned processes and mounts
 are cleaned. Added compile-only parser APIs link against the original image
-(device-services build, 14.1s). Unsupported EC curves fail explicitly; broader
-key-factory and restored-orphan conformance remain #824. The same oracle
+(device-services build, 14.9s). Unsupported EC curves fail explicitly; broader
+key-factory and template/app-install API conformance remain #824. The same oracle
 compares six global-owner transitions: signing/upgrade alias registration, shared
 signing keys, rotation to the alias key with alias release, shared-owner removal,
 last-owner removal and fresh allocation after retirement. Original package
 proper/defined/upgrade IDs and the entire XML-exported global public-key/set/
-counter table match the native owner after every step. Separate ART-service
+counter table match the native owner after every step. A seventh saved-pool
+restoration step matches the original reader: it prunes an orphan set and its
+exclusive public key, keeps a key shared with a live set and a wholly unused
+public key, and preserves last-issued counters. Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,

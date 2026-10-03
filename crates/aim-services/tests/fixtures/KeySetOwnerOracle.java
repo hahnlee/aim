@@ -60,6 +60,29 @@ public final class KeySetOwnerOracle {
             snapshot("remove-last", owner, packages);
             owner.addSigningKeySetToPackageLPw(packages[0], one);
             snapshot("reallocate", owner, packages);
+            // Read a saved pool containing a live set, an orphan set sharing
+            // its key, an orphan-only key and a wholly unused public key.
+            long live = packages[0].getKeySetData().getProperSigningKeySet();
+            String first = java.util.Base64.getEncoder().encodeToString(one.iterator().next().getEncoded());
+            String second = java.util.Base64.getEncoder().encodeToString(two.iterator().next().getEncoded());
+            String document = "<keyset-settings version='1'><keys>"
+                + "<public-key identifier='3' value='" + first + "'/>"
+                + "<public-key identifier='4' value='" + second + "'/>"
+                + "<public-key identifier='5' value='" + first + "'/>"
+                + "</keys><keysets><keyset identifier='" + live + "'><key-id identifier='3'/></keyset>"
+                + "<keyset identifier='4'><key-id identifier='3'/><key-id identifier='4'/></keyset>"
+                + "</keysets><lastIssuedKeyId value='20'/><lastIssuedKeySetId value='30'/></keyset-settings>";
+            var input = android.util.Xml.resolvePullParser(new java.io.ByteArrayInputStream(document.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            while (!"keyset-settings".equals(input.getName())) input.next();
+            // Reuse an empty original ArrayMap, without constructing or
+            // modifying an actual package's alias map.
+            var holder = new PackageSetting("refs", null, new java.io.File("/data/app/refs"), 0, 0, java.util.UUID.randomUUID());
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            android.util.ArrayMap<Long, Integer> refs = (android.util.ArrayMap)(holder.getKeySetData().getAliases());
+            refs.put(live, 1);
+            owner = new KeySetManagerService(map);
+            owner.readKeySetsLPw(input, refs);
+            snapshot("restore-orphan", owner, packages);
         }
     }
 }

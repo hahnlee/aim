@@ -7,4 +7,5 @@ public class KeySetManagerService {
     void addUpgradeKeySetsToPackageLPw(PackageSetting setting, java.util.Set<String> aliases) { throw new RuntimeException("stub"); }
     public void removeAppKeySetDataLPw(String name) { throw new RuntimeException("stub"); }
     void writeKeySetManagerServiceLPr(com.android.modules.utils.TypedXmlSerializer serializer) throws java.io.IOException { throw new RuntimeException("stub"); }
+    void readKeySetsLPw(com.android.modules.utils.TypedXmlPullParser parser, android.util.ArrayMap<Long, Integer> refs) throws java.io.IOException { throw new RuntimeException("stub"); }
 }

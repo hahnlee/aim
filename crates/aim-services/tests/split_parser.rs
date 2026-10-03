@@ -518,7 +518,26 @@ fn manifest_keysets_match_original_parser() {
     key_sets::clear_package(&mut settings, "a").unwrap();
     states.push(("remove-last", settings.clone()));
     key_sets::register(&mut settings, "a", &[one_der], None, &[]).unwrap();
-    states.push(("reallocate", settings));
+    states.push(("reallocate", settings.clone()));
+    settings
+        .key_sets
+        .public_keys
+        .extend([(4, key(2).0), (5, key(1).0)]);
+    settings.key_sets.key_sets.push((4, vec![3, 4]));
+    settings.key_sets.last_issued_key_id = 20;
+    settings.key_sets.last_issued_key_set_id = 30;
+    key_sets::restore(&mut settings).unwrap();
+    assert_eq!(
+        settings
+            .key_sets
+            .public_keys
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [3, 5]
+    );
+    assert_eq!(settings.key_sets.key_sets, [(3, vec![3])]);
+    states.push(("restore-orphan", settings));
     let output = String::from_utf8(run(boot.command().args([
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.KeySetOwnerOracle", "/data/local/tmp/manifest-keysets/reuse.apk", "/data/local/tmp/manifest-keysets/repeat-set.apk",
