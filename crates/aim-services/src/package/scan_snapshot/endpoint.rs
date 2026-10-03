@@ -89,6 +89,43 @@ impl WriteParcelable for PackageUsage {
 
 pub const MAX_CHUNK: usize = 64 * 1024;
 
+pub struct PackageSeInfo {
+    version: u64,
+    name: String,
+    label: String,
+    override_label: bool,
+}
+
+impl PackageSeInfo {
+    pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Self>, String> {
+        let Some(label) = snapshot.owner().seinfo(name)? else {
+            return Ok(None);
+        };
+        let setting = snapshot
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| "seInfo has no active setting".to_string())?;
+        Ok(Some(Self {
+            version: snapshot.version(),
+            name: name.into(),
+            label: label.into(),
+            override_label: setting.shared_user,
+        }))
+    }
+}
+
+impl WriteParcelable for PackageSeInfo {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(self.version as i64);
+        p.write_string16(Some(&self.name));
+        p.write_string16(Some(&self.label));
+        p.write_bool(self.override_label);
+    }
+}
+
 struct Lease {
     snapshot: Option<Arc<Snapshot>>,
     code: BTreeMap<(String, bool), Arc<Vec<u8>>>,
@@ -178,6 +215,30 @@ impl Service for Endpoint {
             return Ok(reply);
         };
         match call.code {
+            api::GET_SE_INFO => {
+                let args = api::GetSeInfo::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                match args.package_name.as_deref() {
+                    None => {
+                        reply.write_exception(&Exception::illegal_argument("package name is null"))
+                    }
+                    Some(name) => match PackageSeInfo::captured(&snapshot, name) {
+                        Err(error) => {
+                            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, error))
+                        }
+                        Ok(state) => {
+                            let bytes = state.map(|state| {
+                                let mut parcel = Parcel::new();
+                                state.write_to(&mut parcel);
+                                parcel.data().to_vec()
+                            });
+                            api::write_get_se_info_reply(&mut reply, &bytes);
+                        }
+                    },
+                }
+            }
             api::GET_VERSION => {
                 api::GetVersion::read(&mut call.data)?;
                 if call.data.remaining() != 0 {

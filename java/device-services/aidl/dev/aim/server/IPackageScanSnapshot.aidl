@@ -9,4 +9,6 @@ interface IPackageScanSnapshot {
     void close();
     /** Captured active-package usage; null for a name outside this capture. */
     byte[] getUsage(String packageName);
+    /** Captured active boot seInfo assignment; unfinished phase is an error. */
+    byte[] getSeInfo(String packageName);
 }

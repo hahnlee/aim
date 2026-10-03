@@ -356,9 +356,27 @@ shared compatibility precedence, partition precedence, missing assignments,
 stale-input rejection and capture isolation. The original SharedUserSetting
 oracle also verifies boot label agreement and the lower-SDK adjustment
 (15.64s with snapshot/usage oracles). These are boot assignments only:
-runtime per-package base/override lifetime, live compatibility invocation,
-complete boot orchestration, label transport and Java replica restoration
-remain #838/#836/#798. Captures without this phase remain incomplete C state.
+runtime per-package base/override lifetime, live compatibility invocation and
+complete boot orchestration remain #838/#836/#798. Captures without this phase
+remain incomplete C state. The private snapshot AIDL now appends method 7 for
+the captured boot label, version/name and original base/override destination.
+Missing assignments return an explicit exception, unknown active code returns
+null, and null names/trailing arguments are rejected. The native Binder unit
+checks old-label retention after newer publication and envelope framing. Java
+PackageSeInfoState is immutable; the lease validates version/name/trailing data
+before caching, and closed leases reject reads. PackageObjects restores a
+shared boot label through original setOverrideSeInfo (retaining the base) and
+an ordinary label through original setSeInfo, after name/version validation.
+All 356 units pass (3.12s), and the 572-parcel original-runtime oracle passes
+(20.23s), including exact native/Java bytes, generated Proxy/Stub framing,
+owner-error retry, invalid envelope/version/name rejection, lease identity,
+original base/override/effective getters and rejected restoration isolation.
+That oracle uses explicit target SDK 36 for its compatibility input; it does
+not prove live PlatformCompat decisions. All oracle references link (3.17s),
+and device-services builds with checked original setters/getters (14.4s).
+These remain separate native-driver and controlled original-Java endpoint
+tests. Actual bootstrap export and full Java PackageState replica construction
+are not wired; runtime base/override lifetime remains unimplemented.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

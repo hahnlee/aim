@@ -45,6 +45,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageSeInfoState.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageUsageState.java"),
         )
         .arg(
@@ -192,6 +196,15 @@ fn native_package_parcels_match_original_read_write() {
         let mut parcel = aim_binder_host::parcel::Parcel::new();
         aim_service_aidl::WriteParcelable::write_to(&usage, &mut parcel);
         fs::write(directory.join(format!("{name}.usage")), parcel.data()).unwrap();
+        let seinfo = aim_services::package::scan_snapshot::endpoint::PackageSeInfo::captured(
+            &snapshot,
+            &pkg.package_name,
+        )
+        .unwrap()
+        .unwrap();
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&seinfo, &mut parcel);
+        fs::write(directory.join(format!("{name}.boot-seinfo")), parcel.data()).unwrap();
         let (policy, policy_read) = match aim_services::package::owner::seinfo::Policy::load(
             &aim_paths::original_image(),
         ) {
@@ -436,7 +449,14 @@ fn native_scan_objects(
             usage.notify(name, reason as i32, time);
         }
     }
-    aim_services::package::scan_snapshot::Store::new(scan.owner, usage)
+    let mut owner = scan.owner;
+    let policy = aim_services::package::owner::seinfo::Policy::load(&original).unwrap();
+    // Controlled compatibility input for this envelope/replica oracle, which
+    // already compares original SELinuxMMAC at explicit target SDK 36.
+    owner
+        .assign_seinfo_at_boot(&policy, &mut |_| Ok(36))
+        .unwrap();
+    aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()
 }

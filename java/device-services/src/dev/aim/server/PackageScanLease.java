@@ -15,6 +15,7 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageCode> active = new HashMap<>();
     private final Map<String, PackageCode> disabled = new HashMap<>();
     private final Map<String, PackageUsageState> usage = new HashMap<>();
+    private final Map<String, PackageSeInfoState> seinfo = new HashMap<>();
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
@@ -94,5 +95,29 @@ public final class PackageScanLease implements AutoCloseable {
         active.clear();
         disabled.clear();
         usage.clear();
+        seinfo.clear();
+    }
+
+    public synchronized PackageSeInfoState getSeInfo(String name) throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(name);
+        if (seinfo.containsKey(name)) return seinfo.get(name);
+        byte[] bytes = endpoint.getSeInfo(name);
+        if (bytes == null) {
+            seinfo.put(name, null);
+            return null;
+        }
+        Parcel parcel = Parcel.obtain();
+        try {
+            parcel.unmarshall(bytes, 0, bytes.length);
+            parcel.setDataPosition(0);
+            PackageSeInfoState state = PackageSeInfoState.CREATOR.createFromParcel(parcel);
+            if (parcel.dataAvail() != 0 || state.getVersion() != version
+                    || !state.getPackageName().equals(name)) {
+                throw new IOException("package seInfo capture mismatch");
+            }
+            seinfo.put(name, state);
+            return state;
+        } finally { parcel.recycle(); }
     }
 }

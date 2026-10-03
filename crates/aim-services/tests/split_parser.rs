@@ -1642,6 +1642,10 @@ fn java_oracles_link_against_original_image() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageSeInfoState.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageUsageState.java"),
         )
         .arg(

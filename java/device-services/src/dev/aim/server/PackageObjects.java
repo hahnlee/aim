@@ -34,6 +34,16 @@ public final class PackageObjects {
         }
     }
 
+    /** Boot shared-user fixups set an override; ordinary scan labels set the base. */
+    public static void restoreBootSeInfo(com.android.server.pm.PackageSetting setting,
+            PackageSeInfoState state, long version) {
+        if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())) {
+            throw new IllegalArgumentException("package seInfo capture mismatch");
+        }
+        if (state.isOverride()) setting.getPkgState().setOverrideSeInfo(state.getLabel());
+        else setting.getPkgState().setSeInfo(state.getLabel());
+    }
+
     public static PackageImpl fromCache(byte[] cache, byte[][] pastCertificates, int[] capabilities) {
         PackageImpl pkg = (PackageImpl) PackageCacher.fromCacheEntryStatic(cache);
         pkg.setSigningDetails(restoreSigning(pkg.getSigningDetails(), pastCertificates, capabilities));

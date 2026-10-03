@@ -114,8 +114,9 @@ public final class PackageRoundTripOracle {
     private static void verifySnapshot(java.io.File file, String name, int uid) throws Exception {
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
         byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
-        var owner = new PageOwner(name, bytes, usageBytes);
-        var stale = new PageOwner(name, bytes, usageBytes);
+        byte[] seinfoBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".boot-seinfo").toPath());
+        var owner = new PageOwner(name, bytes, usageBytes, seinfoBytes);
+        var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes);
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
@@ -126,6 +127,10 @@ public final class PackageRoundTripOracle {
             try {
                 bad.getUsage(name);
                 throw new AssertionError("wrong usage version accepted");
+            } catch (java.io.IOException expected) {}
+            try {
+                bad.getSeInfo(name);
+                throw new AssertionError("wrong seInfo version accepted");
             } catch (java.io.IOException expected) {}
         }
         // Force generated Proxy/Stub parcel framing using the original Binder and Parcel.
@@ -200,6 +205,39 @@ public final class PackageRoundTripOracle {
         usage.getLastPackageUsageTimeInMills()[0] = 99;
         var setting = new com.android.server.pm.PackageSetting(name, null,
                 new java.io.File("/data/app/fixture"), 0, 0, new java.util.UUID(1, 1));
+        owner.fail = true;
+        try { lease.getSeInfo(name); throw new AssertionError("seInfo owner failure swallowed"); }
+        catch (android.os.RemoteException expected) {}
+        owner.fail = false;
+        owner.seinfoTail = true;
+        try { lease.getSeInfo(name); throw new AssertionError("seInfo trailing bytes accepted"); }
+        catch (java.io.IOException expected) {}
+        owner.seinfoTail = false;
+        try { lease.getSeInfo("alias"); throw new AssertionError("seInfo name mismatch accepted"); }
+        catch (java.io.IOException expected) {}
+        var security = lease.getSeInfo(name);
+        int securityReads = owner.seinfoReads;
+        if (lease.getSeInfo(name) != security || owner.seinfoReads != securityReads
+                || lease.getSeInfo("missing") != null) throw new AssertionError("seInfo lease identity");
+        setting.getPkgState().setSeInfo("before-base");
+        dev.aim.server.PackageObjects.restoreBootSeInfo(setting, security, 1);
+        if (!(security.isOverride() ? security.getLabel().equals(setting.getPkgState().getOverrideSeInfo())
+                    && "before-base".equals(setting.getPkgState().getSeInfo())
+                : security.getLabel().equals(setting.getPkgState().getSeInfo())
+                    && setting.getPkgState().getOverrideSeInfo() == null)
+                || !security.getLabel().equals(((com.android.server.pm.pkg.PackageState)setting).getSeInfo())) {
+            throw new AssertionError("original boot base/override differs");
+        }
+        android.os.Parcel securityParcel = android.os.Parcel.obtain();
+        try {
+            security.writeToParcel(securityParcel, 0);
+            if (!java.util.Arrays.equals(seinfoBytes, securityParcel.marshall())) {
+                throw new AssertionError("seInfo native/Java bytes differ");
+            }
+        } finally { securityParcel.recycle(); }
+        try { dev.aim.server.PackageObjects.restoreBootSeInfo(setting, security, 2);
+            throw new AssertionError("wrong seInfo version restored"); }
+        catch (IllegalArgumentException expected) {}
         dev.aim.server.PackageObjects.restoreUsage(setting, usage, 1);
         if (!java.util.Arrays.equals(setting.getPkgState().getLastPackageUsageTimeInMills(),
                 usage.getLastPackageUsageTimeInMills())
@@ -225,6 +263,13 @@ public final class PackageRoundTripOracle {
         catch (IllegalArgumentException expected) {}
         var other = new com.android.server.pm.PackageSetting("other", null,
                 new java.io.File("/data/app/other"), 0, 0, new java.util.UUID(1, 2));
+        try { dev.aim.server.PackageObjects.restoreBootSeInfo(other, security, 1);
+            throw new AssertionError("wrong seInfo name restored"); }
+        catch (IllegalArgumentException expected) {}
+        if (!security.getLabel().equals(((com.android.server.pm.pkg.PackageState)setting).getSeInfo())
+                || other.getPkgState().getOverrideSeInfo() != null) {
+            throw new AssertionError("rejected seInfo restoration changed an owner");
+        }
         try { dev.aim.server.PackageObjects.restoreUsage(other, usage, 1);
             throw new AssertionError("wrong usage name restored"); }
         catch (IllegalArgumentException expected) {}
@@ -249,12 +294,17 @@ public final class PackageRoundTripOracle {
         } catch (IllegalStateException expected) {}
         try { lease.getUsage(name); throw new AssertionError("closed usage lease accepted"); }
         catch (IllegalStateException expected) {}
+        try { lease.getSeInfo(name); throw new AssertionError("closed seInfo lease accepted"); }
+        catch (IllegalStateException expected) {}
     }
 
     private static final class PageOwner extends dev.aim.server.IPackageScanSnapshot.Stub {
         private final String name;
         private final byte[] bytes;
         private final byte[] usage;
+        private final byte[] seinfo;
+        boolean seinfoTail;
+        int seinfoReads;
         boolean usageTail;
         int usageReads;
         boolean fail;
@@ -262,7 +312,7 @@ public final class PackageRoundTripOracle {
         int reads;
         int closes;
         long version = 1;
-        PageOwner(String name, byte[] bytes, byte[] usage) { this.name = name; this.bytes = bytes; this.usage = usage; }
+        PageOwner(String name, byte[] bytes, byte[] usage, byte[] seinfo) { this.name = name; this.bytes = bytes; this.usage = usage; this.seinfo = seinfo; }
         @Override
         public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
         @Override
@@ -285,6 +335,13 @@ public final class PackageRoundTripOracle {
             usageReads++;
             if (candidate.equals("missing")) return null;
             return usageTail ? java.util.Arrays.copyOf(usage, usage.length + 4) : usage.clone();
+        }
+        @Override
+        public byte[] getSeInfo(String candidate) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            seinfoReads++;
+            if (candidate.equals("missing")) return null;
+            return seinfoTail ? java.util.Arrays.copyOf(seinfo, seinfo.length + 4) : seinfo.clone();
         }
     }
 }

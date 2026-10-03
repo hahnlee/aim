@@ -1413,6 +1413,40 @@ mod tests {
         assert!(remote.transact(0x7777, &request(), false).is_err());
         assert!(old.upgrade().is_some());
         for (name, expected) in [
+            (Some("fixture"), Some("default:targetSdkVersion=30")),
+            (Some("missing"), None),
+        ] {
+            let mut p = request();
+            p.write_string16(name);
+            let reply = remote.transact(api::GET_SE_INFO, &p, false).unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let bytes = aim_service_aidl::read_byte_array(&mut r).unwrap();
+            assert_eq!(r.remaining(), 0);
+            if let Some(expected) = expected {
+                let bytes = bytes.unwrap();
+                let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+                assert_eq!(r.read_i64().unwrap(), 1);
+                assert_eq!(r.read_string16().unwrap().as_deref(), name);
+                assert_eq!(r.read_string16().unwrap().as_deref(), Some(expected));
+                assert!(!r.read_bool().unwrap());
+                assert_eq!(r.remaining(), 0);
+            } else {
+                assert!(bytes.is_none());
+            }
+        }
+        let mut p = request();
+        p.write_string16(None);
+        let reply = remote.transact(api::GET_SE_INFO, &p, false).unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -3
+        );
+        let mut p = request();
+        p.write_string16(Some("fixture"));
+        p.write_i32(1);
+        assert!(remote.transact(api::GET_SE_INFO, &p, false).is_err());
+        for (name, expected) in [
             (Some("fixture"), Some([17, 0, 29, 0, 0, 0, 0, 0])),
             (Some("missing"), None),
         ] {
