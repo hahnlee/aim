@@ -5,7 +5,27 @@ use super::*;
 use crate::package::intent_filter::{IntentFilter, ParsedIntentInfo, PatternMatcher};
 use crate::package::parse::parcel::{Entry, Writer};
 
+/// Cache ABI plus the collected lineage metadata which Signature's Parcel omits.
+pub struct FacadeEntry {
+    pub cache: Entry,
+    pub past_signing_certificates: Option<crate::package::sign::Lineage>,
+}
+
 impl AndroidPackage {
+    /// Use collected code signing, never reconciled settings/group signing.
+    pub fn to_facade_entry(
+        &self,
+        collected: &crate::package::sign::SigningDetails,
+    ) -> std::result::Result<FacadeEntry, String> {
+        if self.signing_details.as_ref() != Some(&collected.parcel_details()?) {
+            return Err("package and collected signing metadata differ".into());
+        }
+        Ok(FacadeEntry {
+            cache: self.to_cache_entry()?,
+            past_signing_certificates: collected.past_signing_certificates.clone(),
+        })
+    }
+
     pub fn to_cache_entry(&self) -> std::result::Result<Entry, String> {
         validate(self)?;
         let mut writer = Writer::new();

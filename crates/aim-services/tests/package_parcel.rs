@@ -14,7 +14,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn native_package_parcels_match_original_read_write() {
-    let dir = std::env::temp_dir().join(format!("aim-package-parcels-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("aim-pm-parcels-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
@@ -39,6 +39,9 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageRoundTripOracle.java"),
+        )
+        .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -55,7 +58,8 @@ fn native_package_parcels_match_original_read_write() {
         .arg(&stubs)
         .arg("--output")
         .arg(&dex)
-        .arg(classes.join("PackageRoundTripOracle.class")));
+        .arg(classes.join("PackageRoundTripOracle.class"))
+        .arg(classes.join("dev/aim/server/PackageObjects.class")));
     common::java::check_linkage(
         &dex.join("classes.dex"),
         &["/system/framework/services.jar"],
@@ -145,17 +149,37 @@ fn native_package_parcels_match_original_read_write() {
             expected.push((name, pkg.package_name, entry));
         }
     }
-    for pkg in native_scan_objects(&data.0) {
+    for (pkg, collected) in native_scan_objects(&data.0) {
         let name = format!("scan-{}.native", pkg.uid);
-        let entry = pkg.to_cache_entry().unwrap();
+        let facade = pkg.to_facade_entry(&collected).unwrap();
+        let mut metadata = Vec::new();
+        match facade.past_signing_certificates {
+            None => metadata.extend_from_slice(&(-1_i32).to_be_bytes()),
+            Some(past) => {
+                metadata.extend_from_slice(&(past.len() as i32).to_be_bytes());
+                for (cert, flags) in past {
+                    metadata.extend_from_slice(&(cert.len() as i32).to_be_bytes());
+                    metadata.extend_from_slice(&cert);
+                    metadata.extend_from_slice(&flags.to_be_bytes());
+                }
+            }
+        }
+        fs::write(directory.join(format!("{name}.signing")), metadata).unwrap();
+        let entry = facade.cache;
         fs::write(directory.join(&name), &entry.bytes).unwrap();
         expected.push((name, pkg.package_name, entry));
     }
-    let original = run(boot.command().args([
+    let original = boot.command().args([
         "shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
         "/system/bin", "PackageRoundTripOracle", "/data/local/tmp/package-parcels",
-    ]));
+    ]).output().unwrap();
+    assert!(
+        original.status.success(),
+        "original package oracle: {} {}",
+        String::from_utf8_lossy(&original.stdout),
+        String::from_utf8_lossy(&original.stderr)
+    );
     assert_eq!(
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
@@ -225,7 +249,9 @@ fn normalize_maps(pkg: &mut AndroidPackage) {
 }
 
 // Scan real original framework and rotated GSF code, without saved settings.
-fn native_scan_objects(dir: &std::path::Path) -> Vec<AndroidPackage> {
+fn native_scan_objects(
+    dir: &std::path::Path,
+) -> Vec<(AndroidPackage, aim_services::package::sign::SigningDetails)> {
     use aim_services::package::{
         parse::Platform,
         scan::{
@@ -271,8 +297,14 @@ fn native_scan_objects(dir: &std::path::Path) -> Vec<AndroidPackage> {
         next.set(id + 1);
         Ok([id; 16])
     };
+    let image = Image::load(&apks, &[]).unwrap();
+    let collected: std::collections::BTreeMap<_, _> = image
+        .packages
+        .iter()
+        .map(|code| (code.parsed.package_name.clone(), code.signing.clone()))
+        .collect();
     let scan = SystemImageScan::first_boot(
-        Image::load(&apks, &[]).unwrap(),
+        image,
         &apks,
         &config,
         FirstBootSystemInputs {
@@ -319,11 +351,12 @@ fn native_scan_objects(dir: &std::path::Path) -> Vec<AndroidPackage> {
             assert!(
                 record.parsed.signing_details == Some(record.signing.parcel_details().unwrap())
             );
-            record.parsed
+            let signing = collected.get(&record.parsed.package_name).unwrap().clone();
+            (record.parsed, signing)
         })
         .collect();
     assert_eq!(
-        objects.iter().map(|p| p.uid).collect::<Vec<_>>(),
+        objects.iter().map(|(p, _)| p.uid).collect::<Vec<_>>(),
         [1000, 10000]
     );
     objects

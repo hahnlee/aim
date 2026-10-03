@@ -429,6 +429,23 @@ mod tests {
             },
         };
         let collected = code.collected_package().unwrap();
+        let facade = collected.to_facade_entry(&code.signing).unwrap();
+        assert_eq!(
+            facade.past_signing_certificates,
+            code.signing.past_signing_certificates
+        );
+        assert_eq!(
+            AndroidPackage::read_cache_entry(&facade.cache.bytes)
+                .unwrap()
+                .signing_details,
+            collected.signing_details
+        );
+        let mut wrong = code.signing.clone();
+        wrong.signatures = vec![vec![4]];
+        assert!(collected.to_facade_entry(&wrong).is_err());
+        wrong = code.signing.clone();
+        wrong.past_signing_certificates = None;
+        assert!(collected.to_facade_entry(&wrong).is_err());
         let details = collected.signing_details.unwrap();
         assert_eq!(details.signatures, Some(vec![vec![3]]));
         assert_eq!(

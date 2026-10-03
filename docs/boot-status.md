@@ -196,10 +196,21 @@ Native replica DTO/adapters, version-page capture/publication and original
 permission/ART callback integration remain incomplete (#836/#833); these scopes
 are not installed as PackageManagerLocal in SystemServer. Original PMS is active.
 Cache transport does not preserve historical Signature capability flags: original
-Signature.writeToParcel carries only certificate bytes. Native Record.signing
-retains the verified flags, but the facade must restore them into original
-SigningDetails separately before callbacks/publication (#837). The earlier
-PackageImpl oracle proves certificate/UID/metadata parity, not these capabilities.
+Signature.writeToParcel carries only certificate bytes. Native to_facade_entry
+now pairs the cache with collected certificate/capability metadata, rejecting a
+package/signing mismatch. PackageObjects reconstructs original PackageImpl and
+restores a new SigningDetails after checking lineage presence, lengths and each
+certificate. Signature arrays and the key set are detached from decoded inputs.
+The 572-parcel original-image oracle passes (19.86s), including two native
+first-scan objects. The collected GSF lineage flags are 21/23; original
+checkCapability confirms individual/combined grant and denial masks, and a
+revoked copy denies installed-data access. Malformed metadata rejects and input
+mutation does not change restored flags or decoded objects. All 344 units pass
+(3.07s), all oracle DEX linkage passes (2.92s), and device-services builds against
+original APIs (13.7s). This verifies supplied-object restoration, not callback
+delivery. The replica publisher must retain collected signing separately from
+reconciled saved/group signing and wire both through their owner transports;
+actual permission callbacks remain unimplemented (#837/#833/#836).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

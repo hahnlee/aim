@@ -9,6 +9,7 @@
 //! is kept, so the package can be written back as it was read (#723).
 
 mod write;
+pub use write::FacadeEntry;
 
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 
