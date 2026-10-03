@@ -157,6 +157,15 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .collect();
     let mut scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
     assert!(scan.rejected.is_empty());
+    assert_eq!(scan.owner.loaded_packages().len(), scan.packages.len());
+    assert!(scan.owner.disabled_loaded_packages().is_empty());
+    for completed in &scan.packages {
+        let record = &completed.candidate.record;
+        assert_eq!(
+            *scan.owner.loaded_packages()[&record.settings.name],
+            record.parsed
+        );
+    }
     assert_eq!(
         scan.packages
             .iter()
@@ -899,7 +908,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         Err(SigningError::Rejected(ref error)) if error.phase == "code-time"
     ));
     assert_eq!(scan.owner, before);
-    let retained = scan
+    let mut retained = scan
         .owner
         .scan_existing(
             &code,
@@ -920,6 +929,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert_eq!(scan.owner.identities, before.identities);
     assert_eq!(scan.owner.libraries, before.libraries);
     assert!(retained.copies.is_empty());
+    assert_eq!(
+        *scan.owner.loaded_packages()[&saved.name],
+        retained.candidate.record.parsed
+    );
+    assert_eq!(
+        *before.loaded_packages()[&saved.name],
+        scan.packages[1].candidate.record.parsed
+    );
 
     // The factory scan updates only the disabled copy while a data update is
     // active. It neither reconciles signatures nor admits a live group member.
@@ -960,6 +977,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         Some("63636363-6363-6363-6363-636363636363")
     );
     assert_eq!(factory.record.settings.signatures, saved.signatures);
+    assert_eq!(
+        *factory_owner.disabled_loaded_packages()[&saved.name],
+        factory.record.parsed
+    );
+    assert_eq!(
+        factory_owner.loaded_packages(),
+        factory_before.loaded_packages()
+    );
     assert_eq!(factory.users[&0].first_install_time, -1);
     assert_eq!(factory.record.settings.last_update_time, -1);
     assert_eq!(
@@ -983,6 +1008,24 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .disabled_system_packages
         .push(retained.candidate.record.settings.clone());
     hot_owner.copy_disabled_user_states(&retained).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &hot_owner.loaded_packages()[&saved.name],
+        &hot_owner.disabled_loaded_packages()[&saved.name],
+    ));
+    let frozen = hot_owner.clone();
+    let original_version = retained.candidate.record.parsed.version_name.clone();
+    retained.candidate.record.parsed.version_name = Some("detached-stale-copy".into());
+    assert_eq!(
+        *hot_owner.loaded_packages()[&saved.name],
+        *frozen.loaded_packages()[&saved.name]
+    );
+    assert!(hot_owner.copy_disabled_user_states(&retained).is_err());
+    assert_eq!(hot_owner, frozen);
+    retained.candidate.record.parsed.version_name = original_version;
+    assert_eq!(
+        *hot_owner.disabled_loaded_packages()[&saved.name],
+        retained.candidate.record.parsed
+    );
     assert_eq!(
         hot_owner.disabled_user_states(&saved.name),
         Some(&retained.candidate.users)

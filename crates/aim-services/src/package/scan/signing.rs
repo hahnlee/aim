@@ -20,6 +20,7 @@ use crate::package::{
     system_config::SystemConfig,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// SharedUidMigration permits only these two strategies in the pinned image.
 /// The owner supplies image policy; this does not read a host environment flag.
@@ -39,6 +40,8 @@ pub struct SigningScan {
     pub installers: crate::package::owner::install_sources::Installers,
     pub(super) disabled_users: BTreeMap<String, super::disabled::DisabledUserStates>,
     pub(super) scanned_users: BTreeMap<String, BTreeMap<i32, UserState>>,
+    pub(super) loaded: BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>>,
+    pub(super) disabled_loaded: BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -69,8 +72,21 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Native-parsed active code, admitted only after every scan metadata gate.
+    /// Settings and user state remain in their owners; this is not a query replica.
+    pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>> {
+        &self.loaded
+    }
+
+    /// Verified disabled factory code, kept apart from active UID membership.
+    pub fn disabled_loaded_packages(
+        &self,
+    ) -> &BTreeMap<String, Arc<crate::package::pkg::AndroidPackage>> {
+        &self.disabled_loaded
+    }
+
     pub(super) fn has_scanned_package(&self, name: &str) -> bool {
-        self.parsed.iter().any(|(n, _, _, _)| n == name)
+        self.loaded.contains_key(name) || self.parsed.iter().any(|(n, _, _, _)| n == name)
     }
 
     /// Withdraw the scan's loaded package and declarations while retaining its
@@ -81,6 +97,7 @@ impl SigningScan {
         self.parsed
             .retain(|(name, _, _, _)| name != &record.settings.name);
         self.scanned_users.remove(&record.settings.name);
+        self.loaded.remove(&record.settings.name);
     }
     /// Apply page-size scan policy after ABI/path and installation ownership.
     /// Alignment errors retain existing flags and are returned for reporting.
@@ -388,6 +405,8 @@ impl SigningScan {
                 .map(|p| (p.name.clone(), Default::default()))
                 .collect(),
             scanned_users: BTreeMap::new(),
+            loaded: BTreeMap::new(),
+            disabled_loaded: BTreeMap::new(),
             first_api_level,
             parsed: Vec::new(),
         })
@@ -552,7 +571,7 @@ impl SigningScan {
         super::validate::static_library(&code.parsed, false)
             .map_err(|e| reject("validation", &e))?;
         let original = Identity::original_setting(&code.parsed, &self.settings, &|name| {
-            self.parsed.iter().any(|(n, _, _, _)| n == name)
+            self.has_scanned_package(name)
         })
         .ok_or_else(|| reject("identity", "no eligible original system package"))?;
         let group = if original.shared_user {
@@ -1114,5 +1133,70 @@ mod tests {
                 selected
             );
         }
+    }
+
+    #[test]
+    fn loaded_code_withdrawal_keeps_saved_and_disabled_owners_and_old_snapshots() {
+        use super::*;
+        let package = crate::package::settings::Package {
+            name: "fixture".into(),
+            code_path: "/data/app/fixture".into(),
+            app_id: 10100,
+            ..Default::default()
+        };
+        let settings = Settings {
+            packages: vec![package.clone()],
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let parsed = crate::package::pkg::AndroidPackage {
+            package_name: package.name.clone(),
+            path: Some(package.code_path.clone()),
+            ..Default::default()
+        };
+        owner
+            .loaded
+            .insert(package.name.clone(), Arc::new(parsed.clone()));
+        owner
+            .disabled_loaded
+            .insert(package.name.clone(), Arc::new(parsed.clone()));
+        owner
+            .scanned_users
+            .insert(package.name.clone(), BTreeMap::new());
+        let frozen = owner.clone();
+        let record = Record {
+            settings: package.clone(),
+            parsed,
+            signing: SigningDetails {
+                signatures: vec![],
+                scheme_version: 0,
+                public_keys: vec![],
+                past_signing_certificates: None,
+            },
+            identity: Identity {
+                manifest_name: package.name.clone(),
+                internal_name: package.name.clone(),
+                real_name: None,
+            },
+            origin: ScanOrigin::SystemDirectory,
+        };
+        assert!(owner.remove_package_setting(&package.name).is_err());
+        assert_eq!(owner, frozen);
+        owner.withdraw_scanned_package(&record);
+        assert!(!owner.has_scanned_package(&package.name));
+        assert!(owner.loaded_packages().is_empty());
+        assert!(owner.scanned_user_states(&package.name).is_none());
+        assert_eq!(owner.settings, frozen.settings);
+        assert_eq!(owner.identities, frozen.identities);
+        assert_eq!(
+            owner.disabled_loaded_packages(),
+            frozen.disabled_loaded_packages()
+        );
+        assert_eq!(*frozen.loaded_packages()[&package.name], record.parsed);
+        owner
+            .remove_package_setting(&package.name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(*frozen.loaded_packages()[&package.name], record.parsed);
     }
 }

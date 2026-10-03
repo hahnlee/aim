@@ -595,6 +595,31 @@ fn saved_scan_libraries_match_original_pms() {
         )
         .unwrap();
     assert_eq!(resumed_data.packages.len(), 3);
+    assert_eq!(resumed.loaded_packages().len(), 243);
+    assert_eq!(resumed.disabled_loaded_packages().len(), 3);
+    for completed in resumed_packages
+        .packages
+        .iter()
+        .chain(&resumed_data.packages)
+        .chain(&resumed_data.recovered)
+    {
+        let record = &completed.candidate.record;
+        assert_eq!(
+            *resumed.loaded_packages()[&record.settings.name],
+            record.parsed
+        );
+    }
+    for factory in &resumed_packages.retained_data {
+        let record = &factory.record;
+        assert_eq!(
+            *resumed.disabled_loaded_packages()[&record.settings.name],
+            record.parsed
+        );
+        assert_ne!(
+            resumed.loaded_packages()[&record.settings.name].path,
+            record.parsed.path
+        );
+    }
     assert!(resumed_data.recovered.is_empty());
     assert!(resumed_data.rejected.is_empty());
     assert!(resumed_data.removed.is_empty());

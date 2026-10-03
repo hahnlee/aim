@@ -112,6 +112,23 @@ is still pending. Bootstrap facade wiring, native scan
 integration and native PackageManager
 activation remain pending (#707);
 no native PackageManager CTS result is claimed.
+The scan now retains each fully completed native AndroidPackage in immutable
+active/disabled-factory inventories, separate from saved settings and user state
+(#798). Active objects enter only after ABI, code, flags and keyset completion;
+factory refresh enters only after its metadata succeeds. Scan withdrawal drops
+active code while retaining saved UID/settings and disabled code; saved-setting
+removal rejects still-loaded objects. Disabled copies share the accepted active
+object, and stale/reenabled disabled settings retire that factory object. Old
+scan snapshots retain their objects through later changes. All 339 units pass
+(3.19s), and the original-image first-system-scan integration passes (43.41s),
+including exact completed-object contents, failed re-scan preservation and
+active/factory separation and rejection of a detached mutated completion object.
+The disposable original-PMS saved scan also passes (378.09s): all 243 active APK
+objects and three disabled factories equal their completed native scan records,
+with distinct active/factory code paths and owned process/mount cleanup verified.
+This inventory is not yet a published query replica:
+permission/overlay/platform inputs and facade serialization still require their
+owners (#798/#723).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

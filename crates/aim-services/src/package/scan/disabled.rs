@@ -116,6 +116,7 @@ impl SigningScan {
         let removed = count != self.settings.disabled_system_packages.len();
         if removed {
             self.disabled_users.remove(&identity.internal_name);
+            self.disabled_loaded.remove(&identity.internal_name);
         }
         Ok(removed)
     }
@@ -200,6 +201,7 @@ impl SigningScan {
             .position(|p| p.name == name)?;
         let factory = self.settings.disabled_system_packages.remove(at);
         self.disabled_users.remove(name);
+        self.disabled_loaded.remove(name);
         let active = self.settings.packages.iter().position(|p| p.name == name);
         let at = match active {
             Some(at) if self.settings.packages[at].app_id == factory.app_id => at,
@@ -267,6 +269,10 @@ impl SigningScan {
         self.accepted_slot(&candidate.record, "disabled-users")?;
         let package = &candidate.record.settings;
         if self.scanned_users.get(&package.name) != Some(&candidate.users)
+            || self
+                .loaded
+                .get(&package.name)
+                .is_none_or(|pkg| pkg.as_ref() != &candidate.record.parsed)
             || candidate.record.origin != ScanOrigin::SystemDirectory
             || !self
                 .settings
@@ -285,6 +291,8 @@ impl SigningScan {
             package.name.clone(),
             DisabledUserStates::copied(&candidate.users),
         );
+        self.disabled_loaded
+            .insert(package.name.clone(), self.loaded[&package.name].clone());
         Ok(())
     }
 
@@ -546,6 +554,10 @@ impl SigningScan {
         // scanPackageOnly preserves saved signatures. Strict recollection for
         // selected updated-system packages belongs to the version selector.
         self.settings.disabled_system_packages[at] = setting.package.clone();
+        self.disabled_loaded.insert(
+            setting.package.name.clone(),
+            std::sync::Arc::new(parsed.clone()),
+        );
         self.disabled_users
             .get_mut(&setting.package.name)
             .expect("disabled user setting was validated")

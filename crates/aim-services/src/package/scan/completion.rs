@@ -143,6 +143,10 @@ impl SigningScan {
         staged
             .update_ownership
             .queue(&candidate.record.settings, &candidate.record.parsed);
+        staged.loaded.insert(
+            candidate.record.settings.name.clone(),
+            std::sync::Arc::new(candidate.record.parsed.clone()),
+        );
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,
