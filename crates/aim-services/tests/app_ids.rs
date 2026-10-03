@@ -56,6 +56,11 @@ fn allocation_matches_the_original_runtime() {
         .arg("--output")
         .arg(&dex)
         .arg(classes.join("com/android/server/pm/AppIdsOracle.class")));
+    common::java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
     let boot = Boot {
         ctl: aim_paths::root().join("target/release/aimctl"),
         data: data.0.join("guest"),

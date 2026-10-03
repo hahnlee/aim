@@ -87,6 +87,11 @@ fn public_keys_match_and_deserialize_on_the_original_runtime() {
         .arg(&dex)
         .arg(classes.join("PublicKeySerialization.class"))
         .arg(classes.join("SigningParcel.class")));
+    common::java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
     let inputs = data.0.join("inputs");
     fs::create_dir(&inputs).unwrap();
     run(Command::new(jdk.join("bin/java"))

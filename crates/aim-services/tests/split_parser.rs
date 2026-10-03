@@ -493,6 +493,11 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
             classes.join("com/android/server/pm/UpdateOwnershipResourceOracle.class"),
             classes.join("com/android/server/pm/UpdateOwnershipResourceOracle$1.class"),
         ]));
+    common::java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
     let boot = Boot {
         ctl: aim_paths::root().join("target/release/aimctl"),
         data: data.0.join("guest"),
@@ -922,6 +927,11 @@ fn manifest_keysets_match_original_parser() {
             classes.join("com/android/server/pm/SettingRemovalOracle.class"),
             classes.join("KeystoreMaintenanceOracle.class"),
         ]));
+    common::java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
     let key = |scalar| {
         let mut der = vec![
             0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 2, 1, 0x06, 8, 0x2a,
@@ -1544,4 +1554,119 @@ fn manifest_keysets_match_original_parser() {
         "/system/bin", "KeystoreMaintenanceOracle",
     ])).stdout).unwrap();
     assert_eq!(original, "19001 0\n1019001 0\n");
+}
+
+#[test]
+#[ignore = "requires pinned image, JDK and d8; run explicitly"]
+fn java_fixture_linkage_rejects_unavailable_jdk_api() {
+    use common::runtime::run;
+    let data = Data::new();
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let source = data.0.join("LinkageOracle.java");
+    let classes = data.0.join("classes");
+    let dex = data.0.join("dex");
+    fs::create_dir(&classes).unwrap();
+    fs::create_dir(&dex).unwrap();
+    for (method, links) in [("readAllBytes", true), ("readString", false)] {
+        fs::write(
+            &source,
+            format!(
+                "public class LinkageOracle {{ public static Object read(java.nio.file.Path p) throws java.io.IOException {{ return java.nio.file.Files.{method}(p); }} }}"
+            ),
+        )
+        .unwrap();
+        run(Command::new(jdk.join("bin/javac"))
+            .args(["--release", "17", "-d"])
+            .arg(&classes)
+            .arg(&source));
+        run(Command::new(jdk.join("bin/java"))
+            .arg("-cp")
+            .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
+            .args([
+                "com.android.tools.r8.D8",
+                "--release",
+                "--min-api",
+                "36",
+                "--lib",
+            ])
+            .arg(&jdk)
+            .arg("--output")
+            .arg(&dex)
+            .arg(classes.join("LinkageOracle.class")));
+        let result = common::java::check_linkage(&dex.join("classes.dex"), &[]);
+        if links {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("Ljava/nio/file/Files;->readString"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires pinned image, JDK and d8; run explicitly"]
+fn java_oracles_link_against_original_image() {
+    use common::runtime::run;
+    let data = Data::new();
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let classes = data.0.join("classes");
+    let stubs = data.0.join("stubs");
+    let dex = data.0.join("dex");
+    for dir in [&classes, &stubs, &dex] {
+        fs::create_dir(dir).unwrap();
+    }
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&stubs)
+        .args(common::java::sources(
+            &aim_paths::root().join("java/device-services/stubs"),
+        )));
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg("-classpath")
+        .arg(&stubs)
+        .args(common::java::sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
+        )));
+    let mut pending = vec![classes];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "class") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    assert!(!files.is_empty());
+    run(Command::new(jdk.join("bin/java"))
+        .arg("-cp")
+        .arg(java.join("build-tools-36.0.0/android-16/lib/d8.jar"))
+        .args([
+            "com.android.tools.r8.D8",
+            "--release",
+            "--min-api",
+            "36",
+            "--lib",
+        ])
+        .arg(&jdk)
+        .arg("--classpath")
+        .arg(&stubs)
+        .arg("--output")
+        .arg(&dex)
+        .args(files));
+    common::java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
 }

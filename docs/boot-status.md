@@ -422,9 +422,14 @@ old package, after permission uninstall/shared-UID conversion. Named, absent,
 null and repeated map removals match original Settings; disk reopening preserves
 the native change and unrelated XML. All 338 units pass (3.10s), the combined
 original fixture passes (19.35s), and new image APIs link (14.0s). These stages
-are not yet orchestrated by boot deletion (#798/#822). Fixture preflight Java
-linkage remains #830; the failed oracle also exposed original crash reporting's
-Binder EBADF (#831).
+are not yet orchestrated by boot deletion (#798/#822). All six Java-oracle DEX
+build paths now check references against the original boot classpath and the
+client's explicit services.jar before starting a guest (#830). A separate
+all-oracle compilation/linkage test passes (2.83s), and a JDK API regression
+accepts original readAllBytes but rejects unavailable readString(Path) without
+launching the runtime (1.96s). The combined original fixture passes through the
+new preflight (19.31s). The failed oracle previously exposed original crash
+reporting's Binder EBADF, still unresolved (#831).
 Native query snapshots now own AppsFilter's ordinary and update-retained
 interaction grants (#724). Full recipient/visible UIDs preserve direction and
 user scope; duplicate grants and self-grants follow original return values.

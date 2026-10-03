@@ -69,6 +69,11 @@ fn saved_scan_libraries_match_original_pms() {
         .arg("--output")
         .arg(&dex)
         .arg(classes.join("com/android/server/BootScanOracle.class")));
+    common::java::check_linkage(
+        &dex.join("classes.dex"),
+        &["/system/framework/services.jar"],
+    )
+    .unwrap();
     let boot = Boot {
         ctl: aim_paths::root().join("target/release/aimctl"),
         data: data.0.join("guest"),
