@@ -604,7 +604,7 @@ fn prepare_document(
     }
     let main_valid = fs::read(path)
         .ok()
-        .and_then(|bytes| aim_android_xml::read(&bytes).ok())
+        .and_then(|bytes| aim_android_xml::read_next(&bytes).ok())
         .is_some_and(|root| &root == expected);
     if !main_valid {
         fs::rename(sibling(path, ".reservecopy"), backup).map_err(|e| e.to_string())?;

@@ -177,7 +177,7 @@ fn first<T>(
     let mut failed = Vec::new();
     for path in candidates {
         let Some(b) = bytes(path)? else { continue };
-        match aim_android_xml::read(&b).and_then(|root| parse(&root)) {
+        match aim_android_xml::read_next(&b).and_then(|root| parse(&root)) {
             Ok(v) => return Ok(Some(v)),
             Err(e) => failed.push(format!("{}: {e}", path.display())),
         }

@@ -33,6 +33,95 @@ impl Drop for Data {
 const RESTRICTIONS: &[u8] = b"<package-restrictions><pkg name='example.app' stopped='true' inst='true'><suspend-params suspending-package='android'><dialog-info dialogMessage='keep me' /></suspend-params></pkg><crossProfile-intent-filters><item targetUserId='10'><filter><action name='example.ACTION' /></filter></item></crossProfile-intent-filters></package-restrictions>";
 
 #[test]
+fn enabled_write_preserves_typed_suspension_and_text_cdata_meaning() {
+    use crate::package::restrictions::persistable::{Bundle, Value as Persistable};
+    let data = Data::new();
+    let path = data.settings();
+    fs::write(&path, b"<package-restrictions><pkg name='example.app'><suspend-params suspending-package='android' quarantined='true'><app-extras><string name='message'><![CDATA[kept]]> text</string><int-array name='slots' num='3'><item value='7'/></int-array></app-extras></suspend-params></pkg></package-restrictions>").unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let suspension = store.state().users[0].1.restrictions.packages[0]
+        .1
+        .suspensions[0]
+        .clone();
+    assert_eq!(
+        suspension.app_extras,
+        Some(Bundle {
+            entries: vec![
+                (
+                    Some("message".into()),
+                    Persistable::String("kept text".into())
+                ),
+                (Some("slots".into()), Persistable::Ints(vec![7, 0, 0]))
+            ]
+        })
+    );
+    store
+        .commit_enabled(
+            "example.app",
+            0,
+            &Enabled {
+                enabled: 2,
+                last_disable_app_caller: None,
+                enabled_components: BTreeSet::new(),
+                disabled_components: BTreeSet::new(),
+            },
+        )
+        .unwrap();
+    let reread = State::read(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(reread, *store.state());
+    assert_eq!(
+        reread.users[0].1.restrictions.packages[0].1.suspensions[0],
+        suspension
+    );
+    assert!(fs::read(path).unwrap().starts_with(abx::MAGIC));
+}
+
+#[test]
+fn enabled_write_accepts_unchanged_nan_payload_and_rejects_external_signed_zero_change() {
+    let data = Data::new();
+    let path = data.settings();
+    let mut root = aim_android_xml::read(b"<package-restrictions><pkg name='example.app'><suspend-params suspending-package='android'><app-extras><double name='value' value='0'/></app-extras></suspend-params></pkg></package-restrictions>").unwrap();
+    fn set(root: &mut Element, value: f64) {
+        let child = root
+            .content
+            .iter_mut()
+            .find_map(|n| match n {
+                Node::Element(e) => Some(e),
+                _ => None,
+            })
+            .unwrap();
+        if child.name == "double" {
+            attribute(child, "value", Some(Value::Double(value)));
+        } else {
+            set(child, value);
+        }
+    }
+    let enabled = Enabled {
+        enabled: 2,
+        last_disable_app_caller: None,
+        enabled_components: BTreeSet::new(),
+        disabled_components: BTreeSet::new(),
+    };
+    set(&mut root, f64::from_bits(0xfff0000000000001));
+    fs::write(&path, abx::write(&root).unwrap()).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    store.commit_enabled("example.app", 0, &enabled).unwrap();
+    let reread = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(store.state(), reread.state());
+
+    set(&mut root, 0.0);
+    fs::write(&path, abx::write(&root).unwrap()).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    set(&mut root, -0.0);
+    let external = abx::write(&root).unwrap();
+    fs::write(&path, &external).unwrap();
+    let error = store.commit_enabled("example.app", 0, &enabled).unwrap_err();
+    assert!(!error.committed);
+    assert!(error.message.contains("changed outside the native owner"));
+    assert_eq!(fs::read(path).unwrap(), external);
+}
+
+#[test]
 fn preferred_clearings_preserve_last_choices_persistent_filters_and_other_users() {
     let data = Data::new();
     let path = data.settings();

@@ -6,11 +6,11 @@
 //! `Settings.readPackageRestrictionsLPr` reads it
 //! (`writePackageRestrictions` writes it).
 //!
-//! Not decoded yet (#706): a suspension's PersistableBundle extras;
-//! preferred and persistent preferred
+//! Not assembled here yet (#706): preferred and persistent preferred
 //! activities and cross-profile intent filters.
 
 pub mod dialog;
+pub mod persistable;
 
 use aim_android_xml::Element;
 
@@ -100,9 +100,8 @@ pub struct Suspension {
     pub user: SuspendingUser,
     pub dialog: Option<dialog::DialogInfo>,
     pub quarantined: bool,
-    /// Lossless owned XML until the PersistableBundle decoder is complete (#706).
-    pub app_extras: Option<Element>,
-    pub launcher_extras: Option<Element>,
+    pub app_extras: Option<persistable::Bundle>,
+    pub launcher_extras: Option<persistable::Bundle>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +110,49 @@ pub enum SuspendingUser {
     Current,
     /// `suspend-params`: interpret with `crossUserSuspensionEnabledRo`.
     Persisted(Option<i32>),
+}
+
+impl Suspension {
+    fn read(cursor: &mut persistable::Cursor<'_>, package: String) -> Result<Self, String> {
+        use persistable::Event;
+        let Some(Event::Start(e, depth)) = cursor.event() else {
+            return Err("expected suspension tag".into());
+        };
+        let mut suspension = Self {
+            package,
+            user: SuspendingUser::Persisted(e.int("suspending-user").ok().flatten()),
+            dialog: None,
+            quarantined: e.bool("quarantined").ok().flatten().unwrap_or(false),
+            app_extras: None,
+            launcher_extras: None,
+        };
+        while let Some(event) = cursor.next() {
+            let parameter = match event {
+                Event::End(_, d) if d <= depth => break,
+                Event::Start(e, _) => e,
+                _ => continue,
+            };
+            match parameter.name.as_str() {
+                "dialog-info" => suspension.dialog = Some(dialog::DialogInfo::restore(parameter)),
+                "app-extras" | "launcher-extras" => {
+                    let bundle = match persistable::Bundle::read(cursor) {
+                        Ok(bundle) => bundle,
+                        // SuspendParams catches XmlPullParserException, preserving
+                        // fields read before the failed bundle; runtime errors escape.
+                        Err(persistable::Error::Xml(_)) => break,
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    if parameter.name == "app-extras" {
+                        suspension.app_extras = Some(bundle);
+                    } else {
+                        suspension.launcher_extras = Some(bundle);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(suspension)
+    }
 }
 
 impl UserState {
@@ -228,41 +270,38 @@ fn user_state(e: &Element) -> Result<UserState, String> {
     let mut legacy_dialog = None;
     let mut legacy_app_extras = None;
     let mut legacy_launcher_extras = None;
-    for child in e.children() {
+    let mut cursor = persistable::Cursor::new(e);
+    while let Some(event) = cursor.next() {
+        let persistable::Event::Start(child, _) = event else {
+            continue;
+        };
         match child.name.as_str() {
-            "enabled-components" => s.enabled_components = components(child),
-            "disabled-components" => s.disabled_components = components(child),
+            "enabled-components" => {
+                s.enabled_components = components(child);
+                cursor.skip();
+            }
+            "disabled-components" => {
+                s.disabled_components = components(child);
+                cursor.skip();
+            }
             "suspend-params" => {
                 if let Some(by) = string(child, "suspending-package") {
-                    let mut suspension = Suspension {
-                        package: by,
-                        user: SuspendingUser::Persisted(
-                            child.int("suspending-user").ok().flatten(),
-                        ),
-                        dialog: None,
-                        quarantined: child.bool("quarantined").ok().flatten().unwrap_or(false),
-                        app_extras: None,
-                        launcher_extras: None,
-                    };
-                    for parameter in child.children() {
-                        match parameter.name.as_str() {
-                            "dialog-info" => {
-                                suspension.dialog = Some(dialog::DialogInfo::restore(parameter))
-                            }
-                            "app-extras" => suspension.app_extras = Some(parameter.clone()),
-                            "launcher-extras" => {
-                                suspension.launcher_extras = Some(parameter.clone())
-                            }
-                            _ => {}
-                        }
-                    }
-                    s.suspensions.push(suspension);
+                    s.suspensions.push(Suspension::read(&mut cursor, by)?);
                 }
             }
             "suspended-dialog-info" => legacy_dialog = Some(dialog::DialogInfo::restore(child)),
-            "suspended-app-extras" => legacy_app_extras = Some(child.clone()),
-            "suspended-launcher-extras" => legacy_launcher_extras = Some(child.clone()),
-            "archive-state" => s.archive_state = archive_state(child)?,
+            "suspended-app-extras" => {
+                legacy_app_extras =
+                    Some(persistable::Bundle::read(&mut cursor).map_err(|e| e.to_string())?)
+            }
+            "suspended-launcher-extras" => {
+                legacy_launcher_extras =
+                    Some(persistable::Bundle::read(&mut cursor).map_err(|e| e.to_string())?)
+            }
+            "archive-state" => {
+                s.archive_state = archive_state(child)?;
+                cursor.skip();
+            }
             _ => {}
         }
     }
