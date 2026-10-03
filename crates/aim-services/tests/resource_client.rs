@@ -30,7 +30,7 @@ impl GuestProcess for NoMemory {
         panic!("unexpected file descriptor");
     }
 }
-struct Registry(Binder);
+struct Registry(Binder, &'static str);
 impl Service for Registry {
     fn descriptor(&self) -> &str {
         sm::DESCRIPTOR
@@ -43,7 +43,7 @@ impl Service for Registry {
         let mut reply = Parcel::new();
         sm::write_check_service_reply(
             &mut reply,
-            (name.as_deref() == Some("installd")).then_some(self.0),
+            (name.as_deref() == Some(self.1)).then_some(self.0),
         );
         Ok(reply)
     }
@@ -117,6 +117,128 @@ struct Fixture {
     client: Arc<LocalProcess>,
     data: PathBuf,
 }
+
+struct Maintenance {
+    calls: Mutex<Vec<i64>>,
+    keys: Mutex<std::collections::BTreeSet<i64>>,
+    reject: Mutex<Option<i64>>,
+}
+impl Service for Maintenance {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::android_security_maintenance_ikeystoremaintenance::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_security_maintenance_ikeystoremaintenance as maintenance;
+        assert_eq!(call.sender_euid, 1000);
+        if call.code != maintenance::CLEAR_NAMESPACE {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        // Decode the documented primitive wire format independently of the
+        // generated reader: an enum is not a nullable typed Parcelable.
+        call.data.enforce_interface(maintenance::DESCRIPTOR)?;
+        assert_eq!(call.data.read_i32()?, 0); // Domain.APP
+        let nspace = call.data.read_i64()?;
+        self.calls.lock().unwrap().push(nspace);
+        let mut reply = Parcel::new();
+        if *self.reject.lock().unwrap() == Some(nspace) {
+            reply.write_exception(&Exception::new(-8, "keystore namespace failure"));
+        } else {
+            self.keys.lock().unwrap().remove(&nspace);
+            reply.write_no_exception();
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+fn generated_keystore_calls_capture_uid_scope_and_preserve_fifo_failure_retry() {
+    use aim_services::package::owner::keystore::KeystoreCleanup;
+    let driver = Driver::new();
+    let open = |pid| {
+        LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid,
+                euid: 1000,
+                security_context: None,
+            },
+        )
+    };
+    let manager = open(92001);
+    let client = open(92002);
+    let data = std::env::temp_dir().join(format!("aim-native-keystore-{}", std::process::id()));
+    fs::create_dir(&data).unwrap();
+    let _fixture = Fixture {
+        driver: driver.clone(),
+        manager: manager.clone(),
+        client: client.clone(),
+        data,
+    };
+    let service = Arc::new(Maintenance {
+        calls: Mutex::new(Vec::new()),
+        keys: Mutex::new([19001, 1019001, 19002, 19003].into()),
+        reject: Mutex::new(Some(1019001)),
+    });
+    let endpoint = manager.add_service(service.clone());
+    let Binder::Local(ptr) =
+        manager.add_service(Arc::new(Registry(endpoint, "android.security.maintenance")))
+    else {
+        unreachable!()
+    };
+    let mut object = FlatBinderObject {
+        kind: BINDER_TYPE_BINDER,
+        flags: 0,
+        binder: ptr,
+        cookie: ptr,
+    }
+    .encode();
+    driver
+        .ioctl(
+            manager.proc_handle(),
+            92003,
+            BINDER_SET_CONTEXT_MGR_EXT,
+            &mut object,
+            &mut NoMemory,
+        )
+        .unwrap();
+    manager.start();
+    let cleanup = KeystoreCleanup::new(client);
+    let mut users = vec![0, 10];
+    cleanup.post(19001, &users).unwrap();
+    users[1] = 11;
+    cleanup.post(19002, &[0]).unwrap();
+    cleanup.post(19001, &[0]).unwrap();
+    assert_eq!(cleanup.pending(), 4);
+    for (app_id, users) in [
+        (-1, vec![0]),
+        (19001, vec![]),
+        (19001, vec![0, 0]),
+        (19001, vec![-1]),
+        (19001, vec![i32::MAX]),
+    ] {
+        assert!(cleanup.post(app_id, &users).is_err());
+        assert_eq!(cleanup.pending(), 4);
+    }
+    assert!(cleanup.complete_next().unwrap());
+    assert!(!service.keys.lock().unwrap().contains(&19001));
+    assert!(
+        cleanup
+            .complete_next()
+            .unwrap_err()
+            .contains("keystore namespace failure")
+    );
+    assert_eq!(cleanup.pending(), 3);
+    assert!(service.keys.lock().unwrap().contains(&1019001));
+    *service.reject.lock().unwrap() = None;
+    while cleanup.complete_next().unwrap() {}
+    assert_eq!(
+        *service.calls.lock().unwrap(),
+        [19001, 1019001, 1019001, 19002, 19001]
+    );
+    assert_eq!(*service.keys.lock().unwrap(), [19003].into());
+    assert_eq!(cleanup.pending(), 0);
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.driver.release(self.client.proc_handle());
@@ -162,7 +284,7 @@ fn generated_installer_calls_preserve_failure_and_retry_parent_cleanup() {
         reject_user: Mutex::new(Some(10)),
     });
     let endpoint = manager.add_service(installer.clone());
-    let Binder::Local(ptr) = manager.add_service(Arc::new(Registry(endpoint))) else {
+    let Binder::Local(ptr) = manager.add_service(Arc::new(Registry(endpoint, "installd"))) else {
         unreachable!()
     };
     let mut object = FlatBinderObject {

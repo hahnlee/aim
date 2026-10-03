@@ -891,8 +891,10 @@ fn manifest_keysets_match_original_parser() {
                 .join("tests/fixtures/PreferredClearingOracle.java"),
         )
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ImplicitAccessOracle.java"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/SettingRemovalOracle.java"))
         .arg(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/SettingRemovalOracle.java"),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/KeystoreMaintenanceOracle.java"),
         ));
     run(Command::new(jdk.join("bin/java"))
         .arg("-cp")
@@ -918,6 +920,7 @@ fn manifest_keysets_match_original_parser() {
             classes.join("com/android/server/pm/PreferredClearingOracle.class"),
             classes.join("com/android/server/pm/ImplicitAccessOracle.class"),
             classes.join("com/android/server/pm/SettingRemovalOracle.class"),
+            classes.join("KeystoreMaintenanceOracle.class"),
         ]));
     let key = |scalar| {
         let mut der = vec![
@@ -1381,4 +1384,14 @@ fn manifest_keysets_match_original_parser() {
         "/system/bin", "com.android.server.pm.SettingRemovalOracle",
     ])).stdout).unwrap();
     assert_eq!(original, expected);
+    let saved = aim_services::package::State::read(&boot.data.join("data"), &[0])
+        .unwrap()
+        .unwrap();
+    assert!(saved.settings.packages.iter().all(|p| p.app_id != 19001));
+    assert!(!boot.data.join("data/system/users/10").exists());
+    let original = String::from_utf8(run(boot.command().args([
+        "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "KeystoreMaintenanceOracle",
+    ])).stdout).unwrap();
+    assert_eq!(original, "19001 0\n1019001 0\n");
 }

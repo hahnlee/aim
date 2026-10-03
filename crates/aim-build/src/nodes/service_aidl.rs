@@ -120,6 +120,88 @@ fn char_offset(chars: &[char], i: usize) -> usize {
     chars[..i].iter().map(|c| c.len_utf8()).sum()
 }
 
+/// Resolve enum arguments from their pinned declarations, rather than treating
+/// every named value as a nullable Java Parcelable (#829).
+fn enum_backing(text: &str) -> Result<Option<(String, String)>, String> {
+    let t = tokens(text)?;
+    let Some(at) = t.iter().position(|token| token == "enum") else {
+        return Ok(None);
+    };
+    let package = t
+        .windows(3)
+        .find(|w| w[0] == "package" && w[2] == ";")
+        .ok_or("enum has no package")?[1]
+        .clone();
+    let name = t.get(at + 1).ok_or("enum has no name")?;
+    if t.get(at + 2).map(String::as_str) != Some("{") {
+        return Err("enum has no body".into());
+    }
+    let mut backing = "int".to_owned();
+    if let Some(annotation) = t[..at]
+        .windows(2)
+        .position(|w| w[0] == "@" && w[1] == "Backing")
+    {
+        let value = t
+            .get(annotation..annotation + 7)
+            .ok_or("incomplete enum backing")?;
+        if value[2] != "(" || value[3] != "type" || value[4] != "=" || value[6] != ")" {
+            return Err("invalid enum backing annotation".into());
+        }
+        backing = value[5].trim_matches('"').to_owned();
+    }
+    if !matches!(backing.as_str(), "int" | "long") {
+        return Err(format!(
+            "unsupported enum backing `{backing}` for {package}.{name}"
+        ));
+    }
+    Ok(Some((format!("{package}.{name}"), backing)))
+}
+
+fn resolve_enums(
+    iface: &mut Interface,
+    text: &str,
+    enums: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut imports = BTreeMap::new();
+    for declaration in tokens(text)?.windows(3) {
+        if declaration[0] == "import" && declaration[2] == ";" {
+            let full = &declaration[1];
+            let name = full.rsplit('.').next().unwrap().to_owned();
+            if imports.insert(name.clone(), full.clone()).is_some() {
+                return Err(format!("duplicate imported type `{name}`"));
+            }
+        }
+    }
+    fn resolve(
+        ty: &mut Type,
+        package: &str,
+        imports: &BTreeMap<String, String>,
+        enums: &BTreeMap<String, String>,
+    ) {
+        let full = if ty.name.contains('.') {
+            ty.name.clone()
+        } else {
+            imports
+                .get(&ty.name)
+                .cloned()
+                .unwrap_or_else(|| format!("{package}.{}", ty.name))
+        };
+        if let Some(backing) = enums.get(&full) {
+            ty.name.clone_from(backing);
+        }
+        for arg in &mut ty.args {
+            resolve(arg, package, imports, enums);
+        }
+    }
+    for method in &mut iface.methods {
+        resolve(&mut method.ret, &iface.package, &imports, enums);
+        for param in &mut method.params {
+            resolve(&mut param.ty, &iface.package, &imports, enums);
+        }
+    }
+    Ok(())
+}
+
 struct Parser {
     t: Vec<String>,
     i: usize,
@@ -1036,14 +1118,21 @@ fn constants_code(
     let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let class = format!("L{};", descriptor.replace('.', "/"));
     let mut values = BTreeMap::new();
+    let mut found = false;
     for dex in aim_android_image::system_server::dex_files(&bytes)? {
         let dex = Dex::parse(dex)?;
         if let Some(def) = dex.class(&class) {
+            found = true;
             values.extend(dex.static_values(def)?);
         }
     }
+    if !found {
+        return Err(format!("{jar}: no class {descriptor}"));
+    }
     match values.get("descriptor") {
         Some(Value::String(d)) if d == descriptor => {}
+        // Enum and ordinary constant holders have no Binder descriptor field.
+        None => {}
         _ => return Err(format!("{jar}: {descriptor} does not declare itself")),
     }
     let mut s = String::new();
@@ -1074,6 +1163,15 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         ));
     }
     let image = fs::canonicalize(aim_paths::original_image()).map_err(|e| e.to_string())?;
+    let mut enums = BTreeMap::new();
+    for (path, _) in &files {
+        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some((descriptor, backing)) = enum_backing(&text)? {
+            if enums.insert(descriptor.clone(), backing).is_some() {
+                return Err(format!("duplicate enum declaration `{descriptor}`"));
+            }
+        }
+    }
     let mut code = PRELUDE.to_string();
     for entry in lock.array("INTERFACES") {
         let fields: Vec<&str> = entry.split('|').collect();
@@ -1086,7 +1184,8 @@ pub fn run(log: &mut Log) -> Result<(), String> {
             .find(|(p, _)| p.to_string_lossy().ends_with(&file))
             .ok_or_else(|| format!("{LOCK}: no SOURCE_FILES entry for {descriptor}"))?;
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let iface = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut iface = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        resolve_enums(&mut iface, &text, &enums)?;
         if iface.descriptor() != descriptor {
             return Err(format!(
                 "{}: declares {}",
@@ -1108,7 +1207,10 @@ pub fn run(log: &mut Log) -> Result<(), String> {
         let selected: Vec<String> = methods.split(',').map(str::to_string).collect();
         code += &interface_code(&iface, &selected, origin)?;
     }
-    for (iface, selected, file) in own_interfaces(&lock)? {
+    for (mut iface, selected, file) in own_interfaces(&lock)? {
+        let text = fs::read_to_string(aim_paths::root().join(&file))
+            .map_err(|e| format!("{file}: {e}"))?;
+        resolve_enums(&mut iface, &text, &enums)?;
         code += &interface_code(&iface, &selected, &file)?;
     }
     for entry in lock.array("CONSTANTS") {
@@ -1125,6 +1227,40 @@ pub fn run(log: &mut Log) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_backing_follows_import_and_package_scope_without_parcelable_framing() {
+        let mut enums = BTreeMap::new();
+        for text in [
+            "package first; @Backing(type=\"int\") enum Mode { A=0, }",
+            "package second; @Backing(type=\"long\") enum Mode { A=0, }",
+            "package own; enum Local { A=0, }",
+        ] {
+            let (name, backing) = enum_backing(text).unwrap().unwrap();
+            enums.insert(name, backing);
+        }
+        let text = "package own; import first.Mode; interface ITest { Mode read(in Mode mode, in Mode[] modes, in second.Mode other, in Local local); }";
+        let mut iface = parse(text).unwrap();
+        resolve_enums(&mut iface, text, &enums).unwrap();
+        let method = &iface.methods[0];
+        assert_eq!(method.ret.name, "int");
+        assert_eq!(
+            method
+                .params
+                .iter()
+                .map(|p| p.ty.name.as_str())
+                .collect::<Vec<_>>(),
+            ["int", "int", "long", "int"]
+        );
+        assert!(method.params[1].ty.array);
+        let code = interface_code(&iface, &["read".into()], "fixture").unwrap();
+        assert!(code.contains("pub mode: i32"));
+        assert!(code.contains("pub other: i64"));
+        assert!(!code.contains("write_typed(p"));
+        assert!(enum_backing("package bad; @Backing(type=\"byte\") enum Value { A=0, }").is_err());
+        let conflict = "package own; import first.Mode; import second.Mode; interface ITest { void read(Mode value); }";
+        assert!(resolve_enums(&mut parse(conflict).unwrap(), conflict, &enums).is_err());
+    }
 
     const SAMPLE: &str = r#"
 package android.content;

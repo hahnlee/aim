@@ -341,7 +341,7 @@ keys remain until their last owner disappears; upgrade aliases add no separate
 references and last-issued IDs never rewind (#823). KeySetData now restores
 KEYSET_UNASSIGNED=-1, including the original unversioned-settings reset. A keyset
 owner failure leaves the earlier domain removal in place. The scan then stops at
-missing filter/preferred/keystore and setting/permission cleanup owners
+unconnected filter/preferred/keystore and setting/permission cleanup stages
 (#798/#822). Between keyset retirement and that boundary, the scan now removes
 the deleted provider from native update-ownership denylist relations, preserving
 other providers for overlapping targets. Repeated additions accumulate, matching
@@ -373,8 +373,8 @@ references. Removing a registered installer clears remaining active packages'
 installer/originator/update-owner references and attribution, retaining the
 initiator name/signatures with its uninstalled flag and marking installer
 orphans. Original Settings compares independent/shared/disabled-reserved UID
-removal, repeated missing removal and installer source effects (18.11s). All 331
-units pass (3.09s), and image API linkage passes (15.0s). This in-memory stage is
+removal, repeated missing removal and installer source effects (18.51s). All 331
+units pass (3.05s), and image API linkage passes (13.1s). This in-memory stage is
 not yet called by boot cleanup: full side-owner ordering, permission uninstall
 reconciliation, persistence and publication remain #822/#798.
 Native query snapshots now own AppsFilter's ordinary and update-retained
@@ -386,9 +386,24 @@ including shared app IDs. Replacement retains the retained class and preserves
 ordinary grants only when requested. Snapshot clones retain their prior grants.
 The original AppsFilterImpl grant oracle, with its own original mutable
 ApplicationSharedMemory for cache invalidation, passes in the combined fixture
-(18.11s). All 331 units pass (3.09s), and added image APIs link (15.0s).
+(18.51s). All 331 units pass (3.05s), and added image APIs link (13.1s).
 ActivityManager/WindowManager producers and boot removal/query publication are
 not connected to this owner yet (#724/#822).
+The native keystore cleanup owner captures full per-user UIDs when requests
+are posted and preserves FIFO order, repeated posts and a failed head for retry
+(#822). It calls the original android.security.maintenance service with generated
+clearNamespace transactions and the image's Domain.APP constant. Pinned AIDL
+enums now resolve through package/import scope to their primitive int/long
+backing, preserving array shape and rejecting unsupported backing types (#829);
+the generator recipe was advanced to regenerate the bindings. The Binder
+transport fixture independently checks primitive wire fields, captured user
+scope, unrelated keys and retry order (two resource-client tests pass). The
+original maintenance wrapper acknowledges empty namespaces 19001 and 1019001
+with success in the disposable combined fixture (18.51s), after checking no
+package owns app ID 19001 and user 10 has no saved state. This does not prove
+existing-key deletion; the native queue has no boot deletion executor yet
+(#822). All 31 build-generator tests pass, all 331 service units pass (3.05s),
+and compile-only image API linkage passes (13.1s).
 The native settings store now clears one user's saved preferred activities under
 Settings.clearPackagePreferredActivities rules (#822): a named package removes
 only always choices, while a null package clears all valid choices. Last choices,
