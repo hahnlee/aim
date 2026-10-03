@@ -37,6 +37,12 @@ pub struct User {
 }
 
 impl State {
+    /// DomainVerificationService.clearPackage and Settings.removePackage.
+    /// The original keeps its separate legacy migration state.
+    pub fn clear_package(&mut self, name: &str) {
+        self.active.retain(|p| p.name != name);
+        self.restored.retain(|p| p.name != name);
+    }
     /// `DomainVerificationPersistence.readFromXml`.
     pub fn read(&mut self, root: &Element) -> Result<(), String> {
         for section in root.children() {

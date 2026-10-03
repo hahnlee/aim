@@ -33,6 +33,72 @@ impl Drop for Data {
 const RESTRICTIONS: &[u8] = b"<package-restrictions><pkg name='example.app' stopped='true' inst='true'><suspend-params suspending-package='android'><dialog-info dialogMessage='keep me' /></suspend-params></pkg><crossProfile-intent-filters><item targetUserId='10'><filter><action name='example.ACTION' /></filter></item></crossProfile-intent-filters></package-restrictions>";
 
 #[test]
+fn boot_removal_metadata_commit_retains_uid_users_legacy_domains_and_unknown_xml() {
+    let data = Data::new();
+    let restrictions = data.settings();
+    fs::write(&restrictions, RESTRICTIONS).unwrap();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, br#"<packages future='keep'>
+      <package name='a' codePath='/system/app/a' userId='10100'><proper-signing-keyset identifier='1'/><defined-keyset alias='common' identifier='1'/><defined-keyset alias='only' identifier='2'/><upgrade-keyset identifier='2'/><future value='retained'/></package>
+      <package name='b' codePath='/system/app/b' userId='10101'><proper-signing-keyset identifier='1'/></package>
+      <keyset-settings version='1'><keys><public-key identifier='1' value='QQ=='/><public-key identifier='2' value='Qg=='/><future-key/></keys><keysets><keyset identifier='1'><key-id identifier='1'/></keyset><keyset identifier='2'><key-id identifier='1'/><key-id identifier='2'/></keyset></keysets><lastIssuedKeyId value='99'/><lastIssuedKeySetId value='100'/></keyset-settings>
+      <domain-verifications><active><package-state packageName='a' id='00000000-0000-0000-0000-000000000001'/><package-state packageName='b' id='00000000-0000-0000-0000-000000000002'/><future-domain/></active><restored><package-state packageName='a' id='00000000-0000-0000-0000-000000000003'/></restored></domain-verifications>
+      <domain-verifications-legacy><user-states packageName='a'><user-state userId='0' state='2'/></user-states></domain-verifications-legacy><future-owner/>
+    </packages>"#).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let old = store.state().clone();
+    store.commit_removed_boot_metadata("a").unwrap();
+    let state = store.state();
+    assert_eq!(state.settings.packages[0].app_id, 10100);
+    assert_eq!(
+        state.settings.packages[0].key_set_data,
+        super::super::settings::KeySetData::default()
+    );
+    assert_eq!(state.settings.packages[1], old.settings.packages[1]);
+    assert_eq!(state.settings.key_sets.key_sets, [(1, vec![1])]);
+    assert_eq!(state.settings.key_sets.public_keys, [(1, vec![b'A'])]);
+    assert_eq!(state.settings.key_sets.last_issued_key_id, 99);
+    assert_eq!(state.settings.key_sets.last_issued_key_set_id, 100);
+    assert_eq!(state.settings.domain_verification.active.len(), 1);
+    assert_eq!(state.settings.domain_verification.active[0].name, "b");
+    assert!(state.settings.domain_verification.restored.is_empty());
+    assert_eq!(
+        state.settings.domain_verification.legacy,
+        old.settings.domain_verification.legacy
+    );
+    assert_eq!(state.users, old.users);
+    assert_eq!(fs::read(&restrictions).unwrap(), RESTRICTIONS);
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(abx::MAGIC));
+    assert_eq!(bytes, fs::read(sibling(&path, ".reservecopy")).unwrap());
+    let root = aim_android_xml::read(&bytes).unwrap();
+    assert_eq!(root.string("future").as_deref(), Some("keep"));
+    assert!(root.children().any(|e| e.name == "future-owner"));
+    let package = root
+        .children()
+        .find(|e| e.name == "package" && e.string("name").as_deref() == Some("a"))
+        .unwrap();
+    assert!(package.children().any(|e| e.name == "future"));
+    let keys = root
+        .children()
+        .find(|e| e.name == "keyset-settings")
+        .unwrap()
+        .children()
+        .find(|e| e.name == "keys")
+        .unwrap();
+    assert!(keys.children().any(|e| e.name == "future-key"));
+    let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert_eq!(reopened.state(), store.state());
+    assert!(
+        !store
+            .commit_removed_boot_metadata("missing")
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
 fn native_library_commit_preserves_other_owners_and_clears_legacy_abi_fallback() {
     let data = Data::new();
     data.settings();

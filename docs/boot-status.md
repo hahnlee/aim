@@ -335,8 +335,18 @@ requests for CE/DE/external storage, using saved CE inodes (default zero for a
 user without a state). The boot owner must supply the complete resolved user
 inventory and saved inode state before deletion starts. Installer failure stops
 the scan and preserves earlier user deletions. After successful storage deletion
-the scan still stops at missing domain/keyset/update ownership/filter/preferred/
-keystore and setting/permission cleanup owners (#798/#822). Separate ART-service
+the scan clears active/restored domain state (retaining legacy migration state),
+then retires the package's signing/alias keyset references. Shared sets and public
+keys remain until their last owner disappears; upgrade aliases add no separate
+references and last-issued IDs never rewind (#823). KeySetData now restores
+KEYSET_UNASSIGNED=-1, including the original unversioned-settings reset. A keyset
+owner failure leaves the earlier domain removal in place. The scan then stops at
+missing update ownership/filter/preferred/keystore and setting/permission cleanup
+owners (#798/#822). Store.commit_removed_boot_metadata writes just the completed
+domain/keyset stage as resilient ABX, retaining UID/users, unrelated XML and
+legacy domains; unit tests reopen the files and check reserve copies and failure
+without writes. This is a component writer, not a complete deletion commit. New
+scan keyset registration and restored-orphan pruning are tracked in #824. Separate ART-service
 profile clearing is omitted during PMS construction, as in AppDataHelper;
 installd owns profile/SDK storage cleanup within destroyAppData. The pre-data
 phase also detects disappeared non-updated system settings in reverse order,
@@ -370,13 +380,13 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 302 units pass (3.03s). The original signed framework/GSF fixture passes
-(42.13s), including saved-image iteration, duplicate rejection, integrated source
+All 307 units pass (3.06s). The original signed framework/GSF fixture passes
+(41.99s), including saved-image iteration, duplicate rejection, integrated source
 completion, disposable cleanup, the data loop, ex-system demotion and factory
 fallback, the pre-data missing-system input gate, owner failures and preserved
 earlier effects. The full saved-system/data
-comparison passes (375.05s) with ex-system demotion and the pre-data
-missing-system gate. The nine
+comparison passed (375.05s) before the domain/keyset cleanup change, with
+ex-system demotion and the pre-data missing-system gate. The nine
 original-APK scan-input tests passed (6.21s) before this loop change; the Java
 image API linkage build passes (13.2s). These are system/data APK phases, not a
 complete native boot or template: native APEX preparation, removed-package

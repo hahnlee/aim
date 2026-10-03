@@ -23,8 +23,9 @@ use super::write::Enabled;
 use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
-pub mod resources;
+pub mod key_sets;
 mod native_libraries;
+pub mod resources;
 pub mod shared_users;
 mod signing;
 
@@ -132,6 +133,14 @@ impl Store {
     ) -> Result<(), WriteError> {
         let root = native_libraries::replace(&self.settings_document, settings)
             .map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
+    /// Persist the domain/keyset stage of an owner-authorized boot removal.
+    /// Package settings, UID/user state and permission deletion follow later.
+    pub fn commit_removed_boot_metadata(&mut self, package: &str) -> Result<(), WriteError> {
+        let root =
+            key_sets::replace(&self.settings_document, package).map_err(WriteError::before)?;
         self.commit_package_document(root)
     }
 

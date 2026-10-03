@@ -192,12 +192,22 @@ pub struct Signatures {
 }
 
 /// `PackageKeySetData`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeySetData {
     pub proper_signing_key_set: i64,
     pub upgrade_key_sets: Vec<i64>,
     /// Key sets the package defines: alias, id.
     pub defined_key_sets: Vec<(String, i64)>,
+}
+
+impl Default for KeySetData {
+    fn default() -> Self {
+        Self {
+            proper_signing_key_set: -1,
+            upgrade_key_sets: Vec::new(),
+            defined_key_sets: Vec::new(),
+        }
+    }
 }
 
 /// `SharedUserSetting`.
@@ -265,7 +275,14 @@ impl Settings {
                     }
                 }
                 "verifier" => s.verifier = string(e, "device"),
-                "keyset-settings" => s.key_sets = key_sets(e)?,
+                "keyset-settings" => {
+                    s.key_sets = key_sets(e)?;
+                    if s.key_sets.version.is_none() {
+                        for package in &mut s.packages {
+                            package.key_set_data = KeySetData::default();
+                        }
+                    }
+                }
                 "domain-verifications" => s.domain_verification.read(e)?,
                 "domain-verifications-legacy" => s.domain_verification.read_legacy(e)?,
                 "version" => {

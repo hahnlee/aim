@@ -107,18 +107,26 @@ impl SigningScan {
         let mut incremental = BTreeSet::new();
         // prepareSystemPackageCleanUp removes disappeared, non-updated system
         // settings before a data APK can be considered known (#822).
-        if let Some(package) = self.settings.packages.iter().rev().find(|p| {
-            p.flags & crate::package::settings::FLAG_SYSTEM != 0
-                && !self.has_scanned_package(&p.name)
-                && !self
-                    .settings
-                    .disabled_system_packages
-                    .iter()
-                    .any(|d| d.name == p.name)
-        }) {
-            Self::destroy_removed_boot_storage(package, &inputs)?;
+        if let Some(package) = self
+            .settings
+            .packages
+            .iter()
+            .rev()
+            .find(|p| {
+                p.flags & crate::package::settings::FLAG_SYSTEM != 0
+                    && !self.has_scanned_package(&p.name)
+                    && !self
+                        .settings
+                        .disabled_system_packages
+                        .iter()
+                        .any(|d| d.name == p.name)
+            })
+            .cloned()
+        {
+            Self::destroy_removed_boot_storage(&package, &inputs)?;
+            self.clear_removed_boot_metadata(&package)?;
             return Err(fatal(package.name.clone(), package.code_path.clone(), "package-state",
-                "app storage removed; domain/keyset/update ownership/filter/preferred/keystore and setting/permission deletion require their owners (#822/#798)".into()));
+                "app storage/domain/keysets removed; update ownership/filter/preferred/keystore and setting/permission deletion require their owners (#822/#798)".into()));
         }
         for rejected in &image.rejected {
             if (inputs.is_incremental)(&rejected.location.path).map_err(|e| {
@@ -260,10 +268,17 @@ impl SigningScan {
                 .iter()
                 .position(|p| p.candidate.record.settings.name == name)
             else {
-                let Some(package) = self.settings.packages.iter().find(|p| p.name == name) else {
+                let Some(package) = self
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == name)
+                    .cloned()
+                else {
                     continue;
                 };
-                Self::destroy_removed_boot_storage(package, &inputs)?;
+                Self::destroy_removed_boot_storage(&package, &inputs)?;
+                self.clear_removed_boot_metadata(&package)?;
                 return Err(fatal(name, package.code_path.clone(), "package-state",
                     "app storage removed; remaining package state deletion requires its owners (#822/#798)".into()));
             };
@@ -496,6 +511,25 @@ impl SigningScan {
             .resources
             .destroy_boot_app_storage(package, users, states)
             .map_err(fail)
+    }
+
+    fn clear_removed_boot_metadata(
+        &mut self,
+        package: &crate::package::settings::Package,
+    ) -> Result<(), SigningError> {
+        self.settings
+            .domain_verification
+            .clear_package(&package.name);
+        crate::package::owner::key_sets::clear_package(&mut self.settings, &package.name).map_err(
+            |message| {
+                SigningError::Fatal(Error {
+                    package: package.name.clone(),
+                    path: package.code_path.clone(),
+                    phase: "keysets",
+                    message,
+                })
+            },
+        )
     }
 
     /// Remove rejected parse/signature inputs using their original scan paths.
@@ -751,5 +785,28 @@ impl SigningScan {
             apks,
             completion,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn domain_removal_survives_a_later_keyset_owner_failure() {
+        let root = aim_android_xml::read(b"<packages><package name='a' codePath='/system/app/a' userId='10100'><proper-signing-keyset identifier='7'/></package><domain-verifications><active><package-state packageName='a' id='00000000-0000-0000-0000-000000000001'/></active></domain-verifications></packages>").unwrap();
+        let settings = crate::package::settings::Settings::parse(&root).unwrap();
+        let package = settings.packages[0].clone();
+        let mut owner = SigningScan::new(
+            &crate::package::system_config::SystemConfig::default(),
+            &settings,
+            36,
+        )
+        .unwrap();
+        assert!(
+            matches!(owner.clear_removed_boot_metadata(&package), Err(SigningError::Fatal(e)) if e.phase == "keysets")
+        );
+        assert!(owner.settings.domain_verification.active.is_empty());
+        assert_eq!(owner.settings.packages, settings.packages);
+        assert_eq!(owner.settings.key_sets, settings.key_sets);
     }
 }
