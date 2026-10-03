@@ -124,6 +124,21 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     );
     assert_eq!(scan.packages[0].candidate.record.settings.app_id, 1000);
     assert_eq!(scan.packages[1].candidate.record.settings.app_id, 10000);
+    for package in &scan.packages {
+        let id = package
+            .candidate
+            .record
+            .settings
+            .key_set_data
+            .proper_signing_key_set;
+        assert!(id > 0);
+        let keys = &scan.owner.settings.key_sets;
+        assert!(
+            keys.key_sets
+                .iter()
+                .any(|(set, ids)| *set == id && !ids.is_empty())
+        );
+    }
     assert_eq!(
         scan.packages[0]
             .candidate

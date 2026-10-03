@@ -139,6 +139,7 @@ impl SigningScan {
             inputs.factory_test,
             inputs.context.updated,
         )?;
+        let candidate = staged.finish_key_set_metadata(candidate)?;
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,
@@ -146,6 +147,44 @@ impl SigningScan {
             multi_arch_mismatch,
             alignment_diagnostic,
         })
+    }
+
+    /// Register the verified package's signing public keys only after complete
+    /// metadata succeeds. Manifest keyset parsing remains explicit (#824).
+    fn finish_key_set_metadata(
+        &mut self,
+        mut candidate: NewPackageOutcome,
+    ) -> Result<NewPackageOutcome, SigningError> {
+        let record = &mut candidate.record;
+        let at = self.accepted_slot(record, "keysets")?;
+        let fail = |message| {
+            SigningError::Fatal(super::Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "keysets",
+                message,
+            })
+        };
+        if record
+            .parsed
+            .key_set_mapping
+            .as_ref()
+            .is_some_and(|mapping| !mapping.is_empty())
+        {
+            return Err(fail(
+                "defined manifest keysets require their native parser/decoder (#824)".into(),
+            ));
+        }
+        crate::package::owner::key_sets::register(
+            &mut self.settings,
+            &record.settings.name,
+            &record.signing.public_keys,
+            record.parsed.key_set_mapping.as_ref().map(|_| &[][..]),
+            &record.parsed.upgrade_key_sets,
+        )
+        .map_err(fail)?;
+        record.settings.key_set_data = self.settings.packages[at].key_set_data.clone();
+        Ok(candidate)
     }
 
     /// Final ScanPackageUtils factory-test and ApplicationInfo flag enrichment.

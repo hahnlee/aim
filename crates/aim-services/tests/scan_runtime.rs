@@ -544,6 +544,7 @@ fn saved_scan_libraries_match_original_pms() {
         assert_eq!(candidate.record.settings.app_id, saved.app_id);
         assert_eq!(candidate.record.settings.code_path, saved.code_path);
         assert_eq!(candidate.record.settings.version_code, saved.version_code);
+        assert_eq!(candidate.record.settings.key_set_data, saved.key_set_data);
         assert_eq!(candidate.users, saved_users[&saved.name]);
     }
     let data_image = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
@@ -606,9 +607,11 @@ fn saved_scan_libraries_match_original_pms() {
         assert_eq!(record.settings.flags, saved.flags);
         assert_eq!(record.settings.private_flags, saved.private_flags);
         assert_eq!(record.settings.last_modified_time, saved.last_modified_time);
+        assert_eq!(record.settings.key_set_data, saved.key_set_data);
         assert_eq!(completed.candidate.users, saved_users[&saved.name]);
         assert!(completed.copies.is_empty());
     }
+    assert_eq!(resumed.settings.key_sets, original.settings.key_sets);
     eprintln!(
         "saved native system/data loops completed 240 system APKs and all 3 selected data APKs"
     );
@@ -662,6 +665,38 @@ fn saved_scan_libraries_match_original_pms() {
 
     let mut matched_source = 0;
     for completed in &first_system.packages {
+        let keys = &first_system.owner.settings.key_sets;
+        let proper = completed
+            .candidate
+            .record
+            .settings
+            .key_set_data
+            .proper_signing_key_set;
+        assert!(proper > 0);
+        let ids = &keys
+            .key_sets
+            .iter()
+            .find(|(id, _)| *id == proper)
+            .unwrap()
+            .1;
+        let registered: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                keys.public_keys
+                    .iter()
+                    .find(|(key, _)| key == id)
+                    .unwrap()
+                    .1
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            aim_services::package::sign::serialize_public_keys(&registered).unwrap(),
+            aim_services::package::sign::serialize_public_keys(
+                &completed.candidate.record.signing.public_keys
+            )
+            .unwrap()
+        );
         let candidate = &completed.candidate.record.settings;
         if let Some(saved) =
             original.settings.packages.iter().find(|saved| {

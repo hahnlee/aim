@@ -198,7 +198,7 @@ fn integer_hash(value: &[u8]) -> Result<i32, String> {
     Ok(hash as i32)
 }
 
-fn key(spki: &[u8]) -> Result<(Serialized, i32), String> {
+fn key(spki: &[u8]) -> Result<(Serialized, i32, Vec<u8>), String> {
     let mut outer = Reader::new(spki);
     let mut body = Reader::new(outer.expect(SEQUENCE)?.value);
     if !outer.is_empty() {
@@ -211,7 +211,7 @@ fn key(spki: &[u8]) -> Result<(Serialized, i32), String> {
         return Err("invalid public-key bits".into());
     }
     let mut stream = Stream::new();
-    let (class, hash) = match oid {
+    let (class, hash, canonical) = match oid {
         asn1::RSA_ENCRYPTION => {
             let mut encoded = Reader::new(&bits[1..]);
             let mut rsa = Reader::new(encoded.expect(SEQUENCE)?.value);
@@ -223,7 +223,19 @@ fn key(spki: &[u8]) -> Result<(Serialized, i32), String> {
             stream.object(&RSA);
             stream.integer(modulus)?;
             stream.integer(exponent)?;
-            (&RSA, integer_hash(modulus)? ^ integer_hash(exponent)?)
+            let mut algorithm = der(OID, oid);
+            algorithm.extend_from_slice(&der(0x05, &[]));
+            let mut value = encoded_integer(modulus)?;
+            value.extend_from_slice(&encoded_integer(exponent)?);
+            let mut bits = vec![0];
+            bits.extend_from_slice(&der(SEQUENCE, &value));
+            let mut encoded = der(SEQUENCE, &algorithm);
+            encoded.extend_from_slice(&der(BIT_STRING, &bits));
+            (
+                &RSA,
+                integer_hash(modulus)? ^ integer_hash(exponent)?,
+                der(SEQUENCE, &encoded),
+            )
         }
         asn1::EC_PUBLIC_KEY => {
             let curve = algorithm.expect(OID)?;
@@ -266,7 +278,7 @@ fn key(spki: &[u8]) -> Result<(Serialized, i32), String> {
             });
             stream.object(&EC);
             stream.array(&encoded)?;
-            (&EC, hash)
+            (&EC, hash, encoded)
         }
         asn1::DSA => {
             let mut parameters = Reader::new(algorithm.expect(SEQUENCE)?.value);
@@ -282,9 +294,19 @@ fn key(spki: &[u8]) -> Result<(Serialized, i32), String> {
             for value in [y, p, q, g] {
                 stream.integer(value)?;
             }
+            let mut parameters = encoded_integer(p)?;
+            parameters.extend_from_slice(&encoded_integer(q)?);
+            parameters.extend_from_slice(&encoded_integer(g)?);
+            let mut algorithm = der(OID, oid);
+            algorithm.extend_from_slice(&der(SEQUENCE, &parameters));
+            let mut bits = vec![0];
+            bits.extend_from_slice(&encoded_integer(y)?);
+            let mut encoded = der(SEQUENCE, &algorithm);
+            encoded.extend_from_slice(&der(BIT_STRING, &bits));
             (
                 &DSA,
                 integer_hash(y)? ^ integer_hash(p)? ^ integer_hash(q)? ^ integer_hash(g)?,
+                der(SEQUENCE, &encoded),
             )
         }
         _ => return Err("unsupported public-key serialization algorithm".into()),
@@ -296,7 +318,18 @@ fn key(spki: &[u8]) -> Result<(Serialized, i32), String> {
             bytes: stream.bytes,
         },
         hash,
+        canonical,
     ))
+}
+
+fn encoded_integer(value: &[u8]) -> Result<Vec<u8>, String> {
+    let magnitude = positive(value)?;
+    let mut value = Vec::new();
+    if magnitude.is_empty() || magnitude[0] & 0x80 != 0 {
+        value.push(0);
+    }
+    value.extend_from_slice(magnitude);
+    Ok(der(INTEGER, &value))
 }
 
 fn der(tag: u8, value: &[u8]) -> Vec<u8> {
@@ -316,13 +349,31 @@ fn der(tag: u8, value: &[u8]) -> Vec<u8> {
 /// SigningDetails's ArraySet iterates by signed key hash, retaining the
 /// insertion order for collisions. Equal public keys appear once.
 pub fn public_keys(keys: &[Vec<u8>]) -> Result<Vec<Serialized>, String> {
+    Ok(ordered(keys)?
+        .into_iter()
+        .map(|(value, _, _)| value)
+        .collect())
+}
+
+/// PublicKey.getEncoded and the same ArraySet ordering used in parcels.
+pub(crate) fn canonical_public_keys(keys: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> {
+    Ok(ordered(keys)?
+        .into_iter()
+        .map(|(_, _, encoded)| encoded)
+        .collect())
+}
+
+fn ordered(keys: &[Vec<u8>]) -> Result<Vec<(Serialized, i32, Vec<u8>)>, String> {
     let mut values = Vec::new();
     for spki in keys {
         let value = key(spki)?;
-        if !values.contains(&value) {
+        if !values
+            .iter()
+            .any(|(serialized, hash, _)| serialized == &value.0 && hash == &value.1)
+        {
             values.push(value);
         }
     }
-    values.sort_by_key(|(_, hash)| *hash);
-    Ok(values.into_iter().map(|(value, _)| value).collect())
+    values.sort_by_key(|(_, hash, _)| *hash);
+    Ok(values)
 }

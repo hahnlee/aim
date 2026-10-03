@@ -32,6 +32,7 @@ pub use history::{History, INSTALLED_DATA, JoinType, ROLLBACK, SHARED_USER_ID};
 pub use merge::MergeRule;
 mod jar;
 mod serialize;
+pub(crate) use serialize::canonical_public_keys;
 pub use serialize::public_keys as serialize_public_keys;
 #[cfg(test)]
 mod tests;

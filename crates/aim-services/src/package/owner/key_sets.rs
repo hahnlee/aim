@@ -4,6 +4,8 @@
 use crate::package::settings::{KeySetData, Settings};
 use aim_android_xml::{Element, Node, Value};
 use std::collections::{BTreeMap, BTreeSet};
+mod registration;
+pub use registration::{register, restore};
 
 /// Signing sets and defined aliases each hold a reference; upgrade sets do
 /// not. Public keys are referenced by key sets, not by packages. Validate the
@@ -14,47 +16,16 @@ pub fn clear_package(settings: &mut Settings, name: &str) -> Result<(), String> 
         .iter()
         .position(|p| p.name == name)
         .ok_or_else(|| format!("unknown keyset package {name}"))?;
-    let mut sets = BTreeMap::new();
-    for (id, keys) in &settings.key_sets.key_sets {
-        if *id <= 0 || sets.insert(*id, keys).is_some() {
-            return Err("invalid or duplicate keyset identity".into());
-        }
-    }
-    let mut public = BTreeSet::new();
-    for (id, _) in &settings.key_sets.public_keys {
-        if *id <= 0 || !public.insert(*id) {
-            return Err("invalid or duplicate public key identity".into());
-        }
-    }
-    if sets
-        .values()
-        .any(|keys| keys.iter().any(|id| !public.contains(id)))
-    {
-        return Err("keyset refers to a missing public key".into());
-    }
+    let sets = validated_sets(settings)?;
     let mut remaining = BTreeSet::new();
     let mut retired = BTreeSet::new();
     for (index, package) in settings.packages.iter().enumerate() {
         let data = &package.key_set_data;
-        let mut aliases = BTreeSet::new();
-        if data
-            .defined_key_sets
-            .iter()
-            .any(|(alias, _)| !aliases.insert(alias))
-        {
-            return Err("duplicate keyset alias".into());
-        }
         for id in std::iter::once(&data.proper_signing_key_set)
             .chain(data.defined_key_sets.iter().map(|(_, id)| id))
         {
             if *id == -1 {
                 continue;
-            }
-            if !sets.contains_key(id) {
-                return Err(format!(
-                    "package {} references missing keyset {id}",
-                    package.name
-                ));
             }
             if index == at {
                 retired.insert(*id);
@@ -83,6 +54,49 @@ pub fn clear_package(settings: &mut Settings, name: &str) -> Result<(), String> 
         .retain(|(id, _)| !retired_keys.contains(id) || kept_keys.contains(id));
     settings.packages[at].key_set_data = KeySetData::default();
     Ok(())
+}
+
+fn validated_sets(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, String> {
+    let mut sets = BTreeMap::new();
+    for (id, keys) in &settings.key_sets.key_sets {
+        if *id <= 0 || sets.insert(*id, keys).is_some() {
+            return Err("invalid or duplicate keyset identity".into());
+        }
+    }
+    let mut public = BTreeSet::new();
+    for (id, _) in &settings.key_sets.public_keys {
+        if *id <= 0 || !public.insert(*id) {
+            return Err("invalid or duplicate public key identity".into());
+        }
+    }
+    if sets
+        .values()
+        .any(|keys| keys.iter().any(|id| !public.contains(id)))
+    {
+        return Err("keyset refers to a missing public key".into());
+    }
+    for package in &settings.packages {
+        let data = &package.key_set_data;
+        let mut aliases = BTreeSet::new();
+        if data
+            .defined_key_sets
+            .iter()
+            .any(|(alias, _)| !aliases.insert(alias))
+        {
+            return Err("duplicate keyset alias".into());
+        }
+        for id in std::iter::once(&data.proper_signing_key_set)
+            .chain(data.defined_key_sets.iter().map(|(_, id)| id))
+        {
+            if *id != -1 && !sets.contains_key(id) {
+                return Err(format!(
+                    "package {} references missing keyset {id}",
+                    package.name
+                ));
+            }
+        }
+    }
+    Ok(sets)
 }
 
 pub(super) fn replace(original: &Element, name: &str) -> Result<Element, String> {

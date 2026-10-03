@@ -370,9 +370,11 @@ impl SigningScan {
         settings: &Settings,
         first_api_level: i32,
     ) -> Result<Self, RestoreError> {
+        let mut restored = settings.clone();
+        crate::package::owner::key_sets::restore(&mut restored).map_err(RestoreError::KeySets)?;
         Ok(Self {
             identities: Bootstrap::restore(config, settings)?,
-            settings: settings.clone(),
+            settings: restored,
             libraries: Registry::new(config),
             // readDisabledSysPackageLPw creates fresh settings; it does not
             // restore the active package's restriction state into them.

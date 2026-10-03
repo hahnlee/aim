@@ -796,12 +796,15 @@ mod tests {
         let root = aim_android_xml::read(b"<packages><package name='a' codePath='/system/app/a' userId='10100'><proper-signing-keyset identifier='7'/></package><domain-verifications><active><package-state packageName='a' id='00000000-0000-0000-0000-000000000001'/></active></domain-verifications></packages>").unwrap();
         let settings = crate::package::settings::Settings::parse(&root).unwrap();
         let package = settings.packages[0].clone();
+        let mut restored = settings.clone();
+        restored.packages[0].key_set_data = Default::default();
         let mut owner = SigningScan::new(
             &crate::package::system_config::SystemConfig::default(),
-            &settings,
+            &restored,
             36,
         )
         .unwrap();
+        owner.settings.packages[0].key_set_data = package.key_set_data.clone();
         assert!(
             matches!(owner.clear_removed_boot_metadata(&package), Err(SigningError::Fatal(e)) if e.phase == "keysets")
         );

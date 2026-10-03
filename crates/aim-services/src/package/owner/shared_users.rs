@@ -206,6 +206,7 @@ pub struct Bootstrap {
 pub enum RestoreError {
     Settings(Error),
     Conflict(Rejected),
+    KeySets(String),
 }
 
 impl Bootstrap {
