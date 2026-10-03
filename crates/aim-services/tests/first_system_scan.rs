@@ -161,6 +161,167 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         );
         assert!(package.copies.is_empty());
     }
+    let full_users: std::collections::BTreeMap<_, _> = scan
+        .packages
+        .iter()
+        .map(|p| {
+            (
+                p.candidate.record.settings.name.clone(),
+                p.candidate.users.clone(),
+            )
+        })
+        .collect();
+    let empty_packages = std::collections::BTreeSet::new();
+    let saved_inputs = || aim_services::package::scan::SavedSystemScanInputs {
+        users: &full_users,
+        first_boot_or_upgrade: false,
+        old_stub_packages: &empty_packages,
+        incremental_packages: &empty_packages,
+        resources: &resources,
+    };
+    let baseline = scan.owner.settings.clone();
+    let mut reboot = aim_services::package::scan::SigningScan::new(&config, &baseline, 36).unwrap();
+    let batch = reboot
+        .scan_saved_system_image(
+            Image::load(&apks, &[]).unwrap(),
+            &apks,
+            &config,
+            inputs(&domain_ids),
+            saved_inputs(),
+        )
+        .unwrap();
+    assert_eq!(batch.packages.len(), 2);
+    assert!(batch.retained_data.is_empty());
+    for (original, current) in scan.packages.iter().zip(&batch.packages) {
+        let mut expected = original.candidate.record.settings.clone();
+        expected.domain_set_id = current.candidate.record.settings.domain_set_id.clone();
+        assert_eq!(expected, current.candidate.record.settings);
+        assert_eq!(original.candidate.users, current.candidate.users);
+    }
+    // Stub policy comes from a fixture compressed-sibling inventory.
+    // The original signed APK remains an unchanged symlink target.
+    let stub = fixture.0.join("product/priv-app/GSF-Stub");
+    std::fs::create_dir(&stub).unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"),
+        stub.join("GSF.apk"),
+    )
+    .unwrap();
+    std::fs::write(app.join("GSF.gz"), b"compressed inventory fixture").unwrap();
+    let mut duplicate = Image::load(&apks, &[]).unwrap();
+    let stub_at = duplicate
+        .packages
+        .iter()
+        .position(|code| code.location.path.ends_with("-Stub"))
+        .unwrap();
+    duplicate.packages.swap(1, stub_at);
+    let mut stub_settings = baseline.clone();
+    stub_settings.packages[1].primary_cpu_abi = Some("arm64-v8a".into());
+    let mut owner =
+        aim_services::package::scan::SigningScan::new(&config, &stub_settings, 36).unwrap();
+    let duplicate = owner
+        .scan_saved_system_image(
+            duplicate,
+            &apks,
+            &config,
+            inputs(&domain_ids),
+            saved_inputs(),
+        )
+        .unwrap();
+    assert_eq!(duplicate.packages.len(), 3);
+    assert_eq!(
+        duplicate.packages[1]
+            .candidate
+            .record
+            .settings
+            .primary_cpu_abi
+            .as_deref(),
+        Some("arm64-v8a")
+    );
+    assert!(
+        duplicate.packages[2]
+            .candidate
+            .record
+            .settings
+            .primary_cpu_abi
+            .is_none()
+    );
+    std::fs::remove_dir_all(stub).unwrap();
+    std::fs::remove_file(app.join("GSF.gz")).unwrap();
+    for keep_data in [true, false] {
+        let mut settings = baseline.clone();
+        let factory = settings.packages[1].clone();
+        settings.disabled_system_packages.push(factory.clone());
+        settings.packages[1].code_path = "/data/app/fixture-update".into();
+        settings.packages[1].version_code += if keep_data { 1 } else { -1 };
+        settings.packages[1].flags |= 1 << 7;
+        let active = settings.packages[1].clone();
+        let data_code = writable.join("app/fixture-update");
+        std::fs::write(&data_code, b"disposable updated code").unwrap();
+        let mut owner =
+            aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+        let batch = owner
+            .scan_saved_system_image(
+                Image::load(&apks, &[]).unwrap(),
+                &apks,
+                &config,
+                inputs(&domain_ids),
+                saved_inputs(),
+            )
+            .unwrap();
+        if keep_data {
+            assert_eq!(batch.packages.len(), 1);
+            assert_eq!(batch.retained_data.len(), 1);
+            assert_eq!(batch.retained_data[0].record.settings.name, factory.name);
+            assert_eq!(owner.settings.packages[1], active);
+            assert!(data_code.exists());
+            std::fs::remove_file(data_code).unwrap();
+        } else {
+            assert_eq!(batch.packages.len(), 2);
+            assert!(batch.retained_data.is_empty());
+            assert!(!data_code.exists());
+            assert_eq!(owner.settings.packages[1].code_path, factory.code_path);
+            assert_eq!(owner.settings.packages[1].app_id, factory.app_id);
+            assert_eq!(owner.settings.packages[1].flags & (1 << 7), 0);
+            assert_eq!(batch.packages[1].candidate.users, full_users[&factory.name]);
+            assert!(owner.settings.disabled_system_packages.is_empty());
+        }
+    }
+    let mut missing_data = baseline.clone();
+    missing_data
+        .disabled_system_packages
+        .push(missing_data.packages[1].clone());
+    let previous_id = missing_data.packages[1].app_id;
+    missing_data.packages.remove(1);
+    let mut owner =
+        aim_services::package::scan::SigningScan::new(&config, &missing_data, 36).unwrap();
+    let batch = owner
+        .scan_saved_system_image(
+            Image::load(&apks, &[]).unwrap(),
+            &apks,
+            &config,
+            inputs(&domain_ids),
+            saved_inputs(),
+        )
+        .unwrap();
+    assert_eq!(batch.packages.len(), 2);
+    assert!(batch.retained_data.is_empty());
+    assert!(owner.settings.disabled_system_packages.is_empty());
+    assert_eq!(
+        batch.packages[1].candidate.record.settings.app_id,
+        previous_id
+    );
+    let mut non_system = baseline.clone();
+    non_system.packages[1].flags &= !1;
+    non_system.packages[1].code_path = "/data/app/fixture-update".into();
+    let preserved = non_system.packages[1].clone();
+    let mut owner =
+        aim_services::package::scan::SigningScan::new(&config, &non_system, 36).unwrap();
+    assert!(
+        matches!(owner.scan_saved_system_image(Image::load(&apks, &[]).unwrap(), &apks,
+        &config, inputs(&domain_ids), saved_inputs()), Err(SigningError::Rejected(ref e)) if e.phase == "system-source")
+    );
+    assert_eq!(owner.settings.packages[1], preserved);
     // A retained scan changes its domain setting before the code-time gate.
     // Failure there must roll back every owner, including shared membership.
     let prior = &scan.packages[1].candidate;

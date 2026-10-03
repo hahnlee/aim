@@ -2,14 +2,16 @@
 //! InstallPackageHelper and ScanPackageUtils (#702/#707/#812).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{
-    AbiPolicy, AbiScanContext, AbiScanMode, CompletedScanMetadata, Error, Image, Kind,
-    LibraryCompatibility, NativeLibraryEnvironment, NativeLibraryInstallPolicy, ScanClock,
-    ScanMetadataCompletion, ScanPolicy, SettingMetadata, SigningError, SigningScan, UserPolicy,
-    application_flags,
+    AbiPolicy, AbiScanContext, AbiScanMode, Code, CompletedScanMetadata, DisabledSystemMetadata,
+    Error, Identity, Image, Kind, LibraryCompatibility, NativeLibraryEnvironment,
+    NativeLibraryInstallPolicy, ScanClock, ScanMetadataCompletion, ScanPolicy, SettingMetadata,
+    SettingUpdate, SigningError, SigningScan, UpdatedSystemBootInputs, UpdatedSystemBootOutcome,
+    UserPolicy, application_flags,
 };
 use crate::package::{
     pkg::AndroidPackage, settings::UsesSdkLibrary, system_config::SystemConfig, write::Apks,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Boot/image owners' inputs, resolved before starting the package scan.
 pub struct FirstBootSystemInputs<'a> {
@@ -28,6 +30,38 @@ pub struct FirstBootSystemInputs<'a> {
     pub users: UserPolicy<'a>,
     /// DomainVerificationManagerInternal.generateNewId, supplied by its owner.
     pub new_domain_id: &'a dyn Fn() -> Result<[u8; 16], String>,
+}
+
+/// Restored APK/user and resource owners after APEX identity setup.
+/// The mutable SigningScan supplied by the caller remains authoritative even
+/// when a later package fails after earlier metadata or resource effects.
+pub struct SavedSystemScanInputs<'a> {
+    pub users: &'a BTreeMap<String, BTreeMap<i32, crate::package::restrictions::UserState>>,
+    pub first_boot_or_upgrade: bool,
+    pub old_stub_packages: &'a BTreeSet<String>,
+    pub incremental_packages: &'a BTreeSet<String>,
+    pub resources: &'a crate::package::owner::resources::CodeResources,
+}
+
+#[derive(Debug)]
+pub struct SystemImagePackages {
+    pub packages: Vec<CompletedScanMetadata>,
+    /// Refreshed factories whose selected data code must be scanned next.
+    pub retained_data: Vec<DisabledSystemMetadata>,
+    pub rejected: Vec<super::Rejected>,
+}
+
+impl SigningScan {
+    pub fn scan_saved_system_image(
+        &mut self,
+        image: Image,
+        apks: &Apks,
+        config: &SystemConfig,
+        inputs: FirstBootSystemInputs<'_>,
+        saved: SavedSystemScanInputs<'_>,
+    ) -> Result<SystemImagePackages, SigningError> {
+        scan_system_image(self, image, apks, config, inputs, Some(saved))
+    }
 }
 
 /// Completed system APK candidates in scan order, after APEX identity setup.
@@ -74,26 +108,6 @@ impl SystemImageScan {
                 "initial APEX ownership contains APK settings".into(),
             ));
         }
-        let platform = image
-            .packages
-            .iter()
-            .find(|code| {
-                code.location.kind == Kind::Framework && code.parsed.package_name == "android"
-            })
-            .ok_or_else(|| {
-                fail(
-                    "android".into(),
-                    "/system/framework".into(),
-                    "framework",
-                    "framework package was not loaded".into(),
-                )
-            })?
-            .signing
-            .clone();
-        let should_stop_system_packages = apks
-            .platform
-            .framework_boolean("config_stopSystemPackagesByDefault")
-            .map_err(|message| fail(String::new(), String::new(), "image-policy", message))?;
         let mut owner = SigningScan::new(config, inputs.apex_settings, inputs.first_api_level)
             .map_err(|error| {
                 fail(
@@ -103,128 +117,331 @@ impl SystemImageScan {
                     format!("cannot initialize scan ownership: {error:?}"),
                 )
             })?;
-        let mut packages = Vec::new();
-        let mut platform_loaded = false;
-        for mut code in image.packages {
-            let mut policy = ScanPolicy::for_location(&code.location);
-            if !platform_loaded
-                && policy.needs_shared_uid_privilege_check(
-                    &code.parsed,
-                    &owner.identities,
-                    inputs.vendor_sdk,
-                )
-            {
-                return Err(fail(
-                    code.parsed.package_name.clone(),
-                    code.location.path.clone(),
-                    "policy",
-                    "shared UID privilege requires the scanned platform signing owner".into(),
-                ));
-            }
-            policy.adjust_shared_uid_privilege(
+        let batch = scan_system_image(&mut owner, image, apks, config, inputs, None)?;
+        Ok(Self {
+            owner,
+            packages: batch.packages,
+            rejected: batch.rejected,
+        })
+    }
+}
+
+fn scan_system_image(
+    owner: &mut SigningScan,
+    image: Image,
+    apks: &Apks,
+    config: &SystemConfig,
+    inputs: FirstBootSystemInputs<'_>,
+    saved: Option<SavedSystemScanInputs<'_>>,
+) -> Result<SystemImagePackages, SigningError> {
+    let fail = |package: String, path: String, phase, message| {
+        SigningError::Rejected(Error {
+            package,
+            path,
+            phase,
+            message,
+        })
+    };
+    let platform = image
+        .packages
+        .iter()
+        .find(|code| code.location.kind == Kind::Framework && code.parsed.package_name == "android")
+        .ok_or_else(|| {
+            fail(
+                "android".into(),
+                "/system/framework".into(),
+                "framework",
+                "framework package was not loaded".into(),
+            )
+        })?
+        .signing
+        .clone();
+    let should_stop_system_packages = apks
+        .platform
+        .framework_boolean("config_stopSystemPackagesByDefault")
+        .map_err(|message| fail(String::new(), String::new(), "image-policy", message))?;
+    let mut packages = Vec::new();
+    let mut retained_data = Vec::new();
+    let mut old_stub_packages = saved
+        .as_ref()
+        .map(|s| s.old_stub_packages.clone())
+        .unwrap_or_default();
+    let mut platform_loaded = false;
+    for mut code in image.packages {
+        let identity = Identity::select(&code.parsed, &owner.settings, true);
+        let active = owner
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == identity.internal_name)
+            .cloned();
+        let original = if active.is_none() {
+            Identity::original_setting(&code.parsed, &owner.settings, &|name| {
+                owner.has_scanned_package(name)
+            })
+            .cloned()
+        } else {
+            None
+        };
+        let factory = owner
+            .settings
+            .disabled_system_packages
+            .iter()
+            .find(|p| p.name == identity.internal_name)
+            .cloned();
+        if active
+            .as_ref()
+            .is_some_and(|p| p.flags & crate::package::settings::FLAG_SYSTEM == 0)
+        {
+            return Err(fail(
+                identity.internal_name,
+                code.location.path.clone(),
+                "system-source",
+                "non-system promotion requires its removal/hide owner (#702)".into(),
+            ));
+        }
+        let updated = active.is_some() && factory.is_some();
+        let raw = updated.then(|| Code {
+            location: code.location.clone(),
+            parsed: code.parsed.clone(),
+            signing: code.signing.clone(),
+        });
+        let previous = if updated {
+            factory.as_ref()
+        } else {
+            active.as_ref().or(original.as_ref())
+        };
+        if active.is_none() && original.is_none() && factory.is_some() {
+            owner.remove_stale_disabled_system(&code)?;
+        }
+        let mut policy = ScanPolicy::for_location(&code.location);
+        if !platform_loaded
+            && policy.needs_shared_uid_privilege_check(
                 &code.parsed,
-                &code.signing,
-                &platform,
                 &owner.identities,
                 inputs.vendor_sdk,
-            );
-            policy
-                .apply(
-                    &mut code.parsed,
-                    &code.signing,
-                    platform_loaded.then_some(&platform),
-                    false,
-                    apks,
-                    inputs.compatibility,
-                    None,
-                )
-                .map_err(|message| {
-                    fail(
-                        code.parsed.package_name.clone(),
-                        code.location.path.clone(),
-                        "policy",
-                        message,
-                    )
-                })?;
-            let reject = |phase, message| {
+            )
+        {
+            return Err(fail(
+                code.parsed.package_name.clone(),
+                code.location.path.clone(),
+                "policy",
+                "shared UID privilege requires the scanned platform signing owner".into(),
+            ));
+        }
+        policy.adjust_shared_uid_privilege(
+            &code.parsed,
+            &code.signing,
+            &platform,
+            &owner.identities,
+            inputs.vendor_sdk,
+        );
+        policy
+            .apply(
+                &mut code.parsed,
+                &code.signing,
+                platform_loaded.then_some(&platform),
+                updated,
+                apks,
+                inputs.compatibility,
+                None,
+            )
+            .map_err(|message| {
                 fail(
                     code.parsed.package_name.clone(),
                     code.location.path.clone(),
-                    phase,
+                    "policy",
                     message,
                 )
-            };
-            let host = (apks.files)(&code.location.path)
-                .ok_or_else(|| reject("location", "scan code path not mapped".into()))?;
-            let code_is_directory = std::fs::metadata(host)
-                .map_err(|e| reject("location", e.to_string()))?
-                .is_dir();
-            let native_environment = NativeLibraryEnvironment {
-                preferred_abi: inputs.preferred_abi,
-                app_lib32_install_dir: inputs.app_lib32_install_dir,
-                code_is_directory,
-                canonical_source: None,
-            };
-            let (flags, private_flags) = application_flags(&code.parsed, false);
-            let metadata = SettingMetadata {
-                code_path: code.location.path.clone(),
-                legacy_native_library_path: None,
-                primary_cpu_abi: None,
-                secondary_cpu_abi: None,
-                version_code: (i64::from(code.parsed.version_code_major) << 32)
-                    | i64::from(code.parsed.version_code as u32),
-                flags,
-                private_flags,
-                last_modified_time: 0,
-                uses_sdk_libraries: sdk_libraries(&code.parsed)
-                    .map_err(|e| reject("metadata", e))?,
-                uses_static_libraries: static_libraries(&code.parsed)
-                    .map_err(|e| reject("metadata", e))?,
-                mime_groups: code.parsed.mime_groups.clone(),
-                domain_set_id: (inputs.new_domain_id)().map_err(|e| reject("domain", e))?,
-                target_sdk_version: code.parsed.target_sdk_version,
-                restrict_update_hash: code.parsed.restrict_update_hash.clone(),
-            };
-            let is_platform =
-                code.location.kind == Kind::Framework && code.parsed.package_name == "android";
-            let mut users = inputs.users;
-            users.stopped_system_app =
-                initial_stopped(&code.parsed, config, should_stop_system_packages);
-            let completed = owner.scan_new_system(
-                &code,
-                metadata,
-                users,
-                apks,
-                ScanMetadataCompletion {
-                    abi_policy: inputs.abi_policy,
-                    native_environment: &native_environment,
-                    context: AbiScanContext {
-                        mode: AbiScanMode::Existing {
-                            first_boot_or_upgrade: true,
-                            old_was_stub: false,
-                            saved: None,
-                        },
-                        system: true,
-                        updated: false,
-                        override_abi: None,
-                        platform_runtime_64bit: is_platform
-                            .then_some(inputs.platform_runtime_64bit),
-                    },
-                    install: inputs.install,
-                    destination: None,
-                    clock: inputs.clock,
-                    factory_test: inputs.factory_test,
+            })?;
+        let reject = |phase, message| {
+            fail(
+                code.parsed.package_name.clone(),
+                code.location.path.clone(),
+                phase,
+                message,
+            )
+        };
+        let host = (apks.files)(&code.location.path)
+            .ok_or_else(|| reject("location", "scan code path not mapped".into()))?;
+        let code_is_directory = std::fs::metadata(host)
+            .map_err(|e| reject("location", e.to_string()))?
+            .is_dir();
+        let native_environment = NativeLibraryEnvironment {
+            preferred_abi: inputs.preferred_abi,
+            app_lib32_install_dir: inputs.app_lib32_install_dir,
+            code_is_directory,
+            canonical_source: None,
+        };
+        let (flags, private_flags) = application_flags(&code.parsed, updated);
+        let metadata = SettingMetadata {
+            code_path: code.location.path.clone(),
+            legacy_native_library_path: None,
+            primary_cpu_abi: None,
+            secondary_cpu_abi: None,
+            version_code: (i64::from(code.parsed.version_code_major) << 32)
+                | i64::from(code.parsed.version_code as u32),
+            flags,
+            private_flags,
+            last_modified_time: 0,
+            uses_sdk_libraries: sdk_libraries(&code.parsed).map_err(|e| reject("metadata", e))?,
+            uses_static_libraries: static_libraries(&code.parsed)
+                .map_err(|e| reject("metadata", e))?,
+            mime_groups: code.parsed.mime_groups.clone(),
+            domain_set_id: (inputs.new_domain_id)().map_err(|e| reject("domain", e))?,
+            target_sdk_version: code.parsed.target_sdk_version,
+            restrict_update_hash: code.parsed.restrict_update_hash.clone(),
+        };
+        let is_platform =
+            code.location.kind == Kind::Framework && code.parsed.package_name == "android";
+        let mut users = inputs.users;
+        users.stopped_system_app =
+            initial_stopped(&code.parsed, config, should_stop_system_packages);
+        let completion = ScanMetadataCompletion {
+            abi_policy: inputs.abi_policy,
+            native_environment: &native_environment,
+            context: AbiScanContext {
+                mode: AbiScanMode::Existing {
+                    first_boot_or_upgrade: saved.as_ref().is_none_or(|s| s.first_boot_or_upgrade),
+                    // The disabled-factory ScanRequest has a null oldPkg.
+                    old_was_stub: !updated
+                        && previous.is_some_and(|p| old_stub_packages.contains(&p.name)),
+                    saved: previous,
                 },
+                system: true,
+                updated: if updated {
+                    factory.as_ref().unwrap().flags & (1 << 7) != 0
+                } else {
+                    false
+                },
+                override_abi: None,
+                platform_runtime_64bit: is_platform.then_some(inputs.platform_runtime_64bit),
+            },
+            install: inputs.install,
+            destination: None,
+            clock: inputs.clock,
+            factory_test: inputs.factory_test,
+        };
+        let update = || SettingUpdate {
+            code_path: metadata.code_path.clone(),
+            legacy_native_library_path: previous.and_then(|p| p.legacy_native_library_path.clone()),
+            primary_cpu_abi: previous.and_then(|p| p.primary_cpu_abi.clone()),
+            secondary_cpu_abi: previous.and_then(|p| p.secondary_cpu_abi.clone()),
+            flags: metadata.flags,
+            private_flags: metadata.private_flags,
+            uses_sdk_libraries: metadata.uses_sdk_libraries.clone(),
+            uses_static_libraries: metadata.uses_static_libraries.clone(),
+            mime_groups: metadata.mime_groups.clone(),
+            domain_set_id: metadata.domain_set_id,
+            target_sdk_version: metadata.target_sdk_version,
+            restrict_update_hash: metadata.restrict_update_hash.clone(),
+        };
+        let completed = if updated {
+            let saved = saved.as_ref().ok_or_else(|| {
+                reject(
+                    "settings",
+                    "updated system code requires restored user/resource owners".into(),
+                )
+            })?;
+            let selected = owner.scan_updated_system(
+                &code,
+                update(),
+                users.users,
+                config,
+                apks,
+                completion,
             )?;
-            platform_loaded |= is_platform;
-            packages.push(completed);
+            let completion = ScanMetadataCompletion {
+                abi_policy: inputs.abi_policy,
+                native_environment: &native_environment,
+                context: AbiScanContext {
+                    mode: AbiScanMode::Existing {
+                        first_boot_or_upgrade: saved.first_boot_or_upgrade,
+                        old_was_stub: active
+                            .as_ref()
+                            .is_some_and(|p| old_stub_packages.contains(&p.name)),
+                        saved: active.as_ref(),
+                    },
+                    system: true,
+                    updated: false,
+                    override_abi: None,
+                    platform_runtime_64bit: None,
+                },
+                install: inputs.install,
+                destination: None,
+                clock: inputs.clock,
+                factory_test: inputs.factory_test,
+            };
+            match owner.complete_updated_system_boot(
+                &selected,
+                raw.as_ref().unwrap(),
+                saved.users,
+                users.users,
+                apks,
+                UpdatedSystemBootInputs {
+                    completion,
+                    compatibility: inputs.compatibility,
+                    platform: platform_loaded.then_some(&platform),
+                    vendor_sdk: inputs.vendor_sdk,
+                    remove_test_base: None,
+                    resources: saved.resources,
+                    incremental: active
+                        .as_ref()
+                        .is_some_and(|p| saved.incremental_packages.contains(&p.name)),
+                    new_domain_id: inputs.new_domain_id,
+                },
+            )? {
+                UpdatedSystemBootOutcome::KeepData => {
+                    retained_data.push(selected.factory);
+                    continue;
+                }
+                UpdatedSystemBootOutcome::Factory(completed) => completed,
+            }
+        } else if active.is_some() {
+            let saved = saved.as_ref().ok_or_else(|| {
+                reject(
+                    "settings",
+                    "existing system code requires restored user states".into(),
+                )
+            })?;
+            owner.scan_existing(
+                &code,
+                update(),
+                saved.users,
+                users.users,
+                None,
+                apks,
+                completion,
+            )?
+        } else if original.is_some() {
+            let saved = saved.as_ref().ok_or_else(|| {
+                reject(
+                    "settings",
+                    "original adoption requires restored user states".into(),
+                )
+            })?;
+            let mut staged = owner.clone();
+            let candidate = staged.apply_original_system(&code, metadata, saved.users)?;
+            let completed = staged.finish_scan_metadata(candidate, apks, completion)?;
+            *owner = staged;
+            completed
+        } else {
+            owner.scan_new_system(&code, metadata, users, apks, completion)?
+        };
+        platform_loaded |= is_platform;
+        let record = &completed.candidate.record;
+        if record.parsed.is2(crate::package::pkg::booleans2::STUB) {
+            old_stub_packages.insert(record.settings.name.clone());
+        } else {
+            old_stub_packages.remove(&record.settings.name);
         }
-        Ok(Self {
-            owner,
-            packages,
-            rejected: image.rejected,
-        })
+        packages.push(completed);
     }
+    Ok(SystemImagePackages {
+        packages,
+        retained_data,
+        rejected: image.rejected,
+    })
 }
 
 fn initial_stopped(pkg: &AndroidPackage, config: &SystemConfig, enabled: bool) -> bool {

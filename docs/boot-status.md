@@ -176,7 +176,7 @@ physical order and preserves the five no-APK directory rejections. Final public/
 private flags, version, target SDK, file time, update hash and current signing
 certificates match all 240 original packages at unchanged code paths. The saved
 scan still matches 243 active/3 disabled packages, 16 groups and 23 libraries;
-the whole comparison passes (262.38s), with unchanged disposable disk state and
+the whole comparison passes (376.52s), with unchanged disposable disk state and
 owned process/mount cleanup. A separate original-APK fixture passes (22.28s),
 including reserved APEX UID preservation, invalid seed rejection, domain-owner
 failure, missing framework/image policy and unavailable pre-platform privilege
@@ -251,9 +251,24 @@ and complete active metadata scanning. ABI inputs reference the newly enabled
 setting rather than the stale data candidate. The fixture also checks that
 retaining data allocates no domain ID, incremental rejection allocates none,
 mismatched raw code rejects before deletion, and post-cleanup scan failure
-retains deletion/enabled settings without committing candidate metadata. The
-full image/data loop, publication and failure persistence remain pending;
-this is the integrated updated-system branch, not a complete native boot.
+retains deletion/enabled settings without committing candidate metadata. The system-image loop is now shared by first boot and restored settings.
+scan_saved_system_image retains a mutable caller-owned scan, handles existing
+system packages and eligible original-name adoption, routes updated factories
+through source completion, and returns retained factory records for the later
+data scan. Missing-data factory settings are removed before policy/metadata
+preparation. Accepted active stub state feeds later occurrences' ABI selection;
+the disabled-factory request retains the original null-oldPkg semantics.
+The original-APK fixture checks repeated boot with preserved settings/users,
+data version retention, actual factory restoration, missing-data recovery,
+non-system promotion rejection, and sequential stub/non-stub ABI recalculation
+from an actual fixture compressed-sibling inventory with unchanged signed APKs.
+The whole original saved-image comparison completes 240 active system APKs
+and retains the three original data updates, preserving UID/path/version/users
+and the retained active records. Its resource owner is idle for those retained
+data selections; the separate fixture proves actual recovery deletion. This
+validates the saved system phase, not complete native boot. Data-directory
+iteration, non-system promotion/removal, publication and failure persistence
+remain pending.
 Filesystem tests cover directory order, parent/cache cleanup, app
 data preservation and partial installer failure/retry; the directory backend
 in those tests deletes disposable files, not the original installd daemon.
@@ -271,9 +286,12 @@ old-path bookkeeping remain #816/#798.
 Changed factory shared UID and required extraction reject
 pending their owners (#804/#810); full strict-policy boot acceptance remains
 #814.
-All 301 units pass (3.02s). The original signed framework/GSF fixture passes
-(24.61s), including the integrated source completion, real disposable cleanup,
-setting enable, factory active rescan and failures before/after cleanup. All eight
+All 301 units pass (3.04s). The original signed framework/GSF fixture passes
+(38.34s), including saved-image iteration, sequential ABI recalculation,
+integrated source completion, disposable cleanup and scan failures. The full
+saved-image comparison (376.52s) preceded the final stub-state feedback and
+null-oldPkg adjustment; final units and the original-APK fixture cover that
+feedback, with factory oldPkg ownership checked against the pinned source. All eight
 original-APK scan-input tests passed before this settings transition (5.69s). The Java image
 API linkage build passes (13.2s). This is the initial system APK phase, not a
 complete native boot or template: native APEX preparation, image/data version

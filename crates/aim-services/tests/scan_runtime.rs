@@ -430,6 +430,105 @@ fn saved_scan_libraries_match_original_pms() {
             saved.name
         );
     }
+    let mut saved_users = BTreeMap::new();
+    for (id, user) in &original.users {
+        for (name, state) in &user.restrictions.packages {
+            saved_users
+                .entry(name.clone())
+                .or_insert_with(BTreeMap::new)
+                .insert(*id as i32, state.clone());
+        }
+    }
+    let empty_packages = std::collections::BTreeSet::new();
+    let native_driver = aim_binder_driver::Driver::new();
+    let native_process = aim_binder_host::local::LocalProcess::open(
+        &native_driver,
+        aim_binder_driver::Device::Binder,
+        aim_binder_driver::Credentials {
+            pid: std::process::id() as i32,
+            euid: 1000,
+            security_context: None,
+        },
+    );
+    let resource_root = data.0.join("recovery-data");
+    fs::create_dir(&resource_root).unwrap();
+    let resources = aim_services::package::owner::resources::CodeResources::new(
+        native_process,
+        resource_root,
+        None,
+    );
+    let mut resumed = SigningScan::new(&config, &original.settings, first_api).unwrap();
+    let resumed_packages = resumed
+        .scan_saved_system_image(
+            Image::load(&apks, &apexes).unwrap(),
+            &apks,
+            &config,
+            FirstBootSystemInputs {
+                apex_settings: &Default::default(),
+                first_api_level: first_api,
+                vendor_sdk,
+                abi_policy: &abi_policy,
+                compatibility: &compatibility,
+                preferred_abi: all_abis.first().unwrap(),
+                app_lib32_install_dir: "/data/app-lib",
+                platform_runtime_64bit: true,
+                install: NativeLibraryInstallPolicy {
+                    page_size: 16384,
+                    extract: false,
+                    debuggable: false,
+                    compat_16kb_disabled: false,
+                    manifest_compat_disabled: false,
+                },
+                clock: ScanClock {
+                    current_time: 0,
+                    user_id: 0,
+                    update_time: false,
+                },
+                factory_test: false,
+                users: UserPolicy {
+                    install_user: Some(0),
+                    users: None,
+                    allow_install: true,
+                    instant_app: false,
+                    virtual_preload: false,
+                    stopped_system_app: false,
+                },
+                new_domain_id: &domain_ids,
+            },
+            aim_services::package::scan::SavedSystemScanInputs {
+                users: &saved_users,
+                first_boot_or_upgrade: false,
+                old_stub_packages: &empty_packages,
+                incremental_packages: &empty_packages,
+                resources: &resources,
+            },
+        )
+        .unwrap();
+    assert_eq!(resumed_packages.packages.len(), 240);
+    assert_eq!(resumed_packages.retained_data.len(), 3);
+    for factory in &resumed_packages.retained_data {
+        let name = &factory.record.settings.name;
+        assert_eq!(
+            resumed.settings.packages.iter().find(|p| &p.name == name),
+            original.settings.packages.iter().find(|p| &p.name == name)
+        );
+    }
+    for completed in &resumed_packages.packages {
+        let candidate = &completed.candidate;
+        let saved = original
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == candidate.record.settings.name)
+            .unwrap();
+        assert_eq!(candidate.record.settings.app_id, saved.app_id);
+        assert_eq!(candidate.record.settings.code_path, saved.code_path);
+        assert_eq!(candidate.record.settings.version_code, saved.version_code);
+        assert_eq!(candidate.users, saved_users[&saved.name]);
+    }
+    eprintln!(
+        "saved native image scan completed 240 active system APKs and retained 3 original data sources"
+    );
     let system_count = system_image.packages.len();
     let first_system = SystemImageScan::first_boot(
         system_image,
