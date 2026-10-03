@@ -183,6 +183,7 @@ INTERFACES=(
 # descriptor|jar of the interface in the image|its int constants (the
 # transaction codes) to read from the image.
 CONSTANTS=(
+  "android.os.Process|system/framework/framework.jar|PACKAGE_INFO_GID"
   "android.system.keystore2.Domain|system/framework/framework.jar|APP"
   "android.content.IContentProvider|system/framework/framework.jar|CALL_TRANSACTION"
 )

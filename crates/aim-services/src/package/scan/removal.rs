@@ -11,6 +11,17 @@ pub struct RemovedSetting {
 }
 
 impl SigningScan {
+    /// Remove the real-name key only after permission uninstall and any shared
+    /// UID conversion, as RemovePackageHelper does. Values naming the deleted
+    /// package under other keys are not removed by Settings here.
+    pub fn remove_renamed_package(&mut self, real_name: Option<&str>) -> bool {
+        let before = self.settings.renamed_packages.len();
+        self.settings
+            .renamed_packages
+            .retain(|(new, _)| Some(new.as_str()) != real_name);
+        self.settings.renamed_packages.len() != before
+    }
+
     /// Remove the saved setting and its UID membership. The caller must first
     /// complete data/domain/keyset/filter/preferred cleanup and withdraw loaded
     /// code. Permission uninstall reconciliation follows this step (#822/#798).

@@ -27,6 +27,7 @@ pub mod install_sources;
 pub mod key_sets;
 pub mod keystore;
 mod native_libraries;
+mod package_list;
 mod removal;
 pub mod resources;
 pub mod shared_users;
@@ -82,6 +83,7 @@ pub struct Store {
     restrictions: BTreeMap<u32, Element>,
     settings_document: Element,
     preferred_users: BTreeSet<u32>,
+    list_document: Option<String>,
 }
 
 impl Store {
@@ -109,6 +111,16 @@ impl Store {
             .unwrap_or_else(|| element("package-restrictions"));
             restrictions.insert(user, document);
         }
+        let list_document = super::journaled(&data.join("system/packages.list"))?;
+        if list_document
+            .as_deref()
+            .map(super::list::parse)
+            .transpose()?
+            .unwrap_or_default()
+            != state.list
+        {
+            return Err("packages.list changed while opening native owner".into());
+        }
         let preferred_users = restrictions
             .iter()
             .filter_map(|(&user, root)| {
@@ -121,6 +133,7 @@ impl Store {
             restrictions,
             settings_document,
             preferred_users,
+            list_document,
         }))
     }
 
@@ -189,6 +202,61 @@ impl Store {
             }
         }
         Ok(changed_users)
+    }
+
+    /// Write the final loaded non-APEX inventory supplied by the graph owner.
+    /// The permission owner supplies all active-user GIDs; loaded metadata
+    /// supplies labels, paths and flags. Old rows are not a source for those
+    /// values. Original Settings writes this after packages.xml (#798).
+    pub fn commit_package_list(
+        &mut self,
+        entries: &[super::list::Entry],
+    ) -> Result<(), WriteError> {
+        for entry in entries {
+            let package = self
+                .state
+                .settings
+                .packages
+                .iter()
+                .find(|p| p.name == entry.name)
+                .ok_or_else(|| WriteError::before("packages.list names an unknown setting"))?;
+            if i32::try_from(entry.uid).ok() != Some(package.app_id)
+                || entry.version_code != package.version_code
+            {
+                return Err(WriteError::before(
+                    "packages.list identity/version disagrees with settings",
+                ));
+            }
+        }
+        let text = super::list::serialize(entries).map_err(WriteError::before)?;
+        package_list::write(&self.data, self.list_document.as_deref(), text.as_bytes())?;
+        self.list_document = Some(text);
+        self.state.list = entries.to_vec();
+        Ok(())
+    }
+
+    /// Persist Settings.removeRenamedPackageLPw's real-name key cleanup after
+    /// permission uninstall and shared UID conversion. Other mappings stay.
+    pub fn commit_removed_renamed_package(&mut self, real_name: &str) -> Result<bool, WriteError> {
+        let mut root = self.settings_document.clone();
+        let before = root.content.len();
+        root.content.retain(|node| {
+            !matches!(node, Node::Element(e)
+            if e.name == "renamed-package" && e.string("new").as_deref() == Some(real_name))
+        });
+        if root.content.len() == before {
+            return Ok(false);
+        }
+        let mut expected = self.state.settings.clone();
+        expected
+            .renamed_packages
+            .retain(|(new, _)| new != real_name);
+        if super::settings::Settings::parse(&root).map_err(WriteError::before)? != expected {
+            return Err(WriteError::before(
+                "renamed-package cleanup changed unrelated settings",
+            ));
+        }
+        self.commit_package_document(root).map(|()| true)
     }
 
     /// Persist a completed setting/UID removal after its side owners finish.

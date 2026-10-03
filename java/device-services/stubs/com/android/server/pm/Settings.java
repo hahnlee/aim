@@ -10,6 +10,9 @@ public final class Settings {
         throw new RuntimeException("stub");
     }
     public Settings(java.util.Map<String, PackageSetting> packages) { throw new RuntimeException("stub"); }
+    String addRenamedPackageLPw(String name, String original) { throw new RuntimeException("stub"); }
+    String getRenamedPackageLPr(String name) { throw new RuntimeException("stub"); }
+    void removeRenamedPackageLPw(String name) { throw new RuntimeException("stub"); }
     boolean removePackageAndAppIdLPw(String name) { throw new RuntimeException("stub"); }
     boolean registerAppIdLPw(PackageSetting setting, boolean forceNew) throws Exception { throw new RuntimeException("stub"); }
     SharedUserSetting addSharedUserLPw(String name, int uid, int flags, int privateFlags) { throw new RuntimeException("stub"); }

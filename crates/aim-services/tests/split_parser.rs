@@ -1466,10 +1466,73 @@ fn manifest_keysets_match_original_parser() {
         "persist install-initiator-sigs {certificate_hex} -"
     )
     .unwrap();
-    let original = String::from_utf8(run(boot.command().args([
+    removal_scan.settings.renamed_packages = vec![
+        ("real".into(), "internal".into()),
+        ("other".into(), "internal".into()),
+    ];
+    for name in [Some("missing"), None, Some("real"), Some("real")] {
+        removal_scan.remove_renamed_package(name);
+        let value = |name| {
+            removal_scan
+                .settings
+                .renamed_packages
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("null")
+        };
+        writeln!(&mut expected, "rename {} {}", value("real"), value("other")).unwrap();
+    }
+    let list_text = "app 19002 0 /data/user/0/app default 3003,1003003,3003 0 0 0 @null\n";
+    let entries = aim_services::package::list::parse(list_text).unwrap();
+    owner.commit_package_list(&entries).unwrap();
+    fs::copy(
+        removal_data.join("system/packages.list"),
+        guest.join("packages.list"),
+    )
+    .unwrap();
+    for action in ["read", "rollback", "commit"] {
+        writeln!(&mut expected, "journal {action} {} false", list_text.trim()).unwrap();
+    }
+    let output = boot.command().args([
         "shell", "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/manifest-keysets/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.SettingRemovalOracle", "/data/local/tmp/manifest-keysets/removed-setting.xml",
-    ])).stdout).unwrap();
+        "/data/local/tmp/manifest-keysets/packages.list",
+    ]).output().unwrap();
+    if !output.status.success() {
+        let logs = boot
+            .command()
+            .args([
+                "shell",
+                "logcat",
+                "-d",
+                "-s",
+                "lowmemorykiller",
+                "AndroidRuntime",
+            ])
+            .output()
+            .unwrap();
+        let bounded = |bytes: &[u8]| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .rev()
+                .take(30)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|line| line.chars().take(500).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        panic!(
+            "setting oracle {}: stdout {} stderr {} logs {}",
+            output.status,
+            bounded(&output.stdout),
+            bounded(&output.stderr),
+            bounded(&logs.stdout)
+        );
+    }
+    let original = String::from_utf8(output.stdout).unwrap();
     assert_eq!(original, expected);
     let saved = aim_services::package::State::read(&boot.data.join("data"), &[0])
         .unwrap()

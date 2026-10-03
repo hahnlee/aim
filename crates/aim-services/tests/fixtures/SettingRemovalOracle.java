@@ -74,6 +74,27 @@ public final class SettingRemovalOracle {
                 }
             }
         }
+        settings.addRenamedPackageLPw("real", "internal");
+        settings.addRenamedPackageLPw("other", "internal");
+        for (String name : new String[] {"missing", null, "real", "real"}) {
+            settings.removeRenamedPackageLPw(name);
+            System.out.println("rename " + settings.getRenamedPackageLPr("real") + " "
+                + settings.getRenamedPackageLPr("other"));
+        }
+        if (args.length > 1) {
+            var real = new java.io.File(args[1]);
+            var temp = new java.io.File(args[1] + ".tmp");
+            var journal = new com.android.internal.util.JournaledFile(real, temp);
+            try (var output = new java.io.FileOutputStream(temp)) { output.write("stale".getBytes()); }
+            String original = new String(java.nio.file.Files.readAllBytes(journal.chooseForRead().toPath()), java.nio.charset.StandardCharsets.UTF_8);
+            System.out.println("journal read " + original.trim() + " " + temp.exists());
+            try (var output = new java.io.FileOutputStream(journal.chooseForWrite())) { output.write("partial".getBytes()); }
+            journal.rollback();
+            System.out.println("journal rollback " + new String(java.nio.file.Files.readAllBytes(real.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim() + " " + temp.exists());
+            try (var output = new java.io.FileOutputStream(journal.chooseForWrite())) { output.write(original.getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
+            journal.commit();
+            System.out.println("journal commit " + new String(java.nio.file.Files.readAllBytes(real.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim() + " " + temp.exists());
+        }
         // The test-only Settings constructor starts BackgroundThread.
         System.exit(0);
     }

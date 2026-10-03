@@ -1,10 +1,10 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-struct Data(PathBuf);
+pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "aim-package-owner-{}-{}",
@@ -15,7 +15,7 @@ impl Data {
         Self(path)
     }
 
-    fn settings(&self) -> PathBuf {
+    pub(super) fn settings(&self) -> PathBuf {
         let dir = self.0.join("system/users/0");
         fs::create_dir_all(&dir).unwrap();
         fs::write(self.0.join("system/packages.xml"),
@@ -105,6 +105,92 @@ fn preferred_clearings_preserve_last_choices_persistent_filters_and_other_users(
             .clear_package_preferred_activities(20, None)
             .unwrap_err()
             .committed
+    );
+}
+
+#[test]
+fn renamed_package_cleanup_persists_only_the_real_name_key() {
+    let data = Data::new();
+    let restrictions = data.settings();
+    fs::write(restrictions, RESTRICTIONS).unwrap();
+    let path = data.0.join("system/packages.xml");
+    let input = b"<packages future='keep'><package name='example.app' codePath='/data/app/example' userId='10100'/><renamed-package new='real' old='internal'/><renamed-package new='other' old='internal' future='keep'/><future-owner/></packages>";
+    fs::write(&path, input).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    assert!(!store.commit_removed_renamed_package("internal").unwrap());
+    assert_eq!(fs::read(&path).unwrap(), input);
+    assert!(store.commit_removed_renamed_package("real").unwrap());
+    assert!(!store.commit_removed_renamed_package("real").unwrap());
+    let bytes = fs::read(&path).unwrap();
+    let mut expected = aim_android_xml::read(input).unwrap();
+    expected.content.retain(|node| !matches!(node, Node::Element(e) if e.name == "renamed-package" && e.string("new").as_deref() == Some("real")));
+    assert_eq!(aim_android_xml::read(&bytes).unwrap(), expected);
+    assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
+    assert_eq!(
+        Store::open(&data.0, &[0])
+            .unwrap()
+            .unwrap()
+            .state()
+            .settings
+            .renamed_packages,
+        [("other".into(), "internal".into())]
+    );
+}
+
+#[test]
+fn package_list_commit_validates_owner_inventory_preserves_gid_order_and_detects_external_writes() {
+    let data = Data::new();
+    let restrictions = data.settings();
+    fs::write(restrictions, RESTRICTIONS).unwrap();
+    let path = data.0.join("system/packages.list");
+    let old = "example.app 10100 0 /data/user/0/example.app default none 0 0 0 @null\n";
+    fs::write(&path, old).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let mut entries = store.state().list.clone();
+    entries[0].gids = vec![3003, 1003003, 3003];
+    entries[0].debuggable = true;
+    entries[0].profileable_from_shell = true;
+    entries[0].profileable = true;
+    entries[0].installer = "store".into();
+    for mutation in [0, 1, 2, 3, 4] {
+        let mut invalid = entries.clone();
+        match mutation {
+            0 => invalid[0].name = "unknown".into(),
+            1 => invalid[0].uid += 1,
+            2 => invalid[0].version_code += 1,
+            3 => invalid[0].data_dir = "/data/space path".into(),
+            _ => invalid.push(invalid[0].clone()),
+        }
+        assert!(!store.commit_package_list(&invalid).unwrap_err().committed);
+        assert_eq!(fs::read_to_string(&path).unwrap(), old);
+    }
+    fs::write(&path, old.replace("none", "3002")).unwrap();
+    assert!(!store.commit_package_list(&entries).unwrap_err().committed);
+    fs::write(&path, old).unwrap();
+    fs::write(sibling(&path, ".tmp"), "partial").unwrap();
+    store.commit_package_list(&entries).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "example.app 10100 1 /data/user/0/example.app default 3003,1003003,3003 1 0 1 store\n"
+    );
+    assert!(!sibling(&path, ".tmp").exists());
+    assert_eq!(store.state().list, entries);
+    let metadata = guest_inode::read(&path).unwrap().unwrap();
+    assert_eq!(
+        metadata,
+        GuestInode {
+            uid: Some(1000),
+            gid: Some(aim_service_aidl::android_os_process::PACKAGE_INFO_GID),
+            mode: Some(0o640)
+        }
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state().list,
+        entries
     );
 }
 
