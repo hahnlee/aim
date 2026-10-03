@@ -319,8 +319,20 @@ native-collected framework/GSF objects with original SELinuxMMAC. Oracle classes
 link against the original image (2.94s); device-services remains fresh. The
 original utility's static-only compile declaration is fixture-local, and every
 actual fixture reference is checked against the image before boot. This policy
-has not yet populated the native scan/Java PackageState graph; compatibility,
-shared UID SDK ownership and publication remain #838/#836.
+has not yet populated the native scan/Java PackageState graph. Native shared
+UID ownership now retains the original seInfo target SDK lifetime: initial
+CUR_DEVELOPMENT, first parsed-member admission, boot minimum over actual active
+code, and no recomputation on runtime additions/removals. An explicit boot
+finalization rejects pending scan metadata before mutation; saved-only settings
+and disabled code cannot substitute for active parsed packages. Captures retain
+their own SDK values. All 355 regular units pass (3.12s); an original
+SharedUserSetting oracle verifies admission, boot, removal, empty-group reuse
+and reboot behavior (25.52s with the snapshot/usage oracles). The actual first
+system scan verifies every group's active-code minimum (42.66s), and
+device-services builds with the original API declarations (14.6s). Full boot
+orchestration must call finalization after data selection as well as system
+scanning; PlatformCompat inputs, label assignment and replica publication
+remain #838/#836/#798.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

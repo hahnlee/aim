@@ -157,6 +157,19 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .collect();
     let mut scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
     assert!(scan.rejected.is_empty());
+    scan.owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
+    for group in scan.owner.identities.shared_users.values() {
+        let targets = scan
+            .owner
+            .settings
+            .packages
+            .iter()
+            .filter(|p| p.shared_user && p.app_id == group.app_id)
+            .filter_map(|p| scan.owner.loaded_packages().get(&p.name))
+            .map(|code| code.package.target_sdk_version);
+        let expected = targets.fold(10000, i32::min);
+        assert_eq!(group.seinfo_target_sdk(), expected);
+    }
     let mut usage = aim_services::package::owner::usage::Usage::new(
         scan.owner.settings.packages.iter().map(|p| p.name.as_str()),
     );

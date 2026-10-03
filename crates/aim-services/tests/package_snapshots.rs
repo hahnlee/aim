@@ -44,6 +44,10 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
                 .join("tests/fixtures/PackageUsageOracle.java"),
         )
         .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/SharedSeInfoOracle.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         ));
     let mut pending = vec![classes.clone()];
@@ -159,4 +163,15 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
     original.read(&directory.join("usage.list")).unwrap();
     assert_eq!(original.times("a"), Some(&[9, 10, 44, 4, 5, 6, 7, 55]));
     assert_eq!(original.times("b"), Some(&[0; 8]));
+    let result = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.SharedSeInfoOracle",
+    ]));
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        "SHARED_SEINFO first parsed boot runtime removal empty reboot\n"
+    );
 }

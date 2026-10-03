@@ -20,6 +20,8 @@ pub struct SharedUser {
     /// Per-scan state: None before reconciliation, false after a normal
     /// check, true after an OTA signer replacement. Never persisted.
     pub signatures_changed: Option<bool>,
+    /// SharedUserSetting's boot-fixed seInfo SDK, initially CUR_DEVELOPMENT.
+    seinfo_target_sdk: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,12 +69,34 @@ impl SharedUser {
             packages: BTreeMap::new(),
             signatures: None,
             signatures_changed: None,
+            seinfo_target_sdk: 10000,
         }
     }
 
-    /// SharedUserSetting.addPackage. Re-adding the same setting updates the
-    /// live member's flags without OR-ing them again, as the original set does.
+    pub fn seinfo_target_sdk(&self) -> i32 {
+        self.seinfo_target_sdk
+    }
+
+    /// Restore unparsed settings without substituting saved manifest metadata
+    /// for PackageSetting.getPkg(), which is null at this point.
     pub fn add_package(&mut self, name: &str, flags: i32, private_flags: i32) -> bool {
+        self.add_package_with_code(name, flags, private_flags, None)
+    }
+
+    /// SharedUserSetting.addPackage: the first actual parsed member seeds the
+    /// SDK. Re-adding a setting updates its tracked flags without OR-ing again.
+    pub fn add_package_with_code(
+        &mut self,
+        name: &str,
+        flags: i32,
+        private_flags: i32,
+        target_sdk: Option<i32>,
+    ) -> bool {
+        if self.packages.is_empty() {
+            if let Some(target) = target_sdk {
+                self.seinfo_target_sdk = target;
+            }
+        }
         let added = self
             .packages
             .insert(name.into(), (flags, private_flags))
@@ -82,6 +106,17 @@ impl SharedUser {
             self.private_flags |= private_flags;
         }
         added
+    }
+
+    /// Boot's fixSeInfoLocked considers only members with actual parsed code.
+    /// Runtime additions/removals do not recompute this value. Label overrides
+    /// from that original method are populated separately by the seInfo owner (#838).
+    pub fn fix_seinfo_target_sdk_at_boot(&mut self, parsed_targets: &BTreeMap<String, i32>) {
+        for name in self.packages.keys() {
+            if let Some(target) = parsed_targets.get(name) {
+                self.seinfo_target_sdk = self.seinfo_target_sdk.min(*target);
+            }
+        }
     }
 
     /// SharedUserSetting.removePackage: only active members contribute flags;
@@ -366,6 +401,40 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn seinfo_sdk_tracks_first_code_boot_minimum_and_runtime_lifetime() {
+        let mut group = SharedUser::new(10100, 0, 0);
+        assert_eq!(group.seinfo_target_sdk(), 10000);
+        group.add_package("absent", 0, 0);
+        group.add_package_with_code("a", 0, 0, Some(36));
+        assert_eq!(group.seinfo_target_sdk(), 10000);
+        group.fix_seinfo_target_sdk_at_boot(&[("a".into(), 36), ("foreign".into(), 1)].into());
+        assert_eq!(group.seinfo_target_sdk(), 36);
+        group.add_package_with_code("b", 0, 0, Some(28));
+        assert_eq!(group.seinfo_target_sdk(), 36);
+        group.fix_seinfo_target_sdk_at_boot(&[("a".into(), 36), ("b".into(), 28)].into());
+        assert_eq!(group.seinfo_target_sdk(), 28);
+        let captured = group.clone();
+        group.add_package_with_code("c", 0, 0, Some(19));
+        assert_eq!(group.seinfo_target_sdk(), 28);
+        for name in ["a", "b", "c", "absent"] {
+            group.remove_package(name);
+        }
+        assert_eq!(group.seinfo_target_sdk(), 28);
+        group.add_package_with_code("d", 0, 0, Some(35));
+        assert_eq!(group.seinfo_target_sdk(), 35);
+        group.add_package_with_code("e", 0, 0, Some(24));
+        assert_eq!(group.seinfo_target_sdk(), 35);
+        group.fix_seinfo_target_sdk_at_boot(&[("d".into(), 35), ("e".into(), 24)].into());
+        assert_eq!(group.seinfo_target_sdk(), 24);
+        assert_eq!(captured.seinfo_target_sdk(), 28);
+        let mut reboot = SharedUser::new(10100, 0, 0);
+        reboot.add_package("d", 0, 0);
+        reboot.add_package("e", 0, 0);
+        reboot.fix_seinfo_target_sdk_at_boot(&BTreeMap::new());
+        assert_eq!(reboot.seinfo_target_sdk(), 10000);
+    }
 
     #[test]
     fn active_member_flags_preserve_uid_seeds_duplicate_state_and_removal_conditions() {

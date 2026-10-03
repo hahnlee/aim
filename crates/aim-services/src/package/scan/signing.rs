@@ -76,6 +76,23 @@ impl SigningScan {
     pub(in crate::package) fn capture_ready(&self) -> bool {
         self.pending_metadata.is_empty()
     }
+    /// Called at boot after active scans finish; saved-only and disabled code
+    /// do not stand in for the original active PackageSetting.getPkg().
+    pub fn fix_shared_seinfo_target_sdks_at_boot(&mut self) -> Result<(), String> {
+        if !self.capture_ready() {
+            return Err("scan metadata is not finalized".into());
+        }
+        let targets = self
+            .loaded
+            .iter()
+            .map(|(name, code)| (name.clone(), code.package.target_sdk_version))
+            .collect();
+        for group in self.identities.shared_users.values_mut() {
+            group.fix_seinfo_target_sdk_at_boot(&targets);
+        }
+        Ok(())
+    }
+
     /// Native-parsed active code, admitted only after every scan metadata gate.
     /// Settings and user state remain in their owners; this is not a query replica.
     pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {
@@ -996,10 +1013,11 @@ impl SigningScan {
         if let Some(group) = &mut group
             && admit_member
         {
-            group.add_package(
+            group.add_package_with_code(
                 &record.settings.name,
                 record.settings.flags,
                 record.settings.private_flags,
+                Some(record.parsed.target_sdk_version),
             );
         }
         // All fallible work finishes before changing this candidate.
@@ -1125,6 +1143,66 @@ pub(super) fn selected_shared_user(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn boot_shared_seinfo_uses_active_code_and_rejects_pending_metadata() {
+        use super::*;
+
+        let settings = Settings {
+            shared_users: vec![SharedUser {
+                name: "android.uid.system".into(),
+                app_id: 1000,
+                ..Default::default()
+            }],
+            packages: vec![crate::package::settings::Package {
+                name: "active".into(),
+                app_id: 1000,
+                shared_user: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let signing = SigningDetails {
+            signatures: vec![vec![3]],
+            scheme_version: 3,
+            public_keys: vec![],
+            past_signing_certificates: None,
+        };
+        let code = |sdk| {
+            Arc::new(
+                super::super::LoadedPackage::new(
+                    crate::package::pkg::AndroidPackage {
+                        package_name: "active".into(),
+                        target_sdk_version: sdk,
+                        signing_details: Some(signing.parcel_details().unwrap()),
+                        ..Default::default()
+                    },
+                    signing.clone(),
+                )
+                .unwrap(),
+            )
+        };
+        owner.loaded.insert("active".into(), code(35));
+        owner.disabled_loaded.insert("active".into(), code(16));
+        owner.pending_metadata.insert("active".into());
+        let before = owner.clone();
+        assert_eq!(
+            owner.fix_shared_seinfo_target_sdks_at_boot(),
+            Err("scan metadata is not finalized".into())
+        );
+        assert_eq!(owner, before);
+        owner.pending_metadata.clear();
+        owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
+        assert_eq!(
+            owner.identities.shared_users["android.uid.system"].seinfo_target_sdk(),
+            35
+        );
+        assert_eq!(
+            before.identities.shared_users["android.uid.system"].seinfo_target_sdk(),
+            10000
+        );
+    }
+
     #[test]
     fn binder_scan_lease_pins_old_code_pages_and_close_releases_capture() {
         use super::*;
