@@ -192,6 +192,7 @@ CONSTANTS=(
 # to marshal. Their codes follow the same rule on both sides; the
 # device-services node checks the Java stubs it builds against them.
 OWN_INTERFACES=(
+  "dev.aim.server.IPackageBootstrapBridge|java/device-services/aidl/dev/aim/server/IPackageBootstrapBridge.aidl|*"
   "dev.aim.server.IBridge|java/device-services/aidl/dev/aim/server/IBridge.aidl|*"
   "dev.aim.server.IServiceHost|java/device-services/aidl/dev/aim/server/IServiceHost.aidl|*"
   "dev.aim.server.INotificationPermissionCallback|java/device-services/aidl/dev/aim/server/INotificationPermissionCallback.aidl|*"

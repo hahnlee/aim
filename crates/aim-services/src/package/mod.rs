@@ -9,6 +9,7 @@
 //! `android-16.0.0_r1`.
 
 pub mod apps_filter;
+pub mod bootstrap;
 pub mod component_resolver;
 pub mod domain_verification;
 pub mod intent;

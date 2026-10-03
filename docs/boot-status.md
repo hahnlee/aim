@@ -119,8 +119,8 @@ factory refresh enters only after its metadata succeeds. Scan withdrawal drops
 active code while retaining saved UID/settings and disabled code; saved-setting
 removal rejects still-loaded objects. Disabled copies share the accepted active
 object, and stale/reenabled disabled settings retire that factory object. Old
-scan snapshots retain their objects through later changes. All 343 units pass
-(3.16s), and the original-image first-system-scan integration passes (42.94s),
+scan snapshots retain their objects through later changes. All 344 units pass
+(3.49s), and the original-image first-system-scan integration passes (42.94s),
 including exact completed-object contents, failed re-scan preservation and
 active/factory separation and rejection of a detached mutated completion object.
 The disposable original-PMS saved scan also passes (388.74s): all 243 active APK
@@ -153,6 +153,26 @@ Failed rescans retain prior objects/state; malformed serialized keys reject
 without mutating the raw input. Facade callback delivery and publication remain
 incomplete (#833). The new oracle checks image
 linkage before boot, and its owned processes and mount are cleaned on completion.
+The package bootstrap bridge now has a separate generated AIDL and a synchronous
+IServiceHost attachment (#834); existing late-service methods retain their
+original transaction codes and oneway behavior. It retains the typed Binder
+endpoint without mapping nonce memory or starting late-service listeners. Only
+the matching endpoint is removed on death, so an old server cannot erase its
+replacement. Native clients query the original boot-classpath/native-library
+policy and complete active-user permission GIDs, retaining owner/transport
+errors and GID ordering/duplicates. Java's early endpoint and normal IBridge
+share the same original PlatformCompat, PackageBackwardCompatibility and
+PermissionManagerServiceInternal implementations, with system-UID checks and
+explicit unavailable-owner errors. The facade attachment entry point is
+implemented but not called by SystemServer yet. A Binder-driver test passes
+(0.02s), exercising synchronous attach, invalid/null/foreign callers and tokens,
+wrong endpoint rejection, policy/GID inputs and failures, replacement, actual
+endpoint death, cleanup and absence of late listeners. All three native
+resource-client tests pass (0.01s); AIDL generation and image API linkage pass
+(14.2s combined). These are protocol/linkage checks: early facade boot ordering,
+actual booted owner transactions and callback delivery remain unverified, and
+original PMS remains active. The full late bridge's nonce mapping separately
+needs matching-owner death cleanup (#835).
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

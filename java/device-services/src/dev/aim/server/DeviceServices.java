@@ -14,11 +14,7 @@ import android.util.Slog;
 import android.view.IWindowManager;
 
 import com.android.internal.os.ApplicationSharedMemory;
-import com.android.server.LocalServices;
 import com.android.server.SystemService;
-import com.android.server.compat.PlatformCompat;
-import com.android.server.pm.permission.PermissionManagerServiceInternal;
-import com.android.server.pm.parsing.library.PackageBackwardCompatibility;
 
 import java.io.File;
 import java.io.IOException;
@@ -157,8 +153,7 @@ public final class DeviceServices extends SystemService {
     }
 
     private static final class Bridge extends IBridge.Stub {
-        // SharedLibrariesImpl, android-16.0.0_r1.
-        private static final long ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES = 142191088L;
+        private final PackageBootstrapBridge packageBootstrap = new PackageBootstrapBridge();
         private final Context context;
         private final IServiceHost host;
         private final LocationBridge location;
@@ -227,32 +222,17 @@ public final class DeviceServices extends SystemService {
 
         @Override
         public boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk) {
-            enforceSystemUid();
-            return platformCompat().isChangeEnabledInternal(
-                    ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES, packageName, targetSdk);
+            return packageBootstrap.areNativeLibraryDependenciesEnforced(packageName, targetSdk);
         }
 
         @Override
         public boolean isTestBaseOnBootclasspath() {
-            enforceSystemUid();
-            return PackageBackwardCompatibility.bootClassPathContainsATB();
+            return packageBootstrap.isTestBaseOnBootclasspath();
         }
 
         @Override
         public int[] getPermissionGidsForUid(int uid) {
-            enforceSystemUid();
-            if (uid < 0) throw new IllegalArgumentException("negative permission UID");
-            PermissionManagerServiceInternal permissions = LocalServices.getService(
-                    PermissionManagerServiceInternal.class);
-            if (permissions == null) throw new IllegalStateException("permission owner is unavailable");
-            return permissions.getGidsForUid(uid);
-        }
-
-        private static PlatformCompat platformCompat() {
-            PlatformCompat compat = (PlatformCompat) ServiceManager.getService(
-                    Context.PLATFORM_COMPAT_SERVICE);
-            if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
-            return compat;
+            return packageBootstrap.getPermissionGidsForUid(uid);
         }
 
         private static void enforceSystemUid() {

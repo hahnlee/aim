@@ -1,15 +1,16 @@
 package dev.aim.server;
 
 import dev.aim.server.IBridge;
+import dev.aim.server.IPackageBootstrapBridge;
 import dev.aim.server.INotificationPermissionCallback;
 
 /**
  * The native service host (crates/aim-services), registered with
  * servicemanager as `aim.service_host`.
  */
-oneway interface IServiceHost {
+interface IServiceHost {
     /** system_server's bridge, once its system services are ready. */
-    void attachBridge(IBridge bridge);
+    oneway void attachBridge(IBridge bridge);
 
     /**
      * An app's request for POST_NOTIFICATIONS (#470): asks the Mac for
@@ -17,6 +18,8 @@ oneway interface IServiceHost {
      * the first time), grants or revokes the permission of user `userId`
      * by the answer, and tells `callback`.
      */
-    void requestNotificationPermission(String packageName, int userId,
+    oneway void requestNotificationPermission(String packageName, int userId,
             INotificationPermissionCallback callback);
+    /** Synchronous attach before native package scanning; no late listeners. */
+    void attachPackageBootstrapBridge(IPackageBootstrapBridge bridge);
 }

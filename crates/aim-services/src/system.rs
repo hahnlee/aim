@@ -112,6 +112,7 @@ pub struct System {
     /// Told of each bridge system_server hands over (a handle held for
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
+    package_bootstrap: Mutex<Option<Arc<crate::package::bootstrap::Bridge>>>,
 }
 
 /// Told of a bridge attached, with its handle.
@@ -185,6 +186,7 @@ impl System {
                 nonces: Mutex::new(None),
                 permissions: Mutex::new(Permissions::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
+                package_bootstrap: Mutex::new(None),
             }
         });
         let this = Arc::downgrade(&system);
@@ -375,6 +377,45 @@ impl System {
             table(&mut kept).insert(key, granted);
         }
         Ok(granted)
+    }
+
+    /// Synchronous early package-owner attachment, independent of late listeners.
+    pub fn attach_package_bootstrap(self: &Arc<Self>, handle: u32) -> Result<()> {
+        let bridge = Arc::new(crate::package::bootstrap::Bridge::new(
+            self.process.strong(handle),
+        )?);
+        let this = Arc::downgrade(self);
+        let attached = Arc::downgrade(&bridge);
+        let mut current = self.package_bootstrap.lock().unwrap();
+        *current = Some(bridge.clone());
+        self.process.link_to_death(
+            &bridge.owner,
+            Box::new(move || {
+                if let (Some(system), Some(attached)) = (this.upgrade(), attached.upgrade()) {
+                    let mut current = system.package_bootstrap.lock().unwrap();
+                    if current
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(owner, &attached))
+                    {
+                        current.take();
+                    }
+                }
+            }),
+        );
+        Ok(())
+    }
+
+    pub fn package_bootstrap(&self) -> Result<Arc<crate::package::bootstrap::Bridge>> {
+        self.package_bootstrap
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package bootstrap bridge is unavailable",
+                )
+            })
     }
 
     /// Takes system_server's bridge (#430): maps the shared memory of its

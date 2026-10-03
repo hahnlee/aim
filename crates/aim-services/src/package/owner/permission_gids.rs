@@ -19,6 +19,23 @@ pub enum PermissionGidError {
 /// created if applicable. Preserve user and GID order and duplicates, as the
 /// original IntArray.addAll does; never substitute a saved packages.list row.
 pub fn query(owner: &Strong, app_id: i32, users: &[i32]) -> Result<Vec<u32>, PermissionGidError> {
+    query_with(app_id, users, |uid| {
+        let mut request = Parcel::new();
+        bridge::GetPermissionGidsForUid { uid }.write(&mut request);
+        let reply = owner
+            .transact(bridge::GET_PERMISSION_GIDS_FOR_UID, &request, false)
+            .map_err(PermissionGidError::Transport)?;
+        bridge::read_get_permission_gids_for_uid_reply(&mut reply.reader())
+            .map_err(PermissionGidError::Transport)?
+            .map_err(PermissionGidError::Owner)
+    })
+}
+
+pub(crate) fn query_with(
+    app_id: i32,
+    users: &[i32],
+    ask: impl Fn(i32) -> Result<Option<Vec<i32>>, PermissionGidError>,
+) -> Result<Vec<u32>, PermissionGidError> {
     let invalid = |message: &str| PermissionGidError::Input(message.into());
     if app_id < 0 || users.is_empty() {
         return Err(invalid(
@@ -43,15 +60,8 @@ pub fn query(owner: &Strong, app_id: i32, users: &[i32]) -> Result<Vec<u32>, Per
     }
     let mut gids = Vec::new();
     for uid in uids {
-        let mut request = Parcel::new();
-        bridge::GetPermissionGidsForUid { uid }.write(&mut request);
-        let reply = owner
-            .transact(bridge::GET_PERMISSION_GIDS_FOR_UID, &request, false)
-            .map_err(PermissionGidError::Transport)?;
-        let result = bridge::read_get_permission_gids_for_uid_reply(&mut reply.reader())
-            .map_err(PermissionGidError::Transport)?
-            .map_err(PermissionGidError::Owner)?
-            .ok_or_else(|| invalid("original permission owner returned null GIDs"))?;
+        let result =
+            ask(uid)?.ok_or_else(|| invalid("original permission owner returned null GIDs"))?;
         for gid in result {
             gids.push(
                 gid.try_into()
