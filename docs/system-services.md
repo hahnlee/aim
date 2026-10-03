@@ -92,7 +92,11 @@ are then verified as ART opens them (the build tools' `dexdump -c`, ART's
 redirects eight calls of SystemServer and UserManagerService in the
 pinned services.jar to a fixture class and compares dexdump's
 disassembly of every dex before and after: only the redirected calls
-differ. The list is empty: its first users are M4's slice C
+differ. The M4 C branch's first entry attaches the synchronous package-policy
+bridge at PMS `main`, after original PlatformCompat registration and before
+original scanning (#834). The wrapper continues into original PMS until the
+complete facade and C acceptance gates pass (#798); attachment failure stops
+bootstrap. Remaining users are M4's slice C
 (m4-packagemanager.md, "The call sites") and a native `power` (#668, in
 the core milestone). services.jar's class loader context does not hold
 aim-services.jar, so the `oat` node compiles a redirected call against an

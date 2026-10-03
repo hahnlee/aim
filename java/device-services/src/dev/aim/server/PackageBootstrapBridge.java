@@ -20,6 +20,19 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     private static final long SELINUX_LATEST_CHANGES = 143539591L;
     private static final long SELINUX_R_CHANGES = 168782947L;
 
+    /** Early M4 policy handoff; original PMS remains until the C facade passes its gates (#798). */
+    public static com.android.server.pm.PackageManagerService startPackageManager(Context context,
+            com.android.server.pm.Installer installer,
+            com.android.server.pm.verify.domain.DomainVerificationService domains,
+            boolean factoryTest) {
+        try {
+            attach();
+        } catch (RemoteException failure) {
+            throw new IllegalStateException("package bootstrap attach failed", failure);
+        }
+        return com.android.server.pm.PackageManagerService.main(context, installer, domains, factoryTest);
+    }
+
     /** Called by the C facade before native scanning, after PlatformCompat starts. */
     public static void attach() throws RemoteException {
         IBinder host = ServiceManager.checkService("aim.service_host");

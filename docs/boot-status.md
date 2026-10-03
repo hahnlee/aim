@@ -163,13 +163,24 @@ policy and complete active-user permission GIDs, retaining owner/transport
 errors and GID ordering/duplicates. Java's early endpoint and normal IBridge
 share the same original PlatformCompat, PackageBackwardCompatibility and
 PermissionManagerServiceInternal implementations, with system-UID checks and
-explicit unavailable-owner errors. The facade attachment entry point is
-implemented but not called by SystemServer yet. A Binder-driver test passes
+explicit unavailable-owner errors. The early attachment entry point is
+implemented and attached synchronously from the C branch's PMS-main redirect.
+The one startBootstrapServices call now enters PackageBootstrapBridge before
+original PMS scanning, after original PlatformCompat registration. The wrapper
+returns original PMS until complete C gates pass; attach failure aborts bootstrap.
+Production device-services image API checking passes (14.0s), and system-server
+symbolic call-count/signature and DEX verification pass (1.1s). The complete
+derived image/oat/template build passes (55.8s), with disposable template settings
+at 7.4s, sys.boot_completed at 10.2s and permissions at 22.7s. The template
+builder cleans its owned processes/mounts. Native scan consumption and actual
+original bridge policy/GID calls are still unverified (#834/#798).
+A Binder-driver test passes
 (0.02s), exercising synchronous attach, invalid/null/foreign callers and tokens,
 wrong endpoint rejection, policy/GID inputs and failures, replacement, actual
 endpoint death, cleanup and absence of late listeners. All three native
 resource-client tests pass (0.01s); AIDL generation and image API linkage pass
-(14.2s combined). These are protocol/linkage checks: early facade boot ordering,
+(14.2s combined). These protocol/linkage checks supplement the verified early
+original-PMS handoff. Native facade boot ordering,
 actual booted owner transactions and callback delivery remain unverified, and
 original PMS remains active. The full late bridge's nonce mapping separately
 needs matching-owner death cleanup (#835).
