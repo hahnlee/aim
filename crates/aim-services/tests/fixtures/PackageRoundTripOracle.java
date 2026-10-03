@@ -10,7 +10,36 @@ public final class PackageRoundTripOracle {
         }
     }
 
+    private static void verifyLibraryOwners(java.io.File file) throws Exception {
+        byte[] bytes = java.nio.file.Files.readAllBytes(file.toPath());
+        var in = android.os.Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var info = android.content.pm.ApplicationInfo.CREATOR.createFromParcel(in);
+            if (in.dataAvail() != 0 || info.sharedLibraryInfos.size() != 3
+                    || info.optionalSharedLibraryInfos.size() != 1) throw new AssertionError("library owner framing differs");
+            for (int i = 0; i < 2; i++) {
+                var library = info.sharedLibraryInfos.get(i);
+                if (!library.getOptionalDependentPackages().isEmpty() || !library.getCertDigests().isEmpty()) throw new AssertionError("null/empty library getters differ");
+            }
+            verifyPopulatedLibrary(info.sharedLibraryInfos.get(2));
+            verifyPopulatedLibrary(info.optionalSharedLibraryInfos.get(0));
+        } finally { in.recycle(); }
+    }
+    private static void verifyPopulatedLibrary(android.content.pm.SharedLibraryInfo library) {
+        var optional = library.getOptionalDependentPackages();
+        var digests = library.getCertDigests();
+        if (optional.size() != 2 || optional.get(0) != null
+                || !optional.get(1).getPackageName().equals("consumer") || optional.get(1).getLongVersionCode() != Long.MAX_VALUE
+                || digests.size() != 2 || digests.get(0) != null || !digests.get(1).equals("digest")) throw new AssertionError("optional/certificate library owners lost");
+        var nested = library.getDependencies().get(0);
+        if (!nested.getOptionalDependentPackages().get(0).getPackageName().equals("nested.consumer")
+                || nested.getOptionalDependentPackages().get(0).getLongVersionCode() != 23
+                || !nested.getCertDigests().equals(java.util.List.of("nested.digest"))) throw new AssertionError("nested library owners lost");
+    }
+
     private static void verify(String[] args) throws Exception {
+        verifyLibraryOwners(new java.io.File(args[0], "library-owners.parcel"));
         LegacyPermissionOracle.verify(new java.io.File(args[0]));
         var files = new java.io.File(args[0]).listFiles((dir, name) -> name.endsWith(".native"));
         if (files == null) throw new java.io.IOException("missing parcel inputs");

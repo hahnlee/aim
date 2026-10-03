@@ -191,6 +191,9 @@ pub struct SharedLibrary {
     pub declaring: (String, i64),
     pub dependents: Vec<(String, i64)>,
     pub dependencies: Vec<SharedLibrary>,
+    /// Raw Parcelable list and string list; null and allocated-empty are distinct.
+    pub optional_dependents: Option<Vec<Option<(String, i64)>>>,
+    pub cert_digests: Option<Vec<Option<String>>>,
 }
 
 /// `PackageUserState`: one package's state for one user.

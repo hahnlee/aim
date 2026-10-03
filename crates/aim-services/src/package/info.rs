@@ -1246,8 +1246,8 @@ pub(in crate::package) fn write_libraries(p: &mut Parcel, v: Option<&[SharedLibr
 /// `SharedLibraryInfo.writeToParcel`. The library's own code paths are
 /// there only for a library without a path (a static or dynamic one's
 /// package; `getAllCodePaths` is the path otherwise); its dependents and
-/// dependencies are null until one is added. Optional dependents and
-/// certificate digests are not in the model (#740).
+/// dependencies are null until one is added. Optional dependent and certificate
+/// list owners retain their null/empty distinction.
 fn write_library(p: &mut Parcel, l: &SharedLibrary) {
     const VERSIONED_PACKAGE: &str = "android.content.pm.VersionedPackage";
     p.write_string8(l.path.as_deref());
@@ -1287,8 +1287,31 @@ fn write_library(p: &mut Parcel, l: &SharedLibrary) {
         (!l.dependencies.is_empty()).then_some(&l.dependencies[..]),
     );
     p.write_bool(l.native);
-    p.write_i32(-1);
-    p.write_i32(-1);
+    match &l.optional_dependents {
+        None => p.write_i32(-1),
+        Some(dependents) => {
+            p.write_i32(dependents.len() as i32);
+            for dependent in dependents {
+                match dependent {
+                    None => p.write_string16(None),
+                    Some((name, version)) => {
+                        p.write_string16(Some(VERSIONED_PACKAGE));
+                        p.write_string8(Some(name));
+                        p.write_i64(*version);
+                    }
+                }
+            }
+        }
+    }
+    match &l.cert_digests {
+        None => p.write_i32(-1),
+        Some(digests) => {
+            p.write_i32(digests.len() as i32);
+            for digest in digests {
+                p.write_string16(digest.as_deref());
+            }
+        }
+    }
 }
 
 /// `PackageUserStateUtils.isAvailable`.

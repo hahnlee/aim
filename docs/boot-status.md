@@ -284,7 +284,16 @@ checks retained captures after publication. A controlled declaration/path fixtur
 exceeding 64 KiB exercises original generated Java Binder paging and concrete
 PackageSetting restoration under original ART. Declaration reconstruction preserves
 original constructor null optional fields and requires exact parcel reproduction;
-unsupported optional dependent/certificate states reject (#740). Live policy
+unsupported optional dependent/certificate states reject (#740). The native
+SharedLibrary query model and original ApplicationInfo writer now also retain
+nullable optional-dependent Parcelable lists and nullable certificate string lists,
+including allocated-empty and null elements. Original ART accepts both ordinary
+and optional ApplicationInfo library records, nested values and full 64-bit
+versions (16.89s complete package oracle); original Java linkage passes (3.72s)
+and device-services builds (13.8s). All 393 units pass (3.16s; one ignored/not run),
+including raw null/empty distinction checks. The shadow feed still does not export these
+owners, and declaration-only Java restoration deliberately rejects them; full
+original-state import/assembly remains #740. Live policy
 delivery, overlay effects and factory graph handling remain #707/#808/#836.
 The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target

@@ -21,5 +21,7 @@ public final class SharedLibraryInfo implements android.os.Parcelable {
     public boolean isNative() { throw new RuntimeException("stub"); }
     public VersionedPackage getDeclaringPackage() { throw new RuntimeException("stub"); }
     public List<VersionedPackage> getDependentPackages() { throw new RuntimeException("stub"); }
+    public List<VersionedPackage> getOptionalDependentPackages() { throw new RuntimeException("stub"); }
+    public List<String> getCertDigests() { throw new RuntimeException("stub"); }
     public List<SharedLibraryInfo> getDependencies() { throw new RuntimeException("stub"); }
 }

@@ -170,6 +170,7 @@ fn native_package_parcels_match_original_read_write() {
     let directory = boot.data.join("data/local/tmp/package-parcels");
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
+    write_library_owner_fixture(&directory);
     let mut pending = vec![boot.data.join("data/system/package_cache")];
     let mut files = Vec::new();
     while let Some(dir) = pending.pop() {
@@ -1577,4 +1578,40 @@ fn keysets_xml_expected(directory: &std::path::Path, name: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Raw optional owners are independent of declaration constructors and query feeds.
+fn write_library_owner_fixture(directory: &std::path::Path) {
+    use aim_services::package::{info::ApplicationInfo, model::SharedLibrary};
+    let library = |name: &str, optional_dependents, cert_digests| SharedLibrary {
+        name: Some(name.into()),
+        declaring: ("owner".into(), 7),
+        kind: 3,
+        optional_dependents,
+        cert_digests,
+        ..Default::default()
+    };
+    let nested = library(
+        "nested",
+        Some(vec![Some(("nested.consumer".into(), 23))]),
+        Some(vec![Some("nested.digest".into())]),
+    );
+    let mut populated = library(
+        "populated",
+        Some(vec![None, Some(("consumer".into(), i64::MAX))]),
+        Some(vec![None, Some("digest".into())]),
+    );
+    populated.dependencies.push(nested);
+    let info = ApplicationInfo {
+        shared_library_infos: Some(vec![
+            library("null", None, None),
+            library("empty", Some(vec![]), Some(vec![])),
+            populated.clone(),
+        ]),
+        optional_shared_library_infos: Some(vec![populated]),
+        ..Default::default()
+    };
+    let mut parcel = aim_binder_host::parcel::Parcel::new();
+    info.write(&mut parcel, None);
+    fs::write(directory.join("library-owners.parcel"), parcel.data()).unwrap();
 }

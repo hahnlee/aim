@@ -436,3 +436,56 @@ fn installed_packages_in_the_original_order() {
     let expected: Vec<Value> = expected.iter().map(|n| Value::Str(n.to_string())).collect();
     assert_eq!(names, expected.iter().collect::<Vec<_>>());
 }
+
+#[test]
+fn library_optional_owners_preserve_raw_null_empty_and_nested_values() {
+    use crate::package::model::SharedLibrary;
+    let populated = SharedLibrary {
+        optional_dependents: Some(vec![None, Some(("consumer".into(), i64::MAX))]),
+        cert_digests: Some(vec![None, Some("digest".into())]),
+        ..Default::default()
+    };
+    let libraries = vec![
+        SharedLibrary::default(),
+        SharedLibrary {
+            optional_dependents: Some(vec![]),
+            cert_digests: Some(vec![]),
+            ..Default::default()
+        },
+        SharedLibrary {
+            dependencies: vec![populated.clone()],
+            ..populated
+        },
+    ];
+    let info = info::ApplicationInfo {
+        shared_library_infos: Some(libraries),
+        ..Default::default()
+    };
+    let mut reply = Parcel::new();
+    reply.write_no_exception();
+    reply.write_i32(1);
+    info.write(&mut reply, None);
+    let decoded = decoded(pm::GET_APPLICATION_INFO, &reply);
+    let Value::List(libraries) = field(&decoded, "sharedLibraryInfos") else {
+        panic!("missing libraries")
+    };
+    for name in ["optionalDependentPackages", "certDigests"] {
+        assert_eq!(field(&libraries[0], name), &Value::Null);
+        assert_eq!(field(&libraries[1], name), &Value::List(vec![]));
+    }
+    let optional = Value::List(vec![
+        Value::Null,
+        Value::List(vec![Value::Str("consumer".into()), Value::Long(i64::MAX)]),
+    ]);
+    let certificates = Value::List(vec![Value::Null, Value::Str("digest".into())]);
+    assert_eq!(field(&libraries[2], "optionalDependentPackages"), &optional);
+    assert_eq!(field(&libraries[2], "certDigests"), &certificates);
+    let Value::List(dependencies) = field(&libraries[2], "dependencies") else {
+        panic!("missing nested dependency")
+    };
+    assert_eq!(
+        field(&dependencies[0], "optionalDependentPackages"),
+        &optional
+    );
+    assert_eq!(field(&dependencies[0], "certDigests"), &certificates);
+}

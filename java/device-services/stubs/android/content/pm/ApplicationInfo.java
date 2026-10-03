@@ -12,4 +12,6 @@ public class ApplicationInfo extends PackageItemInfo {
     public String[] resourceDirs;
     public String[] overlayPaths;
     public String[] sharedLibraryFiles;
+    public java.util.List<SharedLibraryInfo> sharedLibraryInfos;
+    public java.util.List<SharedLibraryInfo> optionalSharedLibraryInfos;
 }
