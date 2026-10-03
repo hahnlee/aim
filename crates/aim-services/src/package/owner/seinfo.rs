@@ -1,5 +1,6 @@
 //! SELinuxMMAC policy and label composition, android-16.0.0_r1 (#838).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
+mod sort;
 use crate::package::sign::SigningDetails;
 use aim_android_xml::Element;
 use std::{
@@ -228,15 +229,10 @@ pub fn target_sdk(
     }
 }
 
-// TimSort's short-array path, as used by Collections.sort in the pinned image.
-// Duplicate detection belongs to the comparator, so only compared pairs count.
-// The merging path for larger policy sets remains #838.
 fn sort_rules(rules: &mut Vec<Rule>) -> Result<(), String> {
     use std::cmp::Ordering;
-    if rules.len() >= 32 {
-        return Err("mac-permissions TimSort merging requires implementation (#838)".into());
-    }
-    let compare = |a: &Rule, b: &Rule| -> Result<Ordering, String> {
+    let order = sort::sort(rules.len(), |a, b| {
+        let (a, b) = (&rules[a], &rules[b]);
         let order = a.packages.is_empty().cmp(&b.packages.is_empty());
         if order == Ordering::Equal
             && a.certificates == b.certificates
@@ -245,35 +241,8 @@ fn sort_rules(rules: &mut Vec<Rule>) -> Result<(), String> {
             return Err("duplicate mac-permissions policy".into());
         }
         Ok(order)
-    };
-    if rules.len() < 2 {
-        return Ok(());
-    }
-    let descending = compare(&rules[1], &rules[0])? == Ordering::Less;
-    let mut run = 2;
-    while run < rules.len() {
-        let order = compare(&rules[run], &rules[run - 1])?;
-        if (descending && order != Ordering::Less) || (!descending && order == Ordering::Less) {
-            break;
-        }
-        run += 1;
-    }
-    if descending {
-        rules[..run].reverse();
-    }
-    for at in run..rules.len() {
-        let (mut left, mut right) = (0, at);
-        while left < right {
-            let middle = (left + right) / 2;
-            if compare(&rules[at], &rules[middle])? == Ordering::Less {
-                right = middle;
-            } else {
-                left = middle + 1;
-            }
-        }
-        let rule = rules.remove(at);
-        rules.insert(left, rule);
-    }
+    })?;
+    *rules = order.into_iter().map(|i| rules[i].clone()).collect();
     Ok(())
 }
 
@@ -317,6 +286,41 @@ mod tests {
             past_signing_certificates: past,
         }
     }
+    #[test]
+    fn large_policy_sets_preserve_specificity_and_acceptance() {
+        for count in [32, 33, 64, 65, 257, 1024] {
+            let mut xml = String::from("<policy>");
+            for index in 0..count {
+                xml.push_str(&format!("<signer signature='{index:04x}'>"));
+                if index % 2 == 0 {
+                    xml.push_str(&format!("<seinfo value='label{index}'/>"));
+                } else {
+                    xml.push_str(&format!(
+                        "<package name='app'><seinfo value='label{index}'/></package>"
+                    ));
+                }
+                xml.push_str("</signer>");
+            }
+            xml.push_str("</policy>");
+            let policy = parse(&xml).unwrap();
+            assert_eq!(
+                policy.label("app", Signing::Unknown, false, 36, Partition::Data),
+                "label1:targetSdkVersion=36"
+            );
+            let certificate = [((count - 1) >> 8) as u8, (count - 1) as u8];
+            assert_eq!(
+                policy.label(
+                    "app",
+                    Signing::Known(&signing(&[&certificate], None)),
+                    false,
+                    36,
+                    Partition::Data
+                ),
+                format!("label{}:targetSdkVersion=36", count - 1)
+            );
+        }
+    }
+
     #[test]
     fn policy_validation_specificity_rotation_unknown_and_label_suffixes() {
         let policy = parse("<policy><signer signature='01'><seinfo value='platform'/></signer><signer signature='01'><package name='app'><seinfo value='specific'/></package></signer></policy>").unwrap();

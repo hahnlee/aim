@@ -5,7 +5,19 @@ code is distributed under **GPL-2.0-only WITH Classpath-exception-2.0**.
 
 ## What the repository holds
 
-No OpenJDK-derived file and no patch to one. The ART exception build
+The repository holds a Rust port of libcore's TimSort at
+[`crates/aim-services/src/package/owner/seinfo/sort.rs`](../crates/aim-services/src/package/owner/seinfo/sort.rs).
+It follows `platform/libcore` revision
+`fff4fcc0cf7f080cf2511cbb57561482b13b218f` (`android-16.0.0_r1`),
+[`ojluni/src/main/java/java/util/TimSort.java`](https://android.googlesource.com/platform/libcore/+/fff4fcc0cf7f080cf2511cbb57561482b13b218f/ojluni/src/main/java/java/util/TimSort.java).
+The local changes use policy indices, Rust vectors and Result diagnostics while
+preserving the comparator sequence needed by SELinuxMMAC's duplicate detection.
+The port retains upstream copyright/license notices and the Classpath exception;
+its containing Cargo package records both that exception and the Apache-2.0
+terms of the package's independent files. The root Apache license does not
+relicense the port.
+
+The ART exception build
 (the `art` node of `cargo aim`, ADR 0012 decision 4) compiles, unmodified:
 
 - `art/openjdkjvm/OpenjdkJvm.cc` into `libopenjdkjvm.so`, because that
@@ -38,7 +50,8 @@ The complete upstream license and notice documents are in
 
 ## Corresponding source for any future binary release
 
-A binary release that ships `libopenjdkjvm.so` must provide its complete
+A binary release that ships `libopenjdkjvm.so` or includes the native TimSort
+port must provide the covered components' complete
 corresponding source under GPLv2 using a compliant distribution method: the
 exact upstream sources (fetched by the build script at the pinned tag), the
 build scripts and the toolchain record. A link to an upstream homepage is not

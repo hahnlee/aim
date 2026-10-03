@@ -301,20 +301,26 @@ matches current or rotated collected certificates with package-specific rules
 before global rules. Label composition preserves privilege/target SDK/partition
 suffixes and partition precedence. Compatibility decisions and a nonempty
 shared UID's boot-fixed target SDK are explicit caller inputs, not inferred
-from missing metadata. The short-array ordering follows the pinned Java
-TimSort comparison sequence: duplicate detection occurs on compared pairs,
-matching the original rather than rejecting every repeated selector pair.
-The pinned image has seven rules and loads successfully, including its repeated
-platform/vendor global selector. Policy sets with 32 or more rules explicitly
-fail until the merging path is implemented (#838); no partial policy is
-published. All 351 units pass (3.07s). The 572-parcel original-runtime oracle
+from missing metadata. Ordering now follows the full pinned Java TimSort
+comparison sequence, including run-stack collapse, low/high merges and adaptive
+galloping. Duplicate detection occurs on compared pairs, matching the original
+rather than rejecting every repeated selector pair. The prior 32-rule limit is
+removed; large policy sets preserve specificity and acceptance. All 353 regular
+units pass (3.13s), with the input-dependent TimSort oracle separately executed:
+it passes (12.59s), comparing exact sorted indices and every comparator pair for
+128 original-libcore inputs of 0–4096 elements, using binary policy keys and
+17-way keys. Shared fixture cleanup confirms owned process/mount release. The
+native TimSort port retains GPLv2 with the Classpath exception and its upstream
+notices/provenance; independent native code remains under its existing terms.
+The pinned image's seven rules load successfully, including its repeated
+platform/vendor global selector; no partial policy is published on errors. The 572-parcel original-runtime oracle
 passes (19.59s), comparing policy load success and assignments for actual
 native-collected framework/GSF objects with original SELinuxMMAC. Oracle classes
 link against the original image (2.94s); device-services remains fresh. The
 original utility's static-only compile declaration is fixture-local, and every
 actual fixture reference is checked against the image before boot. This policy
 has not yet populated the native scan/Java PackageState graph; compatibility,
-shared UID SDK ownership, larger-policy sorting and publication remain #838/#836.
+shared UID SDK ownership and publication remain #838/#836.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

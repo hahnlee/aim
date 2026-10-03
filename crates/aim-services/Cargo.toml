@@ -1,5 +1,5 @@
 [package]
-license.workspace = true
+license = "Apache-2.0 AND (GPL-2.0-only WITH Classpath-exception-2.0)"
 name = "aim-services"
 version = "0.1.0"
 edition = "2024"
