@@ -427,8 +427,11 @@ build paths now check references against the original boot classpath and the
 client's explicit services.jar before starting a guest (#830). A separate
 all-oracle compilation/linkage test passes (2.83s), and a JDK API regression
 accepts original readAllBytes but rejects unavailable readString(Path) without
-launching the runtime (1.96s). The combined original fixture passes through the
-new preflight (19.31s). The failed oracle previously exposed original crash
+launching the runtime (1.96s). All six original-runtime fixture paths pass through
+preflight: combined manifest/keyset/removal/keystore (19.31s), UID allocation
+(148.77s), new settings (83.96s), public keys/signing (15.12s), resource XML
+(16.94s), and saved package scan (379.44s). Their owned process/mount cleanup
+checks pass. The failed oracle previously exposed original crash
 reporting's Binder EBADF, still unresolved (#831).
 Native query snapshots now own AppsFilter's ordinary and update-retained
 interaction grants (#724). Full recipient/visible UIDs preserve direction and
