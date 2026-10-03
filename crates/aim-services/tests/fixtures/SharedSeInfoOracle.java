@@ -29,8 +29,15 @@ public final class SharedSeInfoOracle {
         check(group, 10000);
         group.addPackage(absent); group.addPackage(a); check(group, 10000);
         group.fixSeInfoLocked(); check(group, 36);
+        if (!"default:targetSdkVersion=36".equals(((com.android.server.pm.pkg.PackageState)a).getSeInfo())) {
+            throw new AssertionError("original boot seInfo label");
+        }
         group.addPackage(b); check(group, 36);
         group.fixSeInfoLocked(); check(group, 28);
+        if (!"default:targetSdkVersion=28".equals(((com.android.server.pm.pkg.PackageState)a).getSeInfo())
+                || !((com.android.server.pm.pkg.PackageState)a).getSeInfo().equals(((com.android.server.pm.pkg.PackageState)b).getSeInfo())) {
+            throw new AssertionError("original shared boot label agreement");
+        }
         group.addPackage(c); check(group, 28);
         group.removePackage(b); check(group, 28);
         group.removePackage(a); group.removePackage(absent); group.removePackage(c); check(group, 28);

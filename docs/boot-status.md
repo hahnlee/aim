@@ -319,7 +319,8 @@ native-collected framework/GSF objects with original SELinuxMMAC. Oracle classes
 link against the original image (2.94s); device-services remains fresh. The
 original utility's static-only compile declaration is fixture-local, and every
 actual fixture reference is checked against the image before boot. This policy
-has not yet populated the native scan/Java PackageState graph. Native shared
+has a native boot-assignment phase but has not populated Java PackageState
+replicas. Native shared
 UID ownership now retains the original seInfo target SDK lifetime: initial
 CUR_DEVELOPMENT, first parsed-member admission, boot minimum over actual active
 code, and no recomputation on runtime additions/removals. An explicit boot
@@ -341,8 +342,23 @@ test verifies cache framing, the returned SDK and owner-denial propagation
 (0.03s); all 355 regular units pass (3.12s), all oracle references link (2.86s),
 and device-services passes production image API checking (13.8s). This new
 method has not been called by actual SystemServer bootstrap, nor compared with
-live original compatibility decisions. Bootstrap invocation, label assignment
-and replica publication remain #838/#836/#798.
+live original compatibility decisions. Native `assign_seinfo_at_boot` now
+finalizes shared SDKs on a detached candidate and composes every loaded active
+package's label from its collected signing, original setting privilege and
+partition flags, and either the shared SDK or an explicit compatibility-owner
+result. All queries complete before changing SDKs or labels. Absent assignments
+return an explicit unfinished-phase error; only the caller's explicit unread
+policy uses the original default label. Assignments retain their input graph;
+changed code, UID membership or setting flags reject reads/publication until
+the owning phase resolves them. Old captures retain their labels after a new
+version is published. All 356 units pass (3.10s), checking failure atomicity,
+shared compatibility precedence, partition precedence, missing assignments,
+stale-input rejection and capture isolation. The original SharedUserSetting
+oracle also verifies boot label agreement and the lower-SDK adjustment
+(15.64s with snapshot/usage oracles). These are boot assignments only:
+runtime per-package base/override lifetime, live compatibility invocation,
+complete boot orchestration, label transport and Java replica restoration
+remain #838/#836/#798. Captures without this phase remain incomplete C state.
 The write/scan signature adapter now reads the parser's declared base and
 split APK paths rather than discovering files by a `base.apk` name. An
 original signed GSF APK verifies through nonstandard base/split guest

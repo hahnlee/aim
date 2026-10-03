@@ -43,6 +43,7 @@ pub struct SigningScan {
     pub(super) loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) pending_metadata: BTreeSet<String>,
+    pub(super) seinfo: Option<super::seinfo::Assignments>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -428,6 +429,7 @@ impl SigningScan {
             loaded: BTreeMap::new(),
             disabled_loaded: BTreeMap::new(),
             pending_metadata: BTreeSet::new(),
+            seinfo: None,
             first_api_level,
             parsed: Vec::new(),
         })
@@ -1201,6 +1203,35 @@ mod tests {
             before.identities.shared_users["android.uid.system"].seinfo_target_sdk(),
             10000
         );
+        assert_eq!(owner.seinfo("active"), Err("seInfo is not assigned".into()));
+        let policy = crate::package::owner::seinfo::Policy::unread();
+        owner
+            .assign_seinfo_at_boot(&policy, &mut |_| {
+                panic!("nonempty shared UID must not query compatibility")
+            })
+            .unwrap();
+        assert_eq!(
+            owner.seinfo("active").unwrap(),
+            Some("default:privapp:targetSdkVersion=35")
+        );
+        assert_eq!(owner.seinfo("absent").unwrap(), None);
+        let captured = owner.clone();
+        owner.settings.packages[0].private_flags = 8;
+        assert_eq!(
+            owner.seinfo("active"),
+            Err("seInfo inputs changed since assignment".into())
+        );
+        assert_eq!(
+            captured.seinfo("active").unwrap(),
+            Some("default:privapp:targetSdkVersion=35")
+        );
+        owner
+            .assign_seinfo_at_boot(&policy, &mut |_| panic!("shared UID"))
+            .unwrap();
+        assert_eq!(
+            owner.seinfo("active").unwrap(),
+            Some("default:privapp:targetSdkVersion=35")
+        );
     }
 
     #[test]
@@ -1283,13 +1314,35 @@ mod tests {
         let mut usage = crate::package::owner::usage::Usage::new(["fixture"]);
         usage.notify("fixture", 0, 17);
         usage.notify("fixture", 2, 29);
+        let policy = crate::package::owner::seinfo::Policy::unread();
+        owner
+            .assign_seinfo_at_boot(&policy, &mut |_| Ok(30))
+            .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
+        let mut stale = owner.clone();
+        stale.settings.packages[0].private_flags = 8;
+        assert!(matches!(
+            store.publish(&base, stale, base.usage().clone()),
+            Err(crate::package::scan_snapshot::Error::Invalid(_))
+        ));
+        assert!(Arc::ptr_eq(&base, &store.capture()));
         let old = Arc::downgrade(&base);
         let endpoint = Arc::new(Endpoint::new(base.clone()));
         let mut changed_usage = base.usage().clone();
         changed_usage.notify("fixture", 0, 99);
-        store.publish(&base, owner, changed_usage).unwrap();
+        owner
+            .assign_seinfo_at_boot(&policy, &mut |_| Ok(10000))
+            .unwrap();
+        let current = store.publish(&base, owner, changed_usage).unwrap();
+        assert_eq!(
+            current.owner().seinfo("fixture").unwrap(),
+            Some("default:targetSdkVersion=10000")
+        );
+        assert_eq!(
+            base.owner().seinfo("fixture").unwrap(),
+            Some("default:targetSdkVersion=30")
+        );
         drop(base);
         let driver = Driver::new();
         let open = |pid, euid| {
