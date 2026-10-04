@@ -2,6 +2,10 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("original-setting")) {
+            originalSetting();
+            return;
+        }
         if (args.length != 0 && args[0].equals("final-flags")) {
             byte[] cache = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1]));
             for (boolean factory : new boolean[] {false, true}) {
@@ -234,6 +238,73 @@ public final class NewSettingOracle {
                 }
             }
         }
+    }
+
+    private static void originalSetting() {
+        int cases = 0;
+        for (boolean oldShared : new boolean[] {false, true}) {
+            for (boolean newShared : new boolean[] {false, true}) {
+                var original = member("fixture.original", 1, 0).setAppId(10003)
+                    .setPrimaryCpuAbi("armeabi-v7a").setSecondaryCpuAbi("x86")
+                    .setLegacyNativeLibraryPath("/system/old-lib");
+                if (oldShared) original.setSharedUserAppId(10003);
+                original.getOrCreateUserState(10).setInstalled(false).setStopped(true)
+                    .setNotLaunched(true).setHidden(true);
+                var signatures = new android.content.pm.SigningDetails(
+                    new android.content.pm.Signature[] {}, 1,
+                    new android.util.ArraySet<java.security.PublicKey>(), null);
+                original.setSigningDetails(signatures);
+                SharedUserSetting group = null;
+                if (newShared) {
+                    group = new SharedUserSetting("fixture.new-group", 0, 0);
+                    group.mAppId = 10004;
+                }
+                var adopted = Settings.createNewSetting("fixture.incoming", original, null,
+                    null, group, new java.io.File("/system/nonexistent/new"),
+                    null, null, null, 0x100000002L, 1, 8, null, true, true, true,
+                    true, null, new String[] {"sdk"}, new long[] {9},
+                    new boolean[] {true}, new String[] {"static"}, new long[] {7},
+                    java.util.Set.of("incoming.mime"), new java.util.UUID(0, 1), 36,
+                    new byte[] {1, 2});
+                if (!adopted.getPackageName().equals("fixture.original")
+                        || !adopted.getRealName().equals("fixture.incoming")
+                        || adopted.getAppId() != 10003 || adopted.hasSharedUser() != oldShared
+                        || adopted.getPrimaryCpuAbiLegacy() != null
+                        || adopted.getSecondaryCpuAbiLegacy() != null
+                        || adopted.getLegacyNativeLibraryPath() != null
+                        || adopted.getVersionCode() != 0x100000002L
+                        || !java.util.Objects.equals(adopted.getMimeGroups(), original.getMimeGroups())
+                        || adopted.getSigningDetails() != android.content.pm.SigningDetails.UNKNOWN
+                        || adopted.getInstalled(10) || !adopted.readUserState(10).isStopped()
+                        || !adopted.readUserState(10).isNotLaunched()
+                        || adopted.getInstantApp(10) || adopted.getVirtualPreload(10)
+                        || adopted.readUserState(10) != original.readUserState(10)) {
+                    throw new AssertionError("original constructor ownership: "
+                        + oldShared + " -> " + newShared + ": " + adopted.getPackageName()
+                        + "/" + adopted.getRealName() + " uid=" + adopted.getAppId()
+                        + " shared=" + adopted.hasSharedUser() + " abi=" + adopted.getPrimaryCpuAbiLegacy()
+                        + "/" + adopted.getSecondaryCpuAbiLegacy() + " native=" + adopted.getLegacyNativeLibraryPath()
+                        + " version=" + adopted.getVersionCode() + " mime=" + adopted.getMimeGroups()
+                        + " unknown=" + (adopted.getSigningDetails() == android.content.pm.SigningDetails.UNKNOWN)
+                        + " installed=" + adopted.getInstalled(10) + " stopped=" + adopted.readUserState(10).isStopped()
+                        + " notLaunched=" + adopted.readUserState(10).isNotLaunched()
+                        + " instant=" + adopted.getInstantApp(10) + " virtual=" + adopted.getVirtualPreload(10));
+                }
+                adopted.getOrCreateUserState(10).setInstalled(true).setStopped(false);
+                adopted.getOrCreateUserState(11).setInstalled(false);
+                if (!original.getInstalled(10) || original.readUserState(10).isStopped()
+                        || !original.getInstalled(11)
+                        || original.getSigningDetails() != signatures
+                        || !original.getPrimaryCpuAbiLegacy().equals("armeabi-v7a")
+                        || !original.getSecondaryCpuAbiLegacy().equals("x86")
+                        || !original.getLegacyNativeLibraryPath().equals("/system/old-lib")
+                        || original.getVersionCode() != 1L || original.getRealName() != null) {
+                    throw new AssertionError("adoption source metadata or user alias differs");
+                }
+                cases++;
+            }
+        }
+        System.out.println("original setting adoption contracts: " + cases + " cases");
     }
 
     private static PackageSetting member(String name, int flags, int privateFlags) {

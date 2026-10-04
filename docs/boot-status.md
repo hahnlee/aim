@@ -957,8 +957,18 @@ selected pair and rejects a changed parsed name. The original Android parcel
 oracle passes (24.29s), comparing original PackageSetting.setPkg with restoration
 of known and UNKNOWN code under a different setting name, plus scope/version/name
 rejections (including a foreign factory UID) and exact frame roundtrips.
-Shared-UID replacement, complete request execution parity and transfer publication
-outside the scan owner remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
+An original ART constructor oracle now exercises Settings.createNewSetting with
+all four independent/shared original and null/shared target-group combinations.
+It verifies that the original branch retains the source UID/shared owner even
+when a different target group is passed, preserves existing user states without
+applying new-install instant/preload flags, resets its signature wrapper to
+UNKNOWN and replaces its ABI/path/version metadata without changing the source
+metadata. Existing per-user state objects remain aliased to the original;
+mutations propagate to that instance. The full setting/helper comparison passes
+(68.15s). Ordinary scan admission does not yet retain the prior setting instance
+and its user aliases (#927); the APEX retained-instance owner already has alias
+support. Shared-UID replacement, complete request execution parity and transfer
+publication outside the scan owner remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime

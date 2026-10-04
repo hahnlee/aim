@@ -21,7 +21,21 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires aimctl, the pinned derived image, JDK and d8; run explicitly"]
 fn new_settings_match_the_original_runtime() {
-    let dir = std::env::temp_dir().join(format!("aim-setting-{}", std::process::id()));
+    compare_new_settings(false);
+}
+
+#[test]
+#[ignore = "requires aimctl, the pinned derived image, JDK and d8; run explicitly"]
+fn original_setting_adoption_matches_the_original_runtime() {
+    compare_new_settings(true);
+}
+
+fn compare_new_settings(original_only: bool) {
+    let dir = std::env::temp_dir().join(format!(
+        "aim-setting-{}-{}",
+        original_only,
+        std::process::id()
+    ));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
@@ -94,6 +108,37 @@ fn new_settings_match_the_original_runtime() {
         boot.data.join("data/local/tmp/new-setting.dex"),
     )
     .unwrap();
+    let adoption = boot
+        .command()
+        .args([
+            "shell",
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+            "/system/bin",
+            "com.android.server.pm.NewSettingOracle",
+            "original-setting",
+        ])
+        .output()
+        .unwrap();
+    if !adoption.status.success() {
+        let logs = run(boot.command().args(["shell", "logcat", "-d", "-t", "200"]));
+        panic!(
+            "original adoption: {}\n{}\n{}",
+            adoption.status,
+            String::from_utf8_lossy(&adoption.stderr),
+            String::from_utf8_lossy(&logs.stdout)
+        );
+    }
+    assert_eq!(
+        String::from_utf8(adoption.stdout).unwrap(),
+        "original setting adoption contracts: 4 cases\n"
+    );
+    eprintln!(
+        "original setting creation preserves source identity across four shared-UID arguments"
+    );
+    if original_only {
+        return;
+    }
     let original_groups = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
