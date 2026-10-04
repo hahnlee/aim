@@ -33,6 +33,10 @@ fn native_package_parcels_match_original_read_write() {
         .args(sources(
             &aim_paths::root().join("java/device-services/stubs"),
         ))
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/api/PackageBootstrapBridge.java"),
+        )
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java")));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
@@ -182,6 +186,11 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/PackageMigrationPolicyOracle.java"),
+        )
+        .arg(common::java::bootstrap_aidl(&data.0))
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();
@@ -214,7 +223,10 @@ fn native_package_parcels_match_original_read_write() {
         .args(class_files));
     common::java::check_linkage(
         &dex.join("classes.dex"),
-        &["/system/framework/services.jar"],
+        &[
+            "/system/framework/services.jar",
+            "/system/framework/aim-services.jar",
+        ],
     )
     .unwrap();
     let boot = Boot {
@@ -1320,13 +1332,45 @@ fn native_package_parcels_match_original_read_write() {
         domain_counter.set(value + 1);
         Ok([value; 16])
     };
+    let policy_classpath = "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar";
+    let policy_output = run(boot.client(1000).args([
+        "/system/bin/app_process",
+        policy_classpath,
+        "/system/bin",
+        "dev.aim.server.PackageMigrationPolicyOracle",
+        "/data/local/tmp/package-parcels",
+    ]));
+    let bytes = fs::read(directory.join("migration-policy.original")).unwrap();
+    let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+    let best_effort = aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_shared_uid_migration_best_effort_reply(&mut reader).unwrap().unwrap();
+    assert_eq!(reader.remaining(), 0);
+    assert_eq!(
+        String::from_utf8(policy_output.stdout).unwrap(),
+        format!("MIGRATION_POLICY {}\n", i32::from(best_effort))
+    );
+    let migration_policy = if best_effort {
+        aim_services::package::scan::SharedUidMigration::BestEffort
+    } else {
+        aim_services::package::scan::SharedUidMigration::NewInstallOnly
+    };
+    let denied = run(boot.client(2000).args([
+        "/system/bin/app_process",
+        policy_classpath,
+        "/system/bin",
+        "dev.aim.server.PackageMigrationPolicyOracle",
+        "/data/local/tmp/package-parcels",
+    ]));
+    assert_eq!(
+        String::from_utf8(denied.stdout).unwrap(),
+        "MIGRATION_POLICY_DENIED\n"
+    );
     let scan_inputs = |image| aim_services::package::scan::FirstBootSystemInputs {
         seinfo: common::seinfo::scan(),
         apex_image: image,
         notify_apex_scan: &|_| Err("direct APEX phase does not notify".into()),
         first_api_level: 36,
         vendor_sdk: 36,
-        shared_uid_migration: aim_services::package::scan::SharedUidMigration::NewInstallOnly,
+        shared_uid_migration: migration_policy,
         abi_policy: &abi,
         compatibility: &compatibility,
         preferred_abi: "arm64-v8a",
@@ -1491,6 +1535,8 @@ fn native_package_parcels_match_original_read_write() {
     leaving_image.packages[0].parsed.booleans |=
         aim_services::package::pkg::booleans::LEAVING_SHARED_UID;
     let mut leaving_inputs = scan_inputs(&leaving_image);
+    leaving_inputs.shared_uid_migration =
+        aim_services::package::scan::SharedUidMigration::NewInstallOnly;
     leaving_inputs.seinfo.policy = &unread;
     leaving_inputs.seinfo.compatibility = &shared_compatibility;
     let mut not_migrated = shared_without_factory.clone();

@@ -60,6 +60,13 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public boolean isSharedUidMigrationBestEffort() {
+        enforceSystemUid();
+        // android-16.0.0_r1 SharedUidMigration.BEST_EFFORT.
+        return com.android.server.pm.SharedUidMigration.applyStrategy(2);
+    }
+
+    @Override
     public boolean isTestBaseOnBootclasspath() {
         enforceSystemUid();
         return PackageBackwardCompatibility.bootClassPathContainsATB();

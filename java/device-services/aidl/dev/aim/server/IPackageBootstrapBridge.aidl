@@ -17,4 +17,6 @@ interface IPackageBootstrapBridge {
     byte[] getApexBootInventory();
     /** Completed native containers delivered to original ApexManager before APK scanning. */
     void notifyApexScanResults(in byte[] scanResults);
+    /** Original SharedUidMigration.applyStrategy(BEST_EFFORT) decision. */
+    boolean isSharedUidMigrationBestEffort();
 }

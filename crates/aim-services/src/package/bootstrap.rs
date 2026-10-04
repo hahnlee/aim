@@ -78,7 +78,33 @@ impl ScanUsers {
     }
 }
 
+fn read_shared_uid_migration(
+    reader: &mut aim_binder_host::parcel::Reader<'_>,
+) -> Result<super::scan::SharedUidMigration, OwnerError> {
+    let best_effort = bridge::read_is_shared_uid_migration_best_effort_reply(reader)
+        .map_err(OwnerError::Transport)?
+        .map_err(OwnerError::Owner)?;
+    if reader.remaining() != 0 {
+        return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+    }
+    Ok(if best_effort {
+        super::scan::SharedUidMigration::BestEffort
+    } else {
+        super::scan::SharedUidMigration::NewInstallOnly
+    })
+}
+
 impl Bridge {
+    pub fn shared_uid_migration(&self) -> Result<super::scan::SharedUidMigration, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::IsSharedUidMigrationBestEffort {}.write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::IS_SHARED_UID_MIGRATION_BEST_EFFORT, &data, false)
+            .map_err(OwnerError::Transport)?;
+        read_shared_uid_migration(&mut reply.reader())
+    }
+
     pub fn notify_apex_scan(
         &self,
         results: &[super::scan::ApexScanResult],
@@ -294,6 +320,49 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn migration_policy_reply_preserves_owner_failure_and_rejects_truncation_or_tails() {
+        use super::super::scan::SharedUidMigration;
+        for (enabled, expected) in [
+            (false, SharedUidMigration::NewInstallOnly),
+            (true, SharedUidMigration::BestEffort),
+        ] {
+            let mut reply = Parcel::new();
+            reply.write_no_exception();
+            reply.write_bool(enabled);
+            assert_eq!(
+                read_shared_uid_migration(&mut aim_binder_host::parcel::Reader::new(
+                    reply.data(),
+                    reply.objects()
+                ))
+                .unwrap(),
+                expected
+            );
+            reply.write_i32(0);
+            assert!(matches!(
+                read_shared_uid_migration(&mut aim_binder_host::parcel::Reader::new(
+                    reply.data(),
+                    reply.objects()
+                )),
+                Err(OwnerError::Transport(_))
+            ));
+        }
+        let mut missing = Parcel::new();
+        missing.write_no_exception();
+        assert!(matches!(
+            read_shared_uid_migration(&mut aim_binder_host::parcel::Reader::new(
+                missing.data(),
+                missing.objects()
+            )),
+            Err(OwnerError::Transport(_))
+        ));
+        let mut denied = Parcel::new();
+        denied.write_exception(&Exception::security("policy caller denied"));
+        assert!(
+            matches!(read_shared_uid_migration(&mut aim_binder_host::parcel::Reader::new(denied.data(), denied.objects())), Err(OwnerError::Owner(e)) if e.message == "policy caller denied")
+        );
+    }
+
     #[test]
     fn original_scan_users_distinguish_missing_owner_and_reject_invalid_frames() {
         let frame = |words: &[i32]| {

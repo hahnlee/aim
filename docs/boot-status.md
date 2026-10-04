@@ -583,9 +583,21 @@ positive disabled appId only alongside its negative non-shared active container
 and a leaving declaration. Original Settings.isSingleUser, conversion and
 registration agree for no factory, leaving/non-leaving factories and a second
 saved member without parsed code. The original conversion also preserves populated
-legacy permissions and fixed bits. Image-policy handoff to this required input
-remains under #898/#836; captured legacy constructor owners for fresh/group-changing
-scans remain #899/#889. Original/renamed identity adoption remains #890. First shared code uses the supplied
+legacy permissions and fixed bits. The system-UID-guarded bootstrap bridge now
+exports the actual original SharedUidMigration.applyStrategy(BEST_EFFORT) decision
+through generated AIDL (#898), and the native client rejects transport/owner errors,
+truncated replies and trailing data. The original ART oracle makes a generated
+Binder transaction against the actual derived bridge as UID 1000, compares its
+reply with the original policy owner, decodes the original frame natively and
+supplies that decision to the required APEX scan input. UID 2000 is denied; no
+migration property is changed. The policy and four native conversion cases pass
+in 32.57s; 437 service units pass (one ignored/not run), and the constructor
+resolution unit passes. The checked image/template build passes in 63.2s, followed
+by a 2.2s host rebuild after constructor resolution was tightened (#900).
+Compile-only private constructors are accepted only for image classes with no
+constructors; executable constructor references resolve on their own class, never
+an ancestor. Full daemon boot orchestration/publication remains #836/#885; captured
+legacy constructor owners for fresh/group-changing scans remain #899/#889. Original/renamed identity adoption remains #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
