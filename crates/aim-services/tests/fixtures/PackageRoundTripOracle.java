@@ -10,6 +10,17 @@ public final class PackageRoundTripOracle {
         }
     }
 
+    private static void verifyApexScanPolicy(java.io.File file) throws Exception {
+        var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+            PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
+        int systemVendor = (1 << 16) | (1 << 19);
+        com.android.server.pm.ScanPackageUtils.applyPolicy(pkg, systemVendor | (1 << 26), null, false);
+        java.nio.file.Files.write(new java.io.File(file.getPath() + ".apex-package-policy").toPath(), PackageCacher.toCacheEntryStatic(pkg));
+        // An APK in an active APEX must clear a previous APEX package classification.
+        com.android.server.pm.ScanPackageUtils.applyPolicy(pkg, systemVendor | (1 << 23), null, false);
+        java.nio.file.Files.write(new java.io.File(file.getPath() + ".apk-in-apex-policy").toPath(), PackageCacher.toCacheEntryStatic(pkg));
+    }
+
     private static void verifyOriginalScanUsers(java.io.File directory) throws Exception {
         var users = new java.util.ArrayList<android.content.pm.UserInfo>();
         for (int id : new int[] {0, 10, 11, 12}) {
@@ -244,6 +255,7 @@ public final class PackageRoundTripOracle {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
             if (file.getName().startsWith("scan-")) {
+                verifyApexScanPolicy(file);
                 verifyMutableCode(java.nio.file.Files.readAllBytes(file.toPath()));
                 verifySnapshot(file, pkg.getPackageName(), pkg.getUid());
                 int uid = Integer.parseInt(file.getName().substring(5, file.getName().indexOf('.')));

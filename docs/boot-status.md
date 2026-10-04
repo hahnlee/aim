@@ -1163,7 +1163,12 @@ overlay directories in reverse partition order, the framework, then each
 partition's priv-app/app directories and active APEX directories in the
 owner's reported order. Records retain the partition, privilege and
 factory/changed APEX origin; duplicate package names are preserved for
-reconciliation. Unsupported parser behavior and signature failures abort
+reconciliation. An APK inside an APEX retains its origin partition and
+PARSE_APK_IN_APEX without being classified as the APEX package itself (#880).
+Only explicit APEX-package scan policy sets that classification. A regression
+checks both setting and clearing it; the original ART PackageImpl/applyPolicy
+oracle confirms the same distinction (19.51s). The 425 native unit tests pass
+(3.12s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
 the candidate; invalid directory candidates retain their rejection reason,
 and a missing framework package fails. On a disposable original-PMS boot
 (2026-10-02, boot completed), all 243 image APK candidates parsed and

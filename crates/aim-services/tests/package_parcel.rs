@@ -1125,6 +1125,19 @@ fn native_package_parcels_match_original_read_write() {
     aim_services::package::scan_snapshot::Store::new(imported, snapshot.usage().clone()).unwrap();
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            for (suffix, apex) in [("apex-package-policy", true), ("apk-in-apex-policy", false)] {
+                let policy = AndroidPackage::read_cache_entry(
+                    &fs::read(directory.join(format!("{name}.{suffix}"))).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    policy.is2(aim_services::package::pkg::booleans2::APEX),
+                    apex
+                );
+                assert!(policy.is(aim_services::package::pkg::booleans::SYSTEM));
+                assert!(policy.is(aim_services::package::pkg::booleans::VENDOR));
+            }
+
             assert_eq!(
                 fs::read(directory.join(format!("{name}.mime-feed-original"))).unwrap(),
                 fs::read(directory.join(format!("{name}.mime-feed-native"))).unwrap()

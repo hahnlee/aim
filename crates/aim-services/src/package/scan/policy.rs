@@ -70,7 +70,7 @@ impl ScanPolicy {
             product: location.partition == Partition::Product,
             system_ext: location.partition == Partition::SystemExt,
             odm: location.partition == Partition::Odm,
-            apex: location.apex.is_some(),
+            apex: false,
         }
     }
 
@@ -279,6 +279,38 @@ mod tests {
             adopt_permissions: vec!["old".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn apk_in_apex_keeps_partition_policy_without_becoming_an_apex_package() {
+        let location = Location {
+            path: "/apex/module/app/p".into(),
+            partition: Partition::Vendor,
+            kind: super::super::Kind::App,
+            apex: Some(super::super::Apex {
+                mount_path: "/apex/module".into(),
+                partition: Partition::Vendor,
+                factory: false,
+                active_changed: true,
+            }),
+        };
+        let policy = ScanPolicy::for_location(&location);
+        assert!(policy.system && policy.vendor && !policy.apex);
+        assert_eq!(
+            location.parse_flags(),
+            crate::package::parse::PARSE_IS_SYSTEM_DIR | crate::package::parse::PARSE_APK_IN_APEX
+        );
+        let mut pkg = manifest();
+        pkg.booleans2 |= b2::APEX;
+        policy.apply_components(&mut pkg, &signer(&[1]), None, false, false);
+        assert!(pkg.is(b::SYSTEM | b::VENDOR));
+        assert!(!pkg.is2(b2::APEX));
+        ScanPolicy {
+            apex: true,
+            ..policy
+        }
+        .apply_components(&mut pkg, &signer(&[1]), None, false, false);
+        assert!(pkg.is2(b2::APEX));
     }
 
     #[test]
