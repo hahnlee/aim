@@ -847,28 +847,36 @@ missing base/split APKs and a directory base with target SDKs 28/30/36 and both
 verification modes. Mapped signing-source open failures now return package
 INSTALL_PARSE_FAILED_NO_CERTIFICATES (-103); absent native mappings remain fatal
 owner errors. A disposable data scan fixture confirms rejection cleans the outer
-scan path and recovers its retained system factory (7.30s). Complete
+scan path and recovers its retained system factory (7.40s). The fixture now
+parses the real data inventory, removes its owned base APK symlink, then submits
+the uncollected inventory to the sequential owner. Complete
 signatures, lineage flags and public-key serialization class/byte hashes agree
 in the AppIds/signing oracle (27.98s). Explicit Image/DataImage::load_collected
 entry points now consume the collection choice before reconciliation; their
 scan partition fixes the permitted skipVerify input. Immutable original system
 and data scan fixtures retain cached flags 41 and preserve paths/rejections
-(0.61s and 0.35s); mismatched skipVerify/partition inputs reject.
+(0.57s and 0.39s); mismatched skipVerify/partition inputs reject. DataImage::parse
+returns Code<()> inputs without certificate verification. The original boot
+bridge's data phase uses these inputs and collects signing only after selecting
+the current setting and volume owner. Only Code<SigningDetails> exposes collected
+package conversion. Parsed and verified inventories agree on paths, locations,
+rejections and complete parsed packages in the immutable-image fixture.
 The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (7.27s), including settings commit
-and reopening the persisted owner. Updated-system source decisions still need collection at their
-original stages; upstream code inputs still verify afresh before sequential
-selection, so parse/verification timing remains incomplete (#918). Adoption
+commit. The first-system scan fixture passes (7.40s), including settings commit
+and reopening the persisted owner. Updated-system source decisions still need
+collection at their original stages; system inputs still verify afresh before
+sequential selection, so system parse/verification timing remains incomplete
+(#918). Adoption
 when both incoming and original settings exist remains #919. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs (46.89s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only data inputs (57.44s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

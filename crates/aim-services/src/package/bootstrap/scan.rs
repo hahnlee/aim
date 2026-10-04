@@ -167,7 +167,7 @@ impl BootOwners<'_> {
         policy: ScanPolicy<'_>,
         data: DataBootInputs<'_>,
     ) -> Result<crate::package::scan::DataImagePackages, BootError> {
-        let image = crate::package::scan::DataImage::load(apks, data.volumes)
+        let image = crate::package::scan::DataImage::parse(apks, data.volumes)
             .map_err(|error| BootError::Scan(SigningError::Rejected(error)))?;
         let remove_test_base = |package: &crate::package::pkg::AndroidPackage, system| {
             self.bridge
@@ -180,7 +180,7 @@ impl BootOwners<'_> {
                 .map_err(|error| format!("original domain owner: {error:?}"))
         };
         owner
-            .scan_data_image(
+            .scan_parsed_data_image(
                 image,
                 apks,
                 crate::package::scan::DataImageScanInputs {

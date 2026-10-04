@@ -78,7 +78,7 @@ pub use uids::{Uid, UidScan};
 pub struct Record {
     pub settings: settings::Package,
     pub parsed: AndroidPackage,
-    /// Integrity-verified collected code, before saved/shared-UID reconciliation.
+    /// Collected code signing, before saved/shared-UID reconciliation.
     pub signing: sign::SigningDetails,
     pub identity: Identity,
     pub origin: ScanOrigin,

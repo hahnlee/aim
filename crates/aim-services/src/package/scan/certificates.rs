@@ -17,9 +17,9 @@ pub struct CertificateScanPolicy {
 impl SigningScan {
     /// Resolve the current setting and volume owner immediately before the
     /// next initial-scan collection. Earlier package/version effects remain.
-    pub fn collect_initial_code(
+    pub fn collect_initial_code<S>(
         &mut self,
-        code: &Code,
+        code: &Code<S>,
         apks: &Apks,
         policy: CertificateScanPolicy,
     ) -> Result<Code, SigningError> {

@@ -1935,6 +1935,14 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
     };
     let image = DataImage::load(&apks, &["volume".into()]).unwrap();
     assert_eq!(image.packages.len(), 2);
+    let parsed = DataImage::parse(&apks, &["volume".into()]).unwrap();
+    assert_eq!(parsed.packages.len(), image.packages.len());
+    assert_eq!(parsed.rejected, image.rejected);
+    for (parsed, collected) in parsed.packages.iter().zip(&image.packages) {
+        assert_eq!(parsed.scan_path, collected.scan_path);
+        assert_eq!(parsed.code.location, collected.code.location);
+        assert_eq!(parsed.code.parsed, collected.code.parsed);
+    }
     let saved: Vec<_> = image
         .packages
         .iter()

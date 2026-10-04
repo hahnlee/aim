@@ -84,12 +84,13 @@ impl Location {
 }
 
 #[derive(Clone, Debug)]
-/// Parsed code with collected signing before scan identity is applied.
+/// Parsed code before scan identity is applied. The signing type distinguishes
+/// uncollected inputs (`()`) from collected SigningDetails.
 /// Record.parsed has already been renamed and must not be reused here.
-pub struct Code {
+pub struct Code<S = sign::SigningDetails> {
     pub location: Location,
     pub parsed: AndroidPackage,
-    pub signing: sign::SigningDetails,
+    pub signing: S,
 }
 
 impl Code {
@@ -110,11 +111,11 @@ pub struct Rejected {
     pub reason: String,
 }
 
-#[derive(Debug, Default)]
-pub struct Image {
+#[derive(Debug)]
+pub struct Image<S = sign::SigningDetails> {
     /// Scan order is significant for reconciliation and declarations;
     /// names are not deduplicated before the owner selects a package.
-    pub packages: Vec<Code>,
+    pub packages: Vec<Code<S>>,
     pub rejected: Vec<Rejected>,
 }
 
@@ -122,7 +123,11 @@ impl Image {
     /// Native parsing and full signature verification. No package feed,
     /// parser cache, settings, UID allocation or filesystem writes.
     pub fn load(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?, None).map(|(image, _)| image)
+        Self::load_directories(apks, directories(apexes)?, &|parsed, _| {
+            apks.checked_signing_details(parsed)
+                .map_err(|error| ("signatures", error))
+        })
+        .map(|(image, _)| image)
     }
 
     /// Ordered image inputs using the boot owner's certificate collection
@@ -135,17 +140,21 @@ impl Image {
             &Location,
         ) -> Result<CertificateCollection<'a>, String>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?, Some(collection)).map(|(image, _)| image)
+        Self::load_directories(apks, directories(apexes)?, &|parsed, location| {
+            collect(apks, parsed, location, collection)
+        })
+        .map(|(image, _)| image)
     }
 
-    fn load_directories<'a>(
+    fn load_directories<S>(
         apks: &Apks,
         directories: Vec<Location>,
-        collection: Option<
-            &dyn Fn(&AndroidPackage, &Location) -> Result<CertificateCollection<'a>, String>,
-        >,
-    ) -> Result<(Self, Vec<String>), Error> {
-        let mut image = Self::default();
+        signing: &dyn Fn(&AndroidPackage, &Location) -> Result<S, (&'static str, ApkSigningError)>,
+    ) -> Result<(Image<S>, Vec<String>), Error> {
+        let mut image = Image {
+            packages: Vec::new(),
+            rejected: Vec::new(),
+        };
         let mut scan_paths = Vec::new();
         for directory in directories {
             let fail = |path: &str, phase, message| Error {
@@ -227,22 +236,9 @@ impl Image {
                             format!("native parcel does not read: {e}"),
                         )
                     })?;
-                let signing = match if let Some(collection) = collection {
-                    let choice = collection(&parsed, &location)
-                        .map_err(|e| fail(&location.path, "certificates", e))?;
-                    if choice.skip_verify != (location.partition != Partition::Data) {
-                        return Err(fail(
-                            &location.path,
-                            "certificates",
-                            "verification choice disagrees with scan partition".into(),
-                        ));
-                    }
-                    apks.checked_collect_signing_details(&parsed, choice)
-                } else {
-                    apks.checked_signing_details(&parsed)
-                } {
+                let signing = match signing(&parsed, &location) {
                     Ok(signing) => signing,
-                    Err(ApkSigningError::Invalid(error))
+                    Err((_, ApkSigningError::Invalid(error)))
                         if location.partition == Partition::Data =>
                     {
                         image.rejected.push(Rejected {
@@ -251,8 +247,8 @@ impl Image {
                         });
                         continue;
                     }
-                    Err(reason) => {
-                        return Err(fail(&location.path, "signatures", reason.to_string()));
+                    Err((phase, reason)) => {
+                        return Err(fail(&location.path, phase, reason.to_string()));
                     }
                 };
                 if location.partition == Partition::Data {
@@ -291,15 +287,15 @@ impl Image {
 /// Physical data APK inventory before known-package validation or reconciliation.
 /// Rejections retain the outer scan path for the removal owner.
 #[derive(Debug)]
-pub struct DataCode {
+pub struct DataCode<S = sign::SigningDetails> {
     /// The outer file submitted by installPackagesFromDir, before descent.
     pub scan_path: String,
-    pub code: Code,
+    pub code: Code<S>,
 }
 
-#[derive(Debug, Default)]
-pub struct DataImage {
-    pub packages: Vec<DataCode>,
+#[derive(Debug)]
+pub struct DataImage<S = sign::SigningDetails> {
+    pub packages: Vec<DataCode<S>>,
     pub rejected: Vec<Rejected>,
 }
 
@@ -307,7 +303,10 @@ impl DataImage {
     /// Scan /data/app, then explicitly supplied mounted private volumes.
     /// Does not allocate UIDs, mutate settings or remove rejected candidates.
     pub fn load(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, None)
+        Self::load_directories(apks, volumes, &|parsed, _| {
+            apks.checked_signing_details(parsed)
+                .map_err(|error| ("signatures", error))
+        })
     }
 
     pub fn load_collected<'a>(
@@ -318,15 +317,25 @@ impl DataImage {
             &Location,
         ) -> Result<CertificateCollection<'a>, String>,
     ) -> Result<Self, Error> {
-        Self::load_directories(apks, volumes, Some(collection))
+        Self::load_directories(apks, volumes, &|parsed, location| {
+            collect(apks, parsed, location, collection)
+        })
     }
+}
 
-    fn load_directories<'a>(
+impl DataImage<()> {
+    /// Parse data candidates without opening their signing sources. Collection
+    /// follows current-setting selection in the sequential data scan owner.
+    pub fn parse(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
+        Self::load_directories(apks, volumes, &|_, _| Ok(()))
+    }
+}
+
+impl<S> DataImage<S> {
+    fn load_directories(
         apks: &Apks,
         volumes: &[String],
-        collection: Option<
-            &dyn Fn(&AndroidPackage, &Location) -> Result<CertificateCollection<'a>, String>,
-        >,
+        signing: &dyn Fn(&AndroidPackage, &Location) -> Result<S, (&'static str, ApkSigningError)>,
     ) -> Result<Self, Error> {
         let mut roots = vec!["/data/app".to_owned()];
         for volume in volumes {
@@ -363,7 +372,7 @@ impl DataImage {
                     apex: None,
                 })
                 .collect(),
-            collection,
+            signing,
         )?;
         Ok(Self {
             packages: image
@@ -375,6 +384,41 @@ impl DataImage {
             rejected: image.rejected,
         })
     }
+}
+
+impl<S> Default for Image<S> {
+    fn default() -> Self {
+        Self {
+            packages: Vec::new(),
+            rejected: Vec::new(),
+        }
+    }
+}
+impl<S> Default for DataImage<S> {
+    fn default() -> Self {
+        Self {
+            packages: Vec::new(),
+            rejected: Vec::new(),
+        }
+    }
+}
+
+fn collect<'a>(
+    apks: &Apks,
+    parsed: &AndroidPackage,
+    location: &Location,
+    collection: &dyn Fn(&AndroidPackage, &Location) -> Result<CertificateCollection<'a>, String>,
+) -> Result<sign::SigningDetails, (&'static str, ApkSigningError)> {
+    let choice = collection(parsed, location)
+        .map_err(|error| ("certificates", ApkSigningError::Input(error)))?;
+    if choice.skip_verify != (location.partition != Partition::Data) {
+        return Err((
+            "certificates",
+            ApkSigningError::Input("verification choice disagrees with scan partition".into()),
+        ));
+    }
+    apks.checked_collect_signing_details(parsed, choice)
+        .map_err(|error| ("signatures", error))
 }
 
 fn directories(apexes: &[Apex]) -> Result<Vec<Location>, Error> {

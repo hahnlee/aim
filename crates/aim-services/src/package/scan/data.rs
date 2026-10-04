@@ -81,6 +81,25 @@ impl SigningScan {
         apks: &Apks,
         inputs: DataImageScanInputs<'_>,
     ) -> Result<DataImagePackages, SigningError> {
+        self.scan_data_inputs(image, apks, inputs)
+    }
+
+    /// Collect each parsed candidate after selecting its current settings.
+    pub fn scan_parsed_data_image(
+        &mut self,
+        image: super::DataImage<()>,
+        apks: &Apks,
+        inputs: DataImageScanInputs<'_>,
+    ) -> Result<DataImagePackages, SigningError> {
+        self.scan_data_inputs(image, apks, inputs)
+    }
+
+    fn scan_data_inputs<S>(
+        &mut self,
+        image: super::DataImage<S>,
+        apks: &Apks,
+        inputs: DataImageScanInputs<'_>,
+    ) -> Result<DataImagePackages, SigningError> {
         let fatal = |package: String, path: String, phase, message| {
             SigningError::Fatal(Error {
                 package,
@@ -145,11 +164,12 @@ impl SigningScan {
                 incremental.insert(rejected.location.path.clone());
             }
         }
-        Self::clean_invalid_data_inputs(&image, inputs.resources, &incremental)?;
-        for mut entry in image.packages {
+        Self::clean_data_rejections(&image.rejected, inputs.resources, &incremental)?;
+        for entry in image.packages {
             let scan_incremental = (inputs.is_incremental)(&entry.scan_path)
                 .map_err(|e| fatal(String::new(), entry.scan_path.clone(), "incremental", e))?;
-            entry.code = match self.collect_initial_code(&entry.code, apks, inputs.certificates) {
+            let collected = match self.collect_initial_code(&entry.code, apks, inputs.certificates)
+            {
                 Ok(code) => code,
                 Err(error @ SigningError::Rejected(_)) => {
                     inputs
@@ -162,6 +182,10 @@ impl SigningScan {
                     continue;
                 }
                 Err(error) => return Err(error),
+            };
+            let entry = DataCode {
+                scan_path: entry.scan_path,
+                code: collected,
             };
             let code = &entry.code;
             let identity =
@@ -547,7 +571,15 @@ impl SigningScan {
         resources: &crate::package::owner::resources::CodeResources,
         incremental_paths: &BTreeSet<String>,
     ) -> Result<(), SigningError> {
-        for rejected in &image.rejected {
+        Self::clean_data_rejections(&image.rejected, resources, incremental_paths)
+    }
+
+    fn clean_data_rejections(
+        rejected: &[super::Rejected],
+        resources: &crate::package::owner::resources::CodeResources,
+        incremental_paths: &BTreeSet<String>,
+    ) -> Result<(), SigningError> {
+        for rejected in rejected {
             resources
                 .clean(
                     &rejected.location.path,

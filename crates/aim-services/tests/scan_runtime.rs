@@ -573,12 +573,12 @@ fn saved_scan_libraries_match_original_pms() {
         assert_eq!(candidate.record.settings.key_set_data, saved.key_set_data);
         assert_eq!(candidate.users, saved_users[&saved.name]);
     }
-    let data_image = aim_services::package::scan::DataImage::load(&apks, &[]).unwrap();
+    let data_image = aim_services::package::scan::DataImage::parse(&apks, &[]).unwrap();
     assert!(data_image.rejected.is_empty());
     assert_eq!(data_image.packages.len(), 3);
     let destinations = BTreeMap::new();
     let resumed_data = resumed
-        .scan_data_image(
+        .scan_parsed_data_image(
             data_image,
             &apks,
             aim_services::package::scan::DataImageScanInputs {

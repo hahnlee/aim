@@ -1076,8 +1076,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             };
             let mut data_loop = before.clone();
             let complete = data_loop
-                .scan_data_image(
-                    DataImage::load(&apks, &[]).unwrap(),
+                .scan_parsed_data_image(
+                    DataImage::parse(&apks, &[]).unwrap(),
                     &apks,
                     DataImageScanInputs {
                         certificates: Default::default(),
@@ -1303,24 +1303,12 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert!(data_code.exists());
             // A signing source lost after parsing rejects the data APK, cleans
             // its outer scan path and recovers the retained factory.
-            let mut missing_source = raw.clone();
-            missing_source.parsed.base_apk_path = Some(format!(
-                "{}/absent.apk",
-                raw.parsed.path.as_deref().unwrap()
-            ));
+            let missing_inventory = DataImage::parse(&apks, &[]).unwrap();
+            assert_eq!(missing_inventory.packages.len(), 1);
+            std::fs::remove_file(physical_data.join("base.apk")).unwrap();
             let mut missing_owner = before.clone();
             let missing = missing_owner
-                .scan_data_image(
-                    DataImage {
-                        packages: vec![DataCode {
-                            scan_path: valid_candidate.scan_path.clone(),
-                            code: missing_source,
-                        }],
-                        rejected: Vec::new(),
-                    },
-                    &apks,
-                    loop_inputs(),
-                )
+                .scan_parsed_data_image(missing_inventory, &apks, loop_inputs())
                 .unwrap();
             assert!(missing.packages.is_empty());
             assert_eq!(missing.removed.len(), 1);
@@ -1334,6 +1322,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 factory.code_path
             );
             std::fs::write(&data_code, b"disposable retained code").unwrap();
+            std::os::unix::fs::symlink(
+                original.join(
+                    "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk",
+                ),
+                physical_data.join("base.apk"),
+            )
+            .unwrap();
             // An unchanged original signed APK with the wrong identity at this data
             // location is rejected, removed, then the selected GSF factory recovers.
             std::fs::remove_file(physical_data.join("base.apk")).unwrap();
