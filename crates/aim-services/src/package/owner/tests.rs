@@ -727,7 +727,7 @@ fn boot_removal_metadata_commit_retains_uid_users_legacy_domains_and_unknown_xml
     fs::write(&path, br#"<packages future='keep'>
       <package name='a' codePath='/system/app/a' userId='10100'><proper-signing-keyset identifier='1'/><defined-keyset alias='common' identifier='1'/><defined-keyset alias='only' identifier='2'/><upgrade-keyset identifier='2'/><future value='retained'/></package>
       <package name='b' codePath='/system/app/b' userId='10101'><proper-signing-keyset identifier='1'/></package>
-      <keyset-settings version='1'><keys><public-key identifier='1' value='QQ=='/><public-key identifier='2' value='Qg=='/><future-key/></keys><keysets><keyset identifier='1'><key-id identifier='1'/></keyset><keyset identifier='2'><key-id identifier='1'/><key-id identifier='2'/></keyset></keysets><lastIssuedKeyId value='99'/><lastIssuedKeySetId value='100'/></keyset-settings>
+      <keyset-settings version='1'><keys><public-key identifier='1' value='MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAIBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQMCAwEAAQ=='/><public-key identifier='2' value='MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAIBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQcCAwEAAQ=='/><future-key/></keys><keysets><keyset identifier='1'><key-id identifier='1'/></keyset><keyset identifier='2'><key-id identifier='1'/><key-id identifier='2'/></keyset></keysets><lastIssuedKeyId value='99'/><lastIssuedKeySetId value='100'/></keyset-settings>
       <domain-verifications><active><package-state packageName='a' id='00000000-0000-0000-0000-000000000001'/><package-state packageName='b' id='00000000-0000-0000-0000-000000000002'/><future-domain/></active><restored><package-state packageName='a' id='00000000-0000-0000-0000-000000000003'/></restored></domain-verifications>
       <domain-verifications-legacy><user-states packageName='a'><user-state userId='0' state='2'/></user-states></domain-verifications-legacy><future-owner/>
     </packages>"#).unwrap();
@@ -742,7 +742,13 @@ fn boot_removal_metadata_commit_retains_uid_users_legacy_domains_and_unknown_xml
     );
     assert_eq!(state.settings.packages[1], old.settings.packages[1]);
     assert_eq!(state.settings.key_sets.key_sets, [(1, vec![1])]);
-    assert_eq!(state.settings.key_sets.public_keys, [(1, vec![b'A'])]);
+    assert_eq!(
+        state.settings.key_sets.public_keys,
+        [(
+            1,
+            include_bytes!("../../../tests/fixtures/settings-public-key-1.der").to_vec()
+        )]
+    );
     assert_eq!(state.settings.key_sets.last_issued_key_id, 99);
     assert_eq!(state.settings.key_sets.last_issued_key_set_id, 100);
     assert_eq!(state.settings.domain_verification.active.len(), 1);
@@ -1285,7 +1291,7 @@ fn imported_keyset_references_survive_commits_until_restart() {
     let data = Data::new();
     data.settings();
     let path = data.0.join("system/packages.xml");
-    let input = b"<packages><package name='a' codePath='/data/app/a' userId='10100'><proper-signing-keyset identifier='1'/><proper-signing-keyset identifier='1'/><defined-keyset alias='same' identifier='1'/><defined-keyset alias='same' identifier='1'/><defined-keyset alias='replace' identifier='2'/><defined-keyset alias='replace' identifier='1'/></package><keyset-settings version='1'><keys><public-key identifier='1' value='AQ=='/><public-key identifier='2' value='Ag=='/></keys><keysets><keyset identifier='1'><key-id identifier='1'/></keyset><keyset identifier='2'><key-id identifier='2'/></keyset></keysets><lastIssuedKeyId value='2'/><lastIssuedKeySetId value='2'/></keyset-settings></packages>";
+    let input = b"<packages><package name='a' codePath='/data/app/a' userId='10100'><proper-signing-keyset identifier='1'/><proper-signing-keyset identifier='1'/><defined-keyset alias='same' identifier='1'/><defined-keyset alias='same' identifier='1'/><defined-keyset alias='replace' identifier='2'/><defined-keyset alias='replace' identifier='1'/></package><keyset-settings version='1'><keys><public-key identifier='1' value='MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAIBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQMCAwEAAQ=='/><public-key identifier='2' value='MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAIBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQcCAwEAAQ=='/></keys><keysets><keyset identifier='1'><key-id identifier='1'/></keyset><keyset identifier='2'><key-id identifier='2'/></keyset></keysets><lastIssuedKeyId value='2'/><lastIssuedKeySetId value='2'/></keyset-settings></packages>";
     fs::write(&path, input).unwrap();
     let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     assert_eq!(

@@ -199,7 +199,7 @@ mod tests {
                 },
             ],
             key_sets: KeySets {
-                version: Some(1),
+                versioned: true,
                 public_keys: vec![(1, vec![1]), (2, vec![2])],
                 key_sets: vec![(1, vec![1]), (2, vec![1, 2])],
                 last_issued_key_id: 2,

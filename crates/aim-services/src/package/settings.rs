@@ -364,7 +364,8 @@ pub struct SharedUser {
 /// sets by id.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct KeySets {
-    pub version: Option<i32>,
+    /// The original only tests whether the version attribute is present.
+    pub versioned: bool,
     pub public_keys: Vec<(i64, Vec<u8>)>,
     pub key_sets: Vec<(i64, Vec<i64>)>,
     pub last_issued_key_id: i64,
@@ -390,7 +391,7 @@ pub fn fix_protection_level(mut level: i32) -> i32 {
 
 /// The signatures written so far, by index: a certificate's first
 /// `<cert>` in the document carries its key, later ones only its index.
-type Certificates = Vec<Option<Vec<u8>>>;
+type Certificates = Vec<Option<(Vec<u8>, i32)>>;
 
 impl Settings {
     /// The settings in the document whose root is `root`.
@@ -495,7 +496,7 @@ impl Settings {
                 "verifier" => s.verifier = string(e, "device"),
                 "keyset-settings" => {
                     s.key_sets = key_sets(e)?;
-                    if s.key_sets.version.is_some() {
+                    if s.key_sets.versioned {
                         s.key_sets.reference_counts = Some(
                             s.key_sets
                                 .key_sets
@@ -504,7 +505,7 @@ impl Settings {
                                 .collect(),
                         );
                     }
-                    if s.key_sets.version.is_none() {
+                    if !s.key_sets.versioned {
                         for package in &mut s.packages {
                             package.key_set_data = KeySetData::default();
                         }
@@ -570,9 +571,9 @@ fn permissions(e: &Element) -> Result<Vec<Permission>, String> {
         };
         let dynamic = string(item, "type").as_deref() == Some("dynamic");
         let permission = Permission {
-            protection_level: fix_protection_level(item.int("protection")?.unwrap_or(0)),
+            protection_level: fix_protection_level(defaulted(item.int("protection"), 0)),
             dynamic: dynamic
-                .then(|| Ok::<_, String>((item.int("icon")?.unwrap_or(0), string(item, "label"))))
+                .then(|| Ok::<_, String>((defaulted(item.int("icon"), 0), string(item, "label"))))
                 .transpose()?,
             name,
             package,
@@ -727,7 +728,11 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
             continue;
         }
         match child.name.as_str() {
-            "sigs" => p.signatures = signatures(child, certificates)?,
+            "sigs" => {
+                if let Some(signatures) = signatures(child, certificates)? {
+                    p.signatures = Some(signatures);
+                }
+            }
             "install-initiator-sigs" => {
                 p.install_source.initiating_package_signatures = signatures(child, certificates)?
             }
@@ -818,7 +823,9 @@ fn shared_user(e: &Element, certificates: &mut Certificates) -> Result<Option<Sh
         signatures: None,
     };
     for sigs in children(e, "sigs") {
-        u.signatures = signatures(sigs, certificates)?;
+        if let Some(signatures) = signatures(sigs, certificates)? {
+            u.signatures = Some(signatures);
+        }
     }
     Ok(Some(u))
 }
@@ -827,11 +834,12 @@ fn shared_user(e: &Element, certificates: &mut Certificates) -> Result<Option<Sh
 /// skips such an element. A certificate whose key is missing or bad is
 /// left out, as the original leaves it out.
 fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Signatures>, String> {
-    let Some(count) = e.int("count")? else {
+    let count = defaulted(e.int("count"), -1);
+    if count == -1 {
         return Ok(None);
-    };
+    }
     let mut s = Signatures {
-        scheme_version: e.int("schemeVersion")?.unwrap_or(SCHEME_UNKNOWN),
+        scheme_version: defaulted(e.int("schemeVersion"), SCHEME_UNKNOWN),
         ..Signatures::default()
     };
     let mut read = 0;
@@ -839,20 +847,27 @@ fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Sig
         match child.name.as_str() {
             "cert" => {
                 if read < count
-                    && let Some(key) = certificate(child, certificates)?
+                    && let Some((key, _, _)) = certificate(child, certificates)?
                 {
                     s.signatures.push(key);
                 }
                 read += 1;
             }
-            "pastSigs" if s.past_signatures.is_none() => {
-                let Some(count) = child.int("count")? else {
+            "pastSigs" => {
+                let count = defaulted(child.int("count"), -1);
+                if count == -1 {
                     continue;
-                };
+                }
                 let mut past = Vec::new();
                 for cert in children(child, "cert").take(count.max(0) as usize) {
-                    let flags = cert.int("flags")?.unwrap_or(0);
-                    if let Some(key) = certificate(cert, certificates)? {
+                    if let Some((key, inherited, added)) = certificate(cert, certificates)? {
+                        let flags = match defaulted(cert.int("flags"), -1) {
+                            -1 => inherited,
+                            flags => flags,
+                        };
+                        if let Some(index) = added {
+                            certificates[index].as_mut().unwrap().1 = flags;
+                        }
                         past.push((key, flags));
                     }
                 }
@@ -866,20 +881,31 @@ fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Sig
 
 /// A `<cert>`'s key: its own, which takes its index in the document's
 /// table, or the one an earlier `<cert>` gave its index.
-fn certificate(e: &Element, certificates: &mut Certificates) -> Result<Option<Vec<u8>>, String> {
-    let Some(index) = e.int("index")?.filter(|i| *i >= 0).map(|i| i as usize) else {
+fn certificate(
+    e: &Element,
+    certificates: &mut Certificates,
+) -> Result<Option<(Vec<u8>, i32, Option<usize>)>, String> {
+    let index = defaulted(e.int("index"), -1);
+    if index == -1 {
         return Ok(None);
-    };
-    Ok(match e.bytes_hex("key") {
-        Ok(Some(key)) => {
-            if certificates.len() <= index {
-                certificates.resize(index + 1, None);
+    }
+    Ok(match e.bytes_hex("key").ok().flatten() {
+        Some(key) => {
+            // A new Signature is appended, even if its XML index was already
+            // used. Negative indices other than -1 also reach this branch.
+            if index > 0 && certificates.len() < index as usize {
+                certificates.resize(index as usize, None);
             }
-            certificates[index] = Some(key.clone());
-            Some(key)
+            let added = certificates.len();
+            certificates.push(Some((key.clone(), 0)));
+            Some((key, 0, Some(added)))
         }
-        Ok(None) => certificates.get(index).cloned().flatten(),
-        Err(_) => None,
+        None if index >= 0 => certificates
+            .get(index as usize)
+            .cloned()
+            .flatten()
+            .map(|(key, flags)| (key, flags, None)),
+        None => None,
     })
 }
 
@@ -888,18 +914,21 @@ fn certificate(e: &Element, certificates: &mut Certificates) -> Result<Option<Ve
 /// package's key set data.
 fn key_sets(e: &Element) -> Result<KeySets, String> {
     let mut k = KeySets {
-        version: e.int("version")?,
+        versioned: string(e, "version").is_some(),
         ..KeySets::default()
     };
-    if k.version.is_none() {
+    if !k.versioned {
         return Ok(k);
     }
     for child in e.children() {
         match child.name.as_str() {
             "keys" => {
                 for key in children(child, "public-key") {
-                    if let Some(value) = key.bytes_base64("value")? {
-                        k.public_keys.push((identifier(key)?, value));
+                    let id = identifier(key)?;
+                    if let Some(value) = key.bytes_base64("value").ok().flatten()
+                        && let Ok(mut canonical) = super::sign::canonical_public_keys(&[value])
+                    {
+                        k.public_keys.push((id, canonical.remove(0)));
                     }
                 }
             }

@@ -11,6 +11,7 @@ mod common {
     pub mod runtime;
     pub mod seinfo;
     pub mod settings_defaults;
+    pub mod settings_owner_defaults;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -560,6 +561,55 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(directory.join(format!("defaults-input-{index}")), input).unwrap();
     }
     eprintln!("original Settings default cases: {}", defaults_inputs.len());
+    let cert = writer_snapshot
+        .owner()
+        .settings
+        .packages
+        .iter()
+        .find_map(|p| p.signatures.as_ref())
+        .unwrap()
+        .signatures
+        .first()
+        .unwrap();
+    let owner_default_inputs = common::settings_owner_defaults::inputs(cert);
+    let mut owner_default_expected = Vec::new();
+    for (index, input) in owner_default_inputs.iter().enumerate() {
+        let native = directory.join(format!("owner-default-native-{index}"));
+        fs::create_dir_all(native.join("system")).unwrap();
+        let main = native.join("system/packages.xml");
+        let reserve = native.join("system/packages.xml.reservecopy");
+        fs::write(&main, input).unwrap();
+        fs::write(&reserve, "<packages/>").unwrap();
+        let mut state = aim_services::package::settings::Settings::default();
+        let (_, report) = aim_services::package::owner::recovery::Plan::inspect(&native)
+            .unwrap()
+            .recover(&[], &mut state, |bytes, state| {
+                let root = aim_android_xml::read_next_optional(bytes)?;
+                if let Some(root) = &root {
+                    *state = aim_services::package::settings::Settings::parse(root)?;
+                }
+                Ok(root)
+            })
+            .unwrap();
+        fs::write(
+            directory.join(format!("owner-default-input-{index}")),
+            input,
+        )
+        .unwrap();
+        owner_default_expected.push((
+            common::settings_owner_defaults::trace(
+                &state,
+                report.first_boot,
+                main.exists(),
+                reserve.exists(),
+            ),
+            state.key_sets,
+        ));
+    }
+    eprintln!(
+        "original signature/permission/keyset cases: {}",
+        owner_default_inputs.len()
+    );
     let recovery_inputs: Vec<[Option<Vec<u8>>; 3]> = vec![
         [None, None, None],
         [None, None, Some(Vec::new())],
@@ -3672,6 +3722,33 @@ fn native_package_parcels_match_original_read_write() {
     assert_eq!(
         fs::read_to_string(directory.join("empty-document-original")).unwrap(),
         "0=1\n1=1\n2=java.io.IOException\n3=1\n"
+    );
+    let mut owner_default_mismatches = Vec::new();
+    for (index, (expected, keys)) in owner_default_expected.iter().enumerate() {
+        let actual =
+            fs::read_to_string(directory.join(format!("owner-default-output-{index}"))).unwrap();
+        let key_root = aim_android_xml::read_next(
+            &fs::read(directory.join(format!("owner-default-keysets-{index}"))).unwrap(),
+        )
+        .unwrap();
+        let actual_keys = aim_services::package::settings::Settings::parse(&key_root)
+            .unwrap()
+            .key_sets;
+        if actual != *expected
+            || actual_keys.public_keys != keys.public_keys
+            || actual_keys.key_sets != keys.key_sets
+            || actual_keys.last_issued_key_id != keys.last_issued_key_id
+            || actual_keys.last_issued_key_set_id != keys.last_issued_key_set_id
+        {
+            owner_default_mismatches.push(format!("case {index}: original {actual:?}, native {expected:?}, key lengths {}/{}, counters {:?}/{:?}",
+                actual_keys.public_keys.len(), keys.public_keys.len(),
+                (actual_keys.last_issued_key_id, actual_keys.last_issued_key_set_id), (keys.last_issued_key_id, keys.last_issued_key_set_id)));
+        }
+    }
+    assert!(
+        owner_default_mismatches.is_empty(),
+        "owner default mismatches:\n{}",
+        owner_default_mismatches.join("\n")
     );
     let mut defaults_mismatches = Vec::new();
     for (index, expected) in defaults_expected.iter().enumerate() {

@@ -210,7 +210,7 @@ pub fn register(
             release(&mut staged, id);
         }
     }
-    staged.key_sets.version = Some(1);
+    staged.key_sets.versioned = true;
     *settings = staged;
     Ok(())
 }
@@ -382,7 +382,7 @@ mod tests {
         let mut settings = settings();
         settings.packages[0].key_set_data.proper_signing_key_set = 1;
         settings.key_sets = KeySets {
-            version: Some(1),
+            versioned: true,
             key_sets: vec![(1, vec![1]), (2, vec![1, 2])],
             public_keys: vec![(1, key(1)), (2, key(2)), (3, key(3))],
             last_issued_key_id: 3,

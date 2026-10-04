@@ -310,7 +310,7 @@ mod tests {
   </shared-user>
   <renamed-package new="org.example.new" old="org.example.old" />
   <keyset-settings version="1">
-    <keys><public-key identifier="1" value="a2V5" /></keys>
+    <keys><public-key identifier="1" value="MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAIBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQMCAwEAAQ==" /></keys>
     <keysets><keyset identifier="1"><key-id identifier="1" /></keyset></keysets>
     <lastIssuedKeyId value="1" />
     <lastIssuedKeySetId value="3" />
@@ -557,7 +557,13 @@ mod tests {
             s.renamed_packages,
             [("org.example.new".into(), "org.example.old".into())]
         );
-        assert_eq!(s.key_sets.public_keys, [(1, b"key".to_vec())]);
+        assert_eq!(
+            s.key_sets.public_keys,
+            [(
+                1,
+                include_bytes!("../../tests/fixtures/settings-public-key-1.der").to_vec()
+            )]
+        );
         assert_eq!(s.key_sets.key_sets, [(1, vec![1])]);
         assert_eq!(s.key_sets.last_issued_key_set_id, 3);
 

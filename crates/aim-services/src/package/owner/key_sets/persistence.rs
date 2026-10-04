@@ -11,7 +11,7 @@ pub(in crate::package::owner) fn replace_registered(
     desired: &Settings,
 ) -> Result<Element, String> {
     validated_sets(desired)?;
-    if desired.key_sets.version != Some(1)
+    if !desired.key_sets.versioned
         || desired.key_sets.last_issued_key_id < 0
         || desired.key_sets.last_issued_key_set_id < 0
         || desired

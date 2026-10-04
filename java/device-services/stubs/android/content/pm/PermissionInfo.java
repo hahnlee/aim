@@ -3,5 +3,6 @@
 package android.content.pm;
 
 public class PermissionInfo extends PackageItemInfo {
+    public int protectionLevel;
     public PermissionInfo() { throw new RuntimeException("stub"); }
 }

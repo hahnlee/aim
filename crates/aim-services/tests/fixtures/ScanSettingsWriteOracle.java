@@ -11,6 +11,7 @@ public final class ScanSettingsWriteOracle {
         verifyPullMatrix(cache.getParentFile());
         verifySettingsVersionRecovery(cache.getParentFile());
         verifySettingsDefaults(cache.getParentFile());
+        verifyOwnerDefaults(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -42,6 +43,47 @@ public final class ScanSettingsWriteOracle {
             }
             xml.endTag(null, "packages"); xml.endDocument();
         }
+    }
+    private static void verifyOwnerDefaults(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "owner-default-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "owner-default-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            var main = new java.io.File(system, "packages.xml");
+            var reserve = new java.io.File(system, "packages.xml.reservecopy");
+            java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var output = new java.util.ArrayList<String>(); output.add(Boolean.toString(first));
+            var signatures = new java.util.ArrayList<String>();
+            for (var setting : settings.getPackagesLocked().values()) signatures.add(setting.getPackageName() + ":" + signatureTrace(setting.getSigningDetails()));
+            java.util.Collections.sort(signatures); output.add(String.join(";", signatures));
+            for (var list : java.util.List.of(settings.mPermissions.getPermissions(), settings.mPermissions.getPermissionTrees())) {
+                var permissions = new java.util.ArrayList<String>();
+                for (var permission : list) {
+                    var info = permission.getPermissionInfo();
+                    permissions.add(info.name + ":" + info.packageName + ":" + info.protectionLevel + ":" + info.icon + ":" + info.nonLocalizedLabel);
+                }
+                java.util.Collections.sort(permissions); output.add(String.join(";", permissions));
+            }
+            var keysets = new java.io.ByteArrayOutputStream();
+            var xml = android.util.Xml.resolveSerializer(keysets); xml.startDocument(null, true); xml.startTag(null, "packages");
+            settings.getKeySetManagerService().writeKeySetManagerServiceLPr(xml);
+            xml.endTag(null, "packages"); xml.endDocument();
+            java.nio.file.Files.write(new java.io.File(directory, "owner-default-keysets-" + index).toPath(), keysets.toByteArray());
+            output.add(main.exists() + "," + reserve.exists());
+            java.nio.file.Files.write(new java.io.File(directory, "owner-default-output-" + index).toPath(), String.join("|", output).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static String signatureTrace(android.content.pm.SigningDetails details) throws Exception {
+        var current = details.getSignatures(); var past = details.getPastSigningCertificates();
+        var entries = new java.util.ArrayList<String>();
+        if (current != null) for (var cert : current) entries.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())));
+        String signatures = current == null ? "null" : String.join(",", entries); entries.clear();
+        if (past != null) for (var cert : past) entries.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
+        return details.getSignatureSchemeVersion() + ":" + signatures + ":" + (past == null ? "null" : String.join(",", entries));
     }
     private static void verifySettingsDefaults(java.io.File directory) throws Exception {
         for (int index = 0; ; index++) {

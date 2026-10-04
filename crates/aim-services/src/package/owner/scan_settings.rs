@@ -186,7 +186,7 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
         }
         root.content.push(Node::Element(node));
     }
-    if expected.key_sets.version.is_some() {
+    if expected.key_sets.versioned {
         root = key_sets::replace_registered(&root, &expected)?;
     }
     if signing::persisted(Settings::parse(&root)?) != signing::persisted(expected) {
