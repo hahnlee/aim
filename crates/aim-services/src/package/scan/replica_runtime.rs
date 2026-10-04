@@ -136,13 +136,86 @@ impl SigningScan {
         &mut self,
         source: &crate::package::model::State,
     ) -> Result<(), String> {
+        self.capture_runtime_records(&source.runtime_inputs)
+    }
+
+    /// Finish boot runtime after seInfo and dependency resolution. Retained
+    /// factory/unloaded settings require their own identity-bearing inputs.
+    pub fn complete_runtime_at_boot(
+        &mut self,
+        usage: &Usage,
+        mut retained: BTreeMap<(String, bool), OriginalRuntime>,
+    ) -> Result<(), String> {
+        if usage.names().ne(self
+            .settings
+            .packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter())
+        {
+            return Err("boot runtime usage inventory differs".into());
+        }
         let expected = identities(self);
-        if expected.keys().ne(source.runtime_inputs.keys()) {
+        let mut inputs = BTreeMap::new();
+        for (key, identity) in &expected {
+            let input = if !key.1 && identity.code.is_some() {
+                let labels = self
+                    .seinfo_state(&key.0)?
+                    .ok_or("missing boot runtime seInfo owner")?;
+                let (files, libraries) = self
+                    .library_dependencies(&key.0)?
+                    .ok_or("missing boot runtime library owner")?;
+                let setting = self
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == key.0)
+                    .ok_or("missing boot runtime setting")?;
+                OriginalRuntime {
+                    name: key.0.clone(),
+                    app_id: identity.app_id,
+                    path: identity.path.clone(),
+                    version: identity.version,
+                    has_code: true,
+                    state: ReplicaRuntime {
+                        usage: *usage
+                            .times(&key.0)
+                            .ok_or("missing boot runtime usage owner")?,
+                        seinfo: labels.base.clone(),
+                        override_seinfo: labels.override_label.clone(),
+                        library_files: files.to_vec(),
+                        libraries: libraries.to_vec(),
+                    },
+                    transient: setting.transient.clone(),
+                }
+            } else {
+                retained
+                    .remove(key)
+                    .ok_or_else(|| format!("missing retained boot runtime: {key:?}"))?
+            };
+            if !key.1 && usage.times(&key.0) != Some(&input.state.usage) {
+                return Err(format!("retained boot runtime usage differs: {}", key.0));
+            }
+            inputs.insert(key.clone(), input);
+        }
+        if !retained.is_empty() {
+            return Err("unexpected retained boot runtime inventory".into());
+        }
+        self.capture_runtime_records(&inputs)
+    }
+
+    fn capture_runtime_records(
+        &mut self,
+        inputs: &BTreeMap<(String, bool), OriginalRuntime>,
+    ) -> Result<(), String> {
+        let expected = identities(self);
+        if expected.keys().ne(inputs.keys()) {
             return Err("original runtime inventory differs".into());
         }
         let mut values = BTreeMap::new();
         let mut transient = BTreeMap::new();
-        for (key, input) in &source.runtime_inputs {
+        for (key, input) in inputs {
             let identity = &expected[key];
             if input.name != key.0
                 || input.app_id != identity.app_id
@@ -631,6 +704,31 @@ mod tests {
                 },
             );
         }
+        let usage = Usage::new(["p"]);
+        owner
+            .complete_runtime_at_boot(&usage, source.runtime_inputs.clone())
+            .unwrap();
+        let initialized = owner.clone();
+        assert!(
+            owner
+                .complete_runtime_at_boot(&Usage::new([]), source.runtime_inputs.clone())
+                .is_err()
+        );
+        assert!(owner == initialized);
+        assert!(
+            owner
+                .complete_runtime_at_boot(&usage, BTreeMap::new())
+                .is_err()
+        );
+        assert!(owner == initialized);
+        let mut mismatched = source.runtime_inputs.clone();
+        mismatched
+            .get_mut(&("p".into(), false))
+            .unwrap()
+            .state
+            .usage[2] = 1;
+        assert!(owner.complete_runtime_at_boot(&usage, mismatched).is_err());
+        assert!(owner == initialized);
         owner.capture_original_runtime(&source).unwrap();
         let prior = owner.clone();
         assert!(
@@ -653,6 +751,12 @@ mod tests {
                 }
             }
             assert!(owner.capture_original_runtime(&changed).is_err());
+            assert!(owner == prior);
+            assert!(
+                owner
+                    .complete_runtime_at_boot(&usage, changed.runtime_inputs)
+                    .is_err()
+            );
             assert!(owner == prior);
         }
     }

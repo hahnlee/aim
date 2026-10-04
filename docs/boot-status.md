@@ -870,7 +870,15 @@ reaches sys.boot_completed=1 at 4.888s and publishes 66 feed generations without
 feed errors; the final inventory has 290 runtime owners (285 active, five factory).
 An earlier probe excluding bpfloader never received the feed because netd repeatedly
 aborted and restarted zygote; the default boot configuration succeeds. No owned
-runtime processes or probe mounts remain. Native fresh-boot/runtime copy/update
+runtime processes or probe mounts remain. Native boot runtime assembly now joins
+completed seInfo/dependency owners with the usage owner, preserving all eight
+reasons, raw base/override labels, nullable file slots and original library records.
+Factory and unloaded scopes require their own retained identity-bearing inputs;
+missing, extra, foreign and usage-inconsistent sources reject before any owner
+changes. The actual image scan publishes this completed runtime through Store (45.04s);
+the original ART replica oracle uses the same boot assembler (21.81s). All 414
+units pass (3.39s; one ignored/not run), and the host/image build passes (18.6s;
+three rebuilt, 39 fresh). Running daemon bootstrap wiring, runtime copy/update
 ownership, complete live user/alias export, native visibility and publication into
 running SystemServer remain #873/#862/#836. Nullable library file slots now retain their distinction through the query feed,
 native dependency owners and ApplicationInfo parcels (#874). Null, empty strings,

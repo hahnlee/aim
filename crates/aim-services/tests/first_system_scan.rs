@@ -215,6 +215,12 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let before_graph = graph_owner.clone();
     assert!(
         graph_owner
+            .complete_runtime_at_boot(original_capture.usage(), std::collections::BTreeMap::new())
+            .is_err()
+    );
+    assert_eq!(graph_owner, before_graph);
+    assert!(
+        graph_owner
             .complete_library_dependencies(&|_, _| Err(
                 aim_services::package::libraries::ResolveError::Incomplete(
                     "unavailable compatibility owner"
@@ -243,6 +249,28 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             .unwrap()
             .is_none()
     );
+    graph_owner
+        .complete_runtime_at_boot(original_capture.usage(), std::collections::BTreeMap::new())
+        .unwrap();
+    for setting in &graph_owner.settings.packages {
+        let runtime = graph_owner
+            .replica_runtime(&setting.name, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            runtime.usage,
+            *original_capture.usage().times(&setting.name).unwrap()
+        );
+        let labels = graph_owner.seinfo_state(&setting.name).unwrap().unwrap();
+        assert_eq!(runtime.seinfo, labels.base);
+        assert_eq!(runtime.override_seinfo, labels.override_label);
+        let (files, infos) = graph_owner
+            .library_dependencies(&setting.name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.library_files, files);
+        assert_eq!(runtime.libraries, infos);
+    }
     let graph_store = aim_services::package::scan_snapshot::Store::new(
         graph_owner.clone(),
         original_capture.usage().clone(),

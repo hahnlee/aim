@@ -1689,26 +1689,9 @@ fn runtime_fixture_snapshot(
 ) -> std::sync::Arc<aim_services::package::scan_snapshot::Snapshot> {
     let mut owner = snapshot.owner().clone();
     let usage = snapshot.usage().clone();
-    let runtimes = owner
-        .settings
-        .packages
-        .iter()
-        .map(|setting| {
-            let labels = owner.seinfo_state(&setting.name).unwrap().unwrap();
-            let (files, libraries) = owner.library_dependencies(&setting.name).unwrap().unwrap();
-            (
-                (setting.name.clone(), false),
-                aim_services::package::scan::ReplicaRuntime {
-                    usage: *usage.times(&setting.name).unwrap(),
-                    seinfo: labels.base.clone(),
-                    override_seinfo: labels.override_label.clone(),
-                    library_files: files.to_vec(),
-                    libraries: libraries.to_vec(),
-                },
-            )
-        })
-        .collect();
-    owner.capture_replica_runtime(runtimes).unwrap();
+    owner
+        .complete_runtime_at_boot(&usage, std::collections::BTreeMap::new())
+        .unwrap();
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()
