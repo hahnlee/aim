@@ -424,6 +424,7 @@ mod tests {
                 ..Default::default()
             },
             signing: sign::SigningDetails {
+                current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,
                 public_keys: vec![],

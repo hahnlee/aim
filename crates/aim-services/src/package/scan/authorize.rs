@@ -97,6 +97,7 @@ mod tests {
     }
     fn verified(details: &settings::Signatures) -> sign::SigningDetails {
         sign::SigningDetails {
+            current_flags: Vec::new(),
             signatures: details.signatures.clone(),
             scheme_version: 3,
             public_keys: vec![],

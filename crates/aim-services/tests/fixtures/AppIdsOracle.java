@@ -2,6 +2,33 @@ package com.android.server.pm;
 
 public final class AppIdsOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("read-store-signatures")) {
+            var table = new java.util.ArrayList<android.content.pm.Signature>();
+            try (var in = new java.io.FileInputStream(args[1])) {
+                var parser = android.util.Xml.resolvePullParser(in);
+                int event;
+                while ((event = parser.next()) != 1) {
+                    if (event != 2 || !(parser.getName().equals("package") || parser.getName().equals("shared-user"))) continue;
+                    String owner = parser.getName(), name = parser.getAttributeValue(null, "name");
+                    int depth = parser.getDepth();
+                    while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {
+                        if (event != 2) continue;
+                        String tag = parser.getName();
+                        if (tag.equals("sigs") || tag.equals("install-initiator-sigs")) {
+                            var signing = new PackageSignatures(); signing.readXml(parser, table);
+                            var current = signing.mSigningDetails.getSignatures();
+                            var flags = new java.util.ArrayList<String>();
+                            if (current != null) for (var cert : current) flags.add(Integer.toString(cert.getFlags()));
+                            System.out.println(owner + ":" + name + ":" + tag + ":" + (current == null ? "null" : String.join(",", flags)));
+                        } else {
+                            int skipped = parser.getDepth();
+                            while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > skipped)) {}
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("read-signatures")) {
             java.util.ArrayList<android.content.pm.Signature> certificates = new java.util.ArrayList<>();
             try (java.io.InputStream input = new java.io.FileInputStream(args[1])) {
@@ -46,6 +73,7 @@ public final class AppIdsOracle {
             for (int i = 0; i < cases.length; i++) {
                 if (current[i].length == 0) { cases[i] = android.content.pm.SigningDetails.UNKNOWN; continue; }
                 android.content.pm.Signature[] signers = realSignatures(current[i], null, certs);
+                for (var signer : signers) signer.setFlags(i + 1);
                 android.content.pm.Signature[] lineage = realSignatures(past[i], flags[i], certs);
                 cases[i] = new android.content.pm.SigningDetails(signers, i % 4 + 1, lineage);
             }
@@ -57,7 +85,7 @@ public final class AppIdsOracle {
                             boolean changed = merged != cases[i];
                             if (changed) merged = merged.mergeLineageWith(cases[k], 2);
                             System.out.println(i + " " + j + " " + k + " " + changed + " "
-                                + merged.getSignatureSchemeVersion() + " " + describe(merged.getSignatures(), certs, false)
+                                + merged.getSignatureSchemeVersion() + " " + describe(merged.getSignatures(), certs, true)
                                 + " " + describe(merged.getPastSigningCertificates(), certs, true)
                                 + " " + (merged.getPublicKeys() == null ? 0 : merged.getPublicKeys().size()));
                         }
@@ -70,7 +98,7 @@ public final class AppIdsOracle {
                     for (int rule = 0; rule < 3; rule++) {
                         android.content.pm.SigningDetails merged = cases[i].mergeLineageWith(cases[j], rule);
                         System.out.println(i + " " + j + " " + rule + " " + (merged == cases[i]) + " "
-                            + merged.getSignatureSchemeVersion() + " " + describe(merged.getSignatures(), certs, false)
+                            + merged.getSignatureSchemeVersion() + " " + describe(merged.getSignatures(), certs, true)
                             + " " + describe(merged.getPastSigningCertificates(), certs, true)
                             + " " + (merged.getPublicKeys() == null ? 0 : merged.getPublicKeys().size()));
                     }

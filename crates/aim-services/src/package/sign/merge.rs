@@ -15,11 +15,17 @@ impl SigningDetails {
     /// Decode saved certificates and reconstruct their SPKI key set.
     /// This does not verify any APK or authorize reuse of its identity.
     pub fn from_saved(saved: &Signatures) -> Result<Self, String> {
-        Self::new(
+        if !saved.current_flags.is_empty() && saved.current_flags.len() != saved.signatures.len() {
+            return Err("saved current signer flags do not match certificates".into());
+        }
+        let mut details = Self::new(
             saved.signatures.clone(),
             saved.scheme_version,
             saved.past_signatures.clone(),
-        )
+        )?;
+        details.current_flags =
+            crate::package::settings::current_flags(saved.current_flags.clone());
+        Ok(details)
     }
 
     /// A borrowed result preserves the original's unchanged-instance
@@ -101,6 +107,11 @@ impl SigningDetails {
             descendant.scheme_version,
             Some(merged),
         )
-        .map(Cow::Owned)
+        .map(|mut details| {
+            details.current_flags = crate::package::settings::current_flags(vec![
+                descendant.current_flags.first().copied().unwrap_or(0),
+            ]);
+            Cow::Owned(details)
+        })
     }
 }

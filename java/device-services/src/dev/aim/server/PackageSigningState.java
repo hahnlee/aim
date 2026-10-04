@@ -47,6 +47,7 @@ public final class PackageSigningState implements Parcelable {
     static final class Signing {
         private final int scheme;
         private final byte[][] current;
+        private final int[] currentCapabilities;
         private final byte[][] past;
         private final int[] capabilities;
 
@@ -54,7 +55,11 @@ public final class PackageSigningState implements Parcelable {
             scheme = in.readInt();
             int count = count(in, false);
             current = new byte[count][];
-            for (int i = 0; i < count; i++) current[i] = Objects.requireNonNull(in.createByteArray());
+            currentCapabilities = new int[count];
+            for (int i = 0; i < count; i++) {
+                current[i] = Objects.requireNonNull(in.createByteArray());
+                currentCapabilities[i] = in.readInt();
+            }
             count = count(in, true);
             past = count == -1 ? null : new byte[count][];
             capabilities = count == -1 ? null : new int[count];
@@ -66,7 +71,7 @@ public final class PackageSigningState implements Parcelable {
 
         private static int count(Parcel in, boolean nullable) {
             int count = in.readInt();
-            if (count < (nullable ? -1 : 0) || count > in.dataAvail() / (nullable ? 8 : 4)) {
+            if (count < (nullable ? -1 : 0) || count > in.dataAvail() / 8) {
                 throw new IllegalArgumentException("invalid signing certificate count");
             }
             return count;
@@ -88,7 +93,7 @@ public final class PackageSigningState implements Parcelable {
             if (signing == null) return SigningDetails.UNKNOWN;
             try {
                 // The original constructor derives the complete public-key set.
-                return new SigningDetails(signatures(signing.current, null), signing.scheme,
+                return new SigningDetails(signatures(signing.current, signing.currentCapabilities), signing.scheme,
                         signatures(signing.past, signing.capabilities));
             } catch (java.security.cert.CertificateException failure) {
                 throw new IllegalArgumentException("invalid saved signing certificates", failure);
@@ -100,7 +105,10 @@ public final class PackageSigningState implements Parcelable {
             if (signing == null) return;
             out.writeInt(signing.scheme);
             out.writeInt(signing.current.length);
-            for (byte[] certificate : signing.current) out.writeByteArray(certificate);
+            for (int i = 0; i < signing.current.length; i++) {
+                out.writeByteArray(signing.current[i]);
+                out.writeInt(signing.currentCapabilities[i]);
+            }
             out.writeInt(signing.past == null ? -1 : signing.past.length);
             if (signing.past != null) {
                 for (int i = 0; i < signing.past.length; i++) {

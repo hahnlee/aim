@@ -80,6 +80,7 @@ fn loaded_library_withdrawal_preserves_other_versions_and_builtins() {
                         ..Default::default()
                     },
                     signing: SigningDetails {
+                        current_flags: Vec::new(),
                         signatures: Vec::new(),
                         scheme_version: 0,
                         public_keys: Vec::new(),

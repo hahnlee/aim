@@ -404,6 +404,7 @@ mod tests {
         let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
         for setting in &settings.packages {
             let signing = SigningDetails {
+                current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,
                 public_keys: vec![],

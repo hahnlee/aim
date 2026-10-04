@@ -112,6 +112,8 @@ pub type Lineage = Vec<(Vec<u8>, i32)>;
 pub struct SigningDetails {
     /// The signers' certificates, as encoded.
     pub signatures: Vec<Vec<u8>>,
+    /// Current Signature capability flags; empty represents all zero.
+    pub current_flags: Vec<i32>,
     pub scheme_version: i32,
     /// The signers' public keys (`SubjectPublicKeyInfo`), each once.
     pub public_keys: Vec<Vec<u8>>,
@@ -153,6 +155,7 @@ impl SigningDetails {
         }
         Ok(SigningDetails {
             signatures,
+            current_flags: Vec::new(),
             scheme_version,
             public_keys,
             past_signing_certificates,

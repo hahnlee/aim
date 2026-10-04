@@ -1135,6 +1135,64 @@ fn native_package_parcels_match_original_read_write() {
             signing_parcel.data(),
         )
         .unwrap();
+        let mut flagged = snapshot.owner().clone();
+        let setting = flagged
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == pkg.package_name)
+            .unwrap();
+        if let Some(signing) = &mut setting.signatures {
+            signing.current_flags = vec![7; signing.signatures.len()];
+        }
+        if let Some(signing) = &mut setting.install_source.initiating_package_signatures {
+            signing.current_flags = vec![11; signing.signatures.len()];
+        }
+        for group in flagged.identities.shared_users.values_mut() {
+            if let Some(signing) = &mut group.signatures {
+                signing.current_flags = vec![13; signing.signatures.len()];
+            }
+        }
+        for group in &mut flagged.settings.shared_users {
+            if let Some(signing) = &mut group.signatures {
+                signing.current_flags = vec![13; signing.signatures.len()];
+            }
+        }
+        flagged
+            .complete_library_dependencies(&|_, _| {
+                Ok(aim_services::package::libraries::Policy::pinned(false))
+            })
+            .unwrap();
+        let flagged =
+            aim_services::package::scan_snapshot::Store::new(flagged, snapshot.usage().clone())
+                .unwrap()
+                .capture();
+        let signing =
+            aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
+                &flagged,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&signing, &mut parcel);
+        fs::write(
+            directory.join(format!("{name}.flagged-signing")),
+            parcel.data(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join(format!("{name}.flagged-setting")),
+            aim_services::package::scan_snapshot::setting_record::captured(
+                &flagged,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
         let signing_store = aim_services::package::scan_snapshot::Store::new(
             snapshot.owner().clone(),
             snapshot.usage().clone(),

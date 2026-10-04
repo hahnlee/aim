@@ -872,6 +872,7 @@ mod tests {
             let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
             assert!(!owner.disable_system_package("factory").unwrap());
             let signing = SigningDetails {
+                current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,
                 public_keys: Vec::new(),

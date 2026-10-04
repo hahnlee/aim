@@ -551,6 +551,11 @@ fn allocation_matches_the_original_runtime() {
         let keys = committed.signatures.as_ref().unwrap().public_keys.clone();
         assert!(keys.as_ref().is_some_and(|k| !k.is_empty()));
         expected.signatures.as_mut().unwrap().public_keys = keys;
+        // This loader forces fresh verification. Original collectCertificatesLI
+        // selects parsed-code signatures on that path; a boot cache hit instead
+        // clones saved signing (the separate collection policy tracked in #918).
+        expected.signatures.as_mut().unwrap().current_flags =
+            inputs.active[&saved.name].signing.current_flags.clone();
         assert_eq!(
             &expected, committed,
             "signing scan changed persisted metadata: {}",
@@ -611,6 +616,7 @@ fn allocation_matches_the_original_runtime() {
     .enumerate()
     .map(|(i, (current, past))| {
         let saved = Signatures {
+            current_flags: vec![i as i32 + 1; current.len()],
             scheme_version: if current.is_empty() {
                 0
             } else {
@@ -631,7 +637,14 @@ fn allocation_matches_the_original_runtime() {
         let current = details
             .signatures
             .iter()
-            .map(|s| (certs.iter().position(|c| c == s).unwrap() + 1).to_string())
+            .enumerate()
+            .map(|(i, s)| {
+                format!(
+                    "{}:{}",
+                    certs.iter().position(|c| c == s).unwrap() + 1,
+                    details.current_flags.get(i).copied().unwrap_or(0)
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
         let past = details
@@ -804,17 +817,75 @@ fn allocation_matches_the_original_runtime() {
         .unwrap()
         .unwrap();
     assert_eq!(store.state(), &persisted);
+    // Current flags are not explicit writeXml fields. Compare their restored
+    // table-derived values separately against the actual original reader.
+    let guest_xml = boot.data.join("data/local/tmp/appids-signatures.xml");
+    fs::copy(signature_data.join("system/packages.xml"), &guest_xml).unwrap();
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "read-store-signatures",
+        "/data/local/tmp/appids-signatures.xml",
+    ]));
+    let mut actual: Vec<_> = String::from_utf8(original.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let flags = |s: &Signatures| {
+        (0..s.signatures.len())
+            .map(|i| s.current_flags.get(i).copied().unwrap_or(0).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut expected = Vec::new();
+    for p in &persisted.settings.packages {
+        if let Some(s) = &p.signatures {
+            expected.push(format!("package:{}:sigs:{}", p.name, flags(s)));
+        }
+        if let Some(s) = &p.install_source.initiating_package_signatures {
+            expected.push(format!(
+                "package:{}:install-initiator-sigs:{}",
+                p.name,
+                flags(s)
+            ));
+        }
+    }
+    for g in &persisted.settings.shared_users {
+        if let Some(s) = &g.signatures {
+            expected.push(format!("shared-user:{}:sigs:{}", g.name, flags(s)));
+        }
+    }
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected, "original XML restored current flags");
+    let mut restored = persisted.settings.clone();
     for package in &mut desired.packages {
         if let Some(signatures) = &mut package.signatures {
             signatures.public_keys = None;
+            signatures.current_flags.clear();
         }
     }
     for group in &mut desired.shared_users {
         if let Some(signatures) = &mut group.signatures {
             signatures.public_keys = None;
+            signatures.current_flags.clear();
         }
     }
-    assert_eq!(persisted.settings, desired);
+    for p in &mut restored.packages {
+        if let Some(s) = &mut p.signatures {
+            s.current_flags.clear();
+        }
+    }
+    for g in &mut restored.shared_users {
+        if let Some(s) = &mut g.signatures {
+            s.current_flags.clear();
+        }
+    }
+    assert_eq!(restored, desired);
     let path = signature_data.join("system/packages.xml");
     assert_eq!(
         fs::read(&path).unwrap(),

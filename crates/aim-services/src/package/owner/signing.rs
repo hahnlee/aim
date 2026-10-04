@@ -14,6 +14,7 @@ fn without_signatures(mut settings: Settings) -> Settings {
         package.signatures = None;
         if let Some(signatures) = &mut package.install_source.initiating_package_signatures {
             signatures.public_keys = None;
+            signatures.current_flags.clear();
         }
     }
     for group in &mut settings.shared_users {
@@ -44,10 +45,14 @@ pub(super) fn persisted(mut settings: Settings) -> Settings {
         )
     {
         signatures.public_keys = None;
+        // writeXml records flags only for past signers. Current flags can
+        // reappear through table references, not as serialized owner fields.
+        signatures.current_flags.clear();
     }
     for package in &mut settings.packages {
         if let Some(signatures) = &mut package.install_source.initiating_package_signatures {
             signatures.public_keys = None;
+            signatures.current_flags.clear();
         }
     }
     settings

@@ -188,8 +188,9 @@ pub(super) fn write_signing(
     if let Some(signing) = signing {
         p.write_i32(signing.scheme_version);
         p.write_i32(signing.signatures.len() as i32);
-        for certificate in &signing.signatures {
+        for (index, certificate) in signing.signatures.iter().enumerate() {
             write_byte_array(p, Some(certificate));
+            p.write_i32(signing.current_flags.get(index).copied().unwrap_or(0));
         }
         match &signing.past_signing_certificates {
             None => p.write_i32(-1),

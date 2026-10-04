@@ -494,6 +494,7 @@ public final class PackageRoundTripOracle {
     }
 
     private static void verifySnapshot(java.io.File file, String name, int uid) throws Exception {
+        verifyCurrentSignerFlags(file);
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
         byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
         byte[] seinfoBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".boot-seinfo").toPath());
@@ -1352,6 +1353,40 @@ public final class PackageRoundTripOracle {
         try { lease.getLibraries(name); throw new AssertionError("closed dependency lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
+    }
+    private static void verifyCurrentSignerFlags(java.io.File file) throws Exception {
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".flagged-signing").toPath());
+        var in = android.os.Parcel.obtain(); var out = android.os.Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var signing = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(in);
+            if (in.dataAvail() != 0) throw new AssertionError("flagged signing tail");
+            assertCurrentFlags(signing.getPackageSigningDetails(), 7);
+            var group = signing.getSharedSigningDetails();
+            if (group != null) assertCurrentFlags(group, 13);
+            signing.writeToParcel(out, 0);
+            if (!java.util.Arrays.equals(bytes, out.marshall())) throw new AssertionError("current signer flags lost on parcel round trip");
+            var current = signing.getPackageSigningDetails().getSignatures();
+            if (current != null && current.length != 0) {
+                current[0].setFlags(0);
+                assertCurrentFlags(signing.getPackageSigningDetails(), 7);
+            }
+        } finally { in.recycle(); out.recycle(); }
+        bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".flagged-setting").toPath());
+        in = android.os.Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var setting = dev.aim.server.PackageSettingData.read(in);
+            if (in.dataAvail() != 0) throw new AssertionError("flagged setting tail");
+            var source = setting.installSource.getInitiatingSigningDetails();
+            if (source != null) assertCurrentFlags(source, 11);
+        } finally { in.recycle(); }
+    }
+    private static void assertCurrentFlags(android.content.pm.SigningDetails signing, int expected) {
+        var current = signing.getSignatures();
+        if (current != null) for (var cert : current) {
+            if (cert.getFlags() != expected) throw new AssertionError("current signer flags lost: " + cert.getFlags() + " != " + expected);
+        }
     }
 
     private static void settingRuntime(java.io.DataOutputStream out, com.android.server.pm.PackageSetting setting) throws Exception {

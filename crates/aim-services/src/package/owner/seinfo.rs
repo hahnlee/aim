@@ -280,6 +280,7 @@ mod tests {
     }
     fn signing(certificates: &[&[u8]], past: Option<Vec<(Vec<u8>, i32)>>) -> SigningDetails {
         SigningDetails {
+            current_flags: Vec::new(),
             signatures: certificates.iter().map(|c| c.to_vec()).collect(),
             scheme_version: 3,
             public_keys: vec![],
