@@ -523,7 +523,15 @@ impl SigningScan {
         Ok(())
     }
 
+    pub(super) fn detach_retained_user_aliases(&mut self, name: &str) {
+        self.identities.ids.detach_user_aliases(name);
+        for group in self.identities.shared_users.values_mut() {
+            group.detach_user_aliases(name);
+        }
+    }
+
     pub(super) fn detach_disabled_user_aliases(&mut self, name: &str) {
+        self.detach_retained_user_aliases(name);
         if let Some(state) = self.disabled_users.get_mut(name) {
             state.aliases.clear();
         }
@@ -534,6 +542,10 @@ impl SigningScan {
         name: &str,
         users: &BTreeMap<i32, UserState>,
     ) {
+        self.identities.ids.update_user_aliases(name, users);
+        for group in self.identities.shared_users.values_mut() {
+            group.update_user_aliases(name, users);
+        }
         self.scanned_users.insert(name.into(), users.clone());
         if let Some(state) = self.disabled_users.get_mut(name) {
             state.update_active(users);

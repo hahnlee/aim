@@ -144,14 +144,40 @@ public final class ApexNotifyOracle {
             if (in.dataAvail() != 0) throw new AssertionError("conversion cases tail");
         } finally { in.recycle(); original.recycle(); }
     }
+    private static void verifyAdoptedUserAliases(java.io.File directory, String input,
+            PackageSetting old, PackageSetting adopted) throws Exception {
+        var captured = new PackageSetting(old, true);
+        adopted.setInstalled(false, 0); adopted.setInstalled(false, 10);
+        var out = android.os.Parcel.obtain();
+        try {
+            out.writeBoolean(old.readUserState(0) == adopted.readUserState(0));
+            out.writeBoolean(old.readUserState(0).isInstalled());
+            out.writeBoolean(adopted.readUserState(0).isInstalled());
+            out.writeBoolean(old.readUserState(10) == com.android.server.pm.pkg.PackageUserStateInternal.DEFAULT);
+            out.writeBoolean(adopted.readUserState(10).isInstalled());
+            out.writeBoolean(captured.readUserState(0).isInstalled());
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, input).toPath());
+            if (!java.util.Arrays.equals(bytes, out.marshall()))
+                throw new AssertionError("native original adoption user aliases differ");
+        } finally { out.recycle(); }
+    }
     private static void verifySharedOriginalAdoption(java.io.File directory) throws Exception {
+        int oldFlags, oldPrivate, newFlags, newPrivate;
+        var flags = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-original-adoption.flags").toPath());
+            flags.unmarshall(bytes, 0, bytes.length); flags.setDataPosition(0);
+            oldFlags = flags.readInt(); oldPrivate = flags.readInt(); newFlags = flags.readInt(); newPrivate = flags.readInt();
+            if (flags.dataAvail() != 0) throw new AssertionError("shared adoption flag tail");
+        } finally { flags.recycle(); }
         var settings = new Settings(java.util.Map.of());
         var group = settings.addSharedUserLPw("shared.fixture", 10000, 0, 0);
         var old = new PackageSetting("original.fixture", null,
-            new java.io.File("/system/apex/original.fixture.apex"), 1, 0, new java.util.UUID(1, 1));
+            new java.io.File("/system/apex/original.fixture.apex"), oldFlags, oldPrivate, new java.util.UUID(1, 1));
         settings.addPackageSettingLPw(old, group);
+        old.setInstalled(true, 0);
         var adopted = Settings.createNewSetting("incoming.fixture", old, null, null, group,
-            new java.io.File("/system/apex/incoming.fixture.apex"), null, null, null, 2, 1, 0,
+            new java.io.File("/system/apex/incoming.fixture.apex"), null, null, null, 2, newFlags, newPrivate,
             null, true, false, false, false, null, null, null, null, null, null, null,
             new java.util.UUID(1, 2), 36, null);
         adopted.setAppId(-1);
@@ -169,7 +195,23 @@ public final class ApexNotifyOracle {
         try {
             out.writeInt(group.getPackageStates().size()); out.writeBoolean(group.isSingleUser());
             out.writeInt(group.getSeInfoTargetSdkVersion()); out.writeInt(old.getAppId()); out.writeInt(adopted.getAppId());
+            byte[] nativeBytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-original-adoption.input").toPath());
+            if (!java.util.Arrays.equals(nativeBytes, out.marshall()))
+                throw new AssertionError("native shared adoption setting instance owners differ");
             java.nio.file.Files.write(new java.io.File(directory, "apex-shared-original-adoption.original").toPath(), out.marshall());
+        } finally { out.recycle(); }
+        verifyAdoptedUserAliases(directory, "apex-shared-user-alias.input", old, adopted);
+        boolean removedUid = settings.removePackageAndAppIdLPw("original.fixture");
+        if (removedUid || group.getPackageStates().size() != 1 || settings.getSettingLPr(10000) != group)
+            throw new AssertionError("original retained shared member was pruned");
+        out = android.os.Parcel.obtain();
+        try {
+            out.writeInt(group.getPackageStates().size()); out.writeBoolean(removedUid);
+            out.writeInt(group.getFlags()); out.writeInt(group.getPrivateFlags());
+            out.writeInt(group.getSeInfoTargetSdkVersion()); out.writeBoolean(settings.getSettingLPr(10000) == group);
+            byte[] nativeBytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-original-removal.input").toPath());
+            if (!java.util.Arrays.equals(nativeBytes, out.marshall()))
+                throw new AssertionError("native retained shared member removal differs");
         } finally { out.recycle(); }
     }
     private static void verifyOriginalAdoptionSlot(java.io.File directory) throws Exception {
@@ -181,6 +223,7 @@ public final class ApexNotifyOracle {
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.original").toPath());
         old.getLegacyPermissionState().copyFrom(dev.aim.server.PackageLegacyPermissions.restore(10042, users, bytes));
         settings.registerAppIdLPw(old, false); settings.addPackageSettingLPw(old, null);
+        old.setInstalled(true, 0);
         var adopted = Settings.createNewSetting("incoming.fixture", old, null, null, null,
             new java.io.File("/system/apex/incoming.fixture.apex"), null, null, null, 2, 1, 0,
             null, true, false, false, false, null, null, null, null, null, null, null,
@@ -205,6 +248,7 @@ public final class ApexNotifyOracle {
                 throw new AssertionError("native adopted and detached UID permission owners differ");
             java.nio.file.Files.write(new java.io.File(directory, "apex-original-adoption.original").toPath(), out.marshall());
         } finally { out.recycle(); }
+        verifyAdoptedUserAliases(directory, "apex-original-user-alias.input", old, adopted);
     }
     private static void verifyRetainedRename(java.io.File directory) throws Exception {
         var in = android.os.Parcel.obtain();

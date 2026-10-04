@@ -212,6 +212,7 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
             .shared_users
             .get(&saved.name)
             .ok_or_else(|| fail("missing saved shared UID owner"))?;
+        group.validate_retained().map_err(Error::Invalid)?;
         if group.app_id != saved.app_id || group.signatures != saved.signatures {
             return Err(fail("saved shared UID signing differs from its owner"));
         }

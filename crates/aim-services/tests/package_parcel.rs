@@ -2022,19 +2022,234 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap();
     let mut changed_user = original_users[&0].clone();
     changed_user.hidden = false;
+    changed_user.installed = false;
     adoption
         .set_user_state("original.fixture", 0, changed_user)
         .unwrap();
-    assert_eq!(
-        adoption.identities.ids.detached_setting(10000),
-        Some(&captured_slot)
-    );
+    let mut absent_user = aim_services::package::restrictions::UserState::initialized();
+    absent_user.installed = false;
+    adoption
+        .set_user_state("original.fixture", 10, absent_user.clone())
+        .unwrap();
+    let aliased_slot = adoption.identities.ids.detached_setting(10000).unwrap();
+    assert!(!aliased_slot.users[&0].hidden && !aliased_slot.users[&0].installed);
+    assert!(!aliased_slot.users.contains_key(&10));
+    assert!(captured_slot.users[&0].hidden && captured_slot.users[&0].installed);
+    assert_eq!(aliased_slot.package, captured_slot.package);
+    assert_eq!(aliased_slot.legacy, captured_slot.legacy);
+    assert_eq!(aliased_slot.install_fixed, Some(true));
+    let mut alias_record = aim_binder_host::parcel::Parcel::new();
+    alias_record.write_bool(aliased_slot.aliases_user(0));
+    alias_record.write_bool(aliased_slot.users[&0].installed);
+    alias_record
+        .write_bool(adoption.scanned_user_states("original.fixture").unwrap()[&0].installed);
+    alias_record.write_bool(!aliased_slot.users.contains_key(&10));
+    alias_record
+        .write_bool(adoption.scanned_user_states("original.fixture").unwrap()[&10].installed);
+    alias_record.write_bool(captured_slot.users[&0].installed);
+    fs::write(
+        directory.join("apex-original-user-alias.input"),
+        alias_record.data(),
+    )
+    .unwrap();
     assert_eq!(
         adoption
             .install_permissions_fixed("original.fixture", false)
             .unwrap(),
         Some(false)
     );
+    let mut shared_adoption_image = aim_services::package::scan::ApexImage {
+        packages: adoption_image.packages.clone(),
+    };
+    shared_adoption_image.packages[0].parsed.shared_user_id = Some("shared.fixture".into());
+    shared_adoption_image.packages[0].parsed.booleans |=
+        aim_services::package::pkg::booleans::LEAVING_SHARED_UID;
+    let mut shared_original = original_setting.clone();
+    shared_original.shared_user = true;
+    let shared_original_settings = aim_services::package::settings::Settings {
+        packages: vec![shared_original.clone()],
+        shared_users: vec![aim_services::package::settings::SharedUser {
+            name: "shared.fixture".into(),
+            app_id: 10000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut shared_adoption =
+        aim_services::package::scan::SigningScan::new(&config, &shared_original_settings, 36)
+            .unwrap();
+    shared_adoption
+        .capture_user_states(BTreeMap::from([(
+            ("original.fixture".into(), false),
+            aim_services::package::scan::CapturedUsers {
+                states: original_users.clone(),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+    capture_apex_legacy(&mut shared_adoption);
+    let prior_shared_adoption = shared_adoption.clone();
+    let mut shared_adoption_inputs = scan_inputs(&shared_adoption_image);
+    shared_adoption_inputs.shared_uid_migration =
+        aim_services::package::scan::SharedUidMigration::BestEffort;
+    let shared_adoption_results = shared_adoption
+        .scan_initial_apex(&apex_apks, &config, &shared_adoption_inputs)
+        .unwrap();
+    assert_eq!(shared_adoption_results[0].package.uid, -1);
+    let current = &shared_adoption.settings.packages[0];
+    assert!(current.shared_user);
+    assert_eq!(current.app_id, 10000);
+    let group = &shared_adoption.identities.shared_users["shared.fixture"];
+    assert_eq!(group.member_count(), 2);
+    assert_eq!(group.seinfo_target_sdk(), 10000);
+    let retained = group.retained_setting("original.fixture").unwrap();
+    assert_eq!(retained.package, shared_original);
+    assert_eq!(retained.users, original_users);
+    assert_eq!(retained.install_fixed, Some(true));
+    assert_eq!(
+        retained.legacy.as_ref().unwrap(),
+        &apex_legacy.project(10000, &[10, 0, 11]).unwrap()
+    );
+    assert_eq!(
+        prior_shared_adoption.identities.shared_users["shared.fixture"].member_count(),
+        1
+    );
+    assert_eq!(
+        prior_shared_adoption.identities.shared_users["shared.fixture"]
+            .retained_setting("original.fixture"),
+        None
+    );
+    assert_eq!(
+        shared_adoption.identities.ids.get(10000),
+        Some(&aim_services::package::owner::app_ids::Owner::SharedUser(
+            "shared.fixture".into()
+        ))
+    );
+    let mut shared_flags = aim_binder_host::parcel::Parcel::new();
+    shared_flags.write_i32(shared_original.flags);
+    shared_flags.write_i32(shared_original.private_flags);
+    shared_flags.write_i32(current.flags);
+    shared_flags.write_i32(current.private_flags);
+    fs::write(
+        directory.join("apex-shared-original-adoption.flags"),
+        shared_flags.data(),
+    )
+    .unwrap();
+    let mut shared_adoption_record = aim_binder_host::parcel::Parcel::new();
+    shared_adoption_record.write_i32(group.member_count() as i32);
+    shared_adoption_record.write_bool(!current.shared_user);
+    shared_adoption_record.write_i32(group.seinfo_target_sdk());
+    shared_adoption_record.write_i32(retained.package.app_id);
+    shared_adoption_record.write_i32(current.app_id);
+    fs::write(
+        directory.join("apex-shared-original-adoption.input"),
+        shared_adoption_record.data(),
+    )
+    .unwrap();
+    let prior_shared_record = retained.clone();
+    let prior_shared_identities = shared_adoption.identities.clone();
+    assert!(
+        !shared_adoption
+            .migrate_single_shared_user(
+                "shared.fixture",
+                aim_services::package::scan::SharedUidMigration::BestEffort,
+                &Default::default(),
+            )
+            .unwrap()
+    );
+    assert_eq!(shared_adoption.identities, prior_shared_identities);
+    shared_adoption
+        .scan_initial_apex(&apex_apks, &config, &shared_adoption_inputs)
+        .unwrap();
+    shared_adoption
+        .set_install_permissions_fixed("original.fixture", false, false)
+        .unwrap();
+    assert_eq!(
+        shared_adoption.identities.shared_users["shared.fixture"].member_count(),
+        2
+    );
+    assert_eq!(
+        shared_adoption.identities.shared_users["shared.fixture"]
+            .retained_setting("original.fixture"),
+        Some(&prior_shared_record)
+    );
+    // The removal owner has already withdrawn collected code; preserve the
+    // exact runtime group objects while constructing its unloaded setting phase.
+    let mut shared_changed_user = original_users[&0].clone();
+    shared_changed_user.installed = false;
+    shared_adoption
+        .set_user_state("original.fixture", 0, shared_changed_user)
+        .unwrap();
+    shared_adoption
+        .set_user_state("original.fixture", 10, absent_user)
+        .unwrap();
+    let shared_alias = shared_adoption.identities.shared_users["shared.fixture"]
+        .retained_setting("original.fixture")
+        .unwrap();
+    let mut shared_alias_record = aim_binder_host::parcel::Parcel::new();
+    shared_alias_record.write_bool(shared_alias.aliases_user(0));
+    shared_alias_record.write_bool(shared_alias.users[&0].installed);
+    shared_alias_record.write_bool(
+        shared_adoption
+            .scanned_user_states("original.fixture")
+            .unwrap()[&0]
+            .installed,
+    );
+    shared_alias_record.write_bool(!shared_alias.users.contains_key(&10));
+    shared_alias_record.write_bool(
+        shared_adoption
+            .scanned_user_states("original.fixture")
+            .unwrap()[&10]
+            .installed,
+    );
+    shared_alias_record.write_bool(prior_shared_record.users[&0].installed);
+    fs::write(
+        directory.join("apex-shared-user-alias.input"),
+        shared_alias_record.data(),
+    )
+    .unwrap();
+    let retained_after_alias = shared_alias.clone();
+    let mut shared_removal =
+        aim_services::package::scan::SigningScan::new(&config, &shared_adoption.settings, 36)
+            .unwrap();
+    shared_removal.identities = shared_adoption.identities.clone();
+    let removed = shared_removal
+        .remove_package_setting("original.fixture")
+        .unwrap()
+        .unwrap();
+    assert!(!removed.app_id_removed);
+    let remaining = &shared_removal.identities.shared_users["shared.fixture"];
+    assert_eq!(remaining.member_count(), 1);
+    assert_eq!(
+        remaining
+            .retained_setting("original.fixture")
+            .unwrap()
+            .users,
+        retained_after_alias.users
+    );
+    assert!(
+        !remaining
+            .retained_setting("original.fixture")
+            .unwrap()
+            .aliases_user(0)
+    );
+    let mut removal_record = aim_binder_host::parcel::Parcel::new();
+    removal_record.write_i32(remaining.member_count() as i32);
+    removal_record.write_bool(removed.app_id_removed);
+    removal_record.write_i32(remaining.flags);
+    removal_record.write_i32(remaining.private_flags);
+    removal_record.write_i32(remaining.seinfo_target_sdk());
+    removal_record.write_bool(
+        shared_removal.identities.ids.get(10000)
+            == Some(&aim_services::package::owner::app_ids::Owner::SharedUser(
+                "shared.fixture".into(),
+            )),
+    );
+    fs::write(
+        directory.join("apex-shared-original-removal.input"),
+        removal_record.data(),
+    )
+    .unwrap();
     let mut renamed_image = aim_services::package::scan::ApexImage {
         packages: vec![apex_image.packages[0].clone()],
     };

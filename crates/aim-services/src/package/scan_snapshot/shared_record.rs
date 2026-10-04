@@ -12,6 +12,16 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
     if !owner.capture_ready() {
         return Err("scan metadata is not finalized".into());
     }
+    if group.member_count()
+        != group
+            .package_names()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    {
+        return Err(
+            "distinct shared setting instances require captured instance identities (#905)".into(),
+        );
+    }
     let members: Vec<_> = group.package_names().collect();
     let settings: std::collections::BTreeSet<_> = owner
         .settings

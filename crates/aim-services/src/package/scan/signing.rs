@@ -1353,6 +1353,9 @@ impl SigningScan {
                 phase: "identity",
                 message: "shared UID migration group disappeared (#803)".into(),
             })?;
+        if group.member_count() != 1 {
+            return Ok(false);
+        }
         let id = group.app_id;
         let active: Vec<_> = self
             .settings

@@ -16,6 +16,7 @@ pub struct SharedUser {
     uid_flags: i32,
     uid_private_flags: i32,
     packages: BTreeMap<String, (i32, i32)>,
+    retained: BTreeMap<String, std::sync::Arc<super::app_ids::DetachedSetting>>,
     pub signatures: Option<Signatures>,
     /// Per-scan state: None before reconciliation, false after a normal
     /// check, true after an OTA signer replacement. Never persisted.
@@ -57,11 +58,88 @@ pub(in crate::package) fn saved_signatures(details: &SigningDetails) -> Result<S
 
 impl SharedUser {
     pub(in crate::package) fn package_names(&self) -> impl Iterator<Item = &str> {
-        self.packages.keys().map(String::as_str)
+        self.packages
+            .keys()
+            .chain(self.retained.keys())
+            .map(String::as_str)
     }
     pub(in crate::package) fn has_package(&self, name: &str) -> bool {
         self.packages.contains_key(name)
     }
+    pub fn member_count(&self) -> usize {
+        self.packages.len() + self.retained.len()
+    }
+
+    pub fn retained_setting(&self, name: &str) -> Option<&super::app_ids::DetachedSetting> {
+        self.retained.get(name).map(std::sync::Arc::as_ref)
+    }
+
+    /// Original adoption copies the setting without removing the old member.
+    /// The prior member has no parsed code; retain its actual setting state.
+    pub(in crate::package) fn retain_unparsed_setting(
+        &mut self,
+        value: super::app_ids::DetachedSetting,
+    ) -> Result<(), String> {
+        let package = &value.package;
+        if !package.shared_user
+            || package.shared_app_id() != Some(self.app_id)
+            || self.packages.get(&package.name) != Some(&(package.flags, package.private_flags))
+            || self.retained.contains_key(&package.name)
+            || value.users.keys().any(|id| *id < 0)
+            || !value
+                .user_aliases
+                .iter()
+                .all(|id| value.users.contains_key(id))
+            || value
+                .legacy
+                .as_ref()
+                .is_some_and(|state| state.app_id() != package.app_id)
+        {
+            return Err("retained shared setting differs from its member owner".into());
+        }
+        self.packages.remove(&value.package.name);
+        self.retained
+            .insert(value.package.name.clone(), std::sync::Arc::new(value));
+        Ok(())
+    }
+
+    pub(in crate::package) fn update_user_aliases(
+        &mut self,
+        name: &str,
+        users: &BTreeMap<i32, crate::package::restrictions::UserState>,
+    ) {
+        if let Some(value) = self.retained.get_mut(name) {
+            std::sync::Arc::make_mut(value).update_user_aliases(users);
+        }
+    }
+
+    pub(in crate::package) fn detach_user_aliases(&mut self, name: &str) {
+        if let Some(value) = self.retained.get_mut(name) {
+            std::sync::Arc::make_mut(value).user_aliases.clear();
+        }
+    }
+
+    pub(in crate::package) fn validate_retained(&self) -> Result<(), String> {
+        for (name, value) in &self.retained {
+            if value.package.name != *name
+                || !value.package.shared_user
+                || value.package.shared_app_id() != Some(self.app_id)
+                || value.users.keys().any(|id| *id < 0)
+                || !value
+                    .user_aliases
+                    .iter()
+                    .all(|id| value.users.contains_key(id))
+                || value
+                    .legacy
+                    .as_ref()
+                    .is_some_and(|state| state.app_id() != value.package.app_id)
+            {
+                return Err("retained shared setting identity differs".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(app_id: i32, flags: i32, private_flags: i32) -> Self {
         Self {
             app_id,
@@ -70,6 +148,7 @@ impl SharedUser {
             uid_flags: flags,
             uid_private_flags: private_flags,
             packages: BTreeMap::new(),
+            retained: BTreeMap::new(),
             signatures: None,
             signatures_changed: None,
             seinfo_target_sdk: 10000,
@@ -95,7 +174,7 @@ impl SharedUser {
         private_flags: i32,
         target_sdk: Option<i32>,
     ) -> bool {
-        if self.packages.is_empty() {
+        if self.member_count() == 0 {
             if let Some(target) = target_sdk {
                 self.seinfo_target_sdk = target;
             }
@@ -129,13 +208,20 @@ impl SharedUser {
             return false;
         };
         if self.flags & flags != 0 {
-            self.flags = self.packages.values().fold(self.uid_flags, |v, p| v | p.0);
+            self.flags = self
+                .packages
+                .values()
+                .map(|p| p.0)
+                .chain(self.retained.values().map(|p| p.package.flags))
+                .fold(self.uid_flags, |v, flags| v | flags);
         }
         if self.private_flags & private_flags != 0 {
             self.private_flags = self
                 .packages
                 .values()
-                .fold(self.uid_private_flags, |v, p| v | p.1);
+                .map(|p| p.1)
+                .chain(self.retained.values().map(|p| p.package.private_flags))
+                .fold(self.uid_private_flags, |v, flags| v | flags);
         }
         true
     }
@@ -410,6 +496,53 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn retained_unparsed_members_keep_instance_flags_sdk_and_old_versions() {
+        let mut group = SharedUser::new(10000, 8, 16);
+        group.add_package("same", 1, 2);
+        let prior = group.clone();
+        let retained = crate::package::owner::app_ids::DetachedSetting {
+            package: crate::package::settings::Package {
+                name: "same".into(),
+                app_id: 10000,
+                shared_user: true,
+                flags: 1,
+                private_flags: 2,
+                ..Default::default()
+            },
+            users: Default::default(),
+            user_aliases: Default::default(),
+            legacy: None,
+            install_fixed: None,
+            runtime: None,
+        };
+        let mut foreign = retained.clone();
+        foreign.package.app_id = 10001;
+        assert!(group.retain_unparsed_setting(foreign).is_err());
+        assert_eq!(group, prior);
+        group.retain_unparsed_setting(retained.clone()).unwrap();
+        group.add_package_with_code("same", 4, 32, Some(36));
+        assert_eq!(group.member_count(), 2);
+        assert_eq!(
+            group.package_names().collect::<Vec<_>>(),
+            vec!["same", "same"]
+        );
+        assert_eq!(group.seinfo_target_sdk(), 10000);
+        assert_eq!((group.flags, group.private_flags), (13, 50));
+        assert_eq!(prior.member_count(), 1);
+        assert_eq!(prior.retained_setting("same"), None);
+        let captured = group.clone();
+        assert!(group.remove_package("same"));
+        assert_eq!(group.member_count(), 1);
+        assert!(!group.has_package("same"));
+        assert_eq!((group.flags, group.private_flags), (9, 18));
+        assert_eq!(group.retained_setting("same"), Some(&retained));
+        group.validate_retained().unwrap();
+        assert_eq!(captured.member_count(), 2);
+        assert_eq!((captured.flags, captured.private_flags), (13, 50));
+        assert_eq!(captured.retained_setting("same"), Some(&retained));
+    }
 
     #[test]
     fn runtime_shared_id_owns_membership_without_reserving_package_app_id() {

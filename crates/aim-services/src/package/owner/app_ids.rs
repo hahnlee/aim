@@ -51,9 +51,27 @@ pub enum Error {
 pub struct DetachedSetting {
     pub package: crate::package::settings::Package,
     pub users: BTreeMap<i32, crate::package::restrictions::UserState>,
+    pub(in crate::package) user_aliases: BTreeSet<i32>,
     pub legacy: Option<super::legacy_permissions::State>,
     pub install_fixed: Option<bool>,
     pub runtime: Option<crate::package::scan::ReplicaRuntime>,
+}
+
+impl DetachedSetting {
+    pub fn aliases_user(&self, user: i32) -> bool {
+        self.user_aliases.contains(&user)
+    }
+
+    pub(in crate::package) fn update_user_aliases(
+        &mut self,
+        users: &BTreeMap<i32, crate::package::restrictions::UserState>,
+    ) {
+        for id in &self.user_aliases {
+            if let Some(state) = users.get(id) {
+                self.users.insert(*id, state.clone());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +161,10 @@ impl AppIds {
             || self.get(id) != Some(&Owner::Package(value.package.name.clone()))
             || self.detached.contains_key(&id)
             || value.users.keys().any(|id| *id < 0)
+            || !value
+                .user_aliases
+                .iter()
+                .all(|id| value.users.contains_key(id))
             || value
                 .legacy
                 .as_ref()
@@ -160,6 +182,30 @@ impl AppIds {
         self.detached.get(&app_id).map(std::sync::Arc::as_ref)
     }
 
+    pub(in crate::package) fn update_user_aliases(
+        &mut self,
+        name: &str,
+        users: &BTreeMap<i32, crate::package::restrictions::UserState>,
+    ) {
+        for value in self
+            .detached
+            .values_mut()
+            .filter(|v| v.package.name == name)
+        {
+            std::sync::Arc::make_mut(value).update_user_aliases(users);
+        }
+    }
+
+    pub(in crate::package) fn detach_user_aliases(&mut self, name: &str) {
+        for value in self
+            .detached
+            .values_mut()
+            .filter(|v| v.package.name == name)
+        {
+            std::sync::Arc::make_mut(value).user_aliases.clear();
+        }
+    }
+
     pub(in crate::package) fn validate_detached(&self) -> Result<(), String> {
         for (id, owner) in &self.slots {
             if let Owner::DetachedPackage(name) = owner {
@@ -169,6 +215,11 @@ impl AppIds {
                 if value.package.app_id != *id
                     || value.package.name != *name
                     || value.package.shared_user
+                    || value.users.keys().any(|id| *id < 0)
+                    || !value
+                        .user_aliases
+                        .iter()
+                        .all(|id| value.users.contains_key(id))
                     || value
                         .legacy
                         .as_ref()
@@ -280,6 +331,7 @@ mod tests {
                 ..Default::default()
             },
             users: BTreeMap::new(),
+            user_aliases: Default::default(),
             legacy: None,
             install_fixed: None,
             runtime: None,

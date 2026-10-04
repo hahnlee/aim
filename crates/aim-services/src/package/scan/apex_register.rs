@@ -110,8 +110,8 @@ impl SigningScan {
                 None
             };
             if let Some(original) = &original {
-                if original.shared_user
-                    || super::signing::selected_shared_user(
+                if !original.shared_user
+                    && super::signing::selected_shared_user(
                         false,
                         parsed.shared_user_id.as_deref(),
                         parsed.is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
@@ -120,7 +120,7 @@ impl SigningScan {
                 {
                     return Err(fail(
                         "apex-identity",
-                        "original adoption shared-setting instances are not represented (#890)"
+                        "original adoption changing non-shared ownership is not represented (#890)"
                             .into(),
                     ));
                 }
@@ -359,17 +359,33 @@ impl SigningScan {
                 } else {
                     None
                 };
-                staged
-                    .identities
-                    .ids
-                    .detach(crate::package::owner::app_ids::DetachedSetting {
-                        package: original.clone(),
-                        users: setting.users.clone(),
-                        legacy,
-                        install_fixed,
-                        runtime,
-                    })
-                    .map_err(|e| fail("apex-identity", e))?;
+                let retained = crate::package::owner::app_ids::DetachedSetting {
+                    package: original.clone(),
+                    users: setting.users.clone(),
+                    user_aliases: setting.users.keys().copied().collect(),
+                    legacy,
+                    install_fixed,
+                    runtime,
+                };
+                if original.shared_user {
+                    let group = staged
+                        .identities
+                        .shared_users
+                        .values_mut()
+                        .find(|g| Some(g.app_id) == original.shared_app_id())
+                        .ok_or_else(|| {
+                            fail("apex-identity", "original shared owner is missing".into())
+                        })?;
+                    group
+                        .retain_unparsed_setting(retained)
+                        .map_err(|e| fail("apex-identity", e))?;
+                } else {
+                    staged
+                        .identities
+                        .ids
+                        .detach(retained)
+                        .map_err(|e| fail("apex-identity", e))?;
+                }
             }
             if replaces_shared {
                 let old = previous.as_ref().unwrap();

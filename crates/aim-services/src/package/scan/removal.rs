@@ -48,12 +48,14 @@ impl SigningScan {
         if !group.remove_package(&package.name) {
             return Err(fail("shared UID membership is missing"));
         }
-        let used = self
-            .settings
-            .packages
-            .iter()
-            .chain(&self.settings.disabled_system_packages)
-            .any(|p| p.shared_app_id() == Some(id));
+        let retained = group.member_count() != 0;
+        let used = retained
+            || self
+                .settings
+                .packages
+                .iter()
+                .chain(&self.settings.disabled_system_packages)
+                .any(|p| p.shared_app_id() == Some(id));
         if !used {
             self.identities.shared_users.remove(&name);
             self.settings.shared_users.retain(|g| g.name != name);
@@ -102,6 +104,7 @@ impl SigningScan {
             Some(Owner::Package(owner)) if !package.shared_user && owner == name => None,
             _ => return Err(fail("package UID slot disagrees with setting")),
         };
+        self.detach_retained_user_aliases(name);
         self.settings.packages.remove(at);
         self.installers.remove(name, &mut self.settings);
         let app_id_removed = if shared.is_some() {

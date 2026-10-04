@@ -626,25 +626,31 @@ initial original-package adoption: createNewSetting clones the original setting;
 APEX registration gives the adopted copy appId=-1 but getSettingLPr(10000) still
 returns the distinct prior positive-UID setting. Both retain independent populated
 legacy permission state and fixed=true. Native UID slots now represent a distinct
-DetachedPackage owner with an immutable prior setting, explicit captured users,
-optional permission/fixed/runtime imports (#904). Detachment validates the current
-non-shared owner, leaves allocation extent/cursor unchanged, rejects forged detached
-owners, and preserves older cloned versions. Exact slot removal or replacement
-releases only the current detached record; snapshot validation rejects missing or
-foreign detached owners. Initial non-shared original APEX adoption now copies its
-supplied users and setting, rebinds copied legacy state to INVALID_UID, retains the
-prior positive slot and commits the rename map only after metadata succeeds (#890).
-A rejected domain owner leaves the whole scan unchanged; rescan and active
-user/fixed-state mutations preserve the detached prior setting. Original ART
-compares both native positive/negative UID permission owners byte for byte (32.85s).
-438 units pass (one ignored/not run), host build passes (17.5s), and complete initial
-scan passes (67.79s). A typed original shared-adoption probe (31.65s) retains
-both the prior unparsed setting and the adopted setting under the same internal
-package name: group cardinality is two, isSingleUser is false, the UID slot remains
-shared, final setting appIds are 10000, and the group SDK remains CUR_DEVELOPMENT
-(10000) despite the new code targeting 36. The native name-keyed shared-member map
-cannot represent those distinct instances (#905); shared original adoption stays
-an explicit rejection. Transfer ownership remains #890; native PMS is still inactive. First shared code uses the supplied
+DetachedPackage owner with the prior setting, explicit captured users and optional
+permission/fixed/runtime imports (#904). Detachment validates the current non-shared
+owner, leaves allocation extent/cursor unchanged, rejects forged detached owners,
+and preserves older cloned versions. Exact slot removal or replacement releases
+only the current record; snapshot validation rejects missing or foreign owners.
+Initial non-shared original APEX adoption copies supplied users and setting,
+rebinds copied legacy state to INVALID_UID, retains the prior positive slot and
+commits the rename map only after metadata succeeds (#890). A rejected domain
+owner leaves the whole scan unchanged. Existing user states follow the original
+non-sealed PackageSetting copy: current-version mutations update both prior and
+adopted settings, while newly created users have no alias (#906). Actual setting
+removal/replacement ends the aliases; prior captured versions remain unchanged.
+Legacy permissions and fixed bits remain independent copies. The original ART
+oracle compares present/absent user aliases and sealed captures for both detached
+UID slots and retained shared members (32.68s), alongside populated positive/negative
+UID permission frames. Shared adoption now retains the actual prior unparsed
+setting alongside the new parsed setting (#905): cardinality two, no singleton
+conversion, shared UID slot, final setting appIds 10000, and group SDK
+CUR_DEVELOPMENT (10000) despite new code targeting 36. Removing the new setting
+keeps the prior member, its public/private flags, group SDK and UID slot, matching
+original Settings removal. Native snapshot export still requires distinct instance
+identities (#905), and explicitly rejects duplicate names instead of collapsing
+the two objects. 439 units pass (one ignored/not run), host build passes (14.6s),
+all integration targets compile, and complete initial scan passes (68.09s). Transfer ownership remains
+#890; native PMS is still inactive. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
