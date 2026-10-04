@@ -810,12 +810,23 @@ including the original-PMS userdata template. The native updateProcesses operati
 ArraySet member order after checking complete group membership, setting identity
 and collected process/code inputs, then rebuild in original reverse traversal.
 Failures retain the prior owner; captures invalidate on setting path/version or
-collected-code changes. All 415 units pass (3.17s; one ignored/not run). The
-separate original ART process-owner oracle passes (15.72s: incremental addition,
-reverse rebuild, removal, empty/null maps and immutable empty class owners), and
-the host/image build passes (15.6s; three rebuilt, 39 fresh). This explicit rebuild
-is not an import of the original's current incremental aggregate. Direct aggregate
-export/import, runtime daemon wiring, broader shared owners and full snapshot map
+collected-code changes. A typed com.android.server.pm bridge now directly exports
+SharedUserSetting's current processes field from the same original unfiltered
+snapshot, preserving incremental history, ArrayMap/ArraySet ordering, nullable
+class values, denied permissions, all three modes and embedded-dex state. Native
+record decoding and batch publication reject malformed frames, duplicate keys,
+wrong group identities/order and incomplete aggregate inventories. Native import
+validates member/code ownership and retains the original aggregate independently
+of reverse rebuild; validation no longer reconstructs a captured incremental owner.
+All 418 units pass (3.23s; one ignored/not run). Original ART exports actual
+aggregates at empty, incremental add, noop, rebuild, removal and cleared phases;
+native decoded values equal the original owner at every phase (13.88s full facade
+oracle). All integration targets compile; the full image/original-PMS template
+build passes (73.5s; nine rebuilt nodes, final host rebuild 12.7s). A disposable
+original-PMS template window boot reaches boot_completed at 5.022s and publishes
+68 generations without feed errors, with all 16 shared process aggregates and 290
+runtime records (285 active, five factory). No owned runtime processes or probe
+mounts remain. Runtime daemon wiring, broader shared owners and full snapshot map
 publication remain #870/#836. Native PackageImpl cache decoding/encoding now rejects null feature
 flag arrays, null feature flag strings and null ParsedProcess value names, matching
 the original constructors (#871/#872). Snapshot validation applies the same

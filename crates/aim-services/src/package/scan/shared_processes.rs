@@ -4,6 +4,80 @@ use crate::package::owner::shared_processes::Processes;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct OriginalSharedProcesses {
+    pub name: String,
+    pub app_id: i32,
+    pub members: Vec<String>,
+    pub records: Vec<crate::package::pkg::Process>,
+}
+impl OriginalSharedProcesses {
+    pub fn read_original_record(bytes: &[u8]) -> aim_binder_host::parcel::Result<Self> {
+        use aim_binder_host::parcel::{BAD_VALUE, Reader};
+        let mut r = Reader::new(bytes, &[]);
+        fn required(r: &mut Reader<'_>) -> aim_binder_host::parcel::Result<String> {
+            r.read_string16()?.ok_or(BAD_VALUE)
+        }
+        fn count(r: &mut Reader<'_>) -> aim_binder_host::parcel::Result<usize> {
+            let n = r.read_i32()?;
+            if n < 0 || n as usize > r.remaining() / 4 {
+                Err(BAD_VALUE)
+            } else {
+                Ok(n as usize)
+            }
+        }
+        let name = required(&mut r)?;
+        let app_id = r.read_i32()?;
+        let mut members = Vec::new();
+        for _ in 0..count(&mut r)? {
+            members.push(required(&mut r)?);
+        }
+        let mut records = Vec::new();
+        for _ in 0..count(&mut r)? {
+            let map_key = Some(required(&mut r)?);
+            let name = Some(required(&mut r)?);
+            let mut classes = Vec::new();
+            for _ in 0..count(&mut r)? {
+                classes.push((required(&mut r)?, r.read_string16()?));
+            }
+            let mut denied = Vec::new();
+            for _ in 0..count(&mut r)? {
+                denied.push(required(&mut r)?);
+            }
+            let gwp_asan_mode = r.read_i32()?;
+            let memtag_mode = r.read_i32()?;
+            let native_heap_zero_initialized = r.read_i32()?;
+            let use_embedded_dex = match r.read_i32()? {
+                0 => false,
+                1 => true,
+                _ => return Err(BAD_VALUE),
+            };
+            records.push(crate::package::pkg::Process {
+                map_key,
+                name,
+                app_class_names_by_package: classes,
+                denied_permissions: denied,
+                gwp_asan_mode,
+                memtag_mode,
+                native_heap_zero_initialized,
+                use_embedded_dex,
+            });
+        }
+        if r.remaining() != 0
+            || bytes.len() % 4 != 0
+            || members.iter().collect::<BTreeSet<_>>().len() != members.len()
+            || Processes::capture_original(records.clone()).is_err()
+        {
+            return Err(BAD_VALUE);
+        }
+        Ok(Self {
+            name,
+            app_id,
+            members,
+            records,
+        })
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
 struct Member {
     path: String,
     version: i64,
@@ -19,7 +93,11 @@ pub(super) struct Assignments {
     owners: BTreeMap<String, Processes>,
 }
 
-fn build(scan: &SigningScan, orders: BTreeMap<String, Vec<String>>) -> Result<Assignments, String> {
+fn build(
+    scan: &SigningScan,
+    orders: BTreeMap<String, Vec<String>>,
+    mut imported: Option<BTreeMap<String, Processes>>,
+) -> Result<Assignments, String> {
     if !scan.capture_ready() {
         return Err("scan metadata is not finalized".into());
     }
@@ -56,15 +134,26 @@ fn build(scan: &SigningScan, orders: BTreeMap<String, Vec<String>>) -> Result<As
         {
             return Err(format!("shared process member inventory differs: {name}"));
         }
-        let mut owner = Processes::default();
-        owner.rebuild(order.iter().map(|name| {
-            members[name]
-                .code
-                .as_ref()
-                .and_then(|p| p.package.processes.as_deref())
-        }))?;
+        let owner = match &mut imported {
+            Some(values) => values
+                .remove(name)
+                .ok_or("missing original shared process aggregate")?,
+            None => {
+                let mut value = Processes::default();
+                value.rebuild(order.iter().map(|name| {
+                    members[name]
+                        .code
+                        .as_ref()
+                        .and_then(|p| p.package.processes.as_deref())
+                }))?;
+                value
+            }
+        };
         inputs.insert(name.clone(), (group.app_id, members));
         owners.insert(name.clone(), owner);
+    }
+    if imported.as_ref().is_some_and(|values| !values.is_empty()) {
+        return Err("foreign original shared process aggregate".into());
     }
     Ok(Assignments {
         orders,
@@ -80,6 +169,46 @@ impl SigningScan {
         &mut self,
         source: &crate::package::model::State,
     ) -> Result<(), String> {
+        let orders = self.original_member_orders(source)?;
+        self.complete_shared_processes(orders)
+    }
+
+    pub fn capture_original_shared_processes(
+        &mut self,
+        source: &crate::package::model::State,
+    ) -> Result<(), String> {
+        let orders = self.original_member_orders(source)?;
+        if source
+            .shared_process_inputs
+            .keys()
+            .ne(source.shared_users.keys())
+        {
+            return Err("original shared process aggregate inventory differs".into());
+        }
+        let mut owners = BTreeMap::new();
+        for (name, input) in &source.shared_process_inputs {
+            let group = &source.shared_users[name];
+            if input.name != *name
+                || input.app_id != group.app_id
+                || input.members != group.packages
+            {
+                return Err(format!(
+                    "original shared process aggregate identity differs: {name}"
+                ));
+            }
+            owners.insert(
+                name.clone(),
+                Processes::capture_original(input.records.clone())?,
+            );
+        }
+        self.shared_processes = Some(build(self, orders, Some(owners))?);
+        Ok(())
+    }
+
+    fn original_member_orders(
+        &self,
+        source: &crate::package::model::State,
+    ) -> Result<BTreeMap<String, Vec<String>>, String> {
         if source
             .shared_users
             .keys()
@@ -146,7 +275,7 @@ impl SigningScan {
                 original.packages.iter().rev().cloned().collect(),
             );
         }
-        self.complete_shared_processes(orders)
+        Ok(orders)
     }
 
     /// Complete inputs in the operation's real iteration order. An empty list is
@@ -155,7 +284,7 @@ impl SigningScan {
         &mut self,
         orders: BTreeMap<String, Vec<String>>,
     ) -> Result<(), String> {
-        let candidate = build(self, orders)?;
+        let candidate = build(self, orders, None)?;
         self.shared_processes = Some(candidate);
         Ok(())
     }
@@ -164,7 +293,11 @@ impl SigningScan {
         let Some(assignment) = &self.shared_processes else {
             return Ok(());
         };
-        let current = build(self, assignment.orders.clone())?;
+        let current = build(
+            self,
+            assignment.orders.clone(),
+            Some(assignment.owners.clone()),
+        )?;
         if current.inputs != assignment.inputs {
             return Err("shared process inputs changed".into());
         }
@@ -291,6 +424,124 @@ mod tests {
             );
         }
         source
+    }
+    #[test]
+    fn original_incremental_aggregate_is_imported_without_rebuild() {
+        let mut scan = scan();
+        load(&mut scan, "a", 1);
+        load(&mut scan, "b", 0);
+        let mut source = original_source(&scan);
+        let mut aggregate = Processes::default();
+        aggregate
+            .add(scan.loaded["a"].package.processes.as_deref())
+            .unwrap();
+        aggregate
+            .add(scan.loaded["b"].package.processes.as_deref())
+            .unwrap();
+        for (name, group) in &source.shared_users {
+            source.shared_process_inputs.insert(
+                name.clone(),
+                OriginalSharedProcesses {
+                    name: name.clone(),
+                    app_id: group.app_id,
+                    members: group.packages.clone(),
+                    records: if name == "fixture" {
+                        aggregate.records().to_vec()
+                    } else {
+                        vec![]
+                    },
+                },
+            );
+        }
+        scan.capture_original_shared_processes(&source).unwrap();
+        assert_eq!(scan.shared_processes("fixture").unwrap(), Some(&aggregate));
+        assert_eq!(aggregate.records()[0].gwp_asan_mode, 0);
+        let retained = scan.clone();
+        let mut rebuilt = scan.clone();
+        rebuilt
+            .rebuild_shared_processes_from_original_members(&source)
+            .unwrap();
+        assert_eq!(
+            rebuilt
+                .shared_processes("fixture")
+                .unwrap()
+                .unwrap()
+                .records()[0]
+                .gwp_asan_mode,
+            1
+        );
+        for mode in 0..5 {
+            let mut bad = source.clone();
+            match mode {
+                0 => {
+                    bad.shared_process_inputs.remove("fixture");
+                }
+                1 => bad.shared_process_inputs.get_mut("fixture").unwrap().app_id += 1,
+                2 => bad
+                    .shared_process_inputs
+                    .get_mut("fixture")
+                    .unwrap()
+                    .members
+                    .reverse(),
+                3 => {
+                    bad.shared_process_inputs
+                        .get_mut("fixture")
+                        .unwrap()
+                        .records[0]
+                        .map_key = Some("foreign".into())
+                }
+                _ => {
+                    bad.shared_process_inputs
+                        .get_mut("fixture")
+                        .unwrap()
+                        .records[0]
+                        .denied_permissions = vec!["duplicate".into(), "duplicate".into()]
+                }
+            }
+            assert!(scan.capture_original_shared_processes(&bad).is_err());
+            assert_eq!(scan, retained);
+        }
+    }
+    #[test]
+    fn original_aggregate_decoder_rejects_malformed_frames() {
+        use aim_binder_host::parcel::Parcel;
+        let mut p = Parcel::new();
+        p.write_string16(Some("group"));
+        p.write_i32(10100);
+        p.write_i32(1);
+        p.write_string16(Some("a"));
+        p.write_i32(1);
+        p.write_string16(Some("worker"));
+        p.write_string16(Some("worker"));
+        p.write_i32(1);
+        p.write_string16(Some("a"));
+        p.write_string16(None);
+        p.write_i32(1);
+        p.write_string16(Some("denied"));
+        p.write_i32(1);
+        p.write_i32(2);
+        p.write_i32(3);
+        p.write_bool(true);
+        let decoded = OriginalSharedProcesses::read_original_record(p.data()).unwrap();
+        assert_eq!(
+            decoded.records[0].app_class_names_by_package,
+            [("a".into(), None)]
+        );
+        assert_eq!(decoded.records[0].denied_permissions, ["denied"]);
+        let mut tail = p.data().to_vec();
+        tail.extend_from_slice(&0i32.to_le_bytes());
+        assert!(OriginalSharedProcesses::read_original_record(&tail).is_err());
+        assert!(
+            OriginalSharedProcesses::read_original_record(&p.data()[..p.data().len() - 1]).is_err()
+        );
+        let mut invalid = p.data().to_vec();
+        let end = invalid.len();
+        invalid[end - 4..].copy_from_slice(&2i32.to_le_bytes());
+        assert!(OriginalSharedProcesses::read_original_record(&invalid).is_err());
+        let mut missing = Parcel::new();
+        missing.write_string16(None);
+        missing.write_i32(0);
+        assert!(OriginalSharedProcesses::read_original_record(missing.data()).is_err());
     }
     #[test]
     fn original_forward_member_order_drives_rebuild_and_rejects_foreign_sources() {

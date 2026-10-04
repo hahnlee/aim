@@ -46,6 +46,7 @@ const USER: i32 = 5;
 const SYSTEM: i32 = 6;
 const RUNTIME: i32 = 7;
 const DISABLED_SYSTEM_RUNTIME: i32 = 8;
+const SHARED_PROCESSES: i32 = 9;
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -402,6 +403,23 @@ fn build(
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
             }
+            SHARED_PROCESSES => {
+                let input =
+                    crate::package::scan::OriginalSharedProcesses::read_original_record(bytes)
+                        .map_err(failed)?;
+                let group = state
+                    .shared_users
+                    .get(&key.name)
+                    .ok_or_else(|| format!("{key:?}: missing shared process group"))?;
+                if input.name != key.name
+                    || group.name != key.name
+                    || input.app_id != group.app_id
+                    || input.members != group.packages
+                {
+                    return Err(format!("{key:?}: shared process identity differs"));
+                }
+                state.shared_process_inputs.insert(key.name.clone(), input);
+            }
             RUNTIME | DISABLED_SYSTEM_RUNTIME => {
                 let runtime = record::runtime(bytes).map_err(failed)?;
                 let factory = key.kind == DISABLED_SYSTEM_RUNTIME;
@@ -439,6 +457,14 @@ fn build(
             }
             _ => return Err(format!("{key:?}: no such kind")),
         }
+    }
+    if !state.shared_process_inputs.is_empty()
+        && state
+            .shared_process_inputs
+            .keys()
+            .ne(state.shared_users.keys())
+    {
+        return Err("shared process aggregate inventory differs".into());
     }
     for (kind, name, app_id) in shared_user_ids {
         let shared_user = app_id.and_then(|id| {
@@ -488,6 +514,11 @@ fn packages(state: &mut State, installed: bool) -> &mut BTreeMap<String, Package
 pub fn dump(state: &State) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "generation={} nonce={:?}", state.generation, state.nonce);
+    let _ = writeln!(
+        s,
+        "shared_process_inputs={}",
+        state.shared_process_inputs.len()
+    );
     let active_runtime = state
         .runtime_inputs
         .keys()

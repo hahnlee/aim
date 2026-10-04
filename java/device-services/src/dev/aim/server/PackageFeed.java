@@ -98,6 +98,7 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int SYSTEM = 6;
     private static final int RUNTIME = 7;
     private static final int DISABLED_SYSTEM_RUNTIME = 8;
+    private static final int SHARED_PROCESSES = 9;
     /** The largest chunk of a record in one transaction. */
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
@@ -273,6 +274,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             }
             for (SharedUserApi user : snapshot.getSharedUsers().values()) {
                 records.put(new Key(SHARED_USER, user.getName()), sharedUser(user));
+                records.put(new Key(SHARED_PROCESSES, user.getName()), com.android.server.pm.SharedProcessFeed.capture(user));
             }
         }
         for (int user : users) {

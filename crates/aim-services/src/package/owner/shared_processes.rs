@@ -33,6 +33,42 @@ fn classes(target: &mut Vec<(String, Option<String>)>, incoming: &[(String, Opti
 }
 
 impl Processes {
+    pub fn capture_original(records: Vec<Process>) -> Result<Self, String> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut previous = None;
+        for process in &records {
+            let name = process
+                .name
+                .as_deref()
+                .ok_or("original process name is null")?;
+            let key = hash(Some(name));
+            if process.map_key.as_deref() != Some(name)
+                || !names.insert(name)
+                || previous.is_some_and(|p| p > key)
+            {
+                return Err("invalid original process map identity/order".into());
+            }
+            if process
+                .app_class_names_by_package
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != process.app_class_names_by_package.len()
+                || process
+                    .denied_permissions
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != process.denied_permissions.len()
+            {
+                return Err("duplicate original process class/permission".into());
+            }
+            previous = Some(key);
+        }
+        Ok(Self(records))
+    }
+
     pub fn records(&self) -> &[Process] {
         &self.0
     }

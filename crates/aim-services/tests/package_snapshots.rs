@@ -52,6 +52,10 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
                 .join("tests/fixtures/SharedProcessesOracle.java"),
         )
         .arg(
+            aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/SharedProcessFeed.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         ));
     let mut pending = vec![classes.clone()];
@@ -308,6 +312,16 @@ fn verify_shared_processes(boot: &Boot) {
         "SHARED_PROCESSES copy union overwrite modes embedded collisions rebuild removal empty\n"
     );
     let check = |phase: &str, owner: &Processes| {
+        let aggregate = aim_services::package::scan::OriginalSharedProcesses::read_original_record(
+            &fs::read(directory.join(format!("{phase}.aggregate"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(aggregate.name, "group");
+        assert_eq!(
+            aggregate.records,
+            owner.records(),
+            "actual original aggregate {phase}"
+        );
         assert_eq!(
             encode_processes(owner),
             fs::read(directory.join(format!("{phase}.original"))).unwrap(),

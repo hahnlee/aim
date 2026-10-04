@@ -695,3 +695,71 @@ fn library_file_slots_survive_feed_and_application_queries() {
         info::generate_application_info(&target, info::flags::GET_SHARED_LIBRARY_FILES).unwrap();
     assert_eq!(result.shared_library_files, Some(expected));
 }
+
+#[test]
+fn shared_aggregate_batches_require_matching_complete_group_records() {
+    fn aggregate(name: &str, app_id: i32, members: &[&str]) -> Vec<u8> {
+        let mut p = Parcel::new();
+        p.write_string16(Some(name));
+        p.write_i32(app_id);
+        strings(&mut p, members);
+        p.write_i32(0);
+        p.data().to_vec()
+    }
+    let mut inner = Inner::default();
+    put(
+        &mut inner,
+        SHARED_USER,
+        "group",
+        &shared_user_record("group", 10100, &["b", "a"]),
+    );
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "group",
+        &aggregate("group", 10100, &["b", "a"]),
+    );
+    let state = build(&inner.records, 1, None).unwrap();
+    assert_eq!(state.shared_process_inputs["group"].members, ["b", "a"]);
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "group",
+        &aggregate("group", 10100, &["a", "b"]),
+    );
+    assert!(build(&inner.records, 2, None).is_err());
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "group",
+        &aggregate("group", 10100, &["b", "a"]),
+    );
+    put(
+        &mut inner,
+        SHARED_USER,
+        "empty",
+        &shared_user_record("empty", 10101, &[]),
+    );
+    assert!(build(&inner.records, 2, None).is_err());
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "empty",
+        &aggregate("empty", 10101, &[]),
+    );
+    assert_eq!(
+        build(&inner.records, 2, None)
+            .unwrap()
+            .shared_process_inputs
+            .len(),
+        2
+    );
+    put(
+        &mut inner,
+        SHARED_PROCESSES,
+        "empty",
+        &aggregate("foreign", 10101, &[]),
+    );
+    assert!(build(&inner.records, 3, None).is_err());
+    assert_eq!(state.shared_process_inputs["group"].members, ["b", "a"]);
+}
