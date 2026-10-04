@@ -55,7 +55,17 @@ public final class ScanSettingsWriteOracle {
             java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
             java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            var configured = new java.io.File(directory, "owner-default-configured-" + index).exists();
+            com.android.server.pm.permission.LegacyPermission configuredPermission = null, configuredTree = null;
+            if (configured) {
+                configuredPermission = configuredPermission(); configuredTree = configuredPermission();
+                settings.mPermissions.replacePermissions(java.util.List.of(configuredPermission));
+                settings.mPermissions.replacePermissionTrees(java.util.List.of(configuredTree));
+            }
             boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            if (configured && (!settings.mPermissions.getPermissions().contains(configuredPermission)
+                    || !settings.mPermissions.getPermissionTrees().contains(configuredTree)))
+                throw new AssertionError("configured permission identity replaced: " + index);
             var output = new java.util.ArrayList<String>(); output.add(Boolean.toString(first));
             var signatures = new java.util.ArrayList<String>();
             for (var setting : settings.getPackagesLocked().values()) signatures.add(setting.getPackageName() + ":" + signatureTrace(setting.getSigningDetails()));
@@ -64,7 +74,7 @@ public final class ScanSettingsWriteOracle {
                 var permissions = new java.util.ArrayList<String>();
                 for (var permission : list) {
                     var info = permission.getPermissionInfo();
-                    permissions.add(info.name + ":" + info.packageName + ":" + info.protectionLevel + ":" + info.icon + ":" + info.nonLocalizedLabel);
+                    permissions.add(info.name + ":" + info.packageName + ":" + info.protectionLevel + ":" + info.icon + ":" + info.nonLocalizedLabel + ":" + permission.getType());
                 }
                 java.util.Collections.sort(permissions); output.add(String.join(";", permissions));
             }
@@ -76,6 +86,12 @@ public final class ScanSettingsWriteOracle {
             output.add(main.exists() + "," + reserve.exists());
             java.nio.file.Files.write(new java.io.File(directory, "owner-default-output-" + index).toPath(), String.join("|", output).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
+    }
+    private static com.android.server.pm.permission.LegacyPermission configuredPermission() {
+        var info = new android.content.pm.PermissionInfo();
+        info.name = "a"; info.packageName = "configured"; info.protectionLevel = 2;
+        info.icon = 42; info.nonLocalizedLabel = "configured-label";
+        return new com.android.server.pm.permission.LegacyPermission(info, 1, 1234, new int[] {1001, 1002});
     }
     private static String signatureTrace(android.content.pm.SigningDetails details) throws Exception {
         var current = details.getSignatures(); var past = details.getPastSigningCertificates();

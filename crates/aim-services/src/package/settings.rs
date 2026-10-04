@@ -61,10 +61,19 @@ pub struct Version {
 pub struct Permission {
     pub name: String,
     pub package: String,
+    pub owner: PermissionOwner,
     /// `PermissionInfo.protectionLevel`, as `fixProtectionLevel` leaves it.
     pub protection_level: i32,
-    /// A dynamic permission's icon and label; `None` for a manifest one.
+    /// Dynamic XML updates icon/label even on a retained configured owner.
     pub dynamic: Option<(i32, Option<String>)>,
+}
+
+/// LegacyPermission's immutable type and configured UID/GIDs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PermissionOwner {
+    Manifest,
+    Config { uid: i32, gids: Vec<i32> },
+    Dynamic,
 }
 
 /// A `PackageSetting`: a `<package>`, or an `<updated-package>` (the
@@ -613,10 +622,26 @@ fn read_permission(out: &mut Vec<Permission>, item: &Element) {
     let (Some(name), Some(package)) = (string(item, "name"), string(item, "package")) else {
         return;
     };
+    let protection_level = fix_protection_level(defaulted(item.int("protection"), 0));
+    let dynamic = (string(item, "type").as_deref() == Some("dynamic"))
+        .then(|| (defaulted(item.int("icon"), 0), string(item, "label")));
+    if let Some(old) = out.iter_mut().find(|p| p.name == name)
+        && matches!(old.owner, PermissionOwner::Config { .. })
+    {
+        old.protection_level = protection_level;
+        if dynamic.is_some() {
+            old.dynamic = dynamic;
+        }
+        return;
+    }
     let permission = Permission {
-        protection_level: fix_protection_level(defaulted(item.int("protection"), 0)),
-        dynamic: (string(item, "type").as_deref() == Some("dynamic"))
-            .then(|| (defaulted(item.int("icon"), 0), string(item, "label"))),
+        protection_level,
+        owner: if dynamic.is_some() {
+            PermissionOwner::Dynamic
+        } else {
+            PermissionOwner::Manifest
+        },
+        dynamic,
         name,
         package,
     };

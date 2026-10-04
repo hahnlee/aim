@@ -579,6 +579,13 @@ fn native_package_parcels_match_original_read_write() {
         permission_inputs.len()
     );
     owner_default_inputs.extend(permission_inputs);
+    let configured_start = owner_default_inputs.len();
+    let configured_inputs = common::settings_owner_defaults::configured_permission_inputs();
+    eprintln!(
+        "original configured permission cases: {}",
+        configured_inputs.len()
+    );
+    owner_default_inputs.extend(configured_inputs);
     let mut owner_default_expected = Vec::new();
     for (index, input) in owner_default_inputs.iter().enumerate() {
         let native = directory.join(format!("owner-default-native-{index}"));
@@ -588,6 +595,14 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(&main, input).unwrap();
         fs::write(&reserve, "<packages/>").unwrap();
         let mut state = aim_services::package::settings::Settings::default();
+        if index >= configured_start {
+            common::settings_owner_defaults::seed_permissions(&mut state);
+            fs::write(
+                directory.join(format!("owner-default-configured-{index}")),
+                b"configured",
+            )
+            .unwrap();
+        }
         let (_, report) = aim_services::package::owner::recovery::Plan::inspect(&native)
             .unwrap()
             .recover(&[], &mut state, |bytes, state| {
@@ -601,6 +616,9 @@ fn native_package_parcels_match_original_read_write() {
                 Ok(root)
             })
             .unwrap();
+        if index >= configured_start {
+            common::settings_owner_defaults::assert_configured_owners(&state);
+        }
         fs::write(
             directory.join(format!("owner-default-input-{index}")),
             input,

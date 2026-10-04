@@ -112,6 +112,54 @@ pub fn permission_inputs() -> Vec<Vec<u8>> {
     inputs
 }
 
+pub fn configured_permission_inputs() -> Vec<Vec<u8>> {
+    let mut inputs = permission_inputs();
+    for body in [
+        "<permissions><item name='a' package='changed' protection='2'/></permissions>",
+        "<permissions><item name='a' package='changed' type='dynamic' protection='bad' icon='7' label='new'/></permissions>",
+        "<permissions><item name='a' package='changed' type='dynamic' icon='7' label='new'/><item name='a' package='changed-again' protection='2'/></permissions>",
+        "<permission-trees><item name='a' package='changed' type='dynamic' icon='bad'/></permission-trees>",
+    ] {
+        let xml = format!("<packages>{body}</packages>");
+        inputs.push(xml.as_bytes().to_vec());
+        inputs.push(
+            aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap()).unwrap(),
+        );
+    }
+    inputs
+}
+
+pub fn seed_permissions(settings: &mut Settings) {
+    use aim_services::package::settings::{Permission, PermissionOwner};
+    for out in [&mut settings.permissions, &mut settings.permission_trees] {
+        out.push(Permission {
+            name: "a".into(),
+            package: "configured".into(),
+            owner: PermissionOwner::Config {
+                uid: 1234,
+                gids: vec![1001, 1002],
+            },
+            protection_level: 2,
+            dynamic: Some((42, Some("configured-label".into()))),
+        });
+    }
+}
+
+pub fn assert_configured_owners(settings: &Settings) {
+    use aim_services::package::settings::PermissionOwner;
+    for entries in [&settings.permissions, &settings.permission_trees] {
+        let p = entries.iter().find(|p| p.name == "a").unwrap();
+        assert_eq!(p.package, "configured");
+        assert_eq!(
+            p.owner,
+            PermissionOwner::Config {
+                uid: 1234,
+                gids: vec![1001, 1002]
+            }
+        );
+    }
+}
+
 pub fn trace(settings: &Settings, first: bool, main: bool, reserve: bool) -> String {
     let mut packages: Vec<_> = settings
         .packages
@@ -123,13 +171,19 @@ pub fn trace(settings: &Settings, first: bool, main: bool, reserve: bool) -> Str
         let mut entries: Vec<_> = entries
             .iter()
             .map(|p| {
+                use aim_services::package::settings::PermissionOwner;
+                let kind = match p.owner {
+                    PermissionOwner::Manifest => 0,
+                    PermissionOwner::Config { .. } => 1,
+                    PermissionOwner::Dynamic => 2,
+                };
                 let (icon, label) = p
                     .dynamic
                     .as_ref()
                     .map(|(icon, label)| (*icon, label.as_deref().unwrap_or("null")))
                     .unwrap_or((0, "null"));
                 format!(
-                    "{}:{}:{}:{icon}:{label}",
+                    "{}:{}:{}:{icon}:{label}:{kind}",
                     p.name, p.package, p.protection_level
                 )
             })
