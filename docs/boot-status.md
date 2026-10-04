@@ -826,14 +826,32 @@ shared UID, retained and install-initiator signing records. The vendor Java brid
 constructs original Signature objects with these flags. Actual original ART
 roundtrip and getter-isolation checks pass with package flags 7, shared flags 13
 and initiator flags 11. Original lineage comparisons pass 507 merge combinations
-and 2,197 shared UID combinations with nonzero current flags (27.77s).
+and 2,197 shared UID combinations with nonzero current flags (27.82s).
 Original XML writers do not explicitly persist current flags: write preflight
 compares their persisted projection, while a separate original PackageSignatures
 reader compares actual restored flags and serialized public-key class/byte hashes
 for all 243 packages and 16 shared UIDs.
-The native input loader still always verifies code afresh. Original cached
-certificate collection conditionally clones saved signing details and retains
-their flags; its path/timestamp/version/force policy remains #918. The normal AST importer now derives public keys after completing the current
+Inputs::load/load_verified_code and the default Image/DataImage loaders still
+verify code afresh. Apks::collect_signing_details now implements the pinned
+certificate collection choice: matching saved code path/time, no forceCollect,
+DB version at least SIGNATURE_MALFORMED_RECOVER, and nonempty saved signers with
+nonzero scheme reuse the saved signing; misses collect from APKs. Pre-N-MR1
+upgrades compare the code directory timestamp; ordinary clusters compare the
+latest base/split APK timestamp. Its timestamp reads follow File.lastModified's
+zero on stat failure, while missing native path mappings reject explicitly.
+Actual original ScanPackageUtils.collectCertificatesLI agrees on 60 cases with
+signed code on disposable data: monolithic/cluster/split/missing paths, cached
+current flags 37, DB boundaries/future version, forceCollect, skipVerify, absent/
+empty/unknown saved signing, path/time mismatch and legacy timestamps. Complete
+signatures, lineage flags and public-key serialization class/byte hashes agree
+in the AppIds/signing oracle (27.82s). Explicit Image/DataImage::load_collected
+entry points now consume the collection choice before reconciliation; their
+scan partition fixes the permitted skipVerify input. Immutable original system
+and data scan fixtures retain cached flags 41 and preserve paths/rejections
+(0.61s and 0.35s); mismatched skipVerify/partition inputs reject.
+These input APIs do not yet wire the current selected/original-rename setting,
+volume VersionInfo, upgrade state and strict data allowlist into the original
+point of the sequential boot scan; that ownership integration remains #918. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator
 container gets a fresh signing owner. Original Settings comparisons add 24
@@ -865,10 +883,10 @@ legacy flags, negative values, malformed and typed attributes, and precedence
 over older fields. Remaining getter edges still need audit (#915). Full Settings recovery, current-version initialization
 and nonregular/open-IO cases are not proved. Passive Store::open
 and Store::create remain strict and do not adopt malformed artifacts.
-Ordinary units pass 455 (0.47s; three ignored, including the crash helper explicitly
+Ordinary units pass 455 (0.51s; three ignored, including the crash helper explicitly
 run by its parent), XML units previously passed 15, and all current integration targets compile.
-The bridge image/template build previously passed (75.2s, nine rebuilt, 33 fresh);
-the current production build passes (14.3s, three rebuilt, 39 fresh).
+The current full image/template build passes (69.0s, nine rebuilt, 33 fresh);
+the final production build passes (14.6s, three rebuilt, 39 fresh).
 The prior original-APK initial scan fixture passed (68.36s), writing/reopening
 both fresh and existing native settings and checking immutable input metadata,
 ABX/reserve equality and repeat-write stability; it was not rerun for recovery.

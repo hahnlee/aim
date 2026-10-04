@@ -43,7 +43,7 @@ use super::model::{PackageState, State};
 use super::query::{Query, States};
 use crate::shadow::{Answer, Check, CheckOutcome, ShadowCall, Value};
 pub(crate) use apk::ApkSigningError;
-pub use apk::{Apks, Files};
+pub use apk::{Apks, CertificateCollection, Files};
 use session::Sessions;
 
 /// How long a package's state in a user takes no write before the

@@ -12,7 +12,7 @@ use android_image_extract::source::FileSource;
 use crate::package::model::PackageState;
 use crate::package::parse::{self, Platform};
 use crate::package::pkg::AndroidPackage;
-use crate::package::settings::Signatures;
+use crate::package::settings::{Package, Signatures};
 use crate::package::sign::{self, Apk, Build};
 
 /// Where the service host reads a guest path, if others may read it.
@@ -38,6 +38,17 @@ impl std::fmt::Display for ApkSigningError {
             Self::Invalid(e) => e.fmt(f),
         }
     }
+}
+
+/// ScanPackageUtils.collectCertificatesLI inputs from the scan owner.
+#[derive(Clone, Copy)]
+pub struct CertificateCollection<'a> {
+    pub saved: Option<&'a Package>,
+    pub database_version: i32,
+    pub force_collect: bool,
+    /// Only verified system partitions may skip APK content verification.
+    pub skip_verify: bool,
+    pub pre_n_mr1_upgrade: bool,
 }
 
 impl Apks {
@@ -78,9 +89,51 @@ impl Apks {
         self.checked_signing_details(pkg).map_err(|e| e.to_string())
     }
 
+    /// Collect code signing before scan reconciliation, reusing saved signing
+    /// only under the pinned path/time/version gates. This does not authorize
+    /// installation or replace the ordered reconciliation owner.
+    pub fn collect_signing_details(
+        &self,
+        pkg: &AndroidPackage,
+        collection: CertificateCollection<'_>,
+    ) -> Result<sign::SigningDetails, String> {
+        self.checked_collect_signing_details(pkg, collection)
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn checked_collect_signing_details(
+        &self,
+        pkg: &AndroidPackage,
+        collection: CertificateCollection<'_>,
+    ) -> Result<sign::SigningDetails, ApkSigningError> {
+        let modified = collection_file_time(&self.files, pkg, collection.pre_n_mr1_upgrade)
+            .map_err(ApkSigningError::Input)?;
+        if let Some(saved) = collection.saved
+            && !collection.force_collect
+            && pkg.path.as_deref() == Some(saved.code_path.as_str())
+            && saved.last_modified_time == modified
+            // SIGNATURE_END_ENTITY=2; SIGNATURE_MALFORMED_RECOVER=3.
+            && collection.database_version >= 3
+            && let Some(signing) = &saved.signatures
+            && !signing.signatures.is_empty()
+            && signing.scheme_version != sign::UNKNOWN
+        {
+            return sign::SigningDetails::from_saved(signing).map_err(ApkSigningError::Input);
+        }
+        self.signing_details_with_verification(pkg, collection.skip_verify)
+    }
+
     pub(crate) fn checked_signing_details(
         &self,
         pkg: &AndroidPackage,
+    ) -> Result<sign::SigningDetails, ApkSigningError> {
+        self.signing_details_with_verification(pkg, false)
+    }
+
+    fn signing_details_with_verification(
+        &self,
+        pkg: &AndroidPackage,
+        skip_verify: bool,
     ) -> Result<sign::SigningDetails, ApkSigningError> {
         let base = pkg
             .base_apk_path
@@ -115,7 +168,7 @@ impl Apks {
             &splits,
             pkg.static_shared_library_name.is_some(),
             pkg.target_sdk_version,
-            false,
+            skip_verify,
             &Build::of(&self.platform),
         )
         .map_err(ApkSigningError::Invalid)
@@ -168,19 +221,56 @@ fn scan_compressed_files_exist(files: &Files, pkg: &AndroidPackage) -> Result<bo
     Ok(false)
 }
 
-fn scan_file_time(files: &Files, pkg: &AndroidPackage) -> Result<i64, String> {
+// File.lastModified returns zero on stat failure; a missing native path
+// mapping is an owner configuration failure, not that guest API result.
+fn collection_file_time(files: &Files, pkg: &AndroidPackage, legacy: bool) -> Result<i64, String> {
     use std::os::unix::fs::MetadataExt;
     let metadata = |path: &str| {
-        let host = (files)(path).ok_or_else(|| format!("{path}: not readable"))?;
-        std::fs::metadata(host).map_err(|e| format!("{path}: {e}"))
+        let host = files(path).ok_or_else(|| format!("{path}: not readable"))?;
+        Ok::<_, String>(std::fs::metadata(host).ok())
     };
     let millis = |path: &str| {
-        let stat = metadata(path)?;
+        let Some(stat) = metadata(path)? else {
+            return Ok(0);
+        };
         stat.mtime()
             .checked_mul(1000)
             .and_then(|s| s.checked_add(stat.mtime_nsec() / 1_000_000))
             .ok_or_else(|| format!("{path}: modification time exceeds milliseconds range"))
     };
+    let path = pkg.path.as_deref().ok_or("no parsed package path")?;
+    if legacy || !metadata(path)?.is_some_and(|m| m.is_dir()) {
+        return millis(path);
+    }
+    let base = pkg
+        .base_apk_path
+        .as_deref()
+        .ok_or("no parsed base APK path")?;
+    let mut latest = millis(base)?;
+    for split in pkg.split_code_paths.iter().flatten() {
+        latest = latest.max(millis(
+            split.as_deref().ok_or("null parsed split APK path")?,
+        )?);
+    }
+    Ok(latest)
+}
+
+fn file_time(files: &Files, path: &str) -> Result<i64, String> {
+    use std::os::unix::fs::MetadataExt;
+    let host = files(path).ok_or_else(|| format!("{path}: not readable"))?;
+    let stat = std::fs::metadata(host).map_err(|e| format!("{path}: {e}"))?;
+    stat.mtime()
+        .checked_mul(1000)
+        .and_then(|s| s.checked_add(stat.mtime_nsec() / 1_000_000))
+        .ok_or_else(|| format!("{path}: modification time exceeds milliseconds range"))
+}
+
+fn scan_file_time(files: &Files, pkg: &AndroidPackage) -> Result<i64, String> {
+    let metadata = |path: &str| {
+        let host = (files)(path).ok_or_else(|| format!("{path}: not readable"))?;
+        std::fs::metadata(host).map_err(|e| format!("{path}: {e}"))
+    };
+    let millis = |path: &str| file_time(files, path);
     let path = pkg.path.as_deref().ok_or("no parsed package path")?;
     let code = metadata(path)?;
     if !code.is_dir() {

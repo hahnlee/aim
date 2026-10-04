@@ -9,7 +9,7 @@ use crate::package::{
     parse,
     pkg::AndroidPackage,
     sign,
-    write::{ApkSigningError, Apks},
+    write::{ApkSigningError, Apks, CertificateCollection},
 };
 use std::fs;
 
@@ -84,7 +84,7 @@ impl Location {
 }
 
 #[derive(Clone, Debug)]
-/// Parsed and integrity-verified code before scan identity is applied.
+/// Parsed code with collected signing before scan identity is applied.
 /// Record.parsed has already been renamed and must not be reused here.
 pub struct Code {
     pub location: Location,
@@ -122,12 +122,28 @@ impl Image {
     /// Native parsing and full signature verification. No package feed,
     /// parser cache, settings, UID allocation or filesystem writes.
     pub fn load(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
-        Self::load_directories(apks, directories(apexes)?).map(|(image, _)| image)
+        Self::load_directories(apks, directories(apexes)?, None).map(|(image, _)| image)
     }
 
-    fn load_directories(
+    /// Ordered image inputs using the boot owner's certificate collection
+    /// choice for each parsed candidate, before identity/reconciliation.
+    pub fn load_collected<'a>(
+        apks: &Apks,
+        apexes: &[Apex],
+        collection: &dyn Fn(
+            &AndroidPackage,
+            &Location,
+        ) -> Result<CertificateCollection<'a>, String>,
+    ) -> Result<Self, Error> {
+        Self::load_directories(apks, directories(apexes)?, Some(collection)).map(|(image, _)| image)
+    }
+
+    fn load_directories<'a>(
         apks: &Apks,
         directories: Vec<Location>,
+        collection: Option<
+            &dyn Fn(&AndroidPackage, &Location) -> Result<CertificateCollection<'a>, String>,
+        >,
     ) -> Result<(Self, Vec<String>), Error> {
         let mut image = Self::default();
         let mut scan_paths = Vec::new();
@@ -211,7 +227,20 @@ impl Image {
                             format!("native parcel does not read: {e}"),
                         )
                     })?;
-                let signing = match apks.checked_signing_details(&parsed) {
+                let signing = match if let Some(collection) = collection {
+                    let choice = collection(&parsed, &location)
+                        .map_err(|e| fail(&location.path, "certificates", e))?;
+                    if choice.skip_verify != (location.partition != Partition::Data) {
+                        return Err(fail(
+                            &location.path,
+                            "certificates",
+                            "verification choice disagrees with scan partition".into(),
+                        ));
+                    }
+                    apks.checked_collect_signing_details(&parsed, choice)
+                } else {
+                    apks.checked_signing_details(&parsed)
+                } {
                     Ok(signing) => signing,
                     Err(ApkSigningError::Invalid(error))
                         if location.partition == Partition::Data =>
@@ -278,6 +307,27 @@ impl DataImage {
     /// Scan /data/app, then explicitly supplied mounted private volumes.
     /// Does not allocate UIDs, mutate settings or remove rejected candidates.
     pub fn load(apks: &Apks, volumes: &[String]) -> Result<Self, Error> {
+        Self::load_directories(apks, volumes, None)
+    }
+
+    pub fn load_collected<'a>(
+        apks: &Apks,
+        volumes: &[String],
+        collection: &dyn Fn(
+            &AndroidPackage,
+            &Location,
+        ) -> Result<CertificateCollection<'a>, String>,
+    ) -> Result<Self, Error> {
+        Self::load_directories(apks, volumes, Some(collection))
+    }
+
+    fn load_directories<'a>(
+        apks: &Apks,
+        volumes: &[String],
+        collection: Option<
+            &dyn Fn(&AndroidPackage, &Location) -> Result<CertificateCollection<'a>, String>,
+        >,
+    ) -> Result<Self, Error> {
         let mut roots = vec!["/data/app".to_owned()];
         for volume in volumes {
             if volume.is_empty()
@@ -313,6 +363,7 @@ impl DataImage {
                     apex: None,
                 })
                 .collect(),
+            collection,
         )?;
         Ok(Self {
             packages: image

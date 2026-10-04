@@ -50,6 +50,45 @@ fn image_scan_keeps_locations_duplicates_and_rejections_without_settings() {
     };
     let image = Image::load(&apks, &[]).unwrap();
     assert_eq!(image.packages.len(), 3);
+    let saved: Vec<_> = image
+        .packages
+        .iter()
+        .map(|code| cached_setting(&apks, code))
+        .collect();
+    let collected = Image::load_collected(&apks, &[], &|parsed, _| {
+        Ok(aim_services::package::write::CertificateCollection {
+            saved: saved
+                .iter()
+                .find(|saved| Some(saved.code_path.as_str()) == parsed.path.as_deref()),
+            database_version: 3,
+            force_collect: false,
+            skip_verify: true,
+            pre_n_mr1_upgrade: false,
+        })
+    })
+    .unwrap();
+    assert_eq!(collected.rejected, image.rejected);
+    assert_eq!(collected.packages.len(), image.packages.len());
+    let invalid = Image::load_collected(&apks, &[], &|_, _| {
+        Ok(aim_services::package::write::CertificateCollection {
+            saved: None,
+            database_version: 3,
+            force_collect: true,
+            skip_verify: false,
+            pre_n_mr1_upgrade: false,
+        })
+    })
+    .unwrap_err();
+    assert_eq!(invalid.phase, "certificates");
+
+    for (fresh, cached) in image.packages.iter().zip(&collected.packages) {
+        assert_eq!(cached.location, fresh.location);
+        assert_eq!(cached.parsed, fresh.parsed);
+        let mut expected = fresh.signing.clone();
+        expected.current_flags = vec![41; expected.signatures.len()];
+        assert_eq!(cached.signing, expected);
+    }
+
     let mut uids =
         aim_services::package::scan::UidScan::new(&Default::default(), &Default::default())
             .unwrap();
@@ -1896,6 +1935,45 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
     };
     let image = DataImage::load(&apks, &["volume".into()]).unwrap();
     assert_eq!(image.packages.len(), 2);
+    let saved: Vec<_> = image
+        .packages
+        .iter()
+        .map(|entry| cached_setting(&apks, &entry.code))
+        .collect();
+    let collected = DataImage::load_collected(&apks, &["volume".into()], &|parsed, _| {
+        Ok(aim_services::package::write::CertificateCollection {
+            saved: saved
+                .iter()
+                .find(|saved| Some(saved.code_path.as_str()) == parsed.path.as_deref()),
+            database_version: 3,
+            force_collect: false,
+            skip_verify: false,
+            pre_n_mr1_upgrade: false,
+        })
+    })
+    .unwrap();
+    assert_eq!(collected.rejected, image.rejected);
+    assert_eq!(collected.packages.len(), image.packages.len());
+    let invalid = DataImage::load_collected(&apks, &["volume".into()], &|_, _| {
+        Ok(aim_services::package::write::CertificateCollection {
+            saved: None,
+            database_version: 3,
+            force_collect: true,
+            skip_verify: true,
+            pre_n_mr1_upgrade: false,
+        })
+    })
+    .unwrap_err();
+    assert_eq!(invalid.phase, "certificates");
+
+    for (fresh, cached) in image.packages.iter().zip(&collected.packages) {
+        assert_eq!(cached.scan_path, fresh.scan_path);
+        assert_eq!(cached.code.location, fresh.code.location);
+        assert_eq!(cached.code.parsed, fresh.code.parsed);
+        let mut expected = fresh.code.signing.clone();
+        expected.current_flags = vec![41; expected.signatures.len()];
+        assert_eq!(cached.code.signing, expected);
+    }
     assert_eq!(image.packages[0].scan_path, "/data/app/~~container");
     assert_eq!(image.packages[1].scan_path, "/mnt/expand/volume/app/other");
     assert_eq!(
@@ -1955,4 +2033,20 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
     assert!(DataImage::load(&apks, &[]).unwrap().packages.is_empty());
     std::fs::write(fixture.0.join("data/app"), b"not a directory").unwrap();
     assert_eq!(DataImage::load(&apks, &[]).unwrap_err().phase, "directory");
+}
+
+fn cached_setting(apks: &Apks, code: &aim_services::package::scan::Code) -> settings::Package {
+    settings::Package {
+        name: code.parsed.package_name.clone(),
+        code_path: code.parsed.path.clone().unwrap(),
+        last_modified_time: apks.scan_file_time(&code.parsed).unwrap(),
+        signatures: Some(settings::Signatures {
+            scheme_version: code.signing.scheme_version,
+            signatures: code.signing.signatures.clone(),
+            current_flags: vec![41; code.signing.signatures.len()],
+            past_signatures: code.signing.past_signing_certificates.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }

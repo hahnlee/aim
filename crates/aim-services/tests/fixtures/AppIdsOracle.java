@@ -7,6 +7,33 @@ public final class AppIdsOracle {
         return result.toString();
     }
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("collect-certificates")) {
+            var rows = java.nio.file.Files.readAllLines(java.nio.file.Path.of(args[1]));
+            int index = 0;
+            for (String row : rows) {
+                var fields = row.split("\\t");
+                var parsed = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                        com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(fields[0])));
+                var cached = parsed.getSigningDetails();
+                for (var signer : cached.getSignatures()) signer.setFlags(37);
+                var version = new Settings.VersionInfo(); version.databaseVersion = Integer.parseInt(fields[2]);
+                PackageSetting setting = null;
+                if (!fields[1].equals("absent")) {
+                    var path = fields[1].equals("path") ? "/data/local/tmp/other-code" : parsed.getPath();
+                    setting = new PackageSetting(parsed.getPackageName(), null, new java.io.File(path), 0, 0, new java.util.UUID(0, 1));
+                    setting.setLastModifiedTime(Long.parseLong(fields[6]));
+                    if (fields[1].equals("empty")) cached = new android.content.pm.SigningDetails(new android.content.pm.Signature[0], 3, null);
+                    else if (fields[1].equals("unknown")) cached = new android.content.pm.SigningDetails(cached.getSignatures(), 0, cached.getPastSigningCertificates());
+                    setting.setSigningDetails(cached);
+                }
+                parsed.setSigningDetails(android.content.pm.SigningDetails.UNKNOWN);
+                ScanPackageUtils.collectCertificatesLI(setting, parsed, version,
+                        Boolean.parseBoolean(fields[3]), Boolean.parseBoolean(fields[4]), Boolean.parseBoolean(fields[5]));
+                System.out.println(index++ + " " + collectionTrace(parsed.getSigningDetails()));
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("read-store-signatures")) {
             var table = new java.util.ArrayList<android.content.pm.Signature>();
             try (var in = new java.io.FileInputStream(args[1])) {
@@ -259,6 +286,19 @@ public final class AppIdsOracle {
         System.out.println(full.acquireAndRegisterNewAppId(b));
         full.removeSetting(19999);
         System.out.println(full.acquireAndRegisterNewAppId(b));
+    }
+    private static String collectionTrace(android.content.pm.SigningDetails signing) throws Exception {
+        var current = new java.util.ArrayList<String>();
+        for (var cert : signing.getSignatures()) current.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
+        var past = new java.util.ArrayList<String>();
+        if (signing.getPastSigningCertificates() != null) for (var cert : signing.getPastSigningCertificates()) past.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
+        var keys = new java.util.ArrayList<String>();
+        for (var key : signing.getPublicKeys()) {
+            var bytes = new java.io.ByteArrayOutputStream();
+            try (var stream = new java.io.ObjectOutputStream(bytes)) { stream.writeObject(key); }
+            keys.add(key.getClass().getName() + ":" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())));
+        }
+        return signing.getSignatureSchemeVersion() + " " + String.join(",", current) + " " + (signing.getPastSigningCertificates() == null ? "null" : String.join(",", past)) + " " + String.join(",", keys);
     }
     private static String certificateText(android.content.pm.Signature[] signatures, boolean flags) {
         if (signatures == null) return "-";

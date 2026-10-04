@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 mod common {
     pub mod java;
+    pub mod certificate_collection;
     pub mod runtime;
 }
 use common::java::sources;
@@ -471,6 +472,7 @@ fn allocation_matches_the_original_runtime() {
         platform,
     };
     let inputs = aim_services::package::scan::Inputs::load(&state, &apks).unwrap();
+    common::certificate_collection::verify(&boot, &apks, &inputs.active["com.google.android.gsf"]);
     assert_eq!(inputs.active.len(), state.settings.packages.len());
     for (name, record) in &inputs.active {
         assert_eq!(&record.identity.internal_name, name);
