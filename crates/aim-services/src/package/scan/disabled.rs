@@ -7,9 +7,15 @@ use super::{
     physical_parse_flags,
 };
 use crate::package::{
-    owner::shared_users::ScanOrigin, parse, restrictions::UserState, write::Apks,
+    owner::shared_users::ScanOrigin,
+    parse,
+    restrictions::UserState,
+    write::{ApkSigningError, Apks},
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+// PrepareFailure(String, Exception) wraps verifier IO/security exceptions.
+const INSTALL_FAILED_INTERNAL_ERROR: i32 = -110;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct DisabledUserStates {
@@ -610,15 +616,33 @@ impl SigningScan {
         let active = active.clone();
         let mut staged = self.clone();
         let mut factory = staged.scan_disabled_system(code, update, all_users, apks, inputs)?;
+        // scanPackageOnly updates the disabled owner before strict collection;
+        // a later verification failure must retain that metadata refresh.
+        *self = staged;
         if source == UpdatedSystemSource::KeepData
             && config
                 .preinstall_packages_with_strict_signature_check
                 .contains(&factory.record.parsed.package_name)
         {
-            let signatures = crate::package::owner::shared_users::saved_signatures(&code.signing)
-                .map_err(reject)?;
+            let signing =
+                apks.checked_signing_details(&code.parsed)
+                    .map_err(|error| match error {
+                        ApkSigningError::Invalid(error) => {
+                            let message =
+                                format!("Failed collect during scanPackageForInitLI: {error}");
+                            reject(format!("{message} ({INSTALL_FAILED_INTERNAL_ERROR})"))
+                        }
+                        ApkSigningError::Input(message) => SigningError::Fatal(Error {
+                            package: identity.internal_name.clone(),
+                            path: code.location.path.clone(),
+                            phase: "certificates",
+                            message,
+                        }),
+                    })?;
+            let signatures =
+                crate::package::owner::shared_users::saved_signatures(&signing).map_err(reject)?;
             factory.record.settings.signatures = Some(signatures);
-            let saved = staged
+            let saved = self
                 .settings
                 .disabled_system_packages
                 .iter_mut()
@@ -628,7 +652,6 @@ impl SigningScan {
                 .signatures
                 .clone_from(&factory.record.settings.signatures);
         }
-        *self = staged;
         Ok(UpdatedSystemScan {
             active,
             factory,

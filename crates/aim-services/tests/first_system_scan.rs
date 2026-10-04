@@ -1853,6 +1853,51 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 )
                 .unwrap();
             assert_eq!(selected.source, source);
+            if source == KeepData {
+                let mut cached_code = factory_code.clone();
+                cached_code.signing.current_flags = vec![37; cached_code.signing.signatures.len()];
+                let mut cached_owner = before.clone();
+                let refreshed = cached_owner
+                    .scan_updated_system(
+                        &cached_code,
+                        update(),
+                        None,
+                        &policy,
+                        &apks,
+                        selection_inputs(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    refreshed.factory.record.settings.signatures,
+                    if strict {
+                        saved.signatures.clone()
+                    } else {
+                        stale_factory.signatures.clone()
+                    }
+                );
+                if strict {
+                    // A directory still has a timestamp, so metadata refresh
+                    // succeeds; full certificate collection must reject it.
+                    cached_code.parsed.base_apk_path = cached_code.parsed.path.clone();
+                    let mut metadata_only = before.clone();
+                    metadata_only
+                        .scan_updated_system(
+                            &cached_code,
+                            update(),
+                            None,
+                            &SystemConfig::default(),
+                            &apks,
+                            selection_inputs(),
+                        )
+                        .unwrap();
+                    let mut failed = before.clone();
+                    assert!(
+                        matches!(failed.scan_updated_system(&cached_code, update(), None, &policy, &apks, selection_inputs()), Err(SigningError::Rejected(e)) if e.phase == "system-source" && e.message.ends_with("(-110)"))
+                    );
+                    assert_eq!(failed, metadata_only);
+                    assert_ne!(failed, before);
+                }
+            }
             assert_eq!(
                 selected.factory.record.settings.signatures,
                 if strict && source == KeepData {

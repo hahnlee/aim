@@ -8,6 +8,12 @@ public final class AppIdsOracle {
     }
     public static void main(String[] args) throws Exception {
         if (args.length != 0 && args[0].equals("collect-certificates")) {
+            if (new PrepareFailure("Failed collect during scanPackageForInitLI",
+                    new java.io.IOException("source")).error != -110)
+                throw new AssertionError("strict collection preparation error");
+            if (new PrepareFailure("package failure",
+                    new PackageManagerException(-103, "certificates")).error != -103)
+                throw new AssertionError("preparation package error preservation");
             var rows = java.nio.file.Files.readAllLines(java.nio.file.Path.of(args[1]));
             int index = 0;
             for (String row : rows) {

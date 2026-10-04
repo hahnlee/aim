@@ -851,7 +851,9 @@ scan path and recovers its retained system factory (7.40s). The fixture now
 parses the real data inventory, removes its owned base APK symlink, then submits
 the uncollected inventory to the sequential owner. Complete
 signatures, lineage flags and public-key serialization class/byte hashes agree
-in the AppIds/signing oracle (27.98s). Explicit Image/DataImage::load_collected
+in the AppIds/signing oracle (27.94s). Original PrepareFailure constructor checks
+also confirm verifier IO maps to INSTALL_FAILED_INTERNAL_ERROR (-110), while an
+existing PackageManagerException preserves its package error. Explicit Image/DataImage::load_collected
 entry points now consume the collection choice before reconciliation; their
 scan partition fixes the permitted skipVerify input. Immutable original system
 and data scan fixtures retain cached flags 41 and preserve paths/rejections
@@ -865,9 +867,15 @@ The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (7.40s), including settings commit
-and reopening the persisted owner. Updated-system source decisions still need
-collection at their original stages; system inputs still verify afresh before
+commit. The first-system scan fixture passes (7.30s), including settings commit
+and reopening the persisted owner. Updated-system KeepData selection now fully
+verifies strict-allowlisted factory APKs instead of copying input signing, after
+committing the disabled metadata refresh. Source-conformance checks retain
+non-strict saved signing, discard input current flags 37 for strict signing, and
+compare the complete owner after a strict verification failure with the completed
+metadata-only scan. That failure preserves earlier metadata and reports the
+original preparation error -110. Updated-system factory restoration still needs
+collection at its original stage; system inputs still verify afresh before
 sequential selection, so system parse/verification timing remains incomplete
 (#918). Adoption
 when both incoming and original settings exist remains #919. Mapped APK signing
