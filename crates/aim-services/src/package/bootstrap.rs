@@ -14,7 +14,9 @@ use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 mod apex;
 mod scan;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
-pub use scan::{BootError, BootOwners, SavedSystemPhase, ScanPolicy};
+pub use scan::{
+    BootError, BootOwners, DataBootInputs, SavedBootScan, SavedSystemPhase, ScanPolicy,
+};
 
 pub struct Bridge {
     pub(crate) owner: Strong,

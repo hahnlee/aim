@@ -608,7 +608,7 @@ fn saved_scan_libraries_match_original_pms() {
                 old_stub_packages: &empty_packages,
                 expecting_better: &empty_packages,
                 is_incremental: &|_| Ok(false),
-                remove_test_base: &|_| Ok(None),
+                remove_test_base: &|_, _| Err("system/BCP must not query compat".into()),
                 destinations: &destinations,
                 resources: &resources,
                 new_domain_id: &domain_ids,

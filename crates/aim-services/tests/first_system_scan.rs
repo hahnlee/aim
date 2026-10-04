@@ -737,12 +737,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 code_is_directory: true,
                 canonical_source: None,
             };
+            let separate_compatibility =
+                LibraryCompatibility::new(&config, &|_| None, false).unwrap();
             let data_inputs = || aim_services::package::scan::DataScanInputs {
                 factory: Some(&batch.retained_data[0]),
                 platform,
                 vendor_sdk: 36,
                 compatibility: &compatibility,
-                remove_test_base: None,
+                remove_test_base: &|_, _| Err("system/BCP must not query compat".into()),
                 expecting_better: &empty_packages,
                 new_domain_id: &domain_ids,
                 completion: ScanMetadataCompletion {
@@ -900,6 +902,55 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 0
             );
             assert_eq!(ordinary_data.candidate.users, full_users[&active.name]);
+            // The owner's decision sees policy-adjusted code, before library updates.
+            for sdk in [29, 30] {
+                let mut query_code = copy_code();
+                query_code.parsed.target_sdk_version = sdk;
+                query_code.parsed.booleans |= aim_services::package::pkg::booleans::PRIVILEGED
+                    | aim_services::package::pkg::booleans::PERSISTENT;
+                query_code.parsed.protected_broadcasts = vec!["fixture.protected".into()];
+                query_code.parsed.uses_libraries.clear();
+                query_code.parsed.uses_optional_libraries.clear();
+                let calls = std::cell::Cell::new(0);
+                let query = |pkg: &aim_services::package::pkg::AndroidPackage, system: bool| {
+                    calls.set(calls.get() + 1);
+                    assert!(!system);
+                    assert!(!pkg.is(aim_services::package::pkg::booleans::SYSTEM));
+                    assert!(!pkg.is(aim_services::package::pkg::booleans::PRIVILEGED));
+                    assert!(!pkg.is(aim_services::package::pkg::booleans::PERSISTENT));
+                    assert!(pkg.protected_broadcasts.is_empty());
+                    assert!(pkg.uses_libraries.is_empty());
+                    assert_eq!(pkg.target_sdk_version, sdk);
+                    assert_eq!(pkg.path, raw.parsed.path);
+                    assert_eq!(pkg.uid, raw.parsed.uid);
+                    Ok(Some(sdk > 29))
+                };
+                let mut ordinary = before.clone();
+                ordinary.settings.disabled_system_packages.clear();
+                let accepted = ordinary
+                    .scan_known_data(
+                        &query_code,
+                        &full_users,
+                        None,
+                        &apks,
+                        aim_services::package::scan::DataScanInputs {
+                            factory: None,
+                            compatibility: &separate_compatibility,
+                            remove_test_base: &query,
+                            ..data_inputs()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(calls.get(), 1);
+                assert_eq!(
+                    accepted.candidate.record.parsed.uses_libraries,
+                    if sdk == 29 {
+                        vec!["android.test.base".to_string()]
+                    } else {
+                        Vec::new()
+                    }
+                );
+            }
             let DataCandidateOutcome::Accepted(accepted) = owner
                 .scan_data_candidate(
                     valid_candidate,
@@ -937,7 +988,9 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             use aim_services::package::scan::{DataImage, DataImageScanInputs};
             let destinations = std::collections::BTreeMap::new();
             let non_incremental = |_: &str| Ok(false);
-            let remove_test_base = |_: &aim_services::package::pkg::AndroidPackage| Ok(None);
+            let remove_test_base = |_: &aim_services::package::pkg::AndroidPackage, _: bool| {
+                Err("system/BCP must not query compat".into())
+            };
             let loop_inputs = || DataImageScanInputs {
                 seinfo: common::seinfo::scan(),
                 factories: &batch,
@@ -963,7 +1016,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             };
             let mut data_loop = before.clone();
             let complete = data_loop
-                .scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks, loop_inputs())
+                .scan_data_image(
+                    DataImage::load(&apks, &[]).unwrap(),
+                    &apks,
+                    DataImageScanInputs {
+                        compatibility: &separate_compatibility,
+                        ..loop_inputs()
+                    },
+                )
                 .unwrap();
             assert_eq!(complete.packages.len(), 1);
             assert!(complete.recovered.is_empty());
@@ -1010,22 +1070,30 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(ordinary.record.settings.code_path, active.code_path);
             assert_eq!(ordinary.users, full_users[&active.name]);
             assert!(data_code.exists());
+            let separate_compatibility =
+                LibraryCompatibility::new(&config, &|_| None, false).unwrap();
             let calls = std::cell::Cell::new(0);
-            let fail_rescan = |_: &aim_services::package::pkg::AndroidPackage| {
+            let fail_rescan = |pkg: &aim_services::package::pkg::AndroidPackage, system: bool| {
                 calls.set(calls.get() + 1);
-                if calls.get() == 2 {
-                    Err("ex-system policy owner unavailable".into())
-                } else {
-                    Ok(None)
-                }
+                assert!(!system);
+                assert!(!pkg.is(aim_services::package::pkg::booleans::SYSTEM));
+                assert_eq!(
+                    pkg.is(aim_services::package::pkg::booleans::PRIVILEGED),
+                    ordinary_data
+                        .candidate
+                        .record
+                        .parsed
+                        .is(aim_services::package::pkg::booleans::PRIVILEGED)
+                );
+                Err("ex-system policy owner unavailable".into())
             };
             let mut failed_demotion = before.clone();
             assert!(
                 matches!(failed_demotion.scan_data_image(DataImage::load(&apks, &[]).unwrap(), &apks,
-                DataImageScanInputs { factories: &missing_factory, remove_test_base: &fail_rescan, ..loop_inputs() }),
+                DataImageScanInputs { factories: &missing_factory, compatibility: &separate_compatibility, remove_test_base: &fail_rescan, ..loop_inputs() }),
                 Err(SigningError::Fatal(e)) if e.phase == "policy")
             );
-            assert_eq!(calls.get(), 2);
+            assert_eq!(calls.get(), 1);
             assert!(failed_demotion.settings.disabled_system_packages.is_empty());
             assert!(failed_demotion.scanned_user_states(&active.name).is_none());
             assert_eq!(
@@ -1110,7 +1178,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             std::fs::remove_dir_all(changed_path).unwrap();
             let mut absent = before.clone();
             let recovered = absent
-                .scan_data_image(DataImage::default(), &apks, loop_inputs())
+                .scan_data_image(
+                    DataImage::default(),
+                    &apks,
+                    DataImageScanInputs {
+                        compatibility: &separate_compatibility,
+                        ..loop_inputs()
+                    },
+                )
                 .unwrap();
             assert!(recovered.packages.is_empty());
             assert_eq!(recovered.recovered.len(), 1);
@@ -1134,13 +1209,9 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             // checkExistingBetterPackages enables/rescans; it performs no additional data code removal.
             assert!(data_code.exists());
             let attempt = std::cell::Cell::new(0);
-            let fail_later = |_: &aim_services::package::pkg::AndroidPackage| {
+            let fail_later = |_: &aim_services::package::pkg::AndroidPackage, _: bool| {
                 attempt.set(attempt.get() + 1);
-                if attempt.get() == 2 {
-                    Err("policy owner unavailable".to_owned())
-                } else {
-                    Ok(None)
-                }
+                Err("system must not query compat".into())
             };
             let repeated = DataImage {
                 packages: vec![
@@ -1149,7 +1220,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                         code: raw.clone(),
                     },
                     DataCode {
-                        scan_path: valid_candidate.scan_path.clone(),
+                        scan_path: "/data/app/not-owner".into(),
                         code: raw.clone(),
                     },
                 ],
@@ -1157,8 +1228,9 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             };
             let mut partial = before.clone();
             assert!(
-                matches!(partial.scan_data_image(repeated, &apks, DataImageScanInputs { remove_test_base: &fail_later, ..loop_inputs() }), Err(SigningError::Fatal(e)) if e.phase == "policy")
+                matches!(partial.scan_data_image(repeated, &apks, DataImageScanInputs { remove_test_base: &fail_later, ..loop_inputs() }), Err(SigningError::Fatal(e)) if e.phase == "data-cleanup")
             );
+            assert_eq!(attempt.get(), 0);
             assert!(partial.scanned_user_states(&active.name).is_some());
             assert_eq!(
                 partial.scanned_user_states(&active.name),

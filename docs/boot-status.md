@@ -693,12 +693,12 @@ metadata reconciliation, returning retained factory/data candidates separately.
 The caller's mutated owner remains authoritative after earlier effects; the
 phase does not discard it on a later error. Initial and saved phases share their
 exact original input/callback construction. The expanded controlled-owner Binder
-scan test passes (7.40s): unchanged original framework APK, restored native settings,
+scan test passes (9.85s): unchanged original framework APK, restored native settings,
 retained registration UID and per-user enabled/installed/hidden values, fresh
 original domain owner output, unloaded-to-loaded transition, old-owner isolation
 and missing-domain/notification/denied-owner rejection. The expanded ignored test
 ran explicitly; the other ignored test remains not run. These entry points
-are not invoked by the default boot and do not complete data reconciliation,
+are not invoked by the default boot and do not complete full data reconciliation,
 metadata owners, facades or service publication. The early bridge now exposes
 AndroidTestBaseUpdater's original PlatformCompat change 133396946 through generated
 AIDL, rebuilding full ApplicationInfo from native parsed-package cache. Rust skips
@@ -707,11 +707,24 @@ other scans require the original decision. Owner errors and malformed replies
 remain errors. The original ART oracle compares bridge and original IPlatformCompat
 results for SDK 29/30 pre-registration non-system metadata (UID -1), validates
 untrusted-caller rejection and generated reply framing (30.70s). Ordinary units
-pass 441 (3.17s); all integration targets compile; AIDL/image/template builds pass
-(74.5s, then 51.0s for the final checked ApplicationInfo API). The data-loop callback
-still runs before effective ownership/manifest policy is established (#908), so
-this required query is not yet wired into data/factory orchestration. Original PMS remains live; native
-CTS/apps/template/APEX/rollback acceptance remains unrun.
+pass 441 (3.20s); all integration targets compile; the latest host/image/template
+build passes (17.4s, three rebuilt, 39 fresh). Data admission now resolves current
+factory/system ownership and applies manifest restrictions before querying the
+original test-base owner (#908). System updates, factory recovery and test.base
+on the boot classpath never query it. Ex-system rescans query after disabled
+ownership is removed; required owner errors abort without deleting valid code.
+The expanded original-APK native scan fixture passes (67.90s), including SDK
+29/30 decisions on policy-adjusted ordinary data metadata, zero queries for
+classpath/system/factory cases, and ex-system owner failure after demotion.
+BootOwners retains the same original bridge, users and compatibility through
+system and data phases. The daemon's restored-boot entry point derives platform
+signing from scanned original android code, then loads data/private-volume APKs
+and runs admission, ex-system rescans and factory recovery with the same domain,
+seInfo and test-base owners. Earlier effects remain on the caller's owner after
+failure. The controlled Binder fixture verifies restored system followed by an
+empty data inventory (9.85s); it does not prove nonempty full-boot persistence or
+publication. Original PMS remains live; native CTS/apps/template/APEX/rollback
+acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
 Files.write IOException, not evidence of an external kill. Crash reporting also

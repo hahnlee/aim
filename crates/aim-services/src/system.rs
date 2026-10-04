@@ -473,6 +473,73 @@ impl System {
             .scan_saved_system(owner, apks, policy, saved)
     }
 
+    /// Run restored system and data phases against one captured original owner.
+    /// The caller retains mutations on failure; persistence/publication follows.
+    pub fn scan_package_saved_boot(
+        &self,
+        owner: &mut crate::package::scan::SigningScan,
+        apks: &crate::package::write::Apks,
+        config: &crate::package::system_config::SystemConfig,
+        properties: &dyn Fn(&str) -> Option<String>,
+        policy: crate::package::bootstrap::ScanPolicy<'_>,
+        saved: crate::package::scan::SavedSystemScanInputs<'_>,
+        volumes: &[String],
+        expecting_better: &std::collections::BTreeSet<String>,
+        is_incremental: &dyn Fn(&str) -> std::result::Result<bool, String>,
+        destinations: &std::collections::BTreeMap<
+            String,
+            crate::package::scan::NativeLibraryDestination<'_>,
+        >,
+    ) -> std::result::Result<
+        crate::package::bootstrap::SavedBootScan,
+        crate::package::bootstrap::BootError,
+    > {
+        use crate::package::bootstrap::{BootError, DataBootInputs, OwnerError, SavedBootScan};
+        let bridge = self
+            .package_bootstrap()
+            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))?;
+        let boot = bridge.resolve_boot(config, properties)?;
+        let data_users = saved.users;
+        let first_boot_or_upgrade = saved.first_boot_or_upgrade;
+        let old_stub_packages = saved.old_stub_packages;
+        let resources = saved.resources;
+        let system = boot.scan_saved_system(owner, apks, policy, saved)?;
+        let platform = owner
+            .loaded_packages()
+            .get("android")
+            .ok_or_else(|| {
+                BootError::Scan(crate::package::scan::SigningError::Fatal(
+                    crate::package::scan::Error {
+                        package: "android".into(),
+                        path: String::new(),
+                        phase: "platform",
+                        message: "data admission requires the scanned platform signing owner"
+                            .into(),
+                    },
+                ))
+            })?
+            .collected_signing
+            .clone();
+        let data = boot.scan_data(
+            owner,
+            apks,
+            policy,
+            DataBootInputs {
+                factories: &system.system,
+                platform: &platform,
+                volumes,
+                users: data_users,
+                first_boot_or_upgrade,
+                old_stub_packages,
+                expecting_better,
+                is_incremental,
+                destinations,
+                resources,
+            },
+        )?;
+        Ok(SavedBootScan { system, data })
+    }
+
     /// Takes system_server's bridge (#430): maps the shared memory of its
     /// cache nonces, dropped again when system_server dies.
     pub fn attach_bridge(self: &Arc<Self>, handle: u32) -> Result<()> {

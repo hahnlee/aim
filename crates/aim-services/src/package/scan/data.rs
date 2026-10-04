@@ -16,7 +16,10 @@ pub struct DataScanInputs<'a> {
     pub platform: &'a SigningDetails,
     pub vendor_sdk: i32,
     pub compatibility: &'a LibraryCompatibility,
-    pub remove_test_base: Option<bool>,
+    /// Called only for non-system code after manifest policy, when test.base
+    /// is absent from the boot classpath.
+    pub remove_test_base:
+        &'a dyn Fn(&crate::package::pkg::AndroidPackage, bool) -> Result<Option<bool>, String>,
     /// InitAppsHelper's selected system packages awaiting a better data APK.
     pub expecting_better: &'a BTreeSet<String>,
     pub new_domain_id: &'a dyn Fn() -> Result<[u8; 16], String>,
@@ -52,7 +55,7 @@ pub struct DataImageScanInputs<'a> {
     pub expecting_better: &'a BTreeSet<String>,
     pub is_incremental: &'a dyn Fn(&str) -> Result<bool, String>,
     pub remove_test_base:
-        &'a dyn Fn(&crate::package::pkg::AndroidPackage) -> Result<Option<bool>, String>,
+        &'a dyn Fn(&crate::package::pkg::AndroidPackage, bool) -> Result<Option<bool>, String>,
     pub destinations: &'a BTreeMap<String, super::NativeLibraryDestination<'a>>,
     pub resources: &'a crate::package::owner::resources::CodeResources,
     pub new_domain_id: &'a dyn Fn() -> Result<[u8; 16], String>,
@@ -183,14 +186,6 @@ impl SigningScan {
                     e,
                 )
             })?;
-            let remove_test_base = (inputs.remove_test_base)(&code.parsed).map_err(|e| {
-                fatal(
-                    identity.internal_name.clone(),
-                    code.location.path.clone(),
-                    "policy",
-                    e,
-                )
-            })?;
             let completed = self.scan_data_candidate(
                 &entry,
                 inputs.users,
@@ -201,7 +196,7 @@ impl SigningScan {
                     platform: inputs.platform,
                     vendor_sdk: inputs.vendor_sdk,
                     compatibility: inputs.compatibility,
-                    remove_test_base,
+                    remove_test_base: inputs.remove_test_base,
                     expecting_better: &expecting_better,
                     new_domain_id: inputs.new_domain_id,
                     completion: ScanMetadataCompletion {
@@ -316,8 +311,6 @@ impl SigningScan {
                     .is_dir(),
                 canonical_source: None,
             };
-            let remove_test_base = (inputs.remove_test_base)(&raw.parsed)
-                .map_err(|e| fatal(name.clone(), raw.location.path.clone(), "policy", e))?;
             let mut users = inputs.users.clone();
             users.insert(name.clone(), previous.candidate.users);
             let completed = self.scan_known_data(
@@ -330,7 +323,7 @@ impl SigningScan {
                     platform: inputs.platform,
                     vendor_sdk: inputs.vendor_sdk,
                     compatibility: inputs.compatibility,
-                    remove_test_base,
+                    remove_test_base: inputs.remove_test_base,
                     expecting_better: &expecting_better,
                     new_domain_id: inputs.new_domain_id,
                     completion: ScanMetadataCompletion {
@@ -444,14 +437,6 @@ impl SigningScan {
                     .is_dir(),
                 canonical_source: None,
             };
-            let remove_test_base = (inputs.remove_test_base)(&code.parsed).map_err(|e| {
-                fatal(
-                    setting.name.clone(),
-                    code.location.path.clone(),
-                    "policy",
-                    e,
-                )
-            })?;
             let completed = self.scan_enabled_factory(
                 &factory.record,
                 code,
@@ -483,7 +468,7 @@ impl SigningScan {
                     compatibility: inputs.compatibility,
                     platform: Some(inputs.platform),
                     vendor_sdk: inputs.vendor_sdk,
-                    remove_test_base,
+                    remove_test_base: None,
                     resources: inputs.resources,
                     incremental: false,
                     new_domain_id: inputs.new_domain_id,
@@ -750,14 +735,27 @@ impl SigningScan {
             inputs.vendor_sdk,
         );
         policy
-            .apply(
+            .apply_manifest(
                 &mut code.parsed,
                 &code.signing,
                 Some(inputs.platform),
                 updated,
                 apks,
-                inputs.compatibility,
-                inputs.remove_test_base,
+            )
+            .map_err(|e| fatal("policy", e))?;
+        let remove_test_base = if policy.system || inputs.compatibility.test_base_on_bootclasspath {
+            None
+        } else {
+            (inputs.remove_test_base)(&code.parsed, policy.system)
+                .map_err(|e| fatal("policy", e))?
+        };
+        inputs
+            .compatibility
+            .apply(
+                &mut code.parsed,
+                policy.system || updated,
+                updated,
+                remove_test_base,
             )
             .map_err(|e| fatal("policy", e))?;
         let (flags, private_flags) = application_flags(&code.parsed, updated);

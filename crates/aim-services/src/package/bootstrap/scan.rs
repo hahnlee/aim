@@ -20,6 +20,7 @@ pub enum BootError {
 }
 
 /// Image and invocation policy, independent of original service decisions.
+#[derive(Clone, Copy)]
 pub struct ScanPolicy<'a> {
     pub seinfo: &'a Policy,
     pub apex_parse_flags: i32,
@@ -43,6 +44,30 @@ pub struct ScanPolicy<'a> {
 pub struct SavedSystemPhase {
     pub apex: Vec<crate::package::scan::ApexScanResult>,
     pub system: SystemImagePackages,
+}
+
+#[derive(Debug)]
+pub struct SavedBootScan {
+    pub system: SavedSystemPhase,
+    pub data: crate::package::scan::DataImagePackages,
+}
+
+/// Saved state and resource owners for data admission and factory recovery.
+pub struct DataBootInputs<'a> {
+    pub factories: &'a SystemImagePackages,
+    pub platform: &'a crate::package::sign::SigningDetails,
+    pub volumes: &'a [String],
+    pub users: &'a std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<i32, crate::package::restrictions::UserState>,
+    >,
+    pub first_boot_or_upgrade: bool,
+    pub old_stub_packages: &'a std::collections::BTreeSet<String>,
+    pub expecting_better: &'a std::collections::BTreeSet<String>,
+    pub is_incremental: &'a dyn Fn(&str) -> Result<bool, String>,
+    pub destinations:
+        &'a std::collections::BTreeMap<String, crate::package::scan::NativeLibraryDestination<'a>>,
+    pub resources: &'a crate::package::owner::resources::CodeResources,
 }
 
 /// All captured inputs belong to this exact retained original bridge.
@@ -92,7 +117,7 @@ impl BootOwners<'_> {
     /// A completed initial scan is still unpublished: data reconciliation,
     /// permission/runtime owners and final snapshot publication follow it.
     pub fn scan_first_boot(
-        self,
+        &self,
         apks: &Apks,
         policy: ScanPolicy<'_>,
     ) -> Result<SystemImageScan, BootError> {
@@ -109,7 +134,7 @@ impl BootOwners<'_> {
     /// The restored owner remains authoritative after earlier container/resource
     /// effects even when a later system package or notification fails.
     pub fn scan_saved_system(
-        self,
+        &self,
         owner: &mut SigningScan,
         apks: &Apks,
         policy: ScanPolicy<'_>,
@@ -130,6 +155,61 @@ impl BootOwners<'_> {
             let system = owner.scan_saved_system_image(image, apks, self.config, inputs, saved)?;
             Ok(SavedSystemPhase { apex, system })
         })
+    }
+
+    /// Continue the same captured boot owners through data admission, ex-system
+    /// rescans and factory recovery. Earlier effects stay on the supplied owner.
+    pub fn scan_data(
+        &self,
+        owner: &mut SigningScan,
+        apks: &Apks,
+        policy: ScanPolicy<'_>,
+        data: DataBootInputs<'_>,
+    ) -> Result<crate::package::scan::DataImagePackages, BootError> {
+        let image = crate::package::scan::DataImage::load(apks, data.volumes)
+            .map_err(|error| BootError::Scan(SigningError::Rejected(error)))?;
+        let remove_test_base = |package: &crate::package::pkg::AndroidPackage, system| {
+            self.bridge
+                .remove_test_base(package, system)
+                .map_err(|error| format!("original test-base owner: {error:?}"))
+        };
+        let domain = || {
+            self.bridge
+                .new_domain_id()
+                .map_err(|error| format!("original domain owner: {error:?}"))
+        };
+        owner
+            .scan_data_image(
+                image,
+                apks,
+                crate::package::scan::DataImageScanInputs {
+                    seinfo: SeInfoScan {
+                        policy: policy.seinfo,
+                        compatibility: self.bridge,
+                    },
+                    factories: data.factories,
+                    platform: data.platform,
+                    vendor_sdk: policy.vendor_sdk,
+                    abi_policy: policy.abi,
+                    compatibility: &self.compatibility,
+                    preferred_abi: policy.preferred_abi,
+                    app_lib32_install_dir: policy.app_lib32_install_dir,
+                    install: policy.install,
+                    clock: policy.clock,
+                    factory_test: policy.factory_test,
+                    users: data.users,
+                    all_users: self.users.users.as_deref(),
+                    first_boot_or_upgrade: data.first_boot_or_upgrade,
+                    old_stub_packages: data.old_stub_packages,
+                    expecting_better: data.expecting_better,
+                    is_incremental: data.is_incremental,
+                    remove_test_base: &remove_test_base,
+                    destinations: data.destinations,
+                    resources: data.resources,
+                    new_domain_id: &domain,
+                },
+            )
+            .map_err(BootError::Scan)
     }
 
     fn with_scan_inputs<T>(

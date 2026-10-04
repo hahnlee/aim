@@ -1019,6 +1019,32 @@ fn verify_boot_scan(
     assert!(!prior.loaded_packages().contains_key("android"));
     assert!(restarted.loaded_packages().contains_key("android"));
 
+    let mut complete =
+        crate::package::scan::SigningScan::new(config, &restored_settings, 36).unwrap();
+    let completed = system
+        .scan_package_saved_boot(
+            &mut complete,
+            &apks,
+            config,
+            &|_| None,
+            policy(),
+            saved(),
+            &[],
+            &stubs,
+            &|_| Ok(false),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+    assert_eq!(completed.system.system.packages.len(), 1);
+    assert!(completed.data.packages.is_empty());
+    assert!(completed.data.recovered.is_empty());
+    assert!(completed.data.rejected.is_empty());
+    assert!(completed.data.removed.is_empty());
+    assert_eq!(
+        complete.scanned_user_states("android"),
+        Some(&users["android"])
+    );
+
     owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
         system.scan_package_first_boot(&apks, config, &|_| None, policy()),
