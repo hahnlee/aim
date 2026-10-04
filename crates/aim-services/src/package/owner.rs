@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use aim_android_xml::{Element, Node, Value, abx};
@@ -91,6 +91,7 @@ pub struct Store {
     restrictions: BTreeMap<u32, Element>,
     settings_document: Element,
     settings_present: bool,
+    first_write_files: Vec<StartedFile>,
     preferred_users: BTreeSet<u32>,
     list_document: Option<String>,
 }
@@ -163,6 +164,7 @@ impl Store {
             restrictions,
             settings_document,
             settings_present,
+            first_write_files: Vec::new(),
             preferred_users,
             list_document,
         })
@@ -477,6 +479,15 @@ impl Store {
         root: Element,
         key_sets: Option<super::settings::KeySets>,
     ) -> Result<(), WriteError> {
+        self.commit_package_document_using(root, key_sets, |file, bytes| file.write_all(bytes))
+    }
+
+    fn commit_package_document_using(
+        &mut self,
+        root: Element,
+        key_sets: Option<super::settings::KeySets>,
+        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    ) -> Result<(), WriteError> {
         let mut persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
         if let Some(key_sets) = key_sets {
             persisted.key_sets.reference_counts = key_sets.reference_counts;
@@ -493,14 +504,65 @@ impl Store {
             })
             .map_err(WriteError::before)?;
         } else {
-            require_missing_settings(&self.data).map_err(WriteError::before)?;
+            require_initial_files(&self.data, &self.first_write_files)
+                .map_err(WriteError::before)?;
             fs::create_dir_all(path.parent().unwrap()).map_err(WriteError::before)?;
         }
-        let result = write_resilient(&path, &backup, &bytes);
+        let first = !self.settings_present;
+        let payload: std::sync::Arc<[u8]> = if first {
+            bytes.clone().into()
+        } else {
+            std::sync::Arc::from([])
+        };
+        let result = write_with_observed(
+            &path,
+            &backup,
+            |file| write(file, &bytes),
+            |file, main| {
+                if first {
+                    self.first_write_files.push(StartedFile {
+                        file: file.try_clone()?,
+                        payload: if main {
+                            payload.clone()
+                        } else {
+                            std::sync::Arc::from([])
+                        },
+                    });
+                }
+                Ok(())
+            },
+        );
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.settings_document = root;
             self.settings_present = true;
+            self.first_write_files.clear();
             self.state.settings = persisted;
+        } else if first {
+            let paths = settings_paths(&self.data);
+            // Keep descriptors pinned while their files remain: a removed
+            // file's inode cannot be reused to impersonate an owned artifact.
+            self.first_write_files.retain(|started| {
+                paths.iter().any(|path| match fs::symlink_metadata(path) {
+                    Ok(metadata) => started.same_file(&metadata),
+                    Err(error) => error.kind() != io::ErrorKind::NotFound,
+                })
+            });
+            for started in &mut self.first_write_files {
+                for path in &paths {
+                    if fs::symlink_metadata(path).is_ok_and(|metadata| started.same_file(&metadata))
+                    {
+                        let bytes = fs::read(path).map_err(WriteError::before)?;
+                        if !started.payload.starts_with(&bytes) {
+                            return Err(WriteError::before(
+                                "initial write artifact differs from its authorized payload",
+                            ));
+                        }
+                        // Freeze the exact failed output. A later writer may
+                        // neither extend it nor truncate it to another prefix.
+                        started.payload = bytes.into();
+                    }
+                }
+            }
         }
         result
     }
@@ -637,19 +699,52 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-fn require_missing_settings(data: &Path) -> Result<(), String> {
+struct StartedFile {
+    file: File,
+    payload: std::sync::Arc<[u8]>,
+}
+
+impl StartedFile {
+    fn same_file(&self, metadata: &fs::Metadata) -> bool {
+        self.file
+            .metadata()
+            .is_ok_and(|owned| owned.dev() == metadata.dev() && owned.ino() == metadata.ino())
+    }
+}
+
+fn settings_paths(data: &Path) -> [PathBuf; 3] {
     let path = data.join("system/packages.xml");
-    for candidate in [
+    [
         path.clone(),
         data.join("system/packages-backup.xml"),
         sibling(&path, ".reservecopy"),
-    ] {
+    ]
+}
+
+fn require_missing_settings(data: &Path) -> Result<(), String> {
+    require_initial_files(data, &[])
+}
+
+fn require_initial_files(data: &Path, started: &[StartedFile]) -> Result<(), String> {
+    for candidate in settings_paths(data) {
         match fs::symlink_metadata(&candidate) {
-            Ok(_) => {
-                return Err(format!(
-                    "{} already exists; restore its owner",
-                    candidate.display()
-                ));
+            Ok(metadata) => {
+                let owned = started
+                    .iter()
+                    .find(|file| metadata.is_file() && file.same_file(&metadata));
+                let unchanged = match owned {
+                    Some(file) => {
+                        let bytes = fs::read(&candidate).map_err(|e| e.to_string())?;
+                        file.payload.as_ref() == bytes.as_slice()
+                    }
+                    None => false,
+                };
+                if !unchanged {
+                    return Err(format!(
+                        "{} exists outside the initial native write",
+                        candidate.display()
+                    ));
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("{}: {error}", candidate.display())),
@@ -727,8 +822,17 @@ fn write_with(
     backup: &Path,
     write: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> Result<(), WriteError> {
+    write_with_observed(path, backup, write, |_, _| Ok(()))
+}
+
+fn write_with_observed(
+    path: &Path,
+    backup: &Path,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+    mut opened: impl FnMut(&File, bool) -> io::Result<()>,
+) -> Result<(), WriteError> {
     let reserve = sibling(path, ".reservecopy");
-    let start = || -> io::Result<(File, File)> {
+    let mut start = || -> io::Result<(File, File)> {
         if path.exists() {
             if backup.exists() {
                 remove(path)?;
@@ -737,7 +841,11 @@ fn write_with(
             }
         }
         remove(&reserve)?;
-        Ok((File::create(path)?, File::create(&reserve)?))
+        let main = File::create(path)?;
+        opened(&main, true)?;
+        let copy = File::create(&reserve)?;
+        opened(&copy, false)?;
+        Ok((main, copy))
     };
     let (mut main, mut copy) = start().map_err(WriteError::before)?;
     if let Err(e) = write(&mut main).and_then(|_| finish(&mut main, path)) {

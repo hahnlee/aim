@@ -1637,3 +1637,153 @@ fn fresh_settings_claim_validates_related_user_files_and_preserves_documents() {
     assert_eq!(fs::read(&path).unwrap(), RESTRICTIONS);
     assert!(!data.0.join("system/packages.xml").exists());
 }
+
+#[test]
+fn first_write_failure_retains_only_owned_artifacts_and_retries() {
+    let data = Data::new();
+    let mut store = Store::create(&data.0, &[0]).unwrap();
+    let root = aim_android_xml::read(b"<packages><package name='first.app' codePath='/data/app/first' userId='10100'/></packages>").unwrap();
+    let prior = store.state.clone();
+    let error = store
+        .commit_package_document_using(root.clone(), None, |file, bytes| {
+            file.write_all(&bytes[..bytes.len() / 2])?;
+            Err(io::Error::other("controlled partial main failure"))
+        })
+        .unwrap_err();
+    assert!(!error.committed);
+    assert_eq!(store.state, prior);
+    assert!(!store.settings_present);
+    let path = data.0.join("system/packages.xml");
+    let reserve = sibling(&path, ".reservecopy");
+    assert!(!path.exists());
+    assert_eq!(fs::read(&reserve).unwrap(), b"");
+    assert_eq!(store.first_write_files.len(), 1);
+    assert!(Store::create(&data.0, &[0]).is_err());
+    fs::write(&reserve, b"foreign").unwrap();
+    assert!(
+        !store
+            .commit_package_document_using(root.clone(), None, |file, bytes| file.write_all(bytes))
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&reserve).unwrap(), b"foreign");
+    fs::write(&reserve, b"").unwrap();
+    fs::remove_file(&reserve).unwrap();
+    fs::write(&reserve, b"").unwrap();
+    assert!(
+        !store
+            .commit_package_document_using(root.clone(), None, |file, bytes| file.write_all(bytes))
+            .unwrap_err()
+            .committed
+    );
+    assert!(
+        store.first_write_files[0].file.metadata().unwrap().ino()
+            != fs::metadata(&reserve).unwrap().ino()
+    );
+    fs::remove_file(&reserve).unwrap();
+    store
+        .commit_package_document_using(root, None, |file, bytes| file.write_all(bytes))
+        .unwrap();
+    assert!(store.settings_present);
+    assert!(store.first_write_files.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), fs::read(&reserve).unwrap());
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state.settings,
+        store.state.settings
+    );
+}
+
+#[test]
+fn first_write_start_failure_can_retry_its_owned_empty_main() {
+    let data = Data::new();
+    let mut store = Store::create(&data.0, &[0]).unwrap();
+    let path = data.0.join("system/packages.xml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Same observer used by the Store; failure after opening main models
+    // reserve descriptor acquisition failing before a writable stream returns.
+    assert!(
+        !write_with_observed(
+            &path,
+            &data.0.join("system/packages-backup.xml"),
+            |_| Ok(()),
+            |file, main| {
+                store.first_write_files.push(StartedFile {
+                    file: file.try_clone()?,
+                    payload: std::sync::Arc::from([]),
+                });
+                assert!(main);
+                Err(io::Error::other(
+                    "controlled descriptor acquisition failure",
+                ))
+            }
+        )
+        .unwrap_err()
+        .committed
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"");
+    let root = element("packages");
+    store
+        .commit_package_document_using(root, None, |file, bytes| file.write_all(bytes))
+        .unwrap();
+    assert!(store.settings_present);
+    assert!(store.first_write_files.is_empty());
+    assert!(!data.0.join("system/packages-backup.xml").exists());
+}
+
+#[test]
+fn first_write_reserve_failure_publishes_main_and_restores_reserve_on_retry() {
+    let data = Data::new();
+    let mut store = Store::create(&data.0, &[0]).unwrap();
+    let path = data.0.join("system/packages.xml");
+    let reserve = sibling(&path, ".reservecopy");
+    let root = aim_android_xml::read(b"<packages><package name='first.app' codePath='/data/app/first' userId='10100'/></packages>").unwrap();
+    let error = store
+        .commit_package_document_using(root.clone(), None, |file, bytes| {
+            file.write_all(bytes)?;
+            // Invalidate the owned reserve pathname after descriptors opened.
+            // Its finalize metadata operation then fails after main committed.
+            fs::remove_file(&reserve)
+        })
+        .unwrap_err();
+    assert!(error.committed);
+    assert!(store.settings_present);
+    assert!(store.first_write_files.is_empty());
+    assert!(!reserve.exists());
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state.settings,
+        store.state.settings
+    );
+    store
+        .commit_package_document_using(root, None, |file, bytes| file.write_all(bytes))
+        .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), fs::read(&reserve).unwrap());
+}
+
+#[test]
+fn initial_write_retries_owned_reserve_without_retaining_removed_descriptors() {
+    let data = Data::new();
+    let mut store = Store::create(&data.0, &[0]).unwrap();
+    let root = element("packages");
+    let prior = store.state.clone();
+    for _ in 0..5 {
+        let error = store
+            .commit_package_document_using(root.clone(), None, |file, bytes| {
+                file.write_all(&bytes[..3])?;
+                Err(io::Error::other("controlled repeated first-write failure"))
+            })
+            .unwrap_err();
+        assert!(!error.committed);
+        assert_eq!(store.state, prior);
+        assert_eq!(store.first_write_files.len(), 1);
+    }
+    store
+        .commit_package_document_using(root, None, |file, bytes| file.write_all(bytes))
+        .unwrap();
+    assert!(store.settings_present);
+    assert!(store.first_write_files.is_empty());
+    let path = data.0.join("system/packages.xml");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        fs::read(sibling(&path, ".reservecopy")).unwrap()
+    );
+}

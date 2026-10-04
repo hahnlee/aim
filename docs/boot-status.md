@@ -740,21 +740,28 @@ complete two-package/live-group inventory with pinned Settings.writePackageLPr
 and ArrayMap values order using one certificate table. Saved-setting signer
 lineage flags remain separate from parsed-code signing. The oracle also reads
 reindexed real certificates through PackageSignatures.readXml and checks
-ArrayMap signed hash/collision behavior (2026-10-05, 32.02s), now starting from
+ArrayMap signed hash/collision behavior (2026-10-05, 32.19s), starting from
 an absent native settings file. Store::create claims first-boot absence without
 writing a seed document and uses the original related user/access/list readers.
-It rejects every existing main/backup/reserve artifact, including malformed
-files, and rechecks absence before first persistence; another claimant's write
-is rejected. Domain validation failures leave the directory unwritten, complete
+Construction rejects every existing main/backup/reserve artifact, including
+malformed files; another claimant's write is rejected. Initial writes retain
+cloned descriptors for every file actually opened, pinning their inodes through
+failure. Failed main writes retain only their own exact uncommitted output;
+changed bytes and replacement files are rejected before retry. Partial-write
+and descriptor-acquisition failures leave prior settings/state unchanged, repeat
+failures release removed descriptors, and successful retry clears pending ownership.
+A late reserve-finalization failure publishes the committed main and the next
+write restores the reserve. Original ResilientAtomicFile agrees on partial main
+failure, empty retained reserve, descriptor-open failure and successful retry. Domain validation failures leave the directory unwritten, complete
 user XML survives, and a successful main commit changes the owner to restoration
-mode. Ordinary units pass 447 (3.15s; two ignored), all integration targets compile,
-and the host/image/template build passes (14.9s, three rebuilt, 39 fresh). The original-APK initial scan fixture
-also passes (68.36s), writing/reopening both fresh and existing native settings and checking immutable
+mode. Ordinary units pass 451 (3.18s; two ignored), and all integration targets compile.
+The full image/template build passes (67.6s, nine rebuilt, 33 fresh), followed by
+final host (13.5s) and Linux runtime/cache (8.5s) builds. The prior original-APK initial scan fixture
+passed (68.36s), writing/reopening both fresh and existing native settings and checking immutable
 input metadata, ABX/reserve equality and repeat-write stability. This is global setting persistence, not
 a complete Settings.writeLPr boot transaction: remaining global owners, user
-writers, packages.list and coherent publication still need integration. Retrying
-an initial failed write while distinguishing its own uncommitted artifacts from
-foreign files remains #912. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
+writers, packages.list and coherent publication still need integration. In-process first-write retry is verified; restarted-boot recovery of uncommitted
+artifacts remains #912. A new Store does not adopt unknown malformed artifacts. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
 acceptance remains unrun.
 The syscall layer translates Darwin directory-unlink EPERM to Linux EISDIR
 without following symlinks (#913). This lets original bionic remove fall back to

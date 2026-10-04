@@ -5,6 +5,7 @@ public final class ScanSettingsWriteOracle {
     public static void write(java.io.File cache, dev.aim.server.PackageScanLease lease,
             PackageSetting assembled) throws Exception {
         verifyArrayMapOrder();
+        verifyFirstWriteRetry(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -35,6 +36,42 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyFirstWriteRetry(java.io.File directory) throws Exception {
+        var root = new java.io.File(directory, "original-first-write-retry");
+        var main = new java.io.File(root, "main");
+        var backup = new java.io.File(root, "backup");
+        var reserve = new java.io.File(root, "reserve");
+        // Each invocation creates fresh files after the prior successful retry.
+        main.delete(); backup.delete(); reserve.delete();
+        try (var atomic = new ResilientAtomicFile(main, backup, reserve, 0660, "fixture", null)) {
+            var stream = atomic.startWrite(); stream.write(new byte[]{1, 2, 3});
+            atomic.failWrite(stream);
+            if (main.exists() || backup.exists() || !reserve.exists() || reserve.length() != 0)
+                throw new AssertionError("original first-write failure artifacts");
+            stream = atomic.startWrite(); stream.write(new byte[]{4, 5, 6});
+            atomic.finishWrite(stream, false);
+            if (backup.exists() || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), new byte[]{4, 5, 6})
+                    || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), java.nio.file.Files.readAllBytes(reserve.toPath())))
+                throw new AssertionError("original first-write retry output");
+        }
+        main.delete(); reserve.delete();
+        if (!reserve.mkdir()) throw new AssertionError("reserve failure directory");
+        var sentinel = new java.io.File(reserve, "keep"); java.nio.file.Files.write(sentinel.toPath(), new byte[]{1});
+        try (var atomic = new ResilientAtomicFile(main, backup, reserve, 0660, "fixture", null)) {
+            try { atomic.startWrite(); throw new AssertionError("original reserve open failure accepted"); }
+            catch (java.io.IOException expected) {}
+            if (!main.exists() || main.length() != 0 || backup.exists())
+                throw new AssertionError("original failed-start main ownership");
+            boolean sentinelDeleted = sentinel.delete();
+            boolean reserveDeleted = reserve.delete();
+            if (!sentinelDeleted || !reserveDeleted) throw new AssertionError("owned reserve failure cleanup: sentinel=" + sentinelDeleted
+                + " reserve=" + reserveDeleted + " children=" + java.util.Arrays.toString(reserve.list()));
+            var stream = atomic.startWrite(); stream.write(new byte[]{7}); atomic.finishWrite(stream, false);
+            if (backup.exists() || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), new byte[]{7})
+                    || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), java.nio.file.Files.readAllBytes(reserve.toPath())))
+                throw new AssertionError("original failed-start retry output");
         }
     }
     private static void writeInventory(java.io.File directory,
