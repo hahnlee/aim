@@ -867,16 +867,31 @@ impl SigningScan {
         }
         let selected =
             Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
-        if self
+        let installed = self
             .settings
             .packages
             .iter()
-            .any(|p| p.name == selected.internal_name)
-        {
-            return Err(reject(
-                "identity",
-                "incoming package already has a saved setting",
-            ));
+            .find(|p| p.name == selected.internal_name);
+        if let Some(installed) = installed {
+            if installed.shared_user
+                || selected_shared_user(
+                    false,
+                    code.parsed.shared_user_id.as_deref(),
+                    code.parsed.is(booleans::LEAVING_SHARED_UID),
+                )
+                .is_none()
+            {
+                return Err(reject(
+                    "identity",
+                    "incoming setting does not support original recreation (#919)",
+                ));
+            }
+            if !self.identities.ids.owns_package_slot(installed) {
+                return Err(reject(
+                    "identity",
+                    "incoming setting no longer owns its UID",
+                ));
+            }
         }
         super::validate::static_library(&code.parsed, false)
             .map_err(|e| reject("validation", &e))?;
@@ -918,7 +933,11 @@ impl SigningScan {
         let users = original_users
             .get(&original.name)
             .ok_or_else(|| reject("setting", "original package user states were not supplied"))?;
-        let setting = super::NewSetting::adopt(original, users, &selected.manifest_name, metadata);
+        let mut setting =
+            super::NewSetting::adopt(original, users, &selected.manifest_name, metadata);
+        if installed.is_some_and(|p| p.pending_restore) {
+            setting.package.pending_restore = true;
+        }
         let identity = Identity {
             manifest_name: selected.manifest_name,
             internal_name: original.name.clone(),

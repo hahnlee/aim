@@ -1,6 +1,6 @@
 //! Accepted scan completion after identity/signing reconciliation (#702/#810).
 use super::{
-    AbiPolicy, AbiScanContext, NativeLibraryAbiCopy, NativeLibraryDestination,
+    AbiPolicy, AbiScanContext, AbiScanMode, NativeLibraryAbiCopy, NativeLibraryDestination,
     NativeLibraryEnvironment, NativeLibraryError, NativeLibraryInstallPolicy, NewPackageOutcome,
     PageSizeCompatPolicy, ScanClock, SigningError, SigningScan,
 };
@@ -42,6 +42,89 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
+        let identity = super::Identity::select_for_location(
+            &code.parsed,
+            &self.settings,
+            update.flags & crate::package::settings::FLAG_SYSTEM != 0,
+            &code.location,
+        );
+        let installed = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == identity.internal_name)
+            .cloned();
+        let original = super::Identity::original_setting(&code.parsed, &self.settings, &|name| {
+            self.has_scanned_package(name)
+        })
+        .cloned();
+        if let (Some(installed), Some(original)) = (installed.as_ref(), original.as_ref()) {
+            if inputs.context.system
+                && !inputs.context.updated
+                && update.flags & crate::package::settings::FLAG_SYSTEM != 0
+                && !installed.shared_user
+                && original.shared_user
+                && super::signing::selected_shared_user(
+                    false,
+                    code.parsed.shared_user_id.as_deref(),
+                    code.parsed
+                        .is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
+                )
+                .is_some()
+            {
+                let AbiScanMode::Existing {
+                    first_boot_or_upgrade,
+                    old_was_stub,
+                    saved,
+                } = inputs.context.mode
+                else {
+                    return Err(SigningError::Fatal(super::Error {
+                        package: identity.internal_name,
+                        path: code.location.path.clone(),
+                        phase: "original-request",
+                        message: "original recreation requires initial ABI request".into(),
+                    }));
+                };
+                if saved != Some(installed) {
+                    return Err(SigningError::Fatal(super::Error {
+                        package: identity.internal_name,
+                        path: code.location.path.clone(),
+                        phase: "original-request",
+                        message: "original recreation ABI installed owner differs".into(),
+                    }));
+                }
+                let metadata = super::SettingMetadata {
+                    code_path: update.code_path,
+                    legacy_native_library_path: None,
+                    primary_cpu_abi: None,
+                    secondary_cpu_abi: None,
+                    version_code: (i64::from(code.parsed.version_code_major) << 32)
+                        | i64::from(code.parsed.version_code as u32),
+                    flags: update.flags,
+                    private_flags: update.private_flags,
+                    last_modified_time: 0,
+                    uses_sdk_libraries: update.uses_sdk_libraries,
+                    uses_static_libraries: update.uses_static_libraries,
+                    mime_groups: update.mime_groups,
+                    domain_set_id: update.domain_set_id,
+                    target_sdk_version: update.target_sdk_version,
+                    restrict_update_hash: update.restrict_update_hash,
+                };
+                let inputs = ScanMetadataCompletion {
+                    context: AbiScanContext {
+                        mode: AbiScanMode::Original {
+                            first_boot_or_upgrade,
+                            old_was_stub,
+                            installed,
+                            original,
+                        },
+                        ..inputs.context
+                    },
+                    ..inputs
+                };
+                return self.scan_original_system(code, metadata, saved_users, apks, inputs);
+            }
+        }
         self.refresh_init_apex(code);
         let mut staged = self.clone();
         let candidate = staged.apply_existing(code, update, saved_users, all_users, disabled)?;
@@ -51,8 +134,9 @@ impl SigningScan {
         Ok(completed)
     }
 
-    /// Original-name creation copies the original setting only after source
-    /// selection; ABI derivation belongs to the new (null installed) request.
+    /// Original-name creation copies the original setting after source
+    /// selection. The ABI request retains any installed values read before
+    /// shared-UID replacement; a null installed request derives them afresh.
     pub fn scan_original_system(
         &mut self,
         code: &super::Code,

@@ -1068,11 +1068,27 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             owner.identities.ids.detached_setting(10003).unwrap()
         }
     }
-    for (invalid_page_size, shared) in [(false, false), (true, false), (false, true)] {
+    for (invalid_page_size, shared, incoming) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, true, true),
+        (true, true, true),
+    ] {
         let mut settings = both.clone();
-        settings
-            .packages
-            .retain(|p| p.name != "com.google.android.gsf");
+        if incoming {
+            let installed = settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == "com.google.android.gsf")
+                .unwrap();
+            installed.primary_cpu_abi = Some("arm64-v8a".into());
+            installed.pending_restore = true;
+        } else {
+            settings
+                .packages
+                .retain(|p| p.name != "com.google.android.gsf");
+        }
         settings
             .packages
             .iter_mut()
@@ -1132,6 +1148,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert!(owner.transferred_packages().is_empty());
             assert!(owner.settings.renamed_packages.is_empty());
             assert!(owner.identities.ids.detached_setting(10003).is_none());
+            if shared {
+                assert!(
+                    owner.identities.shared_users["fixture.original.group"]
+                        .retained_setting(&old.name)
+                        .is_none()
+                );
+            }
             assert_eq!(
                 owner.settings.packages.iter().find(|p| p.name == old.name),
                 Some(&before)
@@ -1143,6 +1166,27 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(candidate.record.settings.app_id, 10003);
             assert_eq!(candidate.record.parsed.uid, 10003);
             assert_eq!(candidate.users, both_users[&old.name]);
+            if incoming {
+                assert!(candidate.record.settings.pending_restore);
+                assert_eq!(
+                    candidate.record.settings.primary_cpu_abi.as_deref(),
+                    Some("arm64-v8a")
+                );
+                let installed = owner
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == "com.google.android.gsf")
+                    .unwrap();
+                assert_eq!(installed.app_id, 10002);
+                assert!(!owner.loaded_packages().contains_key(&installed.name));
+                assert_eq!(
+                    owner.identities.ids.get(10002),
+                    Some(&aim_services::package::owner::app_ids::Owner::Package(
+                        installed.name.clone()
+                    ))
+                );
+            }
             assert_ne!(
                 candidate.record.settings.primary_cpu_abi.as_deref(),
                 Some("armeabi-v7a")

@@ -20,6 +20,14 @@ pub enum AbiScanMode<'a> {
         saved: &'a Package,
         parsed_name: &'a str,
     },
+    /// ABI values are read from the installed request before shared-UID
+    /// replacement creates a copy of the original setting.
+    Original {
+        first_boot_or_upgrade: bool,
+        old_was_stub: bool,
+        installed: &'a Package,
+        original: &'a Package,
+    },
     /// Compilation/installation owns ABI derivation before SCAN_NEW_INSTALL.
     Install { moved: Option<&'a Package> },
     /// apexd owns APEX native libraries; APK derivation must not inspect them.
@@ -76,6 +84,26 @@ impl AbiScanMode<'_> {
                     }))
                 }
             }
+            Self::Original {
+                first_boot_or_upgrade,
+                old_was_stub,
+                installed,
+                original,
+            } => {
+                if original.name != pkg.package_name {
+                    return Err(NativeLibraryError::Input(
+                        "original ABI parsed owner differs".into(),
+                    ));
+                }
+                if first_boot_or_upgrade || old_was_stub {
+                    Ok(Source::Derive)
+                } else {
+                    Ok(Source::Known(PackageAbis {
+                        primary: installed.primary_cpu_abi.clone(),
+                        secondary: installed.secondary_cpu_abi.clone(),
+                    }))
+                }
+            }
             Self::Existing {
                 first_boot_or_upgrade: true,
                 ..
@@ -106,6 +134,13 @@ impl AbiScanContext<'_> {
             AbiScanMode::DisabledFactory {
                 saved, parsed_name, ..
             } => self.system && saved.name == setting.name && parsed_name == pkg.package_name,
+            AbiScanMode::Original { original, .. } => {
+                self.system
+                    && !self.updated
+                    && original.name == pkg.package_name
+                    && setting.name == original.name
+                    && setting.uid_owner_id() == original.uid_owner_id()
+            }
             _ => pkg.package_name == setting.name,
         }
     }
@@ -181,6 +216,71 @@ impl Apks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn original_recreation_keeps_installed_abi_with_a_bound_original_owner() {
+        let installed = Package {
+            name: "incoming".into(),
+            primary_cpu_abi: Some("arm64-v8a".into()),
+            ..Default::default()
+        };
+        let original = Package {
+            name: "original".into(),
+            app_id: 10003,
+            primary_cpu_abi: Some("armeabi-v7a".into()),
+            ..Default::default()
+        };
+        let pkg = AndroidPackage {
+            package_name: original.name.clone(),
+            ..Default::default()
+        };
+        for (upgrade, stub) in [(false, false), (true, false), (false, true)] {
+            let mode = AbiScanMode::Original {
+                first_boot_or_upgrade: upgrade,
+                old_was_stub: stub,
+                installed: &installed,
+                original: &original,
+            };
+            let source = mode.source(&pkg).unwrap();
+            if upgrade || stub {
+                assert!(matches!(source, Source::Derive));
+            } else {
+                let Source::Known(abis) = source else {
+                    panic!()
+                };
+                assert_eq!(abis.primary, installed.primary_cpu_abi);
+                assert_ne!(abis.primary, original.primary_cpu_abi);
+            }
+            let context = AbiScanContext {
+                mode,
+                system: true,
+                updated: false,
+                override_abi: None,
+                platform_runtime_64bit: None,
+            };
+            assert!(context.matches_setting(&pkg, &original));
+            let mut foreign = original.clone();
+            foreign.app_id += 1;
+            assert!(!context.matches_setting(&pkg, &foreign));
+            assert!(
+                !AbiScanContext {
+                    system: false,
+                    ..context
+                }
+                .matches_setting(&pkg, &original)
+            );
+            assert!(
+                !AbiScanContext {
+                    updated: true,
+                    ..context
+                }
+                .matches_setting(&pkg, &original)
+            );
+            let mut foreign_code = pkg.clone();
+            foreign_code.package_name = installed.name.clone();
+            assert!(mode.source(&foreign_code).is_err());
+        }
+    }
+
     #[test]
     fn disabled_factory_abi_keeps_explicit_setting_and_parsed_owners() {
         let saved = Package {

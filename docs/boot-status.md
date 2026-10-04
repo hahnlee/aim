@@ -946,7 +946,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (10.88s), and release units pass 461 cases. Disabled loaded code now retains a
+creation (11.21s), and release units pass 462 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -979,15 +979,27 @@ stay unchanged. The first-system fixture verifies both UID forms through Store
 capture/publication, rejects a foreign UID owner without replacing its capture,
 and keeps the original slot untouched when metadata fails. Retained slot removal
 preserves prior captures. The actual original
-UID/signing oracle passes (28.87s); release units pass 461 cases. Shared-UID
-replacement, complete request execution parity and transfer publication outside
-the scan owner remain #919; daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
+UID/signing oracle passes (28.87s); release units pass 462 cases. When an incoming
+independent setting declares the original setting's shared UID, initial system
+scan now recreates/adopts the original setting instead of rejecting the changed
+relationship (#919). UID 10003, old users and the prior shared member stay with
+the original; the incoming UID 10002 setting stays unchanged and unloaded. The
+accepted copy preserves pendingRestore from the incoming request. A validated
+Original ABI binding reads the incoming saved ABI, which ScanPackageUtils caches
+before setting recreation; upgrade/stub requests derive afresh. Wrong parsed,
+UID, non-system and updated scopes reject the binding. Native fixtures verify
+successful recreation, Store capture/publication and final metadata failure
+without a retained member or renamed/transfer record. These are controlled native
+requests, not complete original PMS request-execution comparisons. Recreation
+from an incoming shared setting, old-group cleanup/pruning, complete request
+parity and transfer publication outside the scan owner remain #919; daemon
+frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only system and data inputs (39.36s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only system and data inputs (39.87s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator
