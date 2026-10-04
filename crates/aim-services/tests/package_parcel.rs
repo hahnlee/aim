@@ -2369,6 +2369,24 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original_notification.stdout).unwrap(),
         format!("APEX_NOTIFY {}\n", results.len())
     );
+    let adopted = fs::read(directory.join("apex-original-adoption.original")).unwrap();
+    let mut adopted = aim_binder_host::parcel::Reader::new(&adopted, &[]);
+    assert_eq!(adopted.read_i32().unwrap(), 10000);
+    assert_eq!(adopted.read_i32().unwrap(), -1);
+    assert_eq!(
+        aim_service_aidl::read_byte_array(&mut adopted)
+            .unwrap()
+            .unwrap(),
+        apex_legacy.project(10000, &[10, 0, 11]).unwrap().bytes()
+    );
+    assert_eq!(
+        aim_service_aidl::read_byte_array(&mut adopted)
+            .unwrap()
+            .unwrap(),
+        apex_legacy.project(-1, &[10, 0, 11]).unwrap().bytes()
+    );
+    assert_eq!(adopted.remaining(), 0);
+
     let mut inactive = aim_services::package::scan::ApexImage {
         packages: vec![apex_image.packages[0].clone()],
     };

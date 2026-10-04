@@ -621,8 +621,13 @@ name and INVALID_UID. Without the matching saved map, negative-UID restoration
 rejects. Typed original rename-map and Settings.updatePackageSetting owners agree
 with native code names and populated legacy/fixed state (ART 33.93s); 437 units
 pass (one ignored/not run), the host image build passes (19.7s), and the complete
-initial scan passes (66.93s). Initial
-original-package adoption and its exact UID-slot/transfer ownership remain #890. First shared code uses the supplied
+initial scan passes (66.93s). A separate typed original ART probe (32.37s) pins
+initial original-package adoption: createNewSetting clones the original setting;
+APEX registration gives the adopted copy appId=-1 but getSettingLPr(10000) still
+returns the distinct prior positive-UID setting. Both retain independent populated
+legacy permission state and fixed=true. The native name-only UID map does not yet
+represent these two distinct setting owners (#904); initial original-package
+adoption and transfer ownership remain #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while

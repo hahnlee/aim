@@ -36,6 +36,7 @@ public final class ApexNotifyOracle {
         verifyConversionEligibility(directory);
         verifyLegacyConstructors(directory);
         verifyRetainedRename(directory);
+        verifyOriginalAdoptionSlot(directory);
         verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
@@ -141,6 +142,37 @@ public final class ApexNotifyOracle {
             }
             if (in.dataAvail() != 0) throw new AssertionError("conversion cases tail");
         } finally { in.recycle(); original.recycle(); }
+    }
+    private static void verifyOriginalAdoptionSlot(java.io.File directory) throws Exception {
+        var settings = new Settings(java.util.Map.of());
+        var old = new PackageSetting("original.fixture", null,
+            new java.io.File("/system/apex/original.fixture.apex"), 1, 0, new java.util.UUID(1, 1));
+        old.setAppId(10000); old.setInstallPermissionsFixed(true);
+        int[] users = {10, 0, 11};
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.original").toPath());
+        old.getLegacyPermissionState().copyFrom(dev.aim.server.PackageLegacyPermissions.restore(10042, users, bytes));
+        settings.registerAppIdLPw(old, false); settings.addPackageSettingLPw(old, null);
+        var adopted = Settings.createNewSetting("incoming.fixture", old, null, null, null,
+            new java.io.File("/system/apex/incoming.fixture.apex"), null, null, null, 2, 1, 0,
+            null, true, false, false, false, null, null, null, null, null, null, null,
+            new java.util.UUID(1, 2), 36, null);
+        adopted.setAppId(-1);
+        settings.addRenamedPackageLPw("incoming.fixture", old.getPackageName());
+        settings.addPackageSettingLPw(adopted, null);
+        if (settings.getSettingLPr(10000) != old || old.getAppId() != 10000
+                || adopted.getAppId() != -1 || adopted == old
+                || !old.getPackageName().equals(adopted.getPackageName())
+                || !"incoming.fixture".equals(adopted.getRealName())
+                || old.getLegacyPermissionState() == adopted.getLegacyPermissionState()
+                || !adopted.isInstallPermissionsFixed())
+            throw new AssertionError("original APEX adoption slot/copy differs");
+        var out = android.os.Parcel.obtain();
+        try {
+            out.writeInt(old.getAppId()); out.writeInt(adopted.getAppId());
+            out.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(10000, users, old.getLegacyPermissionState()));
+            out.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(-1, users, adopted.getLegacyPermissionState()));
+            java.nio.file.Files.write(new java.io.File(directory, "apex-original-adoption.original").toPath(), out.marshall());
+        } finally { out.recycle(); }
     }
     private static void verifyRetainedRename(java.io.File directory) throws Exception {
         var in = android.os.Parcel.obtain();
