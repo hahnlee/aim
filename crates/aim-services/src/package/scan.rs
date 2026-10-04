@@ -78,13 +78,13 @@ pub use uids::{Uid, UidScan};
 pub struct Record {
     pub settings: settings::Package,
     pub parsed: AndroidPackage,
-    /// Collected code signing, before saved/shared-UID reconciliation.
+    /// Code signing before reconciliation; factory refresh retains UNKNOWN.
     pub signing: sign::SigningDetails,
     pub identity: Identity,
     pub origin: ScanOrigin,
 }
 
-/// Final code and collected signing retained together for facade reconstruction.
+/// Final code and its signing owner retained together for facade reconstruction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedPackage {
     pub package: AndroidPackage,
@@ -96,7 +96,7 @@ impl LoadedPackage {
         package: AndroidPackage,
         collected_signing: sign::SigningDetails,
     ) -> Result<Self, String> {
-        if package.signing_details.as_ref() != Some(&collected_signing.parcel_details()?) {
+        if package.signing_details != collected_signing.package_details()? {
             return Err("loaded package and collected signing differ".into());
         }
         Ok(Self {

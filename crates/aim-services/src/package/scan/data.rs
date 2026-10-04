@@ -425,7 +425,7 @@ impl SigningScan {
                 != factory.record.identity
                 || code.location.path != setting.code_path
                 || version != setting.version_code
-                || code.signing != factory.record.signing
+                || !factory.record.signing.unknown && code.signing != factory.record.signing
             {
                 return Err(fatal(
                     setting.name.clone(),

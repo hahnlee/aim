@@ -98,7 +98,7 @@ impl Code {
     /// before scan reconciliation can merge the saved setting's lineage.
     pub(super) fn collected_package(&self) -> Result<AndroidPackage, String> {
         let mut parsed = self.parsed.clone();
-        parsed.signing_details = Some(self.signing.parcel_details()?);
+        parsed.signing_details = self.signing.package_details()?;
         Ok(parsed)
     }
 }
@@ -519,6 +519,7 @@ mod tests {
                 ..Default::default()
             },
             signing: sign::SigningDetails {
+                unknown: false,
                 current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,

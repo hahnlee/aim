@@ -110,6 +110,8 @@ pub type Lineage = Vec<(Vec<u8>, i32)>;
 /// `SigningDetails`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SigningDetails {
+    /// The original UNKNOWN singleton, distinct from an empty signer array.
+    pub unknown: bool,
     /// The signers' certificates, as encoded.
     pub signatures: Vec<Vec<u8>>,
     /// Current Signature capability flags; empty represents all zero.
@@ -121,9 +123,39 @@ pub struct SigningDetails {
 }
 
 impl SigningDetails {
+    pub fn unknown() -> Self {
+        Self {
+            unknown: true,
+            signatures: Vec::new(),
+            current_flags: Vec::new(),
+            scheme_version: UNKNOWN,
+            public_keys: Vec::new(),
+            past_signing_certificates: None,
+        }
+    }
+
+    pub fn package_details(&self) -> Result<Option<super::pkg::SigningDetails>, String> {
+        if self.unknown {
+            if !self.signatures.is_empty()
+                || !self.current_flags.is_empty()
+                || self.scheme_version != UNKNOWN
+                || !self.public_keys.is_empty()
+                || self.past_signing_certificates.is_some()
+            {
+                return Err("UNKNOWN signing has populated fields".into());
+            }
+            Ok(None)
+        } else {
+            self.parcel_details().map(Some)
+        }
+    }
+
     /// Original PackageImpl's SigningDetails parcel representation. Keep the
     /// collected package lineage separate from reconciled settings signatures.
     pub fn parcel_details(&self) -> Result<super::pkg::SigningDetails, String> {
+        if self.unknown {
+            return Err("UNKNOWN signing has no populated parcel body".into());
+        }
         Ok(super::pkg::SigningDetails {
             signatures: Some(self.signatures.clone()),
             scheme_version: self.scheme_version,
@@ -154,6 +186,7 @@ impl SigningDetails {
             }
         }
         Ok(SigningDetails {
+            unknown: false,
             signatures,
             current_flags: Vec::new(),
             scheme_version,

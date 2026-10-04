@@ -210,8 +210,8 @@ impl SigningScan {
     }
 }
 
-/// Factory metadata is not an active signer/library admission. Its verified
-/// code is retained separately for the later updated-data signature gate.
+/// Factory metadata is not an active signer/library admission. Its package
+/// keeps UNKNOWN signing; the disabled setting owns the later data signature gate.
 #[derive(Debug)]
 pub struct DisabledSystemMetadata {
     pub record: Record,
@@ -561,9 +561,9 @@ impl SigningScan {
     /// Factory refresh followed by scanPackageForInitLI's updated-system
     /// source decision. Only factory metadata is committed here; a restore
     /// outcome requires resource cleanup, enableSystemPackage and active scan.
-    pub fn scan_updated_system(
+    pub fn scan_updated_system<S>(
         &mut self,
-        code: &Code,
+        code: &Code<S>,
         update: SettingUpdate,
         all_users: Option<&[super::User]>,
         config: &crate::package::system_config::SystemConfig,
@@ -664,9 +664,9 @@ impl SigningScan {
     /// Manifest policy must already have run with updated-system policy enabled.
     /// User states belong to the disabled setting; restored and live copied
     /// factory settings have different user-state provenance (#815).
-    pub fn scan_disabled_system(
+    pub fn scan_disabled_system<S>(
         &mut self,
-        code: &Code,
+        code: &Code<S>,
         update: SettingUpdate,
         all_users: Option<&[super::User]>,
         apks: &Apks,
@@ -747,8 +747,12 @@ impl SigningScan {
             )
         })?;
         let mut setting = NewSetting::update(saved, &users.users, update, all_users, false);
-        let mut parsed = code
-            .collected_package()
+        // scanPackageOnly precedes collectCertificatesLI. Its finalized
+        // factory package retains UNKNOWN even after strict setting recollection.
+        let signing = crate::package::sign::SigningDetails::unknown();
+        let mut parsed = code.parsed.clone();
+        parsed.signing_details = signing
+            .package_details()
             .map_err(|e| reject("signatures", e))?;
         identity.apply(&mut parsed);
         let native_error = |error| SigningError::NativeLibrary {
@@ -823,7 +827,7 @@ impl SigningScan {
             inputs.factory_test,
             updated,
         );
-        let loaded = super::LoadedPackage::new(parsed.clone(), code.signing.clone())
+        let loaded = super::LoadedPackage::new(parsed.clone(), signing.clone())
             .map_err(|message| reject("package-finalization", message))?;
         // scanPackageOnly preserves saved signatures. Strict recollection for
         // selected updated-system packages belongs to the version selector.
@@ -847,7 +851,7 @@ impl SigningScan {
             record: Record {
                 settings: setting.package,
                 parsed,
-                signing: code.signing.clone(),
+                signing,
                 identity,
                 origin: ScanOrigin::SystemDirectory,
             },
@@ -895,6 +899,7 @@ mod tests {
             let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
             assert!(!owner.disable_system_package("factory").unwrap());
             let signing = SigningDetails {
+                unknown: false,
                 current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,

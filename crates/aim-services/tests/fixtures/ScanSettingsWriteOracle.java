@@ -412,6 +412,35 @@ public final class ScanSettingsWriteOracle {
         try (var output = new java.io.FileOutputStream(new java.io.File(directory, "settings-inventory-original"))) {
             var xml = android.util.Xml.resolveSerializer(output);
             xml.startDocument(null, true); xml.startTag(null, "packages");
+            // Detached volume owners supplied alongside the detached package
+            // owners. Version emission follows Settings.writeLPr at the pin;
+            // this inventory oracle does not execute the full boot writer.
+            var versions = new android.util.ArrayMap<String, Settings.VersionInfo>();
+            var versionParcel = android.os.Parcel.obtain();
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "settings-versions.parcel").toPath());
+                versionParcel.unmarshall(bytes, 0, bytes.length); versionParcel.setDataPosition(0);
+                int count = versionParcel.readInt();
+                for (int i = 0; i < count; i++) {
+                    String uuid = versionParcel.readString();
+                    var version = settings.findOrCreateVersion(uuid);
+                    version.sdkVersion = versionParcel.readInt(); version.databaseVersion = versionParcel.readInt();
+                    version.buildFingerprint = versionParcel.readString(); version.fingerprint = versionParcel.readString();
+                    if (versions.containsKey(uuid)) throw new AssertionError("duplicate volume owner");
+                    versions.put(uuid, version);
+                }
+                if (count < 0 || versionParcel.dataAvail() != 0) throw new AssertionError("volume owner frame");
+            } finally { versionParcel.recycle(); }
+            for (var entry : versions.entrySet()) {
+                var version = entry.getValue();
+                xml.startTag(null, "version");
+                if (entry.getKey() != null) xml.attribute(null, "volumeUuid", entry.getKey());
+                xml.attributeInt(null, "sdkVersion", version.sdkVersion);
+                xml.attributeInt(null, "databaseVersion", version.databaseVersion);
+                if (version.buildFingerprint != null) xml.attribute(null, "buildFingerprint", version.buildFingerprint);
+                if (version.fingerprint != null) xml.attribute(null, "fingerprint", version.fingerprint);
+                xml.endTag(null, "version");
+            }
             for (var setting : packages.values()) settings.writePackageLPr(xml, certificates, setting);
             var groups = new android.util.ArrayMap<String, dev.aim.server.SharedUserData>();
             for (String name : lease.getSharedUserNames()) groups.put(name, lease.getSharedUserData(name));

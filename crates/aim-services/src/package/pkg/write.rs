@@ -17,7 +17,7 @@ impl AndroidPackage {
         &self,
         collected: &crate::package::sign::SigningDetails,
     ) -> std::result::Result<FacadeEntry, String> {
-        if self.signing_details.as_ref() != Some(&collected.parcel_details()?) {
+        if self.signing_details != collected.package_details()? {
             return Err("package and collected signing metadata differ".into());
         }
         Ok(FacadeEntry {

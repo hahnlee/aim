@@ -286,6 +286,18 @@ public final class PackageRoundTripOracle {
         for (var file : files) {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
+            if (file.getName().equals("unknown-signing.native")) {
+                if (pkg.getSigningDetails() != android.content.pm.SigningDetails.UNKNOWN)
+                    throw new AssertionError("native UNKNOWN signing lost singleton identity");
+            }
+            if (file.getName().equals("empty-signing.native")) {
+                var details = pkg.getSigningDetails();
+                if (details == android.content.pm.SigningDetails.UNKNOWN
+                        || details.getSignatureSchemeVersion() != 0
+                        || details.getSignatures() == null || details.getSignatures().length != 0
+                        || details.getPublicKeys() == null || details.getPublicKeys().size() != 0)
+                    throw new AssertionError("empty known signing became UNKNOWN");
+            }
             if (file.getName().startsWith("scan-")) {
                 verifyApexScanPolicy(file);
                 verifyMutableCode(java.nio.file.Files.readAllBytes(file.toPath()));

@@ -1519,6 +1519,7 @@ mod tests {
         };
         let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
         let signing = SigningDetails {
+            unknown: false,
             current_flags: Vec::new(),
             signatures: vec![vec![3]],
             scheme_version: 3,
@@ -1694,6 +1695,7 @@ mod tests {
         )
         .unwrap();
         let signing = SigningDetails {
+            unknown: false,
             current_flags: Vec::new(),
             signatures: vec![vec![3]],
             scheme_version: 3,
@@ -2921,6 +2923,7 @@ mod tests {
         };
         let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
         let signing = SigningDetails {
+            unknown: false,
             current_flags: Vec::new(),
             signatures: vec![vec![3]],
             scheme_version: 3,

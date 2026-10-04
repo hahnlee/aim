@@ -239,6 +239,7 @@ mod tests {
 
     fn signer(certs: &[u8]) -> SigningDetails {
         SigningDetails {
+            unknown: false,
             current_flags: Vec::new(),
             signatures: certs.iter().map(|c| vec![*c]).collect(),
             scheme_version: 3,

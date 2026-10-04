@@ -829,6 +829,21 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
 
+    let mut version_inputs = aim_binder_host::parcel::Parcel::new();
+    version_inputs.write_i32(snapshot.owner().settings.versions.len() as i32);
+    for version in &snapshot.owner().settings.versions {
+        version_inputs.write_string16(version.volume_uuid.as_deref());
+        version_inputs.write_i32(version.sdk_version);
+        version_inputs.write_i32(version.database_version);
+        version_inputs.write_string16(version.build_fingerprint.as_deref());
+        version_inputs.write_string16(version.fingerprint.as_deref());
+    }
+    fs::write(
+        directory.join("settings-versions.parcel"),
+        version_inputs.data(),
+    )
+    .unwrap();
+
     let mut writer_document =
         aim_android_xml::read(&fs::read(writer_data.join("system/packages.xml")).unwrap()).unwrap();
     // Global keyset ownership is checked by its separate original oracle.
@@ -872,6 +887,23 @@ fn native_package_parcels_match_original_read_write() {
                 .unwrap(),
         )
         .unwrap();
+    }
+    // UNKNOWN is a singleton parcel tag, not an empty known signer array.
+    for unknown in [true, false] {
+        let mut pkg = snapshot.owner().loaded_packages()["android"]
+            .package
+            .clone();
+        let mut signing = aim_services::package::sign::SigningDetails::unknown();
+        signing.unknown = unknown;
+        pkg.signing_details = signing.package_details().unwrap();
+        let facade = pkg.to_facade_entry(&signing).unwrap();
+        let name = if unknown {
+            "unknown-signing.native"
+        } else {
+            "empty-signing.native"
+        };
+        fs::write(directory.join(name), &facade.cache.bytes).unwrap();
+        expected.push((name.to_owned(), pkg.package_name, facade.cache));
     }
     for loaded in snapshot.owner().loaded_packages().values() {
         let pkg = &loaded.package;

@@ -1738,6 +1738,11 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             None,
         )
         .unwrap();
+    let uncollected_factory = aim_services::package::scan::Code {
+        location: factory_code.location.clone(),
+        parsed: factory_code.parsed.clone(),
+        signing: (),
+    };
     let factory_before = factory_owner.clone();
     assert!(matches!(
         factory_owner.scan_disabled_system(&factory_code, update(), None, &unreadable, completion()),
@@ -1745,13 +1750,24 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     ));
     assert_eq!(factory_owner, factory_before);
     let factory = factory_owner
-        .scan_disabled_system(&factory_code, update(), None, &apks, completion())
+        .scan_disabled_system(&uncollected_factory, update(), None, &apks, completion())
         .unwrap();
     assert_eq!(
         factory.record.settings.domain_set_id.as_deref(),
         Some("63636363-6363-6363-6363-636363636363")
     );
     assert_eq!(factory.record.settings.signatures, saved.signatures);
+    assert!(factory.record.signing.unknown);
+    assert!(factory.record.parsed.signing_details.is_none());
+    let loaded_factory = &factory_owner.disabled_loaded_packages()[&saved.name];
+    assert!(loaded_factory.collected_signing.unknown);
+    assert!(
+        loaded_factory
+            .facade_entry()
+            .unwrap()
+            .past_signing_certificates
+            .is_none()
+    );
     assert_eq!(
         factory_owner.disabled_loaded_packages()[&saved.name].package,
         factory.record.parsed
@@ -1997,7 +2013,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(owner, before);
             let selected = owner
                 .scan_updated_system(
-                    &factory_code,
+                    &uncollected_factory,
                     update(),
                     None,
                     &policy,
@@ -2006,6 +2022,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 )
                 .unwrap();
             assert_eq!(selected.source, source);
+            assert!(selected.factory.record.signing.unknown);
+            assert!(selected.factory.record.parsed.signing_details.is_none());
+            assert!(
+                owner.disabled_loaded_packages()[&saved.name]
+                    .collected_signing
+                    .unknown
+            );
             if source == KeepData {
                 let mut cached_code = factory_code.clone();
                 cached_code.signing.current_flags = vec![37; cached_code.signing.signatures.len()];

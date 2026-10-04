@@ -61,7 +61,7 @@ impl SigningScan {
             != factory.identity
             || code.location.path != factory.settings.code_path
             || version != factory.settings.version_code
-            || code.signing != factory.signing
+            || !factory.signing.unknown && code.signing != factory.signing
             || self
                 .settings
                 .packages

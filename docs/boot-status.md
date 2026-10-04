@@ -414,8 +414,9 @@ query context reject explicitly; the parser/read models still need unification
 identity/signing reconciliation; the collected package lineage stays distinct
 from the reconciled saved setting's lineage. Active scan completion sets the
 assigned appId as PackageImpl.uid after all metadata/keyset gates, before
-retaining the immutable object. Disabled factory scans keep collected signing
-without active UID finalization. Original Java getters verify actual first-scan
+retaining the immutable object. Disabled factory metadata refresh keeps the original UNKNOWN signing
+without active UID finalization; saved/strict-recollected setting signing remains
+a separate owner. Original Java getters verify actual first-scan
 UIDs 1000/10000, v3 signers/public keys and GSF's two-certificate history.
 Failed rescans retain prior objects/state; malformed serialized keys reject
 without mutating the raw input. Facade callback delivery and publication remain
@@ -867,10 +868,18 @@ The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (8.59s), including settings commit
+commit. The first-system scan fixture passes (8.79s), including settings commit
 and reopening the persisted owner. Updated-system KeepData selection now fully
 verifies strict-allowlisted factory APKs instead of copying input signing, after
-committing the disabled metadata refresh. Source-conformance checks retain
+committing the disabled metadata refresh. That refresh accepts uncollected
+Code<()> and finalizes the factory package with SigningDetails.UNKNOWN, regardless
+of input signing or a later strict setting recollection. Native facade and
+snapshot validation preserve the singleton parcel tag separately from an empty
+known signer array with scheme zero. The actual original PackageImpl cache oracle
+checks singleton identity and preserves every decoded field for both variants
+(24.01s). Its inventory fixture now supplies detached volume owners alongside
+package/shared-UID owners (#922); version emission follows the pinned writeLPr
+block, while full boot writer execution remains #914. Source-conformance checks retain
 non-strict saved signing, discard input current flags 37 for strict signing, and
 compare the complete owner after a strict verification failure with the completed
 metadata-only scan. That failure preserves earlier metadata and reports the
@@ -887,7 +896,7 @@ mapping/serialization/owner failures stop the scan. A source-conformance fixture
 uses real GSF and framework-res APKs: GSF parse or signing failure is reported,
 then the platform factory recovers; missing parse/signing mappings stop before
 that recovery, retaining earlier enable effects and preserving system code.
-system inputs still verify afresh before
+System inputs still verify afresh before
 sequential selection, so system parse/verification timing remains incomplete
 (#918). Adoption
 when both incoming and original settings exist remains #919. Mapped APK signing
@@ -896,7 +905,7 @@ collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only data inputs (46.36s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only data inputs (45.59s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

@@ -198,13 +198,11 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
                 .map_err(Error::Invalid)?;
             if code.package.package_name != *name
                 || code.package.path.as_deref() != Some(setting.code_path.as_str())
-                || code.package.signing_details.as_ref()
-                    != Some(
-                        &code
-                            .collected_signing
-                            .parcel_details()
-                            .map_err(Error::Invalid)?,
-                    )
+                || code.package.signing_details
+                    != code
+                        .collected_signing
+                        .package_details()
+                        .map_err(Error::Invalid)?
             {
                 return Err(fail("loaded code differs from its owner"));
             }

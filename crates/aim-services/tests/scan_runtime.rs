@@ -658,6 +658,7 @@ fn saved_scan_libraries_match_original_pms() {
             record.signing.past_signing_certificates
         );
         assert_eq!(record.parsed.uid, record.settings.app_id);
+        assert!(!record.signing.unknown);
         assert!(record.parsed.signing_details == Some(record.signing.parcel_details().unwrap()));
         assert_eq!(
             resumed.loaded_packages()[&record.settings.name].package,
@@ -676,7 +677,8 @@ fn saved_scan_libraries_match_original_pms() {
             loaded.facade_entry().unwrap().past_signing_certificates,
             record.signing.past_signing_certificates
         );
-        assert!(record.parsed.signing_details == Some(record.signing.parcel_details().unwrap()));
+        assert!(record.signing.unknown);
+        assert!(record.parsed.signing_details.is_none());
         assert_eq!(
             resumed.disabled_loaded_packages()[&record.settings.name].package,
             record.parsed
