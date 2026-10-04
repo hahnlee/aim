@@ -9,7 +9,7 @@ use crate::package::{
 use aim_android_xml::{Element, Node, Value};
 use std::collections::BTreeSet;
 
-/// Write package/shared setting owners together. Other global owners must have
+/// Write package/shared and volume version owners together. Other global owners must have
 /// committed their changes already; the round trip rejects unresolved changes.
 pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element, String> {
     if !scan.capture_ready() {
@@ -186,6 +186,7 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
         }
         root.content.push(Node::Element(node));
     }
+    write_versions(&mut root, &mut expected)?;
     if expected.key_sets.versioned {
         root = key_sets::replace_registered(&root, &expected)?;
     }
@@ -193,6 +194,81 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
         return Err("scan settings require an unresolved global owner or do not round trip".into());
     }
     Ok(root)
+}
+
+// Settings.writeLPr writes mVersion in ArrayMap order, replacing legacy tags.
+fn write_versions(root: &mut Element, settings: &mut Settings) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for version in &settings.versions {
+        if !seen.insert(version.volume_uuid.clone()) {
+            return Err("duplicate volume version owner".into());
+        }
+    }
+    settings.versions.sort_by_key(|version| {
+        version
+            .volume_uuid
+            .as_deref()
+            .map(crate::package::info::java_hash)
+            .unwrap_or(0)
+    });
+    root.content.retain(|node| !matches!(node, Node::Element(e) if matches!(e.name.as_str(), "version" | "last-platform-version" | "database-version")));
+    let mut nodes = Vec::new();
+    for version in &settings.versions {
+        let mut node = element("version");
+        for (name, value) in [
+            ("volumeUuid", &version.volume_uuid),
+            ("buildFingerprint", &version.build_fingerprint),
+            ("fingerprint", &version.fingerprint),
+        ] {
+            attribute(&mut node, name, value.clone().map(Value::String));
+        }
+        attribute(
+            &mut node,
+            "sdkVersion",
+            Some(Value::Int(version.sdk_version)),
+        );
+        attribute(
+            &mut node,
+            "databaseVersion",
+            Some(Value::Int(version.database_version)),
+        );
+        nodes.push(Node::Element(node));
+    }
+    root.content.splice(0..0, nodes);
+    Ok(())
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn scan_version_commit_replaces_legacy_values_and_retains_collision_slots() {
+        let mut root = aim_android_xml::read(b"<packages><last-platform-version internal='35' external='34'/><database-version internal='2' external='1'/><extension value='keep'/></packages>").unwrap();
+        let mut settings = Settings::parse(&root).unwrap();
+        settings.find_or_create_version(None).database_version = 3;
+        for name in ["BB", "Aa", ""] {
+            let version = settings.find_or_create_version(Some(name.into()));
+            version.sdk_version = 36;
+            version.database_version = 7;
+            version.build_fingerprint = Some(String::new());
+            version.fingerprint = Some("partitions".into());
+        }
+        write_versions(&mut root, &mut settings).unwrap();
+        assert_eq!(Settings::parse(&root).unwrap(), settings);
+        assert!(root.children().any(|node| node.name == "extension"));
+        assert!(!root.children().any(|node| matches!(
+            node.name.as_str(),
+            "last-platform-version" | "database-version"
+        )));
+        let collisions: Vec<_> = settings
+            .versions
+            .iter()
+            .filter_map(|version| version.volume_uuid.as_deref())
+            .filter(|name| *name == "BB" || *name == "Aa")
+            .collect();
+        assert_eq!(collisions, ["BB", "Aa"]);
+    }
 }
 
 fn package_node(

@@ -22,6 +22,7 @@ pub enum BootError {
 /// Image and invocation policy, independent of original service decisions.
 #[derive(Clone, Copy)]
 pub struct ScanPolicy<'a> {
+    pub certificates: crate::package::scan::CertificateScanPolicy,
     pub seinfo: &'a Policy,
     pub apex_parse_flags: i32,
     pub first_api_level: i32,
@@ -183,6 +184,7 @@ impl BootOwners<'_> {
                 image,
                 apks,
                 crate::package::scan::DataImageScanInputs {
+                    certificates: policy.certificates,
                     seinfo: SeInfoScan {
                         policy: policy.seinfo,
                         compatibility: self.bridge,
@@ -231,6 +233,7 @@ impl BootOwners<'_> {
                 .map_err(|error| format!("original domain owner: {error:?}"))
         };
         run(FirstBootSystemInputs {
+            certificates: policy.certificates,
             seinfo: SeInfoScan {
                 policy: policy.seinfo,
                 compatibility: self.bridge,

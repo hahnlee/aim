@@ -50,6 +50,7 @@ pub struct SigningScan {
     pub(super) shared_processes: Option<super::shared_processes::Assignments>,
     pub(super) replica_runtime: Option<super::replica_runtime::Assignments>,
     pub(super) hidden_api_allowlist: BTreeSet<String>,
+    pub(super) strict_signature_packages: BTreeSet<String>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -661,6 +662,9 @@ impl SigningScan {
             shared_processes: None,
             replica_runtime: None,
             hidden_api_allowlist: config.hidden_api_allowlist.iter().cloned().collect(),
+            strict_signature_packages: config
+                .preinstall_packages_with_strict_signature_check
+                .clone(),
             first_api_level,
             parsed: Vec::new(),
         })

@@ -1953,6 +1953,7 @@ fn native_package_parcels_match_original_read_write() {
         "MIGRATION_POLICY_DENIED\n"
     );
     let scan_inputs = |image| aim_services::package::scan::FirstBootSystemInputs {
+        certificates: Default::default(),
         seinfo: common::seinfo::scan(),
         apex_image: image,
         notify_apex_scan: &|_| Err("direct APEX phase does not notify".into()),
@@ -4152,6 +4153,7 @@ fn native_scan_objects(
         &apks,
         &config,
         FirstBootSystemInputs {
+            certificates: Default::default(),
             // Controlled target for the original envelope/replica oracle.
             seinfo: aim_services::package::scan::SeInfoScan {
                 policy: &policy,

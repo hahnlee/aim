@@ -37,6 +37,7 @@ pub enum DataCandidateOutcome {
 
 /// The boot owners for data iteration and missing-update factory recovery.
 pub struct DataImageScanInputs<'a> {
+    pub certificates: super::CertificateScanPolicy,
     pub seinfo: super::SeInfoScan<'a>,
     pub factories: &'a super::SystemImagePackages,
     pub platform: &'a SigningDetails,
@@ -145,7 +146,23 @@ impl SigningScan {
             }
         }
         Self::clean_invalid_data_inputs(&image, inputs.resources, &incremental)?;
-        for entry in image.packages {
+        for mut entry in image.packages {
+            let scan_incremental = (inputs.is_incremental)(&entry.scan_path)
+                .map_err(|e| fatal(String::new(), entry.scan_path.clone(), "incremental", e))?;
+            entry.code = match self.collect_initial_code(&entry.code, apks, inputs.certificates) {
+                Ok(code) => code,
+                Err(error @ SigningError::Rejected(_)) => {
+                    inputs
+                        .resources
+                        .clean(&entry.scan_path, scan_incremental)
+                        .map_err(|e| {
+                            fatal(String::new(), entry.scan_path.clone(), "data-cleanup", e)
+                        })?;
+                    removed.push((entry.scan_path, error));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let code = &entry.code;
             let identity =
                 Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
@@ -178,14 +195,7 @@ impl SigningScan {
                     .is_dir(),
                 canonical_source: None,
             };
-            let incremental = (inputs.is_incremental)(&entry.scan_path).map_err(|e| {
-                fatal(
-                    identity.internal_name.clone(),
-                    entry.scan_path.clone(),
-                    "incremental",
-                    e,
-                )
-            })?;
+            let incremental = scan_incremental;
             let completed = self.scan_data_candidate(
                 &entry,
                 inputs.users,

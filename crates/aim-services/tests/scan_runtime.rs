@@ -502,6 +502,7 @@ fn saved_scan_libraries_match_original_pms() {
             &apks,
             &config,
             FirstBootSystemInputs {
+                certificates: Default::default(),
                 seinfo: common::seinfo::scan(),
                 apex_image: &Default::default(),
                 notify_apex_scan: &|results| {
@@ -581,6 +582,7 @@ fn saved_scan_libraries_match_original_pms() {
             data_image,
             &apks,
             aim_services::package::scan::DataImageScanInputs {
+                certificates: Default::default(),
                 seinfo: common::seinfo::scan(),
                 factories: &resumed_packages,
                 platform: platform_signing,
@@ -717,6 +719,7 @@ fn saved_scan_libraries_match_original_pms() {
         &apks,
         &config,
         FirstBootSystemInputs {
+            certificates: Default::default(),
             seinfo: common::seinfo::scan(),
             apex_image: &Default::default(),
             notify_apex_scan: &|results| {
@@ -926,11 +929,33 @@ fn saved_scan_libraries_match_original_pms() {
         }
         checked_flags += 1;
 
-        let result = scan
-            .apply_with_disabled(
-                &inputs.active[&saved.name],
-                inputs.disabled.get(&saved.name),
+        // This subowner consumes collected signing, not a fresh verification
+        // result. Preserve cache-owned current Signature flags as init does.
+        let collected = scan
+            .collect_initial_code(
+                &Code {
+                    location: scan_location(&saved.code_path, &apexes).unwrap_or(Location {
+                        path: saved.code_path.clone(),
+                        partition: Partition::Data,
+                        kind: Kind::App,
+                        apex: None,
+                    }),
+                    parsed: record.parsed.clone(),
+                    signing: record.signing.clone(),
+                },
+                &apks,
+                Default::default(),
             )
+            .unwrap();
+        let record = aim_services::package::scan::Record {
+            settings: record.settings.clone(),
+            parsed: collected.parsed,
+            signing: collected.signing,
+            identity: record.identity.clone(),
+            origin: record.origin.clone(),
+        };
+        let result = scan
+            .apply_with_disabled(&record, inputs.disabled.get(&saved.name))
             .unwrap_or_else(|error| panic!("{}: {error:?}", saved.name));
         assert!(result.system_signature_mismatch.is_none(), "{}", saved.name);
     }

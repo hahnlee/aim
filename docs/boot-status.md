@@ -849,9 +849,22 @@ entry points now consume the collection choice before reconciliation; their
 scan partition fixes the permitted skipVerify input. Immutable original system
 and data scan fixtures retain cached flags 41 and preserve paths/rejections
 (0.61s and 0.35s); mismatched skipVerify/partition inputs reject.
-These input APIs do not yet wire the current selected/original-rename setting,
-volume VersionInfo, upgrade state and strict data allowlist into the original
-point of the sequential boot scan; that ownership integration remains #918. The normal AST importer now derives public keys after completing the current
+The sequential initial-system and data scan now resolve the current selected/
+original-rename setting, volume VersionInfo, upgrade state and strict data
+allowlist before collecting signing. Scan settings persist those volume owners
+in original ArrayMap order, replacing legacy version tags, before the keyset
+commit. The first-system scan fixture passes (7.27s), including settings commit
+and reopening the persisted owner. Updated-system source decisions still need collection at their
+original stages; upstream code inputs still verify afresh before sequential
+selection, so parse/verification timing remains incomplete (#918). Adoption
+when both incoming and original settings exist remains #919; mapped APK signing
+source IO classification remains #920. The runtime scan diagnostic now performs
+collection before its saved-record reconciliation as well: it retains original
+GSF current flags 23 and compares complete package settings. Original PMS runtime
+comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
+libraries, with saved sequential loops covering 240 system and 3 selected data
+APKs (46.89s). This is an owner diagnostic, not native `package` default boot or
+CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator
 container gets a fresh signing owner. Original Settings comparisons add 24

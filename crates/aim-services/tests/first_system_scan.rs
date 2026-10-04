@@ -93,6 +93,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         Ok(())
     };
     let inputs = |new_domain_id| FirstBootSystemInputs {
+        certificates: Default::default(),
         seinfo: common::seinfo::scan(),
         apex_image: &apex_image,
         notify_apex_scan: &notify_apex,
@@ -1050,6 +1051,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 Err("system/BCP must not query compat".into())
             };
             let loop_inputs = || DataImageScanInputs {
+                certificates: Default::default(),
                 seinfo: common::seinfo::scan(),
                 factories: &batch,
                 platform,
@@ -1078,6 +1080,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     DataImage::load(&apks, &[]).unwrap(),
                     &apks,
                     DataImageScanInputs {
+                        certificates: Default::default(),
                         compatibility: &separate_compatibility,
                         ..loop_inputs()
                     },
@@ -1109,6 +1112,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     DataImage::load(&apks, &[]).unwrap(),
                     &apks,
                     DataImageScanInputs {
+                        certificates: Default::default(),
                         factories: &missing_factory,
                         ..loop_inputs()
                     },
@@ -1240,6 +1244,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     DataImage::default(),
                     &apks,
                     DataImageScanInputs {
+                        certificates: Default::default(),
                         compatibility: &separate_compatibility,
                         ..loop_inputs()
                     },

@@ -1416,6 +1416,7 @@ fn captured_scan_settings_replace_package_metadata_and_reject_uncommitted_global
     setting.uses_static_libraries = vec![("static".into(), 23)];
     setting.split_versions = vec![("archived-split".into(), 7)];
     setting.add_mime_types("types".into(), ["text/plain".into()]);
+    owner.settings.find_or_create_version(None).database_version = 3;
     let capture = |owner| {
         super::super::scan_snapshot::Store::new(owner, super::usage::Usage::new(["example.app"]))
             .unwrap()
@@ -1454,7 +1455,7 @@ fn captured_scan_settings_replace_package_metadata_and_reject_uncommitted_global
     );
     let before = store.state.settings.clone();
     let mut foreign_global = owner.clone();
-    foreign_global.settings.versions.push(Default::default());
+    foreign_global.settings.verifier = Some("uncommitted".into());
     assert!(
         !store
             .commit_scan_settings(&capture(foreign_global))

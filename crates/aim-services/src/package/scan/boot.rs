@@ -21,6 +21,7 @@ pub struct FirstBootSystemInputs<'a> {
     /// ApexManager.notifyScanResult must finish before any APK directory scan.
     pub notify_apex_scan: &'a dyn Fn(&[super::ApexScanResult]) -> Result<(), String>,
     pub first_api_level: i32,
+    pub certificates: super::CertificateScanPolicy,
     pub vendor_sdk: i32,
     /// SharedUidMigration image policy, resolved by the boot owner.
     pub shared_uid_migration: super::SharedUidMigration,
@@ -138,7 +139,7 @@ fn scan_system_image(
             message,
         })
     };
-    let platform = image
+    let mut platform = image
         .packages
         .iter()
         .find(|code| code.location.kind == Kind::Framework && code.parsed.package_name == "android")
@@ -207,6 +208,12 @@ fn scan_system_image(
                 reason: format!("Application package {} already installed; skipping duplicate (INSTALL_FAILED_DUPLICATE_PACKAGE)", identity.internal_name),
             });
             continue;
+        }
+        if !updated {
+            code = owner.collect_initial_code(&code, apks, inputs.certificates)?;
+            if code.location.kind == Kind::Framework && code.parsed.package_name == "android" {
+                platform = code.signing.clone();
+            }
         }
         let raw = updated.then(|| Code {
             location: code.location.clone(),

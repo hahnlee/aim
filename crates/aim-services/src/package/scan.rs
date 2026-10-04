@@ -21,6 +21,8 @@ mod identity;
 mod image;
 mod policy;
 pub use policy::{ScanPolicy, application_flags};
+mod certificates;
+pub use certificates::CertificateScanPolicy;
 mod compatibility;
 pub use compatibility::LibraryCompatibility;
 mod bridge;

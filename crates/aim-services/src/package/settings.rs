@@ -421,27 +421,29 @@ impl Settings {
         Self::parse_with_config(root, &Default::default())
     }
 
+    /// Settings.findOrCreateVersion retains one owner per volume.
+    pub fn find_or_create_version(&mut self, uuid: Option<String>) -> &mut Version {
+        let index = self
+            .versions
+            .iter()
+            .position(|v| v.volume_uuid == uuid)
+            .unwrap_or_else(|| {
+                self.versions.push(Version {
+                    volume_uuid: uuid,
+                    ..Default::default()
+                });
+                self.versions.len() - 1
+            });
+        &mut self.versions[index]
+    }
+
     /// Apply the version event before consuming its subtree. The original
     /// creates its owner and assigns each field before reading the next one;
     /// later attribute failures retain those earlier assignments.
     pub fn read_version(&mut self, element: &Element) -> Result<(), String> {
-        fn find(settings: &mut Settings, uuid: Option<String>) -> &mut Version {
-            let index = settings
-                .versions
-                .iter()
-                .position(|v| v.volume_uuid == uuid)
-                .unwrap_or_else(|| {
-                    settings.versions.push(Version {
-                        volume_uuid: uuid,
-                        ..Default::default()
-                    });
-                    settings.versions.len() - 1
-                });
-            &mut settings.versions[index]
-        }
         match element.name.as_str() {
             "version" => {
-                let version = find(self, string(element, "volumeUuid"));
+                let version = self.find_or_create_version(string(element, "volumeUuid"));
                 version.sdk_version = required(element, "sdkVersion", element.int("sdkVersion")?)?;
                 version.database_version =
                     required(element, "databaseVersion", element.int("databaseVersion")?)?;
@@ -450,27 +452,27 @@ impl Settings {
             }
             "last-platform-version" | "database-version" => {
                 // UUID_PRIVATE_INTERNAL is null; UUID_PRIMARY_PHYSICAL is this string.
-                find(self, None);
-                find(self, Some("primary_physical".into()));
+                self.find_or_create_version(None);
+                self.find_or_create_version(Some("primary_physical".into()));
                 // The default-value getters return the default for malformed
                 // values too, unlike the required getters on <version>.
                 if element.name == "last-platform-version" {
-                    find(self, None).sdk_version =
+                    self.find_or_create_version(None).sdk_version =
                         element.int("internal").ok().flatten().unwrap_or(0);
-                    find(self, Some("primary_physical".into())).sdk_version =
-                        element.int("external").ok().flatten().unwrap_or(0);
+                    self.find_or_create_version(Some("primary_physical".into()))
+                        .sdk_version = element.int("external").ok().flatten().unwrap_or(0);
                     let build = string(element, "buildFingerprint");
                     let fingerprint = string(element, "fingerprint");
                     for uuid in [None, Some("primary_physical".into())] {
-                        let version = find(self, uuid);
+                        let version = self.find_or_create_version(uuid);
                         version.build_fingerprint = build.clone();
                         version.fingerprint = fingerprint.clone();
                     }
                 } else {
-                    find(self, None).database_version =
+                    self.find_or_create_version(None).database_version =
                         element.int("internal").ok().flatten().unwrap_or(0);
-                    find(self, Some("primary_physical".into())).database_version =
-                        element.int("external").ok().flatten().unwrap_or(0);
+                    self.find_or_create_version(Some("primary_physical".into()))
+                        .database_version = element.int("external").ok().flatten().unwrap_or(0);
                 }
             }
             _ => return Err(format!("not a settings version event: {}", element.name)),
