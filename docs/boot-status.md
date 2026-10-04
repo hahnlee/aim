@@ -567,20 +567,30 @@ so later active user changes preserve the old factory; retained updates keep the
 aliases. Original Settings.createNewSetting agrees on signer/legacy/fixed-bit
 inheritance, and the original component copy setters agree in a controlled user
 loop. This does not construct a live original UserManager in the standalone
-oracle. The original ART oracle also executes Settings.convertSharedUserSettingsLPw
-on a controlled shared setting at INVALID_UID: conversion keeps appId=-1,
-clears sharedUserAppId and replaces the group slot at 10000 with that same
-PackageSetting reference. Subsequent addPackageSettingLPw with no group keeps
-both the negative appId and the old slot reference (30.97s). This tests the
-conversion/registration owners, not InstallPackageHelper eligibility or a
-native migration. The checked image API and build pass (61.1s). Native
-best-effort leaving-shared-UID APEX conversion remains #898/#889;
-original/renamed identity adoption remains #890. First shared code uses the supplied
+oracle. Native initial APEX commit now accepts an explicit SharedUidMigration
+policy and converts a retained leaving singleton under BestEffort (#898). New
+leaving declarations bypass group allocation, NewInstallOnly retains existing
+membership, and multiple active members or a non-leaving disabled factory prevent
+conversion. Conversion clears the active/factory shared relationships without
+copying group permissions or changing installPermissionsFixed. Active settings and
+code keep appId=-1; a previously registered disabled factory keeps its positive
+appId. The original shared UID slot continues to reference the converted package,
+so a following APK allocation does not reuse it. seInfo retains its assigned
+transient labels and rebinds the validated identity dependency. A later retained
+rescan keeps the converted relationship, and a rejected domain owner preserves the
+full previous scan. Verified converted factory restoration accepts the original
+positive disabled appId only alongside its negative non-shared active container
+and a leaving declaration. Original Settings.isSingleUser, conversion and
+registration agree for no factory, leaving/non-leaving factories and a second
+saved member without parsed code. The original conversion also preserves populated
+legacy permissions and fixed bits. Image-policy handoff to this required input
+remains under #898/#836; captured legacy constructor owners for fresh/group-changing
+scans remain #899/#889. Original/renamed identity adoption remains #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
 preserving the original group allocation. The original ART oracle passes in
-31.79s, including typed original Settings.addPackageSettingLPw final registration,
+31.59s, including typed original Settings.addPackageSettingLPw final registration,
 SELinuxMMAC labels and SharedUserSetting commit SDK, unchanged archive bytes with
 controlled shared identity, unread policy and
 a declared-target compatibility decision. Original Settings group removal/pruning
@@ -590,11 +600,10 @@ path to unchanged original archive bytes, preserve pendingRestore, query the new
 group's compatibility owner, restore distinct active/factory group identities and
 retain old settings/loaded code on seInfo rejection while keeping only the newly
 allocated empty group. The full initial scan regression
-passes in 68.01s, including grouped container registration and the first APK
+passes in 68.24s, including grouped container registration and the first APK
 allocation at 10001 after group 10000. All integration targets compile, 436 units
 pass (one ignored/not run). The original-image API check and full image/template
-build pass in 73.0s (nine rebuilt, 33 fresh); final host rebuild passes in 16.7s
-(three rebuilt, 39 fresh). These fixtures do not prove a live PlatformCompat call
+build pass in 71.3s (nine rebuilt, 33 fresh). These fixtures do not prove a live PlatformCompat call
 or a manifest-declared shared APEX in the original image. The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original
 PackageImpl objects and signer capability flags, validates the complete frame

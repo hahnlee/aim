@@ -22,6 +22,8 @@ pub struct FirstBootSystemInputs<'a> {
     pub notify_apex_scan: &'a dyn Fn(&[super::ApexScanResult]) -> Result<(), String>,
     pub first_api_level: i32,
     pub vendor_sdk: i32,
+    /// SharedUidMigration image policy, resolved by the boot owner.
+    pub shared_uid_migration: super::SharedUidMigration,
     pub abi_policy: &'a AbiPolicy,
     pub compatibility: &'a LibraryCompatibility,
     pub preferred_abi: &'a str,

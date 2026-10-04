@@ -98,6 +98,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         notify_apex_scan: &notify_apex,
         first_api_level: 36,
         vendor_sdk: 36,
+        shared_uid_migration: aim_services::package::scan::SharedUidMigration::NewInstallOnly,
         abi_policy: &abi_policy,
         compatibility: &compatibility,
         preferred_abi: "arm64-v8a",

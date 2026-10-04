@@ -1326,6 +1326,7 @@ fn native_package_parcels_match_original_read_write() {
         notify_apex_scan: &|_| Err("direct APEX phase does not notify".into()),
         first_api_level: 36,
         vendor_sdk: 36,
+        shared_uid_migration: aim_services::package::scan::SharedUidMigration::NewInstallOnly,
         abi_policy: &abi,
         compatibility: &compatibility,
         preferred_abi: "arm64-v8a",
@@ -1484,6 +1485,269 @@ fn native_package_parcels_match_original_read_write() {
     native.write_i32(setting.app_id);
     fs::write(directory.join("shared-apex.input"), native.data()).unwrap();
     let shared_without_factory = shared.clone();
+    let mut leaving_image = aim_services::package::scan::ApexImage {
+        packages: shared_image.packages.clone(),
+    };
+    leaving_image.packages[0].parsed.booleans |=
+        aim_services::package::pkg::booleans::LEAVING_SHARED_UID;
+    let mut leaving_inputs = scan_inputs(&leaving_image);
+    leaving_inputs.seinfo.policy = &unread;
+    leaving_inputs.seinfo.compatibility = &shared_compatibility;
+    let mut not_migrated = shared_without_factory.clone();
+    not_migrated
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(
+        not_migrated.settings.packages[0].shared_app_id(),
+        Some(10000)
+    );
+    leaving_inputs.shared_uid_migration =
+        aim_services::package::scan::SharedUidMigration::BestEffort;
+    let mut new_leaving =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    let new_result = new_leaving
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(new_leaving.settings.packages[0].shared_app_id(), None);
+    assert_eq!(new_leaving.settings.packages[0].app_id, -1);
+    assert_eq!(new_result[0].package.uid, -1);
+    assert_eq!(
+        new_leaving.identities,
+        aim_services::package::owner::shared_users::Bootstrap::new(&config)
+    );
+    let mut converted = shared_without_factory.clone();
+    let name = converted.settings.packages[0].name.clone();
+    converted
+        .capture_legacy_permissions(
+            &[10, 0, 11],
+            std::collections::BTreeMap::from([((name.clone(), false), apex_legacy.clone())]),
+            converted
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect(),
+        )
+        .unwrap();
+    converted
+        .capture_install_permissions_fixed(std::collections::BTreeMap::from([(
+            (name.clone(), false),
+            true,
+        )]))
+        .unwrap();
+    let mut failed_conversion = converted.clone();
+    let mut denied_conversion = scan_inputs(&leaving_image);
+    denied_conversion.shared_uid_migration =
+        aim_services::package::scan::SharedUidMigration::BestEffort;
+    denied_conversion.seinfo.compatibility = &reject_shared_compatibility;
+    // A retained group supplies its frozen SDK, so use a domain failure to
+    // reject this candidate before the conversion owner is reached.
+    let denied_domain = || Err("conversion domain owner denied scan".into());
+    denied_conversion.new_domain_id = &denied_domain;
+    assert!(
+        matches!(failed_conversion.scan_initial_apex(&apex_apks, &config, &denied_conversion),
+        Err(aim_services::package::scan::SigningError::Rejected(ref error)) if error.phase == "apex-domain")
+    );
+    assert_eq!(failed_conversion, converted);
+    let result = converted
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(converted.settings.packages[0].app_id, -1);
+    assert_eq!(converted.settings.packages[0].shared_app_id(), None);
+    assert_eq!(result[0].package.uid, -1);
+    assert_eq!(
+        converted.identities.ids.get(10000),
+        Some(&aim_services::package::owner::app_ids::Owner::Package(
+            name.clone()
+        ))
+    );
+    assert!(
+        !converted
+            .identities
+            .shared_users
+            .contains_key("aim.fixture.apex")
+    );
+    assert_eq!(
+        converted.legacy_permissions(&name, false).unwrap().unwrap(),
+        detached_apex
+    );
+    assert_eq!(
+        converted.install_permissions_fixed(&name, false).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        converted.seinfo(&name).unwrap(),
+        shared_without_factory.seinfo(&name).unwrap()
+    );
+    let mut ids = converted.identities.ids.clone();
+    assert_eq!(
+        ids.acquire(aim_services::package::owner::app_ids::Owner::Package(
+            "next.apk".into()
+        ))
+        .unwrap(),
+        10001
+    );
+    fs::write(
+        directory.join("apex-conversion-legacy.input"),
+        converted
+            .legacy_permissions(&name, false)
+            .unwrap()
+            .unwrap()
+            .bytes(),
+    )
+    .unwrap();
+    let mut conversion = aim_binder_host::parcel::Parcel::new();
+    conversion.write_i32(converted.settings.packages[0].app_id);
+    conversion.write_i32(converted.settings.packages[0].shared_app_id().unwrap_or(-1));
+    conversion.write_bool(converted.identities.ids.get(10000).is_some());
+    fs::write(directory.join("apex-conversion.input"), conversion.data()).unwrap();
+    converted
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(converted.settings.packages[0].shared_app_id(), None);
+    assert_eq!(
+        converted.identities.ids.get(10000),
+        Some(&aim_services::package::owner::app_ids::Owner::Package(
+            name.clone()
+        ))
+    );
+    let mut blocks_conversion = shared_without_factory.clone();
+    blocks_conversion.disable_system_package(&name).unwrap();
+    blocks_conversion
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(
+        blocks_conversion.settings.packages[0].shared_app_id(),
+        Some(10000)
+    );
+    let mut factory_conversion = not_migrated.clone();
+    factory_conversion.disable_system_package(&name).unwrap();
+    factory_conversion
+        .capture_legacy_permissions(
+            &[10, 0, 11],
+            std::collections::BTreeMap::from([
+                ((name.clone(), false), Default::default()),
+                ((name.clone(), true), apex_legacy.clone()),
+            ]),
+            factory_conversion
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect(),
+        )
+        .unwrap();
+    factory_conversion
+        .capture_install_permissions_fixed(std::collections::BTreeMap::from([
+            ((name.clone(), false), false),
+            ((name.clone(), true), true),
+        ]))
+        .unwrap();
+    let factory_legacy = factory_conversion
+        .legacy_permissions(&name, true)
+        .unwrap()
+        .unwrap();
+    factory_conversion
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(factory_conversion.settings.packages[0].app_id, -1);
+    assert_eq!(
+        factory_conversion.settings.packages[0].shared_app_id(),
+        None
+    );
+    assert_eq!(
+        factory_conversion.settings.disabled_system_packages[0].app_id,
+        10000
+    );
+    assert_eq!(
+        factory_conversion.settings.disabled_system_packages[0].shared_app_id(),
+        None
+    );
+
+    assert_eq!(
+        factory_conversion
+            .legacy_permissions(&name, true)
+            .unwrap()
+            .unwrap(),
+        factory_legacy
+    );
+    assert_eq!(
+        factory_conversion
+            .legacy_permissions(&name, false)
+            .unwrap()
+            .unwrap(),
+        aim_services::package::owner::legacy_permissions::Migration::default()
+            .project(-1, &[10, 0, 11])
+            .unwrap()
+    );
+    assert_eq!(
+        factory_conversion
+            .install_permissions_fixed(&name, false)
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        factory_conversion
+            .install_permissions_fixed(&name, true)
+            .unwrap(),
+        Some(true)
+    );
+    aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &factory_conversion.settings,
+        36,
+        &leaving_image,
+    )
+    .unwrap();
+    let mut multiple = shared_without_factory.clone();
+    multiple
+        .settings
+        .packages
+        .push(aim_services::package::settings::Package {
+            name: "fixture.other".into(),
+            app_id: 10000,
+            shared_user: true,
+            shared_user_app_id: Some(10000),
+            ..Default::default()
+        });
+    multiple
+        .identities
+        .shared_users
+        .get_mut("aim.fixture.apex")
+        .unwrap()
+        .add_package("fixture.other", 0, 0);
+    multiple
+        .scan_initial_apex(&apex_apks, &config, &leaving_inputs)
+        .unwrap();
+    assert_eq!(multiple.settings.packages[0].shared_app_id(), Some(10000));
+    assert_eq!(multiple.settings.packages[1].shared_app_id(), Some(10000));
+    let mut cases = aim_binder_host::parcel::Parcel::new();
+    aim_service_aidl::write_byte_array(
+        &mut cases,
+        Some(&result[0].package.to_cache_entry().unwrap().bytes),
+    );
+    cases.write_i32(4);
+    for (mode, state) in [
+        (0, &converted),
+        (1, &blocks_conversion),
+        (2, &factory_conversion),
+        (3, &multiple),
+    ] {
+        cases.write_i32(mode);
+        cases.write_bool(state.settings.packages[0].shared_app_id().is_none());
+        cases.write_i32(state.settings.packages[0].app_id);
+        cases.write_i32(state.settings.packages[0].shared_app_id().unwrap_or(-1));
+        if mode == 1 || mode == 2 {
+            cases.write_i32(state.settings.disabled_system_packages[0].app_id);
+            cases.write_i32(
+                state.settings.disabled_system_packages[0]
+                    .shared_app_id()
+                    .unwrap_or(-1),
+            );
+        }
+    }
+    fs::write(directory.join("apex-conversion-cases.input"), cases.data()).unwrap();
+
     shared
         .disable_system_package(&setting.name.clone())
         .unwrap();
@@ -2368,6 +2632,7 @@ fn native_scan_objects(
             },
             first_api_level: 36,
             vendor_sdk: 36,
+            shared_uid_migration: aim_services::package::scan::SharedUidMigration::NewInstallOnly,
             abi_policy: &abi,
             compatibility: &compatibility,
             preferred_abi: "arm64-v8a",

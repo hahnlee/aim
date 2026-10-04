@@ -508,6 +508,8 @@ fn saved_scan_libraries_match_original_pms() {
                     assert!(results.is_empty());
                     Ok(())
                 },
+                shared_uid_migration:
+                    aim_services::package::scan::SharedUidMigration::NewInstallOnly,
                 first_api_level: first_api,
                 vendor_sdk,
                 abi_policy: &abi_policy,
@@ -721,6 +723,7 @@ fn saved_scan_libraries_match_original_pms() {
                 assert!(results.is_empty());
                 Ok(())
             },
+            shared_uid_migration: aim_services::package::scan::SharedUidMigration::NewInstallOnly,
             first_api_level: first_api,
             vendor_sdk,
             abi_policy: &abi_policy,

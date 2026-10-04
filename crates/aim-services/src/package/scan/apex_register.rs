@@ -386,7 +386,10 @@ impl SigningScan {
             }
             // The final code retains the scan UID; Settings registration assigns
             // shared application ownership only after code finalization.
-            if let Some(id) = shared_id {
+            let converted = staged
+                .convert_apex_shared_user(name, inputs.shared_uid_migration)
+                .map_err(|message| fail("apex-shared-migration", message))?;
+            if let Some(id) = shared_id.filter(|_| !converted) {
                 staged
                     .settings
                     .packages
@@ -411,6 +414,91 @@ impl SigningScan {
             *self = staged;
         }
         Ok(results)
+    }
+
+    /// commitReconciledScanResultLocked's conversion after completed scan
+    /// metadata and before Settings registration. The APEX code UID stays -1.
+    fn convert_apex_shared_user(
+        &mut self,
+        name: &str,
+        strategy: super::SharedUidMigration,
+    ) -> Result<bool, String> {
+        if strategy != super::SharedUidMigration::BestEffort {
+            return Ok(false);
+        }
+        let setting = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or("APEX migration setting is missing")?;
+        let Some(id) = setting.shared_app_id() else {
+            return Ok(false);
+        };
+        let code = self
+            .loaded
+            .get(name)
+            .ok_or("APEX migration code is missing")?;
+        if !code
+            .package
+            .is(crate::package::pkg::booleans::LEAVING_SHARED_UID)
+        {
+            return Ok(false);
+        }
+        let group = self
+            .identities
+            .shared_users
+            .iter()
+            .find(|(_, g)| g.app_id == id)
+            .ok_or("APEX migration shared owner is missing")?;
+        if group.1.package_names().collect::<Vec<_>>() != vec![name] {
+            return Ok(false);
+        }
+        let disabled: Vec<_> = self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .filter(|p| p.shared_app_id() == Some(id))
+            .collect();
+        if disabled.len() > 1
+            || disabled.first().is_some_and(|p| {
+                !self.disabled_loaded.get(&p.name).is_some_and(|code| {
+                    code.package
+                        .is(crate::package::pkg::booleans::LEAVING_SHARED_UID)
+                })
+            })
+        {
+            return Ok(false);
+        }
+        let group_name = group.0.clone();
+        self.validate_seinfo()?;
+        self.identities
+            .ids
+            .replace(
+                id,
+                crate::package::owner::app_ids::Owner::Package(name.into()),
+            )
+            .map_err(|e| format!("APEX migration slot replacement: {e:?}"))?;
+        let setting = self
+            .settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == name)
+            .unwrap();
+        setting.shared_user = false;
+        setting.shared_user_app_id = None;
+        for setting in &mut self.settings.disabled_system_packages {
+            if setting.shared_app_id() == Some(id) {
+                setting.shared_user = false;
+                setting.shared_user_app_id = None;
+            }
+        }
+        self.settings.shared_users.retain(|g| g.name != group_name);
+        self.identities.shared_users.remove(&group_name);
+        self.commit_converted_legacy(name, &group_name, id)?;
+        self.rebind_apex_seinfo_after_conversion(name, id)?;
+        self.unlink_apex_parsed_uid(name, id)?;
+        Ok(true)
     }
 }
 

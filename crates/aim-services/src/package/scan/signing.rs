@@ -534,7 +534,20 @@ impl SigningScan {
             if let Some(source) = source {
                 let version = (i64::from(source.parsed.version_code_major) << 32)
                     | i64::from(source.parsed.version_code as u32);
-                if package.app_id != package.shared_app_id().unwrap_or(-1)
+                // Conversion clears only the disabled shared relationship;
+                // its previously registered positive appId survives unchanged.
+                let converted_factory = !package.shared_user
+                    && (1..100000).contains(&package.app_id)
+                    && source.parsed.is(booleans::LEAVING_SHARED_UID)
+                    && source
+                        .parsed
+                        .shared_user_id
+                        .as_ref()
+                        .is_some_and(|n| !n.is_empty())
+                    && settings.packages.iter().any(|active| {
+                        active.name == package.name && active.app_id == -1 && !active.shared_user
+                    });
+                if (!converted_factory && package.app_id != package.shared_app_id().unwrap_or(-1))
                     || !group_matches(package, source)
                     || package.version_code != version
                 {
@@ -1294,6 +1307,16 @@ impl SigningScan {
         Ok(SigningOutcome {
             system_signature_mismatch: mismatch,
         })
+    }
+
+    pub(super) fn unlink_apex_parsed_uid(&mut self, name: &str, id: i32) -> Result<(), String> {
+        let (_, parsed_id, _, _) = self
+            .parsed
+            .iter_mut()
+            .find(|(n, uid, _, leaving)| n == name && *uid == id && *leaving)
+            .ok_or("converted APEX parsed owner differs")?;
+        *parsed_id = -1;
+        Ok(())
     }
 
     /// Settings.checkAndConvertSharedUserSettingsLPw and SharedUserSetting's

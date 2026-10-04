@@ -99,6 +99,42 @@ impl SigningScan {
         self.validate_legacy_permissions()
     }
 
+    /// Conversion unlinks ownership without copying LegacyPermissionState or
+    /// installPermissionsFixed. Uncaptured owners remain uncaptured.
+    pub(super) fn commit_converted_legacy(
+        &mut self,
+        name: &str,
+        group: &str,
+        id: i32,
+    ) -> Result<(), String> {
+        let Some(owners) = &mut self.legacy_permissions else {
+            return Ok(());
+        };
+        let active = owners
+            .packages
+            .get_mut(&(name.into(), false))
+            .ok_or("converted legacy active owner is missing")?;
+        if !active.1
+            || ![-1, id].contains(&active.0)
+            || owners.shared_users.get(group).map(|g| g.0) != Some(id)
+        {
+            return Err("converted legacy ownership differs".into());
+        }
+        active.0 = -1;
+        active.1 = false;
+        for setting in &self.settings.disabled_system_packages {
+            let value = owners
+                .packages
+                .get_mut(&(setting.name.clone(), true))
+                .ok_or("converted legacy disabled owner is missing")?;
+            if !setting.shared_user && value.1 && value.0 == id {
+                value.1 = false;
+            }
+        }
+        owners.shared_users.remove(group);
+        self.validate_legacy_permissions()
+    }
+
     pub(in crate::package) fn validate_legacy_permissions(&self) -> Result<(), String> {
         let Some(owners) = &self.legacy_permissions else {
             return Ok(());

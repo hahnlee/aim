@@ -200,6 +200,35 @@ impl SigningScan {
         Ok(())
     }
 
+    /// Settings conversion keeps PackageStateUnserialized's assigned label;
+    /// only its validated UID/group dependency changes.
+    pub(super) fn rebind_apex_seinfo_after_conversion(
+        &mut self,
+        name: &str,
+        id: i32,
+    ) -> Result<(), String> {
+        let current = active_inputs(self)?
+            .remove(name)
+            .ok_or("converted APEX seInfo input is missing")?;
+        let previous = self
+            .seinfo
+            .as_mut()
+            .and_then(|a| a.inputs.get_mut(name))
+            .ok_or("converted APEX seInfo assignment is missing")?;
+        if previous.app_id != id
+            || previous.shared.is_none()
+            || current.app_id != -1
+            || current.shared.is_some()
+            || previous.code != current.code
+            || previous.flags != current.flags
+            || previous.private_flags != current.private_flags
+        {
+            return Err("converted APEX seInfo dependencies differ".into());
+        }
+        *previous = current;
+        self.validate_seinfo()
+    }
+
     pub(in crate::package) fn validate_seinfo(&self) -> Result<(), String> {
         if let Some(assignments) = &self.seinfo {
             let current = inputs(self)?;

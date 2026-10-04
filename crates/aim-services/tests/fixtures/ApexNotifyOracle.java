@@ -32,7 +32,8 @@ public final class ApexNotifyOracle {
         verifySharedIds(directory);
         verifySharedApex(directory);
         verifyChangedGroup(directory);
-        verifyNegativeUidConversion();
+        verifyNegativeUidConversion(directory);
+        verifyConversionEligibility(directory);
         verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
@@ -63,21 +64,81 @@ public final class ApexNotifyOracle {
             if (setting.getAppId() != registeredAppId || registeredAppId != 10000 || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != 10000 || pkg.getUid() != -1) throw new AssertionError("registered shared APEX IDs differ");
         } finally { in.recycle(); }
     }
-    private static void verifyNegativeUidConversion() throws Exception {
+    private static void verifyNegativeUidConversion(java.io.File directory) throws Exception {
         var settings = new Settings(java.util.Map.of());
         var group = settings.addSharedUserLPw("aim.fixture.leaving", 10000, 0, 0);
         var setting = new PackageSetting("fixture", null, new java.io.File("/system/apex/fixture.apex"),
             1, 0, new java.util.UUID(1, 1));
         setting.setAppId(-1); setting.setSharedUserAppId(10000);
         group.addPackage(setting);
+        var in = android.os.Parcel.obtain();
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-conversion.input").toPath());
+        int nativeAppId, nativeSharedId; boolean nativeSlot;
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            nativeAppId = in.readInt(); nativeSharedId = in.readInt(); nativeSlot = in.readBoolean();
+            if (in.dataAvail() != 0) throw new AssertionError("APEX conversion tail");
+        } finally { in.recycle(); }
+        int[] users = {10, 0, 11};
+        byte[] legacy = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.original").toPath());
+        setting.getLegacyPermissionState().copyFrom(dev.aim.server.PackageLegacyPermissions.restore(10042, users, legacy));
+        setting.setInstallPermissionsFixed(true);
         settings.convertSharedUserSettingsLPw(group);
-        if (setting.getAppId() != -1
-                || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != -1
-                || settings.getSettingLPr(10000) != setting)
+        if (setting.getAppId() != nativeAppId || nativeAppId != -1
+                || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != nativeSharedId || nativeSharedId != -1
+                || !nativeSlot || settings.getSettingLPr(10000) != setting)
             throw new AssertionError("negative APEX shared UID conversion differs");
+        byte[] nativeLegacy = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-conversion-legacy.input").toPath());
+        if (!setting.isInstallPermissionsFixed() || !java.util.Arrays.equals(nativeLegacy,
+                dev.aim.server.PackageLegacyPermissions.capture(-1, users, setting.getLegacyPermissionState())))
+            throw new AssertionError("converted APEX legacy/fixed state differs");
         settings.addPackageSettingLPw(setting, null);
         if (setting.getAppId() != -1 || settings.getSettingLPr(10000) != setting)
             throw new AssertionError("negative APEX converted slot changed at registration");
+    }
+    private static void verifyConversionEligibility(java.io.File directory) throws Exception {
+        var in = android.os.Parcel.obtain();
+        var original = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "shared-apex.input").toPath());
+            original.unmarshall(bytes, 0, bytes.length); original.setDataPosition(0);
+            var retainedCode = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(original.createByteArray());
+            bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-conversion-cases.input").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var leavingCode = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(in.createByteArray());
+            if (in.readInt() != 4) throw new AssertionError("conversion case count");
+            for (int i = 0; i < 4; i++) {
+                int mode = in.readInt(); boolean converts = in.readBoolean();
+                int appId = in.readInt(), sharedId = in.readInt();
+                var settings = new Settings(java.util.Map.of());
+                var group = settings.addSharedUserLPw("aim.fixture.leaving", 10000, 0, 0);
+                var active = new PackageSetting("fixture", null, new java.io.File("/system/apex/fixture.apex"), 1, 0, new java.util.UUID(1, 1));
+                active.setPkg((com.android.server.pm.pkg.AndroidPackage)(Object)(mode == 1 ? retainedCode : leavingCode));
+                settings.addPackageSettingLPw(active, group);
+                if ((mode == 1 || mode == 2) && !settings.disableSystemPackageLPw("fixture", true))
+                    throw new AssertionError("conversion factory disable failed");
+                if (mode == 3) {
+                    var other = new PackageSetting("fixture.other", null, new java.io.File("/system/app/other.apk"), 0, 0, new java.util.UUID(1, 2));
+                    settings.addPackageSettingLPw(other, group);
+                }
+                active.setAppId(-1);
+                active.setPkg((com.android.server.pm.pkg.AndroidPackage)(Object)leavingCode);
+                if (group.isSingleUser() != converts) throw new AssertionError("conversion eligibility differs");
+                if (converts) settings.convertSharedUserSettingsLPw(group);
+                settings.addPackageSettingLPw(active, converts ? null : group);
+                if (active.getAppId() != appId || ((com.android.server.pm.pkg.PackageState)active).getSharedUserAppId() != sharedId
+                        || settings.getSettingLPr(10000) != (converts ? active : group))
+                    throw new AssertionError("conversion active ownership differs");
+                if ((mode == 1 || mode == 2)) {
+                    var factory = settings.getDisabledSystemPkgLPr("fixture");
+                    if (factory.getAppId() != in.readInt() || ((com.android.server.pm.pkg.PackageState)factory).getSharedUserAppId() != in.readInt())
+                        throw new AssertionError("conversion factory ownership differs");
+                }
+            }
+            if (in.dataAvail() != 0) throw new AssertionError("conversion cases tail");
+        } finally { in.recycle(); original.recycle(); }
     }
     private static void verifyChangedGroup(java.io.File directory) throws Exception {
         var in = android.os.Parcel.obtain();
