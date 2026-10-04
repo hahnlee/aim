@@ -28,4 +28,8 @@ interface IPackageScanSnapshot {
     byte[] getTransientState(String packageName, boolean disabled);
     /** Native policy over this capture's code and image SystemConfig. */
     int getHiddenApiEnforcementPolicy(String packageName, boolean disabled);
+    /** Complete shared UID inventory in this capture. */
+    String[] getSharedUserNames();
+    int getSharedUserStateLength(String sharedUserName);
+    byte[] getSharedUserStateChunk(String sharedUserName, int offset, int length);
 }

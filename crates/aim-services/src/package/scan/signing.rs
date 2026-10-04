@@ -2096,6 +2096,70 @@ mod tests {
         r.read_exception().unwrap().unwrap();
         assert_eq!(r.read_i32().unwrap(), 1);
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+        let shared = remote
+            .transact(api::GET_SHARED_USER_NAMES, &request(), false)
+            .unwrap();
+        let mut r = shared.reader();
+        r.read_exception().unwrap().unwrap();
+        let count = r.read_i32().unwrap();
+        assert_eq!(count, 9);
+        let mut groups = Vec::new();
+        for _ in 0..count {
+            groups.push(r.read_string16().unwrap().unwrap());
+        }
+        assert_eq!(r.remaining(), 0);
+        for group in &groups {
+            let mut p = request();
+            p.write_string16(Some(group));
+            let reply = remote
+                .transact(api::GET_SHARED_USER_STATE_LENGTH, &p, false)
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let length = r.read_i32().unwrap();
+            assert!(length > 0);
+            let mut p = request();
+            p.write_string16(Some(group));
+            p.write_i32(0);
+            p.write_i32(length);
+            let reply = remote
+                .transact(api::GET_SHARED_USER_STATE_CHUNK, &p, false)
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let bytes = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
+            assert_eq!(bytes.len(), length as usize);
+            let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+            assert_eq!(r.read_i64().unwrap(), 1);
+            assert_eq!(r.read_string16().unwrap().as_deref(), Some(group.as_str()));
+        }
+        for name in [None, Some("unknown.shared")] {
+            let mut p = request();
+            p.write_string16(name);
+            let reply = remote
+                .transact(api::GET_SHARED_USER_STATE_LENGTH, &p, false)
+                .unwrap();
+            let mut r = reply.reader();
+            if name.is_none() {
+                assert_eq!(r.read_exception().unwrap().unwrap_err().code, -3);
+            } else {
+                r.read_exception().unwrap().unwrap();
+                assert_eq!(r.read_i32().unwrap(), -1);
+            }
+        }
+        for (offset, length) in [(-1, 1), (0, 0), (0, MAX_CHUNK as i32 + 1), (i32::MAX, 1)] {
+            let mut p = request();
+            p.write_string16(Some(&groups[0]));
+            p.write_i32(offset);
+            p.write_i32(length);
+            let reply = remote
+                .transact(api::GET_SHARED_USER_STATE_CHUNK, &p, false)
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
         let mut p = request();
         p.write_string16(Some("fixture"));
         p.write_bool(false);

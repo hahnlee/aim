@@ -1765,6 +1765,11 @@ fn java_oracles_link_against_original_image() {
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageStateReplica.java"),
         )
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/SharedUserData.java"))
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/SharedUserReplica.java"),
+        )
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes];
     let mut files = Vec::new();

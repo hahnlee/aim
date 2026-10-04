@@ -2,6 +2,7 @@
 package com.android.server.pm;
 
 public final class SharedUserSetting extends SettingBase {
+    public SharedUserSetting snapshot() { throw new RuntimeException("stub"); }
     int mAppId;
     void addProcesses(java.util.Map<String, com.android.internal.pm.pkg.component.ParsedProcess> processes) { throw new RuntimeException("stub"); }
     public void updateProcesses() { throw new RuntimeException("stub"); }

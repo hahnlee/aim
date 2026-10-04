@@ -8,6 +8,7 @@ pub mod endpoint;
 pub mod user_record;
 pub mod setting_record;
 pub mod library_record;
+pub mod shared_record;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},

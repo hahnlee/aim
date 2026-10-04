@@ -323,9 +323,15 @@ public final class PackageRoundTripOracle {
         owner.user12 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-12").toPath());
         owner.user13 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-13").toPath());
         owner.user14 = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user-14").toPath());
+        for (var sharedFile : file.getParentFile().listFiles((dir, entry) -> entry.startsWith("shared-") && entry.endsWith(".record"))) {
+            String group = sharedFile.getName().substring(7, sharedFile.getName().length() - 7);
+            byte[] record = java.nio.file.Files.readAllBytes(sharedFile.toPath());
+            owner.sharedUsers.put(group, record); stale.sharedUsers.put(group, record);
+        }
         stale.version = 2;
         try (var bad = new dev.aim.server.PackageScanLease(
                 dev.aim.server.IPackageScanSnapshot.Stub.asInterface(stale))) {
+            try { bad.getSharedUserData(stale.sharedUsers.keySet().iterator().next()); throw new AssertionError("wrong shared UID version accepted"); } catch (java.io.IOException expected) {}
             try { bad.getSetting(name, false); throw new AssertionError("wrong setting version accepted"); } catch (java.io.IOException expected) {}
             try {
                 bad.getUserState(name, false, 0);
@@ -976,6 +982,13 @@ public final class PackageRoundTripOracle {
         if (replica != lease.getPackageStateReplica(name, true) || owner.hiddenApiReads != 1
                 || lease.getPackageStateReplica("missing", true) != null) throw new AssertionError("captured PackageState identity differs");
         CapturedPackageStateOracle.verify(replica, lease.newScannedSetting(name, true));
+        owner.shortChunk = true;
+        String sharedName = lease.getSharedUserNames().get(0);
+        try { lease.getSharedUserData(sharedName); throw new AssertionError("short shared UID chunk accepted"); }
+        catch (java.io.IOException expected) {}
+        owner.shortChunk = false;
+        var sharedReplicas = com.android.server.pm.CapturedSharedUserOracle.verify(lease, name);
+
         int capturedPolicy = owner.hiddenApiPolicy;
         owner.hiddenApiPolicy = capturedPolicy == 0 ? 2 : 0;
         if (replica.getHiddenApiEnforcementPolicy() != capturedPolicy
@@ -1114,6 +1127,15 @@ public final class PackageRoundTripOracle {
         }
         lease.close();
         lease.close();
+        for (var shared : sharedReplicas) {
+            shared.getSigningDetails();
+            for (var member : shared.getPackageStates()) member.getSigningDetails();
+            if (shared.getSeInfoTargetSdkVersion() != 0) throw new AssertionError("closed shared UID projection differs");
+        }
+        try { lease.getSharedUserNames(); throw new AssertionError("closed shared UID inventory accepted"); } catch (IllegalStateException expected) {}
+        try { lease.getSharedUserData(sharedName); throw new AssertionError("closed shared UID record accepted"); } catch (IllegalStateException expected) {}
+        try { lease.getSharedUserReplica(sharedName, true); throw new AssertionError("closed shared UID replica accepted"); } catch (IllegalStateException expected) {}
+
         if (owner.closes != 1) throw new AssertionError("close is not idempotent");
         try {
             lease.getCode(name, false);
@@ -1371,6 +1393,7 @@ public final class PackageRoundTripOracle {
         private final byte[] seinfo;
         private final byte[] signing;
         byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting, libraries, transientState;
+        final java.util.Map<String, byte[]> sharedUsers = new java.util.TreeMap<>();
         Integer hiddenApiPolicy;
         int hiddenApiReads;
         int[] userInventory = {0, 10, 11, 12, 13, 14};
@@ -1397,6 +1420,12 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override public String[] getSharedUserNames() { return sharedUsers.keySet().toArray(new String[0]); }
+        @Override public int getSharedUserStateLength(String name) { byte[] value = sharedUsers.get(name); return value == null ? -1 : value.length; }
+        @Override public byte[] getSharedUserStateChunk(String name, int offset, int length) {
+            byte[] value = sharedUsers.get(name);
+            return value == null ? null : java.util.Arrays.copyOfRange(value, offset, Math.min(value.length, offset + length) - (shortChunk ? 1 : 0));
+        }
         @Override public int getHiddenApiEnforcementPolicy(String candidate, boolean disabled) throws android.os.RemoteException {
             if (fail || hiddenApiPolicy == null) throw new android.os.RemoteException();
             if (disabled || !name.equals(candidate)) throw new IllegalArgumentException("unknown package setting");

@@ -29,6 +29,9 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<ReplicaKey, PackageUserStateReplica> userReplicas = new HashMap<>();
     private record StateKey(String name, boolean crossUserSuspensions) {}
     private final Map<StateKey, PackageStateReplica> stateReplicas = new HashMap<>();
+    private final Map<String, SharedUserData> sharedUsers = new HashMap<>();
+    private final Map<StateKey, SharedUserReplica> sharedReplicas = new HashMap<>();
+    private java.util.List<String> sharedNames;
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
@@ -118,6 +121,9 @@ public final class PackageScanLease implements AutoCloseable {
         hiddenApiPolicies.clear();
         stateReplicas.clear();
         userReplicas.clear();
+        sharedUsers.clear();
+        sharedReplicas.clear();
+        sharedNames = null;
     }
 
     public synchronized PackageSigningState getSigningState(String name, boolean factory)
@@ -302,6 +308,64 @@ public final class PackageScanLease implements AutoCloseable {
         }
         var replica = new PackageStateReplica(factory.factory(), replicas, getHiddenApiEnforcementPolicy(name, false));
         stateReplicas.put(key, replica);
+        return replica;
+    }
+
+    public synchronized java.util.List<String> getSharedUserNames() throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        if (sharedNames != null) return sharedNames;
+        String[] names = endpoint.getSharedUserNames();
+        if (names == null) throw new IOException("missing shared UID inventory");
+        var unique = new java.util.HashSet<String>();
+        for (String name : names) {
+            if (name == null || !unique.add(name)) throw new IOException("invalid shared UID inventory");
+        }
+        sharedNames = java.util.List.of(names);
+        return sharedNames;
+    }
+
+    public synchronized SharedUserData getSharedUserData(String name) throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(name);
+        if (sharedUsers.containsKey(name)) return sharedUsers.get(name);
+        int length = endpoint.getSharedUserStateLength(name);
+        if (length == -1) { sharedUsers.put(name, null); return null; }
+        if (length <= 0 || (length & 3) != 0) throw new IOException("invalid shared UID length");
+        byte[] bytes = new byte[length];
+        for (int offset = 0; offset < length;) {
+            int requested = Math.min(CHUNK, length - offset);
+            byte[] chunk = endpoint.getSharedUserStateChunk(name, offset, requested);
+            if (chunk == null || chunk.length != requested) throw new IOException("incomplete shared UID chunk");
+            System.arraycopy(chunk, 0, bytes, offset, requested);
+            offset += requested;
+        }
+        Parcel in = Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            SharedUserData state = SharedUserData.CREATOR.createFromParcel(in);
+            if (in.dataAvail() != 0 || state.getVersion() != version || !state.getName().equals(name)) {
+                throw new IOException("shared UID capture mismatch");
+            }
+            sharedUsers.put(name, state);
+            return state;
+        } finally { in.recycle(); }
+    }
+
+    public synchronized SharedUserReplica getSharedUserReplica(String name, boolean crossUserSuspensions)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        StateKey key = new StateKey(Objects.requireNonNull(name), crossUserSuspensions);
+        if (sharedReplicas.containsKey(key)) return sharedReplicas.get(key);
+        SharedUserData state = getSharedUserData(name);
+        if (state == null) { sharedReplicas.put(key, null); return null; }
+        var members = new java.util.ArrayList<PackageStateReplica>();
+        for (String member : state.getPackageNames()) {
+            var replica = getPackageStateReplica(member, crossUserSuspensions);
+            if (replica == null) throw new IOException("missing shared UID package owner");
+            members.add(replica);
+        }
+        var replica = new SharedUserReplica(state, members);
+        sharedReplicas.put(key, replica);
         return replica;
     }
 

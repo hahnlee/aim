@@ -58,6 +58,8 @@ public final class SharedSeInfoOracle {
         group.addPackage(d); check(group, 35);
         group.addPackage(e); check(group, 35);
         group.fixSeInfoLocked(); check(group, 24);
+        var frozen = group.snapshot();
+        if (frozen.getSeInfoTargetSdkVersion() != 0) throw new AssertionError("original frozen shared SDK: " + frozen.getSeInfoTargetSdkVersion());
         var reboot = new SharedUserSetting("group", 0, 0);
         reboot.addPackage(member("d", null)); reboot.addPackage(member("e", null));
         check(reboot, 10000);

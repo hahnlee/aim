@@ -51,6 +51,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageCacheValidationOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/CapturedSharedUserOracle.java"),
+        )
         .arg("-classpath")
         .arg(&stubs)
         .arg(
@@ -133,6 +137,11 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageStateReplica.java"),
+        )
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/SharedUserData.java"))
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/SharedUserReplica.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
@@ -287,6 +296,15 @@ fn native_package_parcels_match_original_read_write() {
         &directory,
         &snapshot.owner().loaded_packages()["android"].package,
     );
+    for group in snapshot.owner().identities.shared_users.keys() {
+        fs::write(
+            directory.join(format!("shared-{group}.record")),
+            aim_services::package::scan_snapshot::shared_record::captured(&snapshot, group)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+    }
     for loaded in snapshot.owner().loaded_packages().values() {
         let pkg = &loaded.package;
         let name = format!("scan-{}.native", pkg.uid);

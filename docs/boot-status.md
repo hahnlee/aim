@@ -790,8 +790,24 @@ the actual first-system image scan passes (50.66s), and the final full build pas
 (18.5s; three host nodes rebuilt, 39 fresh). The original-PMS userdata template
 also rebuilt successfully in the preceding full build (61.9s). No owned runtime
 processes or disposable test mounts remain.
-Import/live member-order producers and full SharedUserApi capture/export remain
-#870/#836. Native PackageImpl cache decoding/encoding now rejects null feature
+Shared UID captures now transport the complete native group inventory and each
+record's name, app ID, privilege, saved signing, active member names and seInfo
+SDK projections through generated snapshot methods 18-20. Native records reject
+membership differences against active settings. Java binds loaded active member
+PackageStateReplica identities into the image's retained six-method SharedUserApi;
+missing or foreign members reject construction. Returned ArraySet containers and
+signing objects are detached, and replicas retain their inputs after lease close.
+The pinned original SharedUserSetting snapshot copy omits seInfoTargetSdkVersion,
+so its frozen getter is zero independently of the live boot-label SDK; both are
+captured separately, as confirmed by original ART. The original package oracle
+passes (28.12s): native record roundtrips, original frozen getters for populated
+and empty groups, member identity, container isolation, unknown/missing owners,
+short chunks, incorrect versions and use after close. All 408 native units pass
+(3.21s; one ignored/not run), including real Binder inventory, bounded chunks,
+unknown/null names and invalid ranges. All integration targets compile. Original
+Java linkage passes (4.03s). The full build passes (68.8s; nine rebuilt nodes),
+including the original-PMS userdata template. Import/live member-order producers, broader shared
+owners and full snapshot map publication remain #870/#836. Native PackageImpl cache decoding/encoding now rejects null feature
 flag arrays, null feature flag strings and null ParsedProcess value names, matching
 the original constructors (#871/#872). Snapshot validation applies the same
 required-field checks to active/factory loaded code before publication; an invalid
