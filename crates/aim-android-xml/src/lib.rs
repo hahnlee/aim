@@ -11,6 +11,7 @@ pub mod abx;
 mod base64;
 mod double;
 pub mod text;
+pub mod pull;
 
 use std::borrow::Cow;
 
@@ -68,6 +69,14 @@ pub const TEXT: u8 = 4;
 pub const CDSECT: u8 = 5;
 /// `XmlPullParser.COMMENT`.
 pub const COMMENT: u8 = 9;
+/// `XmlPullParser.ENTITY_REF`.
+pub const ENTITY_REF: u8 = 6;
+/// `XmlPullParser.IGNORABLE_WHITESPACE`.
+pub const IGNORABLE_WHITESPACE: u8 = 7;
+/// `XmlPullParser.PROCESSING_INSTRUCTION`.
+pub const PROCESSING_INSTRUCTION: u8 = 8;
+/// `XmlPullParser.DOCDECL`.
+pub const DOCDECL: u8 = 10;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {

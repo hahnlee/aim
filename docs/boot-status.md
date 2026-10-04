@@ -740,7 +740,7 @@ complete two-package/live-group inventory with pinned Settings.writePackageLPr
 and ArrayMap values order using one certificate table. Saved-setting signer
 lineage flags remain separate from parsed-code signing. The oracle also reads
 reindexed real certificates through PackageSignatures.readXml and checks
-ArrayMap signed hash/collision behavior (2026-10-05, 33.69s), starting from
+ArrayMap signed hash/collision behavior (2026-10-05, 32.11s), starting from
 an absent native settings file. Store::create claims first-boot absence without
 writing a seed document and uses the original related user/access/list readers.
 Construction rejects every existing main/backup/reserve artifact, including
@@ -764,15 +764,22 @@ rootless ABX from truncated ABX. A real child process exits during its first
 partial write; a new recovery owner cleans the partial main, claims the empty
 reserve and completes a write that reopens successfully. Ten disposable
 regular-file recovery cases agree with actual original ResilientAtomicFile and
-Xml parsing in the ART oracle (33.69s). Its first-boot flag uses the pinned
+Xml parsing in the ART oracle (32.11s). Its first-boot flag uses the pinned
 Settings control-flow rule; this does not exercise original Settings.readLPw.
-The callback preserves frontend mutations before failure, but a native incremental
-Settings reader is still missing (#914); full Settings recovery, version
-initialization and nonregular/open-IO cases are not proved. Passive Store::open
+The callback preserves frontend mutations before failure. A native incremental
+XML event reader now exposes completed starts/attributes and ends before later
+errors and lets the owner stop at the outer root end (#914). It follows original
+text/ABX EOF behavior and text coalescing; required-root whole-document readers
+remain strict. Actual original Xml event traces match 234 cases (text and ABX
+at every truncation boundary, attributes/depth, text/CDATA/comments, malformed
+input and outer-root stop), in the full original ART oracle (32.11s). The native incremental Settings record owner is still missing;
+full Settings recovery, version initialization and nonregular/open-IO cases are
+not proved. Passive Store::open
 and Store::create remain strict and do not adopt malformed artifacts.
-Ordinary units pass 454 (3.24s; three ignored, including the crash helper explicitly
-run by its parent), XML units pass 12, and all integration targets compile.
-The full image/template build passes (67.6s, 11 rebuilt, 31 fresh).
+Ordinary units pass 454 (3.40s; three ignored, including the crash helper explicitly
+run by its parent), XML units pass 15, and all integration targets compile.
+The full image/template build passes (57.0s, 11 rebuilt, 31 fresh), followed by
+a final host rebuild (2.5s, five rebuilt, 37 fresh).
 The prior original-APK initial scan fixture passed (68.36s), writing/reopening
 both fresh and existing native settings and checking immutable input metadata,
 ABX/reserve equality and repeat-write stability; it was not rerun for recovery.
@@ -787,7 +794,7 @@ without following symlinks (#913). This lets original bionic remove fall back to
 directory removal. Expanded NDK file tests actually run and pass (1.55s), covering
 empty/nonempty directories, directory symlinks, invalid flags, missing paths and
 libc remove. The original ResilientAtomicFile failure/retry ART oracle now removes
-its own reserve directory and passes with the complete package oracle (33.69s).
+its own reserve directory and passes with the complete package oracle (32.11s).
 
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a

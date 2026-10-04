@@ -412,6 +412,35 @@ fn native_package_parcels_match_original_read_write() {
     let mut writer_store = aim_services::package::owner::Store::create(&writer_data, &[0]).unwrap();
     assert!(!writer_data.join("system/packages.xml").exists());
     writer_store.commit_scan_settings(&writer_snapshot).unwrap();
+    let text_pull = b"<packages><version sdkVersion='36'/><package name='p' codePath='/system/p'><sigs/></package></packages>";
+    let binary_pull =
+        aim_android_xml::abx::write(&aim_android_xml::read(text_pull).unwrap()).unwrap();
+    let mut pull_inputs = vec![
+        Vec::new(),
+        b" \n".to_vec(),
+        b"<packages/>broken".to_vec(),
+        b"<p>a<!--x--><![CDATA[b]]>c</p>".to_vec(),
+        b"<p><![CDATA[a]]></p>".to_vec(),
+        b"<p>&#65;&amp;</p>".to_vec(),
+        b"<p><q></p>".to_vec(),
+        b"<p a='broken".to_vec(),
+    ];
+    for input in [text_pull.as_slice(), binary_pull.as_slice()] {
+        // Every truncation boundary exposes which earlier events were delivered.
+        pull_inputs.extend((0..=input.len()).map(|end| input[..end].to_vec()));
+    }
+    let mut binary_text = aim_android_xml::read(b"<p>a<!--x--><![CDATA[b]]>c</p>").unwrap();
+    pull_inputs.push(aim_android_xml::abx::write(&binary_text).unwrap());
+    binary_text.content = vec![aim_android_xml::Node::Token(
+        aim_android_xml::CDSECT,
+        Some("a".into()),
+    )];
+    pull_inputs.push(aim_android_xml::abx::write(&binary_text).unwrap());
+    eprintln!("incremental XML cases: {}", pull_inputs.len());
+    let pull_expected: Vec<_> = pull_inputs.iter().map(|bytes| pull_trace(bytes)).collect();
+    for (index, bytes) in pull_inputs.iter().enumerate() {
+        fs::write(directory.join(format!("pull-input-{index}")), bytes).unwrap();
+    }
     let recovery_inputs: Vec<[Option<Vec<u8>>; 3]> = vec![
         [None, None, None],
         [None, None, Some(Vec::new())],
@@ -3525,6 +3554,21 @@ fn native_package_parcels_match_original_read_write() {
         fs::read_to_string(directory.join("empty-document-original")).unwrap(),
         "0=1\n1=1\n2=java.io.IOException\n3=1\n"
     );
+    let mut pull_mismatches = Vec::new();
+    for (index, expected) in pull_expected.iter().enumerate() {
+        let actual = fs::read_to_string(directory.join(format!("pull-output-{index}"))).unwrap();
+        if actual != *expected {
+            pull_mismatches.push(format!(
+                "case {index} input {:?}: original {actual:?}, native {expected:?}",
+                String::from_utf8_lossy(&pull_inputs[index])
+            ));
+        }
+    }
+    assert!(
+        pull_mismatches.is_empty(),
+        "incremental XML mismatches:\n{}",
+        pull_mismatches.join("\n")
+    );
     for (index, expected) in recovery_expected.iter().enumerate() {
         assert_eq!(
             fs::read_to_string(directory.join(format!("recovery-output-{index}"))).unwrap(),
@@ -4706,4 +4750,54 @@ fn cache_validation_objects(directory: &std::path::Path, original: &AndroidPacka
     fs::write(directory.join("cache-validation-null-process-name"), null).unwrap();
     process.processes.as_mut().unwrap()[0].name = None;
     assert!(process.to_cache_entry().is_err());
+}
+
+fn pull_trace(bytes: &[u8]) -> String {
+    use aim_android_xml::pull::{Event, Reader};
+    let hex = |value: &str| {
+        value
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let mut events = Vec::new();
+    let result = (|| {
+        let mut reader = Reader::new(bytes)?;
+        let mut started = false;
+        loop {
+            match reader.next()? {
+                Event::Start(element) => {
+                    started = true;
+                    let attrs = ["name", "codePath", "sdkVersion"]
+                        .iter()
+                        .map(|name| {
+                            element
+                                .string(name)
+                                .map(|value| hex(&value))
+                                .unwrap_or_else(|| "missing".into())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    events.push(format!("start:{}:{}:{attrs}", element.name, reader.depth()));
+                }
+                Event::End(name) => {
+                    events.push(format!("end:{name}:{}", reader.depth()));
+                    if started && reader.depth() == 1 {
+                        break;
+                    }
+                }
+                Event::Text(text) => events.push(format!("text:{}:{}", reader.depth(), hex(&text))),
+                Event::EndDocument => {
+                    events.push("end-document".into());
+                    break;
+                }
+            }
+        }
+        Ok::<_, String>(())
+    })();
+    if result.is_err() {
+        events.push("error".into());
+    }
+    events.join("|")
 }

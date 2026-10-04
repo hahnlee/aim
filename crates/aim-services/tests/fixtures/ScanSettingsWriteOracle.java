@@ -8,6 +8,7 @@ public final class ScanSettingsWriteOracle {
         verifyFirstWriteRetry(cache.getParentFile());
         verifyEmptyDocuments(cache.getParentFile());
         verifyRecoveryMatrix(cache.getParentFile());
+        verifyPullMatrix(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -38,6 +39,34 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyPullMatrix(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "pull-input-" + index);
+            if (!input.exists()) break;
+            var events = new java.util.ArrayList<String>(); boolean started = false;
+            try (var stream = new java.io.FileInputStream(input)) {
+                var parser = android.util.Xml.resolvePullParser(stream);
+                while (true) {
+                    int event = parser.next();
+                    if (event == 2) {
+                        started = true; var attrs = new java.util.ArrayList<String>();
+                        for (String name : new String[]{"name", "codePath", "sdkVersion"}) {
+                            String value = parser.getAttributeValue(null, name);
+                            attrs.add(value == null ? "missing" : hex(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                        }
+                        events.add("start:" + parser.getName() + ":" + parser.getDepth() + ":" + String.join(",", attrs));
+                    } else if (event == 3) {
+                        events.add("end:" + parser.getName() + ":" + parser.getDepth());
+                        if (started && parser.getDepth() == 1) break;
+                    } else if (event == 4) {
+                        events.add("text:" + parser.getDepth() + ":" + hex(parser.getText().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                    } else if (event == 1) { events.add("end-document"); break; }
+                }
+            } catch (Exception failure) { events.add("error"); }
+            java.nio.file.Files.write(new java.io.File(directory, "pull-output-" + index).toPath(),
+                String.join("|", events).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
     private static void verifyRecoveryMatrix(java.io.File directory) throws Exception {

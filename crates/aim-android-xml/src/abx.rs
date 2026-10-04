@@ -424,3 +424,83 @@ mod tests {
         assert_eq!(decode_utf(&[0xf0, 0x9f, 0x98, 0x80]), None);
     }
 }
+
+pub(crate) struct Pull<'a> {
+    reader: Reader<'a>,
+}
+
+impl<'a> Pull<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        let mut reader = Reader {
+            bytes,
+            at: MAGIC.len(),
+            interned: Vec::new(),
+        };
+        // setInput peeks the first token, so magic alone is an input error.
+        let token = *bytes.get(reader.at).ok_or("ABX: truncated header")?;
+        if token & 0x0f == START_DOCUMENT {
+            reader.at += 1;
+        }
+        Ok(Self { reader })
+    }
+
+    pub(crate) fn peek(&self) -> Result<u8, String> {
+        self.reader
+            .bytes
+            .get(self.reader.at)
+            .map(|b| b & 0x0f)
+            .ok_or_else(|| format!("ABX: truncated at {}", self.reader.at))
+    }
+
+    pub(crate) fn token(&mut self) -> Result<crate::pull::Token, String> {
+        use crate::pull::Token;
+        let r = &mut self.reader;
+        // nextToken treats EOF during external token decoding as END_DOCUMENT.
+        let result = (|| {
+            let [token] = r.take()?;
+            let event = token & 0x0f;
+            Ok::<_, String>(match event {
+                START_TAG => Token::Start(Element {
+                    name: r.interned()?,
+                    attrs: Vec::new(),
+                    content: Vec::new(),
+                }),
+                END_TAG => Token::End(r.interned()?),
+                END_DOCUMENT => Token::EndDocument,
+                START_DOCUMENT => Token::Content(START_DOCUMENT, None),
+                crate::ENTITY_REF => {
+                    Token::Content(crate::CDSECT, Some(crate::pull::entity(&r.utf()?)?))
+                }
+                crate::TEXT
+                | crate::CDSECT
+                | crate::COMMENT
+                | crate::PROCESSING_INSTRUCTION
+                | crate::DOCDECL
+                | crate::IGNORABLE_WHITESPACE => Token::Content(event, Some(r.utf()?)),
+                _ => return Err(format!("ABX: unexpected token {event}")),
+            })
+        })();
+        let mut token = match result {
+            Err(message) if message.starts_with("ABX: truncated at ") => {
+                return Ok(Token::EndDocument);
+            }
+            other => other?,
+        };
+        if let Token::Start(element) = &mut token {
+            loop {
+                let byte = *r
+                    .bytes
+                    .get(r.at)
+                    .ok_or_else(|| format!("ABX: truncated at {}", r.at))?;
+                if byte & 0x0f != ATTRIBUTE {
+                    break;
+                }
+                r.at += 1;
+                let name = r.interned()?;
+                let value = r.value(byte & 0xf0)?;
+                element.attrs.push((name, value));
+            }
+        }
+        Ok(token)
+    }
+}

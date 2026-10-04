@@ -76,8 +76,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// The element whose `<` was just read.
-    fn element(&mut self) -> Result<Element, String> {
+    fn start(&mut self) -> Result<(Element, bool), String> {
         let mut e = Element {
             name: self.name()?.to_owned(),
             attrs: Vec::new(),
@@ -86,10 +85,10 @@ impl<'a> Reader<'a> {
         loop {
             self.skip_space();
             if self.eat("/>") {
-                return Ok(e);
+                return Ok((e, true));
             }
             if self.eat(">") {
-                break;
+                return Ok((e, false));
             }
             let name = self.name()?.to_owned();
             self.skip_space();
@@ -104,6 +103,14 @@ impl<'a> Reader<'a> {
             self.at += 1;
             let value = unescape(self.until(&quote.to_string())?).map_err(|w| self.error(&w))?;
             e.attrs.push((name, Value::String(value)));
+        }
+    }
+
+    /// The element whose `<` was just read.
+    fn element(&mut self) -> Result<Element, String> {
+        let (mut e, empty) = self.start()?;
+        if empty {
+            return Ok(e);
         }
         loop {
             if self.eat("</") {
@@ -244,5 +251,106 @@ mod tests {
         ] {
             assert!(read(doc.as_bytes()).is_err(), "{doc}");
         }
+    }
+}
+
+pub(crate) struct Pull<'a> {
+    reader: Reader<'a>,
+    open: Vec<String>,
+    empty_end: Option<String>,
+    started: bool,
+}
+
+impl<'a> Pull<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Result<Self, String> {
+        let s = std::str::from_utf8(bytes).map_err(|e| format!("XML: {e}"))?;
+        Ok(Self {
+            reader: Reader {
+                s: s.strip_prefix('\u{feff}').unwrap_or(s),
+                at: 0,
+            },
+            open: Vec::new(),
+            empty_end: None,
+            started: false,
+        })
+    }
+
+    pub(crate) fn peek(&self) -> Result<u8, String> {
+        let rest = self.reader.rest();
+        Ok(if self.empty_end.is_some() || rest.starts_with("</") {
+            3
+        } else if rest.starts_with("<!--") {
+            COMMENT
+        } else if rest.starts_with("<![CDATA[") {
+            CDSECT
+        } else if rest.starts_with("<?") {
+            crate::PROCESSING_INSTRUCTION
+        } else if rest.starts_with('<') {
+            2
+        } else if rest.is_empty() {
+            1
+        } else {
+            TEXT
+        })
+    }
+
+    pub(crate) fn token(&mut self) -> Result<crate::pull::Token, String> {
+        use crate::pull::Token;
+        if let Some(name) = self.empty_end.take() {
+            self.open.pop();
+            return Ok(Token::End(name));
+        }
+        let r = &mut self.reader;
+        if self.open.is_empty() {
+            if !r.misc()? {
+                return Ok(Token::EndDocument);
+            }
+            if self.started {
+                return Err(r.error("content after the root element"));
+            }
+            if !r.rest().starts_with('<') {
+                return Err(r.error("no root element"));
+            }
+        }
+        if r.rest().is_empty() {
+            return Ok(Token::EndDocument);
+        }
+        if r.eat("</") {
+            let name = r.name()?.to_owned();
+            r.skip_space();
+            if self.open.last() != Some(&name) || !r.eat(">") {
+                return Err(r.error(&format!("unexpected </{name}>")));
+            }
+            self.open.pop();
+            return Ok(Token::End(name));
+        }
+        if r.eat("<!--") {
+            return Ok(Token::Content(COMMENT, Some(r.until("-->")?.into())));
+        }
+        if r.eat("<![CDATA[") {
+            return Ok(Token::Content(CDSECT, Some(r.until("]]>")?.into())));
+        }
+        if r.eat("<?") {
+            return Ok(Token::Content(
+                crate::PROCESSING_INSTRUCTION,
+                Some(r.until("?>")?.into()),
+            ));
+        }
+        if r.eat("<") {
+            let (element, empty) = r.start()?;
+            self.started = true;
+            self.open.push(element.name.clone());
+            if empty {
+                self.empty_end = Some(element.name.clone());
+            }
+            return Ok(Token::Start(element));
+        }
+        let rest = r.rest();
+        let n = rest.find('<').unwrap_or(rest.len());
+        r.at += n;
+        Ok(Token::Content(
+            TEXT,
+            Some(unescape(&rest[..n]).map_err(|w| r.error(&w))?),
+        ))
     }
 }
