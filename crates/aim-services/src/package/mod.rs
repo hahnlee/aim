@@ -134,6 +134,9 @@ fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String
     // the settings' legacy one.
     let legacy_times = file.is_some();
     let mut restrictions = file.unwrap_or_default();
+    restrictions
+        .legacy_domain_states
+        .retain(|(name, _)| settings.packages.iter().any(|p| &p.name == name));
     let mut states: HashMap<String, UserState> = restrictions.packages.drain(..).collect();
     restrictions.packages = settings
         .packages
@@ -329,12 +332,12 @@ mod tests {
 "#;
 
     const RESTRICTIONS: &str = r#"<package-restrictions>
-  <pkg name="android" ceDataInode="5" />
+  <pkg name="android" ceDataInode="5" domainVerificationStatus="2" />
   <pkg name="org.example.app" ceDataInode="9181" deDataInode="9203" stopped="true" nl="true" enabled="3" enabledCaller="shell:1000" install-reason="4" first-install-time="2b" blockUninstall="true">
     <enabled-components><item name="org.example.app.A" /></enabled-components>
     <disabled-components><item name="org.example.app.B" /><item name="org.example.app.B" /></disabled-components>
   </pkg>
-  <pkg name="org.example.unknown" />
+  <pkg name="org.example.unknown" domainVerificationStatus="3" />
   <preferred-activities />
   <default-apps><default-browser packageName="org.example.app" /></default-apps>
 </package-restrictions>
@@ -560,6 +563,10 @@ mod tests {
         // The unknown package is dropped; a missing first install time is
         // the settings' legacy one.
         assert_eq!(r.packages.len(), 2);
+        assert_eq!(
+            r.legacy_domain_states,
+            [("android".into(), 2), ("org.example.app".into(), 0)]
+        );
         let (_, android) = &r.packages[0];
         assert!(android.installed && android.ce_data_inode == 5);
         assert_eq!(android.first_install_time, 0x1234);
@@ -635,6 +642,7 @@ mod tests {
         let state = read().unwrap().unwrap();
         let r = &state.users[0].1.restrictions;
         assert_eq!(r.packages.len(), 2);
+        assert!(r.legacy_domain_states.is_empty());
         assert!(
             r.packages
                 .iter()

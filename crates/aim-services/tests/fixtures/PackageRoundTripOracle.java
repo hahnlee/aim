@@ -10,6 +10,19 @@ public final class PackageRoundTripOracle {
         }
     }
 
+    private static void verifyOriginalDomainIds() {
+        var owner = new com.android.server.pm.verify.domain.DomainVerificationService(null, null, null);
+        var ids = new java.util.HashSet<java.util.UUID>();
+        for (int i = 0; i < 16; i++) {
+            byte[] bytes = dev.aim.server.PackageDomainIds.generate(owner);
+            var in = java.nio.ByteBuffer.wrap(bytes);
+            var id = new java.util.UUID(in.getLong(), in.getLong());
+            if (in.hasRemaining() || id.version() != 4 || id.variant() != 2 || !ids.add(id)) throw new AssertionError("original domain UUID differs");
+        }
+        try { dev.aim.server.PackageDomainIds.generate(null); throw new AssertionError("missing domain owner accepted"); }
+        catch (IllegalStateException expected) {}
+    }
+
     private static android.content.pm.SharedLibraryInfo nullableLibrary() {
         return new android.content.pm.SharedLibraryInfo(null, "nullable.owner",
             java.util.Arrays.asList(null, "/system/nullable.apk"), "nullable.library", 51L, 1,
@@ -192,6 +205,7 @@ public final class PackageRoundTripOracle {
     }
 
     private static void verify(String[] args) throws Exception {
+        verifyOriginalDomainIds();
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyScopedRuntime(new java.io.File(args[0]));
         verifyOriginalUserScopes(new java.io.File(args[0]));

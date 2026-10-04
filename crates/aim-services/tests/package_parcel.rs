@@ -81,6 +81,9 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
         )
+        .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageDomainIds.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(
             aim_paths::root()

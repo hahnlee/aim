@@ -13,9 +13,17 @@ import com.android.server.pm.parsing.PackageCacher;
 import com.android.server.pm.parsing.pkg.AndroidPackageUtils;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.permission.PermissionManagerServiceInternal;
+import com.android.server.pm.verify.domain.DomainVerificationManagerInternal;
 
 /** Original package-policy owners, available independently of late services. */
 public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
+    private final DomainVerificationManagerInternal domains;
+
+    public PackageBootstrapBridge() { this(null); }
+    public PackageBootstrapBridge(DomainVerificationManagerInternal domains) {
+        this.domains = domains;
+    }
+
     private static final long ENFORCE_NATIVE_SHARED_LIBRARY_DEPENDENCIES = 142191088L;
     private static final long SELINUX_LATEST_CHANGES = 143539591L;
     private static final long SELINUX_R_CHANGES = 168782947L;
@@ -26,7 +34,7 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
             com.android.server.pm.verify.domain.DomainVerificationService domains,
             boolean factoryTest) {
         try {
-            attach();
+            attach(domains);
         } catch (RemoteException failure) {
             throw new IllegalStateException("package bootstrap attach failed", failure);
         }
@@ -34,10 +42,11 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     /** Called by the C facade before native scanning, after PlatformCompat starts. */
-    public static void attach() throws RemoteException {
+    public static void attach(DomainVerificationManagerInternal domains) throws RemoteException {
+        if (domains == null) throw new IllegalArgumentException("missing domain owner");
         IBinder host = ServiceManager.checkService("aim.service_host");
         if (host == null) throw new IllegalStateException("native service host is unavailable");
-        IServiceHost.Stub.asInterface(host).attachPackageBootstrapBridge(new PackageBootstrapBridge());
+        IServiceHost.Stub.asInterface(host).attachPackageBootstrapBridge(new PackageBootstrapBridge(domains));
     }
 
     @Override
@@ -92,6 +101,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
                 PermissionManagerServiceInternal.class);
         if (permissions == null) throw new IllegalStateException("permission owner is unavailable");
         return PackageLegacyPermissions.capture(appId, userIds, permissions.getLegacyPermissionState(appId));
+    }
+
+    @Override
+    public byte[] generateNewDomainId() {
+        enforceSystemUid();
+        return PackageDomainIds.generate(domains);
     }
 
     private static void enforceSystemUid() {

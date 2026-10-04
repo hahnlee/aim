@@ -23,7 +23,33 @@ pub enum SeInfoError {
     Owner(Exception),
 }
 
+#[derive(Debug)]
+pub enum DomainIdError {
+    Transport(i32),
+    Owner(Exception),
+}
+
 impl Bridge {
+    pub fn new_domain_id(&self) -> Result<[u8; 16], DomainIdError> {
+        let mut data = Parcel::new();
+        bridge::GenerateNewDomainId {}.write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::GENERATE_NEW_DOMAIN_ID, &data, false)
+            .map_err(DomainIdError::Transport)?;
+        let mut reader = reply.reader();
+        let bytes = bridge::read_generate_new_domain_id_reply(&mut reader)
+            .map_err(DomainIdError::Transport)?
+            .map_err(DomainIdError::Owner)?
+            .ok_or(DomainIdError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
+        if reader.remaining() != 0 {
+            return Err(DomainIdError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        bytes
+            .try_into()
+            .map_err(|_| DomainIdError::Transport(aim_binder_host::parcel::BAD_VALUE))
+    }
+
     /// SELinuxMMAC's non-shared decision uses the original ApplicationInfo
     /// generated from parsed code, including flags rather than name/SDK alone.
     /// A nonempty shared UID uses its own boot-fixed SDK instead (#838).

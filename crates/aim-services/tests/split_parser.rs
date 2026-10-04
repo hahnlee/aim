@@ -1735,6 +1735,9 @@ fn java_oracles_link_against_original_image() {
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
         )
         .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageDomainIds.java"),
+        )
+        .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageMimeGroups.java"),
         )

@@ -437,6 +437,21 @@ implemented and attached synchronously from the C branch's PMS-main redirect.
 The one startBootstrapServices call now enters PackageBootstrapBridge before
 original PMS scanning, after original PlatformCompat registration. The wrapper
 returns original PMS until complete C gates pass; attach failure aborts bootstrap.
+The early wrapper now hands the actual original DomainVerificationService to
+that retained endpoint (#878). Generated generateNewDomainId returns its UUID
+as two big-endian words; the native bootstrap rejects null, non-16-byte and
+trailing replies and propagates owner/transport errors. No local replacement
+ID is substituted. Real Binder tests cover exact values, malformed replies,
+owner rejection and endpoint replacement. Original ART constructs the original
+domain service and exercises the production exporter against actual random UUID
+version/variant and missing-owner behavior (19.33s package oracle). All 422 units
+pass (3.31s; one ignored/not run); original Java linkage passes (4.43s), and the
+full image/original-PMS template build passes (58.0s; six rebuilt, 36 fresh).
+This supplies another mandatory boot owner; full native scan initialization and
+publication are not yet invoked by the running daemon (#836/#798). Restored
+legacy-domain migration inputs also now discard packages unknown to Settings,
+matching the existing user-state ownership filter (#877), and a missing user
+restrictions file produces no migration inputs.
 Production device-services image API checking passes (14.0s), and system-server
 symbolic call-count/signature and DEX verification pass (1.1s). The complete
 derived image/oat/template build passes (55.8s), with disposable template settings

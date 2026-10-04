@@ -88,6 +88,7 @@ struct Owner {
     malformed_bcp: AtomicBool,
     malformed_seinfo: AtomicBool,
     legacy_reply: AtomicUsize,
+    domain_reply: AtomicUsize,
     gid: i32,
 }
 impl Service for Owner {
@@ -151,6 +152,22 @@ impl Service for Owner {
                     (mode != 1).then_some(payload.data()),
                 );
                 if mode == 3 {
+                    reply.write_i32(99);
+                }
+            }
+            bootstrap::GENERATE_NEW_DOMAIN_ID => {
+                let mode = self.domain_reply.load(Ordering::SeqCst);
+                let id = [self.gid as u8; 16];
+                aim_service_aidl::write_byte_array(
+                    &mut reply,
+                    match mode {
+                        1 => None,
+                        2 => Some(&[1; 15]),
+                        3 => Some(&[1; 17]),
+                        _ => Some(&id),
+                    },
+                );
+                if mode == 4 {
                     reply.write_i32(99);
                 }
             }
@@ -273,6 +290,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
+        domain_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -284,6 +302,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
+        domain_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -354,6 +373,17 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         assert!(old.legacy_permissions(19001, &[10, 0]).is_err());
     }
     owner.legacy_reply.store(0, Ordering::SeqCst);
+    assert_eq!(old.new_domain_id().unwrap(), [3003i32 as u8; 16]);
+    for mode in 1..=4 {
+        owner.domain_reply.store(mode, Ordering::SeqCst);
+        assert!(matches!(
+            old.new_domain_id(),
+            Err(crate::package::bootstrap::DomainIdError::Transport(
+                aim_binder_host::parcel::BAD_VALUE
+            ))
+        ));
+    }
+    owner.domain_reply.store(0, Ordering::SeqCst);
     parsed.target_sdk_version = 29;
     assert_eq!(old.seinfo_target_sdk(&parsed).unwrap(), 30);
     assert_eq!(
@@ -371,6 +401,10 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     owner.malformed_seinfo.store(false, Ordering::SeqCst);
     assert!(old.permission_gids(19001, &[0, 0]).is_err());
     owner.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        old.new_domain_id(),
+        Err(crate::package::bootstrap::DomainIdError::Owner(_))
+    ));
     assert!(matches!(
         old.seinfo_target_sdk(&parsed),
         Err(crate::package::bootstrap::SeInfoError::Owner(_))
@@ -408,6 +442,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
+        domain_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,
@@ -415,6 +450,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     attach(&second, Some(replacement)).unwrap();
     let current = system.package_bootstrap().unwrap();
     assert!(!Arc::ptr_eq(&old, &current));
+    assert_eq!(current.new_domain_id().unwrap(), [3004i32 as u8; 16]);
     driver.release(first.proc_handle());
     // Wait for the actual old endpoint death, then ensure it did not erase the new one.
     until(|| {

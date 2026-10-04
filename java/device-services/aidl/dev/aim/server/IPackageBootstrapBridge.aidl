@@ -9,4 +9,6 @@ interface IPackageBootstrapBridge {
     int getSeInfoTargetSdkVersion(in byte[] packageCache);
     /** Projection of the original permission owner over resolved users, including pre-created users. */
     byte[] getLegacyPermissionState(int appId, in int[] userIds);
+    /** UUID from the original domain owner, most-significant word first. */
+    byte[] generateNewDomainId();
 }
