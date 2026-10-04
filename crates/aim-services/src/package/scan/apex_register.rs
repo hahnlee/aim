@@ -118,7 +118,10 @@ impl SigningScan {
                     "APEX original identity transition is not completed (#890)".into(),
                 ));
             }
-            if previous.as_ref().is_some_and(|p| p.app_id != -1) {
+            if previous
+                .as_ref()
+                .is_some_and(|p| p.app_id != p.shared_app_id().unwrap_or(-1))
+            {
                 return Err(fail(
                     "apex-identity",
                     "container replaces an application UID owner".into(),
@@ -278,6 +281,7 @@ impl SigningScan {
             };
             let mut staged = self.clone();
             let mut package = setting.package;
+            package.app_id = -1;
             package.shared_user_app_id = shared_id;
             package.transient.updated_system_app |= updated;
             package
@@ -344,6 +348,17 @@ impl SigningScan {
                 },
             )?;
             let name = &completed.candidate.record.settings.name;
+            // The final code retains the scan UID; Settings registration assigns
+            // shared application ownership only after code finalization.
+            if let Some(id) = shared_id {
+                staged
+                    .settings
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == *name)
+                    .unwrap()
+                    .app_id = id;
+            }
             if source.info.factory && !source.info.active {
                 staged.disable_system_package(name)?;
             }

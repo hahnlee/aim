@@ -32,6 +32,8 @@ public final class ApexNotifyOracle {
         verifySharedIds(directory);
         verifySharedApex(directory);
         System.out.println("APEX_NOTIFY " + count);
+        // The test-only Settings constructor starts BackgroundThread.
+        System.exit(0);
     }
     private ApexNotifyOracle() {}
     private static void verifySharedApex(java.io.File directory) throws Exception {
@@ -42,7 +44,7 @@ public final class ApexNotifyOracle {
             var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
                 com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(in.createByteArray());
             int flags = in.readInt(), privateFlags = in.readInt();
-            String label = in.readString(); int sdk = in.readInt();
+            String label = in.readString(); int sdk = in.readInt(), registeredAppId = in.readInt();
             if (in.dataAvail() != 0 || pkg.getUid() != -1 || !pkg.isApex()) throw new AssertionError("shared APEX code differs");
             var group = new SharedUserSetting("aim.fixture.apex", 0, 0); group.mAppId = 10000;
             var setting = new PackageSetting(pkg.getPackageName(), null, new java.io.File(pkg.getPath()),
@@ -52,7 +54,10 @@ public final class ApexNotifyOracle {
             if (!java.util.Objects.equals(label, originalLabel)) throw new AssertionError("shared scan seInfo differs: " + label + " != " + originalLabel);
             setting.setAppId(-1); setting.setPkg((com.android.server.pm.pkg.AndroidPackage)(Object)pkg); group.addPackage(setting);
             if (group.getSeInfoTargetSdkVersion() != sdk || sdk != pkg.getTargetSdkVersion()) throw new AssertionError("first committed shared SDK differs");
-            if (setting.getAppId() != -1 || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != 10000) throw new AssertionError("shared APEX setting IDs differ");
+            var settings = new Settings(java.util.Map.of());
+            var registeredGroup = settings.addSharedUserLPw("aim.fixture.apex", 10000, 0, 0);
+            settings.addPackageSettingLPw(setting, registeredGroup);
+            if (setting.getAppId() != registeredAppId || registeredAppId != 10000 || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != 10000 || pkg.getUid() != -1) throw new AssertionError("registered shared APEX IDs differ");
         } finally { in.recycle(); }
     }
     private static void verifySharedIds(java.io.File directory) throws Exception {

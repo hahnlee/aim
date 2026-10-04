@@ -46,7 +46,7 @@ pub enum SeInfoSetting {
     New,
 }
 
-/// Original PlatformCompat decisions for packages without a shared UID.
+/// Original PlatformCompat decisions when no loaded shared code supplies a target.
 pub trait SeInfoCompatibility {
     fn target_sdk(&self, package: &AndroidPackage) -> Result<i32, String>;
 }
@@ -123,7 +123,7 @@ fn active_inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String>
                     code: code.clone(),
                     flags: setting.flags,
                     private_flags: setting.private_flags,
-                    app_id: setting.app_id,
+                    app_id: setting.uid_owner_id(),
                     shared,
                 },
             ))

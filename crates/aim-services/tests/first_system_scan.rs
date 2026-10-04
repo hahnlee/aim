@@ -2081,7 +2081,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let shared_scan =
         SystemImageScan::first_boot(|| Image::load(&apks, &[]), &apks, &config, shared_inputs)
             .unwrap();
-    assert_eq!(shared_scan.owner.settings.packages[0].app_id, -1);
+    assert_eq!(shared_scan.owner.settings.packages[0].app_id, 10000);
     assert_eq!(
         shared_scan.owner.settings.packages[0].shared_app_id(),
         Some(10000)

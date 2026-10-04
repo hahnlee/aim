@@ -1434,7 +1434,7 @@ fn native_package_parcels_match_original_read_write() {
         10000
     );
     let setting = &shared.settings.packages[0];
-    assert_eq!(setting.app_id, -1);
+    assert_eq!(setting.app_id, 10000);
     assert_eq!(setting.shared_app_id(), Some(10000));
     assert_eq!(shared_results[0].package.uid, -1);
     let group = &shared.identities.shared_users["aim.fixture.apex"];
@@ -1468,6 +1468,7 @@ fn native_package_parcels_match_original_read_write() {
     native.write_i32(setting.private_flags);
     native.write_string16(shared.seinfo(&setting.name).unwrap());
     native.write_i32(group.seinfo_target_sdk());
+    native.write_i32(setting.app_id);
     fs::write(directory.join("shared-apex.input"), native.data()).unwrap();
     shared
         .disable_system_package(&setting.name.clone())
@@ -1476,6 +1477,7 @@ fn native_package_parcels_match_original_read_write() {
         shared.settings.disabled_system_packages[0].shared_app_id(),
         Some(10000)
     );
+    assert_eq!(shared.settings.disabled_system_packages[0].app_id, 10000);
     aim_services::package::scan::SigningScan::new_after_apex(
         &config,
         &shared.settings,

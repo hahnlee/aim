@@ -510,7 +510,7 @@ impl SigningScan {
             if let Some(source) = source {
                 let version = (i64::from(source.parsed.version_code_major) << 32)
                     | i64::from(source.parsed.version_code as u32);
-                if package.app_id != -1
+                if package.app_id != package.shared_app_id().unwrap_or(-1)
                     || !group_matches(package, source)
                     || package.version_code != version
                 {
@@ -542,7 +542,7 @@ impl SigningScan {
             if let Some(source) = source {
                 let version = (i64::from(source.parsed.version_code_major) << 32)
                     | i64::from(source.parsed.version_code as u32);
-                if package.app_id != -1
+                if package.app_id != package.shared_app_id().unwrap_or(-1)
                     || !group_matches(package, source)
                     || package.version_code != version
                 {
@@ -556,11 +556,12 @@ impl SigningScan {
             }
         }
         let mut identities = Bootstrap::restore(config, &uid_settings)?;
-        for package in settings
-            .packages
-            .iter()
-            .filter(|p| p.app_id == -1 && p.shared_user)
-        {
+        for package in settings.packages.iter().filter(|p| {
+            p.shared_user
+                && apex.packages.iter().any(|code| {
+                    code.parsed.package_name == p.name && code.info.module_path == p.code_path
+                })
+        }) {
             let group = identities
                 .shared_users
                 .values_mut()

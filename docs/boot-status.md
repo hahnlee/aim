@@ -508,7 +508,7 @@ membership without contributing active flags. Missing, unloaded, non-system,
 already-updated or already-disabled packages return the original false result;
 incomplete metadata/user/shared owners reject before mutation. The unchanged
 original-image scan gate exercises the actual transition and user alias behavior
-(67.72s). SigningScan.new_after_apex retains verified container settings at
+(67.72s). SigningScan.new_after_apex retains verified non-shared container settings at
 INVALID_UID (-1) without reserving APK slots (#887). Original PMS MATCH_APEX
 reports -1 for all 42 containers; mixed APK/APEX restoration preserves APK slots
 and their allocation cursor and rejects unknown negative IDs and mismatched
@@ -518,7 +518,7 @@ before APK admission (#888). Policy uses the actual container code partition,
 always sets SYSTEM/APEX and does not inherit an updated container's preinstalled
 partition mask. Original scan parse flags determine signature/time origin,
 including updated /data/apex containers; APK physical-path rules remain separate.
-New containers retain INVALID_UID, raw module ownership and full signer details;
+New container code retains INVALID_UID, raw module ownership and full signer details;
 retained containers preserve their user owners. The APEX ABI branch leaves payload
 libraries to apexd, and APEX keysets never enter the persistent pool. Completed
 page/code/application/seInfo metadata enters loaded ownership, and inactive
@@ -547,21 +547,27 @@ original ART oracle verifies native paired-ID records with appId 10123 and group
 original setting changes appId to INVALID_UID. Native owner checks retain active
 and disabled group references without reserving an independent package slot and
 reject missing/invalid groups. Native initial APEX registration now resolves a
-new or retained declared shared UID, keeps the container application ID at -1,
-and allocates only the group ID (#889). Signing and privilege policy use that
-owner; active and disabled container restoration validates the declared group.
+new or retained declared shared UID and allocates only the group ID (#889).
+Parsed/final code keeps INVALID_UID (-1); subsequent Settings registration sets
+the shared container setting appId to the group ID while retaining sharedUserAppId
+(#895). Non-shared container settings remain at -1. Signing and privilege policy use that
+owner; active and disabled container restoration validates the declared group and the
+committed setting appId. seInfo retention validates the effective UID owner,
+preserving labels across this scan-to-registration setting ID transition.
 Changing an existing container's group still rejects explicitly (#889), as does
 original/renamed identity adoption (#890). First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
 preserving the original group allocation. The original ART oracle passes in
-29.89s, including typed original SELinuxMMAC labels and SharedUserSetting commit
-SDK, unchanged archive bytes with controlled shared identity, unread policy and
+29.29s, including typed original Settings.addPackageSettingLPw final registration,
+SELinuxMMAC labels and SharedUserSetting commit SDK, unchanged archive bytes with
+controlled shared identity, unread policy and
 a declared-target compatibility decision. The full initial scan regression
-passes in 69.96s, including grouped container registration and the first APK
+passes in 68.66s, including grouped container registration and the first APK
 allocation at 10001 after group 10000. All integration targets compile, 435 units
-pass (one ignored/not run), and the current host/image build passes in 15.7s
+pass (one ignored/not run). The original-image API check and full image/template
+build pass in 60.8s (six rebuilt, 36 fresh); the final host build passes in 13.3s
 (three rebuilt, 39 fresh). These fixtures do not prove a live PlatformCompat call
 or a manifest-declared shared APEX in the original image. The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original

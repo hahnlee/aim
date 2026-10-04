@@ -17,6 +17,7 @@ public final class Settings {
     boolean registerAppIdLPw(PackageSetting setting, boolean forceNew) throws Exception { throw new RuntimeException("stub"); }
     SharedUserSetting addSharedUserLPw(String name, int uid, int flags, int privateFlags) { throw new RuntimeException("stub"); }
     boolean disableSystemPackageLPw(String name, boolean replaced) { throw new RuntimeException("stub"); }
+    void addPackageSettingLPw(PackageSetting setting, SharedUserSetting shared) { throw new RuntimeException("stub"); }
     public SettingBase getSettingLPr(int id) { throw new RuntimeException("stub"); }
     void addInstallerPackageNames(InstallSource source) { throw new RuntimeException("stub"); }
     void readPreferredActivitiesLPw(com.android.modules.utils.TypedXmlPullParser parser, int userId)
