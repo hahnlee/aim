@@ -3,5 +3,7 @@
 package android.content.pm;
 
 public class UserInfo {
+    public int id;
+    public boolean preCreated;
     public UserInfo() { throw new RuntimeException("stub"); }
 }

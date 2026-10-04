@@ -84,6 +84,9 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageDomainIds.java"),
         )
+        .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanUsers.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(
             aim_paths::root()
@@ -925,6 +928,34 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    let scan_users = aim_services::package::bootstrap::ScanUsers::read_original_record(
+        &fs::read(directory.join("scan-users.original")).unwrap(),
+    )
+    .unwrap()
+    .users
+    .unwrap();
+    assert_eq!(
+        scan_users
+            .iter()
+            .map(|u| (u.id, u.pre_created, u.adb_install_disallowed))
+            .collect::<Vec<_>>(),
+        [
+            (0, false, false),
+            (10, true, false),
+            (11, false, true),
+            (12, false, false)
+        ]
+    );
+    for (phase, expected) in [("empty", Some(Vec::new())), ("uninitialized", None)] {
+        assert_eq!(
+            aim_services::package::bootstrap::ScanUsers::read_original_record(
+                &fs::read(directory.join(format!("scan-users-{phase}.original"))).unwrap()
+            )
+            .unwrap()
+            .users,
+            expected
+        );
+    }
     let library_feed = fs::read(directory.join("library-feed-original.parcel")).unwrap();
     let mut reader = aim_binder_host::parcel::Reader::new(&library_feed, &[]);
     assert_eq!(reader.read_i32().unwrap(), 7);

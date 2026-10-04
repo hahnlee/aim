@@ -24,30 +24,93 @@ pub enum SeInfoError {
 }
 
 #[derive(Debug)]
-pub enum DomainIdError {
+pub enum OwnerError {
     Transport(i32),
     Owner(Exception),
 }
 
+/// None is the original uninitialized UserManager, distinct from an empty owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanUsers {
+    pub users: Option<Vec<super::scan::User>>,
+}
+
+impl ScanUsers {
+    pub fn read_original_record(bytes: &[u8]) -> aim_binder_host::parcel::Result<Self> {
+        use aim_binder_host::parcel::{BAD_VALUE, Reader};
+        let mut reader = Reader::new(bytes, &[]);
+        let boolean = |r: &mut Reader<'_>| match r.read_i32()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(BAD_VALUE),
+        };
+        let users = if boolean(&mut reader)? {
+            let count = reader.read_i32()?;
+            if count < 0 || count as usize > reader.remaining() / 12 {
+                return Err(BAD_VALUE);
+            }
+            let mut users = Vec::new();
+            let mut previous = -1;
+            for _ in 0..count {
+                let id = reader.read_i32()?;
+                if id <= previous {
+                    return Err(BAD_VALUE);
+                }
+                users.push(super::scan::User {
+                    id,
+                    pre_created: boolean(&mut reader)?,
+                    adb_install_disallowed: boolean(&mut reader)?,
+                });
+                previous = id;
+            }
+            Some(users)
+        } else {
+            None
+        };
+        if reader.remaining() != 0 || bytes.len() % 4 != 0 {
+            return Err(BAD_VALUE);
+        }
+        Ok(Self { users })
+    }
+}
+
 impl Bridge {
-    pub fn new_domain_id(&self) -> Result<[u8; 16], DomainIdError> {
+    pub fn scan_users(&self) -> Result<ScanUsers, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::GetPackageScanUsers {}.write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_SCAN_USERS, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let bytes = bridge::read_get_package_scan_users_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
+            .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        ScanUsers::read_original_record(&bytes).map_err(OwnerError::Transport)
+    }
+
+    pub fn new_domain_id(&self) -> Result<[u8; 16], OwnerError> {
         let mut data = Parcel::new();
         bridge::GenerateNewDomainId {}.write(&mut data);
         let reply = self
             .owner
             .transact(bridge::GENERATE_NEW_DOMAIN_ID, &data, false)
-            .map_err(DomainIdError::Transport)?;
+            .map_err(OwnerError::Transport)?;
         let mut reader = reply.reader();
         let bytes = bridge::read_generate_new_domain_id_reply(&mut reader)
-            .map_err(DomainIdError::Transport)?
-            .map_err(DomainIdError::Owner)?
-            .ok_or(DomainIdError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
+            .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
         if reader.remaining() != 0 {
-            return Err(DomainIdError::Transport(aim_binder_host::parcel::BAD_VALUE));
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
         bytes
             .try_into()
-            .map_err(|_| DomainIdError::Transport(aim_binder_host::parcel::BAD_VALUE))
+            .map_err(|_| OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))
     }
 
     /// SELinuxMMAC's non-shared decision uses the original ApplicationInfo
@@ -178,5 +241,63 @@ impl Bridge {
                 .map_err(PermissionGidError::Transport)?
                 .map_err(PermissionGidError::Owner)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn original_scan_users_distinguish_missing_owner_and_reject_invalid_frames() {
+        let frame = |words: &[i32]| {
+            let mut p = Parcel::new();
+            for word in words {
+                p.write_i32(*word);
+            }
+            p.data().to_vec()
+        };
+        assert_eq!(
+            ScanUsers::read_original_record(&frame(&[0])).unwrap().users,
+            None
+        );
+        assert_eq!(
+            ScanUsers::read_original_record(&frame(&[1, 0]))
+                .unwrap()
+                .users,
+            Some(Vec::new())
+        );
+        let original = frame(&[1, 2, 0, 0, 1, 10, 1, 0]);
+        let users = ScanUsers::read_original_record(&original).unwrap();
+        assert_eq!(
+            users
+                .users
+                .unwrap()
+                .iter()
+                .map(|u| (u.id, u.pre_created, u.adb_install_disallowed))
+                .collect::<Vec<_>>(),
+            [(0, false, true), (10, true, false)]
+        );
+        for words in [
+            vec![],
+            vec![2],
+            vec![0, 0],
+            vec![1, -1],
+            vec![1, 2],
+            vec![1, 1, -1, 0, 0],
+            vec![1, 1, 0, 2, 0],
+            vec![1, 1, 0, 0, 2],
+            vec![1, 2, 0, 0, 0, 0, 0, 0],
+            vec![1, 2, 10, 0, 0, 0, 0, 0],
+            vec![1, 0, 99],
+        ] {
+            assert!(
+                ScanUsers::read_original_record(&frame(&words)).is_err(),
+                "{words:?}"
+            );
+        }
+        let mut bad = original.clone();
+        bad.push(0);
+        assert!(ScanUsers::read_original_record(&bad).is_err());
+        assert!(ScanUsers::read_original_record(&original[..original.len() - 1]).is_err());
     }
 }

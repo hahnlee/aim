@@ -11,4 +11,6 @@ interface IPackageBootstrapBridge {
     byte[] getLegacyPermissionState(int appId, in int[] userIds);
     /** UUID from the original domain owner, most-significant word first. */
     byte[] generateNewDomainId();
+    /** Original resolved scan users, including pre-created users and ADB restrictions. */
+    byte[] getPackageScanUsers();
 }

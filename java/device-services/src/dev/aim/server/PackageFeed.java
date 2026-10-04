@@ -101,6 +101,7 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int SHARED_PROCESSES = 9;
     private static final int USER_SCOPE = 10;
     private static final int DISABLED_SYSTEM_USER_SCOPE = 11;
+    private static final int SCAN_USERS = 12;
     /** The largest chunk of a record in one transaction. */
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
@@ -285,6 +286,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             records.put(new Key(USER, Integer.toString(user)), user(user));
         }
         records.put(new Key(SYSTEM, ""), system());
+        records.put(new Key(SCAN_USERS, ""), PackageScanUsers.capture());
         host.begin(reset);
         for (Map.Entry<Key, byte[]> e : records.entrySet()) {
             byte[] hash = sha256(e.getValue());

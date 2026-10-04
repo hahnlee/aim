@@ -444,10 +444,25 @@ trailing replies and propagates owner/transport errors. No local replacement
 ID is substituted. Real Binder tests cover exact values, malformed replies,
 owner rejection and endpoint replacement. Original ART constructs the original
 domain service and exercises the production exporter against actual random UUID
-version/variant and missing-owner behavior (19.33s package oracle). All 422 units
-pass (3.31s; one ignored/not run); original Java linkage passes (4.43s), and the
-full image/original-PMS template build passes (58.0s; six rebuilt, 36 fresh).
-This supplies another mandatory boot owner; full native scan initialization and
+version/variant and missing-owner behavior. The generated bootstrap also now
+exports Settings.getAllUsers' actual UserManagerService inventory, with partial
+users excluded, dying/pre-created users retained, and each user's original ADB
+installation restriction (#879). An uninitialized owner is distinct from an
+initialized empty list; strict decoding rejects malformed flags/counts, duplicate,
+negative or unordered IDs, null payloads and tails. The native setting admission
+uses these decoded policy inputs, preserving null/USER_ALL/explicit-target rules.
+Feed kind 12 captures this same original user owner for live parity and retains
+it under each immutable feed generation. Actual original ART verifies production
+export from original UserInfo objects, pre-created/restricted flags, empty versus
+uninitialized owners and detached bytes (21.46s full package oracle). All 424 units
+pass (3.13s; one ignored/not run); original Java linkage passes (4.15s), and the
+full image/original-PMS template build passes (67.1s; six rebuilt, 36 fresh).
+A disposable default window boot reaches sys.boot_completed at 4.944s; generation
+65 contains one resolved scan user, 290 package user scopes, 16 shared-process
+aggregates and 290 runtime owners with no feed errors. No owned probe processes
+or mounts remain. This is user policy inventory, not complete PackageUserState
+value export (#862). Original UserManager construction/facade boot ordering and
+permission/writer callbacks remain #858/#798; full native scan initialization and
 publication are not yet invoked by the running daemon (#836/#798). Restored
 legacy-domain migration inputs also now discard packages unknown to Settings,
 matching the existing user-state ownership filter (#877), and a missing user

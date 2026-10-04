@@ -109,6 +109,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return PackageDomainIds.generate(domains);
     }
 
+    @Override
+    public byte[] getPackageScanUsers() {
+        enforceSystemUid();
+        return PackageScanUsers.capture();
+    }
+
     private static void enforceSystemUid() {
         if (Binder.getCallingUid() != Process.SYSTEM_UID) {
             throw new SecurityException("the package bridge serves the system uid only");

@@ -89,6 +89,7 @@ struct Owner {
     malformed_seinfo: AtomicBool,
     legacy_reply: AtomicUsize,
     domain_reply: AtomicUsize,
+    users_reply: AtomicUsize,
     gid: i32,
 }
 impl Service for Owner {
@@ -152,6 +153,31 @@ impl Service for Owner {
                     (mode != 1).then_some(payload.data()),
                 );
                 if mode == 3 {
+                    reply.write_i32(99);
+                }
+            }
+            bootstrap::GET_PACKAGE_SCAN_USERS => {
+                let mode = self.users_reply.load(Ordering::SeqCst);
+                let mut payload = Parcel::new();
+                payload.write_bool(mode != 1);
+                if mode != 1 {
+                    payload.write_i32(if mode == 2 { 0 } else { 2 });
+                    if mode != 2 {
+                        for (id, pre_created, adb) in [(0, false, true), (10, true, false)] {
+                            payload.write_i32(id);
+                            payload.write_bool(pre_created);
+                            payload.write_bool(adb);
+                        }
+                    }
+                }
+                if mode == 3 {
+                    payload.write_i32(99);
+                }
+                aim_service_aidl::write_byte_array(
+                    &mut reply,
+                    (mode != 4).then_some(payload.data()),
+                );
+                if mode == 5 {
                     reply.write_i32(99);
                 }
             }
@@ -291,6 +317,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
         domain_reply: AtomicUsize::new(0),
+        users_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -303,6 +330,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
         domain_reply: AtomicUsize::new(0),
+        users_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -378,12 +406,33 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         owner.domain_reply.store(mode, Ordering::SeqCst);
         assert!(matches!(
             old.new_domain_id(),
-            Err(crate::package::bootstrap::DomainIdError::Transport(
+            Err(crate::package::bootstrap::OwnerError::Transport(
                 aim_binder_host::parcel::BAD_VALUE
             ))
         ));
     }
     owner.domain_reply.store(0, Ordering::SeqCst);
+    let users = old.scan_users().unwrap();
+    assert_eq!(
+        users
+            .users
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|u| (u.id, u.pre_created, u.adb_install_disallowed))
+            .collect::<Vec<_>>(),
+        [(0, false, true), (10, true, false)]
+    );
+    owner.users_reply.store(1, Ordering::SeqCst);
+    assert_eq!(old.scan_users().unwrap().users, None);
+    owner.users_reply.store(2, Ordering::SeqCst);
+    assert_eq!(old.scan_users().unwrap().users, Some(Vec::new()));
+    for mode in 3..=5 {
+        owner.users_reply.store(mode, Ordering::SeqCst);
+        assert!(old.scan_users().is_err());
+    }
+    owner.users_reply.store(0, Ordering::SeqCst);
+    assert_eq!(users.users.as_ref().unwrap().len(), 2);
     parsed.target_sdk_version = 29;
     assert_eq!(old.seinfo_target_sdk(&parsed).unwrap(), 30);
     assert_eq!(
@@ -402,8 +451,12 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert!(old.permission_gids(19001, &[0, 0]).is_err());
     owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
+        old.scan_users(),
+        Err(crate::package::bootstrap::OwnerError::Owner(_))
+    ));
+    assert!(matches!(
         old.new_domain_id(),
-        Err(crate::package::bootstrap::DomainIdError::Owner(_))
+        Err(crate::package::bootstrap::OwnerError::Owner(_))
     ));
     assert!(matches!(
         old.seinfo_target_sdk(&parsed),
@@ -443,6 +496,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
         domain_reply: AtomicUsize::new(0),
+        users_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,

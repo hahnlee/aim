@@ -819,3 +819,27 @@ fn original_user_scopes_require_complete_package_inventory_and_sparse_ids() {
         std::collections::BTreeSet::from([0])
     );
 }
+
+#[test]
+fn scan_user_publication_retains_owner_presence_and_rejects_foreign_keys() {
+    let mut inner = Inner::default();
+    let bytes = [1i32, 1, 0, 0, 1]
+        .into_iter()
+        .flat_map(i32::to_le_bytes)
+        .collect::<Vec<_>>();
+    put(&mut inner, SCAN_USERS, "", &bytes);
+    let old = build(&inner.records, 1, None).unwrap();
+    assert!(old.scan_users.as_ref().unwrap().users.as_ref().unwrap()[0].adb_install_disallowed);
+    put(&mut inner, SCAN_USERS, "", &0i32.to_le_bytes());
+    assert_eq!(
+        build(&inner.records, 2, None)
+            .unwrap()
+            .scan_users
+            .unwrap()
+            .users,
+        None
+    );
+    assert_eq!(old.scan_users.unwrap().users.unwrap().len(), 1);
+    put(&mut inner, SCAN_USERS, "foreign", &bytes);
+    assert!(build(&inner.records, 3, None).is_err());
+}

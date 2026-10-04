@@ -49,6 +49,7 @@ const DISABLED_SYSTEM_RUNTIME: i32 = 8;
 const SHARED_PROCESSES: i32 = 9;
 const USER_SCOPE: i32 = 10;
 const DISABLED_SYSTEM_USER_SCOPE: i32 = 11;
+const SCAN_USERS: i32 = 12;
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -405,6 +406,15 @@ fn build(
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
             }
+            SCAN_USERS => {
+                if !key.name.is_empty() {
+                    return Err("scan users require the singleton key".into());
+                }
+                state.scan_users = Some(
+                    crate::package::bootstrap::ScanUsers::read_original_record(bytes)
+                        .map_err(failed)?,
+                );
+            }
             USER_SCOPE | DISABLED_SYSTEM_USER_SCOPE => {
                 let input = crate::package::scan::OriginalUserScope::read_original_record(bytes)
                     .map_err(failed)?;
@@ -582,6 +592,17 @@ pub fn dump(state: &State) -> String {
             .values()
             .map(|s| s.active_aliases.len())
             .sum::<usize>()
+    );
+    let _ = writeln!(
+        s,
+        "scan_users={}",
+        match &state.scan_users {
+            None => "missing".into(),
+            Some(users) => users
+                .users
+                .as_ref()
+                .map_or_else(|| "uninitialized".into(), |u| u.len().to_string()),
+        }
     );
     let active_runtime = state
         .runtime_inputs

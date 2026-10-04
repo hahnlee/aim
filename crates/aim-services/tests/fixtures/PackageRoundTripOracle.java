@@ -10,6 +10,25 @@ public final class PackageRoundTripOracle {
         }
     }
 
+    private static void verifyOriginalScanUsers(java.io.File directory) throws Exception {
+        var users = new java.util.ArrayList<android.content.pm.UserInfo>();
+        for (int id : new int[] {0, 10, 11, 12}) {
+            var user = new android.content.pm.UserInfo(); user.id = id; user.preCreated = id == 10;
+            users.add(user);
+        }
+        java.nio.file.Files.write(new java.io.File(directory, "scan-users.original").toPath(),
+            dev.aim.server.PackageScanUsers.capture(users, id -> id == 11));
+        users.get(0).preCreated = true;
+        java.nio.file.Files.write(new java.io.File(directory, "scan-users-empty.original").toPath(),
+            dev.aim.server.PackageScanUsers.capture(java.util.List.of(), id -> { throw new AssertionError("empty user restriction queried"); }));
+        java.nio.file.Files.write(new java.io.File(directory, "scan-users-uninitialized.original").toPath(),
+            dev.aim.server.PackageScanUsers.capture());
+        for (var invalid : java.util.List.of(java.util.List.of(users.get(1), users.get(0)), java.util.List.of(users.get(0), users.get(0)))) {
+            try { dev.aim.server.PackageScanUsers.capture(invalid, id -> false); throw new AssertionError("invalid user inventory accepted"); }
+            catch (IllegalArgumentException expected) {}
+        }
+    }
+
     private static void verifyOriginalDomainIds() {
         var owner = new com.android.server.pm.verify.domain.DomainVerificationService(null, null, null);
         var ids = new java.util.HashSet<java.util.UUID>();
@@ -206,6 +225,7 @@ public final class PackageRoundTripOracle {
 
     private static void verify(String[] args) throws Exception {
         verifyOriginalDomainIds();
+        verifyOriginalScanUsers(new java.io.File(args[0]));
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyScopedRuntime(new java.io.File(args[0]));
         verifyOriginalUserScopes(new java.io.File(args[0]));

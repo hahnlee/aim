@@ -46,7 +46,7 @@ pub struct SettingUpdate {
 
 /// UserManager.getUsers(excludePartial=true, excludeDying=false,
 /// excludePreCreated=false), with DISALLOW_DEBUGGING_FEATURES per user.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct User {
     pub id: i32,
     pub pre_created: bool,
@@ -563,6 +563,18 @@ mod tests {
                 adb_install_disallowed: false,
             },
         ];
+        let mut source = aim_binder_host::parcel::Parcel::new();
+        source.write_bool(true);
+        source.write_i32(users.len() as i32);
+        for user in users {
+            source.write_i32(user.id);
+            source.write_bool(user.pre_created);
+            source.write_bool(user.adb_install_disallowed);
+        }
+        let users = crate::package::bootstrap::ScanUsers::read_original_record(source.data())
+            .unwrap()
+            .users
+            .unwrap();
         for (target, installed) in [
             (None, vec![0, 10, 11, 12]),
             (Some(-1), vec![0, 12]),
@@ -581,7 +593,7 @@ mod tests {
             let setting = NewSetting::new(&identity, &uid, metadata(0), policy);
             assert!(!setting.package.scanned_as_stopped_system_app);
             assert_eq!(setting.users.len(), 4);
-            for user in users {
+            for user in &users {
                 let state = &setting.users[&user.id];
                 assert_eq!(
                     state,
