@@ -1707,7 +1707,7 @@ fn first_write_start_failure_can_retry_its_owned_empty_main() {
             &data.0.join("system/packages-backup.xml"),
             |_| Ok(()),
             |file, main| {
-                store.first_write_files.push(StartedFile {
+                store.first_write_files.push(OwnedFile {
                     file: file.try_clone()?,
                     payload: std::sync::Arc::from([]),
                 });
@@ -1786,4 +1786,214 @@ fn initial_write_retries_owned_reserve_without_retaining_removed_descriptors() {
         fs::read(&path).unwrap(),
         fs::read(sibling(&path, ".reservecopy")).unwrap()
     );
+}
+
+#[test]
+fn restarted_settings_recovery_matches_resilient_file_precedence_and_no_root() {
+    use recovery::{Event, Plan, Source};
+    let read = |bytes: &[u8], settings: &mut super::super::settings::Settings| {
+        let root = aim_android_xml::read_next_optional(bytes)?;
+        if let Some(root) = &root {
+            *settings = super::super::settings::Settings::parse(root)?;
+        }
+        Ok(root)
+    };
+    let cases: &[(Option<&[u8]>, Option<&[u8]>, Option<&[u8]>, bool, usize, Vec<Event>)] = &[
+        (None, None, None, true, 0, vec![Event::Absent]),
+        (None, None, Some(b""), true, 0, vec![Event::Selected(Source::Reserve), Event::NoStartTag(Source::Reserve)]),
+        (Some(b""), None, Some(b"<packages/>"), true, 0, vec![Event::Selected(Source::Main), Event::NoStartTag(Source::Main)]),
+        (Some(b"<packages/>"), Some(b"<packages><package name='backup' codePath='/data/app/backup' userId='10100'/></packages>"), Some(b"<packages/>"), false, 1,
+            vec![Event::Selected(Source::Backup), Event::Removed(Source::Main), Event::Removed(Source::Reserve)]),
+    ];
+    for (main, backup, reserve, first_boot, packages, expected) in cases {
+        let data = Data::new();
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        for (path, value) in settings_paths(&data.0)
+            .into_iter()
+            .zip([main, backup, reserve])
+        {
+            if let Some(bytes) = value {
+                fs::write(path, bytes).unwrap();
+            }
+        }
+        let plan = Plan::inspect(&data.0).unwrap();
+        let mut settings = Default::default();
+        let (mut store, report) = plan.recover(&[0], &mut settings, read).unwrap();
+        assert_eq!(report.first_boot, *first_boot);
+        assert_eq!(report.events, *expected);
+        assert_eq!(store.state.settings.packages.len(), *packages);
+        store
+            .commit_package_document_using(element("packages"), None, |file, bytes| {
+                file.write_all(bytes)
+            })
+            .unwrap();
+        assert!(Store::open(&data.0, &[0]).unwrap().is_some());
+    }
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let paths = settings_paths(&data.0);
+    fs::write(&paths[0], b"broken").unwrap();
+    fs::write(&paths[2], b"<packages/>").unwrap();
+    let (store, report) = Plan::inspect(&data.0)
+        .unwrap()
+        .recover(&[0], &mut Default::default(), read)
+        .unwrap();
+    assert!(!report.first_boot);
+    assert!(matches!(
+        report.events[1],
+        Event::Failed {
+            source: Source::Main,
+            ..
+        }
+    ));
+    assert_eq!(report.events[2], Event::Removed(Source::Main));
+    assert_eq!(report.events[3], Event::Selected(Source::Reserve));
+    assert!(store.settings_present);
+    assert!(!paths[0].exists());
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let paths = settings_paths(&data.0);
+    fs::write(&paths[0], b"<packages/>").unwrap();
+    fs::write(&paths[1], b"broken").unwrap();
+    fs::write(&paths[2], b"<packages/>").unwrap();
+    let (_, report) = Plan::inspect(&data.0)
+        .unwrap()
+        .recover(&[0], &mut Default::default(), read)
+        .unwrap();
+    assert!(!report.first_boot); // The outer failed read returns true even if retry finds nothing.
+    assert_eq!(report.events.last(), Some(&Event::Absent));
+    assert!(paths.iter().all(|path| !path.exists()));
+}
+
+#[test]
+fn recovery_rejects_foreign_changes_and_retains_frontend_effects_before_failure() {
+    use recovery::{Event, Plan, Source};
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages/>").unwrap();
+    let plan = Plan::inspect(&data.0).unwrap();
+    fs::write(&path, b"foreign").unwrap();
+    let error = plan
+        .recover(&[0], &mut Default::default(), |_, _| {
+            panic!("foreign input reached frontend")
+        })
+        .err()
+        .unwrap();
+    assert!(error.events.is_empty());
+    assert_eq!(fs::read(&path).unwrap(), b"foreign");
+    fs::write(&path, b"broken").unwrap();
+    let plan = Plan::inspect(&data.0).unwrap();
+    let mut settings = super::super::settings::Settings::default();
+    let (store, report) = plan
+        .recover(&[0], &mut settings, |_, state| {
+            state.verifier = Some("retained frontend effect".into());
+            Err("controlled frontend failure".into())
+        })
+        .unwrap();
+    assert_eq!(
+        settings.verifier.as_deref(),
+        Some("retained frontend effect")
+    );
+    assert_eq!(store.state.settings.verifier, settings.verifier);
+    assert!(matches!(
+        report.events[1],
+        Event::Failed {
+            source: Source::Main,
+            ..
+        }
+    ));
+    assert!(!report.first_boot);
+    assert!(!path.exists());
+}
+
+#[test]
+#[ignore = "invoked as the controlled first-write crash subprocess"]
+fn recovery_first_write_crash_child() {
+    use std::io::Read;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).unwrap();
+    let data = PathBuf::from(input);
+    assert!(data.starts_with(std::env::temp_dir()));
+    assert!(
+        data.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("aim-package-owner-")
+    );
+    let mut store = Store::create(&data, &[0]).unwrap();
+    store
+        .commit_package_document_using(element("packages"), None, |file, bytes| {
+            file.write_all(&bytes[..3])?;
+            file.sync_all()?;
+            std::process::exit(17); // No failWrite or Rust destructors run.
+        })
+        .unwrap();
+    panic!("controlled crash returned");
+}
+
+#[test]
+fn recovery_claim_survives_an_actual_first_write_process_exit() {
+    use std::process::{Command, Stdio};
+    let data = Data::new();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "package::owner::tests::recovery_first_write_crash_child",
+            "--ignored",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let write = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(data.0.to_str().unwrap().as_bytes());
+    if let Err(error) = write {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("controlled child input: {error}");
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(17),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(Store::open(&data.0, &[0]).is_err());
+    assert!(Store::create(&data.0, &[0]).is_err());
+    let mut state = super::super::settings::Settings::default();
+    let (mut store, report) = recovery::Plan::inspect(&data.0)
+        .unwrap()
+        .recover(&[0], &mut state, |bytes, settings| {
+            let root = aim_android_xml::read_next_optional(bytes)?;
+            if let Some(root) = &root {
+                *settings = super::super::settings::Settings::parse(root)?;
+            }
+            Ok(root)
+        })
+        .unwrap();
+    assert!(!report.first_boot);
+    assert!(report.events.iter().any(|event| matches!(
+        event,
+        recovery::Event::Failed {
+            source: recovery::Source::Main,
+            ..
+        }
+    )));
+    assert_eq!(
+        report.events.last(),
+        Some(&recovery::Event::NoStartTag(recovery::Source::Reserve))
+    );
+    store
+        .commit_package_document_using(element("packages"), None, |file, bytes| {
+            file.write_all(bytes)
+        })
+        .unwrap();
+    assert!(Store::open(&data.0, &[0]).unwrap().is_some());
+    assert!(store.first_write_files.is_empty());
 }

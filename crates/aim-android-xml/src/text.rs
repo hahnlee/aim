@@ -170,19 +170,31 @@ fn unescape(s: &str) -> Result<String, String> {
 
 /// The root element of the text XML document `bytes` (UTF-8).
 pub fn read(bytes: &[u8]) -> Result<Element, String> {
+    read_optional(bytes)?.ok_or_else(|| {
+        format!(
+            "XML: no root element at line {}",
+            bytes.iter().filter(|b| **b == b'\n').count() + 1
+        )
+    })
+}
+
+pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
     let s = std::str::from_utf8(bytes).map_err(|e| format!("XML: {e}"))?;
     let mut r = Reader {
         s: s.strip_prefix('\u{feff}').unwrap_or(s),
         at: 0,
     };
-    if !r.misc()? || !r.eat("<") {
+    if !r.misc()? {
+        return Ok(None);
+    }
+    if !r.eat("<") {
         return Err(r.error("no root element"));
     }
     let root = r.element()?;
     if r.misc()? {
         return Err(r.error("content after the root element"));
     }
-    Ok(root)
+    Ok(Some(root))
 }
 
 #[cfg(test)]

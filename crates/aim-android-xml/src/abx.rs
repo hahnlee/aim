@@ -111,6 +111,10 @@ impl Reader<'_> {
 /// The root element of the binary XML document `bytes`. Tokens outside
 /// the root element are left out.
 pub fn read(bytes: &[u8]) -> Result<Element, String> {
+    read_optional(bytes)?.ok_or_else(|| "ABX: no root element".into())
+}
+
+pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
     if !bytes.starts_with(MAGIC) {
         return Err("not ABX".into());
     }
@@ -167,7 +171,7 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
     if !open.is_empty() {
         return Err(format!("ABX: <{}> does not end", open[0].name));
     }
-    root.ok_or_else(|| "ABX: no root element".into())
+    Ok(root)
 }
 
 /// `root` as one binary XML document, written as `BinaryXmlSerializer`

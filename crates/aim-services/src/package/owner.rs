@@ -37,6 +37,7 @@ pub mod shared_users;
 pub mod shared_processes;
 mod signing;
 mod scan_settings;
+pub mod recovery;
 pub mod update_ownership;
 pub mod usage;
 pub mod transient;
@@ -91,7 +92,7 @@ pub struct Store {
     restrictions: BTreeMap<u32, Element>,
     settings_document: Element,
     settings_present: bool,
-    first_write_files: Vec<StartedFile>,
+    first_write_files: Vec<OwnedFile>,
     preferred_users: BTreeSet<u32>,
     list_document: Option<String>,
 }
@@ -520,7 +521,7 @@ impl Store {
             |file| write(file, &bytes),
             |file, main| {
                 if first {
-                    self.first_write_files.push(StartedFile {
+                    self.first_write_files.push(OwnedFile {
                         file: file.try_clone()?,
                         payload: if main {
                             payload.clone()
@@ -699,12 +700,12 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-struct StartedFile {
+struct OwnedFile {
     file: File,
     payload: std::sync::Arc<[u8]>,
 }
 
-impl StartedFile {
+impl OwnedFile {
     fn same_file(&self, metadata: &fs::Metadata) -> bool {
         self.file
             .metadata()
@@ -725,7 +726,7 @@ fn require_missing_settings(data: &Path) -> Result<(), String> {
     require_initial_files(data, &[])
 }
 
-fn require_initial_files(data: &Path, started: &[StartedFile]) -> Result<(), String> {
+fn require_initial_files(data: &Path, started: &[OwnedFile]) -> Result<(), String> {
     for candidate in settings_paths(data) {
         match fs::symlink_metadata(&candidate) {
             Ok(metadata) => {

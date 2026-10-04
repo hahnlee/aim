@@ -90,6 +90,21 @@ pub fn read(bytes: &[u8]) -> Result<Element, String> {
 /// subsequent ABX write retains their meaning. BinaryXmlPullParser skips a
 /// standalone CDATA/entity token; text XML reports CDATA as text.
 pub fn read_next(bytes: &[u8]) -> Result<Element, String> {
+    read_next_optional(bytes)?.ok_or_else(|| {
+        if bytes.starts_with(abx::MAGIC) {
+            "ABX: no root element".into()
+        } else {
+            format!(
+                "XML: no root element at line {}",
+                bytes.iter().filter(|b| **b == b'\n').count() + 1
+            )
+        }
+    })
+}
+
+/// Pull-parser END_DOCUMENT without START_TAG is distinct from malformed XML.
+/// Required-root readers continue to reject this through read/read_next.
+pub fn read_next_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
     fn normalize(e: &mut Element, binary: bool) -> Result<(), String> {
         let mut pending_text = false;
         let mut content = Vec::new();
@@ -138,8 +153,14 @@ pub fn read_next(bytes: &[u8]) -> Result<Element, String> {
         e.content = content;
         Ok(())
     }
-    let mut root = read(bytes)?;
-    normalize(&mut root, bytes.starts_with(abx::MAGIC))?;
+    let mut root = if bytes.starts_with(abx::MAGIC) {
+        abx::read_optional(bytes)?
+    } else {
+        text::read_optional(bytes)?
+    };
+    if let Some(root) = &mut root {
+        normalize(root, bytes.starts_with(abx::MAGIC))?;
+    }
     Ok(root)
 }
 
@@ -392,5 +413,26 @@ mod tests {
         assert!(e.bool("i").is_err());
         // `Integer.parseInt(s, 16)` takes no two's complement.
         assert!(element(&[("h", s("ffffffff"))]).int_hex("h").is_err());
+    }
+}
+
+#[cfg(test)]
+mod optional_document_tests {
+    #[test]
+    fn no_start_tag_is_distinct_from_malformed_or_truncated_input() {
+        for bytes in [b"".as_slice(), b" \n", b"ABX\0\x10\x11"] {
+            assert_eq!(super::read_next_optional(bytes).unwrap(), None);
+            assert!(super::read_next(bytes).is_err());
+            assert!(super::read(bytes).is_err());
+        }
+        assert!(super::read_next_optional(b"ABX\0").is_err());
+        assert!(super::read_next_optional(b"<packages><").is_err());
+        assert_eq!(
+            super::read_next_optional(b"<packages/>")
+                .unwrap()
+                .unwrap()
+                .name,
+            "packages"
+        );
     }
 }

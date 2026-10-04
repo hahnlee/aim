@@ -740,7 +740,7 @@ complete two-package/live-group inventory with pinned Settings.writePackageLPr
 and ArrayMap values order using one certificate table. Saved-setting signer
 lineage flags remain separate from parsed-code signing. The oracle also reads
 reindexed real certificates through PackageSignatures.readXml and checks
-ArrayMap signed hash/collision behavior (2026-10-05, 32.19s), starting from
+ArrayMap signed hash/collision behavior (2026-10-05, 33.69s), starting from
 an absent native settings file. Store::create claims first-boot absence without
 writing a seed document and uses the original related user/access/list readers.
 Construction rejects every existing main/backup/reserve artifact, including
@@ -754,21 +754,40 @@ A late reserve-finalization failure publishes the committed main and the next
 write restores the reserve. Original ResilientAtomicFile agrees on partial main
 failure, empty retained reserve, descriptor-open failure and successful retry. Domain validation failures leave the directory unwritten, complete
 user XML survives, and a successful main commit changes the owner to restoration
-mode. Ordinary units pass 451 (3.18s; two ignored), and all integration targets compile.
-The full image/template build passes (67.6s, nine rebuilt, 33 fresh), followed by
-final host (13.5s) and Linux runtime/cache (8.5s) builds. The prior original-APK initial scan fixture
-passed (68.36s), writing/reopening both fresh and existing native settings and checking immutable
-input metadata, ABX/reserve equality and repeat-write stability. This is global setting persistence, not
-a complete Settings.writeLPr boot transaction: remaining global owners, user
-writers, packages.list and coherent publication still need integration. In-process first-write retry is verified; restarted-boot recovery of uncommitted
-artifacts remains #912. A new Store does not adopt unknown malformed artifacts. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
+mode. An explicit exclusive recovery plan now claims regular settings inputs
+with pinned descriptors and exact bytes, then follows original backup/main/reserve
+selection and failRead cleanup (#912). Backup selection removes main/reserve
+before parsing; no-start-tag documents remain, whereas malformed reads remove
+the selected file and retry. Changed or replaced claimed files reject before
+cleanup. Optional XML root parsing distinguishes empty/whitespace and complete
+rootless ABX from truncated ABX. A real child process exits during its first
+partial write; a new recovery owner cleans the partial main, claims the empty
+reserve and completes a write that reopens successfully. Ten disposable
+regular-file recovery cases agree with actual original ResilientAtomicFile and
+Xml parsing in the ART oracle (33.69s). Its first-boot flag uses the pinned
+Settings control-flow rule; this does not exercise original Settings.readLPw.
+The callback preserves frontend mutations before failure, but a native incremental
+Settings reader is still missing (#914); full Settings recovery, version
+initialization and nonregular/open-IO cases are not proved. Passive Store::open
+and Store::create remain strict and do not adopt malformed artifacts.
+Ordinary units pass 454 (3.24s; three ignored, including the crash helper explicitly
+run by its parent), XML units pass 12, and all integration targets compile.
+The full image/template build passes (67.6s, 11 rebuilt, 31 fresh).
+The prior original-APK initial scan fixture passed (68.36s), writing/reopening
+both fresh and existing native settings and checking immutable input metadata,
+ABX/reserve equality and repeat-write stability; it was not rerun for recovery.
+The prior controlled Binder fixture (9.52s) was not rerun either. This is global
+setting persistence, not a complete Settings.writeLPr boot transaction: remaining
+global owners, user writers, packages.list and coherent publication still need
+integration. Disabled serialization is not covered by the original ART writer
+comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
 acceptance remains unrun.
 The syscall layer translates Darwin directory-unlink EPERM to Linux EISDIR
 without following symlinks (#913). This lets original bionic remove fall back to
 directory removal. Expanded NDK file tests actually run and pass (1.55s), covering
 empty/nonempty directories, directory symlinks, invalid flags, missing paths and
 libc remove. The original ResilientAtomicFile failure/retry ART oracle now removes
-its own reserve directory and passes with the complete package oracle (32.19s).
+its own reserve directory and passes with the complete package oracle (33.69s).
 
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a

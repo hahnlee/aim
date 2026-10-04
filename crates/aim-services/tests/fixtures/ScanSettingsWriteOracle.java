@@ -6,6 +6,8 @@ public final class ScanSettingsWriteOracle {
             PackageSetting assembled) throws Exception {
         verifyArrayMapOrder();
         verifyFirstWriteRetry(cache.getParentFile());
+        verifyEmptyDocuments(cache.getParentFile());
+        verifyRecoveryMatrix(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -37,6 +39,66 @@ public final class ScanSettingsWriteOracle {
             }
             xml.endTag(null, "packages"); xml.endDocument();
         }
+    }
+    private static void verifyRecoveryMatrix(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var inputFile = new java.io.File(directory, "recovery-input-" + index);
+            if (!inputFile.exists()) break;
+            var inputs = new java.util.Properties();
+            try (var input = new java.io.FileInputStream(inputFile)) { inputs.load(input); }
+            var root = new java.io.File(directory, "recovery-original-" + index); root.mkdirs();
+            var files = new java.io.File[]{new java.io.File(root, "main"), new java.io.File(root, "backup"), new java.io.File(root, "reserve")};
+            for (int slot = 0; slot < 3; slot++) {
+                files[slot].delete(); String value = inputs.getProperty(Integer.toString(slot));
+                if (!value.equals("missing")) {
+                    byte[] bytes = new byte[value.length() / 2];
+                    for (int i = 0; i < bytes.length; i++) bytes[i] = (byte)Integer.parseInt(value.substring(i * 2, i * 2 + 2), 16);
+                    java.nio.file.Files.write(files[slot].toPath(), bytes);
+                }
+            }
+            var events = new java.util.ArrayList<String>(); boolean failed = false, first = false;
+            var sources = new String[]{"Main", "Backup", "Reserve"};
+            try (var atomic = new ResilientAtomicFile(files[0], files[1], files[2], 0660, "fixture", null)) {
+                while (true) {
+                    int selected = files[1].exists() ? 1 : files[0].exists() ? 0 : files[2].exists() ? 2 : -1;
+                    boolean main = files[0].exists(), reserve = files[2].exists();
+                    var stream = atomic.openRead();
+                    if (stream == null) { events.add("absent"); first = !failed; break; }
+                    events.add("selected." + sources[selected]);
+                    if (selected == 1) {
+                        if (main && !files[0].exists()) events.add("removed.Main");
+                        if (reserve && !files[2].exists()) events.add("removed.Reserve");
+                    }
+                    try {
+                        var parser = android.util.Xml.resolvePullParser(stream); int event;
+                        do { event = parser.next(); } while (event != 1 && event != 2);
+                        if (event == 1) { events.add("no-root." + sources[selected]); first = !failed; break; }
+                        while (parser.next() != 1) {}
+                        first = false; stream.close(); break;
+                    } catch (Exception failure) {
+                        failed = true; events.add("failed." + sources[selected]);
+                        atomic.failRead(stream, failure); events.add("removed." + sources[selected]);
+                    }
+                }
+            }
+            var remains = new java.util.ArrayList<String>();
+            for (var file : files) remains.add(file.exists() ? hex(java.nio.file.Files.readAllBytes(file.toPath())) : "missing");
+            String output = first + "|" + String.join(",", events) + "|" + String.join(";", remains);
+            java.nio.file.Files.write(new java.io.File(directory, "recovery-output-" + index).toPath(), output.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyEmptyDocuments(java.io.File directory) throws Exception {
+        var results = new java.util.ArrayList<String>();
+        byte[][] inputs = {new byte[0], " \n".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            new byte[]{65, 66, 88, 0}, new byte[]{65, 66, 88, 0, 16, 17}};
+        for (int i = 0; i < inputs.length; i++) {
+            try {
+                var parser = android.util.Xml.resolvePullParser(new java.io.ByteArrayInputStream(inputs[i]));
+                int event; do { event = parser.next(); } while (event != 1 && event != 2);
+                results.add(i + "=" + event);
+            } catch (Exception failure) { results.add(i + "=" + failure.getClass().getName()); }
+        }
+        java.nio.file.Files.write(new java.io.File(directory, "empty-document-original").toPath(), results);
     }
     private static void verifyFirstWriteRetry(java.io.File directory) throws Exception {
         var root = new java.io.File(directory, "original-first-write-retry");

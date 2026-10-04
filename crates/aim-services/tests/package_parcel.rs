@@ -412,6 +412,87 @@ fn native_package_parcels_match_original_read_write() {
     let mut writer_store = aim_services::package::owner::Store::create(&writer_data, &[0]).unwrap();
     assert!(!writer_data.join("system/packages.xml").exists());
     writer_store.commit_scan_settings(&writer_snapshot).unwrap();
+    let recovery_inputs: Vec<[Option<Vec<u8>>; 3]> = vec![
+        [None, None, None],
+        [None, None, Some(Vec::new())],
+        [Some(Vec::new()), None, Some(b"<packages/>".to_vec())],
+        [
+            Some(b"<packages/>".to_vec()),
+            Some(b"<packages/>".to_vec()),
+            Some(b"<packages/>".to_vec()),
+        ],
+        [Some(b"<".to_vec()), None, Some(b"<packages/>".to_vec())],
+        [
+            Some(b"<packages/>".to_vec()),
+            Some(b"<".to_vec()),
+            Some(b"<packages/>".to_vec()),
+        ],
+        [Some(b"<".to_vec()), None, Some(Vec::new())],
+        [None, None, Some(b"ABX\0".to_vec())],
+        [None, None, Some(b"ABX\0\x10\x11".to_vec())],
+        [Some(b"broken".to_vec()), None, None],
+    ];
+    let mut recovery_expected = Vec::new();
+    for (index, inputs) in recovery_inputs.iter().enumerate() {
+        let native = directory.join(format!("recovery-native-{index}"));
+        fs::create_dir_all(native.join("system")).unwrap();
+        let names = [
+            "packages.xml",
+            "packages-backup.xml",
+            "packages.xml.reservecopy",
+        ];
+        let mut properties = String::new();
+        for (slot, input) in inputs.iter().enumerate() {
+            properties.push_str(&format!(
+                "{slot}={}\n",
+                input
+                    .as_ref()
+                    .map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    .unwrap_or_else(|| "missing".into())
+            ));
+            if let Some(bytes) = input {
+                fs::write(native.join("system").join(names[slot]), bytes).unwrap();
+            }
+        }
+        fs::write(
+            directory.join(format!("recovery-input-{index}")),
+            properties,
+        )
+        .unwrap();
+        let (_, report) = aim_services::package::owner::recovery::Plan::inspect(&native)
+            .unwrap()
+            .recover(&[0], &mut Default::default(), |bytes, state| {
+                let root = aim_android_xml::read_next_optional(bytes)?;
+                if let Some(root) = &root {
+                    *state = aim_services::package::settings::Settings::parse(root)?;
+                }
+                Ok(root)
+            })
+            .unwrap();
+        use aim_services::package::owner::recovery::Event;
+        let events = report
+            .events
+            .iter()
+            .map(|event| match event {
+                Event::Selected(source) => format!("selected.{source:?}"),
+                Event::Removed(source) => format!("removed.{source:?}"),
+                Event::Failed { source, .. } => format!("failed.{source:?}"),
+                Event::NoStartTag(source) => format!("no-root.{source:?}"),
+                Event::Absent => "absent".into(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let remains = names
+            .iter()
+            .map(|name| match fs::read(native.join("system").join(name)) {
+                Ok(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+                Err(error) => panic!("recovery output: {error}"),
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        recovery_expected.push(format!("{}|{events}|{remains}", report.first_boot));
+    }
     let reindexed_data = directory.join("reindexed-settings-writer");
     fs::create_dir_all(reindexed_data.join("system")).unwrap();
     fs::write(
@@ -3440,6 +3521,17 @@ fn native_package_parcels_match_original_read_write() {
     let mut imported = snapshot.owner().clone();
     imported.capture_original_runtime(&original_inputs).unwrap();
     aim_services::package::scan_snapshot::Store::new(imported, snapshot.usage().clone()).unwrap();
+    assert_eq!(
+        fs::read_to_string(directory.join("empty-document-original")).unwrap(),
+        "0=1\n1=1\n2=java.io.IOException\n3=1\n"
+    );
+    for (index, expected) in recovery_expected.iter().enumerate() {
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("recovery-output-{index}"))).unwrap(),
+            *expected,
+            "original recovery case {index}"
+        );
+    }
     let full_original = aim_services::package::settings::Settings::parse(
         &aim_android_xml::read(&fs::read(directory.join("settings-inventory-original")).unwrap())
             .unwrap(),
