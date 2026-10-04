@@ -19,4 +19,6 @@ interface IPackageBootstrapBridge {
     void notifyApexScanResults(in byte[] scanResults);
     /** Original SharedUidMigration.applyStrategy(BEST_EFFORT) decision. */
     boolean isSharedUidMigrationBestEffort();
+    /** Original AndroidTestBaseUpdater change, using full parsed ApplicationInfo. */
+    boolean isTestBaseLibraryChangeEnabled(in byte[] packageCache);
 }

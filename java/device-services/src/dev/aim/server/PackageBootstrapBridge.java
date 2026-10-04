@@ -60,6 +60,17 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public boolean isTestBaseLibraryChangeEnabled(byte[] packageCache) throws RemoteException {
+        enforceSystemUid();
+        if (packageCache == null) throw new IllegalArgumentException("missing parsed package");
+        AndroidPackage pkg = (AndroidPackage) PackageCacher.fromCacheEntryStatic(packageCache);
+        var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
+                ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
+        if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
+        return compat.isChangeEnabled(133396946L, AndroidPackageUtils.generateAppInfoWithoutState(pkg));
+    }
+
+    @Override
     public boolean isSharedUidMigrationBestEffort() {
         enforceSystemUid();
         // android-16.0.0_r1 SharedUidMigration.BEST_EFFORT.

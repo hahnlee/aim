@@ -4,6 +4,7 @@ package android.content.pm;
 
 public class ApplicationInfo extends PackageItemInfo {
     public static final android.os.Parcelable.Creator<ApplicationInfo> CREATOR = null;
+    public boolean isSystemApp() { throw new RuntimeException("stub"); }
     public boolean enabled;
     public int targetSdkVersion;
     public int uid;

@@ -693,15 +693,24 @@ metadata reconciliation, returning retained factory/data candidates separately.
 The caller's mutated owner remains authoritative after earlier effects; the
 phase does not discard it on a later error. Initial and saved phases share their
 exact original input/callback construction. The expanded controlled-owner Binder
-scan test passes (7.31s): unchanged original framework APK, restored native settings,
+scan test passes (7.40s): unchanged original framework APK, restored native settings,
 retained registration UID and per-user enabled/installed/hidden values, fresh
 original domain owner output, unloaded-to-loaded transition, old-owner isolation
-and missing-domain/notification/denied-owner rejection. Ordinary units pass 441
-(3.24s); the expanded
-ignored test ran explicitly, the other ignored test remains not run; all
-integration targets compile and the host build passes (13.0s). These entry points
+and missing-domain/notification/denied-owner rejection. The expanded ignored test
+ran explicitly; the other ignored test remains not run. These entry points
 are not invoked by the default boot and do not complete data reconciliation,
-metadata owners, facades or service publication. Original PMS remains live; native
+metadata owners, facades or service publication. The early bridge now exposes
+AndroidTestBaseUpdater's original PlatformCompat change 133396946 through generated
+AIDL, rebuilding full ApplicationInfo from native parsed-package cache. Rust skips
+the query for a classpath containing test.base and for effective system ownership;
+other scans require the original decision. Owner errors and malformed replies
+remain errors. The original ART oracle compares bridge and original IPlatformCompat
+results for SDK 29/30 pre-registration non-system metadata (UID -1), validates
+untrusted-caller rejection and generated reply framing (30.70s). Ordinary units
+pass 441 (3.17s); all integration targets compile; AIDL/image/template builds pass
+(74.5s, then 51.0s for the final checked ApplicationInfo API). The data-loop callback
+still runs before effective ownership/manifest policy is established (#908), so
+this required query is not yet wired into data/factory orchestration. Original PMS remains live; native
 CTS/apps/template/APEX/rollback acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a

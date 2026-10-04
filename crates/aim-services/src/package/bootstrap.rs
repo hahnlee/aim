@@ -97,6 +97,45 @@ fn read_shared_uid_migration(
 }
 
 impl Bridge {
+    /// System packages and a boot classpath containing test.base require no
+    /// PlatformCompat query, as in android-16.0.0_r1 AndroidTestBaseUpdater.
+    pub fn remove_test_base(
+        &self,
+        package: &super::pkg::AndroidPackage,
+        is_system: bool,
+    ) -> Result<Option<bool>, OwnerError> {
+        if self.test_base_on_bcp || is_system {
+            return Ok(None);
+        }
+        self.test_base_change(package).map(Some)
+    }
+
+    pub fn test_base_change(
+        &self,
+        package: &super::pkg::AndroidPackage,
+    ) -> Result<bool, OwnerError> {
+        let cache = package
+            .to_cache_entry()
+            .map_err(|error| OwnerError::Code(format!("{error:?}")))?;
+        let mut data = Parcel::new();
+        bridge::IsTestBaseLibraryChangeEnabled {
+            package_cache: Some(cache.bytes),
+        }
+        .write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::IS_TEST_BASE_LIBRARY_CHANGE_ENABLED, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let enabled = bridge::read_is_test_base_library_change_enabled_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        Ok(enabled)
+    }
+
     pub fn shared_uid_migration(&self) -> Result<super::scan::SharedUidMigration, OwnerError> {
         let mut data = Parcel::new();
         bridge::IsSharedUidMigrationBestEffort {}.write(&mut data);

@@ -85,6 +85,8 @@ struct Owner {
     calls: Mutex<Vec<i32>>,
     reject: AtomicBool,
     bcp_reads: AtomicUsize,
+    bcp_present: bool,
+    test_base_reply: AtomicUsize,
     malformed_bcp: AtomicBool,
     malformed_seinfo: AtomicBool,
     legacy_reply: AtomicUsize,
@@ -111,12 +113,23 @@ impl Service for Owner {
         reply.write_no_exception();
         match call.code {
             bootstrap::IS_TEST_BASE_ON_BOOTCLASSPATH => {
-                reply.write_i32(1);
+                reply.write_bool(self.bcp_present);
                 if self.malformed_bcp.load(Ordering::SeqCst) {
                     reply.write_i32(99);
                 }
             }
             bootstrap::IS_SHARED_UID_MIGRATION_BEST_EFFORT => reply.write_bool(false),
+            bootstrap::IS_TEST_BASE_LIBRARY_CHANGE_ENABLED => {
+                let cache = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
+                let parsed = crate::package::pkg::AndroidPackage::read_cache_entry(&cache).unwrap();
+                let mode = self.test_base_reply.load(Ordering::SeqCst);
+                if mode != 2 {
+                    reply.write_bool(parsed.target_sdk_version > 29);
+                }
+                if mode == 1 {
+                    reply.write_i32(99);
+                }
+            }
             bootstrap::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
                 assert_eq!(
                     call.data.read_string16()?.as_deref(),
@@ -353,6 +366,8 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(attach(&first, None).is_err());
     let owner = Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
+        bcp_present: true,
+        test_base_reply: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
@@ -367,6 +382,8 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(attach(&foreign, None).is_err_and(|e| e.code == -1));
     let foreign_node = foreign.add_service(Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
+        bcp_present: true,
+        test_base_reply: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
@@ -490,6 +507,11 @@ fn exercise_bootstrap(run_scan: bool) {
     ));
     owner.apex_reply.store(0, Ordering::SeqCst);
     owner.reject.store(true, Ordering::SeqCst);
+    assert_eq!(old.remove_test_base(&parsed, false).unwrap(), None);
+    assert!(matches!(
+        old.test_base_change(&parsed),
+        Err(crate::package::bootstrap::OwnerError::Owner(_))
+    ));
     assert!(matches!(
         old.notify_apex_scan(&[]),
         Err(crate::package::bootstrap::OwnerError::Owner(_))
@@ -536,6 +558,16 @@ fn exercise_bootstrap(run_scan: bool) {
     }
     owner.users_reply.store(0, Ordering::SeqCst);
     assert_eq!(users.users.as_ref().unwrap().len(), 2);
+    assert_eq!(old.remove_test_base(&parsed, false).unwrap(), None);
+    parsed.target_sdk_version = 29;
+    assert!(!old.test_base_change(&parsed).unwrap());
+    parsed.target_sdk_version = 30;
+    assert!(old.test_base_change(&parsed).unwrap());
+    for mode in 1..=2 {
+        owner.test_base_reply.store(mode, Ordering::SeqCst);
+        assert!(old.test_base_change(&parsed).is_err());
+    }
+    owner.test_base_reply.store(0, Ordering::SeqCst);
     parsed.target_sdk_version = 29;
     assert_eq!(old.seinfo_target_sdk(&parsed).unwrap(), 30);
     assert_eq!(
@@ -599,6 +631,8 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
     let replacement = second.add_service(Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
+        bcp_present: false,
+        test_base_reply: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
@@ -612,6 +646,16 @@ fn exercise_bootstrap(run_scan: bool) {
     attach(&second, Some(replacement)).unwrap();
     let current = system.package_bootstrap().unwrap();
     assert!(!Arc::ptr_eq(&old, &current));
+    assert_eq!(current.remove_test_base(&parsed, true).unwrap(), None);
+    assert_eq!(
+        current.remove_test_base(&parsed, false).unwrap(),
+        Some(false)
+    );
+    parsed.target_sdk_version = 30;
+    assert_eq!(
+        current.remove_test_base(&parsed, false).unwrap(),
+        Some(true)
+    );
     assert_eq!(current.new_domain_id().unwrap(), [3004i32 as u8; 16]);
     driver.release(first.proc_handle());
     // Wait for the actual old endpoint death, then ensure it did not erase the new one.

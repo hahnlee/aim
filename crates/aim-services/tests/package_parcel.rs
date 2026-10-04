@@ -1362,6 +1362,16 @@ fn native_package_parcels_match_original_read_write() {
         domain_counter.set(value + 1);
         Ok([value; 16])
     };
+    let mut test_base_pkg = snapshot.owner().loaded_packages()["android"]
+        .package
+        .clone();
+    test_base_pkg.booleans &= !aim_services::package::pkg::booleans::SYSTEM;
+    test_base_pkg.uid = -1;
+    fs::write(
+        directory.join("test-base.cache"),
+        test_base_pkg.to_cache_entry().unwrap().bytes,
+    )
+    .unwrap();
     let policy_classpath = "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar";
     let policy_output = boot
         .client(1000)
@@ -1383,6 +1393,12 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(policy_output.stdout).unwrap(),
         format!("MIGRATION_POLICY {}\n", i32::from(best_effort))
     );
+    for sdk in [29, 30] {
+        let bytes = fs::read(directory.join(format!("test-base-{sdk}.original"))).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_test_base_library_change_enabled_reply(&mut reader).unwrap().unwrap();
+        assert_eq!(reader.remaining(), 0);
+    }
     let migration_policy = if best_effort {
         aim_services::package::scan::SharedUidMigration::BestEffort
     } else {
