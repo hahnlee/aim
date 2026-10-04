@@ -39,13 +39,13 @@ impl SignatureReader {
         let signatures: Vec<_> = current.into_iter().map(|(key, _)| key).collect();
         // SigningDetails.Builder derives public keys only after reading the
         // complete list. Invalid DER clears SigningDetails, not its read table.
-        *target = super::super::sign::saved_certificate_keys(&signatures)?.map(|keys| Signatures {
+        *target = build(Signatures {
             scheme_version: defaulted(start.int("schemeVersion"), 0),
             signatures,
-            current_flags: super::current_flags(flags.clone()),
-            public_keys: Some(keys.into_iter().map(Some).collect()),
+            current_flags: flags.clone(),
             past_signatures: past,
-        });
+            ..Signatures::default()
+        })?;
         Ok(Some(flags))
     }
 
@@ -108,4 +108,14 @@ fn skip(reader: &mut Reader<'_>) -> Result<(), String> {
             _ => {}
         }
     }
+}
+
+// Both frontends publish only after the original SigningDetails.Builder.
+pub(super) fn build(mut signing: Signatures) -> Result<Option<Signatures>, String> {
+    let Some(keys) = super::super::sign::saved_certificate_keys(&signing.signatures)? else {
+        return Ok(None);
+    };
+    signing.current_flags = super::current_flags(signing.current_flags);
+    signing.public_keys = Some(keys.into_iter().map(Some).collect());
+    Ok(Some(signing))
 }

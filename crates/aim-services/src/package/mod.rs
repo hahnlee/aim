@@ -441,7 +441,11 @@ mod tests {
             };
             fs::write(path, bytes).unwrap();
         };
-        write("system/packages.xml", PACKAGES, binary);
+        write(
+            "system/packages.xml",
+            std::str::from_utf8(&super::test_certificates::xml(PACKAGES.as_bytes())).unwrap(),
+            binary,
+        );
         write(
             "system/users/0/package-restrictions.xml",
             RESTRICTIONS,
@@ -531,16 +535,19 @@ mod tests {
         assert!(!app.uses_sdk_libraries[0].optional);
         // A certificate's key is written once, then named by its index.
         let sigs = app.signatures.as_ref().unwrap();
-        assert_eq!(sigs.signatures, [vec![0x30, 0x82, 0xbb]]);
+        assert_eq!(sigs.signatures, [super::test_certificates::certificate(1)]);
         assert_eq!(
             sigs.past_signatures,
             Some(vec![
-                (vec![0x30, 0x82, 0xcc], 23),
-                (vec![0x30, 0x82, 0xbb], 17)
+                (super::test_certificates::certificate(2), 23),
+                (super::test_certificates::certificate(1), 17)
             ])
         );
         let initiator = app.install_source.initiating_package_signatures.as_ref();
-        assert_eq!(initiator.unwrap().signatures, [vec![0x30, 0x82, 0xaa]]);
+        assert_eq!(
+            initiator.unwrap().signatures,
+            [super::test_certificates::certificate(0)]
+        );
         assert_eq!(s.shared_users[0].signatures, android.signatures);
         assert_eq!(
             app.key_set_data.defined_key_sets,
@@ -669,3 +676,7 @@ mod tests {
         fs::remove_dir_all(d).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/certificates.rs"]
+mod test_certificates;

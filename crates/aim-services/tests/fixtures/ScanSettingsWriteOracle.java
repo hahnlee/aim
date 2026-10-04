@@ -73,7 +73,20 @@ public final class ScanSettingsWriteOracle {
                 var details = setting.getSigningDetails(); var current = details.getSignatures();
                 var flags = new java.util.ArrayList<String>();
                 if (current != null) for (var certificate : current) flags.add(Integer.toString(certificate.getFlags()));
-                signatures.add(setting.getPackageName() + ":" + signatureTrace(details) + ":" + (current == null ? "null" : String.join(",", flags)));
+                String trace = setting.getPackageName() + ":" + signatureTrace(details) + ":" + (current == null ? "null" : String.join(",", flags)) + ":" + publicKeyTrace(details);
+                var source = setting.getInstallSource();
+                if (source.mInitiatingPackageName != null) {
+                    var initiator = source.mInitiatingPackageSignatures;
+                    var signing = initiator == null ? android.content.pm.SigningDetails.UNKNOWN : initiator.mSigningDetails;
+                    trace += ":initiator=" + signatureTrace(signing) + ":" + publicKeyTrace(signing);
+                }
+                signatures.add(trace);
+            }
+            for (var group : settings.getAllSharedUsersLPw()) {
+                var details = group.signatures.mSigningDetails; var current = details.getSignatures();
+                var flags = new java.util.ArrayList<String>();
+                if (current != null) for (var certificate : current) flags.add(Integer.toString(certificate.getFlags()));
+                signatures.add("shared:" + group.getName() + ":" + signatureTrace(details) + ":" + (current == null ? "null" : String.join(",", flags)) + ":" + publicKeyTrace(details));
             }
             java.util.Collections.sort(signatures); output.add(String.join(";", signatures));
             for (var list : java.util.List.of(settings.mPermissions.getPermissions(), settings.mPermissions.getPermissionTrees())) {
@@ -98,6 +111,17 @@ public final class ScanSettingsWriteOracle {
         info.name = "a"; info.packageName = "configured"; info.protectionLevel = 2;
         info.icon = 42; info.nonLocalizedLabel = "configured-label";
         return new com.android.server.pm.permission.LegacyPermission(info, 1, 1234, new int[] {1001, 1002});
+    }
+    private static String publicKeyTrace(android.content.pm.SigningDetails details) throws Exception {
+        var keys = details.getPublicKeys();
+        if (keys == null) return "null";
+        var result = new java.util.ArrayList<String>();
+        for (var key : keys) {
+            var bytes = new java.io.ByteArrayOutputStream();
+            try (var stream = new java.io.ObjectOutputStream(bytes)) { stream.writeObject(key); }
+            result.add(key.getClass().getName() + ":" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())));
+        }
+        return String.join(",", result);
     }
     private static String signatureTrace(android.content.pm.SigningDetails details) throws Exception {
         var current = details.getSignatures(); var past = details.getPastSigningCertificates();

@@ -1,3 +1,4 @@
+use super::super::test_certificates::{certificate, xml as certificate_xml};
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -318,8 +319,8 @@ fn package_list_commit_validates_owner_inventory_preserves_gid_order_and_detects
 fn removed_setting_persistence_preserves_signer_references_sources_and_other_user_xml() {
     let data = Data::new();
     let restriction = data.settings();
-    let input = b"<packages future='keep'><package name='store' codePath='/data/app/store' userId='10100'><sigs count='1' schemeVersion='3'><cert index='0' key='0102'/></sigs></package><package name='app' codePath='/data/app/app' userId='10101' installer='store' installerUid='10100' installInitiator='store' installOriginator='store' updateOwner='store' installerAttributionTag='tag'><sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='0' flags='7'/></pastSigs></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/></install-initiator-sigs><future-package/></package><updated-package name='app' codePath='/system/app/app' userId='10101' installer='store'/><future-owner/></packages>";
-    fs::write(data.0.join("system/packages.xml"), input).unwrap();
+    let input = certificate_xml(b"<packages future='keep'><package name='store' codePath='/data/app/store' userId='10100'><sigs count='1' schemeVersion='3'><cert index='0' key='0102'/></sigs></package><package name='app' codePath='/data/app/app' userId='10101' installer='store' installerUid='10100' installInitiator='store' installOriginator='store' updateOwner='store' installerAttributionTag='tag'><sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='0' flags='7'/></pastSigs></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/></install-initiator-sigs><future-package/></package><updated-package name='app' codePath='/system/app/app' userId='10101' installer='store'/><future-owner/></packages>");
+    fs::write(data.0.join("system/packages.xml"), &input).unwrap();
     let user_xml = b"<package-restrictions future='keep'><pkg name='store' stopped='true'/><pkg name='app' enabled='2'><future-package/></pkg><preferred-activities><future-list/></preferred-activities><future-root/></package-restrictions>";
     fs::write(&restriction, user_xml).unwrap();
     let other = data.0.join("system/users/10/package-restrictions.xml");
@@ -1049,22 +1050,27 @@ fn signature_commit_reindexes_certificates_and_retains_unrelated_documents() {
     let restrictions = data.settings();
     fs::write(&restrictions, RESTRICTIONS).unwrap();
     let path = data.0.join("system/packages.xml");
-    fs::write(&path, b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' custom='keep'><keep value='nested'/><sigs count='1' schemeVersion='3'><cert index='7' key='aa'/></sigs></package><shared-user name='group' userId='1000'><sigs count='1' schemeVersion='3'><cert index='7'/></sigs></shared-user><unknown attr='retain'/></packages>").unwrap();
+    fs::write(&path, certificate_xml(b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' custom='keep'><keep value='nested'/><sigs count='1' schemeVersion='3'><cert index='7' key='aa'/></sigs></package><shared-user name='group' userId='1000'><sigs count='1' schemeVersion='3'><cert index='7'/></sigs></shared-user><unknown attr='retain'/></packages>")).unwrap();
     let old_root = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
     let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     let mut desired = store.state.settings.clone();
     desired.packages[0].signatures = Some(super::super::settings::Signatures {
         scheme_version: 3,
-        signatures: vec![vec![0xaa], vec![0xbb]],
-        past_signatures: Some(vec![(vec![0xcc], 3), (vec![0xaa], 1), (vec![0xbb], 0)]),
+        signatures: vec![certificate(0), certificate(1)],
+        past_signatures: Some(vec![
+            (certificate(2), 3),
+            (certificate(0), 1),
+            (certificate(1), 0),
+        ]),
         ..Default::default()
     });
     desired.shared_users[0].signatures = Some(super::super::settings::Signatures {
         scheme_version: 3,
-        signatures: vec![vec![0xbb]],
-        past_signatures: Some(vec![(vec![0xcc], 3), (vec![0xbb], 0)]),
+        signatures: vec![certificate(1)],
+        past_signatures: Some(vec![(certificate(2), 3), (certificate(1), 0)]),
         ..Default::default()
     });
+    derive_public_keys(&mut desired);
     store.commit_signatures(&desired).unwrap();
     assert_eq!(store.state.settings, desired);
     assert_eq!(store.state(), &State::read(&data.0, &[0]).unwrap().unwrap());
@@ -1132,8 +1138,8 @@ fn shared_uid_persistence_preserves_ids_metadata_and_rebuilds_removed_certificat
     let restrictions = data.settings();
     fs::write(&restrictions, RESTRICTIONS).unwrap();
     let path = data.0.join("system/packages.xml");
-    fs::write(&path, SHARED_MIGRATION).unwrap();
-    let original = aim_android_xml::read(SHARED_MIGRATION).unwrap();
+    fs::write(&path, certificate_xml(SHARED_MIGRATION)).unwrap();
+    let original = aim_android_xml::read(&certificate_xml(SHARED_MIGRATION)).unwrap();
     let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     let mut desired = store.state.settings.clone();
     desired.packages[0].shared_user = false;
@@ -1180,7 +1186,7 @@ fn shared_uid_persistence_preserves_ids_metadata_and_rebuilds_removed_certificat
         .children()
         .next()
         .unwrap();
-    assert_eq!(cert.bytes_hex("key").unwrap(), Some(vec![0xaa]));
+    assert_eq!(cert.bytes_hex("key").unwrap(), Some(certificate(0)));
     assert_eq!(cert.int("index").unwrap(), Some(0));
     assert_eq!(guest_inode::read(&path).unwrap().unwrap().uid, Some(1000));
 }
@@ -1190,7 +1196,7 @@ fn shared_uid_persistence_rejects_partial_migration_remapping_and_cleared_signer
     let data = Data::new();
     data.settings();
     let path = data.0.join("system/packages.xml");
-    fs::write(&path, SHARED_MIGRATION).unwrap();
+    fs::write(&path, certificate_xml(SHARED_MIGRATION)).unwrap();
     let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     let before = store.state.clone();
     let mut valid = before.settings.clone();
@@ -1224,7 +1230,7 @@ fn shared_uid_persistence_rejects_partial_migration_remapping_and_cleared_signer
                 .committed
         );
         assert_eq!(store.state(), &before);
-        assert_eq!(fs::read(&path).unwrap(), SHARED_MIGRATION);
+        assert_eq!(fs::read(&path).unwrap(), certificate_xml(SHARED_MIGRATION));
         assert!(!sibling(&path, ".reservecopy").exists());
     }
     let mut multiple = before.settings.clone();
@@ -1252,7 +1258,7 @@ fn shared_uid_writer_rejects_multi_member_and_empty_group_deletion() {
         let data = Data::new();
         data.settings();
         let path = data.0.join("system/packages.xml");
-        let document = String::from_utf8(SHARED_MIGRATION.to_vec())
+        let document = String::from_utf8(certificate_xml(SHARED_MIGRATION))
             .unwrap()
             .replace("</packages>", &format!("{added}</packages>"));
         fs::write(&path, &document).unwrap();
@@ -1328,10 +1334,11 @@ fn initiating_signatures_share_the_reindexed_package_and_group_table() {
     let data = Data::new();
     data.settings();
     let path = data.0.join("system/packages.xml");
-    fs::write(&path, b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' installInitiator='installer'><sigs count='1' schemeVersion='3'><cert index='0' key='aa'/></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='1' key='bb' flags='7'/></pastSigs></install-initiator-sigs></package><shared-user name='group' userId='1000'><sigs count='1' schemeVersion='3'><cert index='1'/></sigs></shared-user></packages>").unwrap();
+    fs::write(&path, certificate_xml(b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' installInitiator='installer'><sigs count='1' schemeVersion='3'><cert index='0' key='aa'/></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='1' key='bb' flags='7'/></pastSigs></install-initiator-sigs></package><shared-user name='group' userId='1000'><sigs count='1' schemeVersion='3'><cert index='1'/></sigs></shared-user></packages>")).unwrap();
     let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
     let mut desired = store.state.settings.clone();
-    desired.packages[0].signatures.as_mut().unwrap().signatures = vec![vec![0xcc]];
+    desired.packages[0].signatures.as_mut().unwrap().signatures = vec![certificate(2)];
+    derive_public_keys(&mut desired);
     store.commit_signatures(&desired).unwrap();
     assert_eq!(store.state.settings, desired);
     assert_eq!(
@@ -1355,7 +1362,7 @@ fn initiating_signatures_share_the_reindexed_package_and_group_table() {
             .unwrap()
             .bytes_hex("key")
             .unwrap(),
-        Some(vec![0xaa])
+        Some(certificate(0))
     );
     let group = root.children().find(|e| e.name == "shared-user").unwrap();
     assert_eq!(
@@ -2002,4 +2009,27 @@ fn recovery_claim_survives_an_actual_first_write_process_exit() {
         .unwrap();
     assert!(Store::open(&data.0, &[0]).unwrap().is_some());
     assert!(store.first_write_files.is_empty());
+}
+
+fn derive_public_keys(settings: &mut crate::package::settings::Settings) {
+    for signing in settings
+        .packages
+        .iter_mut()
+        .filter_map(|p| p.signatures.as_mut())
+        .chain(
+            settings
+                .shared_users
+                .iter_mut()
+                .filter_map(|g| g.signatures.as_mut()),
+        )
+    {
+        signing.public_keys = Some(
+            super::super::sign::saved_certificate_keys(&signing.signatures)
+                .unwrap()
+                .unwrap()
+                .into_iter()
+                .map(Some)
+                .collect(),
+        );
+    }
 }

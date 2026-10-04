@@ -841,27 +841,60 @@ fn allocation_matches_the_original_runtime() {
             .collect::<Vec<_>>()
             .join(",")
     };
+    let public_keys = |s: &Signatures| {
+        use sha2::{Digest, Sha256};
+        s.public_keys
+            .as_ref()
+            .map(|keys| {
+                keys.iter()
+                    .map(|key| {
+                        let key = key.as_ref().unwrap();
+                        let hash: String = Sha256::digest(&key.bytes)
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect();
+                        format!("{}:{hash}", key.class)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "null".into())
+    };
     let mut expected = Vec::new();
     for p in &persisted.settings.packages {
         if let Some(s) = &p.signatures {
-            expected.push(format!("package:{}:sigs:{}", p.name, flags(s)));
+            expected.push(format!(
+                "package:{}:sigs:{}:{}",
+                p.name,
+                flags(s),
+                public_keys(s)
+            ));
         }
         if let Some(s) = &p.install_source.initiating_package_signatures {
             expected.push(format!(
-                "package:{}:install-initiator-sigs:{}",
+                "package:{}:install-initiator-sigs:{}:{}",
                 p.name,
-                flags(s)
+                flags(s),
+                public_keys(s)
             ));
         }
     }
     for g in &persisted.settings.shared_users {
         if let Some(s) = &g.signatures {
-            expected.push(format!("shared-user:{}:sigs:{}", g.name, flags(s)));
+            expected.push(format!(
+                "shared-user:{}:sigs:{}:{}",
+                g.name,
+                flags(s),
+                public_keys(s)
+            ));
         }
     }
     actual.sort();
     expected.sort();
-    assert_eq!(actual, expected, "original XML restored current flags");
+    assert_eq!(
+        actual, expected,
+        "original XML restored current flags and public keys"
+    );
     let mut restored = persisted.settings.clone();
     for package in &mut desired.packages {
         if let Some(signatures) = &mut package.signatures {
@@ -878,11 +911,13 @@ fn allocation_matches_the_original_runtime() {
     for p in &mut restored.packages {
         if let Some(s) = &mut p.signatures {
             s.current_flags.clear();
+            s.public_keys = None;
         }
     }
     for g in &mut restored.shared_users {
         if let Some(s) = &mut g.signatures {
             s.current_flags.clear();
+            s.public_keys = None;
         }
     }
     assert_eq!(restored, desired);

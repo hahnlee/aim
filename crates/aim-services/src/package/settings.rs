@@ -821,12 +821,12 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
         }
         match child.name.as_str() {
             "sigs" => {
-                if let Some(signatures) = signatures(child, certificates)? {
-                    p.signatures = Some(signatures);
-                }
+                signatures(child, certificates, &mut p.signatures)?;
             }
             "install-initiator-sigs" => {
-                p.install_source.initiating_package_signatures = signatures(child, certificates)?
+                let mut target = None;
+                signatures(child, certificates, &mut target)?;
+                p.install_source.initiating_package_signatures = target;
             }
             "mime-group" => {
                 if let Some(group) = string(child, "name") {
@@ -915,20 +915,21 @@ fn shared_user(e: &Element, certificates: &mut Certificates) -> Result<Option<Sh
         signatures: None,
     };
     for sigs in children(e, "sigs") {
-        if let Some(signatures) = signatures(sigs, certificates)? {
-            u.signatures = Some(signatures);
-        }
+        signatures(sigs, certificates, &mut u.signatures)?;
     }
     Ok(Some(u))
 }
 
-/// `PackageSignatures.readXml`: `None` without a count, as the original
-/// skips such an element. A certificate whose key is missing or bad is
-/// left out, as the original leaves it out.
-fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Signatures>, String> {
+/// `PackageSignatures.readXml`: a missing count preserves the target;
+/// invalid completed signing data clears it after certificate-table effects.
+fn signatures(
+    e: &Element,
+    certificates: &mut Certificates,
+    target: &mut Option<Signatures>,
+) -> Result<(), String> {
     let count = defaulted(e.int("count"), -1);
     if count == -1 {
-        return Ok(None);
+        return Ok(());
     }
     let mut s = Signatures {
         scheme_version: defaulted(e.int("schemeVersion"), SCHEME_UNKNOWN),
@@ -969,8 +970,8 @@ fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Sig
             _ => {}
         }
     }
-    s.current_flags = current_flags(s.current_flags);
-    Ok(Some(s))
+    *target = signatures::build(s)?;
+    Ok(())
 }
 
 /// A `<cert>`'s key: its own, which takes its index in the document's

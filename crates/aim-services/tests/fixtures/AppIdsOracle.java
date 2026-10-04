@@ -1,6 +1,11 @@
 package com.android.server.pm;
 
 public final class AppIdsOracle {
+    private static String hex(byte[] bytes) {
+        var result = new StringBuilder();
+        for (byte value : bytes) result.append(String.format("%02x", value & 255));
+        return result.toString();
+    }
     public static void main(String[] args) throws Exception {
         if (args.length != 0 && args[0].equals("read-store-signatures")) {
             var table = new java.util.ArrayList<android.content.pm.Signature>();
@@ -19,7 +24,14 @@ public final class AppIdsOracle {
                             var current = signing.mSigningDetails.getSignatures();
                             var flags = new java.util.ArrayList<String>();
                             if (current != null) for (var cert : current) flags.add(Integer.toString(cert.getFlags()));
-                            System.out.println(owner + ":" + name + ":" + tag + ":" + (current == null ? "null" : String.join(",", flags)));
+                            var keys = new java.util.ArrayList<String>();
+                            var publicKeys = signing.mSigningDetails.getPublicKeys();
+                            if (publicKeys != null) for (var key : publicKeys) {
+                                var bytes = new java.io.ByteArrayOutputStream();
+                                try (var stream = new java.io.ObjectOutputStream(bytes)) { stream.writeObject(key); }
+                                keys.add(key.getClass().getName() + ":" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())));
+                            }
+                            System.out.println(owner + ":" + name + ":" + tag + ":" + (current == null ? "null" : String.join(",", flags)) + ":" + (publicKeys == null ? "null" : String.join(",", keys)));
                         } else {
                             int skipped = parser.getDepth();
                             while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > skipped)) {}

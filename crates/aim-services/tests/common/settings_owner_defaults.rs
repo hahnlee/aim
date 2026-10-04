@@ -37,6 +37,29 @@ pub fn inputs(cert: &[u8]) -> Vec<Vec<u8>> {
         ));
     }
     documents.push(format!("<packages><package {header}><sigs count='1' schemeVersion='3'><cert index='0' key='{cert}'/><pastSigs count='1'><cert index='0' key='{cert}' flags='7'/></pastSigs></sigs></package><package name='q' codePath='/system/q' userId='10002' domainSetId='00000000-0000-0000-0000-000000000002'><sigs count='1' schemeVersion='3'><cert index='1'/></sigs></package></packages>"));
+    for body in [
+        format!(
+            "<sigs count='1' schemeVersion='3'><cert index='0' key='{cert}'/></sigs><sigs count='1'><cert index='1' key='AA'/></sigs>"
+        ),
+        format!(
+            "<sigs count='1' schemeVersion='3'><cert index='0' key='{cert}'/></sigs><sigs count='1'><cert index='1' key='AA'/><pastSigs count='1'><cert index='2' key='{cert}' flags='9'/></pastSigs></sigs>"
+        ),
+        format!(
+            "<sigs count='2' schemeVersion='3'><cert index='0' key='{cert}'/><cert index='1' key='AA'/></sigs>"
+        ),
+        format!(
+            "<sigs count='1' schemeVersion='3'><cert index='0' key='{cert}'/><pastSigs count='1'><cert index='1' key='AA' flags='7'/></pastSigs></sigs>"
+        ),
+    ] {
+        documents.push(format!("<packages><package {header}>{body}</package><package name='q' codePath='/system/q' userId='10002' domainSetId='00000000-0000-0000-0000-000000000002'><sigs count='1' schemeVersion='3'><cert index='2'/></sigs></package></packages>"));
+        documents.push(format!(
+            "<packages><shared-user name='g' userId='10003'>{body}</shared-user></packages>"
+        ));
+        documents.push(format!(
+            "<packages><package {header} installInitiator='installer'>{}</package></packages>",
+            body.replace("sigs", "install-initiator-sigs")
+        ));
+    }
     for tag in ["permissions", "permission-trees"] {
         for attrs in ["protection='bad' icon='9'", "protection='2' icon='bad'"] {
             documents.push(format!("<packages><{tag}><item name='perm' package='p' type='dynamic' label='label' {attrs}/></{tag}></packages>"));
@@ -176,9 +199,40 @@ pub fn trace(settings: &Settings, first: bool, main: bool, reserve: bool) -> Str
                         .join(",")
                 })
                 .unwrap_or_else(|| "null".into());
-            format!("{}:{}:{flags}", p.name, signature(p.signatures.as_ref()))
+            let mut trace = format!(
+                "{}:{}:{flags}:{}",
+                p.name,
+                signature(p.signatures.as_ref()),
+                public_keys(p.signatures.as_ref())
+            );
+            if p.install_source.initiating_package.is_some() {
+                let initiator = p.install_source.initiating_package_signatures.as_ref();
+                trace.push_str(&format!(
+                    ":initiator={}:{}",
+                    signature(initiator),
+                    public_keys(initiator)
+                ));
+            }
+            trace
         })
         .collect();
+    for group in &settings.shared_users {
+        let signing = group.signatures.as_ref();
+        let flags = signing
+            .map(|s| {
+                (0..s.signatures.len())
+                    .map(|i| s.current_flags.get(i).copied().unwrap_or(0).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "null".into());
+        packages.push(format!(
+            "shared:{}:{}:{flags}:{}",
+            group.name,
+            signature(signing),
+            public_keys(signing)
+        ));
+    }
     packages.sort();
     let permissions = |entries: &[aim_services::package::settings::Permission]| {
         let mut entries: Vec<_> = entries
@@ -238,4 +292,19 @@ pub fn signature(s: Option<&Signatures>) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn public_keys(signing: Option<&Signatures>) -> String {
+    signing
+        .and_then(|s| s.public_keys.as_ref())
+        .map(|keys| {
+            keys.iter()
+                .map(|key| {
+                    let key = key.as_ref().unwrap();
+                    format!("{}:{}", key.class, hex(&Sha256::digest(&key.bytes)))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "null".into())
 }
