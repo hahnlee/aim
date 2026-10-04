@@ -154,14 +154,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .bytes
         .push(0);
     let declared =
-        SystemImageScan::first_boot(declared, &apks, &config, inputs(&domain_ids)).unwrap();
+        SystemImageScan::first_boot(|| Ok(declared), &apks, &config, inputs(&domain_ids)).unwrap();
     let keydata = &declared.packages[1].candidate.record.settings.key_set_data;
     assert_eq!(
         keydata.defined_key_sets,
         [(Some("next".into()), keydata.proper_signing_key_set)]
     );
     assert_eq!(keydata.upgrade_key_sets, [keydata.proper_signing_key_set]);
-    let failure = SystemImageScan::first_boot(corrupt, &apks, &config, inputs(&domain_ids))
+    let failure = SystemImageScan::first_boot(|| Ok(corrupt), &apks, &config, inputs(&domain_ids))
         .err()
         .unwrap();
     let SigningError::Fatal(failure) = failure else {
@@ -174,7 +174,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .iter()
         .map(|code| apks.scan_file_time(&code.parsed).unwrap())
         .collect();
-    let mut scan = SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)).unwrap();
+    let mut scan =
+        SystemImageScan::first_boot(|| Ok(image), &apks, &config, inputs(&domain_ids)).unwrap();
     assert!(scan.rejected.is_empty());
     scan.owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
     for group in scan.owner.identities.shared_users.values() {
@@ -480,7 +481,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 active_changed: !factory,
             };
             let registered = SystemImageScan::first_boot(
-                Image::load(&apks, &[apex.clone()]).unwrap(),
+                || Image::load(&apks, &[apex.clone()]),
                 &apks,
                 &config,
                 inputs(&domain_ids),
@@ -504,9 +505,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             if factory && module.is_some() {
                 let mut static_image = Image::load(&apks, &[apex.clone()]).unwrap();
                 static_model(&mut static_image);
-                let static_scan =
-                    SystemImageScan::first_boot(static_image, &apks, &config, inputs(&domain_ids))
-                        .unwrap();
+                let static_scan = SystemImageScan::first_boot(
+                    || Ok(static_image),
+                    &apks,
+                    &config,
+                    inputs(&domain_ids),
+                )
+                .unwrap();
                 let record = &static_scan.packages[1].candidate.record;
                 assert_eq!(record.settings.name, "com.google.android.gsf");
                 assert_eq!(record.identity.internal_name, record.settings.name);
@@ -605,7 +610,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let mut ordinary_static = Image::load(&apks, &[]).unwrap();
     static_model(&mut ordinary_static);
     let ordinary_static =
-        SystemImageScan::first_boot(ordinary_static, &apks, &config, inputs(&domain_ids)).unwrap();
+        SystemImageScan::first_boot(|| Ok(ordinary_static), &apks, &config, inputs(&domain_ids))
+            .unwrap();
     assert_eq!(
         ordinary_static.packages[1].candidate.record.settings.name,
         "com.google.android.gsf_4294967303"
@@ -2029,9 +2035,19 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let parsed_apex = &verified_apex.packages[0].parsed;
     let mut with_apex = inputs(&domain_ids);
     with_apex.apex_image = &verified_apex;
-    let scan =
-        SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config, with_apex)
-            .unwrap();
+    let image_reads = std::cell::Cell::new(0);
+    let scan = SystemImageScan::first_boot(
+        || {
+            assert_eq!(notified_apex.get(), 1);
+            image_reads.set(image_reads.get() + 1);
+            Image::load(&apks, &[])
+        },
+        &apks,
+        &config,
+        with_apex,
+    )
+    .unwrap();
+    assert_eq!(image_reads.get(), 1);
     assert_eq!(scan.packages[1].candidate.record.settings.app_id, 10000);
     let registered = &scan.owner.settings.packages[0];
     assert_eq!(registered.name, parsed_apex.package_name);
@@ -2063,11 +2079,29 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     rejected_notification.apex_image = &verified_apex;
     rejected_notification.notify_apex_scan = &reject_notification;
     let domains_before = next_id.load(Ordering::SeqCst);
-    assert!(
-        matches!(SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config,
-        rejected_notification), Err(SigningError::Rejected(ref error)) if error.phase == "apex-notification")
-    );
+    image_reads.set(0);
+    assert!(matches!(SystemImageScan::first_boot(|| {
+            image_reads.set(image_reads.get() + 1);
+            Image::load(&apks, &[])
+        }, &apks, &config,
+        rejected_notification), Err(SigningError::Rejected(ref error)) if error.phase == "apex-notification"));
+    assert_eq!(image_reads.get(), 0);
     // One domain belongs to the completed container; no APK admission followed.
+    assert_eq!(next_id.load(Ordering::SeqCst), domains_before + 1);
+
+    let domains_before = next_id.load(Ordering::SeqCst);
+    notified_apex.set(0);
+    let mut failed_image = inputs(&domain_ids);
+    failed_image.apex_image = &verified_apex;
+    assert!(matches!(SystemImageScan::first_boot(|| {
+        assert_eq!(notified_apex.get(), 1);
+        Err(aim_services::package::scan::Error {
+            package: String::new(), path: "/system/framework".into(),
+            phase: "directory", message: "APK image read failed".into(),
+        })
+    }, &apks, &config, failed_image), Err(SigningError::Rejected(ref error))
+        if error.phase == "directory" && error.path == "/system/framework"
+            && error.message == "APK image read failed"));
     assert_eq!(next_id.load(Ordering::SeqCst), domains_before + 1);
 
     let mut early = Image::load(&apks, &[]).unwrap();
@@ -2076,7 +2110,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     overlay.parsed.shared_user_id = Some("android.uid.system".into());
     early.packages.insert(0, overlay);
     assert!(
-        matches!(SystemImageScan::first_boot(early, &apks, &config, inputs(&domain_ids)), Err(SigningError::Rejected(ref error)) if error.phase == "policy" && error.message.contains("scanned platform"))
+        matches!(SystemImageScan::first_boot(|| Ok(early), &apks, &config, inputs(&domain_ids)), Err(SigningError::Rejected(ref error)) if error.phase == "policy" && error.message.contains("scanned platform"))
     );
     assert!(
         apks.platform
@@ -2086,14 +2120,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
 
     let fail_domain = || Err("domain owner failure".into());
     assert!(
-        matches!(SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config, inputs(&fail_domain)), Err(SigningError::Rejected(ref error)) if error.phase == "domain")
+        matches!(SystemImageScan::first_boot(|| Image::load(&apks, &[]), &apks, &config, inputs(&fail_domain)), Err(SigningError::Rejected(ref error)) if error.phase == "domain")
     );
     let mut image = Image::load(&apks, &[]).unwrap();
     image
         .packages
         .retain(|code| code.parsed.package_name != "android");
     assert!(
-        matches!(SystemImageScan::first_boot(image, &apks, &config, inputs(&domain_ids)), Err(SigningError::Rejected(ref error)) if error.phase == "framework")
+        matches!(SystemImageScan::first_boot(|| Ok(image), &apks, &config, inputs(&domain_ids)), Err(SigningError::Rejected(ref error)) if error.phase == "framework")
     );
     assert_eq!(std::fs::read_dir(&framework).unwrap().count(), 1);
     assert_eq!(std::fs::read_dir(&app).unwrap().count(), 1);

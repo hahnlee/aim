@@ -711,7 +711,7 @@ fn saved_scan_libraries_match_original_pms() {
     );
     let system_count = system_image.packages.len();
     let first_system = SystemImageScan::first_boot(
-        system_image,
+        || Ok(system_image),
         &apks,
         &config,
         FirstBootSystemInputs {

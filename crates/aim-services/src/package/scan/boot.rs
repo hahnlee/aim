@@ -81,11 +81,10 @@ pub struct SystemImageScan {
 }
 
 impl SystemImageScan {
-    /// Consume the image's physical directory order without persisted package
-    /// order or a parser feed. A failed owner/policy gate returns an error,
-    /// rather than admitting an incomplete package or publishing partial state.
+    /// Read APK directories only after APEX registration and original notification.
+    /// The loader preserves physical directory order without a parser feed.
     pub fn first_boot(
-        image: Image,
+        load_image: impl FnOnce() -> Result<Image, Error>,
         apks: &Apks,
         config: &SystemConfig,
         inputs: FirstBootSystemInputs<'_>,
@@ -110,6 +109,7 @@ impl SystemImageScan {
         let apex = owner.scan_initial_apex(apks, config, &inputs)?;
         (inputs.notify_apex_scan)(&apex)
             .map_err(|message| fail(String::new(), String::new(), "apex-notification", message))?;
+        let image = load_image().map_err(SigningError::Rejected)?;
         let batch = scan_system_image(&mut owner, image, apks, config, inputs, None)?;
         Ok(Self {
             owner,

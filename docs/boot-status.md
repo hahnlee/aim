@@ -523,16 +523,19 @@ retained containers preserve their user owners. The APEX ABI branch leaves paylo
 libraries to apexd, and APEX keysets never enter the persistent pool. Completed
 page/code/application/seInfo metadata enters loaded ownership, and inactive
 factories invoke the actual disable transition. Original typed notification
-records are retained separately from APK results. First boot requires the caller's
-notification to succeed before APK registration; rejection aborts the phase.
-The full original ART package oracle passes: all 42 original archives
+records are retained separately from APK results. First boot invokes its deferred APK image loader only after the caller's
+notification succeeds (#892); rejection prevents all APK directory reads as well
+as registration. Loader errors retain their original phase/path/message and
+abort without returning a scan result.
+The full original ART package oracle passes (29.50s): all 42 original archives
 parse, verify and complete native registration without APK UID allocation, with
 loaded code, signatures and assigned seInfo. Controlled inactive-factory and
 updated-container views use unchanged original archive bytes in disposable paths,
 preserve disabled code and UID-free active ownership, and verify that a later
 domain rejection preserves only the original disabled-module refresh. The initial
-scan gate passes (67.72s), including actual container registration, first APK UID
-10000 and notification rejection before any APK domain admission. Compatibility,
+scan gate passes (65.53s), including actual container registration, first APK UID
+10000, exactly one deferred image read after notification, no image read after
+notification rejection, and loader failure before any APK domain admission. Compatibility,
 user/domain and notification owners in these native phase fixtures are controlled;
 these results do not prove live original callbacks or complete facade publication.
 Declared APEX shared UID and original/renamed identity transitions reject explicitly
@@ -544,11 +547,13 @@ original ART oracle uses a fresh original ApexManager implementation and verifie
 module and active-package mappings for all 42 results; it does not notify the
 running original PMS singleton. Missing counts, unaligned and trailing payloads
 reject. Complete daemon ordering remains #885/#836/#798; the running daemon still
-does not invoke native initialization. All 434 units pass (3.19s; one ignored/not
+does not invoke native initialization. All 434 units pass (3.16s; one ignored/not
 run), including generated Binder notification and reply/error handling. Actual original ART also continues to verify the user/APEX
 inventory exporters, static-library identity, complete package parcels and signer
 lineage. The full image/template build, including the original-image API reference check,
-passes for the added typed notification boundary.
+passes for the typed notification boundary. All integration targets compile after
+the deferred-loader API change, and its full build passes (16.9s; three rebuilt,
+39 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
@@ -1277,7 +1282,8 @@ native scan ownership: shared-UID privilege and manifest/library policy,
 constructor library/MIME/domain inputs, UID/signing reconciliation, bundled ABI,
 page policy, actual code time and final application flags. Native APEX registration
 now supplies its Settings and loaded code from verified original containers (#888);
-its notification owner must succeed before APK admission. Containers retain
+its notification owner must succeed before invoking the deferred APK directory
+loader (#892). Containers retain
 INVALID_UID and reserve no APK slots. The
 original platform is available to policy only after its scan completes. Required
 framework booleans resolve through the image's static overlays and reject missing

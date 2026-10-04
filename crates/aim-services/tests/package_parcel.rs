@@ -1954,7 +1954,7 @@ fn native_scan_objects(
         .collect();
     let policy = aim_services::package::owner::seinfo::Policy::load(&original).unwrap();
     let scan = SystemImageScan::first_boot(
-        image,
+        || Ok(image),
         &apks,
         &config,
         FirstBootSystemInputs {
