@@ -24,4 +24,6 @@ interface IPackageScanSnapshot {
     /** Finalized active dependency owner; missing/unresolved inputs are errors. */
     int getLibraryStateLength(String packageName);
     byte[] getLibraryStateChunk(String packageName, int offset, int length);
+    /** Runtime setting flags and APEX ownership, never inferred from saved flags. */
+    byte[] getTransientState(String packageName, boolean disabled);
 }

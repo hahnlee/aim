@@ -246,6 +246,7 @@ impl SigningScan {
         p.target_sdk_version = factory.target_sdk_version;
         p.restrict_update_hash = factory.restrict_update_hash;
         p.scanned_as_stopped_system_app = factory.scanned_as_stopped_system_app;
+        p.transient.updated_system_app = false;
         p.install_source = factory.install_source;
         Some(p.clone())
     }
@@ -428,7 +429,7 @@ impl SigningScan {
             .position(|p| p.name == identity.internal_name)
             .ok_or_else(|| reject("setting", "disabled factory setting is missing".into()))?;
         let saved = &self.settings.disabled_system_packages[at];
-        let updated = saved.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP != 0;
+        let updated = saved.transient.updated_system_app;
         if !inputs.context.system
             || inputs.context.updated != updated
             || inputs.destination.is_some()

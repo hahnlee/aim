@@ -717,8 +717,36 @@ Units pass 392 (3.14s; one ignored/not run), all integration targets compile,
 original Java linkage passes (4.02s), device-services builds (16.6s), and the
 actual first-system image scan checks every accepted setting's enriched bit
 (42.90s). Live original-state export/import wiring remains #861/#836.
-Factory transient/dependency assembly and remaining transient scalar owners remain
-#836; live query/write shadow differences remain #865-#868.
+The runtime flags owned by original PackageStateUnserialized now have a native
+setting owner: hidden-until-installed, updated-system-app, APK-in-updated-APEX
+and nullable APEX module name. Fresh settings use the original constructor's
+false/null state, copies retain current values, and XML reads reconstruct fresh
+owners; saved ApplicationInfo flags do not stand in for these fields. Complete
+active/factory imports validate the inventory before any mutation. Scan completion
+retains the current update bit for ABI/application metadata; factory enabling and
+ex-system data rescanning explicitly clear it at the original owning stage.
+Disabled-factory scans read the runtime owner rather than a saved flags bit.
+A generated captured-snapshot method transports version/name/UID/factory and these
+fields. Java leases retain immutable inputs and reject identity/scope/trailing,
+invalid boolean, truncated and unaligned data. Original Parcel rounds unmarshalled
+storage to words, so byte alignment is checked before unmarshalling. Native Binder
+checks old-capture retention, absent names/factories, null/trailing requests and
+closed leases. newScannedSetting restores the captured fields through original
+PackageStateUnserialized setters after joining the existing code/signing/user/
+usage/seInfo/library owners. Original ART checks 48 active/factory combinations
+per package (all booleans and null/empty/populated APEX names), original getters,
+exact bytes, original copy isolation, rejected UID/version/scope mutations,
+malformed transport and detached combined settings with populated runtime fields.
+The actual first-system image scan passes (42.08s), including retaining an update
+and clearing it when its factory disappears. The full original package ART oracle
+passes (18.99s), and original Java oracle linkage passes (3.91s). All 402 units
+pass (3.56s; one ignored/not run), all integration targets compile (5.97s), and
+the full boot build passes (66.0s; nine rebuilt nodes), including the original-PMS
+userdata template. No owned runtime processes or disposable data mounts remain;
+the reusable derived system image stays mounted read-only.
+Factory transient/dependency assembly, live APEX/hidden-state delivery and full
+PackageState facade publication remain #836; live query/write shadow differences
+remain #865-#868.
 Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native

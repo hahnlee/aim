@@ -226,6 +226,74 @@ mod tests {
     }
 
     #[test]
+    fn transient_owners_are_separate_from_flags_factories_and_later_versions() {
+        use aim_service_aidl::WriteParcelable;
+        use endpoint::PackageTransientState;
+        let mut owner = owner();
+        let mut factory = owner.settings.packages[0].clone();
+        factory.flags = 128;
+        owner.settings.disabled_system_packages.push(factory);
+        owner.settings.packages[0].transient = super::super::owner::transient::State {
+            hidden_until_installed: true,
+            updated_system_app: true,
+            apk_in_updated_apex: true,
+            apex_module_name: Some("module".into()),
+        };
+        let prior = owner.clone();
+        assert!(owner.capture_transient_states(Default::default()).is_err());
+        assert_eq!(owner, prior);
+        let active = owner.settings.packages[0].transient.clone();
+        let mut inputs = std::collections::BTreeMap::from([
+            (("fixture".into(), false), active.clone()),
+            (("foreign".into(), true), Default::default()),
+        ]);
+        assert!(owner.capture_transient_states(inputs.clone()).is_err());
+        assert_eq!(owner, prior);
+        inputs.remove(&("foreign".into(), true));
+        inputs.insert(("fixture".into(), true), Default::default());
+        owner.capture_transient_states(inputs).unwrap();
+        assert_eq!(owner.settings.packages[0].transient, active);
+        let store = Store::new(owner, Usage::new(["fixture"])).unwrap();
+        let old = store.capture();
+        let mut changed = old.owner().clone();
+        changed.settings.packages[0].transient = Default::default();
+        let new = store.publish(&old, changed, old.usage().clone()).unwrap();
+        for (capture, disabled, expected) in [
+            (&old, false, true),
+            (&old, true, false),
+            (&new, false, false),
+        ] {
+            let state = PackageTransientState::captured(capture, "fixture", disabled).unwrap();
+            let mut p = aim_binder_host::parcel::Parcel::new();
+            state.write_to(&mut p);
+            let mut r = aim_binder_host::parcel::Reader::new(p.data(), p.objects());
+            assert_eq!(r.read_i64().unwrap(), capture.version() as i64);
+            assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+            assert_eq!(r.read_i32().unwrap(), 10100);
+            assert_eq!(r.read_bool().unwrap(), disabled);
+            for _ in 0..3 {
+                assert_eq!(r.read_bool().unwrap(), expected);
+            }
+            assert_eq!(
+                r.read_string16().unwrap().as_deref(),
+                expected.then_some("module")
+            );
+            assert_eq!(r.remaining(), 0);
+        }
+        assert!(PackageTransientState::captured(&old, "unknown", false).is_none());
+        assert!(
+            old.owner().settings.packages[0]
+                .transient
+                .updated_system_app
+        );
+        assert!(
+            !new.owner().settings.packages[0]
+                .transient
+                .updated_system_app
+        );
+    }
+
+    #[test]
     fn usage_is_mandatory_matches_membership_and_isolated_between_versions() {
         assert!(matches!(
             Store::new(owner(), Usage::new([])),

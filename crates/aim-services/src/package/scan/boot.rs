@@ -323,7 +323,7 @@ fn scan_system_image(
                 },
                 system: true,
                 updated: if updated {
-                    factory.as_ref().unwrap().flags & (1 << 7) != 0
+                    factory.as_ref().unwrap().transient.updated_system_app
                 } else {
                     false
                 },

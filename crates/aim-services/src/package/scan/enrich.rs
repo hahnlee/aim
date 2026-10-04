@@ -92,7 +92,11 @@ pub(super) fn application(
     {
         parsed.booleans |= booleans::FACTORY_TEST;
     }
-    (package.flags, package.private_flags) = super::application_flags(parsed, updated_system_app);
+    // ScanPackageUtils sets this bit when an update is selected; an ordinary
+    // retained-setting scan does not clear it. Factory enabling clears it.
+    package.transient.updated_system_app |= updated_system_app;
+    (package.flags, package.private_flags) =
+        super::application_flags(parsed, package.transient.updated_system_app);
 }
 
 #[cfg(test)]
@@ -130,6 +134,21 @@ mod tests {
                 assert_eq!(setting.leaving_shared_user, Some(leaving));
             }
         }
+    }
+    #[test]
+    fn retained_scan_keeps_transient_update_state_and_fresh_owner_starts_clear() {
+        let mut setting = settings::Package::default();
+        assert_eq!(setting.transient, Default::default());
+        let mut parsed = AndroidPackage::default();
+        application(&mut setting, &mut parsed, false, true);
+        let mut retained = setting.clone();
+        application(&mut retained, &mut parsed, false, false);
+        assert!(retained.transient.updated_system_app);
+        assert_ne!(retained.flags & 128, 0);
+        retained.transient.updated_system_app = false;
+        application(&mut retained, &mut parsed, false, false);
+        assert_eq!(retained.flags & 128, 0);
+        assert!(setting.transient.updated_system_app);
     }
     #[test]
     fn final_flags_replace_saved_bits_and_gate_factory_mode_by_requested_permission() {

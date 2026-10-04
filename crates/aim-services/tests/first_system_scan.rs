@@ -706,6 +706,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(accepted.candidate.users, full_users[&active.name]);
             assert_ne!(accepted.candidate.record.settings.flags & 1, 0);
             assert_ne!(accepted.candidate.record.settings.flags & (1 << 7), 0);
+            assert!(
+                accepted
+                    .candidate
+                    .record
+                    .settings
+                    .transient
+                    .updated_system_app
+            );
             assert_ne!(accepted.candidate.record.settings.private_flags & 8, 0);
             assert_eq!(accepted.candidate.record.signing, raw.signing);
             assert!(accepted.copies.is_empty());
@@ -777,6 +785,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert!(ex_system.settings.disabled_system_packages.is_empty());
             let ordinary = &demoted.packages[0].candidate;
             assert_eq!(ordinary.record.settings.flags & (1 | (1 << 7)), 0);
+            assert!(!ordinary.record.settings.transient.updated_system_app);
             assert_eq!(
                 ordinary.record.settings.private_flags,
                 ordinary_data.candidate.record.settings.private_flags

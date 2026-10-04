@@ -93,9 +93,10 @@ impl SigningScan {
         &mut self,
         candidate: NewPackageOutcome,
         apks: &Apks,
-        inputs: ScanMetadataCompletion<'_>,
+        mut inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
         self.accepted_slot(&candidate.record, "scan-completion")?;
+        inputs.context.updated |= candidate.record.settings.transient.updated_system_app;
         let page_policy =
             PageSizeCompatPolicy::from_platform(&apks.platform).map_err(|message| {
                 SigningError::NativeLibrary {

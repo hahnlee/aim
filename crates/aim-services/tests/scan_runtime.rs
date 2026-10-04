@@ -380,7 +380,7 @@ fn saved_scan_libraries_match_original_pms() {
                 None,
             )
             .unwrap();
-        let updated = saved.flags & aim_services::package::info::FLAG_UPDATED_SYSTEM_APP != 0;
+        let updated = saved.transient.updated_system_app;
         let (flags, private_flags) = application_flags(&code.parsed, updated);
         let environment = NativeLibraryEnvironment {
             preferred_abi: all_abis.first().unwrap(),

@@ -9,6 +9,9 @@ public class PackageStateUnserialized {
     public String getOverrideSeInfo() { throw new RuntimeException("stub"); }
     public PackageStateUnserialized(com.android.server.pm.PackageSetting setting) { throw new RuntimeException("stub"); }
     public PackageStateUnserialized setUpdatedSystemApp(boolean value) { throw new RuntimeException("stub"); }
+    public PackageStateUnserialized setHiddenUntilInstalled(boolean value) { throw new RuntimeException("stub"); }
+    public PackageStateUnserialized setApkInUpdatedApex(boolean value) { throw new RuntimeException("stub"); }
+    public PackageStateUnserialized setApexModuleName(String value) { throw new RuntimeException("stub"); }
     public PackageStateUnserialized setLastPackageUsageTimeInMills(int reason, long time) { throw new RuntimeException("stub"); }
     public long[] getLastPackageUsageTimeInMills() { throw new RuntimeException("stub"); }
     public long getLatestPackageUseTimeInMills() { throw new RuntimeException("stub"); }

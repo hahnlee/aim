@@ -1488,6 +1488,17 @@ mod tests {
                 Ok(crate::package::libraries::Policy::pinned(false))
             })
             .unwrap();
+        owner
+            .capture_transient_states(BTreeMap::from([(
+                ("fixture".into(), false),
+                crate::package::owner::transient::State {
+                    hidden_until_installed: true,
+                    updated_system_app: true,
+                    apk_in_updated_apex: true,
+                    apex_module_name: Some("module".into()),
+                },
+            )]))
+            .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         let captured_library =
@@ -1553,6 +1564,12 @@ mod tests {
         state.archive_state.as_mut().unwrap().activities[0].icon_path =
             Some("/data/new-icon".into());
         owner.set_user_state("fixture", 10, state).unwrap();
+        owner
+            .capture_transient_states(BTreeMap::from([(
+                ("fixture".into(), false),
+                Default::default(),
+            )]))
+            .unwrap();
         owner.settings.packages[0].remove_old_path(Some("/data/old"));
         owner.settings.packages[0].set_loading_progress(1.0);
         owner.settings.packages[0].remove_old_path(Some(&"x".repeat(150_000)));
@@ -1811,6 +1828,65 @@ mod tests {
             p.write_interface_token(api::DESCRIPTOR);
             p
         };
+        let transient_request = |name: Option<&str>, disabled| {
+            let mut p = Parcel::new();
+            api::GetTransientState {
+                package_name: name.map(str::to_owned),
+                disabled,
+            }
+            .write(&mut p);
+            p
+        };
+        for (name, disabled, present) in [
+            ("fixture", false, true),
+            ("fixture", true, false),
+            ("missing", false, false),
+        ] {
+            let reply = remote
+                .transact(
+                    api::GET_TRANSIENT_STATE,
+                    &transient_request(Some(name), disabled),
+                    false,
+                )
+                .unwrap();
+            let mut r = reply.reader();
+            r.read_exception().unwrap().unwrap();
+            let bytes = aim_service_aidl::read_byte_array(&mut r).unwrap();
+            assert_eq!(r.remaining(), 0);
+            if present {
+                let bytes = bytes.unwrap();
+                let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+                assert_eq!(r.read_i64().unwrap(), 1);
+                assert_eq!(r.read_string16().unwrap().as_deref(), Some(name));
+                assert_eq!(r.read_i32().unwrap(), 10100);
+                assert!(!r.read_bool().unwrap());
+                for _ in 0..3 {
+                    assert!(r.read_bool().unwrap());
+                }
+                assert_eq!(r.read_string16().unwrap().as_deref(), Some("module"));
+                assert_eq!(r.remaining(), 0);
+            } else {
+                assert!(bytes.is_none());
+            }
+        }
+        let reply = remote
+            .transact(
+                api::GET_TRANSIENT_STATE,
+                &transient_request(None, false),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -3
+        );
+        let mut invalid = transient_request(Some("fixture"), false);
+        invalid.write_i32(0);
+        assert!(
+            remote
+                .transact(api::GET_TRANSIENT_STATE, &invalid, false)
+                .is_err()
+        );
         let version = remote
             .transact(api::GET_VERSION, &request(), false)
             .unwrap();
@@ -2310,6 +2386,18 @@ mod tests {
             reply.reader().read_exception().unwrap().unwrap();
         }
         assert!(old.upgrade().is_none());
+        let reply = remote
+            .transact(
+                api::GET_TRANSIENT_STATE,
+                &transient_request(Some("fixture"), false),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -5
+        );
+
         let reply = remote
             .transact(
                 api::GET_SETTING_LENGTH,

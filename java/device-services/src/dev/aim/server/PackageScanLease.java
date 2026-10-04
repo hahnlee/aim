@@ -21,6 +21,7 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<String, PackageSigningState> factorySigning = new HashMap<>();
     private record SettingKey(String name, boolean factory) {}
     private final Map<SettingKey, PackageSettingData> settings = new HashMap<>();
+    private final Map<SettingKey, PackageTransientState> transientStates = new HashMap<>();
     private record UserKey(String name, boolean factory, int user) {}
     private final Map<UserKey, PackageUserStateData> users = new HashMap<>();
     private record ReplicaKey(UserKey user, boolean crossUserSuspensions) {}
@@ -110,6 +111,7 @@ public final class PackageScanLease implements AutoCloseable {
         factorySigning.clear();
         users.clear();
         settings.clear();
+        transientStates.clear();
         userReplicas.clear();
     }
 
@@ -247,7 +249,8 @@ public final class PackageScanLease implements AutoCloseable {
         PackageUsageState times = getUsage(name);
         PackageSeInfoState labels = getSeInfo(name);
         PackageLibraryState dependencies = getLibraries(name);
-        if (code == null || saved == null || times == null || labels == null || dependencies == null) {
+        PackageTransientState transientState = getTransientState(name, false);
+        if (code == null || saved == null || times == null || labels == null || dependencies == null || transientState == null) {
             throw new IOException("missing collected package owner");
         }
         PackageObjects.restoreCollectedCode(setting, code, version, false);
@@ -255,7 +258,29 @@ public final class PackageScanLease implements AutoCloseable {
         PackageObjects.restoreUsage(setting, times, version);
         PackageObjects.restoreSeInfo(setting, labels, version);
         PackageObjects.restoreLibraries(setting, dependencies, version);
+        PackageObjects.restoreTransientState(setting, transientState, version, false);
         return setting;
+    }
+
+    public synchronized PackageTransientState getTransientState(String name, boolean factory)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        SettingKey key = new SettingKey(Objects.requireNonNull(name), factory);
+        if (transientStates.containsKey(key)) return transientStates.get(key);
+        byte[] bytes = endpoint.getTransientState(name, factory);
+        if (bytes == null) { transientStates.put(key, null); return null; }
+        if ((bytes.length & 3) != 0) throw new IOException("unaligned transient setting");
+        Parcel in = Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var state = PackageTransientState.CREATOR.createFromParcel(in);
+            if (in.dataAvail() != 0 || state.getVersion() != version
+                    || !state.getPackageName().equals(name) || state.isFactory() != factory) {
+                throw new IOException("package transient capture mismatch");
+            }
+            transientStates.put(key, state);
+            return state;
+        } finally { in.recycle(); }
     }
 
     public synchronized PackageUserStateData getUserState(String name, boolean factory, int user)

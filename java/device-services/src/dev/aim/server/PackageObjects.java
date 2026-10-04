@@ -68,6 +68,17 @@ public final class PackageObjects {
         setting.getPkgState().setUsesLibraryFiles(files);
     }
 
+    public static void restoreTransientState(com.android.server.pm.PackageSetting setting,
+            PackageTransientState state, long version, boolean factory) {
+        if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())
+                || state.getAppId() != setting.getAppId() || state.isFactory() != factory) {
+            throw new IllegalArgumentException("transient setting capture mismatch");
+        }
+        setting.getPkgState().setHiddenUntilInstalled(state.isHiddenUntilInstalled())
+            .setUpdatedSystemApp(state.isUpdatedSystemApp()).setApkInUpdatedApex(state.isApkInUpdatedApex())
+            .setApexModuleName(state.getApexModuleName());
+    }
+
     /** Boot shared-user fixups set an override; ordinary scan labels set the base. */
     public static void restoreBootSeInfo(com.android.server.pm.PackageSetting setting,
             PackageSeInfoState state, long version) {

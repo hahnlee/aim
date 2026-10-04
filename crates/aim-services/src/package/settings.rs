@@ -71,6 +71,7 @@ pub struct Permission {
 /// system package an update replaced), whose flags the reader derives.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    pub transient: super::owner::transient::State,
     pub name: String,
     pub real_name: Option<String>,
     pub code_path: String,

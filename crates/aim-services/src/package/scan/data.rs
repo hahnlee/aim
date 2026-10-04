@@ -286,6 +286,11 @@ impl SigningScan {
             };
             let previous = packages.remove(at);
             self.withdraw_scanned_package(&previous.candidate.record);
+            // InstallPackageHelper clears the retained runtime bit before
+            // rescanning a former system update as an ordinary data APK.
+            if let Some(setting) = self.settings.packages.iter_mut().find(|p| p.name == name) {
+                setting.transient.updated_system_app = false;
+            }
             let raw = &admitted_code[&name];
             let host = (apks.files)(&raw.location.path).ok_or_else(|| {
                 fatal(

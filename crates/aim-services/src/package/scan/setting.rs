@@ -74,6 +74,42 @@ pub struct NewSetting {
 }
 
 impl SigningScan {
+    /// Import one complete current runtime owner inventory, before publishing
+    /// a facade replica. A partial or foreign inventory changes nothing.
+    pub fn capture_transient_states(
+        &mut self,
+        values: BTreeMap<(String, bool), crate::package::owner::transient::State>,
+    ) -> Result<(), String> {
+        let expected: std::collections::BTreeSet<_> = self
+            .settings
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), false))
+            .chain(
+                self.settings
+                    .disabled_system_packages
+                    .iter()
+                    .map(|p| (p.name.clone(), true)),
+            )
+            .collect();
+        if values
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+        {
+            return Err("transient setting inventory differs".into());
+        }
+        for (packages, factory) in [
+            (&mut self.settings.packages, false),
+            (&mut self.settings.disabled_system_packages, true),
+        ] {
+            for setting in packages {
+                setting.transient = values[&(setting.name.clone(), factory)].clone();
+            }
+        }
+        Ok(())
+    }
     /// Import current active/factory PackageSetting bits as one complete input.
     pub fn capture_leaving_shared_users(
         &mut self,

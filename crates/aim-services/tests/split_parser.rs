@@ -1728,6 +1728,10 @@ fn java_oracles_link_against_original_image() {
         )
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageTransientState.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
         )
         .arg(

@@ -310,6 +310,8 @@ public final class PackageRoundTripOracle {
         var stale = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
         owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".user").toPath());
         owner.libraries = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".libraries").toPath());
+        owner.transientState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".transient").toPath());
+        stale.transientState = owner.transientState;
         stale.userState = owner.userState;
         owner.setting = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".setting").toPath());
         stale.setting = owner.setting;
@@ -940,6 +942,33 @@ public final class PackageRoundTripOracle {
                 throw new AssertionError("native/Java usage DTO differs");
             }
         } finally { out.recycle(); }
+        for (int length = 0; length <= owner.transientState.length; length++) {
+            var malformedOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+            malformedOwner.transientState = java.util.Arrays.copyOf(owner.transientState,
+                length == owner.transientState.length ? length + 4 : length);
+            try (var malformedLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(malformedOwner))) {
+                try { malformedLease.getTransientState(name, false); throw new AssertionError("malformed transient transport accepted"); }
+                catch (java.io.IOException | RuntimeException expected) {}
+            }
+        }
+        CapturedTransientOracle.verify(file, metadata, lease);
+        var transientOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+        transientOwner.setting = owner.setting; transientOwner.libraries = owner.libraries;
+        transientOwner.userState = owner.userState; transientOwner.user10 = owner.user10;
+        transientOwner.user11 = owner.user11; transientOwner.user12 = owner.user12;
+        transientOwner.user13 = owner.user13; transientOwner.user14 = owner.user14;
+        transientOwner.transientState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".transient-23").toPath());
+        try (var transientLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(transientOwner))) {
+            var populated = transientLease.newScannedSetting(name, true);
+            var state = (com.android.server.pm.pkg.PackageState)populated;
+            if (!state.isHiddenUntilInstalled() || !state.isUpdatedSystemApp() || !state.isApkInUpdatedApex()
+                    || !"com.example.apex".equals(state.getApexModuleName())) throw new AssertionError("combined transient setting differs");
+            populated.getPkgState().setHiddenUntilInstalled(false).setUpdatedSystemApp(false)
+                .setApkInUpdatedApex(false).setApexModuleName("changed");
+            var freshState = (com.android.server.pm.pkg.PackageState)transientLease.newScannedSetting(name, true);
+            if (!freshState.isHiddenUntilInstalled() || !freshState.isUpdatedSystemApp() || !freshState.isApkInUpdatedApex()
+                    || !"com.example.apex".equals(freshState.getApexModuleName())) throw new AssertionError("combined transient setting shares mutable owner");
+        }
         var assembled = lease.newScannedSetting(name, true);
         var assembledState = (com.android.server.pm.pkg.PackageState)assembled;
         var assembledPkg = (com.android.internal.pm.parsing.pkg.PackageImpl)assembledState.getAndroidPackage();
@@ -1051,10 +1080,11 @@ public final class PackageRoundTripOracle {
             if (!cleared.getSharedLibraryDependencies().isEmpty() || !cleared.getUsesLibraryFiles().isEmpty()) throw new AssertionError("empty dependency owner kept stale state");
         } finally { emptyLibraries.recycle(); }
         try { dev.aim.server.PackageObjects.restoreLibraries(detached, libraryState, 2); throw new AssertionError("wrong library version accepted"); } catch (IllegalArgumentException expected) {}
-        for (int missing = 1; missing <= 5; missing++) {
+        for (int missing = 1; missing <= 6; missing++) {
             var incompleteOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
             incompleteOwner.setting = owner.setting;
             incompleteOwner.libraries = owner.libraries;
+            incompleteOwner.transientState = owner.transientState;
             incompleteOwner.userInventory = new int[0];
             incompleteOwner.missingOwner = missing;
             try (var incompleteLease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(incompleteOwner))) {
@@ -1317,7 +1347,7 @@ public final class PackageRoundTripOracle {
         private final byte[] usage;
         private final byte[] seinfo;
         private final byte[] signing;
-        byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting, libraries;
+        byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting, libraries, transientState;
         int[] userInventory = {0, 10, 11, 12, 13, 14};
         int userReads;
         boolean signingTail;
@@ -1342,6 +1372,10 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override public byte[] getTransientState(String candidate, boolean disabled) throws android.os.RemoteException {
+            if (fail) throw new android.os.RemoteException();
+            return missingOwner != 6 && !disabled && name.equals(candidate) ? transientState : null;
+        }
         @Override public int getLibraryStateLength(String candidate) { return missingOwner != 5 && name.equals(candidate) ? libraries.length : -1; }
         @Override public byte[] getLibraryStateChunk(String candidate, int offset, int length) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();

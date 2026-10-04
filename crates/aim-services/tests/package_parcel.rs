@@ -35,6 +35,14 @@ fn native_package_parcels_match_original_read_write() {
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageTransientState.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/CapturedTransientOracle.java"),
+        )
         .arg("-classpath")
         .arg(&stubs)
         .arg(
@@ -326,6 +334,69 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.setting")), setting_bytes).unwrap();
+        for variant in 0..49 {
+            let factory = variant >= 24 && variant < 48;
+            let mut owner = snapshot.owner().clone();
+            let state = if variant == 48 {
+                captured_setting.transient.clone()
+            } else {
+                aim_services::package::owner::transient::State {
+                    hidden_until_installed: variant % 8 & 1 != 0,
+                    updated_system_app: variant % 8 & 2 != 0,
+                    apk_in_updated_apex: variant % 8 & 4 != 0,
+                    apex_module_name: match (variant % 24) / 8 {
+                        0 => None,
+                        1 => Some(String::new()),
+                        _ => Some("com.example.apex".into()),
+                    },
+                }
+            };
+            if factory {
+                let mut setting = captured_setting.clone();
+                setting.transient = state;
+                owner
+                    .settings
+                    .disabled_system_packages
+                    .retain(|p| p.name != pkg.package_name);
+                owner.settings.disabled_system_packages.push(setting);
+                // This fixture captures only fresh active/factory settings;
+                // it does not supply unrelated scan/permission assignments.
+                owner = aim_services::package::scan::SigningScan::new(
+                    &Default::default(),
+                    &owner.settings,
+                    36,
+                )
+                .unwrap();
+            } else {
+                owner
+                    .settings
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == pkg.package_name)
+                    .unwrap()
+                    .transient = state;
+            }
+            let capture =
+                aim_services::package::scan_snapshot::Store::new(owner, snapshot.usage().clone())
+                    .unwrap()
+                    .capture();
+            let state =
+                aim_services::package::scan_snapshot::endpoint::PackageTransientState::captured(
+                    &capture,
+                    &pkg.package_name,
+                    factory,
+                )
+                .unwrap();
+            let mut p = aim_binder_host::parcel::Parcel::new();
+            aim_service_aidl::WriteParcelable::write_to(&state, &mut p);
+            let suffix = if variant == 48 {
+                "transient".into()
+            } else {
+                format!("transient-{variant}")
+            };
+            fs::write(directory.join(format!("{name}.{suffix}")), p.data()).unwrap();
+        }
+
         fs::write(
             directory.join(format!("{name}.libraries")),
             aim_services::package::scan_snapshot::library_record::captured(

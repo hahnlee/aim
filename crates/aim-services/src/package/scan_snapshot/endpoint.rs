@@ -189,6 +189,46 @@ impl WriteParcelable for PackageSigningState {
 
 pub const MAX_CHUNK: usize = 64 * 1024;
 
+pub struct PackageTransientState {
+    version: u64,
+    name: String,
+    app_id: i32,
+    disabled: bool,
+    state: crate::package::owner::transient::State,
+}
+
+impl PackageTransientState {
+    pub fn captured(snapshot: &Snapshot, name: &str, disabled: bool) -> Option<Self> {
+        let settings = &snapshot.owner().settings;
+        let packages = if disabled {
+            &settings.disabled_system_packages
+        } else {
+            &settings.packages
+        };
+        let setting = packages.iter().find(|p| p.name == name)?;
+        Some(Self {
+            version: snapshot.version(),
+            name: name.into(),
+            app_id: setting.app_id,
+            disabled,
+            state: setting.transient.clone(),
+        })
+    }
+}
+
+impl WriteParcelable for PackageTransientState {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i64(self.version as i64);
+        p.write_string16(Some(&self.name));
+        p.write_i32(self.app_id);
+        p.write_bool(self.disabled);
+        p.write_bool(self.state.hidden_until_installed);
+        p.write_bool(self.state.updated_system_app);
+        p.write_bool(self.state.apk_in_updated_apex);
+        p.write_string16(self.state.apex_module_name.as_deref());
+    }
+}
+
 pub struct PackageSeInfo {
     version: u64,
     name: String,
@@ -383,6 +423,30 @@ impl Service for Endpoint {
             return Ok(reply);
         };
         match call.code {
+            api::GET_TRANSIENT_STATE => {
+                let args = api::GetTransientState::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                let Some(name) = args.package_name.as_deref() else {
+                    reply.write_exception(&Exception::illegal_argument("package name is null"));
+                    return Ok(reply);
+                };
+                let bytes =
+                    PackageTransientState::captured(&snapshot, name, args.disabled).map(|s| {
+                        let mut p = Parcel::new();
+                        s.write_to(&mut p);
+                        p.data().to_vec()
+                    });
+                if bytes.as_ref().is_some_and(|b| b.len() > MAX_CHUNK) {
+                    reply.write_exception(&Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "transient setting exceeds transport size",
+                    ));
+                } else {
+                    api::write_get_transient_state_reply(&mut reply, &bytes);
+                }
+            }
             api::GET_LIBRARY_STATE_LENGTH => {
                 let args = api::GetLibraryStateLength::read(&mut call.data)?;
                 if call.data.remaining() != 0 {
