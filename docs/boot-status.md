@@ -867,15 +867,21 @@ The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (7.30s), including settings commit
+commit. The first-system scan fixture passes (7.54s), including settings commit
 and reopening the persisted owner. Updated-system KeepData selection now fully
 verifies strict-allowlisted factory APKs instead of copying input signing, after
 committing the disabled metadata refresh. Source-conformance checks retain
 non-strict saved signing, discard input current flags 37 for strict signing, and
 compare the complete owner after a strict verification failure with the completed
 metadata-only scan. That failure preserves earlier metadata and reports the
-original preparation error -110. Updated-system factory restoration still needs
-collection at its original stage; system inputs still verify afresh before
+original preparation error -110. Updated-system factory restoration now collects
+after resource cleanup and setting enable, using the pre-enable selected active
+setting for cache decisions and explicit upgrade/pre-N-MR1 policy. Input flags
+37 are replaced by fresh factory signing; a mapped invalid signing source fails
+with -103 while earlier cleanup/enable effects remain. Missing-update factory
+recovery also collects after enable, using its current selected setting. It still
+uses retained parsed factory code rather than initPackageTracedLI's reparse;
+system inputs still verify afresh before
 sequential selection, so system parse/verification timing remains incomplete
 (#918). Adoption
 when both incoming and original settings exist remains #919. Mapped APK signing
@@ -884,7 +890,7 @@ collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only data inputs (57.44s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only data inputs (46.56s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

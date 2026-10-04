@@ -448,6 +448,8 @@ impl SigningScan {
                         "factory setting could not be enabled".into(),
                     )
                 })?;
+            let collected = self.collect_initial_code(code, apks, inputs.certificates)?;
+            let code = &collected;
             let host = (apks.files)(&code.location.path).ok_or_else(|| {
                 fatal(
                     setting.name.clone(),
@@ -479,6 +481,7 @@ impl SigningScan {
                 inputs.all_users,
                 apks,
                 super::UpdatedSystemBootInputs {
+                    certificates: inputs.certificates,
                     completion: ScanMetadataCompletion {
                         seinfo: inputs.seinfo,
                         abi_policy: inputs.abi_policy,

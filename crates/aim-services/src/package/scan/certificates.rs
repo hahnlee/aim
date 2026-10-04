@@ -37,6 +37,21 @@ impl SigningScan {
                     .find(|p| p.name == identity.internal_name)
             })
             .cloned();
+        self.collect_selected_initial_code(code, apks, policy, saved.as_ref())
+    }
+
+    /// Initial scan retains its selected setting across enableSystemPackage;
+    /// certificate cache decisions still use that pre-enable owner.
+    pub(super) fn collect_selected_initial_code<S>(
+        &mut self,
+        code: &Code<S>,
+        apks: &Apks,
+        policy: CertificateScanPolicy,
+        saved: Option<&crate::package::settings::Package>,
+    ) -> Result<Code, SigningError> {
+        let system = code.location.parse_flags() & parse::PARSE_IS_SYSTEM_DIR != 0;
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, system, &code.location);
         let force_collect = if system {
             policy.upgrade
         } else {
@@ -69,7 +84,7 @@ impl SigningScan {
             .checked_collect_signing_details(
                 &code.parsed,
                 CertificateCollection {
-                    saved: saved.as_ref(),
+                    saved,
                     database_version,
                     force_collect,
                     skip_verify: system,

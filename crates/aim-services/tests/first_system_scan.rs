@@ -1801,6 +1801,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     };
     let raw_factory = Image::load(&apks, &[]).unwrap().packages.remove(1);
     let restore_inputs = || aim_services::package::scan::UpdatedSystemBootInputs {
+        certificates: Default::default(),
         completion: completion(),
         compatibility: &compatibility,
         platform: Some(&scan.packages[0].candidate.record.signing),
@@ -2088,6 +2089,67 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 assert_eq!(restored.candidate.record.settings.flags & (1 << 7), 0);
                 assert_eq!(restored.candidate.users, saved_users[&saved.name]);
                 assert!(owner.settings.disabled_system_packages.is_empty());
+                // Collection occurs after resource removal/enable, and ignores
+                // a precollected input's flags when the old data path differs.
+                let mut cached_code = factory_code.clone();
+                cached_code.signing.current_flags = vec![37; cached_code.signing.signatures.len()];
+                let mut cached_raw = raw_factory.clone();
+                cached_raw.signing.current_flags = cached_code.signing.current_flags.clone();
+                let mut cached_owner =
+                    aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+                let cached_selected = cached_owner
+                    .scan_updated_system(
+                        &cached_code,
+                        update(),
+                        None,
+                        &policy,
+                        &apks,
+                        selection_inputs(),
+                    )
+                    .unwrap();
+                std::fs::write(&disposable_code, b"disposable replaced code").unwrap();
+                let aim_services::package::scan::UpdatedSystemBootOutcome::Factory(collected) =
+                    cached_owner
+                        .complete_updated_system_boot(
+                            &cached_selected,
+                            &cached_raw,
+                            &saved_users,
+                            None,
+                            &apks,
+                            restore_inputs(),
+                        )
+                        .unwrap()
+                else {
+                    panic!("factory restoration retained data");
+                };
+                assert_eq!(collected.candidate.record.signing, raw_factory.signing);
+                assert!(!disposable_code.exists());
+                let base = raw_factory.parsed.base_apk_path.clone().unwrap();
+                let root = fixture.0.clone();
+                let bad_source = Apks {
+                    files: Box::new(move |path| {
+                        Some(if path == base {
+                            root.clone()
+                        } else {
+                            root.join(path.trim_start_matches('/'))
+                        })
+                    }),
+                    platform: Platform::load(&original, Default::default()).unwrap(),
+                };
+                std::fs::write(&disposable_code, b"disposable replaced code").unwrap();
+                let mut failed_collection = before.clone();
+                assert!(
+                    matches!(failed_collection.complete_updated_system_boot(&selected, &raw_factory, &saved_users, None, &bad_source, restore_inputs()), Err(SigningError::Rejected(e)) if e.phase == "certificates" && e.message.ends_with("(-103)"))
+                );
+                assert!(!disposable_code.exists());
+                assert!(
+                    failed_collection
+                        .settings
+                        .disabled_system_packages
+                        .is_empty()
+                );
+                assert_eq!(failed_collection.identities, ids);
+                assert_eq!(failed_collection.libraries, before.libraries);
             }
         }
     }

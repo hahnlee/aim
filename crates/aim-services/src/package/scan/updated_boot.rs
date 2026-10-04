@@ -12,6 +12,7 @@ use crate::package::{
 use std::collections::BTreeMap;
 
 pub struct UpdatedSystemBootInputs<'a> {
+    pub certificates: super::CertificateScanPolicy,
     pub completion: ScanMetadataCompletion<'a>,
     pub compatibility: &'a LibraryCompatibility,
     pub platform: Option<&'a SigningDetails>,
@@ -91,8 +92,22 @@ impl SigningScan {
             inputs.incremental,
             inputs.new_domain_id,
         )?;
-        self.scan_enabled_factory(factory, code, enabled, saved_users, all_users, apks, inputs)
-            .map(UpdatedSystemBootOutcome::Factory)
+        let collected = self.collect_selected_initial_code(
+            code,
+            apks,
+            inputs.certificates,
+            Some(&selected.active),
+        )?;
+        self.scan_enabled_factory(
+            factory,
+            &collected,
+            enabled,
+            saved_users,
+            all_users,
+            apks,
+            inputs,
+        )
+        .map(UpdatedSystemBootOutcome::Factory)
     }
 
     pub(super) fn scan_enabled_factory(

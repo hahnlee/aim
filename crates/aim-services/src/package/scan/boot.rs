@@ -395,6 +395,7 @@ fn scan_system_image(
                 users.users,
                 apks,
                 UpdatedSystemBootInputs {
+                    certificates: inputs.certificates,
                     completion,
                     compatibility: inputs.compatibility,
                     platform: platform_loaded.then_some(&platform),
