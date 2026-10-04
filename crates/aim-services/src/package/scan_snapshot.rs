@@ -196,13 +196,13 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
             owner
                 .validate_collected_uid(setting, &code.package, active)
                 .map_err(Error::Invalid)?;
-            if code.package.package_name != *name
-                || code.package.path.as_deref() != Some(setting.code_path.as_str())
-                || code.package.signing_details
-                    != code
-                        .collected_signing
-                        .package_details()
-                        .map_err(Error::Invalid)?
+            code.validate_setting(setting, !active)
+                .map_err(Error::Invalid)?;
+            if code.package.signing_details
+                != code
+                    .collected_signing
+                    .package_details()
+                    .map_err(Error::Invalid)?
             {
                 return Err(fail("loaded code differs from its owner"));
             }

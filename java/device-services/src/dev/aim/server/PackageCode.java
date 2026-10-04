@@ -8,6 +8,9 @@ import java.util.Objects;
 public final class PackageCode implements Parcelable {
     private final long version;
     private final String name;
+    private final String parsedName;
+    private final boolean factory;
+    private final int appId;
     private final byte[] cache;
     private final byte[][] certificates;
     private final int[] capabilities;
@@ -15,6 +18,12 @@ public final class PackageCode implements Parcelable {
     private PackageCode(Parcel in) {
         version = in.readLong();
         name = Objects.requireNonNull(in.readString());
+        parsedName = Objects.requireNonNull(in.readString());
+        int scope = in.readInt();
+        if (scope != 0 && scope != 1) throw new IllegalArgumentException("invalid code scope");
+        factory = scope == 1;
+        appId = in.readInt();
+        if (!factory && !name.equals(parsedName)) throw new IllegalArgumentException("active code name mismatch");
         cache = Objects.requireNonNull(in.createByteArray());
         int count = in.readInt();
         if (count < -1 || count > in.dataAvail() / 8) {
@@ -30,6 +39,9 @@ public final class PackageCode implements Parcelable {
 
     public long getVersion() { return version; }
     public String getPackageName() { return name; }
+    public String getParsedPackageName() { return parsedName; }
+    public boolean isFactory() { return factory; }
+    public int getAppId() { return appId; }
 
     public byte[] getCache() { return cache.clone(); }
     public int[] getCapabilities() { return capabilities == null ? null : capabilities.clone(); }
@@ -44,6 +56,9 @@ public final class PackageCode implements Parcelable {
     public void writeToParcel(Parcel out, int flags) {
         out.writeLong(version);
         out.writeString(name);
+        out.writeString(parsedName);
+        out.writeInt(factory ? 1 : 0);
+        out.writeInt(appId);
         out.writeByteArray(cache);
         out.writeInt(certificates == null ? -1 : certificates.length);
         if (certificates != null) {

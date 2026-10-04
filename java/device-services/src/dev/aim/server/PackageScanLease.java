@@ -72,7 +72,7 @@ public final class PackageScanLease implements AutoCloseable {
             parcel.setDataPosition(0);
             PackageCode code = PackageCode.CREATOR.createFromParcel(parcel);
             if (parcel.dataAvail() != 0 || code.getVersion() != version
-                    || !code.getPackageName().equals(name)) {
+                    || !code.getPackageName().equals(name) || code.isFactory() != factory) {
                 throw new IOException("package code capture mismatch");
             }
             cache.put(name, code);

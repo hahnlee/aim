@@ -509,6 +509,7 @@ mod tests {
         scan.loaded.insert(
             name.into(),
             std::sync::Arc::new(super::super::LoadedPackage {
+                disabled_binding: None,
                 package: crate::package::pkg::AndroidPackage {
                     package_name: name.into(),
                     uid: 10100,

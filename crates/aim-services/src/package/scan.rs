@@ -89,6 +89,16 @@ pub struct Record {
 pub struct LoadedPackage {
     pub package: AndroidPackage,
     pub collected_signing: sign::SigningDetails,
+    disabled_binding: Option<DisabledCodeBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DisabledCodeBinding {
+    name: String,
+    parsed_name: String,
+    app_id: i32,
+    path: String,
+    version: i64,
 }
 
 impl LoadedPackage {
@@ -102,7 +112,46 @@ impl LoadedPackage {
         Ok(Self {
             package,
             collected_signing,
+            disabled_binding: None,
         })
+    }
+
+    fn bind_disabled(mut self, setting: &settings::Package) -> Self {
+        self.disabled_binding = Some(DisabledCodeBinding {
+            name: setting.name.clone(),
+            parsed_name: self.package.package_name.clone(),
+            app_id: setting.app_id,
+            path: setting.code_path.clone(),
+            version: setting.version_code,
+        });
+        self
+    }
+
+    pub(in crate::package) fn validate_setting(
+        &self,
+        setting: &settings::Package,
+        factory: bool,
+    ) -> Result<(), String> {
+        let bound = match &self.disabled_binding {
+            Some(binding) => {
+                factory
+                    && binding.name == setting.name
+                    && binding.parsed_name == self.package.package_name
+                    && binding.app_id == setting.app_id
+                    && binding.path == setting.code_path
+                    && binding.version == setting.version_code
+            }
+            None => self.package.package_name == setting.name,
+        };
+        let version = (i64::from(self.package.version_code_major) << 32)
+            | i64::from(self.package.version_code as u32);
+        if !bound
+            || self.package.path.as_deref() != Some(setting.code_path.as_str())
+            || version != setting.version_code
+        {
+            return Err("loaded code differs from its owner".into());
+        }
+        Ok(())
     }
 
     pub fn facade_entry(&self) -> Result<super::pkg::FacadeEntry, String> {
@@ -249,6 +298,43 @@ fn physical_parse_flags(path: &str) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_code_binding_preserves_two_names_and_rejects_foreign_owners() {
+        let setting = settings::Package {
+            name: "original".into(),
+            app_id: 10003,
+            code_path: "/product/app/Incoming".into(),
+            version_code: 17,
+            ..Default::default()
+        };
+        let pkg = AndroidPackage {
+            package_name: "incoming".into(),
+            path: Some(setting.code_path.clone()),
+            version_code: 17,
+            ..Default::default()
+        };
+        let unbound = LoadedPackage::new(pkg, sign::SigningDetails::unknown()).unwrap();
+        assert!(unbound.validate_setting(&setting, true).is_err());
+        let bound = std::sync::Arc::new(unbound.bind_disabled(&setting));
+        bound.validate_setting(&setting, true).unwrap();
+        assert!(bound.validate_setting(&setting, false).is_err());
+        for field in 0..4 {
+            let mut foreign = setting.clone();
+            match field {
+                0 => foreign.name = "foreign".into(),
+                1 => foreign.app_id += 1,
+                2 => foreign.code_path.push_str("/other"),
+                _ => foreign.version_code += 1,
+            }
+            assert!(bound.validate_setting(&foreign, true).is_err());
+        }
+        let mut changed = (*bound).clone();
+        changed.package.package_name = "foreign".into();
+        assert!(changed.validate_setting(&setting, true).is_err());
+        assert_eq!(bound.package.package_name, "incoming");
+        bound.validate_setting(&setting, true).unwrap();
+    }
 
     #[test]
     fn scan_flags_follow_location_instead_of_saved_system_status() {

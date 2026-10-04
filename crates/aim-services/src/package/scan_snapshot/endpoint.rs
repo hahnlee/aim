@@ -16,6 +16,9 @@ use std::{
 pub struct PackageCode {
     version: u64,
     name: String,
+    parsed_name: String,
+    app_id: i32,
+    disabled: bool,
     entry: FacadeEntry,
 }
 
@@ -34,9 +37,22 @@ impl PackageCode {
         let Some(code) = loaded.get(name) else {
             return Ok(None);
         };
+        let settings = if disabled {
+            &owner.settings.disabled_system_packages
+        } else {
+            &owner.settings.packages
+        };
+        let setting = settings
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or("code has no captured setting")?;
+        code.validate_setting(setting, disabled)?;
         Ok(Some(Self {
             version: snapshot.version(),
             name: name.into(),
+            parsed_name: code.package.package_name.clone(),
+            app_id: setting.app_id,
+            disabled,
             entry: code.facade_entry()?,
         }))
     }
@@ -46,6 +62,9 @@ impl WriteParcelable for PackageCode {
     fn write_to(&self, p: &mut Parcel) {
         p.write_i64(self.version as i64);
         p.write_string16(Some(&self.name));
+        p.write_string16(Some(&self.parsed_name));
+        p.write_bool(self.disabled);
+        p.write_i32(self.app_id);
         write_byte_array(p, Some(&self.entry.cache.bytes));
         match &self.entry.past_signing_certificates {
             None => p.write_i32(-1),

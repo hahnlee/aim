@@ -505,8 +505,49 @@ public final class PackageRoundTripOracle {
         try { lease.getPackageStateReplica(name, true, true); throw new AssertionError("closed factory replica accepted"); } catch (IllegalStateException expected) {}
     }
 
+    private static void verifyFactoryCodeBinding(java.io.File file, String parsedName) throws Exception {
+        for (boolean unknown : new boolean[] {false, true}) {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".factory-" + unknown).toPath());
+            var frame = android.os.Parcel.obtain();
+            var out = android.os.Parcel.obtain();
+            try {
+                frame.unmarshall(bytes, 0, bytes.length); frame.setDataPosition(0);
+                var code = dev.aim.server.PackageCode.CREATOR.createFromParcel(frame);
+                if (frame.dataAvail() != 0 || !code.isFactory() || !code.getParsedPackageName().equals(parsedName))
+                    throw new AssertionError("factory code binding frame");
+                var pkg = dev.aim.server.PackageObjects.fromSnapshot(code, 1, "fixture.original", true);
+                var original = new com.android.server.pm.PackageSetting("fixture.original", null,
+                    new java.io.File(pkg.getPath()), 1, 0, new java.util.UUID(1, 2));
+                original.setAppId(10003); original.setLongVersionCode(pkg.getLongVersionCode());
+                // The actual original setting accepts distinct parsed identity.
+                var expected = new com.android.server.pm.PackageSetting(original, false);
+                expected.setPkg(pkg);
+                dev.aim.server.PackageObjects.restoreCollectedCode(original, code, 1, true);
+                var restored = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                    ((com.android.server.pm.pkg.PackageStateInternal)(Object)original).getPkg();
+                if (!original.getPackageName().equals(expected.getPackageName())
+                        || original.getAppId() != 10003 || !restored.getPackageName().equals(parsedName)
+                        || (restored.getSigningDetails() == android.content.pm.SigningDetails.UNKNOWN) != unknown)
+                    throw new AssertionError("original factory setting/code binding differs");
+                original.setAppId(10004);
+                try { dev.aim.server.PackageObjects.restoreCollectedCode(original, code, 1, true);
+                    throw new AssertionError("foreign factory UID accepted"); } catch (IllegalArgumentException expectedError) {}
+                original.setAppId(10003);
+                code.writeToParcel(out, 0);
+                if (!java.util.Arrays.equals(out.marshall(), bytes)) throw new AssertionError("factory binding DTO roundtrip");
+                try { dev.aim.server.PackageObjects.fromSnapshot(code, 1, "fixture.original", false);
+                    throw new AssertionError("factory code accepted as active"); } catch (IllegalArgumentException expectedError) {}
+                try { dev.aim.server.PackageObjects.fromSnapshot(code, 2, "fixture.original", true);
+                    throw new AssertionError("stale factory code accepted"); } catch (IllegalArgumentException expectedError) {}
+                try { dev.aim.server.PackageObjects.fromSnapshot(code, 1, "foreign", true);
+                    throw new AssertionError("foreign factory setting accepted"); } catch (IllegalArgumentException expectedError) {}
+            } finally { frame.recycle(); out.recycle(); }
+        }
+    }
+
     private static void verifySnapshot(java.io.File file, String name, int uid) throws Exception {
         verifyCurrentSignerFlags(file);
+        verifyFactoryCodeBinding(file, name);
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
         byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
         byte[] seinfoBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".boot-seinfo").toPath());

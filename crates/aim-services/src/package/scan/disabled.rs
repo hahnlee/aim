@@ -859,7 +859,8 @@ impl SigningScan {
             updated,
         );
         let loaded = super::LoadedPackage::new(parsed.clone(), signing.clone())
-            .map_err(|message| reject("package-finalization", message))?;
+            .map_err(|message| reject("package-finalization", message))?
+            .bind_disabled(&setting.package);
         // scanPackageOnly preserves saved signatures. Strict recollection for
         // selected updated-system packages belongs to the version selector.
         self.settings.disabled_system_packages[at] = setting.package.clone();

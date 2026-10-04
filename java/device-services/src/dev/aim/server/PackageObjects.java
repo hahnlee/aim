@@ -13,11 +13,16 @@ public final class PackageObjects {
     private PackageObjects() {}
 
     public static PackageImpl fromSnapshot(PackageCode code, long version, String name) {
-        if (code.getVersion() != version || !code.getPackageName().equals(name)) {
+        return fromSnapshot(code, version, name, false);
+    }
+
+    public static PackageImpl fromSnapshot(PackageCode code, long version, String name, boolean factory) {
+        if (code.getVersion() != version || !code.getPackageName().equals(name) || code.isFactory() != factory) {
             throw new IllegalArgumentException("package code capture mismatch");
         }
         PackageImpl pkg = fromCache(code.getCache(), code.getCertificates(), code.getCapabilities());
-        if (!name.equals(pkg.getPackageName())) {
+        if (!code.getParsedPackageName().equals(pkg.getPackageName())
+                || !factory && !name.equals(pkg.getPackageName())) {
             throw new IllegalArgumentException("package code name mismatch");
         }
         return pkg;
@@ -25,13 +30,13 @@ public final class PackageObjects {
 
     public static void restoreCollectedCode(com.android.server.pm.PackageSetting setting,
             PackageCode code, long version, boolean factory) {
-        PackageImpl pkg = fromSnapshot(code, version, setting.getPackageName());
+        PackageImpl pkg = fromSnapshot(code, version, setting.getPackageName(), factory);
         var state = (com.android.server.pm.pkg.PackageState)setting;
         boolean uidMatches = pkg.isApex()
             ? pkg.getUid() == -1 && (factory
                 || setting.getAppId() == (setting.hasSharedUser() ? state.getSharedUserAppId() : -1))
             : factory || pkg.getUid() == setting.getAppId();
-        if (!uidMatches
+        if (code.getAppId() != setting.getAppId() || !uidMatches
                 || !Objects.equals(state.getPath(), new java.io.File(pkg.getPath()))
                 || state.getVersionCode() != pkg.getLongVersionCode()) {
             throw new IllegalArgumentException("package code setting mismatch");

@@ -941,6 +941,40 @@ fn native_package_parcels_match_original_read_write() {
         let mut parcel = aim_binder_host::parcel::Parcel::new();
         aim_service_aidl::WriteParcelable::write_to(&code, &mut parcel);
         fs::write(directory.join(format!("{name}.snapshot")), parcel.data()).unwrap();
+        // Controlled code envelopes exercise the original PackageSetting.setPkg
+        // with independent setting/parsed names, including UNKNOWN signing.
+        for unknown in [false, true] {
+            let mut parsed = pkg.clone();
+            let signing = if unknown {
+                parsed.signing_details = None;
+                aim_services::package::sign::SigningDetails::unknown()
+            } else {
+                loaded.collected_signing.clone()
+            };
+            let factory_code = parsed.to_facade_entry(&signing).unwrap();
+            let mut frame = aim_binder_host::parcel::Parcel::new();
+            frame.write_i64(1);
+            frame.write_string16(Some("fixture.original"));
+            frame.write_string16(Some(&parsed.package_name));
+            frame.write_bool(true);
+            frame.write_i32(10003);
+            aim_service_aidl::write_byte_array(&mut frame, Some(&factory_code.cache.bytes));
+            match &factory_code.past_signing_certificates {
+                None => frame.write_i32(-1),
+                Some(past) => {
+                    frame.write_i32(past.len() as i32);
+                    for (certificate, flags) in past {
+                        aim_service_aidl::write_byte_array(&mut frame, Some(certificate));
+                        frame.write_i32(*flags);
+                    }
+                }
+            }
+            fs::write(
+                directory.join(format!("{name}.factory-{unknown}")),
+                frame.data(),
+            )
+            .unwrap();
+        }
         let user_state = aim_services::package::scan_snapshot::user_record::captured(
             &snapshot,
             &pkg.package_name,

@@ -1816,6 +1816,64 @@ mod tests {
                 },
             )]))
             .unwrap();
+        // A copied factory can retain its setting name while holding incoming
+        // parsed code. Only the selected disabled binding permits that pair.
+        let mut factory_owner = owner.clone();
+        factory_owner.settings.packages[0].flags |= crate::package::settings::FLAG_SYSTEM;
+        factory_owner.settings.packages[0]
+            .transient
+            .updated_system_app = false;
+        factory_owner
+            .assign_seinfo_at_boot(&policy, &mut |_| Ok(30))
+            .unwrap();
+        assert!(factory_owner.disable_system_package("fixture").unwrap());
+        let factory_setting = factory_owner.settings.disabled_system_packages[0].clone();
+        let mut factory_pkg = factory_owner.disabled_loaded["fixture"].package.clone();
+        factory_pkg.package_name = "incoming".into();
+        factory_pkg.signing_details = None;
+        factory_owner.disabled_loaded.insert(
+            "fixture".into(),
+            Arc::new(
+                super::super::LoadedPackage::new(factory_pkg, SigningDetails::unknown())
+                    .unwrap()
+                    .bind_disabled(&factory_setting),
+            ),
+        );
+        factory_owner
+            .assign_seinfo_at_boot(&policy, &mut |_| Ok(30))
+            .unwrap();
+        let factory_store = Store::new(factory_owner, usage.clone()).unwrap();
+        let factory_base = factory_store.capture();
+        let factory_code = crate::package::scan_snapshot::endpoint::PackageCode::captured(
+            &factory_base,
+            "fixture",
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let mut frame = Parcel::new();
+        aim_service_aidl::WriteParcelable::write_to(&factory_code, &mut frame);
+        let mut reader = aim_binder_host::parcel::Reader::new(frame.data(), &[]);
+        assert_eq!(reader.read_i64().unwrap(), 1);
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("fixture"));
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("incoming"));
+        assert!(reader.read_bool().unwrap());
+        assert_eq!(reader.read_i32().unwrap(), 10100);
+        let mut foreign = factory_base.owner().clone();
+        Arc::make_mut(foreign.disabled_loaded.get_mut("fixture").unwrap())
+            .package
+            .package_name = "foreign".into();
+        assert!(
+            factory_store
+                .publish(&factory_base, foreign, usage.clone())
+                .is_err()
+        );
+        assert_eq!(
+            factory_base.owner().disabled_loaded["fixture"]
+                .package
+                .package_name,
+            "incoming"
+        );
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
         for mode in 0..3 {
@@ -2501,6 +2559,9 @@ mod tests {
         let mut r = aim_binder_host::parcel::Reader::new(&bytes, &[]);
         assert_eq!(r.read_i64().unwrap(), 1);
         assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+        assert_eq!(r.read_string16().unwrap().as_deref(), Some("fixture"));
+        assert_eq!(r.read_i32().unwrap(), 0);
+        assert_eq!(r.read_i32().unwrap(), 10100);
         let cache = aim_service_aidl::read_byte_array(&mut r).unwrap().unwrap();
         let decoded = crate::package::pkg::AndroidPackage::read_cache_entry(&cache).unwrap();
         assert_eq!(decoded.uid, 10100);
