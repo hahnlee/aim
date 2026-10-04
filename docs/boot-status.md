@@ -880,7 +880,10 @@ setting for cache decisions and explicit upgrade/pre-N-MR1 policy. Input flags
 37 are replaced by fresh factory signing; a mapped invalid signing source fails
 with -103 while earlier cleanup/enable effects remain. Missing-update factory
 recovery also collects after enable, using its current selected setting. It still
-uses retained parsed factory code rather than initPackageTracedLI's reparse;
+uses retained parsed factory code rather than initPackageTracedLI's reparse.
+Guest factory failures currently stop the data scan instead of being reported
+while continuing to subsequent factories as checkExistingBetterPackages does
+(#921);
 system inputs still verify afresh before
 sequential selection, so system parse/verification timing remains incomplete
 (#918). Adoption
