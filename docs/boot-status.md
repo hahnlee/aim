@@ -806,8 +806,17 @@ short chunks, incorrect versions and use after close. All 408 native units pass
 (3.21s; one ignored/not run), including real Binder inventory, bounded chunks,
 unknown/null names and invalid ranges. All integration targets compile. Original
 Java linkage passes (4.03s). The full build passes (68.8s; nine rebuilt nodes),
-including the original-PMS userdata template. Import/live member-order producers, broader shared
-owners and full snapshot map publication remain #870/#836. Native PackageImpl cache decoding/encoding now rejects null feature
+including the original-PMS userdata template. The native updateProcesses operation can now consume the original feed's forward
+ArraySet member order after checking complete group membership, setting identity
+and collected process/code inputs, then rebuild in original reverse traversal.
+Failures retain the prior owner; captures invalidate on setting path/version or
+collected-code changes. All 415 units pass (3.17s; one ignored/not run). The
+separate original ART process-owner oracle passes (15.72s: incremental addition,
+reverse rebuild, removal, empty/null maps and immutable empty class owners), and
+the host/image build passes (15.6s; three rebuilt, 39 fresh). This explicit rebuild
+is not an import of the original's current incremental aggregate. Direct aggregate
+export/import, runtime daemon wiring, broader shared owners and full snapshot map
+publication remain #870/#836. Native PackageImpl cache decoding/encoding now rejects null feature
 flag arrays, null feature flag strings and null ParsedProcess value names, matching
 the original constructors (#871/#872). Snapshot validation applies the same
 required-field checks to active/factory loaded code before publication; an invalid
