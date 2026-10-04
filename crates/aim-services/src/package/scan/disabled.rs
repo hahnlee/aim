@@ -580,18 +580,25 @@ impl SigningScan {
                 message,
             })
         };
-        let active = self
+        let installed = self
             .settings
             .packages
             .iter()
-            .find(|p| p.name == identity.internal_name)
-            .ok_or_else(|| reject("updated-system selection has no active setting".into()))?;
-        let group = if active.shared_user {
+            .find(|p| p.name == identity.internal_name);
+        let active = Identity::original_setting(&code.parsed, &self.settings, &|name| {
+            self.has_scanned_package(name)
+        })
+        .or(installed)
+        .ok_or_else(|| reject("updated-system selection has no active setting".into()))?;
+        // Initial ScanRequest retains the incoming setting's old shared UID,
+        // independently of the original selected for path/version policy.
+        let group = if installed.is_some_and(|p| p.shared_user) {
+            let installed = installed.unwrap();
             Some(
                 self.settings
                     .shared_users
                     .iter()
-                    .find(|g| Some(g.app_id) == active.shared_app_id())
+                    .find(|g| Some(g.app_id) == installed.shared_app_id())
                     .ok_or_else(|| reject("active shared UID owner is missing".into()))?
                     .name
                     .as_str(),
@@ -600,7 +607,7 @@ impl SigningScan {
             None
         };
         let selected = super::signing::selected_shared_user(
-            active.shared_user,
+            installed.is_some_and(|p| p.shared_user),
             code.parsed.shared_user_id.as_deref(),
             code.parsed
                 .is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
@@ -692,11 +699,17 @@ impl SigningScan {
                 "disabled factory code is not at its system path".into(),
             ));
         }
+        let source = Identity::original_setting(&code.parsed, &self.settings, &|name| {
+            self.has_scanned_package(name)
+        });
+        let source_name = source
+            .map(|p| p.name.as_str())
+            .unwrap_or(&identity.internal_name);
         let at = self
             .settings
             .disabled_system_packages
             .iter()
-            .position(|p| p.name == identity.internal_name)
+            .position(|p| p.name == source_name)
             .ok_or_else(|| reject("setting", "disabled factory setting is missing".into()))?;
         let saved = &self.settings.disabled_system_packages[at];
         let updated = saved.transient.updated_system_app;
@@ -710,6 +723,21 @@ impl SigningScan {
                 "factory completion does not describe the disabled setting".into(),
             ));
         }
+        let AbiScanMode::Existing {
+            first_boot_or_upgrade,
+            ..
+        } = inputs.context.mode
+        else {
+            unreachable!("factory ABI context was validated");
+        };
+        let context = super::AbiScanContext {
+            mode: AbiScanMode::DisabledFactory {
+                first_boot_or_upgrade,
+                saved,
+                parsed_name: &identity.internal_name,
+            },
+            ..inputs.context
+        };
         let group = if saved.shared_user {
             Some(
                 self.settings
@@ -727,7 +755,11 @@ impl SigningScan {
         };
         if group
             != super::signing::selected_shared_user(
-                saved.shared_user,
+                self.settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == identity.internal_name)
+                    .is_some_and(|p| p.shared_user),
                 code.parsed.shared_user_id.as_deref(),
                 code.parsed
                     .is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
@@ -765,7 +797,7 @@ impl SigningScan {
                 &parsed,
                 inputs.abi_policy,
                 inputs.native_environment,
-                inputs.context,
+                context,
             )
             .map_err(native_error)?;
         let mut multi_arch_mismatch = false;
@@ -779,8 +811,7 @@ impl SigningScan {
             multi_arch_mismatch = scan.multi_arch_mismatch;
             scan.apply_metadata(&mut parsed);
         }
-        inputs
-            .context
+        context
             .apply_setting(&parsed, &mut setting.package)
             .map_err(native_error)?;
         let policy = PageSizeCompatPolicy::from_platform(&apks.platform)
@@ -793,7 +824,7 @@ impl SigningScan {
             .apply_setting(
                 &parsed,
                 &mut setting.package,
-                inputs.context,
+                context,
                 inputs.install.page_size,
                 &inputs.abi_policy.bit64,
                 &|| {

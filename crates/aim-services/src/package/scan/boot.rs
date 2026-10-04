@@ -241,14 +241,6 @@ fn scan_system_image<S>(
             }
             Err(error) => return Err(error),
         }
-        if factory.is_some() && source_setting.is_some_and(|p| p.name != identity.internal_name) {
-            return Err(SigningError::Fatal(super::Error {
-                package: identity.internal_name,
-                path: code.location.path.clone(),
-                phase: "system-source",
-                message: "original-name factory selection requires distinct source and admission owners (#919)".into(),
-            }));
-        }
         if source_setting.is_some_and(|p| p.flags & crate::package::settings::FLAG_SYSTEM == 0) {
             return Err(fail(
                 identity.internal_name,

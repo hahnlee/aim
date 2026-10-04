@@ -13,6 +13,13 @@ pub enum AbiScanMode<'a> {
         old_was_stub: bool,
         saved: Option<&'a Package>,
     },
+    /// The disabled ScanRequest may bind an original-name setting to incoming
+    /// parsed code. The caller validates that source selection before binding.
+    DisabledFactory {
+        first_boot_or_upgrade: bool,
+        saved: &'a Package,
+        parsed_name: &'a str,
+    },
     /// Compilation/installation owns ABI derivation before SCAN_NEW_INSTALL.
     Install { moved: Option<&'a Package> },
     /// apexd owns APEX native libraries; APK derivation must not inspect them.
@@ -50,6 +57,25 @@ impl AbiScanMode<'_> {
         };
         match self {
             Self::Apex => Ok(Source::Apex),
+            Self::DisabledFactory {
+                first_boot_or_upgrade,
+                saved,
+                parsed_name,
+            } => {
+                if parsed_name != pkg.package_name {
+                    return Err(NativeLibraryError::Input(
+                        "factory ABI parsed owner differs".into(),
+                    ));
+                }
+                if first_boot_or_upgrade {
+                    Ok(Source::Derive)
+                } else {
+                    Ok(Source::Known(PackageAbis {
+                        primary: saved.primary_cpu_abi.clone(),
+                        secondary: saved.secondary_cpu_abi.clone(),
+                    }))
+                }
+            }
             Self::Existing {
                 first_boot_or_upgrade: true,
                 ..
@@ -75,13 +101,22 @@ impl AbiScanContext<'_> {
         self.override_abi.filter(|a| *a != "-")
     }
 
+    pub(super) fn matches_setting(&self, pkg: &AndroidPackage, setting: &Package) -> bool {
+        match self.mode {
+            AbiScanMode::DisabledFactory {
+                saved, parsed_name, ..
+            } => self.system && saved.name == setting.name && parsed_name == pkg.package_name,
+            _ => pkg.package_name == setting.name,
+        }
+    }
+
     /// Final ScanPackageUtils setting enrichment, including APEX settings.
     pub fn apply_setting(
         &self,
         pkg: &AndroidPackage,
         setting: &mut Package,
     ) -> Result<(), NativeLibraryError> {
-        if pkg.package_name != setting.name {
+        if !self.matches_setting(pkg, setting) {
             return Err(NativeLibraryError::Input(
                 "ABI setting belongs to another package".into(),
             ));
@@ -146,6 +181,61 @@ impl Apks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disabled_factory_abi_keeps_explicit_setting_and_parsed_owners() {
+        let saved = Package {
+            name: "original".into(),
+            primary_cpu_abi: Some("arm64-v8a".into()),
+            ..Default::default()
+        };
+        let mut pkg = AndroidPackage {
+            package_name: "incoming".into(),
+            ..Default::default()
+        };
+        for upgrade in [false, true] {
+            let context = AbiScanContext {
+                mode: AbiScanMode::DisabledFactory {
+                    first_boot_or_upgrade: upgrade,
+                    saved: &saved,
+                    parsed_name: "incoming",
+                },
+                system: true,
+                updated: false,
+                override_abi: None,
+                platform_runtime_64bit: None,
+            };
+            let source = context.mode.source(&pkg).unwrap();
+            if upgrade {
+                assert!(matches!(source, Source::Derive));
+            } else {
+                assert!(
+                    matches!(source, Source::Known(abis) if abis.primary == saved.primary_cpu_abi)
+                );
+            }
+            pkg.primary_cpu_abi = Some("arm64-v8a".into());
+            let mut target = saved.clone();
+            context.apply_setting(&pkg, &mut target).unwrap();
+            assert_eq!(target.name, "original");
+            assert_eq!(pkg.package_name, "incoming");
+            target.name = "foreign".into();
+            assert!(context.apply_setting(&pkg, &mut target).is_err());
+            let foreign = AndroidPackage {
+                package_name: "foreign".into(),
+                ..pkg.clone()
+            };
+            assert!(context.mode.source(&foreign).is_err());
+            assert!(context.apply_setting(&foreign, &mut saved.clone()).is_err());
+            assert!(
+                AbiScanContext {
+                    system: false,
+                    ..context
+                }
+                .apply_setting(&pkg, &mut saved.clone())
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn lifecycle_selects_saved_compiled_rederived_and_apex_sources() {
         let pkg = AndroidPackage {

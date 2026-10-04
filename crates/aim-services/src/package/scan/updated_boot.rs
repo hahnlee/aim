@@ -128,6 +128,17 @@ impl SigningScan {
                 message,
             })
         };
+        if self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == enabled.name)
+            != Some(&enabled)
+        {
+            return Err(reject(
+                "enabled factory setting changed before admission".into(),
+            ));
+        }
         let AbiScanMode::Existing {
             first_boot_or_upgrade,
             old_was_stub,
@@ -168,12 +179,22 @@ impl SigningScan {
                 inputs.remove_test_base,
             )
             .map_err(reject)?;
+        let identity = Identity::select_for_location(&parsed, &self.settings, true, &code.location);
+        let admission = self.settings.packages.iter()
+            .find(|p| p.name == identity.internal_name)
+            .cloned()
+            .ok_or_else(|| SigningError::Fatal(Error {
+                package: identity.internal_name,
+                path: code.location.path.clone(),
+                phase: "updated-system-boot",
+                message: "factory restoration without an incoming setting requires original admission (#919)".into(),
+            }))?;
         let (flags, private_flags) = application_flags(&parsed, false);
         let update = SettingUpdate {
             code_path: code.location.path.clone(),
-            legacy_native_library_path: enabled.legacy_native_library_path.clone(),
-            primary_cpu_abi: enabled.primary_cpu_abi.clone(),
-            secondary_cpu_abi: enabled.secondary_cpu_abi.clone(),
+            legacy_native_library_path: admission.legacy_native_library_path.clone(),
+            primary_cpu_abi: admission.primary_cpu_abi.clone(),
+            secondary_cpu_abi: admission.secondary_cpu_abi.clone(),
             flags,
             private_flags,
             uses_sdk_libraries: super::boot::sdk_libraries(&parsed).map_err(reject)?,
@@ -193,7 +214,7 @@ impl SigningScan {
                 mode: AbiScanMode::Existing {
                     first_boot_or_upgrade,
                     old_was_stub,
-                    saved: Some(&enabled),
+                    saved: Some(&admission),
                 },
                 system: true,
                 updated: false,

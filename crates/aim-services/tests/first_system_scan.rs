@@ -906,40 +906,105 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             .loaded_packages()
             .contains_key("com.google.android.gsf")
     );
-    // A disabled factory under the original name must not refresh the
-    // incoming name's factory through the currently single-name backend.
-    both.disabled_system_packages.push(old.clone());
-    let mut factory_owner =
-        aim_services::package::scan::SigningScan::new(&config, &both, 36).unwrap();
-    let mut both_image = Image::parse(&apks, &[]).unwrap();
-    both_image.packages[1].parsed.shared_user_id = None;
-    both_image.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
-    let error = factory_owner
-        .scan_saved_parsed_system_image(
-            both_image,
-            &apks,
-            &config,
-            inputs(&domain_ids),
-            aim_services::package::scan::SavedSystemScanInputs {
-                users: &both_users,
-                ..saved_inputs()
-            },
-        )
-        .unwrap_err();
-    assert!(matches!(error, SigningError::Fatal(error)
-        if error.phase == "system-source" && error.message.contains("#919")));
-    assert_eq!(
-        factory_owner.settings.disabled_system_packages,
-        vec![old.clone()]
-    );
-    assert_eq!(
-        factory_owner
-            .settings
+    // The original's disabled ScanRequest copies that setting while retaining
+    // the incoming parsed name. Source choice uses the original version/path;
+    // restoration enables that owner before admitting the incoming setting.
+    for restore in [false, true] {
+        let mut both = both.clone();
+        let source = both
             .packages
+            .iter_mut()
+            .find(|p| p.name == old.name)
+            .unwrap();
+        source.code_path = "/data/app/OriginalGSF".into();
+        source.version_code = if restore { 0 } else { i64::MAX };
+        source.transient.updated_system_app = true;
+        let source_before = source.clone();
+        let mut factory = old.clone();
+        factory.transient.updated_system_app = false;
+        both.disabled_system_packages.push(factory);
+        let mut factory_owner =
+            aim_services::package::scan::SigningScan::new(&config, &both, 36).unwrap();
+        let captured = both_users
             .iter()
-            .find(|p| p.name == old.name),
-        Some(&old)
-    );
+            .map(|(name, users)| {
+                (
+                    (name.clone(), false),
+                    aim_services::package::scan::CapturedUsers {
+                        states: users.clone(),
+                        active_aliases: Default::default(),
+                    },
+                )
+            })
+            .chain(std::iter::once((
+                (old.name.clone(), true),
+                aim_services::package::scan::CapturedUsers {
+                    states: both_users[&old.name].clone(),
+                    active_aliases: Default::default(),
+                },
+            )))
+            .collect();
+        factory_owner.capture_user_states(captured).unwrap();
+        let mut both_image = Image::parse(&apks, &[]).unwrap();
+        both_image.packages[1].parsed.shared_user_id = None;
+        both_image.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
+        let result = factory_owner
+            .scan_saved_parsed_system_image(
+                both_image,
+                &apks,
+                &config,
+                inputs(&domain_ids),
+                aim_services::package::scan::SavedSystemScanInputs {
+                    users: &both_users,
+                    ..saved_inputs()
+                },
+            )
+            .unwrap();
+        assert!(factory_owner.settings.renamed_packages.is_empty());
+        assert!(!factory_owner.loaded_packages().contains_key(&old.name));
+        if restore {
+            assert!(result.retained_data.is_empty());
+            assert!(factory_owner.settings.disabled_system_packages.is_empty());
+            let accepted = &result.packages[1].candidate;
+            assert_eq!(accepted.record.settings.name, "com.google.android.gsf");
+            assert_eq!(accepted.record.settings.app_id, 10002);
+            assert_eq!(accepted.users, both_users["com.google.android.gsf"]);
+            let enabled = factory_owner
+                .settings
+                .packages
+                .iter()
+                .find(|p| p.name == old.name)
+                .unwrap();
+            assert_eq!(enabled.app_id, 10003);
+            assert!(!enabled.transient.updated_system_app);
+        } else {
+            assert_eq!(result.packages.len(), 1);
+            assert_eq!(result.retained_data.len(), 1);
+            let factory = &result.retained_data[0];
+            assert_eq!(factory.record.settings.name, old.name);
+            assert_eq!(factory.record.settings.app_id, 10003);
+            assert_eq!(factory.record.parsed.package_name, "com.google.android.gsf");
+            assert_eq!(
+                factory.record.identity.internal_name,
+                "com.google.android.gsf"
+            );
+            assert!(factory.record.signing.unknown);
+            assert_eq!(factory.users, both_users[&old.name]);
+            assert_eq!(
+                factory_owner
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == old.name),
+                Some(&source_before)
+            );
+            assert!(
+                !factory_owner
+                    .loaded_packages()
+                    .contains_key("com.google.android.gsf")
+            );
+        }
+    }
     // Stub policy comes from a fixture compressed-sibling inventory.
     // The original signed APK remains an unchanged symlink target.
     let stub = fixture.0.join("product/priv-app/GSF-Stub");

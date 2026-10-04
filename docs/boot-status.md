@@ -928,16 +928,25 @@ The normal unchanged-shared-UID admission still copies the incoming setting,
 as scanPackageNew does: a controlled request over unchanged GSF code verifies
 incoming UID 10002 and its user states survive while the original UID 10003,
 setting and unloaded identity remain unchanged, with no renamed-package entry.
-The complete first-system scan passes (10.36s). A disabled factory under the
-original name currently stops with an explicit native owner error before either
-factory is refreshed; distinct source/admission factory handling and shared-UID
-replacement remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
+Disabled factory refresh also selects that original name while retaining the
+incoming parsed APK name, as the copied disabled ScanRequest does. Its ABI and
+page-size metadata carry an explicit setting/parsed owner binding, preserving
+saved factory ABIs without permitting unrelated setting updates. Source version
+and path use the original setting; the old shared UID still comes from the
+incoming installed setting. Controlled unchanged-GSF requests verify both
+KeepData (original factory UID 10003 and UNKNOWN code signing, no incoming
+admission) and RestoreFactory (enable original UID 10003 before admitting incoming
+UID 10002 and its user states). The complete first-system scan passes
+(10.58s), and release units pass 458 cases. Snapshot/facade capture of distinct disabled
+setting/code names remains #926; original admission when there is no incoming
+setting, shared-UID replacement and complete request execution parity remain
+#919. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only system and data inputs (50.91s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only system and data inputs (40.00s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

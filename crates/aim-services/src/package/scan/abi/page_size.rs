@@ -32,7 +32,7 @@ impl PageSizeCompatPolicy {
         if page_size < 4096 || !page_size.is_power_of_two() {
             return Err(NativeLibraryError::Input("invalid guest page size".into()));
         }
-        if pkg.package_name != setting.name {
+        if !context.matches_setting(pkg, setting) {
             return Err(NativeLibraryError::Input(
                 "page-size setting belongs to another package".into(),
             ));
