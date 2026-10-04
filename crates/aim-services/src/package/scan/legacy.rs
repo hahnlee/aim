@@ -62,6 +62,43 @@ impl SigningScan {
         Ok(())
     }
 
+    pub(super) fn disabled_legacy_for_replacement(&self, name: &str) -> Result<Migration, String> {
+        self.validate_legacy_permissions()?;
+        self.legacy_permissions
+            .as_ref()
+            .and_then(|owners| owners.packages.get(&(name.into(), true)))
+            .map(|(_, _, migration)| migration.clone())
+            .ok_or_else(|| "disabled legacy migration owner is not captured".into())
+    }
+
+    pub(super) fn commit_replaced_legacy(
+        &mut self,
+        name: &str,
+        migration: Migration,
+    ) -> Result<(), String> {
+        let setting = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or("replacement setting is missing")?;
+        let owners = self
+            .legacy_permissions
+            .as_mut()
+            .ok_or("legacy migration owner is not captured")?;
+        let key = (name.into(), false);
+        let active = owners
+            .packages
+            .get_mut(&key)
+            .ok_or("active legacy migration owner is missing")?;
+        *active = (setting.app_id, setting.shared_user, migration);
+        owners
+            .install_fixed
+            .get_or_insert_with(Default::default)
+            .insert(key, false);
+        self.validate_legacy_permissions()
+    }
+
     pub(in crate::package) fn validate_legacy_permissions(&self) -> Result<(), String> {
         let Some(owners) = &self.legacy_permissions else {
             return Ok(());

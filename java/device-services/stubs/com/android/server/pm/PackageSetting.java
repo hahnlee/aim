@@ -27,6 +27,8 @@ public class PackageSetting extends SettingBase {
     public PackageSetting setAppMetadataFilePath(String value) { throw new RuntimeException("stub"); }
     public PackageSetting setAppMetadataSource(int value) { throw new RuntimeException("stub"); }
 
+    void setEnabledComponentsCopy(com.android.server.utils.WatchedArraySet<String> components, int user) { throw new RuntimeException("stub"); }
+    void setDisabledComponentsCopy(com.android.server.utils.WatchedArraySet<String> components, int user) { throw new RuntimeException("stub"); }
     public boolean isInstallPermissionsFixed() { throw new RuntimeException("stub"); }
     public PackageSetting setInstallPermissionsFixed(boolean fixed) { throw new RuntimeException("stub"); }
     public String getPackageName() { throw new RuntimeException("stub"); }

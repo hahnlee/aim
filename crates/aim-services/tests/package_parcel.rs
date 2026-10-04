@@ -1650,6 +1650,123 @@ fn native_package_parcels_match_original_read_write() {
         transitions.data(),
     )
     .unwrap();
+    let mut inherited = shared_without_factory.clone();
+    let name = inherited.settings.packages[0].name.clone();
+    inherited
+        .set_user_state(
+            &name,
+            0,
+            aim_services::package::restrictions::UserState {
+                hidden: true,
+                installed: false,
+                enabled_components: Some(vec!["enabled.fixture".into()]),
+                disabled_components: Some(vec!["disabled.fixture".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    inherited.disable_system_package(&name).unwrap();
+    inherited
+        .capture_legacy_permissions(
+            &[10, 0, 11],
+            std::collections::BTreeMap::from([
+                ((name.clone(), false), Default::default()),
+                ((name.clone(), true), apex_legacy.clone()),
+            ]),
+            inherited
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect(),
+        )
+        .unwrap();
+    let inheritance_users = [aim_services::package::scan::User {
+        id: 0,
+        pre_created: false,
+        adb_install_disallowed: false,
+    }];
+    let mut inheritance_inputs = scan_inputs(&unshared_image);
+    inheritance_inputs.users.users = Some(&inheritance_users);
+    let mut partial_bits = inherited.clone();
+    partial_bits
+        .scan_initial_apex(&replacement_apks, &config, &inheritance_inputs)
+        .unwrap();
+    assert_eq!(
+        partial_bits
+            .install_permissions_fixed(&name, false)
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        partial_bits.install_permissions_fixed(&name, true).unwrap(),
+        None
+    );
+    inherited
+        .capture_install_permissions_fixed(std::collections::BTreeMap::from([
+            ((name.clone(), false), true),
+            ((name.clone(), true), true),
+        ]))
+        .unwrap();
+    let mut failed_inheritance = inherited.clone();
+    let mut denied = scan_inputs(&unshared_image);
+    denied.users.users = Some(&inheritance_users);
+    denied.seinfo.compatibility = &reject_shared_compatibility;
+    assert!(
+        matches!(failed_inheritance.scan_initial_apex(&replacement_apks, &config, &denied),
+        Err(aim_services::package::scan::SigningError::Rejected(ref error)) if error.phase == "seinfo")
+    );
+    assert_eq!(failed_inheritance, inherited);
+    inherited
+        .scan_initial_apex(&replacement_apks, &config, &inheritance_inputs)
+        .unwrap();
+    assert_eq!(
+        inherited.legacy_permissions(&name, false).unwrap().unwrap(),
+        detached_apex
+    );
+    assert_eq!(
+        inherited.install_permissions_fixed(&name, false).unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        inherited.install_permissions_fixed(&name, true).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        inherited.settings.packages[0].signatures,
+        inherited.settings.disabled_system_packages[0].signatures
+    );
+    let user = &inherited.scanned_user_states(&name).unwrap()[&0];
+    assert!(!user.hidden && user.installed);
+    assert_eq!(
+        user.enabled_components.as_deref(),
+        Some(["enabled.fixture".into()].as_slice())
+    );
+    assert_eq!(
+        user.disabled_components.as_deref(),
+        Some(["disabled.fixture".into()].as_slice())
+    );
+    fs::write(
+        directory.join("disabled-apex-legacy.input"),
+        inherited
+            .legacy_permissions(&name, false)
+            .unwrap()
+            .unwrap()
+            .bytes(),
+    )
+    .unwrap();
+    let factory_user = inherited.disabled_user_states(&name).unwrap()[&0].clone();
+    let mut changed = user.clone();
+    changed
+        .enabled_components
+        .as_mut()
+        .unwrap()
+        .push("late.fixture".into());
+    inherited.set_user_state(&name, 0, changed).unwrap();
+    assert_eq!(
+        inherited.disabled_user_states(&name).unwrap()[&0],
+        factory_user
+    );
     let mut failed_replacement = shared_without_factory.clone();
     let previous_packages = failed_replacement.settings.packages.clone();
     replacement_inputs.seinfo.compatibility = &reject_shared_compatibility;

@@ -557,15 +557,23 @@ preserving labels across this scan-to-registration setting ID transition.
 Changing an existing container's declared group now creates a fresh setting,
 preserves pendingRestore and withdraws the old loaded scan only within the staged
 candidate. Successful completion removes the old group membership and prunes its
-UID only when no active or disabled reference remains (#889). A non-shared
-replacement with a disabled factory still rejects because its legacy permission
-and component owners are not supplied (#889); original/renamed identity adoption
-also rejects (#890). First shared code uses the supplied
+UID only when no active or disabled reference remains (#889). A non-shared replacement with a disabled factory now copies its saved signer
+and captured LegacyPermissionState; only the enumerated users' enabled/disabled
+component sets are copied, with fresh constructor defaults for other user fields.
+Missing migration/component owners reject before commit. A fresh setting records
+its constructor's installPermissionsFixed=false even when other fixed bits remain
+unresolved. Old disabled-user aliases detach only for fresh replacements (#897),
+so later active user changes preserve the old factory; retained updates keep their
+aliases. Original Settings.createNewSetting agrees on signer/legacy/fixed-bit
+inheritance, and the original component copy setters agree in a controlled user
+loop. This does not construct a live original UserManager in the standalone
+oracle. Best-effort leaving-shared-UID APEX conversion remains #898/#889;
+original/renamed identity adoption remains #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
 preserving the original group allocation. The original ART oracle passes in
-30.73s, including typed original Settings.addPackageSettingLPw final registration,
+31.79s, including typed original Settings.addPackageSettingLPw final registration,
 SELinuxMMAC labels and SharedUserSetting commit SDK, unchanged archive bytes with
 controlled shared identity, unread policy and
 a declared-target compatibility decision. Original Settings group removal/pruning
@@ -575,10 +583,11 @@ path to unchanged original archive bytes, preserve pendingRestore, query the new
 group's compatibility owner, restore distinct active/factory group identities and
 retain old settings/loaded code on seInfo rejection while keeping only the newly
 allocated empty group. The full initial scan regression
-passes in 67.78s, including grouped container registration and the first APK
+passes in 68.01s, including grouped container registration and the first APK
 allocation at 10001 after group 10000. All integration targets compile, 436 units
 pass (one ignored/not run). The original-image API check and full image/template
-build pass in 79.5s (nine rebuilt, 33 fresh). These fixtures do not prove a live PlatformCompat call
+build pass in 73.0s (nine rebuilt, 33 fresh); final host rebuild passes in 16.7s
+(three rebuilt, 39 fresh). These fixtures do not prove a live PlatformCompat call
 or a manifest-declared shared APEX in the original image. The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original
 PackageImpl objects and signer capability flags, validates the complete frame
@@ -797,7 +806,8 @@ legacy inventory and retains the negative-ID projection. The first fixture omitt
 policy-seeded shared owners and was rejected; it now supplies every controlled
 owner rather than infer empty permissions. All 436 units pass (one ignored/not run),
 all integration targets compile, and the original-image API check/full image and
-template build pass in 79.5s (nine rebuilt, 33 fresh). The initial system scan
+template build pass in 73.0s (nine rebuilt, 33 fresh); final host rebuild passes in 16.7s
+(three rebuilt, 39 fresh). The initial system scan
 regression also passes in 67.78s. The real native Binder test now retains a
 150,000-character legacy permission across a changed publication. Original ART
 agrees on 16 text/ABX pinned reader-loop ports using original parsers/owners,

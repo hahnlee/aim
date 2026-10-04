@@ -160,13 +160,14 @@ impl SigningScan {
             let replaces_shared = previous
                 .as_ref()
                 .is_some_and(|p| p.shared_app_id() != shared_id);
-            if replaces_shared && shared_id.is_none() && disabled.is_some() {
-                return Err(fail(
-                    "apex-identity",
-                    "non-shared replacement requires disabled permission/component owners (#889)"
-                        .into(),
-                ));
-            }
+            let disabled_legacy = if replaces_shared && shared_id.is_none() && disabled.is_some() {
+                Some(
+                    self.disabled_legacy_for_replacement(&identity.internal_name)
+                        .map_err(|message| fail("apex-legacy", message))?,
+                )
+            } else {
+                None
+            };
             let updated = !source.info.factory || disabled.is_some();
             let mut policy = container_policy(&source.info.module_path);
             if policy.needs_shared_uid_privilege_check(&parsed, &self.identities, inputs.vendor_sdk)
@@ -281,12 +282,33 @@ impl SigningScan {
                     users,
                 )
             };
+            if disabled_legacy.is_some() {
+                let factory = disabled.as_ref().unwrap();
+                setting.package.signatures = factory.signatures.clone();
+                if let Some(users) = inputs.users.users {
+                    let states = self.disabled_user_states(&factory.name).ok_or_else(|| {
+                        fail(
+                            "apex-users",
+                            "disabled component owner is not captured".into(),
+                        )
+                    })?;
+                    for user in users {
+                        let original = states.get(&user.id).cloned().unwrap_or_default();
+                        let state = setting.users.entry(user.id).or_default();
+                        state.enabled_components =
+                            Some(original.enabled_components.unwrap_or_default());
+                        state.disabled_components =
+                            Some(original.disabled_components.unwrap_or_default());
+                    }
+                }
+            }
             if replaces_shared {
                 setting.package.pending_restore = previous.as_ref().unwrap().pending_restore;
             }
             let mut staged = self.clone();
             if replaces_shared {
                 let old = previous.as_ref().unwrap();
+                staged.detach_disabled_user_aliases(&old.name);
                 staged
                     .withdraw_loaded_apex(old)
                     .map_err(|message| fail("apex-origin", message))?;
@@ -372,6 +394,11 @@ impl SigningScan {
                     .find(|p| p.name == *name)
                     .unwrap()
                     .app_id = id;
+            }
+            if let Some(migration) = disabled_legacy {
+                staged
+                    .commit_replaced_legacy(name, migration)
+                    .map_err(|message| fail("apex-legacy", message))?;
             }
             if source.info.factory && !source.info.active {
                 staged.disable_system_package(name)?;

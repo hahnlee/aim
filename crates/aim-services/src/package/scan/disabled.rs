@@ -520,6 +520,12 @@ impl SigningScan {
         Ok(())
     }
 
+    pub(super) fn detach_disabled_user_aliases(&mut self, name: &str) {
+        if let Some(state) = self.disabled_users.get_mut(name) {
+            state.aliases.clear();
+        }
+    }
+
     pub(super) fn update_disabled_user_aliases(
         &mut self,
         name: &str,

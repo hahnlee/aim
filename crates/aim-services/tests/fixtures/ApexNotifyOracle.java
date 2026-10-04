@@ -32,6 +32,7 @@ public final class ApexNotifyOracle {
         verifySharedIds(directory);
         verifySharedApex(directory);
         verifyChangedGroup(directory);
+        verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
         System.exit(0);
@@ -87,6 +88,43 @@ public final class ApexNotifyOracle {
                     throw new AssertionError("changed group registration/pruning differs");
             }
             if (in.dataAvail() != 0) throw new AssertionError("group transition tail");
+        } finally { in.recycle(); }
+    }
+    private static void verifyDisabledInheritance(java.io.File directory) throws Exception {
+        var in = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "shared-apex.input").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var code = (com.android.internal.pm.parsing.pkg.PackageImpl)com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(in.createByteArray());
+            int flags = in.readInt(), privateFlags = in.readInt();
+            var factory = new PackageSetting(code.getPackageName(), null, new java.io.File(code.getPath()), flags, privateFlags, new java.util.UUID(1, 1));
+            factory.setAppId(10000); factory.setSharedUserAppId(10000);
+            factory.setSigningDetails(code.getSigningDetails()); factory.setInstallPermissionsFixed(true);
+            int[] users = {10, 0, 11};
+            byte[] legacy = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.original").toPath());
+            factory.getLegacyPermissionState().copyFrom(dev.aim.server.PackageLegacyPermissions.restore(10042, users, legacy));
+            var factoryUser = factory.getOrCreateUserState(0);
+            var enabled = new android.util.ArraySet<String>(); enabled.add("enabled.fixture");
+            var disabled = new android.util.ArraySet<String>(); disabled.add("disabled.fixture");
+            factoryUser.setEnabledComponents(enabled); factoryUser.setDisabledComponents(disabled); factoryUser.setHidden(true); factoryUser.setInstalled(false);
+            var replacement = Settings.createNewSetting(code.getPackageName(), null, factory, null, null,
+                new java.io.File("/data/apex/active/shared-replacement.apex"), null, null, null, 1,
+                flags, privateFlags, null, true, false, false, false, null,
+                null, null, null, null, null, null, new java.util.UUID(1, 2), code.getTargetSdkVersion(), null);
+            replacement.setAppId(-1);
+            byte[] nativeBytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "disabled-apex-legacy.input").toPath());
+            if (!java.util.Arrays.equals(nativeBytes, dev.aim.server.PackageLegacyPermissions.capture(-1, users, replacement.getLegacyPermissionState())))
+                throw new AssertionError("disabled legacy inheritance differs");
+            if (replacement.isInstallPermissionsFixed() || !factory.isInstallPermissionsFixed()
+                    || !replacement.getSigningDetails().equals(factory.getSigningDetails())) throw new AssertionError("factory signatures/fixed bit differs");
+            // Settings' enumerated-user loop uses these original copy setters.
+            replacement.setEnabledComponentsCopy(factoryUser.getEnabledComponentsNoCopy(), 0);
+            replacement.setDisabledComponentsCopy(factoryUser.getDisabledComponentsNoCopy(), 0);
+            var user = (com.android.server.pm.pkg.PackageUserStateInternal)(Object)replacement.getOrCreateUserState(0);
+            if (user.isHidden() || !user.isInstalled() || !user.getEnabledComponents().equals(enabled) || !user.getDisabledComponents().equals(disabled))
+                throw new AssertionError("disabled component inheritance differs");
+            user.getEnabledComponents().add("late.fixture");
+            if (((com.android.server.pm.pkg.PackageUserStateInternal)(Object)factoryUser).getEnabledComponents().contains("late.fixture")) throw new AssertionError("factory aliases replacement user");
         } finally { in.recycle(); }
     }
     private static void verifySharedIds(java.io.File directory) throws Exception {
