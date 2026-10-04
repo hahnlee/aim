@@ -1,7 +1,7 @@
 //! SettingBase's legacy migration owner, separate from the live exporter.
 //! Ported from pinned LegacyPermissionState and Settings permission readers.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-use super::{Error, Permission, State, User, validate};
+use super::{Error, Permission, State, User, validate_setting};
 use aim_android_xml::Element;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -127,7 +127,7 @@ impl Migration {
     }
 
     pub fn project(&self, app_id: i32, users: &[i32]) -> Result<State, Error> {
-        validate(app_id, users)?;
+        validate_setting(app_id, users)?;
         Ok(State {
             app_id,
             users: users
@@ -218,6 +218,30 @@ mod tests {
         );
         let new = migration.project(10042, &[10, 0, 11]).unwrap();
         assert_eq!(State::read(&new.bytes(), 10042, &[10, 0, 11]).unwrap(), new);
+    }
+
+    #[test]
+    fn invalid_uid_setting_owns_legacy_state_without_a_live_application_lookup() {
+        let mut owner = Migration::default();
+        owner.set_missing(10, true).unwrap();
+        owner
+            .put(
+                0,
+                Permission {
+                    name: Some("camera".into()),
+                    runtime: true,
+                    granted: true,
+                    flags: 17,
+                },
+            )
+            .unwrap();
+        let state = owner.project(-1, &[0, 10]).unwrap();
+        assert_eq!(State::read(&state.bytes(), -1, &[0, 10]).unwrap(), state);
+        assert!(state.user(10).unwrap().missing);
+        assert!(state.user(0).unwrap().permissions[0].granted);
+        assert!(super::super::validate(-1, &[0, 10]).is_err());
+        assert!(owner.project(-2, &[0, 10]).is_err());
+        assert!(State::read(&state.bytes(), 10000, &[0, 10]).is_err());
     }
 
     #[test]

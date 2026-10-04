@@ -953,6 +953,19 @@ fn native_package_parcels_match_original_read_write() {
         permissions.bytes(),
     )
     .unwrap();
+    let mut apex_legacy = aim_services::package::owner::legacy_permissions::Migration::default();
+    for user in permissions.users() {
+        apex_legacy.set_missing(user.id, user.missing).unwrap();
+        for permission in &user.permissions {
+            apex_legacy.put(user.id, permission.clone()).unwrap();
+        }
+    }
+    let detached_apex = apex_legacy.project(-1, &[10, 0, 11]).unwrap();
+    fs::write(
+        directory.join("legacy-permissions-apex.input"),
+        detached_apex.bytes(),
+    )
+    .unwrap();
     let mut apex_features = aim_services::package::parse::Platform::load(
         &aim_paths::original_image(),
         Default::default(),
@@ -1597,6 +1610,24 @@ fn native_package_parcels_match_original_read_write() {
     assert_eq!(unshared.settings.packages[0].shared_app_id(), None);
     assert_eq!(result[0].package.uid, -1);
     assert!(unshared.identities.ids.get(10000).is_none());
+    let name = unshared.settings.packages[0].name.clone();
+    let group_permissions = unshared
+        .identities
+        .shared_users
+        .keys()
+        .map(|name| (name.clone(), apex_legacy.clone()))
+        .collect();
+    unshared
+        .capture_legacy_permissions(
+            &[10, 0, 11],
+            std::collections::BTreeMap::from([((name.clone(), false), apex_legacy.clone())]),
+            group_permissions,
+        )
+        .unwrap();
+    assert_eq!(
+        unshared.legacy_permissions(&name, false).unwrap().unwrap(),
+        detached_apex
+    );
     aim_services::package::scan::SigningScan::new_after_apex(
         &config,
         &unshared.settings,

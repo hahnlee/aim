@@ -10,7 +10,7 @@ public final class PackageLegacyPermissions {
     private PackageLegacyPermissions() {}
 
     public static byte[] capture(int appId, int[] users, LegacyPermissionState state) {
-        validate(appId, users);
+        validateSetting(appId, users);
         Objects.requireNonNull(state);
         Parcel out = Parcel.obtain();
         try {
@@ -31,7 +31,7 @@ public final class PackageLegacyPermissions {
     }
 
     public static LegacyPermissionState restore(int appId, int[] users, byte[] bytes) {
-        validate(appId, users);
+        validateSetting(appId, users);
         Objects.requireNonNull(bytes);
         if (bytes.length % 4 != 0) throw new IllegalArgumentException("unaligned permission capture");
         Parcel in = Parcel.obtain();
@@ -67,7 +67,12 @@ public final class PackageLegacyPermissions {
     }
 
     public static void validate(int appId, int[] users) {
-        if (appId < 0 || appId >= 100000 || users == null || users.length == 0) {
+        if (appId < 0) throw new IllegalArgumentException("live permission lookup requires an application ID");
+        validateSetting(appId, users);
+    }
+
+    private static void validateSetting(int appId, int[] users) {
+        if (appId < -1 || appId >= 100000 || users == null || users.length == 0) {
             throw new IllegalArgumentException("permission capture requires app ID and resolved users");
         }
         var seen = new HashSet<Integer>();

@@ -41,7 +41,18 @@ pub enum Error {
 }
 
 pub fn validate(app_id: i32, users: &[i32]) -> Result<(), Error> {
-    if !(0..100_000).contains(&app_id) || users.is_empty() {
+    if app_id < 0 {
+        return Err(Error::Input(
+            "live permission lookup requires an application ID".into(),
+        ));
+    }
+    validate_setting(app_id, users)
+}
+
+/// Detached SettingBase ownership can carry Process.INVALID_UID, unlike a
+/// live PermissionManager lookup keyed by an application's appId.
+pub(super) fn validate_setting(app_id: i32, users: &[i32]) -> Result<(), Error> {
+    if !(-1..100_000).contains(&app_id) || users.is_empty() {
         return Err(Error::Input(
             "permission capture requires app ID and resolved users".into(),
         ));
@@ -65,7 +76,7 @@ impl State {
     }
 
     pub fn read(bytes: &[u8], app_id: i32, users: &[i32]) -> Result<Self, Error> {
-        validate(app_id, users)?;
+        validate_setting(app_id, users)?;
         let parse = || -> Result<Self, String> {
             let mut r = Reader::new(bytes, &[]);
             let mut int = || r.read_i32().map_err(|e| format!("permission capture: {e}"));

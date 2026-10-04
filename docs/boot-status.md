@@ -565,7 +565,7 @@ compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
 preserving the original group allocation. The original ART oracle passes in
-30.84s, including typed original Settings.addPackageSettingLPw final registration,
+30.73s, including typed original Settings.addPackageSettingLPw final registration,
 SELinuxMMAC labels and SharedUserSetting commit SDK, unchanged archive bytes with
 controlled shared identity, unread policy and
 a declared-target compatibility decision. Original Settings group removal/pruning
@@ -575,10 +575,10 @@ path to unchanged original archive bytes, preserve pendingRestore, query the new
 group's compatibility owner, restore distinct active/factory group identities and
 retain old settings/loaded code on seInfo rejection while keeping only the newly
 allocated empty group. The full initial scan regression
-passes in 67.99s, including grouped container registration and the first APK
-allocation at 10001 after group 10000. All integration targets compile, 435 units
+passes in 67.78s, including grouped container registration and the first APK
+allocation at 10001 after group 10000. All integration targets compile, 436 units
 pass (one ignored/not run). The original-image API check and full image/template
-build pass in 67.4s (nine rebuilt, 33 fresh). These fixtures do not prove a live PlatformCompat call
+build pass in 79.5s (nine rebuilt, 33 fresh). These fixtures do not prove a live PlatformCompat call
 or a manifest-declared shared APEX in the original image. The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original
 PackageImpl objects and signer capability flags, validates the complete frame
@@ -587,7 +587,7 @@ original ART oracle uses a fresh original ApexManager implementation and verifie
 module and active-package mappings for all 42 results; it does not notify the
 running original PMS singleton. Missing counts, unaligned and trailing payloads
 reject. Complete daemon ordering remains #885/#836/#798; the running daemon still
-does not invoke native initialization. All 435 units pass (one ignored/not
+does not invoke native initialization. All 436 units pass (one ignored/not
 run), including generated Binder notification and reply/error handling. Actual original ART also continues to verify the user/APEX
 inventory exporters, static-library identity, complete package parcels and signer
 lineage. The full image/template build, including the original-image API reference check,
@@ -785,7 +785,20 @@ invalid user inventories and later package/UID inventory mismatches reject witho
 replacing prior state. Older captures retain earlier permissions. Setting pages
 carry the migration projection and Java rebuilds detached original
 LegacyPermissionState objects; an unresolved marker makes the getter fail instead
-of supplying an empty substitute. The real native Binder test now retains a
+of supplying an empty substitute. Detached Migration/State and Java permission
+capture/restore now admit the exact INVALID_UID (-1) SettingBase identity (#896).
+A non-shared APEX still owns real legacy permissions without an application UID;
+negative live PermissionManager lookups remain rejected before Binder/provider
+calls. The original ART oracle passes in 30.73s, including populated original
+PackageSetting legacy state at appId -1, native/Java byte equality and restoration,
+foreign IDs, lower negative IDs and trailing-frame rejection. The native verified
+non-shared APEX owner captures a complete explicitly supplied package/shared
+legacy inventory and retains the negative-ID projection. The first fixture omitted
+policy-seeded shared owners and was rejected; it now supplies every controlled
+owner rather than infer empty permissions. All 436 units pass (one ignored/not run),
+all integration targets compile, and the original-image API check/full image and
+template build pass in 79.5s (nine rebuilt, 33 fresh). The initial system scan
+regression also passes in 67.78s. The real native Binder test now retains a
 150,000-character legacy permission across a changed publication. Original ART
 agrees on 16 text/ABX pinned reader-loop ports using original parsers/owners,
 original SettingBase/PackageSetting copies,

@@ -20,6 +20,19 @@ public final class LegacyPermissionOracle {
         java.nio.file.Files.write(new java.io.File(directory, "legacy-permissions.original").toPath(), captured);
         byte[] nativeBytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.input").toPath());
         if (!java.util.Arrays.equals(captured, nativeBytes)) throw new AssertionError("native legacy permission capture differs");
+        var apex = new com.android.server.pm.PackageSetting("apex", null,
+            new java.io.File("/system/apex/fixture.apex"), 1, 0, new java.util.UUID(0, 0)).setAppId(-1);
+        apex.getLegacyPermissionState().copyFrom(source);
+        byte[] nativeApex = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions-apex.input").toPath());
+        if (!java.util.Arrays.equals(nativeApex, PackageLegacyPermissions.capture(apex.getAppId(), users, apex.getLegacyPermissionState())))
+            throw new AssertionError("INVALID_UID SettingBase capture differs");
+        var apexRestored = PackageLegacyPermissions.restore(-1, users, nativeApex);
+        if (!java.util.Arrays.equals(nativeApex, PackageLegacyPermissions.capture(-1, users, apexRestored)))
+            throw new AssertionError("INVALID_UID SettingBase restoration differs");
+        rejects(-2, users, nativeApex); rejects(10042, users, nativeApex);
+        byte[] invalidApex = java.util.Arrays.copyOf(nativeApex, nativeApex.length + 4); rejects(-1, users, invalidApex);
+        try { PackageLegacyPermissions.validate(-1, users); throw new AssertionError("negative live permission identity accepted"); }
+        catch (IllegalArgumentException expected) {}
         var restored = PackageLegacyPermissions.restore(10042, users, nativeBytes);
         if (!restored.isMissing(10) || restored.isMissing(0) || restored.isMissing(11)
             || !restored.getPermissionStates(11).isEmpty() || restored.getPermissionStates(10).size() != 4) throw new AssertionError("permission users/missing state lost");
