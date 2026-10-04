@@ -174,7 +174,8 @@ fn scan_system_image(
     let mut platform_loaded = false;
     for mut code in image.packages {
         owner.refresh_init_apex(&code);
-        let identity = Identity::select(&code.parsed, &owner.settings, true);
+        let identity =
+            Identity::select_for_location(&code.parsed, &owner.settings, true, &code.location);
         let active = owner
             .settings
             .packages

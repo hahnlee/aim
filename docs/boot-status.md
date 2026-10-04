@@ -476,17 +476,30 @@ selection; that refresh survives a later rejection or selection of the data
 copy. New, retained and original-name-adopted completion update the accepted
 setting and returned candidate together. Source-rule regressions cover nullable
 owner precedence, unrelated retained bits and refresh before identity selection.
-The explicit unchanged-original-APK initial scan gate passes (63.38s), with a
+The explicit unchanged-original-APK initial scan gate passes (75.21s), with a
 disposable APEX mount matrix for null/non-null modules and factory/update state,
 retained-data selection and a later domain error preserving the disabled refresh.
-Static-library identity inside APEX remains #883. Native APEX settings preparation,
-notifyScanResult and daemon orchestration remain incomplete (#836/#798). Actual original ART verifies production
+Initial-scan static-library identity now retains the raw package name for APKs
+whose scan location carries active APEX info (#883); ordinary static libraries
+receive the 64-bit version suffix. The guard uses physical owner context rather
+than parsed isApex. UID, signing, disabled-factory, data and boot revalidation use
+the same location-aware selector; saved-code verification uses its physical
+PARSE_APK_IN_APEX flag. UID regressions keep ordinary/APEX identities distinct
+and retain the APEX provider's UID across static-library versions. Original ART
+calls the retained PackageManagerService.renameStaticSharedLibraryPackage with
+the pinned addForInitLI guard; full PackageImpl fields agree for both contexts.
+The native full-scan gate also checks controlled parsed static-library DTOs on
+unchanged original verified APKs at ordinary and disposable APEX locations,
+including final loaded code and module ownership. This is identity-stage evidence,
+not a claim that those fixture APK manifests declare a static library.
+Native APEX settings preparation, notifyScanResult and daemon orchestration
+remain incomplete (#836/#798). Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
-uninitialized owners and detached bytes (21.77s full package oracle, including
-APEX inventories). All 430 units pass (3.63s; one ignored/not run). Integration targets compiled
-after the bootstrap inventory addition. The full image/template build passes
-(12.7s; three rebuilt, 39 fresh); original image ABI linkage and the original-PMS
-template remain fresh from the inventory build (70.4s; nine rebuilt, 33 fresh).
+uninitialized owners and detached bytes (19.15s full package oracle, including
+APEX inventories and static-library identity). All 431 units pass (3.16s; one
+ignored/not run). Integration targets compiled after the bootstrap inventory
+addition. The full image/template build and original image ABI linkage pass
+(62.9s; nine rebuilt, 33 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
@@ -1198,8 +1211,8 @@ reconciliation. An APK inside an APEX retains its origin partition and
 PARSE_APK_IN_APEX without being classified as the APEX package itself (#880).
 Only explicit APEX-package scan policy sets that classification. A regression
 checks both setting and clearing it; the original ART PackageImpl/applyPolicy
-oracle confirms the same distinction (21.77s). The 430 native unit tests pass
-(3.63s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
+oracle confirms the same distinction (19.15s). The 431 native unit tests pass
+(3.16s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
 the candidate; invalid directory candidates retain their rejection reason,
 and a missing framework package fails. On a disposable original-PMS boot
 (2026-10-02, boot completed), all 243 image APK candidates parsed and

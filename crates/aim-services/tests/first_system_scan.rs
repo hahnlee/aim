@@ -431,6 +431,23 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     };
     // Use unchanged original code at a disposable APEX mount to exercise the
     // complete scan and skipped-factory registration order, not just setters.
+    let static_model = |image: &mut Image| {
+        let pkg = &mut image.packages[1].parsed;
+        pkg.static_shared_library_name = Some("fixture.static".into());
+        pkg.static_shared_lib_version = 0x100000007;
+        pkg.shared_user_id = None;
+        pkg.original_packages = None;
+        pkg.library_names.clear();
+        pkg.activities.clear();
+        pkg.services.clear();
+        pkg.providers.clear();
+        pkg.receivers.clear();
+        pkg.permission_groups.clear();
+        pkg.attributions.clear();
+        pkg.permissions.clear();
+        pkg.protected_broadcasts.clear();
+        pkg.overlay_target = None;
+    };
     let apex_app = fixture.0.join("apex/different.mount/priv-app/GSF");
     std::fs::create_dir_all(&apex_app).unwrap();
     std::os::unix::fs::symlink(
@@ -470,6 +487,24 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 registered.owner.settings.packages[1].transient,
                 record.settings.transient
             );
+            if factory && module.is_some() {
+                let mut static_image = Image::load(&apks, &[apex.clone()]).unwrap();
+                static_model(&mut static_image);
+                let static_scan =
+                    SystemImageScan::first_boot(static_image, &apks, &config, inputs(&domain_ids))
+                        .unwrap();
+                let record = &static_scan.packages[1].candidate.record;
+                assert_eq!(record.settings.name, "com.google.android.gsf");
+                assert_eq!(record.identity.internal_name, record.settings.name);
+                assert_eq!(
+                    record.settings.transient.apex_module_name.as_deref(),
+                    module
+                );
+                assert_eq!(
+                    static_scan.owner.loaded_packages()[&record.settings.name].package,
+                    record.parsed
+                );
+            }
             let mut settings = registered.owner.settings.clone();
             let mut disabled = settings.packages[1].clone();
             disabled.transient.apex_module_name = Some("stale.factory".into());
@@ -550,6 +585,17 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         app.join("GSF.apk"),
     )
     .unwrap();
+    // A controlled parsed static-library DTO exercises scan identity with
+    // original verified code; APK bytes and parser fixtures remain unchanged.
+
+    let mut ordinary_static = Image::load(&apks, &[]).unwrap();
+    static_model(&mut ordinary_static);
+    let ordinary_static =
+        SystemImageScan::first_boot(ordinary_static, &apks, &config, inputs(&domain_ids)).unwrap();
+    assert_eq!(
+        ordinary_static.packages[1].candidate.record.settings.name,
+        "com.google.android.gsf_4294967303"
+    );
     let baseline = scan.owner.settings.clone();
     let mut reboot = aim_services::package::scan::SigningScan::new(&config, &baseline, 36).unwrap();
     let batch = reboot

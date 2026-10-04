@@ -265,6 +265,7 @@ public final class PackageRoundTripOracle {
         verifyOriginalDomainIds();
         verifyOriginalScanUsers(new java.io.File(args[0]));
         verifyOriginalApexInventory(new java.io.File(args[0]));
+        com.android.server.pm.StaticLibraryIdentityOracle.verify(new java.io.File(args[0]));
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyScopedRuntime(new java.io.File(args[0]));
         verifyOriginalUserScopes(new java.io.File(args[0]));

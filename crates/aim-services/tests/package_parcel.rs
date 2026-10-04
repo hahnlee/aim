@@ -91,6 +91,10 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/ApexBootFeed.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/StaticLibraryIdentityOracle.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(
             aim_paths::root()
@@ -318,6 +322,27 @@ fn native_package_parcels_match_original_read_write() {
     eprintln!("original cache entries: {}", files.len());
     let snapshot = native_scan_objects(&data.0);
     let runtime_snapshot = runtime_fixture_snapshot(&snapshot);
+    let mut static_identity = snapshot.owner().loaded_packages()["android"]
+        .package
+        .clone();
+    static_identity.package_name = "fixture.provider".into();
+    static_identity.manifest_package_name = Some("fixture.provider".into());
+    aim_services::package::scan::Identity {
+        manifest_name: "fixture.provider".into(),
+        internal_name: "fixture.provider".into(),
+        real_name: None,
+    }
+    .apply(&mut static_identity);
+
+    static_identity.static_shared_library_name = Some("fixture.library".into());
+    static_identity.static_shared_lib_version = 0x100000007;
+    static_identity.booleans2 |= aim_services::package::pkg::booleans2::APEX;
+    fs::write(
+        directory.join("static-identity.input"),
+        static_identity.to_cache_entry().unwrap().bytes,
+    )
+    .unwrap();
+
     scoped_runtime_objects(&directory);
     cache_validation_objects(
         &directory,
@@ -932,6 +957,43 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    for active in [false, true] {
+        let location = aim_services::package::scan::Location {
+            path: if active {
+                "/apex/mount/app/provider"
+            } else {
+                "/system/app/provider"
+            }
+            .into(),
+            partition: aim_services::package::scan::Partition::System,
+            kind: aim_services::package::scan::Kind::App,
+            apex: active.then(|| aim_services::package::scan::Apex {
+                module_name: None,
+                mount_path: "/apex/mount".into(),
+                partition: aim_services::package::scan::Partition::System,
+                factory: true,
+                active_changed: false,
+            }),
+        };
+        let mut native = static_identity.clone();
+        aim_services::package::scan::Identity::select_for_location(
+            &native,
+            &Default::default(),
+            true,
+            &location,
+        )
+        .apply(&mut native);
+        let mut original = AndroidPackage::read_cache_entry(
+            &fs::read(directory.join(format!("static-identity-{active}.original"))).unwrap(),
+        )
+        .unwrap();
+        normalize_maps(&mut native);
+        normalize_maps(&mut original);
+        assert!(
+            native == original,
+            "original static-library rename differs for active APEX {active}"
+        );
+    }
     let apex = aim_services::package::bootstrap::ApexInventory::read_original_record(
         &fs::read(directory.join("apex-inventory.original")).unwrap(),
     )

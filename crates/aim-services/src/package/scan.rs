@@ -161,10 +161,11 @@ impl Inputs {
                 let mut parsed = apks
                     .parsed_path(&ps.code_path, flags)
                     .map_err(|e| fail("parse", e))?;
-                let identity = Identity::select(
+                let identity = Identity::select_for_parse_flags(
                     &parsed,
                     &state.settings,
                     ps.flags & settings::FLAG_SYSTEM != 0,
+                    flags,
                 );
                 if identity.internal_name != ps.name {
                     return Err(fail(

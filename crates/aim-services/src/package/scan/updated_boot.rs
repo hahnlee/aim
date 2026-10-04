@@ -56,7 +56,8 @@ impl SigningScan {
         };
         let version = (i64::from(code.parsed.version_code_major) << 32)
             | i64::from(code.parsed.version_code as u32);
-        if Identity::select(&code.parsed, &self.settings, true) != factory.identity
+        if Identity::select_for_location(&code.parsed, &self.settings, true, &code.location)
+            != factory.identity
             || code.location.path != factory.settings.code_path
             || version != factory.settings.version_code
             || code.signing != factory.signing

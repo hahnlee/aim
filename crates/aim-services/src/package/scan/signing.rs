@@ -503,10 +503,11 @@ impl SigningScan {
                 message,
             })
         })?;
-        let identity = Identity::select(
+        let identity = Identity::select_for_location(
             &code.parsed,
             &self.settings,
             update.flags & crate::package::settings::FLAG_SYSTEM != 0,
+            &code.location,
         );
         let reject = |phase, message: &str| {
             SigningError::Rejected(Error {
@@ -629,7 +630,8 @@ impl SigningScan {
                 "original adoption requires matching system code",
             ));
         }
-        let selected = Identity::select(&code.parsed, &self.settings, true);
+        let selected =
+            Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
         if self
             .settings
             .packages
@@ -750,7 +752,8 @@ impl SigningScan {
         metadata: SettingMetadata,
         users: UserPolicy<'_>,
     ) -> Result<(NewPackageOutcome, UidScan), SigningError> {
-        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
         let reject = |phase, message: &str| {
             SigningError::Rejected(Error {
                 package: identity.internal_name.clone(),

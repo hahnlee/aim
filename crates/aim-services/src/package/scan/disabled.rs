@@ -264,7 +264,8 @@ impl SigningScan {
                 message: "stale factory recovery requires system code".into(),
             }));
         }
-        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
         if self
             .settings
             .packages
@@ -487,7 +488,8 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<UpdatedSystemScan, SigningError> {
-        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
         let reject = |message: String| {
             SigningError::Rejected(Error {
                 package: identity.internal_name.clone(),
@@ -571,7 +573,8 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<DisabledSystemMetadata, SigningError> {
-        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
         let reject = |phase, message: String| {
             SigningError::Rejected(Error {
                 package: identity.internal_name.clone(),

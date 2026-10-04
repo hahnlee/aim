@@ -76,7 +76,8 @@ impl UidScan {
     /// A changed existing group requires replacement metadata and is rejected
     /// here until that owner transition is implemented (#804).
     pub fn apply(&mut self, code: &Code) -> Result<(Identity, Uid), Error> {
-        let identity = Identity::select(&code.parsed, &self.settings, true);
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
         let previous = self.packages.get(&identity.internal_name);
         let shared_user = super::signing::selected_shared_user(
             previous.is_some_and(|p| p.shared_user.is_some()),
@@ -301,6 +302,21 @@ mod tests {
             scan.identities.ids.get(10000),
             Some(&Owner::Package("library_7".into()))
         );
+        library.location.path = "/apex/mount/app/library.apk".into();
+        library.location.apex = Some(super::super::Apex {
+            module_name: Some("raw.module".into()),
+            mount_path: "/apex/mount".into(),
+            partition: Partition::System,
+            factory: true,
+            active_changed: false,
+        });
+        let (identity, apex_uid) = scan.apply(&library).unwrap();
+        assert_eq!(identity.internal_name, "library");
+        assert_ne!(apex_uid.app_id, uid.app_id);
+        let accepted = scan.clone();
+        library.parsed.static_shared_lib_version += 1;
+        assert_eq!(scan.apply(&library).unwrap().1.app_id, apex_uid.app_id);
+        assert_eq!(scan, accepted);
         let mut original = code("renamed");
         original.parsed.original_packages = Some(vec![Some("known".into())]);
         let snapshot = scan.clone();

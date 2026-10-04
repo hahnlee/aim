@@ -144,7 +144,8 @@ impl SigningScan {
         Self::clean_invalid_data_inputs(&image, inputs.resources, &incremental)?;
         for entry in image.packages {
             let code = &entry.code;
-            let identity = Identity::select(&code.parsed, &self.settings, true);
+            let identity =
+                Identity::select_for_location(&code.parsed, &self.settings, true, &code.location);
             let factory = inputs
                 .factories
                 .retained_data
@@ -389,7 +390,8 @@ impl SigningScan {
             }
             let version = (i64::from(code.parsed.version_code_major) << 32)
                 | i64::from(code.parsed.version_code as u32);
-            if Identity::select(&code.parsed, &self.settings, true) != factory.record.identity
+            if Identity::select_for_location(&code.parsed, &self.settings, true, &code.location)
+                != factory.record.identity
                 || code.location.path != setting.code_path
                 || version != setting.version_code
                 || code.signing != factory.record.signing
@@ -667,7 +669,8 @@ impl SigningScan {
                 message,
             })
         };
-        let system_identity = Identity::select(&raw.parsed, &self.settings, true);
+        let system_identity =
+            Identity::select_for_location(&raw.parsed, &self.settings, true, &raw.location);
         let factory_setting = self
             .settings
             .disabled_system_packages
@@ -688,7 +691,8 @@ impl SigningScan {
             }
         }
         let updated = factory_setting.is_some();
-        let identity = Identity::select(&raw.parsed, &self.settings, updated);
+        let identity =
+            Identity::select_for_location(&raw.parsed, &self.settings, updated, &raw.location);
         let previous = self.settings.packages.iter()
             .find(|p| p.name == identity.internal_name).cloned()
             .ok_or_else(|| fail("require-known", "Application package not found; ignoring (INSTALL_FAILED_INVALID_INSTALL_LOCATION)".into()))?;

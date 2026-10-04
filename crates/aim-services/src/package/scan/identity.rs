@@ -48,11 +48,45 @@ impl Identity {
     /// Select from a raw native-parsed APK, before any owner rename.
     /// Apply the result after code verification, before reconciliation.
     pub fn select(pkg: &AndroidPackage, settings: &Settings, system: bool) -> Self {
+        Self::select_with_static_rename(pkg, settings, system, true)
+    }
+
+    /// addForInitLI skips the synthetic static-library name when its scan
+    /// partition carries original ActiveApexInfo, independently of isApex.
+    pub fn select_for_location(
+        pkg: &AndroidPackage,
+        settings: &Settings,
+        system: bool,
+        location: &super::Location,
+    ) -> Self {
+        Self::select_with_static_rename(pkg, settings, system, location.apex.is_none())
+    }
+
+    pub(super) fn select_for_parse_flags(
+        pkg: &AndroidPackage,
+        settings: &Settings,
+        system: bool,
+        parse_flags: i32,
+    ) -> Self {
+        Self::select_with_static_rename(
+            pkg,
+            settings,
+            system,
+            parse_flags & crate::package::parse::PARSE_APK_IN_APEX == 0,
+        )
+    }
+
+    fn select_with_static_rename(
+        pkg: &AndroidPackage,
+        settings: &Settings,
+        system: bool,
+        rename_static: bool,
+    ) -> Self {
         let manifest_name = pkg
             .manifest_package_name
             .clone()
             .unwrap_or_else(|| pkg.package_name.clone());
-        let mut internal_name = if pkg.static_shared_library_name.is_some() {
+        let mut internal_name = if rename_static && pkg.static_shared_library_name.is_some() {
             format!("{}_{}", pkg.package_name, pkg.static_shared_lib_version)
         } else {
             pkg.package_name.clone()
@@ -120,6 +154,44 @@ impl Identity {
 mod tests {
     use super::*;
     use crate::package::pkg::*;
+    #[test]
+    fn static_identity_uses_active_apex_context_instead_of_package_flags() {
+        use crate::package::scan::{Apex, Kind, Location, Partition};
+        let pkg = AndroidPackage {
+            package_name: "provider".into(),
+            static_shared_library_name: Some("library".into()),
+            static_shared_lib_version: 0x100000007,
+            booleans2: booleans2::APEX,
+            ..Default::default()
+        };
+        let mut location = Location {
+            path: "/system/app/provider".into(),
+            partition: Partition::System,
+            kind: Kind::App,
+            apex: None,
+        };
+        let settings = Settings::default();
+        assert_eq!(
+            Identity::select_for_location(&pkg, &settings, true, &location).internal_name,
+            "provider_4294967303"
+        );
+        location.path = "/apex/mount/app/provider".into();
+        location.apex = Some(Apex {
+            module_name: None,
+            mount_path: "/apex/mount".into(),
+            partition: Partition::System,
+            factory: true,
+            active_changed: false,
+        });
+        let identity = Identity::select_for_location(&pkg, &settings, true, &location);
+        assert_eq!(identity.internal_name, "provider");
+        assert_eq!(identity.manifest_name, "provider");
+        assert_eq!(
+            Identity::select_for_parse_flags(&pkg, &settings, true, location.parse_flags()),
+            identity
+        );
+    }
+
     #[test]
     fn originals_follow_reverse_order_system_presence_and_shared_uid_rules() {
         use crate::package::settings::{FLAG_SYSTEM, Package, SharedUser};
