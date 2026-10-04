@@ -6,7 +6,39 @@ public final class AppIdsOracle {
         for (byte value : bytes) result.append(String.format("%02x", value & 255));
         return result.toString();
     }
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
+        try { runOracle(args); System.exit(0); }
+        catch (Throwable error) { error.printStackTrace(); System.exit(1); }
+    }
+    private static void runOracle(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("shared-prepare")) {
+            var settings = new Settings(java.util.Map.of());
+            if (settings.getSharedUserLPw("missing", 0, 0, false) != null)
+                throw new AssertionError("lookup created a shared user");
+            var first = settings.getSharedUserLPw("prepared", 0, 0, true);
+            if (first.mAppId != 10000 || first.getFlags() != 0 || first.getPrivateFlags() != 0
+                    || first.signatures.mSigningDetails != android.content.pm.SigningDetails.UNKNOWN
+                    || !first.getPackageStates().isEmpty())
+                throw new AssertionError("initial shared user defaults");
+            if (settings.getSharedUserLPw("prepared", 3, 4, true) != first)
+                throw new AssertionError("shared user lookup replaced its owner");
+            if (first.getFlags() != 0 || first.getPrivateFlags() != 0)
+                throw new AssertionError("shared user lookup changed flags");
+            for (int i = 10001; i <= 19999; i++)
+                if (settings.getSharedUserLPw("filler." + i, 0, 0, true).mAppId != i)
+                    throw new AssertionError("shared user allocation order");
+            try {
+                settings.getSharedUserLPw("exhausted", 0, 0, true);
+                throw new AssertionError("shared UID exhaustion succeeded");
+            } catch (PackageManagerException expected) {
+                if (expected.error != -4) throw expected;
+            }
+            if (settings.getSharedUserLPw("exhausted", 0, 0, false) != null
+                    || settings.getSharedUserLPw("prepared", 0, 0, true) != first)
+                throw new AssertionError("failed creation changed prior ownership");
+            System.out.println("SHARED PREPARED");
+            return;
+        }
         if (args.length != 0 && args[0].equals("collect-certificates")) {
             if (new PrepareFailure("Failed collect during scanPackageForInitLI",
                     new java.io.IOException("source")).error != -110)

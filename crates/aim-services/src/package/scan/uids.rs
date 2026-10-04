@@ -13,6 +13,62 @@ use crate::package::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+impl super::SigningScan {
+    /// prepareInitialScanRequest selects the installed setting for leaving-
+    /// shared-UID policy, then commits getSharedUserLPw before collection.
+    pub(super) fn prepare_initial_shared_user<S>(
+        &mut self,
+        code: &Code<S>,
+    ) -> Result<(), super::SigningError> {
+        let system = code.location.parse_flags() & crate::package::parse::PARSE_IS_SYSTEM_DIR != 0;
+        let identity =
+            Identity::select_for_location(&code.parsed, &self.settings, system, &code.location);
+        let installed = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == identity.internal_name);
+        let Some(name) = super::signing::selected_shared_user(
+            installed.is_some_and(|p| p.shared_user),
+            code.parsed.shared_user_id.as_deref(),
+            code.parsed.is(booleans::LEAVING_SHARED_UID),
+        ) else {
+            return Ok(());
+        };
+        let group = self
+            .identities
+            .get_shared_user(name, 0, 0, true)
+            .map_err(|reason| {
+                let error = Error {
+                    package: identity.internal_name.clone(),
+                    path: code.location.path.clone(),
+                    phase: "identity",
+                    message: format!("Creating shared user {name} failed: {reason:?}"),
+                };
+                if reason == crate::package::owner::app_ids::Error::Exhausted {
+                    super::SigningError::Rejected(Error {
+                        message: format!("{} (-4)", error.message),
+                        ..error
+                    })
+                } else {
+                    super::SigningError::Fatal(error)
+                }
+            })?
+            .expect("create=true supplies the shared UID owner");
+        if !self.settings.shared_users.iter().any(|g| g.name == name) {
+            self.settings
+                .shared_users
+                .push(crate::package::settings::SharedUser {
+                    name: name.into(),
+                    app_id: group.app_id,
+                    flags: group.flags,
+                    signatures: group.signatures.clone(),
+                });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Uid {
     pub app_id: i32,
@@ -270,6 +326,90 @@ mod tests {
             },
             signing: SigningDetails::from_saved(&Default::default()).unwrap(),
         }
+    }
+
+    #[test]
+    fn initial_shared_uid_preparation_uses_installed_leaving_policy() {
+        for installed in [None, Some(false), Some(true)] {
+            for leaving in [false, true] {
+                let mut settings = Settings::default();
+                if let Some(shared) = installed {
+                    settings.packages.push(Package {
+                        name: "input".into(),
+                        app_id: 11000,
+                        shared_user: shared,
+                        ..Default::default()
+                    });
+                    if shared {
+                        settings
+                            .shared_users
+                            .push(crate::package::settings::SharedUser {
+                                name: "old.group".into(),
+                                app_id: 11000,
+                                flags: 0,
+                                signatures: None,
+                            });
+                    }
+                }
+                let mut owner =
+                    super::super::SigningScan::new(&Default::default(), &settings, 36).unwrap();
+                let before = owner.clone();
+                let mut input = code("input");
+                input.parsed.shared_user_id = Some("new.group".into());
+                if leaving {
+                    input.parsed.booleans |= booleans::LEAVING_SHARED_UID;
+                }
+                owner.prepare_initial_shared_user(&input).unwrap();
+                if leaving && installed != Some(true) {
+                    assert_eq!(owner, before);
+                } else {
+                    let group = &owner.identities.shared_users["new.group"];
+                    assert_eq!(
+                        (group.app_id, group.flags, group.private_flags),
+                        (10000, 0, 0)
+                    );
+                    assert!(group.signatures.is_none() && group.package_names().next().is_none());
+                    assert_eq!(
+                        owner.identities.ids.get(10000),
+                        Some(&Owner::SharedUser("new.group".into()))
+                    );
+                    let saved = owner
+                        .settings
+                        .shared_users
+                        .iter()
+                        .find(|g| g.name == "new.group")
+                        .unwrap();
+                    assert_eq!(
+                        (saved.app_id, saved.flags, saved.signatures.as_ref()),
+                        (10000, 0, None)
+                    );
+                    assert_eq!(owner.settings.packages, before.settings.packages);
+                    let prepared = owner.clone();
+                    owner.prepare_initial_shared_user(&input).unwrap();
+                    assert_eq!(owner, prepared);
+                }
+            }
+        }
+        let mut owner =
+            super::super::SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+        for _ in 10000..=19999 {
+            owner
+                .identities
+                .ids
+                .acquire(Owner::Package("filler".into()))
+                .unwrap();
+        }
+        let before = owner.clone();
+        let mut input = code("input");
+        input.parsed.shared_user_id = Some("exhausted".into());
+        assert!(
+            matches!(owner.prepare_initial_shared_user(&input), Err(super::super::SigningError::Rejected(error))
+            if error.phase == "identity" && error.message.ends_with("(-4)"))
+        );
+        assert_eq!(owner, before);
+        input.parsed.shared_user_id = None;
+        owner.prepare_initial_shared_user(&input).unwrap();
+        assert_eq!(owner, before);
     }
 
     #[test]

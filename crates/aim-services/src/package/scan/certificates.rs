@@ -23,6 +23,7 @@ impl SigningScan {
         apks: &Apks,
         policy: CertificateScanPolicy,
     ) -> Result<Code, SigningError> {
+        self.prepare_initial_shared_user(code)?;
         let system = code.location.parse_flags() & parse::PARSE_IS_SYSTEM_DIR != 0;
         let identity =
             Identity::select_for_location(&code.parsed, &self.settings, system, &code.location);

@@ -88,6 +88,18 @@ fn allocation_matches_the_original_runtime() {
         boot.data.join("data/local/tmp/app-ids.dex"),
     )
     .unwrap();
+    let prepared = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "shared-prepare",
+    ]));
+    assert_eq!(
+        String::from_utf8(prepared.stdout).unwrap(),
+        "SHARED PREPARED\n"
+    );
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",

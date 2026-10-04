@@ -225,6 +225,20 @@ fn scan_system_image<S>(
             .iter()
             .find(|p| p.name == identity.internal_name)
             .cloned();
+        match owner.prepare_initial_shared_user(&code) {
+            Ok(()) => {}
+            Err(SigningError::Rejected(error))
+                if !(code.location.kind == Kind::Framework
+                    && code.parsed.package_name == "android") =>
+            {
+                rejected.push(super::Rejected {
+                    location: code.location.clone(),
+                    reason: error.message,
+                });
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
         if active
             .as_ref()
             .is_some_and(|p| p.flags & crate::package::settings::FLAG_SYSTEM == 0)
@@ -244,8 +258,24 @@ fn scan_system_image<S>(
             });
             continue;
         }
+        if active.is_none() && original.is_none() && factory.is_some() {
+            owner.remove_stale_disabled_system(&code)?;
+        }
         if !updated {
-            code = owner.collect_initial_code(&code, apks, inputs.certificates)?;
+            code = match owner.collect_initial_code(&code, apks, inputs.certificates) {
+                Ok(code) => code,
+                Err(SigningError::Rejected(error))
+                    if !(code.location.kind == Kind::Framework
+                        && code.parsed.package_name == "android") =>
+                {
+                    rejected.push(super::Rejected {
+                        location: code.location.clone(),
+                        reason: error.message,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if code.location.kind == Kind::Framework && code.parsed.package_name == "android" {
                 platform = code.signing.clone();
             }
@@ -260,9 +290,6 @@ fn scan_system_image<S>(
         } else {
             active.as_ref().or(original.as_ref())
         };
-        if active.is_none() && original.is_none() && factory.is_some() {
-            owner.remove_stale_disabled_system(&code)?;
-        }
         let mut policy = ScanPolicy::for_location(&code.location);
         if !platform_loaded
             && policy.needs_shared_uid_privilege_check(

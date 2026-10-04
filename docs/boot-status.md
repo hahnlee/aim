@@ -868,7 +868,7 @@ The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (9.12s), including settings commit
+commit. The first-system scan fixture passes (9.93s), including settings commit
 and reopening the persisted owner. Updated-system KeepData selection now fully
 verifies strict-allowlisted factory APKs instead of copying input signing, after
 committing the disabled metadata refresh. That refresh accepts uncollected
@@ -906,16 +906,30 @@ fails the explicit fresh verifier but passes parsed inventory and non-strict
 KeepData metadata refresh; strict KeepData fails with -110 after committing the
 UNKNOWN factory package. Parsed and verified system inventories preserve all
 locations, rejections and parsed fields (0.71s). Explicit fresh-verification
-loaders remain diagnostic APIs. Initial request-stage shared UID preparation
-still follows collection in native code, unlike the original (#923); full
-collection/request/error timing remains incomplete (#918/#914). Adoption
+loaders remain diagnostic APIs. Initial request-stage shared UID preparation now precedes collection (#923).
+It selects the installed setting for leaving-shared-UID policy, allocates with
+zero flags/private flags, and records the setting without active membership or
+signatures. An allocation failure reports the original -4 error without creating
+a partial group. Normal system certificate failures are reported and later
+candidates continue; missing native inputs stop scanning. A controlled request
+DTO backed by unchanged GSF code verifies failed collection retains an unused
+UID 10000 and later GSF gets 10001. Fatal mapping failures preserve that prepared
+owner while stopping before GSF admission. Inconsistent disabled settings are
+also removed before collection, retaining removal on both guest and native
+failures (#924). Actual original Settings.getSharedUserLPw confirms zero defaults,
+lookup instance/flag stability and -4 exhaustion across 10,000 allocated slots;
+the AppIds/signing oracle passes (28.69s), including the 78 collection cases and
+259 saved signature owners. Its Settings test uses explicit process exit because
+the constructor starts BackgroundThread (#925). Broad source/admission failure
+continuation and full request/frontend ownership remain incomplete (#914/#918).
+Adoption
 when both incoming and original settings exist remains #919. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only system and data inputs (39.41s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only system and data inputs (39.58s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

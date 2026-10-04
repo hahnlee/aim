@@ -681,6 +681,151 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         ordinary_static.packages[1].candidate.record.settings.name,
         "com.google.android.gsf_4294967303"
     );
+    // Controlled request DTOs use unchanged original APKs. A failed signer
+    // reserves its otherwise unused shared UID before the later GSF admission.
+    let rejected_dir = fixture.0.join("product/priv-app/EarlyReject");
+    std::fs::create_dir(&rejected_dir).unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"),
+        rejected_dir.join("GSF.apk"),
+    )
+    .unwrap();
+    let mut raw = Image::parse(&apks, &[]).unwrap();
+    let early = raw
+        .packages
+        .iter_mut()
+        .find(|p| p.location.path.ends_with("EarlyReject"))
+        .unwrap();
+    early.parsed.shared_user_id = Some("fixture.rejected.shared".into());
+    let root = fixture.0.clone();
+    let bad_signing = Apks {
+        files: Box::new(move |path| {
+            Some(
+                root.join(if path == "/product/priv-app/EarlyReject/GSF.apk" {
+                    "product/priv-app/EarlyReject"
+                } else {
+                    path.trim_start_matches('/')
+                }),
+            )
+        }),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let continued =
+        SystemImageScan::first_boot_parsed(|| Ok(raw), &bad_signing, &config, inputs(&domain_ids))
+            .unwrap();
+    assert_eq!(continued.packages.len(), 2);
+    assert_eq!(continued.rejected.len(), 1);
+    assert!(continued.rejected[0].reason.ends_with("(-103)"));
+    let failed_group = &continued.owner.identities.shared_users["fixture.rejected.shared"];
+    assert_eq!(
+        (
+            failed_group.app_id,
+            failed_group.flags,
+            failed_group.private_flags
+        ),
+        (10000, 0, 0)
+    );
+    assert!(failed_group.signatures.is_none());
+    assert_eq!(failed_group.member_count(), 0);
+    assert_eq!(
+        continued.packages[1].candidate.record.settings.app_id,
+        10001
+    );
+    assert!(
+        continued
+            .owner
+            .settings
+            .shared_users
+            .iter()
+            .any(|g| g.name == "fixture.rejected.shared"
+                && g.app_id == 10000
+                && g.signatures.is_none())
+    );
+    assert!(rejected_dir.join("GSF.apk").exists());
+    // Missing native mapping is fatal, but preparation remains committed.
+    let mut raw = Image::parse(&apks, &[]).unwrap();
+    raw.packages
+        .iter_mut()
+        .find(|p| p.location.path.ends_with("EarlyReject"))
+        .unwrap()
+        .parsed
+        .shared_user_id = Some("fixture.rejected.shared".into());
+    let root = fixture.0.clone();
+    let unmapped = Apks {
+        files: Box::new(move |path| {
+            if path == "/product/priv-app/EarlyReject/GSF.apk" {
+                None
+            } else {
+                Some(root.join(path.trim_start_matches('/')))
+            }
+        }),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let mut stopped =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    assert!(
+        matches!(stopped.scan_saved_parsed_system_image(raw, &unmapped, &config,
+        inputs(&domain_ids), saved_inputs()), Err(SigningError::Fatal(error)) if error.phase == "certificates")
+    );
+    assert_eq!(
+        stopped.identities.shared_users["fixture.rejected.shared"].app_id,
+        10000
+    );
+    assert!(stopped.loaded_packages().contains_key("android"));
+    assert!(
+        !stopped
+            .loaded_packages()
+            .contains_key("com.google.android.gsf")
+    );
+    let mut stale = scan.owner.settings.clone();
+    stale
+        .disabled_system_packages
+        .push(stale.packages[1].clone());
+    stale.packages.clear();
+    for fatal in [false, true] {
+        let mut raw = Image::parse(&apks, &[]).unwrap();
+        raw.packages
+            .iter_mut()
+            .find(|p| p.location.path.ends_with("EarlyReject"))
+            .unwrap()
+            .parsed
+            .shared_user_id = Some("fixture.rejected.shared".into());
+        let mut owner = aim_services::package::scan::SigningScan::new(&config, &stale, 36).unwrap();
+        let result = owner.scan_saved_parsed_system_image(
+            raw,
+            if fatal { &unmapped } else { &bad_signing },
+            &config,
+            inputs(&domain_ids),
+            saved_inputs(),
+        );
+        if fatal {
+            assert!(
+                matches!(result, Err(SigningError::Fatal(error)) if error.phase == "certificates")
+            );
+            assert!(
+                !owner
+                    .loaded_packages()
+                    .contains_key("com.google.android.gsf")
+            );
+        } else {
+            let result = result.unwrap();
+            assert_eq!(result.rejected.len(), 1);
+            assert!(
+                owner
+                    .loaded_packages()
+                    .contains_key("com.google.android.gsf")
+            );
+        }
+        assert!(owner.settings.disabled_system_packages.is_empty());
+        assert!(owner.disabled_loaded_packages().is_empty());
+        assert_eq!(
+            owner.identities.shared_users["fixture.rejected.shared"].app_id,
+            10001
+        );
+        assert!(rejected_dir.join("GSF.apk").exists());
+    }
+    std::fs::remove_file(rejected_dir.join("GSF.apk")).unwrap();
+    std::fs::remove_dir(rejected_dir).unwrap();
     let baseline = scan.owner.settings.clone();
     let mut reboot = aim_services::package::scan::SigningScan::new(&config, &baseline, 36).unwrap();
     let batch = reboot
