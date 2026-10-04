@@ -15,6 +15,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 const EPERM: i64 = 1;
 const EXDEV: i64 = 18;
+const EISDIR: i64 = 21;
 const EOPNOTSUPP: i64 = 95;
 
 fn resolve_w(dirfd: u64, path: u64, follow: bool) -> Result<Resolved, i64> {
@@ -106,14 +107,32 @@ pub fn unlinkat(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     match resolve_w(a[0], a[1], false) {
-        // SAFETY: host path.
-        Ok(r) => errno::check(unsafe {
-            if a[2] & AT_REMOVEDIR != 0 {
-                libc::rmdir(r.host.as_ptr())
-            } else {
-                libc::unlink(r.host.as_ptr())
+        Ok(r) => {
+            // SAFETY: resolved host path.
+            let result = unsafe {
+                if a[2] & AT_REMOVEDIR != 0 {
+                    libc::rmdir(r.host.as_ptr())
+                } else {
+                    libc::unlink(r.host.as_ptr())
+                }
+            };
+            if result == 0 {
+                return 0;
             }
-        } as i64),
+            let error = errno::last() as i64;
+            if a[2] == 0 && error == EPERM {
+                // Darwin returns EPERM for directory unlink; Linux uses
+                // EISDIR. Do not follow a symlink to a directory.
+                let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: resolved host path and local stat buffer.
+                if unsafe { libc::lstat(r.host.as_ptr(), &mut metadata) } == 0
+                    && metadata.st_mode & libc::S_IFMT == libc::S_IFDIR
+                {
+                    return -EISDIR;
+                }
+            }
+            -error
+        }
         Err(e) => e,
     }
 }

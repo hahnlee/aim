@@ -756,6 +756,13 @@ writers, packages.list and coherent publication still need integration. Retrying
 an initial failed write while distinguishing its own uncommitted artifacts from
 foreign files remains #912. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
 acceptance remains unrun.
+The syscall layer translates Darwin directory-unlink EPERM to Linux EISDIR
+without following symlinks (#913). This lets original bionic remove fall back to
+directory removal. Expanded NDK file tests actually run and pass (1.55s), covering
+empty/nonempty directories, directory symlinks, invalid flags, missing paths and
+libc remove. The original ResilientAtomicFile failure/retry ART oracle now removes
+its own reserve directory and passes with the complete package oracle (32.19s).
+
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
 Files.write IOException, not evidence of an external kill. Crash reporting also
