@@ -466,14 +466,27 @@ Real Binder tests cover decoded origin, malformed payload/envelope, owner errors
 and immutable old inputs; feed tests verify generation detachment. Original ART
 uses the original ActiveApexInfo constructor and actual ApexManager inventory,
 and confirms factory/update duplicates, null names, versions and detached bytes.
-Native APEX settings preparation, notifyScanResult, scan registration of module
-and update state (#881), and daemon scan orchestration remain incomplete
-(#836/#798). Actual original ART verifies production
+Native initial-scan registration now assigns the raw active APEX module name,
+including null, before publishing the accepted setting (#881). Without active
+APEX info it uses the disabled owner even when its module is null, then the
+existing owner. APK-in-APEX commits set apkInUpdatedApex from the factory flag;
+ordinary APK commits preserve its retained value. Disabled factories refresh
+only their module name from raw parsed identity before version/signature
+selection; that refresh survives a later rejection or selection of the data
+copy. New, retained and original-name-adopted completion update the accepted
+setting and returned candidate together. Source-rule regressions cover nullable
+owner precedence, unrelated retained bits and refresh before identity selection.
+The explicit unchanged-original-APK initial scan gate passes (63.38s), with a
+disposable APEX mount matrix for null/non-null modules and factory/update state,
+retained-data selection and a later domain error preserving the disabled refresh.
+Static-library identity inside APEX remains #883. Native APEX settings preparation,
+notifyScanResult and daemon orchestration remain incomplete (#836/#798). Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
 uninitialized owners and detached bytes (21.77s full package oracle, including
-APEX inventories). All 428 units pass (3.17s; one ignored/not run); all integration
-targets compile, and the full image/original-PMS template build, including original
-image ABI linkage, passes (70.4s; nine rebuilt, 33 fresh).
+APEX inventories). All 430 units pass (3.63s; one ignored/not run). Integration targets compiled
+after the bootstrap inventory addition. The full image/template build passes
+(12.7s; three rebuilt, 39 fresh); original image ABI linkage and the original-PMS
+template remain fresh from the inventory build (70.4s; nine rebuilt, 33 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
@@ -1185,8 +1198,8 @@ reconciliation. An APK inside an APEX retains its origin partition and
 PARSE_APK_IN_APEX without being classified as the APEX package itself (#880).
 Only explicit APEX-package scan policy sets that classification. A regression
 checks both setting and clearing it; the original ART PackageImpl/applyPolicy
-oracle confirms the same distinction (19.51s). The 425 native unit tests pass
-(3.12s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
+oracle confirms the same distinction (21.77s). The 430 native unit tests pass
+(3.63s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
 the candidate; invalid directory candidates retain their rejection reason,
 and a missing framework package fails. On a disposable original-PMS boot
 (2026-10-02, boot completed), all 243 image APK candidates parsed and

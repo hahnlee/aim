@@ -9,6 +9,7 @@ use super::{
 };
 use std::collections::BTreeMap;
 
+mod apex;
 mod authorize;
 mod enrich;
 pub use enrich::{ScanClock, ScanTime};

@@ -429,6 +429,127 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         incremental_packages: &empty_packages,
         resources: &resources,
     };
+    // Use unchanged original code at a disposable APEX mount to exercise the
+    // complete scan and skipped-factory registration order, not just setters.
+    let apex_app = fixture.0.join("apex/different.mount/priv-app/GSF");
+    std::fs::create_dir_all(&apex_app).unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"),
+        apex_app.join("GSF.apk"),
+    )
+    .unwrap();
+    std::fs::remove_file(app.join("GSF.apk")).unwrap();
+    for module in [None, Some("raw.module")] {
+        for factory in [false, true] {
+            let apex = aim_services::package::scan::Apex {
+                module_name: module.map(str::to_owned),
+                mount_path: "/apex/different.mount".into(),
+                partition: aim_services::package::scan::Partition::Product,
+                factory,
+                active_changed: !factory,
+            };
+            let registered = SystemImageScan::first_boot(
+                Image::load(&apks, &[apex.clone()]).unwrap(),
+                &apks,
+                &config,
+                inputs(&domain_ids),
+            )
+            .unwrap();
+            let record = &registered.packages[1].candidate.record;
+            assert_eq!(
+                record.settings.transient.apex_module_name.as_deref(),
+                module
+            );
+            assert_eq!(record.settings.transient.apk_in_updated_apex, !factory);
+            assert!(
+                !record
+                    .parsed
+                    .is2(aim_services::package::pkg::booleans2::APEX)
+            );
+            assert_eq!(
+                registered.owner.settings.packages[1].transient,
+                record.settings.transient
+            );
+            let mut settings = registered.owner.settings.clone();
+            let mut disabled = settings.packages[1].clone();
+            disabled.transient.apex_module_name = Some("stale.factory".into());
+            settings.disabled_system_packages.push(disabled);
+            settings.packages[1].code_path = "/data/app/fixture-apex-update".into();
+            settings.packages[1].version_code += 1;
+            settings.packages[1].flags |= 1 << 7;
+            settings.packages[1].transient.apex_module_name = Some("active.before".into());
+            let active = settings.packages[1].clone();
+            let path = writable.join("app/fixture-apex-update");
+            std::fs::write(&path, b"disposable updated code").unwrap();
+            if module.is_some() && !factory {
+                let mut failed =
+                    aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+                let calls = AtomicU8::new(0);
+                let reject_factory_domain = || {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Ok([1; 16])
+                    } else {
+                        Err("domain owner unavailable".into())
+                    }
+                };
+                assert!(matches!(failed.scan_saved_system_image(
+                    Image::load(&apks, &[apex.clone()]).unwrap(), &apks, &config,
+                    FirstBootSystemInputs { new_domain_id: &reject_factory_domain, ..inputs(&domain_ids) }, saved_inputs()),
+                    Err(SigningError::Rejected(error)) if error.phase == "domain"));
+                assert_eq!(
+                    failed.settings.disabled_system_packages[0]
+                        .transient
+                        .apex_module_name
+                        .as_deref(),
+                    module
+                );
+                assert_eq!(failed.settings.packages[1], active);
+            }
+            let mut owner =
+                aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+            let batch = owner
+                .scan_saved_system_image(
+                    Image::load(&apks, &[apex]).unwrap(),
+                    &apks,
+                    &config,
+                    inputs(&domain_ids),
+                    saved_inputs(),
+                )
+                .unwrap();
+            assert_eq!(batch.retained_data.len(), 1);
+            assert_eq!(owner.settings.packages[1], active);
+            assert_eq!(
+                owner.settings.disabled_system_packages[0]
+                    .transient
+                    .apex_module_name
+                    .as_deref(),
+                module
+            );
+            assert_eq!(
+                batch.retained_data[0]
+                    .record
+                    .settings
+                    .transient
+                    .apex_module_name
+                    .as_deref(),
+                module
+            );
+            // scanPackageOnly does not commit a new APK-in-updated-APEX bit.
+            assert_eq!(
+                owner.settings.disabled_system_packages[0]
+                    .transient
+                    .apk_in_updated_apex,
+                !factory
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    std::fs::remove_dir_all(fixture.0.join("apex")).unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"),
+        app.join("GSF.apk"),
+    )
+    .unwrap();
     let baseline = scan.owner.settings.clone();
     let mut reboot = aim_services::package::scan::SigningScan::new(&config, &baseline, 36).unwrap();
     let batch = reboot

@@ -173,6 +173,7 @@ fn scan_system_image(
         .unwrap_or_default();
     let mut platform_loaded = false;
     for mut code in image.packages {
+        owner.refresh_init_apex(&code);
         let identity = Identity::select(&code.parsed, &owner.settings, true);
         let active = owner
             .settings
@@ -436,7 +437,9 @@ fn scan_system_image(
                 )
             })?;
             let mut staged = owner.clone();
+            staged.refresh_init_apex(&code);
             let candidate = staged.apply_original_system(&code, metadata, saved.users)?;
+            let candidate = staged.finish_init_apex(candidate, &code.location)?;
             let completed = staged.finish_scan_metadata(candidate, apks, completion)?;
             *owner = staged;
             completed

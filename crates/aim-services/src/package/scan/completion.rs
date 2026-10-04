@@ -42,8 +42,10 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
+        self.refresh_init_apex(code);
         let mut staged = self.clone();
         let candidate = staged.apply_existing(code, update, saved_users, all_users, disabled)?;
+        let candidate = staged.finish_init_apex(candidate, &code.location)?;
         let completed = staged.finish_scan_metadata(candidate, apks, inputs)?;
         *self = staged;
         Ok(completed)
@@ -60,6 +62,7 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
+        self.refresh_init_apex(code);
         self.remove_stale_disabled_system(code)?;
         let mut staged = self.clone();
         let (candidate, mut preparation) = match staged.prepare_new_system(code, metadata, users) {
@@ -70,6 +73,7 @@ impl SigningScan {
             }
         };
         let name = candidate.record.settings.name.clone();
+        let candidate = staged.finish_init_apex(candidate, &code.location)?;
         let completed = match staged.finish_scan_metadata(candidate, apks, inputs) {
             Ok(completed) => completed,
             Err(error) => {
