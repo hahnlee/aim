@@ -170,6 +170,14 @@ fn native_package_parcels_match_original_read_write() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/SharedUserData.java"))
         .arg(
             aim_paths::root()
+                .join("crates/aim-services/tests/fixtures/RetainedSharedUserOracle.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/RetainedPackageData.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/SharedUserReplica.java"),
         )
         .arg(
@@ -2088,6 +2096,18 @@ fn native_package_parcels_match_original_read_write() {
         )]))
         .unwrap();
     capture_apex_legacy(&mut shared_adoption);
+    shared_adoption
+        .capture_replica_runtime(BTreeMap::from([(
+            ("original.fixture".into(), false),
+            aim_services::package::scan::ReplicaRuntime {
+                usage: [0; 8],
+                seinfo: None,
+                override_seinfo: None,
+                library_files: vec![],
+                libraries: vec![],
+            },
+        )]))
+        .unwrap();
     let prior_shared_adoption = shared_adoption.clone();
     let mut shared_adoption_inputs = scan_inputs(&shared_adoption_image);
     shared_adoption_inputs.shared_uid_migration =
@@ -2147,6 +2167,17 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
     let prior_shared_record = retained.clone();
+    std::fs::write(
+        directory.join("apex-shared-instance.record"),
+        aim_services::package::scan_snapshot::shared_record::captured_owner(
+            17,
+            &shared_adoption,
+            "shared.fixture",
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
     let prior_shared_identities = shared_adoption.identities.clone();
     assert!(
         !shared_adoption

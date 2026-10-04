@@ -200,6 +200,7 @@ public final class ApexNotifyOracle {
                 throw new AssertionError("native shared adoption setting instance owners differ");
             java.nio.file.Files.write(new java.io.File(directory, "apex-shared-original-adoption.original").toPath(), out.marshall());
         } finally { out.recycle(); }
+        dev.aim.server.RetainedSharedUserOracle.verify(directory, old, adopted, group);
         verifyAdoptedUserAliases(directory, "apex-shared-user-alias.input", old, adopted);
         boolean removedUid = settings.removePackageAndAppIdLPw("original.fixture");
         if (removedUid || group.getPackageStates().size() != 1 || settings.getSettingLPr(10000) != group)

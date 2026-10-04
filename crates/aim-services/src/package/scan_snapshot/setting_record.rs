@@ -13,8 +13,36 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     let Some(s) = packages.iter().find(|s| s.name == name) else {
         return Ok(None);
     };
+    let legacy = if snapshot.owner().has_legacy_permissions() {
+        Some(
+            snapshot
+                .owner()
+                .legacy_permissions(name, factory)?
+                .ok_or("missing legacy setting owner")?,
+        )
+    } else {
+        None
+    };
+    write(
+        snapshot.version(),
+        s,
+        factory,
+        legacy.as_ref(),
+        snapshot.owner().install_permissions_fixed(name, factory)?,
+    )
+    .map(Some)
+}
+
+pub(super) fn write(
+    version: u64,
+    s: &crate::package::settings::Package,
+    factory: bool,
+    legacy: Option<&crate::package::owner::legacy_permissions::State>,
+    fixed: Option<bool>,
+) -> Result<Vec<u8>, String> {
+    let name = s.name.as_str();
     let mut p = Parcel::new();
-    p.write_i64(snapshot.version() as i64);
+    p.write_i64(version as i64);
     p.write_string16(Some(name));
     p.write_bool(factory);
     p.write_string16(s.real_name.as_deref());
@@ -117,22 +145,13 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     if p.data().len() > i32::MAX as usize {
         return Err("package setting exceeds transport size".into());
     }
-    p.write_bool(snapshot.owner().has_legacy_permissions());
-    if snapshot.owner().has_legacy_permissions() {
-        let legacy = snapshot
-            .owner()
-            .legacy_permissions(name, factory)?
-            .ok_or("missing legacy setting owner")?;
+    p.write_bool(legacy.is_some());
+    if let Some(legacy) = legacy {
         let users: Vec<_> = legacy.users().iter().map(|user| user.id).collect();
         aim_service_aidl::write_int_array(&mut p, Some(&users));
         write_byte_array(&mut p, Some(&legacy.bytes()));
     }
-    p.write_i32(
-        snapshot
-            .owner()
-            .install_permissions_fixed(name, factory)?
-            .map_or(-1, i32::from),
-    );
+    p.write_i32(fixed.map_or(-1, i32::from));
     p.write_i32(s.leaving_shared_user.map_or(-1, i32::from));
-    Ok(Some(p.data().to_vec()))
+    Ok(p.data().to_vec())
 }

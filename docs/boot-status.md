@@ -646,10 +646,22 @@ setting alongside the new parsed setting (#905): cardinality two, no singleton
 conversion, shared UID slot, final setting appIds 10000, and group SDK
 CUR_DEVELOPMENT (10000) despite new code targeting 36. Removing the new setting
 keeps the prior member, its public/private flags, group SDK and UID slot, matching
-original Settings removal. Native snapshot export still requires distinct instance
-identities (#905), and explicitly rejects duplicate names instead of collapsing
-the two objects. 439 units pass (one ignored/not run), host build passes (14.6s),
-all integration targets compile, and complete initial scan passes (68.09s). Transfer ownership remains
+original Settings removal. Shared-group capture now distinguishes current and retained instances with the
+same name (#905), carrying the retained setting, saved signing, legacy/fixed,
+explicit users, transient fields and captured runtime in independent framed
+records. Java reconstructs a distinct unparsed PackageStateReplica; the shared
+replica preserves both object identities instead of resolving both through the
+current name cache. Missing retained runtime/legacy/fixed/leaving inputs reject.
+The original ART oracle compares retained flags, UID, sparse users, unparsed code,
+shared snapshot cardinality/SDK, detached containers and exact record roundtrip
+(34.84s); ordinary shared lease reads still pass. This verifies the retained
+member transport and replica builder, not publication of a full adopted APEX
+snapshot: Store and collected-code validation still require equal code/setting
+UIDs, while original shared APEX adoption has code UID -1 and setting UID 10000
+(#836). Shared process projections still require instance-aware inputs (#905).
+439 units pass (one ignored/not run); the checked image/template build passes
+(53.1s), all integration targets compile, and complete initial scan passes
+(68.25s). Transfer ownership remains
 #890; native PMS is still inactive. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained

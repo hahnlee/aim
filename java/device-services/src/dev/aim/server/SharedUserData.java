@@ -17,7 +17,8 @@ public final class SharedUserData implements Parcelable {
     private final int liveSdk;
     private final int snapshotSdk;
     private final PackageSigningState.Signing signing;
-    private final List<String> members;
+    public record Member(String name, RetainedPackageData retained) {}
+    private final List<Member> members;
 
     private SharedUserData(Parcel in) {
         version = in.readLong();
@@ -31,12 +32,15 @@ public final class SharedUserData implements Parcelable {
         signing = PackageSigningState.Signing.read(in);
         int count = in.readInt();
         if (count < 0 || count > in.dataAvail() / 4) throw new IllegalArgumentException("invalid shared UID member count");
-        var values = new ArrayList<String>(count);
+        var values = new ArrayList<Member>(count);
         var unique = new HashSet<String>();
         for (int i = 0; i < count; i++) {
             String member = Objects.requireNonNull(in.readString());
-            if (!unique.add(member)) throw new IllegalArgumentException("duplicate shared UID member");
-            values.add(member);
+            int kind = in.readInt();
+            if (kind != 0 && kind != 1) throw new IllegalArgumentException("invalid shared member kind");
+            if (!unique.add(kind + ":" + member)) throw new IllegalArgumentException("duplicate shared UID instance");
+            var retained = kind == 1 ? new RetainedPackageData(in.createByteArray(), version, member, appId, name) : null;
+            values.add(new Member(member, retained));
         }
         members = List.copyOf(values);
     }
@@ -48,14 +52,18 @@ public final class SharedUserData implements Parcelable {
     public int getLiveSeInfoTargetSdkVersion() { return liveSdk; }
     public int getSeInfoTargetSdkVersion() { return snapshotSdk; }
     public SigningDetails getSigningDetails() { return PackageSigningState.Signing.details(signing); }
-    public List<String> getPackageNames() { return members; }
+    public List<String> getPackageNames() { return members.stream().map(Member::name).toList(); }
+    public List<Member> getMembers() { return members; }
 
     @Override public void writeToParcel(Parcel out, int flags) {
         out.writeLong(version); out.writeString(name); out.writeInt(appId);
         out.writeBoolean(privileged); out.writeInt(liveSdk); out.writeInt(snapshotSdk);
         PackageSigningState.Signing.write(out, signing);
         out.writeInt(members.size());
-        for (String member : members) out.writeString(member);
+        for (var member : members) {
+            out.writeString(member.name()); out.writeBoolean(member.retained() != null);
+            if (member.retained() != null) member.retained().writeToParcel(out);
+        }
     }
     @Override public int describeContents() { return 0; }
     public static final Parcelable.Creator<SharedUserData> CREATOR = new Parcelable.Creator<>() {

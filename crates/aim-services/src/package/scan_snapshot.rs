@@ -9,6 +9,7 @@ pub mod user_record;
 pub mod setting_record;
 pub mod library_record;
 pub mod shared_record;
+mod retained_record;
 pub mod runtime_record;
 use std::{
     collections::BTreeSet,

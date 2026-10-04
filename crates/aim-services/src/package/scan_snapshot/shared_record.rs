@@ -5,25 +5,23 @@ use crate::package::{settings::PRIVATE_FLAG_PRIVILEGED, sign::SigningDetails};
 use aim_binder_host::parcel::Parcel;
 
 pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, String> {
-    let owner = snapshot.owner();
+    captured_owner(snapshot.version(), snapshot.owner(), name)
+}
+
+pub fn captured_owner(
+    version: u64,
+    owner: &crate::package::scan::SigningScan,
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
     let Some(group) = owner.identities.shared_users.get(name) else {
         return Ok(None);
     };
     if !owner.capture_ready() {
         return Err("scan metadata is not finalized".into());
     }
-    if group.member_count()
-        != group
-            .package_names()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-    {
-        return Err(
-            "distinct shared setting instances require captured instance identities (#905)".into(),
-        );
-    }
+    group.validate_retained()?;
     let members: Vec<_> = group.package_names().collect();
-    let settings: std::collections::BTreeSet<_> = owner
+    let current: std::collections::BTreeSet<_> = owner
         .settings
         .packages
         .iter()
@@ -33,8 +31,9 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
     if members
         .iter()
         .copied()
+        .filter(|n| group.has_package(n))
         .collect::<std::collections::BTreeSet<_>>()
-        != settings
+        != current
     {
         return Err("shared UID member owner differs".into());
     }
@@ -44,7 +43,7 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
         .map(SigningDetails::from_saved)
         .transpose()?;
     let mut p = Parcel::new();
-    p.write_i64(snapshot.version() as i64);
+    p.write_i64(version as i64);
     p.write_string16(Some(name));
     p.write_i32(group.app_id);
     p.write_bool(group.private_flags & PRIVATE_FLAG_PRIVILEGED != 0);
@@ -54,8 +53,19 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
     p.write_i32(0);
     write_signing(&mut p, signing.as_ref());
     p.write_i32(i32::try_from(members.len()).map_err(|_| "too many shared UID members")?);
-    for member in members {
-        p.write_string16(Some(member));
+    // A name can own both a current and a retained instance. Emit each once.
+    let names: std::collections::BTreeSet<_> = members.into_iter().collect();
+    for member in names {
+        if group.has_package(member) {
+            p.write_string16(Some(member));
+            p.write_bool(false);
+        }
+        if let Some(retained) = group.retained_setting(member) {
+            p.write_string16(Some(member));
+            p.write_bool(true);
+            let bytes = super::retained_record::captured(version, name, group, retained)?;
+            aim_service_aidl::write_byte_array(&mut p, Some(&bytes));
+        }
     }
     if p.data().len() > i32::MAX as usize {
         return Err("shared UID record exceeds transport size".into());

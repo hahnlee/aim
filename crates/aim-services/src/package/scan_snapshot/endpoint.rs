@@ -99,6 +99,32 @@ pub struct PackageSigningState {
 }
 
 impl PackageSigningState {
+    pub(super) fn retained(
+        version: u64,
+        setting: &crate::package::settings::Package,
+        group_name: &str,
+        group: &crate::package::owner::shared_users::SharedUser,
+    ) -> Result<Self, String> {
+        use crate::package::sign::SigningDetails;
+        Ok(Self {
+            version,
+            name: setting.name.clone(),
+            app_id: setting.app_id,
+            disabled: false,
+            shared_group: Some(group_name.into()),
+            shared_app_id: group.app_id,
+            package: setting
+                .signatures
+                .as_ref()
+                .map(SigningDetails::from_saved)
+                .transpose()?,
+            shared: group
+                .signatures
+                .as_ref()
+                .map(SigningDetails::from_saved)
+                .transpose()?,
+        })
+    }
     pub fn captured(
         snapshot: &Snapshot,
         name: &str,

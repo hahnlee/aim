@@ -55,8 +55,19 @@ pub fn captured(
     // existing setting has no explicit entry for this user.
     let default = UserState::default();
     let state = users.get(&user).unwrap_or(&default);
+    write_capture(snapshot.version(), setting, disabled, user, state).map(Some)
+}
+
+pub(super) fn write_capture(
+    version: u64,
+    setting: &crate::package::settings::Package,
+    disabled: bool,
+    user: i32,
+    state: &UserState,
+) -> Result<Vec<u8>, String> {
+    let name = setting.name.as_str();
     let mut p = Parcel::new();
-    p.write_i64(snapshot.version() as i64);
+    p.write_i64(version as i64);
     p.write_string16(Some(name));
     p.write_i32(setting.app_id);
     p.write_bool(disabled);
@@ -65,7 +76,7 @@ pub fn captured(
     if p.position() > i32::MAX as usize {
         return Err("user state exceeds transport range".into());
     }
-    Ok(Some(p.data().to_vec()))
+    Ok(p.data().to_vec())
 }
 
 fn count(p: &mut Parcel, n: usize) -> Result<(), String> {

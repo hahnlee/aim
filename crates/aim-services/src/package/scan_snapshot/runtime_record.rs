@@ -16,26 +16,42 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     let state = owner
         .replica_runtime(name, factory)?
         .ok_or("missing replica runtime owner")?;
-    let mut p = Parcel::new();
-    p.write_i64(snapshot.version() as i64);
-    p.write_string16(Some(name));
-    p.write_i32(setting.app_id);
-    p.write_bool(factory);
-    p.write_bool(
+    write(
+        snapshot.version(),
+        setting,
+        factory,
         if factory {
             owner.disabled_loaded_packages()
         } else {
             owner.loaded_packages()
         }
         .contains_key(name),
-    );
+        state,
+    )
+    .map(Some)
+}
+
+pub(super) fn write(
+    version: u64,
+    setting: &crate::package::settings::Package,
+    factory: bool,
+    has_code: bool,
+    state: &crate::package::scan::ReplicaRuntime,
+) -> Result<Vec<u8>, String> {
+    let name = setting.name.as_str();
+    let mut p = Parcel::new();
+    p.write_i64(version as i64);
+    p.write_string16(Some(name));
+    p.write_i32(setting.app_id);
+    p.write_bool(factory);
+    p.write_bool(has_code);
     p.write_string16(state.seinfo.as_deref());
     p.write_string16(state.override_seinfo.as_deref());
     aim_service_aidl::write_long_array(&mut p, Some(&state.usage));
     // Reuse the original library owner envelope, preserving nullable file slots.
     let mut libraries = Parcel::new();
     crate::package::info::write_libraries(&mut libraries, Some(&state.libraries));
-    p.write_i64(snapshot.version() as i64);
+    p.write_i64(version as i64);
     p.write_string16(Some(name));
     p.write_i32(setting.app_id);
     p.write_i32(
@@ -48,5 +64,5 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     if p.data().len() > i32::MAX as usize {
         return Err("runtime state exceeds transport size".into());
     }
-    Ok(Some(p.data().to_vec()))
+    Ok(p.data().to_vec())
 }

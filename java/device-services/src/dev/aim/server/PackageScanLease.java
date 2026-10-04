@@ -476,8 +476,10 @@ public final class PackageScanLease implements AutoCloseable {
         SharedUserData state = getSharedUserData(name);
         if (state == null) { sharedReplicas.put(key, null); return null; }
         var members = new java.util.ArrayList<PackageStateReplica>();
-        for (String member : state.getPackageNames()) {
-            var replica = getPackageStateReplica(member, crossUserSuspensions);
+        for (var member : state.getMembers()) {
+            var replica = member.retained() == null
+                ? getPackageStateReplica(member.name(), crossUserSuspensions)
+                : member.retained().newReplica(crossUserSuspensions);
             if (replica == null) throw new IOException("missing shared UID package owner");
             members.add(replica);
         }
