@@ -3,11 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+#[track_caller]
 pub fn run(command: &mut Command) -> Output {
     let output = command.output().unwrap();
     assert!(
         output.status.success(),
-        "{command:?}: {}",
+        "{:?}: {}: {}",
+        command.get_program(),
+        output.status,
         String::from_utf8_lossy(&output.stderr)
     );
     output
