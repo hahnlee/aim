@@ -8,7 +8,7 @@
 //! Not modelled yet: what only older platforms write (per-package
 //! `<enabled-components>`, `<disabled-components>`,
 //! `<domain-verification>`, the single-user
-//! preferred activities, the pre-M `flags`), which
+//! preferred activities), which
 //! the original reads only to migrate.
 
 use aim_android_xml::Element;
@@ -696,8 +696,20 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
         p.private_flags = string(e, "privateFlags")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
+    } else if let Some(flags) = string(e, "flags") {
+        // Pre-M stored these private bits in the public flags field.
+        p.flags = flags.parse().unwrap_or(0);
+        for (old, private) in [(1 << 27, 1 << 0), (1 << 28, 1 << 1), (1 << 30, 1 << 3)] {
+            if p.flags & old != 0 {
+                p.private_flags |= private;
+            }
+            p.flags &= !old;
+        }
     } else {
-        p.flags = FLAG_SYSTEM;
+        p.flags = match string(e, "system") {
+            Some(system) if !system.eq_ignore_ascii_case("true") => 0,
+            _ => FLAG_SYSTEM,
+        };
     }
     p.legacy_first_install_time = defaulted(e.long_hex("it"), 0);
     p.install_source = InstallSource {

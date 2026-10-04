@@ -124,6 +124,37 @@ pub fn inputs() -> Vec<Vec<u8>> {
         .unwrap()
         .1 = Value::IntHex(0x10);
     out.push(aim_android_xml::abx::write(&flags).unwrap());
+    for attrs in [
+        "",
+        "system='true'",
+        "system='TrUe'",
+        "system='false'",
+        "system='bad'",
+        "system='1'",
+        "flags='0' system='true'",
+        "flags='bad' system='true'",
+        "flags='134217729'",
+        "flags='268435457'",
+        "flags='1073741825'",
+        "flags='1476395009' privateFlags='16'",
+        "flags='-1'",
+        "publicFlags='2' privateFlags='16' flags='1476395009' system='true'",
+    ] {
+        let xml = format!(
+            "<packages><package name='p' codePath='/system/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001' {attrs}/></packages>"
+        );
+        let mut root = aim_android_xml::read(xml.as_bytes()).unwrap();
+        out.push(xml.into_bytes());
+        out.push(aim_android_xml::abx::write(&root).unwrap());
+        for (name, value) in &mut first(&mut root).attrs {
+            if name == "flags" {
+                *value = Value::IntHex(0x58000001);
+            } else if name == "system" {
+                *value = Value::Bool(true);
+            }
+        }
+        out.push(aim_android_xml::abx::write(&root).unwrap());
+    }
     out
 }
 
