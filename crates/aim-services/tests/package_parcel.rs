@@ -152,6 +152,10 @@ fn native_package_parcels_match_original_read_write() {
                 .join("java/device-services/src/dev/aim/server/PackageRuntimeFeed.java"),
         )
         .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageUserScopeFeed.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));
@@ -1040,6 +1044,25 @@ fn native_package_parcels_match_original_read_write() {
             } else {
                 vec![]
             }
+        );
+    }
+    for (phase, factory, users, aliases) in [
+        ("active", false, vec![0], vec![]),
+        ("factory", true, vec![0, 10], vec![0]),
+        ("independent", true, vec![0], vec![]),
+    ] {
+        let scope = aim_services::package::scan::OriginalUserScope::read_original_record(
+            &fs::read(directory.join(format!("scope-{phase}.original"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(scope.name, "scope.fixture");
+        assert_eq!(scope.app_id, 10123);
+        assert_eq!(scope.version, 7);
+        assert_eq!(scope.factory, factory);
+        assert_eq!(scope.users.into_iter().collect::<Vec<_>>(), users);
+        assert_eq!(
+            scope.active_aliases.into_iter().collect::<Vec<_>>(),
+            aliases
         );
     }
     let mut original_inputs = aim_services::package::model::State::default();

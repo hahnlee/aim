@@ -99,6 +99,8 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int RUNTIME = 7;
     private static final int DISABLED_SYSTEM_RUNTIME = 8;
     private static final int SHARED_PROCESSES = 9;
+    private static final int USER_SCOPE = 10;
+    private static final int DISABLED_SYSTEM_USER_SCOPE = 11;
     /** The largest chunk of a record in one transaction. */
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
@@ -267,10 +269,12 @@ final class PackageFeed extends IPackageFeed.Stub {
             mInstalledPermissions = installedPermissions(snapshot.getPackageStates().values());
             for (PackageState state : snapshot.getPackageStates().values()) {
                 add(records, users, PACKAGE, PARSED, state);
+                records.put(new Key(USER_SCOPE, state.getPackageName()), PackageUserScopeFeed.capture(state, null, false));
             }
             for (PackageState state : snapshot.getDisabledSystemPackageStates().values()) {
                 add(records, users, DISABLED_SYSTEM_PACKAGE, DISABLED_SYSTEM_PARSED,
                         state);
+                records.put(new Key(DISABLED_SYSTEM_USER_SCOPE, state.getPackageName()), PackageUserScopeFeed.capture(state, snapshot.getPackageStates().get(state.getPackageName()), true));
             }
             for (SharedUserApi user : snapshot.getSharedUsers().values()) {
                 records.put(new Key(SHARED_USER, user.getName()), sharedUser(user));

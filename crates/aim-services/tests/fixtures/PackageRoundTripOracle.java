@@ -194,6 +194,7 @@ public final class PackageRoundTripOracle {
     private static void verify(String[] args) throws Exception {
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyScopedRuntime(new java.io.File(args[0]));
+        verifyOriginalUserScopes(new java.io.File(args[0]));
         verifyFallbackParsing();
         android.content.pm.FallbackCategoryProvider.loadFallbacks();
         for (String line : java.nio.file.Files.readAllLines(new java.io.File(args[0], "fallback-categories.txt").toPath())) {
@@ -301,6 +302,25 @@ public final class PackageRoundTripOracle {
             return;
         }
         throw new AssertionError("inconsistent lineage accepted");
+    }
+
+    private static void verifyOriginalUserScopes(java.io.File directory) throws Exception {
+        var active = new com.android.server.pm.PackageSetting("scope.fixture", null, new java.io.File("/data/app/scope"), 0, 0, new java.util.UUID(1, 2));
+        active.setAppId(10123); active.setLongVersionCode(7);
+        active.getOrCreateUserState(0).setEnabledState(2);
+        var factory = new com.android.server.pm.PackageSetting(active, false);
+        factory.getOrCreateUserState(10).setEnabledState(3);
+        var independent = new com.android.server.pm.PackageSetting("scope.fixture", null, new java.io.File("/system/scope"), 0, 0, new java.util.UUID(3, 4));
+        independent.setAppId(10123); independent.setLongVersionCode(7);
+        independent.getOrCreateUserState(0).setEnabledState(2);
+        var activeSnapshot = (com.android.server.pm.pkg.PackageState)(Object)new com.android.server.pm.PackageSetting(active, true);
+        var factorySnapshot = (com.android.server.pm.pkg.PackageState)(Object)new com.android.server.pm.PackageSetting(factory, true);
+        var independentSnapshot = (com.android.server.pm.pkg.PackageState)(Object)new com.android.server.pm.PackageSetting(independent, true);
+        if (activeSnapshot.getUserStates().get(0) != factorySnapshot.getUserStates().get(0)
+                || activeSnapshot.getUserStates().get(0) == independentSnapshot.getUserStates().get(0)) throw new AssertionError("original user aliases differ");
+        java.nio.file.Files.write(new java.io.File(directory, "scope-active.original").toPath(), dev.aim.server.PackageUserScopeFeed.capture(activeSnapshot, null, false));
+        java.nio.file.Files.write(new java.io.File(directory, "scope-factory.original").toPath(), dev.aim.server.PackageUserScopeFeed.capture(factorySnapshot, activeSnapshot, true));
+        java.nio.file.Files.write(new java.io.File(directory, "scope-independent.original").toPath(), dev.aim.server.PackageUserScopeFeed.capture(independentSnapshot, activeSnapshot, true));
     }
 
     private static void verifyScopedRuntime(java.io.File directory) throws Exception {

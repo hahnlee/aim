@@ -899,8 +899,22 @@ changes. The actual image scan publishes this completed runtime through Store (4
 the original ART replica oracle uses the same boot assembler (21.81s). All 414
 units pass (3.39s; one ignored/not run), and the host/image build passes (18.6s;
 three rebuilt, 39 fresh). Running daemon bootstrap wiring, runtime copy/update
-ownership, complete live user/alias export, native visibility and publication into
-running SystemServer remain #873/#862/#836. Nullable library file slots now retain their distinction through the query feed,
+ownership, complete live user value export, native visibility and publication into
+running SystemServer remain #873/#862/#836. The unfiltered original snapshot now
+exports every active/factory sparse user ID and actual factory-to-active object
+alias (#862). Native import binds that provenance to complete existing user
+values with exact package/path/UID/version and user inventories; partial, foreign
+or inconsistent sources reject atomically. The original ART oracle verifies
+sealed snapshots retain actual aliases and distinguishes equal independent
+objects (22.42s). All 421 units pass (3.47s; one ignored/not run), Java oracle
+linkage passes (4.19s, including the shared-process producer dependency fix
+#875), and the full image/template build passes (85.1s). A disposable default
+window boot reaches sys.boot_completed at 6.729s and generation 74 contains
+290 user scopes, zero factory aliases, 16 shared-process aggregates and 290
+runtime owners, with no feed errors or remaining owned processes/probe mounts.
+This source feed does not export full raw user values or component label maps
+(#862), and native daemon bootstrap remains unwired. Legacy domain migration
+state must be separated from aliased PackageUserState owners (#876). Nullable library file slots now retain their distinction through the query feed,
 native dependency owners and ApplicationInfo parcels (#874). Null, empty strings,
 paths and repeated null slots survive original ART decoding (19.38s package
 oracle); provider dependency deduplication retains the first null occurrence.

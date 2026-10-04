@@ -43,7 +43,111 @@ pub struct CapturedUsers {
     pub active_aliases: BTreeSet<i32>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct OriginalUserScope {
+    pub name: String,
+    pub app_id: i32,
+    pub path: String,
+    pub version: i64,
+    pub factory: bool,
+    pub users: BTreeSet<i32>,
+    pub active_aliases: BTreeSet<i32>,
+}
+impl OriginalUserScope {
+    pub fn read_original_record(bytes: &[u8]) -> aim_binder_host::parcel::Result<Self> {
+        use aim_binder_host::parcel::{BAD_VALUE, Reader};
+        let mut r = Reader::new(bytes, &[]);
+        let name = r.read_string16()?.ok_or(BAD_VALUE)?;
+        let app_id = r.read_i32()?;
+        let path = r.read_string16()?.ok_or(BAD_VALUE)?;
+        let version = r.read_i64()?;
+        let boolean = |r: &mut Reader<'_>| match r.read_i32()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(BAD_VALUE),
+        };
+        let factory = boolean(&mut r)?;
+        let count = r.read_i32()?;
+        if count < 0 || count as usize > r.remaining() / 8 {
+            return Err(BAD_VALUE);
+        }
+        let mut users = BTreeSet::new();
+        let mut active_aliases = BTreeSet::new();
+        let mut previous = None;
+        for _ in 0..count {
+            let id = r.read_i32()?;
+            let alias = boolean(&mut r)?;
+            if id < 0 || previous.is_some_and(|p| p >= id) || alias && !factory {
+                return Err(BAD_VALUE);
+            }
+            users.insert(id);
+            if alias {
+                active_aliases.insert(id);
+            }
+            previous = Some(id);
+        }
+        if r.remaining() != 0 || bytes.len() % 4 != 0 {
+            return Err(BAD_VALUE);
+        }
+        Ok(Self {
+            name,
+            app_id,
+            path,
+            version,
+            factory,
+            users,
+            active_aliases,
+        })
+    }
+}
+
 impl SigningScan {
+    /// Bind original alias provenance to already captured complete native user
+    /// values. Query projections never substitute for those full owners.
+    pub fn capture_original_user_aliases(
+        &mut self,
+        source: &crate::package::model::State,
+    ) -> Result<(), String> {
+        let mut values = BTreeMap::new();
+        for (settings, factory) in [
+            (&self.settings.packages, false),
+            (&self.settings.disabled_system_packages, true),
+        ] {
+            for setting in settings {
+                let input = source
+                    .user_scopes
+                    .get(&(setting.name.clone(), factory))
+                    .ok_or("missing original user scope")?;
+                let states = if factory {
+                    self.disabled_user_states(&setting.name)
+                } else {
+                    self.scanned_user_states(&setting.name)
+                }
+                .ok_or("complete native user states are not captured")?;
+                if input.name != setting.name
+                    || input.app_id != setting.app_id
+                    || input.path != setting.code_path
+                    || input.version != setting.version_code
+                    || input.factory != factory
+                    || states.keys().copied().collect::<BTreeSet<_>>() != input.users
+                {
+                    return Err(format!("original user scope differs: {}", setting.name));
+                }
+                values.insert(
+                    (setting.name.clone(), factory),
+                    CapturedUsers {
+                        states: states.clone(),
+                        active_aliases: input.active_aliases.clone(),
+                    },
+                );
+            }
+        }
+        if values.keys().ne(source.user_scopes.keys()) {
+            return Err("original user scope inventory differs".into());
+        }
+        self.capture_user_states(values)
+    }
+
     pub fn capture_user_states(
         &mut self,
         values: BTreeMap<(String, bool), CapturedUsers>,
@@ -655,6 +759,146 @@ impl SigningScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn original_scope_aliases_bind_complete_owned_values_and_reject_foreign_inputs() {
+        use crate::package::settings::{Package, Settings};
+        let active = Package {
+            name: "p".into(),
+            app_id: 10123,
+            code_path: "/data/p".into(),
+            version_code: 7,
+            ..Default::default()
+        };
+        let factory = Package {
+            code_path: "/system/p".into(),
+            ..active.clone()
+        };
+        let mut owner = SigningScan::new(
+            &Default::default(),
+            &Settings {
+                packages: vec![active],
+                disabled_system_packages: vec![factory],
+                ..Default::default()
+            },
+            36,
+        )
+        .unwrap();
+        let mut states = BTreeMap::new();
+        states.insert(
+            ("p".into(), false),
+            CapturedUsers {
+                states: BTreeMap::from([(0, UserState::default())]),
+                active_aliases: BTreeSet::new(),
+            },
+        );
+        states.insert(
+            ("p".into(), true),
+            CapturedUsers {
+                states: BTreeMap::from([(0, UserState::default()), (10, UserState::default())]),
+                active_aliases: BTreeSet::new(),
+            },
+        );
+        owner.capture_user_states(states).unwrap();
+        let mut source = crate::package::model::State::default();
+        for factory in [false, true] {
+            source.user_scopes.insert(
+                ("p".into(), factory),
+                OriginalUserScope {
+                    name: "p".into(),
+                    app_id: 10123,
+                    path: if factory {
+                        "/system/p".into()
+                    } else {
+                        "/data/p".into()
+                    },
+                    version: 7,
+                    factory,
+                    users: if factory {
+                        BTreeSet::from([0, 10])
+                    } else {
+                        BTreeSet::from([0])
+                    },
+                    active_aliases: if factory {
+                        BTreeSet::from([0])
+                    } else {
+                        BTreeSet::new()
+                    },
+                },
+            );
+        }
+        owner.capture_original_user_aliases(&source).unwrap();
+        let retained = owner.clone();
+        for mode in 0..6 {
+            let mut bad = source.clone();
+            let scope = bad.user_scopes.get_mut(&("p".into(), true)).unwrap();
+            match mode {
+                0 => scope.app_id += 1,
+                1 => scope.path = "other".into(),
+                2 => scope.version += 1,
+                3 => {
+                    scope.users.remove(&10);
+                }
+                4 => {
+                    scope.active_aliases.insert(10);
+                }
+                _ => {
+                    bad.user_scopes.remove(&("p".into(), false));
+                }
+            }
+            assert!(owner.capture_original_user_aliases(&bad).is_err());
+            assert_eq!(owner, retained);
+        }
+        let mut updated = UserState::default();
+        updated.enabled = 2;
+        owner.set_user_state("p", 0, updated.clone()).unwrap();
+        assert_eq!(owner.disabled_user_states("p").unwrap()[&0], updated);
+        assert_eq!(
+            owner.disabled_user_states("p").unwrap()[&10],
+            UserState::default()
+        );
+        assert_eq!(
+            retained.disabled_user_states("p").unwrap()[&0],
+            UserState::default()
+        );
+    }
+    #[test]
+    fn original_user_scope_codec_rejects_invalid_order_aliases_and_frames() {
+        use aim_binder_host::parcel::Parcel;
+        let record = |factory, entries: &[(i32, i32)]| {
+            let mut p = Parcel::new();
+            p.write_string16(Some("p"));
+            p.write_i32(10123);
+            p.write_string16(Some("/system/p"));
+            p.write_i64(7);
+            p.write_bool(factory);
+            p.write_i32(entries.len() as i32);
+            for (id, alias) in entries {
+                p.write_i32(*id);
+                p.write_i32(*alias);
+            }
+            p.data().to_vec()
+        };
+        let good = record(true, &[(0, 1), (10, 0)]);
+        assert_eq!(
+            OriginalUserScope::read_original_record(&good)
+                .unwrap()
+                .active_aliases,
+            BTreeSet::from([0])
+        );
+        for bad in [
+            record(false, &[(0, 1)]),
+            record(true, &[(0, 2)]),
+            record(true, &[(-1, 0)]),
+            record(true, &[(10, 0), (0, 0)]),
+            record(true, &[(0, 0), (0, 0)]),
+        ] {
+            assert!(OriginalUserScope::read_original_record(&bad).is_err());
+        }
+        let mut tail = good.clone();
+        tail.extend_from_slice(&0i32.to_le_bytes());
+        assert!(OriginalUserScope::read_original_record(&tail).is_err());
+        assert!(OriginalUserScope::read_original_record(&good[..good.len() - 1]).is_err());
+    }
     #[test]
     fn enable_factory_preserves_active_identity_and_restrictions_until_rescan() {
         use crate::package::{

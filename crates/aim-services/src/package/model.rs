@@ -29,6 +29,7 @@ pub struct State {
     /// By name.
     pub shared_users: BTreeMap<String, SharedUser>,
     pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,
+    pub user_scopes: BTreeMap<(String, bool), super::scan::OriginalUserScope>,
     /// Complete scoped runtime owners exported by the original snapshot.
     pub runtime_inputs: BTreeMap<(String, bool), super::scan::OriginalRuntime>,
     /// By user id.

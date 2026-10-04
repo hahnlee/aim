@@ -47,6 +47,8 @@ const SYSTEM: i32 = 6;
 const RUNTIME: i32 = 7;
 const DISABLED_SYSTEM_RUNTIME: i32 = 8;
 const SHARED_PROCESSES: i32 = 9;
+const USER_SCOPE: i32 = 10;
+const DISABLED_SYSTEM_USER_SCOPE: i32 = 11;
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -403,6 +405,25 @@ fn build(
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
             }
+            USER_SCOPE | DISABLED_SYSTEM_USER_SCOPE => {
+                let input = crate::package::scan::OriginalUserScope::read_original_record(bytes)
+                    .map_err(failed)?;
+                let factory = key.kind == DISABLED_SYSTEM_USER_SCOPE;
+                let package = packages(&mut state, !factory)
+                    .get(&key.name)
+                    .ok_or_else(|| format!("{key:?}: missing user-scope package"))?;
+                if input.name != key.name
+                    || package.name != key.name
+                    || input.factory != factory
+                    || input.app_id != package.app_id
+                    || input.path != package.path
+                    || input.version != package.version_code
+                    || input.users != package.users.keys().copied().collect()
+                {
+                    return Err(format!("{key:?}: user scope identity differs"));
+                }
+                state.user_scopes.insert((key.name.clone(), factory), input);
+            }
             SHARED_PROCESSES => {
                 let input =
                     crate::package::scan::OriginalSharedProcesses::read_original_record(bytes)
@@ -475,6 +496,39 @@ fn build(
             p.shared_user = shared_user;
         }
     }
+    if !state.user_scopes.is_empty() {
+        let expected: std::collections::BTreeSet<_> = state
+            .packages
+            .keys()
+            .map(|n| (n.clone(), false))
+            .chain(
+                state
+                    .disabled_system_packages
+                    .keys()
+                    .map(|n| (n.clone(), true)),
+            )
+            .collect();
+        if state
+            .user_scopes
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+        {
+            return Err("original user scope inventory is incomplete".into());
+        }
+        for ((name, _), input) in &state.user_scopes {
+            for id in &input.active_aliases {
+                if !state
+                    .user_scopes
+                    .get(&(name.clone(), false))
+                    .is_some_and(|active| active.users.contains(id))
+                {
+                    return Err("original user alias has no active owner".into());
+                }
+            }
+        }
+    }
     if !state.runtime_inputs.is_empty() {
         let expected: std::collections::BTreeSet<_> = state
             .packages
@@ -518,6 +572,16 @@ pub fn dump(state: &State) -> String {
         s,
         "shared_process_inputs={}",
         state.shared_process_inputs.len()
+    );
+    let _ = writeln!(
+        s,
+        "user_scopes={} factory_aliases={}",
+        state.user_scopes.len(),
+        state
+            .user_scopes
+            .values()
+            .map(|s| s.active_aliases.len())
+            .sum::<usize>()
     );
     let active_runtime = state
         .runtime_inputs

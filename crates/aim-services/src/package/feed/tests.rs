@@ -763,3 +763,59 @@ fn shared_aggregate_batches_require_matching_complete_group_records() {
     assert!(build(&inner.records, 3, None).is_err());
     assert_eq!(state.shared_process_inputs["group"].members, ["b", "a"]);
 }
+
+#[test]
+fn original_user_scopes_require_complete_package_inventory_and_sparse_ids() {
+    fn scope(factory: bool, version: i64, users: &[(i32, bool)]) -> Vec<u8> {
+        let mut p = Parcel::new();
+        p.write_string16(Some("p"));
+        p.write_i32(10100);
+        p.write_string16(Some("/data/app/~~a/com.example.app-b"));
+        p.write_i64(version);
+        p.write_bool(factory);
+        p.write_i32(users.len() as i32);
+        for (id, alias) in users {
+            p.write_i32(*id);
+            p.write_bool(*alias);
+        }
+        p.data().to_vec()
+    }
+    let mut inner = Inner::default();
+    put(&mut inner, PACKAGE, "p", &package_record("p", None));
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_PACKAGE,
+        "p",
+        &package_record("p", None),
+    );
+    put(
+        &mut inner,
+        USER_SCOPE,
+        "p",
+        &scope(false, 42, &[(0, false)]),
+    );
+    assert!(build(&inner.records, 1, None).is_err());
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_USER_SCOPE,
+        "p",
+        &scope(true, 42, &[(0, true)]),
+    );
+    let state = build(&inner.records, 1, None).unwrap();
+    assert_eq!(
+        state.user_scopes[&("p".into(), true)].active_aliases,
+        std::collections::BTreeSet::from([0])
+    );
+    for bad in [
+        scope(true, 41, &[(0, true)]),
+        scope(true, 42, &[]),
+        scope(false, 42, &[(0, false)]),
+    ] {
+        put(&mut inner, DISABLED_SYSTEM_USER_SCOPE, "p", &bad);
+        assert!(build(&inner.records, 2, None).is_err());
+    }
+    assert_eq!(
+        state.user_scopes[&("p".into(), true)].users,
+        std::collections::BTreeSet::from([0])
+    );
+}

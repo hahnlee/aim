@@ -38,7 +38,10 @@ mod updated_boot;
 pub use boot::{
     FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,
 };
-pub use disabled::{CapturedUsers, DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
+pub use disabled::{
+    CapturedUsers, DisabledSystemMetadata, OriginalUserScope, UpdatedSystemScan,
+    UpdatedSystemSource,
+};
 pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
 mod removal;
 mod setting;
