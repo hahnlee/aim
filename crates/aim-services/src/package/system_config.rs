@@ -10,7 +10,10 @@
 //!
 //! The library declaration and public native list readers are ported
 //! from AOSP android-16.0.0_r1 `SystemConfig`, Copyright (C) The Android
-//! Open Source Project, Apache License 2.0.
+//! Open Source Project, Apache License 2.0. The fallback reader ports
+//! `FallbackCategoryProvider.loadFallbacks` from the same tag (Copyright
+//! (C) 2017 The Android Open Source Project, Apache License 2.0), retaining
+//! its property, line, replacement and failure semantics in Rust.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -401,18 +404,51 @@ pub(crate) fn decimal_uid(s: &str) -> Option<i32> {
 
 /// `FallbackCategoryProvider.loadFallbacks`: the framework's
 /// `raw/fallback_categories` (a package and a category per line).
-fn fallback_categories(csv: &[u8], prop: &dyn Fn(&str) -> Option<String>) -> Vec<(String, i32)> {
-    if prop("fw.ignore_fb_categories").as_deref() == Some("true") {
-        return Vec::new();
+fn fallback_categories(
+    csv: Option<&[u8]>,
+    prop: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, i32)>, String> {
+    if matches!(
+        prop("fw.ignore_fb_categories").as_deref(),
+        Some("1" | "y" | "yes" | "on" | "true")
+    ) {
+        return Ok(Vec::new());
     }
-    String::from_utf8_lossy(csv)
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| {
-            let (package, category) = l.split_once(',')?;
-            Some((package.to_string(), category.parse().ok()?))
-        })
-        .collect()
+    let csv = csv.ok_or("missing framework fallback category resource")?;
+    let text = String::from_utf8_lossy(csv)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let mut categories: Vec<(String, i32)> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            return Err(format!("empty fallback category line {}", index + 1));
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        // Java String.split drops trailing empty elements.
+        let mut fields: Vec<_> = line.split(',').collect();
+        while fields.last() == Some(&"") {
+            fields.pop();
+        }
+        if fields.len() != 2 {
+            continue;
+        }
+        let Some(category) = decimal_uid(fields[1]) else {
+            // NumberFormatException ends the read, retaining preceding entries.
+            eprintln!(
+                "package configuration: invalid fallback category integer at line {}",
+                index + 1
+            );
+            break;
+        };
+        if let Some((_, value)) = categories.iter_mut().find(|(p, _)| p == fields[0]) {
+            *value = category;
+        } else {
+            categories.push((fields[0].to_owned(), category));
+        }
+    }
+    Ok(categories)
 }
 
 /// Properties as the device has them at run time: a property's value by
@@ -420,12 +456,12 @@ fn fallback_categories(csv: &[u8], prop: &dyn Fn(&str) -> Option<String>) -> Vec
 pub type Properties = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// What the image's framework fixes: its aconfig flags,
-/// `config_useRoundIcon` after static overlays and the bare framework's
-/// `raw/fallback_categories` (FallbackCategoryProvider's own AssetManager).
+/// `config_useRoundIcon` and `raw/fallback_categories` after system asset
+/// overlays, which even a newly created AssetManager includes.
 pub struct Framework {
     flags: Vec<(String, bool)>,
     use_round_icon: bool,
-    fallback_categories: Vec<u8>,
+    fallback_categories: Option<Vec<u8>>,
 }
 
 impl Framework {
@@ -436,9 +472,7 @@ impl Framework {
         Ok(Framework {
             flags,
             use_round_icon: platform.use_round_icon,
-            fallback_categories: platform
-                .framework_file_without_overlays(root, "raw", "fallback_categories")
-                .unwrap_or_default(),
+            fallback_categories: platform.framework_file(root, "raw", "fallback_categories"),
         })
     }
 }
@@ -447,9 +481,13 @@ impl Framework {
 /// framework's constants of the image whose root is `root`, with the
 /// properties `prop` (the device's at run time: the SKU picks permission
 /// directories, init sets the GL ES version).
-pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Framework) -> System {
+pub fn system(
+    root: &Path,
+    prop: &dyn Fn(&str) -> Option<String>,
+    framework: &Framework,
+) -> Result<System, String> {
     let config = SystemConfig::read(root, prop);
-    System {
+    Ok(System {
         features: config.features,
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
@@ -459,15 +497,62 @@ pub fn system(root: &Path, prop: &dyn Fn(&str) -> Option<String>, framework: &Fr
         // Settings.Global.compatibility_mode's default; PackageManager reads
         // the setting at systemReady (#737).
         compatibility_mode: true,
-        fallback_categories: fallback_categories(&framework.fallback_categories, prop),
+        fallback_categories: fallback_categories(framework.fallback_categories.as_deref(), prop)?,
         flags: framework.flags.clone(),
         ..System::default()
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_categories_replace_duplicates_and_stop_on_invalid_numbers() {
+        let csv = "# header\r\nfirst,1\rfirst,٣,\nignored,1,2\nminimum,-2147483648\nbad,2147483648\nlate,6\n";
+        assert_eq!(
+            fallback_categories(Some(csv.as_bytes()), &|_| None).unwrap(),
+            [("first".into(), 3), ("minimum".into(), i32::MIN)],
+        );
+        assert_eq!(
+            fallback_categories(
+                Some(b",7\ntrailing,2,,\nmissing,\nskip,,\nspace, 1\nlate,3"),
+                &|_| None
+            )
+            .unwrap(),
+            [("".into(), 7), ("trailing".into(), 2)],
+        );
+    }
+
+    #[test]
+    fn fallback_category_ignore_property_uses_original_boolean_values() {
+        for value in ["1", "y", "yes", "on", "true"] {
+            let prop = |_: &str| Some(value.to_owned());
+            assert!(fallback_categories(None, &prop).unwrap().is_empty());
+            assert!(fallback_categories(Some(b"\n"), &prop).unwrap().is_empty());
+        }
+        for value in [
+            "0", "n", "no", "off", "false", "TRUE", " true ", "", "invalid",
+        ] {
+            assert_eq!(
+                fallback_categories(Some(b"package,7"), &|_| Some(value.to_owned())).unwrap(),
+                [("package".into(), 7)],
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_categories_reject_missing_resource_and_blank_lines() {
+        assert!(fallback_categories(None, &|_| None).is_err());
+        assert!(
+            fallback_categories(Some(b""), &|_| None)
+                .unwrap()
+                .is_empty()
+        );
+        for csv in [b"\n".as_slice(), b"\r", b"\r\n", b"package,1\n\n"] {
+            assert!(fallback_categories(Some(csv), &|_| None).is_err());
+        }
+    }
 
     #[test]
     fn update_owners_ignore_partition_gate_and_keep_last_valid_declaration() {

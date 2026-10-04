@@ -175,6 +175,27 @@ fn native_package_parcels_match_original_read_write() {
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
     write_library_owner_fixture(&directory);
+    let framework =
+        aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
+    let system = aim_services::package::system_config::system(
+        &aim_paths::derived_image(),
+        &|_| None,
+        &framework,
+    )
+    .unwrap();
+    let mut fallback_cases = String::new();
+    for (name, category) in &system.fallback_categories {
+        fallback_cases.push_str(&format!("{name}\t{category}\n"));
+    }
+    for name in ["com.android.printspooler", "com.google.android.gms"] {
+        let category = system
+            .fallback_categories
+            .iter()
+            .find(|(p, _)| p == name)
+            .map_or(-1, |(_, c)| *c);
+        fallback_cases.push_str(&format!("{name}\t{category}\n"));
+    }
+    fs::write(directory.join("fallback-categories.txt"), fallback_cases).unwrap();
     let mut pending = vec![boot.data.join("data/system/package_cache")];
     let mut files = Vec::new();
     while let Some(dir) = pending.pop() {

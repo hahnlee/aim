@@ -304,7 +304,7 @@ constructor normalizes null optional lists. Raw code paths and null/empty depend
 lists are read from the captured parcel, not inferred from convenience getters.
 Every returned original object must reproduce its complete captured bytes;
 non-reproducible input rejects. The complete original package ART oracle passes
-(18.15s): seven original owner forms, nested nullable constructor owners inside
+(18.49s): seven original owner forms, nested nullable constructor owners inside
 populated optional/certificate records, exact bytes, original concrete setting
 restoration, mutation isolation and malformed-owner rejection. It also verifies
 that changing category on the same detached original PackageImpl changes its
@@ -312,15 +312,14 @@ cache bytes and restoring the category restores the complete original bytes.
 The feed now serializes parsed code inside the unfiltered snapshot and uses
 content hashes for all records: retaining an AndroidPackage object's identity
 cannot suppress a changed code record. Original Java linkage passes (5.06s);
-device-services builds (14.0s). The complete boot build passes (75.3s), including
-the original-PMS userdata template and the bare fallback-resource correction.
-Before that resource correction, a disposable 90-second original-PMS shadow
+device-services builds in the full boot build (64.8s), including the original-PMS
+userdata template. A disposable 90-second original-PMS shadow
 publishes the changed live feed without read/publication errors: final generation
-74 contains 285 active packages and five disabled factories. It exits successfully
-and leaves no owned processes or mounted data. Its 22,074 shadow calls include
-20,707 matches, 498 classified races, 16 differences and 853 not modelled; four
+75 contains 285 active packages and five disabled factories. It exits successfully
+and leaves no owned processes or mounted data. Its 22,853 shadow calls include
+21,525 matches, 470 classified races, 16 differences and 842 not modelled; six
 write checks also differ. Category differences still reproduce (#865): this run
-has six category mismatches, so code-record freshness alone does not resolve them.
+has eight GMS category mismatches, so code-record freshness alone does not resolve them.
 Enabled-state/eligibility/write differences are #866, provider eligibility #867
 and install-parse lifecycle comparison #868. Additional disposable shadow
 instrumentation confirms the mismatching native category 7 comes from a saved
@@ -328,13 +327,21 @@ category override 7, with parsed category -1 and no GMS fallback. The final fed
 GMS code and override are both -1; the query/snapshot timing remains under #865,
 not a proved category-computation defect. Instrumentation has been removed and
 both diagnostic boots exit cleanly without owned processes or mounted data.
-FallbackCategoryProvider's bare AssetManager now selects the framework APK's raw
-CSV without applying framework overlays. An explicitly run image integration
-passes (2.53s), comparing the selected bytes to the actual framework APK and
-checking its sole printspooler category. This avoids importing the Google overlay's
-387-entry list, which the original owner does not load. All 395 units pass
-(4.11s; one ignored/not run). Property, duplicate and malformed-line parsing
-semantics remain #869. No library-field differences were
+FallbackCategoryProvider's newly constructed AssetManager includes system asset
+overlays. Native selection retains GoogleConfigOverlay's 387-entry CSV; removing
+those overlays caused widespread live category differences and was reverted.
+The original ART oracle now directly loads FallbackCategoryProvider and compares
+all 387 native values plus two undefined values, rather than inferring selection
+from addAssetPath alone. Its original BufferedReader/String/Integer/ArrayMap
+owners verify duplicates, trailing commas, CR/LF/CRLF, Unicode digits and partial
+malformed input; original SystemProperties verifies true, false and default
+variants. Native import uses those semantics: duplicate replacement, stopping at
+the first numeric error while retaining preceding values, and explicit failure
+for blank lines or missing resources. Ignoring categories bypasses those resource
+errors. An explicitly run image integration passes (1.63s), checking the selected
+bytes against the actual overlay APK. All 398 units pass (5.40s; one ignored/not
+run), and all integration targets compile. These resolve #869 without a per-app
+category rule. No library-field differences were
 observed in this boot workload; targeted original owner fixtures prove nullable
 optional/certificate reproduction. This is original-PMS feed validation, not
 native PMS conformance. Native-to-SystemServer lease bootstrap and complete

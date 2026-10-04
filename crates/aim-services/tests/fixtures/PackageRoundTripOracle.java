@@ -128,7 +128,75 @@ public final class PackageRoundTripOracle {
         if (!java.util.Arrays.equals(before, PackageCacher.toCacheEntryStatic(owner))) throw new AssertionError("original category restoration changed other code owners");
     }
 
+    private record FallbackRead(java.util.Map<String, Integer> categories, boolean malformed) {}
+
+    /*
+     * Copyright (C) 2017 The Android Open Source Project
+     *
+     * Licensed under the Apache License, Version 2.0 (the "License");
+     * you may not use this file except in compliance with the License.
+     * You may obtain a copy of the License at
+     *
+     *      http://www.apache.org/licenses/LICENSE-2.0
+     *
+     * Unless required by applicable law or agreed to in writing, software
+     * distributed under the License is distributed on an "AS IS" BASIS,
+     * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     * See the License for the specific language governing permissions and
+     * limitations under the License.
+     */
+    // Adapted from core/java/android/content/pm/FallbackCategoryProvider.java
+    // at android-16.0.0_r1: StringReader supplies controlled text and the
+    // result records the original NumberFormatException boundary.
+    private static FallbackRead readFallbacks(String text) throws Exception {
+        var values = new android.util.ArrayMap<String, Integer>();
+        try (var reader = new java.io.BufferedReader(new java.io.StringReader(text))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.charAt(0) == '#') continue;
+                String[] fields = line.split(",");
+                if (fields.length == 2) values.put(fields[0], Integer.parseInt(fields[1]));
+            }
+            return new FallbackRead(values, false);
+        } catch (NumberFormatException expected) {
+            return new FallbackRead(values, true);
+        }
+    }
+
+    private static void verifyFallbackParsing() throws Exception {
+        var first = readFallbacks("# header\r\nfirst,1\rfirst,٣,\nignored,1,2\nminimum,-2147483648\nbad,2147483648\nlate,6\n");
+        if (!first.malformed() || !first.categories().equals(java.util.Map.of("first", 3, "minimum", Integer.MIN_VALUE))) throw new AssertionError("original duplicate/partial fallback parsing differs");
+        var second = readFallbacks(",7\ntrailing,2,,\nmissing,\nskip,,\nspace, 1\nlate,3");
+        if (!second.malformed() || !second.categories().equals(java.util.Map.of("", 7, "trailing", 2))) throw new AssertionError("original split/whitespace fallback parsing differs");
+        if (!readFallbacks("").categories().isEmpty()) throw new AssertionError("empty fallback resource differs");
+        for (String text : new String[] { "\n", "\r", "\r\n", "package,1\n\n" }) {
+            try { readFallbacks(text); throw new AssertionError("original blank fallback line accepted"); }
+            catch (StringIndexOutOfBoundsException expected) { }
+        }
+        String key = "debug.aim.fallback.boolean";
+        try {
+            for (String value : new String[] { "1", "y", "yes", "on", "true" }) {
+                android.os.SystemProperties.set(key, value);
+                if (!android.os.SystemProperties.getBoolean(key, false)) throw new AssertionError("original property true value differs: " + value);
+            }
+            for (String value : new String[] { "0", "n", "no", "off", "false" }) {
+                android.os.SystemProperties.set(key, value);
+                if (android.os.SystemProperties.getBoolean(key, true)) throw new AssertionError("original property false value differs: " + value);
+            }
+            for (String value : new String[] { "TRUE", " true ", "", "invalid" }) {
+                android.os.SystemProperties.set(key, value);
+                if (android.os.SystemProperties.getBoolean(key, false) || !android.os.SystemProperties.getBoolean(key, true)) throw new AssertionError("original property default differs: " + value);
+            }
+        } finally { android.os.SystemProperties.set(key, ""); }
+    }
+
     private static void verify(String[] args) throws Exception {
+        verifyFallbackParsing();
+        android.content.pm.FallbackCategoryProvider.loadFallbacks();
+        for (String line : java.nio.file.Files.readAllLines(new java.io.File(args[0], "fallback-categories.txt").toPath())) {
+            String[] fields = line.split("\t");
+            if (android.content.pm.FallbackCategoryProvider.getFallbackCategory(fields[0]) != Integer.parseInt(fields[1])) throw new AssertionError("original fallback resource value differs: " + fields[0]);
+        }
         verifyLibraryOwners(new java.io.File(args[0], "library-owners.parcel"));
         LegacyPermissionOracle.verify(new java.io.File(args[0]));
         var files = new java.io.File(args[0]).listFiles((dir, name) -> name.endsWith(".native"));

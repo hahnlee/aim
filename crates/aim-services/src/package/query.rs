@@ -190,9 +190,16 @@ impl Join {
         {
             return Some(m.clone());
         }
-        let device = self.device.get_or_insert_with(|| {
-            system_config::system(&self.image, &self.props, &self.framework)
-        });
+        if self.device.is_none() {
+            match system_config::system(&self.image, &self.props, &self.framework) {
+                Ok(device) => self.device = Some(device),
+                Err(error) => {
+                    eprintln!("package shadow: system configuration: {error}");
+                    return None;
+                }
+            }
+        }
+        let device = self.device.as_ref().unwrap();
         let mut state = (*fed).clone();
         state.system = System {
             implicit_access: fed.system.implicit_access.clone(),

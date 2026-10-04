@@ -1479,7 +1479,8 @@ fn new_settings_match_the_original_runtime() {
         &aim_paths::derived_image(),
         &|p| properties.get(p).cloned(),
         &framework,
-    );
+    )
+    .unwrap();
     let original_bcp = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
