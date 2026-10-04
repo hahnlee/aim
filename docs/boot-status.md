@@ -678,8 +678,22 @@ retained-only removal capture (30.58s). Unit tests pass 441 with one ignored/not
 run; the image/template build passes (65.7s), all integration targets compile,
 and the complete initial scan passes (68.05s). The original shared process
 union/overwrite/rebuild/removal and immutable facade snapshot oracle also passes
-(11.42s). Native daemon publication remains
-incomplete (#836); these process owners do not replace the live PMS.
+(11.42s). The native daemon now exposes an initial scan entry point through its
+retained early package bridge (#836/#885). BootOwners captures original APEX,
+resolved users, migration policy and library compatibility against the same
+bridge and immutable SystemConfig; caller image/ABI/installation policy remains
+explicit. The scan parses original containers, completes native APEX registration,
+notifies the original owner before APK directory loading, and uses that same
+bridge for domain IDs and seInfo compatibility. Owner/malformed notification
+failures abort without publishing a snapshot. The real Binder test with a
+controlled owner and an unchanged original framework APK passes (3.01s), including
+notification failure and denied-owner rejection. All 441 ordinary units pass;
+the new ignored scan test was run explicitly, while the other ignored test remains
+not run. All integration targets compile and the host build passes (14.6s).
+This entry point is not invoked
+by the default boot and does not complete saved/data reconciliation, metadata
+owners, facades or service publication. Original PMS remains live; native
+CTS/apps/template/APEX/rollback acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
 Files.write IOException, not evidence of an external kill. Crash reporting also

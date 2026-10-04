@@ -429,6 +429,27 @@ impl System {
             })
     }
 
+    /// Prepare native first-boot code using this daemon's retained early owner.
+    /// The result is unpublished until reconciliation and snapshot gates finish.
+    pub fn scan_package_first_boot(
+        &self,
+        apks: &crate::package::write::Apks,
+        config: &crate::package::system_config::SystemConfig,
+        properties: &dyn Fn(&str) -> Option<String>,
+        policy: crate::package::bootstrap::ScanPolicy<'_>,
+    ) -> std::result::Result<
+        crate::package::scan::SystemImageScan,
+        crate::package::bootstrap::BootError,
+    > {
+        use crate::package::bootstrap::{BootError, OwnerError};
+        let bridge = self
+            .package_bootstrap()
+            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))?;
+        bridge
+            .resolve_boot(config, properties)?
+            .scan_first_boot(apks, policy)
+    }
+
     /// Takes system_server's bridge (#430): maps the shared memory of its
     /// cache nonces, dropped again when system_server dies.
     pub fn attach_bridge(self: &Arc<Self>, handle: u32) -> Result<()> {

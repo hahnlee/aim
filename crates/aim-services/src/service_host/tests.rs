@@ -116,6 +116,7 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::IS_SHARED_UID_MIGRATION_BEST_EFFORT => reply.write_bool(false),
             bootstrap::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
                 assert_eq!(
                     call.data.read_string16()?.as_deref(),
@@ -234,9 +235,7 @@ impl Service for Owner {
                 let cache = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
                 let parsed = crate::package::pkg::AndroidPackage::read_cache_entry(&cache)
                     .expect("original parsed package cache");
-                assert_eq!(parsed.package_name, "fixture.package");
-                assert_eq!(parsed.target_sdk_version, 29);
-                reply.write_i32(30);
+                reply.write_i32(parsed.target_sdk_version + 1);
                 if self.malformed_seinfo.load(Ordering::SeqCst) {
                     reply.write_i32(99);
                 }
@@ -281,6 +280,14 @@ fn until(mut predicate: impl FnMut() -> bool) {
 }
 #[test]
 fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_failures() {
+    exercise_bootstrap(false);
+}
+#[test]
+#[ignore = "requires pinned original image; run explicitly"]
+fn native_boot_scan_uses_retained_original_bootstrap_owners() {
+    exercise_bootstrap(true);
+}
+fn exercise_bootstrap(run_scan: bool) {
     let driver = Driver::new();
     let open = |pid, euid| {
         LocalProcess::open(
@@ -385,6 +392,32 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
     assert!(!late.load(Ordering::SeqCst));
     let config = SystemConfig::default();
+    let boot = old.resolve_boot(&config, &|_| None).unwrap();
+    assert_eq!(
+        boot.migration(),
+        crate::package::scan::SharedUidMigration::NewInstallOnly
+    );
+    assert_eq!(boot.users().users.as_ref().unwrap().len(), 2);
+    assert_eq!(boot.apex().active.len(), 1);
+    owner.users_reply.store(1, Ordering::SeqCst);
+    assert_eq!(
+        old.resolve_boot(&config, &|_| None).unwrap().users().users,
+        None
+    );
+    owner.users_reply.store(2, Ordering::SeqCst);
+    assert_eq!(
+        old.resolve_boot(&config, &|_| None).unwrap().users().users,
+        Some(vec![])
+    );
+    owner.users_reply.store(3, Ordering::SeqCst);
+    assert!(old.resolve_boot(&config, &|_| None).is_err());
+    owner.users_reply.store(0, Ordering::SeqCst);
+    owner.apex_reply.store(2, Ordering::SeqCst);
+    assert!(old.resolve_boot(&config, &|_| None).is_err());
+    owner.apex_reply.store(0, Ordering::SeqCst);
+    if run_scan {
+        verify_boot_scan(&system, &old, &owner, &config);
+    }
     let mut parsed = crate::package::pkg::AndroidPackage {
         feature_flag_state: Some(Vec::new()),
         package_name: "fixture.package".into(),
@@ -780,4 +813,106 @@ fn late_bridge_death_preserves_replacement_nonce_mapping() {
     assert_eq!(system.package_info_nonce(), Some(42));
     driver.release(second.proc_handle());
     until(|| system.package_info_nonce().is_none());
+}
+
+fn verify_boot_scan(
+    system: &System,
+    bridge: &crate::package::bootstrap::Bridge,
+    owner: &Owner,
+    config: &SystemConfig,
+) {
+    use crate::package::{
+        bootstrap::ScanPolicy,
+        parse::Platform,
+        scan::{AbiPolicy, NativeLibraryInstallPolicy, ScanClock},
+        write::Apks,
+    };
+    let original = aim_paths::original_image();
+    let root = std::env::temp_dir().join(format!("aim-bootstrap-scan-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    struct Data(std::path::PathBuf);
+    impl Drop for Data {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    let data = Data(root.clone());
+    let framework = root.join("system/framework");
+    std::fs::create_dir_all(&framework).unwrap();
+    std::os::unix::fs::symlink(
+        original.join("system/framework/framework-res.apk"),
+        framework.join("framework-res.apk"),
+    )
+    .unwrap();
+    let apks = Apks {
+        files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
+        platform: Platform::load(&original, Default::default()).unwrap(),
+    };
+    let seinfo = crate::package::owner::seinfo::Policy::load(&original).unwrap();
+    let abi = AbiPolicy {
+        all: vec!["arm64-v8a".into()],
+        bit32: vec![],
+        bit64: vec!["arm64-v8a".into()],
+        native32: vec![],
+        native64: vec!["arm64-v8a".into()],
+        force_multi_arch_match: false,
+    };
+    let policy = || ScanPolicy {
+        seinfo: &seinfo,
+        apex_parse_flags: crate::package::parse::PARSE_IS_SYSTEM_DIR,
+        first_api_level: 36,
+        vendor_sdk: 36,
+        abi: &abi,
+        preferred_abi: "arm64-v8a",
+        app_lib32_install_dir: "/data/app-lib",
+        platform_runtime_64bit: true,
+        install: NativeLibraryInstallPolicy {
+            page_size: 4096,
+            extract: false,
+            debuggable: false,
+            compat_16kb_disabled: false,
+            manifest_compat_disabled: false,
+        },
+        clock: ScanClock {
+            current_time: 0,
+            user_id: 0,
+            update_time: false,
+        },
+        factory_test: false,
+        install_user: None,
+        allow_install: true,
+        instant_app: false,
+        virtual_preload: false,
+        stopped_system_app: false,
+    };
+    // Capture valid inventory before testing notification failure.
+    owner.apex_reply.store(1, Ordering::SeqCst);
+    let boot = bridge.resolve_boot(config, &|_| None).unwrap();
+    owner.apex_reply.store(4, Ordering::SeqCst);
+    assert!(
+        matches!(boot.scan_first_boot(&apks, policy()), Err(crate::package::bootstrap::BootError::Scan(crate::package::scan::SigningError::Rejected(e))) if e.phase == "apex-notification")
+    );
+    owner.apex_reply.store(1, Ordering::SeqCst);
+    let scan = system
+        .scan_package_first_boot(&apks, config, &|_| None, policy())
+        .unwrap();
+    assert_eq!(scan.packages.len(), 1);
+    assert_eq!(scan.packages[0].candidate.record.settings.name, "android");
+    assert_eq!(
+        scan.owner
+            .scanned_user_states("android")
+            .unwrap()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [0]
+    );
+    owner.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        system.scan_package_first_boot(&apks, config, &|_| None, policy()),
+        Err(crate::package::bootstrap::BootError::Owner(_))
+    ));
+    owner.reject.store(false, Ordering::SeqCst);
+    owner.apex_reply.store(0, Ordering::SeqCst);
+    drop(data);
 }
