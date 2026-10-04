@@ -417,6 +417,7 @@ mod tests {
                 apex: None,
             },
             parsed: AndroidPackage {
+                feature_flag_state: Some(Vec::new()),
                 uid: -1,
                 signing_details: Some(Default::default()),
                 ..Default::default()

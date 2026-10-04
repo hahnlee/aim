@@ -304,6 +304,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     assert!(!late.load(Ordering::SeqCst));
     let config = SystemConfig::default();
     let mut parsed = crate::package::pkg::AndroidPackage {
+        feature_flag_state: Some(Vec::new()),
         package_name: "fixture.package".into(),
         target_sdk_version: 36,
         uses_libraries: vec!["android.test.base".into()],

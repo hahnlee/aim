@@ -160,6 +160,9 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
             }
         }
         for (name, code) in loaded {
+            code.package
+                .validate_cache_constructor_fields()
+                .map_err(Error::Invalid)?;
             let setting = settings
                 .iter()
                 .find(|p| &p.name == name)

@@ -47,6 +47,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedPackageStateOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/PackageCacheValidationOracle.java"),
+        )
         .arg("-classpath")
         .arg(&stubs)
         .arg(
@@ -279,6 +283,10 @@ fn native_package_parcels_match_original_read_write() {
     }
     eprintln!("original cache entries: {}", files.len());
     let snapshot = native_scan_objects(&data.0);
+    cache_validation_objects(
+        &directory,
+        &snapshot.owner().loaded_packages()["android"].package,
+    );
     for loaded in snapshot.owner().loaded_packages().values() {
         let pkg = &loaded.package;
         let name = format!("scan-{}.native", pkg.uid);
@@ -1805,4 +1813,83 @@ fn write_library_owner_fixture(directory: &std::path::Path) {
     let mut parcel = aim_binder_host::parcel::Parcel::new();
     info.write(&mut parcel, None);
     fs::write(directory.join("library-owners.parcel"), parcel.data()).unwrap();
+}
+
+fn cache_validation_objects(directory: &std::path::Path, original: &AndroidPackage) {
+    let mut empty = original.clone();
+    empty.feature_flag_state = Some(Vec::new());
+    empty.processes = None;
+    let entry = empty.to_cache_entry().unwrap();
+    fs::write(directory.join("cache-validation-empty"), &entry.bytes).unwrap();
+    assert_eq!(
+        AndroidPackage::read_cache_entry(&entry.bytes).unwrap(),
+        empty
+    );
+    let mut null = entry.bytes.clone();
+    null[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+    assert!(AndroidPackage::read_cache_entry(&null).is_err());
+    fs::write(directory.join("cache-validation-null-array"), null).unwrap();
+    let mut invalid = empty.clone();
+    invalid.feature_flag_state = None;
+    assert!(invalid.to_cache_entry().is_err());
+    let mut populated = empty.clone();
+    let mut flags = vec![
+        Some("aim.test.true=1".into()),
+        Some("aim.test.false=0".into()),
+        Some("aim.test.unknown=?".into()),
+    ];
+    flags.sort_by_key(|flag: &Option<String>| {
+        aim_services::package::info::java_hash(flag.as_ref().unwrap().rsplit_once('=').unwrap().0)
+    });
+    populated.feature_flag_state = Some(flags);
+    let entry = populated.to_cache_entry().unwrap();
+    assert!(
+        AndroidPackage::read_cache_entry(&entry.bytes).unwrap() == populated,
+        "populated feature owner changed"
+    );
+    fs::write(directory.join("cache-validation-populated"), &entry.bytes).unwrap();
+    let mut null = entry.bytes.clone();
+    let null_index = entry.pool.iter().position(Option::is_none).unwrap() as i32;
+    null[8..12].copy_from_slice(&null_index.to_le_bytes());
+    assert!(AndroidPackage::read_cache_entry(&null).is_err());
+    fs::write(directory.join("cache-validation-null-string"), null).unwrap();
+    invalid.feature_flag_state = Some(vec![None]);
+    assert!(invalid.to_cache_entry().is_err());
+    let mut process = empty.clone();
+    process.processes = Some(vec![aim_services::package::pkg::Process {
+        map_key: None,
+        name: Some(String::new()),
+        ..Default::default()
+    }]);
+    let entry = process.to_cache_entry().unwrap();
+    assert!(
+        AndroidPackage::read_cache_entry(&entry.bytes).unwrap() == process,
+        "empty process name owner changed"
+    );
+    fs::write(
+        directory.join("cache-validation-empty-process-name"),
+        &entry.bytes,
+    )
+    .unwrap();
+    process.processes.as_mut().unwrap()[0].name =
+        Some("aim.native.cache.validation.process".into());
+    let entry = process.to_cache_entry().unwrap();
+    let index = entry
+        .pool
+        .iter()
+        .position(|value| value.as_deref() == Some("aim.native.cache.validation.process"))
+        .unwrap() as i32;
+    let positions: Vec<_> = entry
+        .strings
+        .iter()
+        .filter(|(_, value)| *value == index)
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let null_index = entry.pool.iter().position(Option::is_none).unwrap() as i32;
+    let mut null = entry.bytes.clone();
+    null[positions[0].0..positions[0].0 + 4].copy_from_slice(&null_index.to_le_bytes());
+    assert!(AndroidPackage::read_cache_entry(&null).is_err());
+    fs::write(directory.join("cache-validation-null-process-name"), null).unwrap();
+    process.processes.as_mut().unwrap()[0].name = None;
+    assert!(process.to_cache_entry().is_err());
 }

@@ -566,7 +566,7 @@ impl AndroidPackage {
     /// `PackageImpl(Parcel)`.
     pub fn read(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<AndroidPackage> {
         Ok(AndroidPackage {
-            feature_flag_state: string_array(r, s)?,
+            feature_flag_state: feature_flag_state(r, s)?,
             supports_small_screens: for_boolean(r)?,
             supports_normal_screens: for_boolean(r)?,
             supports_large_screens: for_boolean(r)?,
@@ -948,6 +948,18 @@ fn string_array(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Op
     array(r, |r| s.string16(r))
 }
 
+// PackageImpl.readFeatureFlagState iterates both the array and every string.
+fn feature_flag_state(
+    r: &mut Reader<'_>,
+    s: &mut dyn Strings,
+) -> Result<Option<Vec<Option<String>>>> {
+    let values = string_array(r, s)?.ok_or(BAD_VALUE)?;
+    if values.iter().any(Option::is_none) {
+        return Err(BAD_VALUE);
+    }
+    Ok(Some(values))
+}
+
 fn string8_array(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Option<String>>>> {
     array(r, |r| s.string8(r))
 }
@@ -1164,7 +1176,7 @@ fn processes(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Proce
             Ok(Process {
                 map_key,
                 use_embedded_dex: flags & 0x40 != 0,
-                name: s.string16(r)?,
+                name: Some(s.string16(r)?.ok_or(BAD_VALUE)?),
                 app_class_names_by_package: array(r, |r| {
                     let key = string_value(r, s)?.ok_or(BAD_VALUE)?;
                     Ok((key, string_value(r, s)?))
@@ -1443,6 +1455,61 @@ mod tests {
         c.p.write_i64(0);
         c.i(1).i(0).i(-1).i(-1).i(0);
         c.finish()
+    }
+
+    #[test]
+    fn code_cache_rejects_null_constructor_inputs_and_retains_empty_owners() {
+        let valid = AndroidPackage::read_cache_entry(&package()).unwrap();
+        for flags in [None, Some(vec![None])] {
+            let mut invalid = valid.clone();
+            invalid.feature_flag_state = flags;
+            assert!(invalid.to_cache_entry().is_err());
+        }
+        let mut empty = valid.clone();
+        empty.feature_flag_state = Some(Vec::new());
+        let entry = empty.to_cache_entry().unwrap();
+        assert_eq!(
+            AndroidPackage::read_cache_entry(&entry.bytes)
+                .unwrap()
+                .feature_flag_state,
+            Some(Vec::new())
+        );
+        let mut null_array = entry.bytes.clone();
+        null_array[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+        assert!(AndroidPackage::read_cache_entry(&null_array).is_err());
+        let entry = valid.to_cache_entry().unwrap();
+        let null = entry.pool.iter().position(Option::is_none).unwrap() as i32;
+        let mut null_string = entry.bytes.clone();
+        null_string[8..12].copy_from_slice(&null.to_le_bytes());
+        assert!(AndroidPackage::read_cache_entry(&null_string).is_err());
+        let mut process = valid.clone();
+        process.processes = Some(vec![Process {
+            map_key: None,
+            name: Some("cache.validation.process".into()),
+            ..Default::default()
+        }]);
+        let entry = process.to_cache_entry().unwrap();
+        let index = entry
+            .pool
+            .iter()
+            .position(|v| v.as_deref() == Some("cache.validation.process"))
+            .unwrap() as i32;
+        let positions: Vec<_> = entry.strings.iter().filter(|(_, i)| *i == index).collect();
+        assert_eq!(positions.len(), 1);
+        let mut null_name = entry.bytes.clone();
+        let null = entry.pool.iter().position(Option::is_none).unwrap() as i32;
+        null_name[positions[0].0..positions[0].0 + 4].copy_from_slice(&null.to_le_bytes());
+        assert!(AndroidPackage::read_cache_entry(&null_name).is_err());
+        process.processes.as_mut().unwrap()[0].name = None;
+        assert!(process.to_cache_entry().is_err());
+        process.processes.as_mut().unwrap()[0].name = Some(String::new());
+        let decoded =
+            AndroidPackage::read_cache_entry(&process.to_cache_entry().unwrap().bytes).unwrap();
+        assert_eq!(
+            decoded.processes.as_ref().unwrap()[0].name.as_deref(),
+            Some("")
+        );
+        assert_eq!(decoded.processes.as_ref().unwrap()[0].map_key, None);
     }
 
     #[test]

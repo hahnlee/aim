@@ -1391,6 +1391,7 @@ mod tests {
             past_signing_certificates: Some(vec![(vec![1], 21), (vec![3], 23)]),
         };
         let parsed = crate::package::pkg::AndroidPackage {
+            feature_flag_state: Some(Vec::new()),
             package_name: package.name.clone(),
             path: Some(package.code_path.clone()),
             uid: package.app_id,
@@ -1505,6 +1506,26 @@ mod tests {
             .unwrap();
         let store = Store::new(owner.clone(), usage).unwrap();
         let base = store.capture();
+        for mode in 0..3 {
+            let mut invalid = owner.clone();
+            let code = &mut Arc::make_mut(invalid.loaded.get_mut("fixture").unwrap()).package;
+            match mode {
+                0 => code.feature_flag_state = None,
+                1 => code.feature_flag_state = Some(vec![None]),
+                _ => {
+                    code.processes = Some(vec![crate::package::pkg::Process {
+                        name: None,
+                        ..Default::default()
+                    }])
+                }
+            }
+            assert!(matches!(
+                store.publish(&base, invalid, base.usage().clone()),
+                Err(crate::package::scan_snapshot::Error::Invalid(_))
+            ));
+            assert!(Arc::ptr_eq(&store.capture(), &base));
+        }
+
         let captured_library =
             crate::package::scan_snapshot::library_record::captured(&base, "fixture")
                 .unwrap()
@@ -2531,6 +2552,7 @@ mod tests {
             past_signing_certificates: Some(vec![(vec![1], 21), (vec![3], 23)]),
         };
         let parsed = crate::package::pkg::AndroidPackage {
+            feature_flag_state: Some(Vec::new()),
             package_name: package.name.clone(),
             path: Some(package.code_path.clone()),
             signing_details: Some(signing.parcel_details().unwrap()),

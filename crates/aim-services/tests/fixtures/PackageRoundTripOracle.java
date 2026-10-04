@@ -191,6 +191,7 @@ public final class PackageRoundTripOracle {
     }
 
     private static void verify(String[] args) throws Exception {
+        PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyFallbackParsing();
         android.content.pm.FallbackCategoryProvider.loadFallbacks();
         for (String line : java.nio.file.Files.readAllLines(new java.io.File(args[0], "fallback-categories.txt").toPath())) {

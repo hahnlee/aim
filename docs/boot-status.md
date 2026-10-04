@@ -791,9 +791,24 @@ the actual first-system image scan passes (50.66s), and the final full build pas
 also rebuilt successfully in the preceding full build (61.9s). No owned runtime
 processes or disposable test mounts remain.
 Import/live member-order producers and full SharedUserApi capture/export remain
-#870/#836. Original ART also exposed invalid native cache states: null feature
-flag arrays (#871) and null process names (#872) are rejected by original
-constructors; the wider native cache boundaries remain to be repaired.
+#870/#836. Native PackageImpl cache decoding/encoding now rejects null feature
+flag arrays, null feature flag strings and null ParsedProcess value names, matching
+the original constructors (#871/#872). Snapshot validation applies the same
+required-field checks to active/factory loaded code before publication; an invalid
+candidate retains the previous capture. Allocated-empty feature arrays, canonical
+true/false/unknown flag states, empty process names and nullable enclosing map keys
+remain distinct and preserve exact original read/write bytes. Controlled fixture
+packages now supply the original constructor's allocated-empty feature state;
+production code does not replace missing inputs with defaults. All 408 units pass
+(3.14s; one ignored/not run), including malformed cache decoding, encoding rejection
+and publication atomicity. The full original package ART oracle passes (24.10s):
+three invalid constructor inputs reject with the original NullPointerException,
+while three valid owner forms reproduce their complete cache bytes. All integration
+targets compile (16.22s), original Java linkage passes (7.03s), the actual first-system
+image scan passes (51.39s), and the full build passes (22.1s; three host nodes rebuilt,
+39 fresh, including the retained original-PMS template). No owned runtime processes
+or disposable test mounts remain. Native PMS activation and acceptance remain
+unproved.
 Factory/unloaded facade assembly, live APEX/hidden-state delivery and
 complete PackageState facade publication remain #836; live query/write shadow differences
 remain #865-#868.

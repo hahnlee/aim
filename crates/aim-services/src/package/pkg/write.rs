@@ -32,6 +32,24 @@ impl AndroidPackage {
         self.write(&mut writer);
         Ok(writer.finish())
     }
+    /// Required non-null inputs checked by the original cache constructors.
+    pub(in crate::package) fn validate_cache_constructor_fields(
+        &self,
+    ) -> std::result::Result<(), String> {
+        let flags = self
+            .feature_flag_state
+            .as_ref()
+            .ok_or("PackageImpl feature flag state is null")?;
+        if flags.iter().any(Option::is_none) {
+            return Err("PackageImpl feature flag string is null".into());
+        }
+        if self.processes.iter().flatten().any(|p| p.name.is_none()) {
+            return Err("ParsedProcess name is null".into());
+        }
+
+        Ok(())
+    }
+
     fn write(&self, w: &mut Writer) {
         w.field("mFeatureFlagState");
         w.optional_strings(self.feature_flag_state.as_deref());
@@ -927,6 +945,7 @@ fn write_intent(w: &mut Writer, value: &Intent) {
     w.int(0);
 }
 fn validate(pkg: &AndroidPackage) -> std::result::Result<(), String> {
+    pkg.validate_cache_constructor_fields()?;
     let check_properties =
         |values: Option<&[(String, Property)]>| -> std::result::Result<(), String> {
             if values
