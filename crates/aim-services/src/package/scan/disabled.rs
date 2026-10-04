@@ -783,18 +783,32 @@ mod tests {
             36,
         )
         .unwrap();
+        let read = |status| {
+            crate::package::restrictions::Restrictions::parse(
+                &aim_android_xml::read(format!(
+                    "<package-restrictions><pkg name='p' domainVerificationStatus='{status}'/></package-restrictions>"
+                ).as_bytes()).unwrap()
+            ).unwrap()
+        };
+        let active_restrictions = read(2);
+        let factory_restrictions = read(3);
+        let original_user = active_restrictions.packages[0].1.clone();
+        assert_eq!(original_user, factory_restrictions.packages[0].1);
         let mut states = BTreeMap::new();
         states.insert(
             ("p".into(), false),
             CapturedUsers {
-                states: BTreeMap::from([(0, UserState::default())]),
+                states: BTreeMap::from([(0, original_user.clone())]),
                 active_aliases: BTreeSet::new(),
             },
         );
         states.insert(
             ("p".into(), true),
             CapturedUsers {
-                states: BTreeMap::from([(0, UserState::default()), (10, UserState::default())]),
+                states: BTreeMap::from([
+                    (0, factory_restrictions.packages[0].1.clone()),
+                    (10, UserState::default()),
+                ]),
                 active_aliases: BTreeSet::new(),
             },
         );
@@ -858,8 +872,10 @@ mod tests {
         );
         assert_eq!(
             retained.disabled_user_states("p").unwrap()[&0],
-            UserState::default()
+            original_user
         );
+        assert_eq!(active_restrictions.legacy_domain_states, [("p".into(), 2)]);
+        assert_eq!(factory_restrictions.legacy_domain_states, [("p".into(), 3)]);
     }
     #[test]
     fn original_user_scope_codec_rejects_invalid_order_aliases_and_frames() {

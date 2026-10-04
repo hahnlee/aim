@@ -163,10 +163,7 @@ pub(super) fn legacy_domain_states(user: &User) -> HashMap<String, i32> {
     else {
         return HashMap::new();
     };
-    r.packages
-        .into_iter()
-        .map(|(name, s)| (name, s.domain_verification_status))
-        .collect()
+    r.legacy_domain_states.into_iter().collect()
 }
 
 impl Resolution {

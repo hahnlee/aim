@@ -914,7 +914,14 @@ window boot reaches sys.boot_completed at 6.729s and generation 74 contains
 runtime owners, with no feed errors or remaining owned processes/probe mounts.
 This source feed does not export full raw user values or component label maps
 (#862), and native daemon bootstrap remains unwired. Legacy domain migration
-state must be separated from aliased PackageUserState owners (#876). Nullable library file slots now retain their distinction through the query feed,
+inputs now stay in the restrictions reader separately from PackageUserState
+values (#876); the resolver reads that separate inventory. They no longer
+participate in user alias equality/copying or user-state snapshot transport.
+Aliases between identical user states with different retained migration inputs
+accept and update without changing those inputs. All 422 units pass (5.72s;
+one ignored/not run), original ART verifies the revised captured-user transport
+and original user-state assembly (19.75s), and the full image/template build
+passes (59.9s; nine rebuilt, 33 fresh). Nullable library file slots now retain their distinction through the query feed,
 native dependency owners and ApplicationInfo parcels (#874). Null, empty strings,
 paths and repeated null slots survive original ART decoding (19.38s package
 oracle); provider dependency deduplication retains the first null occurrence.

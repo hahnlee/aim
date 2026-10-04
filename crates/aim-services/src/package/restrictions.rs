@@ -23,6 +23,8 @@ pub const COMPONENT_ENABLED_STATE_DEFAULT: i32 = 0;
 pub struct Restrictions {
     /// By package name.
     pub packages: Vec<(String, UserState)>,
+    /// Inputs handed separately to DomainVerificationManager by Settings.
+    pub legacy_domain_states: Vec<(String, i32)>,
     pub default_browser: Option<String>,
     pub block_uninstall: Vec<String>,
 }
@@ -61,9 +63,6 @@ pub struct UserState {
     /// `PackageManager.USER_MIN_ASPECT_RATIO_*`.
     pub min_aspect_ratio: i32,
     pub archive_state: Option<ArchiveState>,
-    /// The legacy `domainVerificationStatus`, which the original hands to
-    /// domain verification.
-    pub domain_verification_status: i32,
 }
 
 impl Default for UserState {
@@ -92,7 +91,6 @@ impl Default for UserState {
             first_install_time: 0,
             min_aspect_ratio: 0,
             archive_state: None,
-            domain_verification_status: 0,
         }
     }
 }
@@ -316,7 +314,10 @@ impl Restrictions {
                     {
                         r.block_uninstall.push(name.clone());
                     }
-                    r.packages.push((name, user_state(e)?));
+                    let state = user_state(e)?;
+                    let legacy = e.int("domainVerificationStatus")?.unwrap_or(0);
+                    r.legacy_domain_states.push((name.clone(), legacy));
+                    r.packages.push((name, state));
                 }
                 "default-apps" => {
                     for browser in children(e, "default-browser") {
@@ -357,7 +358,6 @@ fn user_state(e: &Element) -> Result<UserState, String> {
         splash_screen_theme: string(e, "splash-screen-theme"),
         first_install_time: e.long_hex("first-install-time")?.unwrap_or(0),
         min_aspect_ratio: e.int("min-aspect-ratio")?.unwrap_or(0),
-        domain_verification_status: e.int("domainVerificationStatus")?.unwrap_or(0),
         ..UserState::initialized()
     };
     let mut legacy_dialog = None;
@@ -498,6 +498,19 @@ mod tests {
 
     fn state(xml: &[u8]) -> UserState {
         user_state(&aim_android_xml::read(xml).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn legacy_domain_migration_inputs_do_not_belong_to_user_state() {
+        let read = |xml: &[u8]| Restrictions::parse(&aim_android_xml::read(xml).unwrap()).unwrap();
+        let active = read(br#"<package-restrictions><pkg name='p' domainVerificationStatus='2'/></package-restrictions>"#);
+        let factory = read(br#"<package-restrictions><pkg name='p' domainVerificationStatus='3'/></package-restrictions>"#);
+        assert_eq!(active.packages, factory.packages);
+        assert_eq!(active.legacy_domain_states, [("p".into(), 2)]);
+        assert_eq!(factory.legacy_domain_states, [("p".into(), 3)]);
+        let default = read(br#"<package-restrictions><pkg name='p'/></package-restrictions>"#);
+        assert_eq!(default.legacy_domain_states, [("p".into(), 0)]);
+        assert!(Restrictions::parse(&aim_android_xml::read(br#"<package-restrictions><pkg name='p' domainVerificationStatus='bad'/></package-restrictions>"#).unwrap()).is_err());
     }
 
     #[test]

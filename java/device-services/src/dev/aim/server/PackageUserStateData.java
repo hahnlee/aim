@@ -14,7 +14,7 @@ public final class PackageUserStateData {
     private final boolean factory;
     public final long ceDataInode, deDataInode, firstInstallTime;
     public final boolean installed, stopped, notLaunched, hidden, instantApp, virtualPreload;
-    public final int distractionFlags, enabled, installReason, uninstallReason, minAspectRatio, legacyDomainStatus;
+    public final int distractionFlags, enabled, installReason, uninstallReason, minAspectRatio;
     public final String lastDisableCaller, harmfulWarning, splashTheme;
     private final String[] enabledComponents, disabledComponents;
     private final List<Suspension> suspensions;
@@ -38,7 +38,7 @@ public final class PackageUserStateData {
         enabledComponents = strings(in); disabledComponents = strings(in);
         installReason = in.readInt(); uninstallReason = in.readInt();
         harmfulWarning = in.readString(); splashTheme = in.readString();
-        firstInstallTime = in.readLong(); minAspectRatio = in.readInt(); legacyDomainStatus = in.readInt();
+        firstInstallTime = in.readLong(); minAspectRatio = in.readInt();
         int count = in.readInt();
         if (count < -1 || count > in.dataAvail() / 4) throw new IllegalArgumentException("invalid suspension count");
         var records = new ArrayList<Suspension>(Math.max(0, count));

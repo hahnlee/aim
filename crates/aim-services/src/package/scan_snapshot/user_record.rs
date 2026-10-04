@@ -109,7 +109,6 @@ fn write(p: &mut Parcel, state: &UserState) -> Result<(), String> {
     p.write_string16(state.splash_screen_theme.as_deref());
     p.write_i64(state.first_install_time);
     p.write_i32(state.min_aspect_ratio);
-    p.write_i32(state.domain_verification_status);
     if let Some(suspensions) = &state.suspensions {
         count(p, suspensions.len())?;
     } else {
