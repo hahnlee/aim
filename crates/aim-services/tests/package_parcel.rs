@@ -12,6 +12,7 @@ mod common {
     pub mod seinfo;
     pub mod settings_defaults;
     pub mod settings_owner_defaults;
+    pub mod signature_events;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -571,6 +572,38 @@ fn native_package_parcels_match_original_read_write() {
         .signatures
         .first()
         .unwrap();
+    let signature_inputs = common::signature_events::inputs(cert);
+    let signature_seed = common::signature_events::seed(cert);
+    fs::write(directory.join("signature-event-seed"), &signature_seed).unwrap();
+    fs::write(
+        directory.join("signature-event-retry"),
+        common::signature_events::RETRY,
+    )
+    .unwrap();
+    let mut signature_expected = Vec::new();
+    for (index, input) in signature_inputs.iter().enumerate() {
+        let mut owner = aim_services::package::settings::SignatureReader::default();
+        let mut target = None;
+        let mut flags = Vec::new();
+        common::signature_events::read(&signature_seed, &mut owner, &mut target, &mut flags);
+        let first = common::signature_events::read(input, &mut owner, &mut target, &mut flags);
+        let retry = common::signature_events::read(
+            common::signature_events::RETRY,
+            &mut owner,
+            &mut target,
+            &mut flags,
+        );
+        signature_expected.push(format!("{first}\n{retry}"));
+        fs::write(
+            directory.join(format!("signature-event-input-{index}")),
+            input,
+        )
+        .unwrap();
+    }
+    eprintln!(
+        "original incremental signature cases: {}",
+        signature_inputs.len()
+    );
     let mut owner_default_inputs = common::settings_owner_defaults::inputs(cert);
     let defaults_count = owner_default_inputs.len();
     let permission_inputs = common::settings_owner_defaults::permission_inputs();
@@ -3752,6 +3785,11 @@ fn native_package_parcels_match_original_read_write() {
         "0=1\n1=1\n2=java.io.IOException\n3=1\n"
     );
     let mut owner_default_mismatches = Vec::new();
+    for (index, expected) in signature_expected.iter().enumerate() {
+        let actual =
+            fs::read_to_string(directory.join(format!("signature-event-output-{index}"))).unwrap();
+        assert_eq!(&actual, expected, "signature event case {index}");
+    }
     for (index, (expected, keys)) in owner_default_expected.iter().enumerate() {
         let actual =
             fs::read_to_string(directory.join(format!("owner-default-output-{index}"))).unwrap();

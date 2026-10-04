@@ -199,7 +199,7 @@ pub fn trace(settings: &Settings, first: bool, main: bool, reserve: bool) -> Str
     )
 }
 
-fn signature(s: Option<&Signatures>) -> String {
+pub fn signature(s: Option<&Signatures>) -> String {
     let Some(s) = s else {
         return "0:null:null".into();
     };

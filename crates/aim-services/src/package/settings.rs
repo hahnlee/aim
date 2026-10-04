@@ -16,6 +16,9 @@ use aim_android_xml::Element;
 use super::domain_verification;
 use super::{children, string};
 
+mod signatures;
+pub use signatures::SignatureReader;
+
 /// `ApplicationInfo.FLAG_SYSTEM`.
 pub const FLAG_SYSTEM: i32 = 1 << 0;
 /// `ApplicationInfo.PRIVATE_FLAG_PRIVILEGED`.

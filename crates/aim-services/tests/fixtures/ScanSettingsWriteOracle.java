@@ -12,6 +12,7 @@ public final class ScanSettingsWriteOracle {
         verifySettingsVersionRecovery(cache.getParentFile());
         verifySettingsDefaults(cache.getParentFile());
         verifyOwnerDefaults(cache.getParentFile());
+        verifySignatureEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -100,6 +101,38 @@ public final class ScanSettingsWriteOracle {
         String signatures = current == null ? "null" : String.join(",", entries); entries.clear();
         if (past != null) for (var cert : past) entries.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
         return details.getSignatureSchemeVersion() + ":" + signatures + ":" + (past == null ? "null" : String.join(",", entries));
+    }
+    private static void verifySignatureEvents(java.io.File directory) throws Exception {
+        byte[] seed = java.nio.file.Files.readAllBytes(new java.io.File(directory, "signature-event-seed").toPath());
+        byte[] retry = java.nio.file.Files.readAllBytes(new java.io.File(directory, "signature-event-retry").toPath());
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "signature-event-input-" + index);
+            if (!input.exists()) break;
+            var owner = new PackageSignatures();
+            var table = new java.util.ArrayList<android.content.pm.Signature>();
+            readSignatureEvent(seed, owner, table);
+            String first = readSignatureEvent(java.nio.file.Files.readAllBytes(input.toPath()), owner, table);
+            String second = readSignatureEvent(retry, owner, table);
+            java.nio.file.Files.write(new java.io.File(directory, "signature-event-output-" + index).toPath(),
+                    (first + "\n" + second).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static String readSignatureEvent(byte[] bytes, PackageSignatures owner,
+            java.util.ArrayList<android.content.pm.Signature> table) throws Exception {
+        String status = "ok";
+        try {
+            var parser = android.util.Xml.resolvePullParser(new java.io.ByteArrayInputStream(bytes));
+            int type;
+            while ((type = parser.next()) != 2 && type != 1) {}
+            if (type == 1) status = "absent";
+            else owner.readXml(parser, table);
+        } catch (Exception error) { status = "error"; }
+        var flags = new java.util.ArrayList<String>();
+        var current = owner.mSigningDetails.getSignatures();
+        if (current != null) for (var cert : current) flags.add(Integer.toString(cert.getFlags()));
+        var entries = new java.util.ArrayList<String>();
+        for (var cert : table) entries.add(cert == null ? "null" : hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
+        return status + "|" + signatureTrace(owner.mSigningDetails) + "|" + (current == null ? "null" : String.join(",", flags)) + "|" + String.join(",", entries);
     }
     private static void verifySettingsDefaults(java.io.File directory) throws Exception {
         for (int index = 0; ; index++) {

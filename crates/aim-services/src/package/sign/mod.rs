@@ -35,6 +35,13 @@ mod serialize;
 pub(crate) use serialize::canonical_public_keys;
 pub use serialize::decode_public_key as deserialize_public_key;
 pub use serialize::public_keys as serialize_public_keys;
+
+pub(crate) fn saved_certificates_valid(certificates: &[Vec<u8>]) -> bool {
+    certificates.iter().all(|bytes| {
+        asn1::Certificate::parse(bytes)
+            .is_ok_and(|cert| canonical_public_keys(&[cert.public_key.to_vec()]).is_ok())
+    })
+}
 #[cfg(test)]
 mod tests;
 mod v2;

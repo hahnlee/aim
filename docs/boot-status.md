@@ -740,7 +740,7 @@ complete two-package/live-group inventory with pinned Settings.writePackageLPr
 and ArrayMap values order using one certificate table. Saved-setting signer
 lineage flags remain separate from parsed-code signing. The oracle also reads
 reindexed real certificates through PackageSignatures.readXml and checks
-ArrayMap signed hash/collision behavior (2026-10-05, 19.15s), starting from
+ArrayMap signed hash/collision behavior (2026-10-05, 24.11s), starting from
 an absent native settings file. Store::create claims first-boot absence without
 writing a seed document and uses the original related user/access/list readers.
 Construction rejects every existing main/backup/reserve artifact, including
@@ -764,10 +764,10 @@ rootless ABX from truncated ABX. A real child process exits during its first
 partial write; a new recovery owner cleans the partial main, claims the empty
 reserve and completes a write that reopens successfully. Ten disposable
 regular-file recovery cases agree with actual original ResilientAtomicFile and
-Xml parsing in the ART oracle (19.15s). Its first-boot flag uses the pinned
+Xml parsing in the ART oracle (24.11s). Its first-boot flag uses the pinned
 Settings control-flow rule; that file-only matrix does not exercise original
 Settings.readSettingsLPw. A separate version-owner oracle now directly calls
-original Settings.readSettingsLPw on 28 disposable text/ABX cases (19.15s):
+original Settings.readSettingsLPw on 28 disposable text/ABX cases (24.11s):
 required-field failure retains earlier SDK assignments and existing DB/fingerprint
 fields, a newly referenced volume exists before its first failing attribute,
 legacy defaulted getters tolerate malformed values, nested attribute-only tags
@@ -782,7 +782,7 @@ errors and lets the owner stop at the outer root end (#914). It follows original
 text/ABX EOF behavior and text coalescing; required-root whole-document readers
 remain strict. Actual original Xml event traces match 234 cases (text and ABX
 at every truncation boundary, attributes/depth, text/CDATA/comments, malformed
-input and outer-root stop), in the full original ART oracle (19.15s). A native permission-container owner now applies each completed item start before
+input and outer-root stop), in the full original ART oracle (24.11s). A native permission-container owner now applies each completed item start before
 skipping its subtree, retains prior definitions after later XML errors and merges
 repeated containers by name. The whole-document reader shares that item owner.
 Actual original Settings.readSettingsLPw agrees on 159 additional permission
@@ -798,12 +798,25 @@ owner types, metadata and failed-read/reserve-retry behavior. Actual original AR
 passes all 385 signature/permission/keyset-owner cases (59 default, 159 incremental
 permission and 167 configured-owner cases). Bootstrap delivery of configured
 owners, nullable configured PermissionInfo identities and complete permission
-writer integration remain #917; this fixture supplies explicit nonnull identities. Incremental package/signature/shared UID/keyset owners and full
-boot integration remain #914. Active/disabled package attributes, shared UID headers,
+writer integration remain #917; this fixture supplies explicit nonnull identities. An incremental SignatureReader now owns one read attempt's shared certificate
+table separately from its signing targets. Completed cert starts append table
+entries/flags before subtree skip; XML failures retain table effects and the prior
+signing target, while completed reads publish the built result. It returns current
+certificate flags for its caller. Invalid DER clears the signing target after
+table mutations. Direct original PackageSignatures comparisons match 2,544 cases:
+all ABX byte truncation boundaries, malformed text/default counts, certificate
+append/clone flags, repeated/nested histories, invalid DER and a following signature
+read sharing the same table. This is a within-attempt signature-owner comparison,
+not Settings failRead file retry (each new file attempt needs a fresh table).
+The normal AST importer still uses its earlier signature projection; full package/
+shared UID/keyset event owners, SignatureReader frontend integration and default
+boot integration remain #914. Current flags must still be carried into the stored
+native Signatures model, public-key derivation must be retained and broader original
+CertificateFactory encoding acceptance remains unproved (#916). Active/disabled package attributes, shared UID headers,
 library versions/optionality and split revisions now use only the default-value
 getters the pinned owner uses (#915), including malformed values. Public/private
 flags use original string parsing rather than typed integer conversion. Actual
-Settings.readSettingsLPw matches 174 text/ABX cases (19.15s): package metadata,
+Settings.readSettingsLPw matches 174 text/ABX cases (24.11s): package metadata,
 install-source fields, flags, loading, library/split arrays, shared groups, and
 main/reserve retention agree; valid values remain intact. Signature/permission/keyset readers now match the original explicit default
 getters, certificate-table append and cloned past-signature flags, repeated
@@ -812,10 +825,10 @@ keyset-version presence checks. Keyset public-key identifiers are read before
 optional bytes, and invalid public keys are ignored while valid keys are
 canonicalized. Actual original Settings.readSettingsLPw matches 59 additional
 text/ABX cases with real certificates and public keys, including original keyset
-writer output (19.15s). Required-getter failures in these cases occur before
+writer output (24.11s). Required-getter failures in these cases occur before
 other owner mutations; the whole-document callback does not prove partial
-package/permission/keyset mutation recovery. Current-signature capability flags
-and invalid-certificate SigningDetails.UNKNOWN/table effects remain #916;
+package/permission/keyset mutation recovery. The original AST signature projection still lacks current-signature flags
+and invalid-certificate SigningDetails.UNKNOWN/table effects (#916);
 The pre-M public flags now migrate hidden/cannot-save-state/privileged bits
 to private flags, and the older system string uses original case-insensitive
 true/default semantics. The original comparison adds 42 text/ABX cases for
@@ -823,9 +836,9 @@ legacy flags, negative values, malformed and typed attributes, and precedence
 over older fields. Remaining getter edges still need audit (#915). Full Settings recovery, current-version initialization
 and nonregular/open-IO cases are not proved. Passive Store::open
 and Store::create remain strict and do not adopt malformed artifacts.
-Ordinary units pass 455 (0.48s; three ignored, including the crash helper explicitly
+Ordinary units pass 455 (0.49s; three ignored, including the crash helper explicitly
 run by its parent), XML units previously passed 15, and all current integration targets compile.
-The full image/template build passes (63.1s, nine rebuilt, 33 fresh).
+The full image/template build passes (25.7s, three rebuilt, 39 fresh).
 The prior original-APK initial scan fixture passed (68.36s), writing/reopening
 both fresh and existing native settings and checking immutable input metadata,
 ABX/reserve equality and repeat-write stability; it was not rerun for recovery.
@@ -840,7 +853,7 @@ without following symlinks (#913). This lets original bionic remove fall back to
 directory removal. Expanded NDK file tests actually run and pass (1.55s), covering
 empty/nonempty directories, directory symlinks, invalid flags, missing paths and
 libc remove. The original ResilientAtomicFile failure/retry ART oracle now removes
-its own reserve directory and passes with the complete package oracle (19.15s).
+its own reserve directory and passes with the complete package oracle (24.11s).
 
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
