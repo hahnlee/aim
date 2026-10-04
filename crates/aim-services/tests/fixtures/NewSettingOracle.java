@@ -328,6 +328,56 @@ public final class NewSettingOracle {
         }
         System.out.println("original setting adoption contracts: " + cases + " cases");
         sharedRequestRemoval();
+        sharedOriginalRecreation();
+    }
+
+    private static void sharedOriginalRecreation() throws Exception {
+        int cases = 0;
+        for (boolean shared : new boolean[] {false, true}) {
+            for (int keep = 0; keep < 3; keep++) {
+                var settings = new Settings(java.util.Map.of());
+                var oldGroup = settings.addSharedUserLPw("fixture.incoming-group", 10002, 0, 0);
+                var incoming = member("fixture.incoming", 1, 0).setAppId(10002)
+                    .setSharedUserAppId(10002).setPrimaryCpuAbi("arm64-v8a");
+                incoming.setPkg((com.android.internal.pm.parsing.pkg.PackageImpl)
+                    com.android.internal.pm.parsing.pkg.PackageImpl.forTesting("fixture.incoming"));
+                settings.addPackageSettingLPw(incoming, oldGroup);
+                if (keep == 1) {
+                    settings.addPackageSettingLPw(member("fixture.other", 1, 0)
+                        .setAppId(10002).setSharedUserAppId(10002), oldGroup);
+                } else if (keep == 2 && !settings.disableSystemPackageLPw("fixture.incoming", true)) {
+                    throw new AssertionError("disabled recreation member not registered");
+                }
+                var original = member("fixture.original", 1, 0).setAppId(10003);
+                SharedUserSetting target = shared
+                    ? settings.addSharedUserLPw("fixture.original-group", 10003, 0, 0) : null;
+                if (shared) original.setSharedUserAppId(10003);
+                settings.registerAppIdLPw(original, false);
+                settings.addPackageSettingLPw(original, target);
+                var adopted = Settings.createNewSetting("fixture.incoming", original, null,
+                    null, target, new java.io.File("/system/nonexistent/new"),
+                    null, null, null, 2L, 1, 8, null, true, true, true,
+                    true, null, null, null, null, null, null, java.util.Set.of(),
+                    new java.util.UUID(0, 1), 36, null);
+                if (!oldGroup.removePackage(incoming))
+                    throw new AssertionError("incoming recreation member missing");
+                boolean pruned = settings.checkAndPruneSharedUserLPw(oldGroup, false);
+                settings.addPackageSettingLPw(adopted, target);
+                if (pruned != (keep == 0)
+                        || settings.getPackagesLocked().get("fixture.incoming") != incoming
+                        || settings.getPackagesLocked().get("fixture.original") != adopted
+                        || settings.getSettingLPr(10002) != (keep == 0 ? null : oldGroup)
+                        || settings.getSettingLPr(10003) != (shared ? target : adopted)
+                        || oldGroup.getPackageStates().contains(incoming)
+                        || (shared && (target.getPackageStates().size() != 2
+                            || !target.getPackageStates().contains(original)
+                            || !target.getPackageStates().contains(adopted)))) {
+                    throw new AssertionError("shared original recreation differs: " + shared + "/" + keep);
+                }
+                cases++;
+            }
+        }
+        System.out.println("shared original recreation contracts: " + cases + " cases");
     }
 
     private static void sharedRequestRemoval() throws Exception {

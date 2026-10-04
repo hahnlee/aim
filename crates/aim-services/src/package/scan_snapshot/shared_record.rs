@@ -21,13 +21,15 @@ pub fn captured_owner(
     }
     group.validate_retained()?;
     let members: Vec<_> = group.package_names().collect();
-    let current: std::collections::BTreeSet<_> = owner
-        .settings
-        .packages
-        .iter()
-        .filter(|p| p.shared_app_id() == Some(group.app_id))
-        .map(|p| p.name.as_str())
-        .collect();
+    owner.validate_displaced_shared_settings()?;
+    let mut current = std::collections::BTreeSet::new();
+    for setting in &owner.settings.packages {
+        if setting.shared_app_id() == Some(group.app_id)
+            && !owner.is_displaced_shared_setting(setting)?
+        {
+            current.insert(setting.name.as_str());
+        }
+    }
     if members
         .iter()
         .copied()

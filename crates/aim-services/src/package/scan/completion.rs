@@ -62,15 +62,7 @@ impl SigningScan {
             if inputs.context.system
                 && !inputs.context.updated
                 && update.flags & crate::package::settings::FLAG_SYSTEM != 0
-                && !installed.shared_user
-                && original.shared_user
-                && super::signing::selected_shared_user(
-                    false,
-                    code.parsed.shared_user_id.as_deref(),
-                    code.parsed
-                        .is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
-                )
-                .is_some()
+                && self.original_recreation_required(installed, &code.parsed)?
             {
                 let AbiScanMode::Existing {
                     first_boot_or_upgrade,
@@ -145,6 +137,12 @@ impl SigningScan {
         apks: &Apks,
         inputs: ScanMetadataCompletion<'_>,
     ) -> Result<CompletedScanMetadata, SigningError> {
+        let installed = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == code.parsed.package_name && p.shared_user)
+            .cloned();
         self.refresh_init_apex(code);
         let mut staged = self.clone();
         let candidate = staged.apply_original_system(code, metadata, saved_users)?;
@@ -169,6 +167,9 @@ impl SigningScan {
                         message: format!("{reason:?}"),
                     })
                 })?;
+        }
+        if let Some(installed) = installed {
+            staged.displace_shared_setting(installed, &setting.name)?;
         }
         *self = staged;
         Ok(completed)

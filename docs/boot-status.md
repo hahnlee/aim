@@ -948,7 +948,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (11.16s), and release units pass 463 cases. Disabled loaded code now retains a
+creation (13.20s), and release units pass 463 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -969,7 +969,8 @@ metadata. Existing per-user state objects remain aliased to the original;
 mutations propagate to that instance. The full setting/helper comparison passes
 (68.15s). The focused original constructor/registration oracle also verifies
 sealed snapshot isolation, independence of new users and final UID-slot owners,
-plus three old shared-group removal cases (10.02s). Ordinary scan admission shares the APEX prior-instance owner during
+plus three old shared-group removal cases and six shared-to-independent/shared
+original recreation/registration cases (20.51s). Ordinary scan admission shares the APEX prior-instance owner during
 candidate construction (#927), then matches Settings.addPackageSettingLPw:
 registered ordinary APK slots point to the final accepted setting, discarding the
 prior independent slot instance; INVALID_UID/APEX admission leaves the original
@@ -992,16 +993,26 @@ before setting recreation; upgrade/stub requests derive afresh. Wrong parsed,
 UID, non-system and updated scopes reject the binding. Native fixtures verify
 successful recreation, Store capture/publication and final metadata failure
 without a retained member or renamed/transfer record. These are controlled native
-requests, not complete original PMS request-execution comparisons. Recreation
-from an incoming shared setting still requires its displaced/unparsed incoming
-owner representation (#929). The old-group pruning primitive now counts actual
-active/retained members and disabled references instead of all active Settings
-map references (#928). Original ART and native owner fixtures verify last-member
-pruning, another active member and a disabled-system member while keeping the
-incoming setting in the Settings map. In the pruned case its old UID slot is
-absent; with another/disabled member the group stays but the incoming setting is
-not a member. Native capture/replica and restore handling of that displaced
-setting remain #929; full request parity and transfer publication remain #919,
+requests, not complete original PMS request-execution comparisons. Ordinary
+original recreation also accepts an incoming shared setting when the requested
+shared owner changes (#919/#929). After all metadata gates succeed, it removes
+the incoming instance from the old group while retaining that exact unparsed
+setting in the Settings map. A private binding pins its metadata, old group,
+accepted original code and rename/transfer record; capture validates that binding
+instead of inventing membership or a UID slot. Shared-group records omit the
+displaced incoming setting. Changed incoming metadata and foreign UID owners
+reject publication, and previous captures remain unchanged. Native first-system
+fixtures cover shared-to-independent/shared recreation with last-member pruning,
+another active member or a disabled-system reference, and metadata failure
+without membership removal. The original ART oracle executes the corresponding
+six constructor/prune/final-registration sequences and checks Settings-map and
+UID-slot instance identities. The old-group pruning primitive counts actual
+active/retained members and disabled references (#928). On reread the original
+resolves saved shared references: an absent old group drops the incoming setting,
+while a surviving group registers it again. The native settings reader already
+drops unresolved shared references; complete restart comparison, Java replica
+assembly and displaced-setting mutation handling remain #929. Full original
+request parity and transfer publication remain #919,
 and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original

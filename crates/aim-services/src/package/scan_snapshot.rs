@@ -106,6 +106,9 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
         .identities
         .ordered_shared_users()
         .map_err(Error::Invalid)?;
+    owner
+        .validate_displaced_shared_settings()
+        .map_err(Error::Invalid)?;
     owner.validate_seinfo().map_err(Error::Invalid)?;
     owner
         .validate_replica_runtime(Some(usage))
@@ -156,7 +159,11 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
             if !names.insert(setting.name.as_str()) {
                 return Err(fail("duplicate package setting"));
             }
-            if active {
+            if active
+                && !owner
+                    .is_displaced_shared_setting(setting)
+                    .map_err(Error::Invalid)?
+            {
                 match owner.identities.ids.get(setting.uid_owner_id()) {
                     Some(Owner::Package(_) | Owner::DetachedPackage(_))
                         if owner.identities.ids.owns_package_slot(setting) => {}

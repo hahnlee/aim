@@ -44,6 +44,7 @@ pub struct SigningScan {
     pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) pending_metadata: BTreeSet<String>,
     transferred_packages: BTreeSet<String>,
+    displaced_shared_settings: BTreeMap<String, DisplacedSharedSetting>,
     apex_origins: BTreeMap<String, ScanOrigin>,
     pub(super) seinfo: Option<super::seinfo::Assignments>,
     pub(super) legacy_permissions: Option<super::legacy::Assignments>,
@@ -54,6 +55,13 @@ pub struct SigningScan {
     pub(super) strict_signature_packages: BTreeSet<String>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DisplacedSharedSetting {
+    installed: crate::package::settings::Package,
+    group: String,
+    original: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -117,6 +125,121 @@ impl SigningScan {
             .collect();
         for group in self.identities.shared_users.values_mut() {
             group.fix_seinfo_target_sdk_at_boot(&targets);
+        }
+        Ok(())
+    }
+
+    pub(super) fn original_recreation_required(
+        &self,
+        installed: &crate::package::settings::Package,
+        parsed: &crate::package::pkg::AndroidPackage,
+    ) -> Result<bool, SigningError> {
+        let old = if installed.shared_user {
+            Some(
+                self.settings
+                    .shared_users
+                    .iter()
+                    .find(|g| Some(g.app_id) == installed.shared_app_id())
+                    .ok_or_else(|| {
+                        SigningError::Fatal(Error {
+                            package: installed.name.clone(),
+                            path: installed.code_path.clone(),
+                            phase: "original-request",
+                            message: "incoming shared setting has no group".into(),
+                        })
+                    })?
+                    .name
+                    .as_str(),
+            )
+        } else {
+            None
+        };
+        let new = selected_shared_user(
+            installed.shared_user,
+            parsed.shared_user_id.as_deref(),
+            parsed.is(booleans::LEAVING_SHARED_UID),
+        );
+        Ok(old != new)
+    }
+
+    /// Commit the old request's membership removal only after metadata succeeds.
+    /// Settings keeps that exact unparsed instance under the incoming name.
+    pub(super) fn displace_shared_setting(
+        &mut self,
+        installed: crate::package::settings::Package,
+        original: &str,
+    ) -> Result<(), SigningError> {
+        let Some(Owner::SharedUser(group)) = self.identities.ids.get(installed.uid_owner_id())
+        else {
+            return Err(SigningError::Fatal(Error {
+                package: installed.name.clone(),
+                path: installed.code_path.clone(),
+                phase: "original-request",
+                message: "displaced request has no shared UID owner".into(),
+            }));
+        };
+        let group = group.clone();
+        self.detach_shared_member(&installed)?;
+        self.displaced_shared_settings.insert(
+            installed.name.clone(),
+            DisplacedSharedSetting {
+                installed,
+                group,
+                original: original.into(),
+            },
+        );
+        Ok(())
+    }
+
+    pub(in crate::package) fn is_displaced_shared_setting(
+        &self,
+        setting: &crate::package::settings::Package,
+    ) -> Result<bool, String> {
+        let Some(binding) = self.displaced_shared_settings.get(&setting.name) else {
+            return Ok(false);
+        };
+        if binding.installed != *setting
+            || !setting.shared_user
+            || self.loaded.contains_key(&setting.name)
+            || !self.transferred_packages.contains(&binding.original)
+            || !self.loaded.contains_key(&binding.original)
+            || !self
+                .settings
+                .renamed_packages
+                .iter()
+                .any(|(new, old)| new == &setting.name && old == &binding.original)
+        {
+            return Err("displaced shared setting differs from accepted original request".into());
+        }
+        match self.identities.ids.get(setting.uid_owner_id()) {
+            None if !self.identities.shared_users.contains_key(&binding.group) => {}
+            Some(Owner::SharedUser(name)) if name == &binding.group => {
+                let group = self
+                    .identities
+                    .shared_users
+                    .get(name)
+                    .ok_or("missing displaced shared group")?;
+                if Some(group.app_id) != setting.shared_app_id()
+                    || group.has_package(&setting.name)
+                    || group.retained_setting(&setting.name).is_some()
+                {
+                    return Err("displaced shared setting still owns group membership".into());
+                }
+            }
+            _ => return Err("displaced shared UID slot differs".into()),
+        }
+        Ok(true)
+    }
+
+    pub(in crate::package) fn validate_displaced_shared_settings(&self) -> Result<(), String> {
+        for binding in self.displaced_shared_settings.values() {
+            let setting = self
+                .settings
+                .packages
+                .iter()
+                .find(|p| p.name == binding.installed.name)
+                .ok_or("displaced shared setting is missing from Settings")?;
+            self.is_displaced_shared_setting(setting)?;
         }
         Ok(())
     }
@@ -661,6 +784,7 @@ impl SigningScan {
             disabled_loaded: BTreeMap::new(),
             pending_metadata: BTreeSet::new(),
             transferred_packages: BTreeSet::new(),
+            displaced_shared_settings: BTreeMap::new(),
             apex_origins: BTreeMap::new(),
             seinfo: None,
             legacy_permissions: None,
@@ -873,23 +997,23 @@ impl SigningScan {
             .iter()
             .find(|p| p.name == selected.internal_name);
         if let Some(installed) = installed {
-            if installed.shared_user
-                || selected_shared_user(
-                    false,
-                    code.parsed.shared_user_id.as_deref(),
-                    code.parsed.is(booleans::LEAVING_SHARED_UID),
-                )
-                .is_none()
-            {
+            if !self.original_recreation_required(installed, &code.parsed)? {
                 return Err(reject(
                     "identity",
-                    "incoming setting does not support original recreation (#919)",
+                    "incoming setting does not require original recreation",
                 ));
             }
-            if !self.identities.ids.owns_package_slot(installed) {
+            let owns_uid = if installed.shared_user {
+                matches!(self.identities.ids.get(installed.uid_owner_id()), Some(Owner::SharedUser(name))
+                    if self.identities.shared_users.get(name).is_some_and(|g|
+                        g.has_package(&installed.name) && Some(g.app_id) == installed.shared_app_id()))
+            } else {
+                self.identities.ids.owns_package_slot(installed)
+            };
+            if !owns_uid || self.loaded.contains_key(&installed.name) {
                 return Err(reject(
                     "identity",
-                    "incoming setting no longer owns its UID",
+                    "incoming setting has no unparsed UID owner",
                 ));
             }
         }

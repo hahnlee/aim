@@ -1068,13 +1068,24 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             owner.identities.ids.detached_setting(10003).unwrap()
         }
     }
-    for (invalid_page_size, shared, incoming) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (false, true, true),
-        (true, true, true),
+    for (invalid_page_size, shared, incoming, incoming_shared, keep) in [
+        (false, false, false, false, 0),
+        (true, false, false, false, 0),
+        (false, true, false, false, 0),
+        (false, true, true, false, 0),
+        (true, true, true, false, 0),
+        (false, false, true, true, 0),
+        (false, false, true, true, 1),
+        (false, true, true, true, 0),
+        (false, true, true, true, 1),
+        (true, false, true, true, 0),
+        (true, true, true, true, 1),
+        (false, false, true, true, 2),
+        (false, true, true, true, 2),
     ] {
+        let keep_member = keep == 1;
+        let keep_disabled = keep == 2;
+        let kept = keep != 0;
         let mut settings = both.clone();
         if incoming {
             let installed = settings
@@ -1112,6 +1123,36 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     signatures: original.signatures.clone(),
                 });
         }
+        if incoming_shared {
+            let installed = settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == "com.google.android.gsf")
+                .unwrap();
+            installed.shared_user = true;
+            installed.shared_user_app_id = Some(10002);
+            if keep_disabled {
+                settings.disabled_system_packages.push(installed.clone());
+            }
+            let mut other = installed.clone();
+            other.name = "fixture.old-group-member".into();
+            settings
+                .shared_users
+                .push(aim_services::package::settings::SharedUser {
+                    name: "fixture.incoming.group".into(),
+                    app_id: 10002,
+                    flags: 0,
+                    signatures: installed.signatures.clone(),
+                });
+            if keep_member {
+                settings.packages.push(other);
+            }
+        }
+        let incoming_before = settings
+            .packages
+            .iter()
+            .find(|p| p.name == "com.google.android.gsf")
+            .cloned();
         let before = settings
             .packages
             .iter()
@@ -1145,6 +1186,20 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 matches!(result, Err(SigningError::NativeLibrary { package, .. })
                 if package == old.name)
             );
+            if incoming_shared {
+                assert_eq!(
+                    owner.identities.shared_users["fixture.incoming.group"].member_count(),
+                    if keep_member { 2 } else { 1 }
+                );
+                assert_eq!(
+                    owner
+                        .settings
+                        .packages
+                        .iter()
+                        .find(|p| p.name == "com.google.android.gsf"),
+                    incoming_before.as_ref()
+                );
+            }
             assert!(owner.transferred_packages().is_empty());
             assert!(owner.settings.renamed_packages.is_empty());
             assert!(owner.identities.ids.detached_setting(10003).is_none());
@@ -1180,12 +1235,61 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     .unwrap();
                 assert_eq!(installed.app_id, 10002);
                 assert!(!owner.loaded_packages().contains_key(&installed.name));
-                assert_eq!(
-                    owner.identities.ids.get(10002),
-                    Some(&aim_services::package::owner::app_ids::Owner::Package(
-                        installed.name.clone()
-                    ))
+                assert_eq!(Some(installed), incoming_before.as_ref());
+                if incoming_shared {
+                    assert_eq!(owner.identities.ids.get(10002).is_some(), kept);
+                    if kept {
+                        assert_eq!(
+                            owner.identities.shared_users["fixture.incoming.group"].member_count(),
+                            if keep_member { 1 } else { 0 }
+                        );
+                    } else {
+                        assert!(
+                            !owner
+                                .identities
+                                .shared_users
+                                .contains_key("fixture.incoming.group")
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        owner.identities.ids.get(10002),
+                        Some(&aim_services::package::owner::app_ids::Owner::Package(
+                            installed.name.clone()
+                        ))
+                    );
+                }
+            }
+            if incoming_shared {
+                let usage = aim_services::package::owner::usage::Usage::new(
+                    owner.settings.packages.iter().map(|p| p.name.as_str()),
                 );
+                let store =
+                    aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
+                let capture = store.capture();
+                assert_eq!(
+                    aim_services::package::scan_snapshot::shared_record::captured(
+                        &capture,
+                        "fixture.incoming.group"
+                    )
+                    .unwrap()
+                    .is_some(),
+                    kept
+                );
+                let mut foreign = owner.clone();
+                foreign
+                    .settings
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == "com.google.android.gsf")
+                    .unwrap()
+                    .version_code += 1;
+                assert!(
+                    store
+                        .publish(&capture, foreign, capture.usage().clone())
+                        .is_err()
+                );
+                assert_eq!(store.capture().version(), capture.version());
             }
             assert_ne!(
                 candidate.record.settings.primary_cpu_abi.as_deref(),

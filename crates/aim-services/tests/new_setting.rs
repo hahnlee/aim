@@ -131,7 +131,7 @@ fn compare_new_settings(original_only: bool) {
     }
     assert_eq!(
         String::from_utf8(adoption.stdout).unwrap(),
-        "original setting adoption contracts: 4 cases\nold shared request removal contracts: 3 cases\n"
+        "original setting adoption contracts: 4 cases\nold shared request removal contracts: 3 cases\nshared original recreation contracts: 6 cases\n"
     );
     eprintln!(
         "original setting creation preserves source identity across four shared-UID arguments"
