@@ -148,6 +148,10 @@ fn native_package_parcels_match_original_read_write() {
                 .join("java/device-services/src/dev/aim/server/PackageRuntimeState.java"),
         )
         .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageRuntimeFeed.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));
@@ -1015,6 +1019,53 @@ fn native_package_parcels_match_original_read_write() {
         permissions
     );
     assert_eq!(original_permissions, permissions.bytes());
+    for factory in [false, true] {
+        let bytes = fs::read(directory.join(format!("scoped-{factory}.original-runtime"))).unwrap();
+        let exported =
+            aim_services::package::scan::OriginalRuntime::read_original_record(&bytes).unwrap();
+        assert_eq!(exported.name, "aim.unloaded.fixture");
+        assert!(!exported.has_code);
+        assert_eq!(
+            exported.state.usage[if factory { 0 } else { 2 }],
+            if factory { 17 } else { 71 }
+        );
+        assert_eq!(
+            exported.state.seinfo.as_deref(),
+            if factory { None } else { Some("active-label") }
+        );
+        assert_eq!(
+            exported.state.library_files,
+            if factory {
+                vec![None, Some("/system/null-slot.jar".into())]
+            } else {
+                vec![]
+            }
+        );
+    }
+    let mut original_inputs = aim_services::package::model::State::default();
+    for loaded in runtime_snapshot.owner().loaded_packages().values() {
+        let bytes = fs::read(directory.join(format!(
+            "scan-{}.native.original-runtime",
+            loaded.package.uid
+        )))
+        .unwrap();
+        let exported =
+            aim_services::package::scan::OriginalRuntime::read_original_record(&bytes).unwrap();
+        assert_eq!(
+            &exported.state,
+            runtime_snapshot
+                .owner()
+                .replica_runtime(&exported.name, false)
+                .unwrap()
+                .unwrap()
+        );
+        original_inputs
+            .runtime_inputs
+            .insert((exported.name.clone(), false), exported);
+    }
+    let mut imported = snapshot.owner().clone();
+    imported.capture_original_runtime(&original_inputs).unwrap();
+    aim_services::package::scan_snapshot::Store::new(imported, snapshot.usage().clone()).unwrap();
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
             assert_eq!(

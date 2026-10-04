@@ -13,6 +13,81 @@ pub struct ReplicaRuntime {
     pub libraries: Vec<SharedLibrary>,
 }
 
+/// Identity and runtime values exported together from one original snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OriginalRuntime {
+    pub name: String,
+    pub app_id: i32,
+    pub path: String,
+    pub version: i64,
+    pub has_code: bool,
+    pub state: ReplicaRuntime,
+    pub transient: crate::package::owner::transient::State,
+}
+
+impl OriginalRuntime {
+    pub fn read_original_record(bytes: &[u8]) -> aim_binder_host::parcel::Result<Self> {
+        use aim_binder_host::parcel::{BAD_VALUE, Reader};
+        let mut r = Reader::new(bytes, &[]);
+        let name = r.read_string16()?.ok_or(BAD_VALUE)?;
+        let app_id = r.read_i32()?;
+        let path = r.read_string16()?.ok_or(BAD_VALUE)?;
+        let version = r.read_i64()?;
+        let boolean = |r: &mut Reader<'_>| match r.read_i32()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(BAD_VALUE),
+        };
+        let has_code = boolean(&mut r)?;
+        let seinfo = r.read_string16()?;
+        let override_seinfo = r.read_string16()?;
+        let usage: [i64; 8] = aim_service_aidl::read_long_array(&mut r)?
+            .ok_or(BAD_VALUE)?
+            .try_into()
+            .map_err(|_| BAD_VALUE)?;
+        let count = |r: &mut Reader<'_>| {
+            let n = r.read_i32()?;
+            if n < 0 || n as usize > r.remaining() / 4 {
+                Err(BAD_VALUE)
+            } else {
+                Ok(n as usize)
+            }
+        };
+        let mut library_files = Vec::new();
+        for _ in 0..count(&mut r)? {
+            library_files.push(r.read_string16()?);
+        }
+        let mut libraries = Vec::new();
+        for _ in 0..count(&mut r)? {
+            libraries.push(super::super::library_parcel::read_feed(&mut r)?);
+        }
+        let transient = crate::package::owner::transient::State {
+            hidden_until_installed: boolean(&mut r)?,
+            updated_system_app: boolean(&mut r)?,
+            apk_in_updated_apex: boolean(&mut r)?,
+            apex_module_name: r.read_string16()?,
+        };
+        if r.remaining() != 0 || bytes.len() % 4 != 0 {
+            return Err(BAD_VALUE);
+        }
+        Ok(crate::package::scan::OriginalRuntime {
+            name,
+            app_id,
+            path,
+            version,
+            has_code,
+            state: crate::package::scan::ReplicaRuntime {
+                usage,
+                seinfo,
+                override_seinfo,
+                library_files,
+                libraries,
+            },
+            transient,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Identity {
     app_id: i32,
@@ -55,6 +130,42 @@ fn identities(owner: &SigningScan) -> BTreeMap<(String, bool), Identity> {
 }
 
 impl SigningScan {
+    /// Import an entire original snapshot's runtime inventory after matching
+    /// the native scan's settings and code scope. A rejected source changes nothing.
+    pub fn capture_original_runtime(
+        &mut self,
+        source: &crate::package::model::State,
+    ) -> Result<(), String> {
+        let expected = identities(self);
+        if expected.keys().ne(source.runtime_inputs.keys()) {
+            return Err("original runtime inventory differs".into());
+        }
+        let mut values = BTreeMap::new();
+        let mut transient = BTreeMap::new();
+        for (key, input) in &source.runtime_inputs {
+            let identity = &expected[key];
+            if input.name != key.0
+                || input.app_id != identity.app_id
+                || input.path != identity.path
+                || input.version != identity.version
+                || input.has_code != identity.code.is_some()
+            {
+                return Err(format!(
+                    "original runtime setting/code scope differs: {}",
+                    key.0
+                ));
+            }
+            values.insert(key.clone(), input.state.clone());
+            transient.insert(key.clone(), input.transient.clone());
+        }
+        let mut candidate = self.clone();
+        candidate.capture_replica_runtime(values)?;
+        candidate.capture_transient_states(transient)?;
+        self.replica_runtime = candidate.replica_runtime;
+        self.settings = candidate.settings;
+        Ok(())
+    }
+
     /// Capture the owning operation's complete current runtime inventory. No
     /// active fields are substituted for a factory setting with the same name.
     pub fn capture_replica_runtime(
@@ -495,5 +606,57 @@ mod tests {
             reply.reader().read_exception().unwrap().unwrap_err().code,
             -5
         );
+    }
+    #[test]
+    fn original_runtime_import_rejects_identity_scope_and_partial_sources_atomically() {
+        let mut owner = owner();
+        let mut source = crate::package::model::State::default();
+        for ((name, factory), state) in values() {
+            source.runtime_inputs.insert(
+                (name.clone(), factory),
+                OriginalRuntime {
+                    name,
+                    app_id: 10123,
+                    path: if factory {
+                        "/system/p".into()
+                    } else {
+                        "/data/p".into()
+                    },
+                    version: 0,
+                    has_code: false,
+                    state,
+                    transient: crate::package::owner::transient::State {
+                        hidden_until_installed: factory,
+                        updated_system_app: factory,
+                        apk_in_updated_apex: factory,
+                        apex_module_name: factory.then(|| "factory-apex".into()),
+                    },
+                },
+            );
+        }
+        owner.capture_original_runtime(&source).unwrap();
+        let prior = owner.clone();
+        assert!(
+            owner.settings.disabled_system_packages[0]
+                .transient
+                .updated_system_app
+        );
+        assert!(!owner.settings.packages[0].transient.updated_system_app);
+        for mode in 0..6 {
+            let mut changed = source.clone();
+            let input = changed.runtime_inputs.get_mut(&("p".into(), true)).unwrap();
+            match mode {
+                0 => input.name = "foreign".into(),
+                1 => input.app_id += 1,
+                2 => input.path = "/data/p".into(),
+                3 => input.version += 1,
+                4 => input.has_code = true,
+                _ => {
+                    changed.runtime_inputs.remove(&("p".into(), false));
+                }
+            }
+            assert!(owner.capture_original_runtime(&changed).is_err());
+            assert!(owner == prior);
+        }
     }
 }

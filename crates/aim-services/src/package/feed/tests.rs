@@ -571,3 +571,80 @@ fn publication_history_keeps_intermediate_updates_before_worker_observation() {
         &latest
     ));
 }
+
+fn runtime_record(name: &str, has_code: bool, usage: i64) -> Vec<u8> {
+    let mut p = Parcel::new();
+    p.write_string16(Some(name));
+    p.write_i32(10100);
+    p.write_string16(Some("/data/app/~~a/com.example.app-b"));
+    p.write_i64(42);
+    p.write_bool(has_code);
+    p.write_string16(Some("default:targetSdkVersion=36"));
+    p.write_string16(None);
+    aim_service_aidl::write_long_array(&mut p, Some(&[usage; 8]));
+    strings(&mut p, &["/system/framework/lib.jar"]);
+    p.write_i32(1);
+    library(&mut p, "lib", Some("dep"));
+    p.write_bool(false);
+    p.write_bool(false);
+    p.write_bool(false);
+    p.write_string16(None);
+    p.data().to_vec()
+}
+
+#[test]
+fn runtime_records_require_complete_matching_package_and_code_scopes() {
+    let mut inner = Inner::default();
+    put(&mut inner, PACKAGE, "p", &package_record("p", None));
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_PACKAGE,
+        "p",
+        &package_record("p", None),
+    );
+    put(&mut inner, RUNTIME, "p", &runtime_record("p", false, 17));
+    assert!(build(&inner.records, 1, None).is_err());
+    put(
+        &mut inner,
+        DISABLED_SYSTEM_RUNTIME,
+        "p",
+        &runtime_record("p", false, 29),
+    );
+    let state = build(&inner.records, 1, None).unwrap();
+    assert_eq!(
+        state.runtime_inputs[&("p".into(), false)].state.usage,
+        [17; 8]
+    );
+    assert_eq!(
+        state.runtime_inputs[&("p".into(), true)].state.usage,
+        [29; 8]
+    );
+    put(&mut inner, RUNTIME, "p", &runtime_record("p", true, 17));
+    assert!(build(&inner.records, 2, None).is_err());
+    put(&mut inner, PARSED, "p", b"retained code");
+    assert!(build(&inner.records, 2, None).is_ok());
+    put(
+        &mut inner,
+        RUNTIME,
+        "p",
+        &runtime_record("wrong-name", true, 17),
+    );
+    assert!(build(&inner.records, 2, None).is_err());
+    assert_eq!(
+        state.runtime_inputs[&("p".into(), false)].state.usage,
+        [17; 8]
+    );
+    let mut tail = runtime_record("p", false, 0);
+    tail.extend([0; 4]);
+    assert!(record::runtime(&tail).is_err());
+    let mut invalid_bool = runtime_record("p", false, 0);
+    let mut r = aim_binder_host::parcel::Reader::new(&invalid_bool, &[]);
+    r.read_string16().unwrap();
+    r.read_i32().unwrap();
+    r.read_string16().unwrap();
+    r.read_i64().unwrap();
+    let offset = invalid_bool.len() - r.remaining();
+    invalid_bool[offset..offset + 4].copy_from_slice(&2i32.to_le_bytes());
+    assert!(record::runtime(&invalid_bool).is_err());
+    assert!(record::runtime(&runtime_record("p", false, 0)[..17]).is_err());
+}

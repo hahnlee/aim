@@ -331,6 +331,7 @@ public final class PackageRoundTripOracle {
             original.getPkgState().setUsesLibraryFiles(factory ? java.util.Arrays.asList(null, "/system/null-slot.jar") : java.util.List.of());
             original.setSigningDetails(android.content.pm.SigningDetails.UNKNOWN);
             CapturedPackageStateOracle.verify(replica, original);
+            java.nio.file.Files.write(new java.io.File(directory, "scoped-" + factory + ".original-runtime").toPath(), dev.aim.server.PackageRuntimeFeed.capture((com.android.server.pm.pkg.PackageState)(Object)original));
             if (replica.getTargetSdkVersion() != (factory ? 24 : 28) || replica.getVersionCode() != (factory ? 7 : 19)
                     || replica.getUserStateOrDefault(factory ? 10 : 0).getEnabledState() != (factory ? 3 : 2)
                     || replica.getUserStates().size() != 1 || replica.getSeInfo() != null && factory) throw new AssertionError("active/factory inputs mixed");
@@ -1076,6 +1077,7 @@ public final class PackageRoundTripOracle {
         if (replica != lease.getPackageStateReplica(name, true) || owner.hiddenApiReads != 1
                 || lease.getPackageStateReplica("missing", true) != null) throw new AssertionError("captured PackageState identity differs");
         CapturedPackageStateOracle.verify(replica, lease.newScannedSetting(name, true));
+        java.nio.file.Files.write(new java.io.File(file.getPath() + ".original-runtime").toPath(), dev.aim.server.PackageRuntimeFeed.capture((com.android.server.pm.pkg.PackageState)(Object)lease.newScannedSetting(name, true)));
         owner.shortChunk = true;
         String sharedName = lease.getSharedUserNames().get(0);
         try { lease.getSharedUserData(sharedName); throw new AssertionError("short shared UID chunk accepted"); }

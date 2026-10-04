@@ -353,3 +353,7 @@ pub(super) fn mime_groups(
     }
     Ok(groups)
 }
+
+pub(super) fn runtime(bytes: &[u8]) -> Result<crate::package::scan::OriginalRuntime> {
+    crate::package::scan::OriginalRuntime::read_original_record(bytes)
+}

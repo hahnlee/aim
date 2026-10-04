@@ -850,9 +850,31 @@ including atomic import/stale publication, explicit user aliases and real Binder
 paging of large factory records retained across a newer publication. All integration
 targets compile, original Java linkage passes (4.47s), the actual first-system
 image scan passes (42.62s), and the full build passes (60.6s; ten rebuilt nodes),
-including the original-PMS userdata template. Live bootstrap/runtime/user producers,
-copy/update ownership, native visibility and publication into running SystemServer
-remain #873/#862/#836; live query/write differences remain #865-#868. Live APEX/
+including the original-PMS userdata template. The running original PackageFeed
+now exports separate active/factory runtime records from the same unfiltered
+snapshot as its package/code records. Each carries identity, code presence, raw
+base/override seInfo, all eight usage values, exact original library owner parcels,
+nullable file slots and transient flags. Native decoding rejects malformed counts,
+booleans and tails, and complete-batch assembly requires matching package/code
+identity, getter values and every setting scope before publishing. A native import
+matches the scan's path/UID/version/code scope, imports runtime and transient owners
+atomically, and retains the prior owner on partial/foreign sources. Original ART
+exports populated loaded and unloaded active/factory owners; Rust reads the actual
+bytes, compares complete runtime values and imports them into a validated native
+capture (19.00s full package oracle). All 413 units pass (3.17s; one ignored/not run),
+including full runtime batch completeness, code/scope mismatches and atomic import.
+All integration targets compile, original Java linkage passes (5.11s), and the
+full build passes (67.9s, including the original-PMS template; final host rebuild
+13.2s). A 60-second disposable template-backed window boot with package shadowing
+reaches sys.boot_completed=1 at 4.888s and publishes 66 feed generations without
+feed errors; the final inventory has 290 runtime owners (285 active, five factory).
+An earlier probe excluding bpfloader never received the feed because netd repeatedly
+aborted and restarted zygote; the default boot configuration succeeds. No owned
+runtime processes or probe mounts remain. Native fresh-boot/runtime copy/update
+ownership, complete live user/alias export, native visibility and publication into
+running SystemServer remain #873/#862/#836. Nullable library file slots still lose
+their distinction in the older query read model (#874); the runtime path preserves
+them. Other live query/write differences remain #865-#868. Live APEX/
 hidden-state delivery, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

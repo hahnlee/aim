@@ -96,6 +96,8 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int SHARED_USER = 4;
     private static final int USER = 5;
     private static final int SYSTEM = 6;
+    private static final int RUNTIME = 7;
+    private static final int DISABLED_SYSTEM_RUNTIME = 8;
     /** The largest chunk of a record in one transaction. */
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
@@ -298,6 +300,8 @@ final class PackageFeed extends IPackageFeed.Stub {
             int kind, int parsedKind, PackageState state) {
         String name = state.getPackageName();
         records.put(new Key(kind, name), packageState(state, kind == PACKAGE));
+        records.put(new Key(kind == PACKAGE ? RUNTIME : DISABLED_SYSTEM_RUNTIME, name),
+                PackageRuntimeFeed.capture(state));
         AndroidPackage pkg = state.getAndroidPackage();
         if (pkg instanceof ParsedPackage parsed) {
             // PackageImpl fields can change while the original retains its identity.

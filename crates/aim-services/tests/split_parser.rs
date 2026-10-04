@@ -1775,6 +1775,10 @@ fn java_oracles_link_against_original_image() {
                 .join("java/device-services/src/dev/aim/server/PackageRuntimeState.java"),
         )
         .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageRuntimeFeed.java"),
+        )
+        .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));

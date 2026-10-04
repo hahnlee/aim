@@ -51,7 +51,7 @@ mod shared_processes;
 mod replica_runtime;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 pub use removal::RemovedSetting;
-pub use replica_runtime::ReplicaRuntime;
+pub use replica_runtime::{OriginalRuntime, ReplicaRuntime};
 pub use seinfo::{SeInfoCompatibility, SeInfoScan, SeInfoSetting, SeInfoState};
 mod uids;
 mod validate;

@@ -28,6 +28,8 @@ pub struct State {
     pub disabled_system_packages: BTreeMap<String, PackageState>,
     /// By name.
     pub shared_users: BTreeMap<String, SharedUser>,
+    /// Complete scoped runtime owners exported by the original snapshot.
+    pub runtime_inputs: BTreeMap<(String, bool), super::scan::OriginalRuntime>,
     /// By user id.
     pub users: BTreeMap<i32, User>,
     pub system: System,

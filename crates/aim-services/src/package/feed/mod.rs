@@ -44,6 +44,8 @@ const DISABLED_SYSTEM_PARSED: i32 = 3;
 const SHARED_USER: i32 = 4;
 const USER: i32 = 5;
 const SYSTEM: i32 = 6;
+const RUNTIME: i32 = 7;
+const DISABLED_SYSTEM_RUNTIME: i32 = 8;
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -400,6 +402,48 @@ fn build(
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
             }
+            RUNTIME | DISABLED_SYSTEM_RUNTIME => {
+                let runtime = record::runtime(bytes).map_err(failed)?;
+                let factory = key.kind == DISABLED_SYSTEM_RUNTIME;
+                let package = packages(&mut state, !factory)
+                    .get(&key.name)
+                    .ok_or_else(|| format!("{key:?}: runtime package is missing"))?;
+                if runtime.name != key.name
+                    || package.name != key.name
+                    || runtime.app_id != package.app_id
+                    || package.path != runtime.path
+                    || runtime.version != package.version_code
+                    || runtime.has_code != package.parcel.is_some()
+                {
+                    return Err(format!("{key:?}: runtime package/code identity differs"));
+                }
+                let effective = runtime
+                    .state
+                    .override_seinfo
+                    .as_deref()
+                    .filter(|v| !v.is_empty())
+                    .or(runtime.state.seinfo.as_deref());
+                if effective != package.seinfo.as_deref()
+                    || runtime.state.libraries != package.uses_library_infos
+                    || runtime
+                        .state
+                        .library_files
+                        .iter()
+                        .cloned()
+                        .map(Option::unwrap_or_default)
+                        .collect::<Vec<_>>()
+                        != package.uses_library_files
+                    || runtime.transient.hidden_until_installed != package.is.hidden_until_installed
+                    || runtime.transient.updated_system_app != package.is.updated_system_app
+                    || runtime.transient.apk_in_updated_apex != package.is.apk_in_updated_apex
+                    || runtime.transient.apex_module_name != package.apex_module_name
+                {
+                    return Err(format!("{key:?}: runtime package getters differ"));
+                }
+                state
+                    .runtime_inputs
+                    .insert((key.name.clone(), factory), runtime);
+            }
             _ => return Err(format!("{key:?}: no such kind")),
         }
     }
@@ -410,6 +454,28 @@ fn build(
         });
         if let Some(p) = packages(&mut state, kind == PACKAGE).get_mut(&name) {
             p.shared_user = shared_user;
+        }
+    }
+    if !state.runtime_inputs.is_empty() {
+        let expected: std::collections::BTreeSet<_> = state
+            .packages
+            .keys()
+            .map(|name| (name.clone(), false))
+            .chain(
+                state
+                    .disabled_system_packages
+                    .keys()
+                    .map(|name| (name.clone(), true)),
+            )
+            .collect();
+        if state
+            .runtime_inputs
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != expected
+        {
+            return Err("original runtime inventory is incomplete".into());
         }
     }
     Ok(state)
@@ -429,6 +495,20 @@ fn packages(state: &mut State, installed: bool) -> &mut BTreeMap<String, Package
 pub fn dump(state: &State) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "generation={} nonce={:?}", state.generation, state.nonce);
+    let active_runtime = state
+        .runtime_inputs
+        .keys()
+        .filter(|(_, factory)| !factory)
+        .count();
+    let factory_runtime = state.runtime_inputs.len() - active_runtime;
+    let _ = writeln!(
+        s,
+        "runtime_inputs={} active={} factory={}",
+        state.runtime_inputs.len(),
+        active_runtime,
+        factory_runtime
+    );
+
     for (title, packages) in [
         ("Packages:", &state.packages),
         ("Hidden system packages:", &state.disabled_system_packages),
