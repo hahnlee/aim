@@ -66,6 +66,9 @@ pub struct DataImageScanInputs<'a> {
 pub struct DataImagePackages {
     pub packages: Vec<CompletedScanMetadata>,
     pub recovered: Vec<CompletedScanMetadata>,
+    /// Original checkExistingBetterPackages reports these and proceeds.
+    /// System code and earlier setting-enable effects remain intact.
+    pub factory_rejected: Vec<(String, SigningError)>,
     pub rejected: Vec<super::Rejected>,
     pub removed: Vec<(String, SigningError)>,
 }
@@ -127,6 +130,7 @@ impl SigningScan {
         let mut packages = Vec::new();
         let mut admitted_code = BTreeMap::new();
         let mut recovered = Vec::new();
+        let mut factory_rejected = Vec::new();
         let mut removed = Vec::new();
         let mut incremental = BTreeSet::new();
         // prepareSystemPackageCleanUp removes disappeared, non-updated system
@@ -448,7 +452,43 @@ impl SigningScan {
                         "factory setting could not be enabled".into(),
                     )
                 })?;
-            let collected = self.collect_initial_code(code, apks, inputs.certificates)?;
+            let parsed =
+                match apks.checked_parsed_path(&code.location.path, code.location.parse_flags()) {
+                    Ok(parsed) => parsed,
+                    Err(crate::package::parse::Error::Parse(message)) => {
+                        factory_rejected.push((
+                            code.location.path.clone(),
+                            SigningError::Rejected(Error {
+                                package: setting.name.clone(),
+                                path: code.location.path.clone(),
+                                phase: "parse",
+                                message,
+                            }),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(fatal(
+                            setting.name.clone(),
+                            code.location.path.clone(),
+                            "parse",
+                            error.to_string(),
+                        ));
+                    }
+                };
+            let raw = Code {
+                location: code.location.clone(),
+                parsed,
+                signing: (),
+            };
+            let collected = match self.collect_initial_code(&raw, apks, inputs.certificates) {
+                Ok(code) => code,
+                Err(error @ SigningError::Rejected(_)) => {
+                    factory_rejected.push((code.location.path.clone(), error));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let code = &collected;
             let host = (apks.files)(&code.location.path).ok_or_else(|| {
                 fatal(
@@ -510,12 +550,29 @@ impl SigningScan {
                     incremental: false,
                     new_domain_id: inputs.new_domain_id,
                 },
-            )?;
-            recovered.push(completed);
+            );
+            match completed {
+                Ok(completed) => recovered.push(completed),
+                Err(SigningError::Rejected(reason))
+                    if matches!(reason.phase, "validation" | "authorization") =>
+                {
+                    factory_rejected
+                        .push((code.location.path.clone(), SigningError::Rejected(reason)));
+                }
+                Err(
+                    error @ SigningError::NativeLibrary {
+                        error: super::NativeLibraryError::Selection(_),
+                        ..
+                    },
+                ) => factory_rejected.push((code.location.path.clone(), error)),
+                Err(SigningError::Rejected(error)) => return Err(SigningError::Fatal(error)),
+                Err(error) => return Err(error),
+            }
         }
         Ok(DataImagePackages {
             packages,
             recovered,
+            factory_rejected,
             rejected: image.rejected,
             removed,
         })

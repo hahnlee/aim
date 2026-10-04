@@ -1272,6 +1272,158 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             // checkExistingBetterPackages enables/rescans; it performs no additional data code removal.
             assert!(data_code.exists());
             let attempt = std::cell::Cell::new(0);
+            // Two real image APKs, with GSF failing before the platform factory.
+            let raw_factories = Image::load(&apks, &[]).unwrap();
+            let mut fallback_settings = scan.owner.settings.clone();
+            fallback_settings.disabled_system_packages = fallback_settings.packages.clone();
+            for setting in &mut fallback_settings.packages {
+                setting.code_path = format!("/data/app/absent/{}", setting.name);
+                setting.version_code += 1;
+                setting.flags |= 1 << 7;
+            }
+            let order = [1, 0];
+            let fallback_factories = aim_services::package::scan::SystemImagePackages {
+                packages: Vec::new(),
+                retained_data: order
+                    .iter()
+                    .map(|&index| {
+                        let record = &scan.packages[index].candidate.record;
+                        aim_services::package::scan::DisabledSystemMetadata {
+                            record: aim_services::package::scan::Record {
+                                settings: record.settings.clone(),
+                                parsed: record.parsed.clone(),
+                                signing: record.signing.clone(),
+                                identity: record.identity.clone(),
+                                origin: record.origin.clone(),
+                            },
+                            users: full_users[&record.settings.name].clone(),
+                            multi_arch_mismatch: false,
+                            alignment_diagnostic: None,
+                        }
+                    })
+                    .collect(),
+                retained_code: order
+                    .iter()
+                    .map(|&index| raw_factories.packages[index].clone())
+                    .collect(),
+                rejected: Vec::new(),
+            };
+            let base = raw_factories.packages[1]
+                .parsed
+                .base_apk_path
+                .clone()
+                .unwrap();
+            let root = fixture.0.clone();
+            let bad_factory = Apks {
+                files: Box::new(move |path| {
+                    Some(if path == base {
+                        root.clone()
+                    } else {
+                        root.join(path.trim_start_matches('/'))
+                    })
+                }),
+                platform: Platform::load(&original, Default::default()).unwrap(),
+            };
+            let mut fallback_owner =
+                aim_services::package::scan::SigningScan::new(&config, &fallback_settings, 36)
+                    .unwrap();
+            let fallback = fallback_owner
+                .scan_data_image(
+                    DataImage::default(),
+                    &bad_factory,
+                    DataImageScanInputs {
+                        factories: &fallback_factories,
+                        ..loop_inputs()
+                    },
+                )
+                .unwrap();
+            assert_eq!(fallback.factory_rejected.len(), 1);
+            assert!(
+                matches!(&fallback.factory_rejected[0].1, SigningError::Rejected(e) if e.phase == "certificates" && e.message.ends_with("(-103)"))
+            );
+            assert_eq!(fallback.recovered.len(), 1);
+            assert_eq!(
+                fallback.recovered[0].candidate.record.settings.name,
+                "android"
+            );
+            assert!(fallback_owner.settings.disabled_system_packages.is_empty());
+            assert!(!fallback_owner.loaded_packages().contains_key(&factory.name));
+            assert!(fallback_owner.loaded_packages().contains_key("android"));
+            assert!(app.join("GSF.apk").exists());
+            let root = fixture.0.clone();
+            let base = raw_factories.packages[1]
+                .parsed
+                .base_apk_path
+                .clone()
+                .unwrap();
+            let unmapped_factory = Apks {
+                files: Box::new(move |path| {
+                    (path != base).then(|| root.join(path.trim_start_matches('/')))
+                }),
+                platform: Platform::load(&original, Default::default()).unwrap(),
+            };
+            let mut fatal_owner =
+                aim_services::package::scan::SigningScan::new(&config, &fallback_settings, 36)
+                    .unwrap();
+            assert!(
+                matches!(fatal_owner.scan_data_image(DataImage::default(), &unmapped_factory, DataImageScanInputs { factories: &fallback_factories, ..loop_inputs() }), Err(SigningError::Fatal(e)) if e.phase == "certificates")
+            );
+            assert_eq!(fatal_owner.settings.disabled_system_packages.len(), 1);
+            assert!(!fatal_owner.loaded_packages().contains_key("android"));
+            let empty_factory = fixture.0.join("empty-factory");
+            std::fs::create_dir(&empty_factory).unwrap();
+            let bad_path = raw_factories.packages[1].location.path.clone();
+            let root = fixture.0.clone();
+            let bad_parse = Apks {
+                files: Box::new(move |path| {
+                    Some(if path == bad_path {
+                        empty_factory.clone()
+                    } else {
+                        root.join(path.trim_start_matches('/'))
+                    })
+                }),
+                platform: Platform::load(&original, Default::default()).unwrap(),
+            };
+            let mut parse_owner =
+                aim_services::package::scan::SigningScan::new(&config, &fallback_settings, 36)
+                    .unwrap();
+            let parsed = parse_owner
+                .scan_data_image(
+                    DataImage::default(),
+                    &bad_parse,
+                    DataImageScanInputs {
+                        factories: &fallback_factories,
+                        ..loop_inputs()
+                    },
+                )
+                .unwrap();
+            assert_eq!(parsed.factory_rejected.len(), 1);
+            assert!(
+                matches!(&parsed.factory_rejected[0].1, SigningError::Rejected(e) if e.phase == "parse")
+            );
+            assert_eq!(parsed.recovered.len(), 1);
+            assert_eq!(
+                parsed.recovered[0].candidate.record.settings.name,
+                "android"
+            );
+            assert!(parse_owner.settings.disabled_system_packages.is_empty());
+            let bad_path = raw_factories.packages[1].location.path.clone();
+            let root = fixture.0.clone();
+            let unmapped_parse = Apks {
+                files: Box::new(move |path| {
+                    (path != bad_path).then(|| root.join(path.trim_start_matches('/')))
+                }),
+                platform: Platform::load(&original, Default::default()).unwrap(),
+            };
+            let mut fatal_parse =
+                aim_services::package::scan::SigningScan::new(&config, &fallback_settings, 36)
+                    .unwrap();
+            assert!(
+                matches!(fatal_parse.scan_data_image(DataImage::default(), &unmapped_parse, DataImageScanInputs { factories: &fallback_factories, ..loop_inputs() }), Err(SigningError::Fatal(e)) if e.phase == "parse")
+            );
+            assert_eq!(fatal_parse.settings.disabled_system_packages.len(), 1);
+            assert!(!fatal_parse.loaded_packages().contains_key("android"));
+            std::fs::remove_dir(fixture.0.join("empty-factory")).unwrap();
             let fail_later = |_: &aim_services::package::pkg::AndroidPackage, _: bool| {
                 attempt.set(attempt.get() + 1);
                 Err("system must not query compat".into())

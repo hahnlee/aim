@@ -867,7 +867,7 @@ The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (7.54s), including settings commit
+commit. The first-system scan fixture passes (8.59s), including settings commit
 and reopening the persisted owner. Updated-system KeepData selection now fully
 verifies strict-allowlisted factory APKs instead of copying input signing, after
 committing the disabled metadata refresh. Source-conformance checks retain
@@ -879,11 +879,14 @@ after resource cleanup and setting enable, using the pre-enable selected active
 setting for cache decisions and explicit upgrade/pre-N-MR1 policy. Input flags
 37 are replaced by fresh factory signing; a mapped invalid signing source fails
 with -103 while earlier cleanup/enable effects remain. Missing-update factory
-recovery also collects after enable, using its current selected setting. It still
-uses retained parsed factory code rather than initPackageTracedLI's reparse.
-Guest factory failures currently stop the data scan instead of being reported
-while continuing to subsequent factories as checkExistingBetterPackages does
-(#921);
+recovery reparses its physical code after enable, then collects using its current
+selected setting. Guest parse/certificate/validation/authorization failures and
+ABI selection failures are returned in DataImagePackages.factory_rejected while
+later factories continue, as checkExistingBetterPackages does (#921). Native
+mapping/serialization/owner failures stop the scan. A source-conformance fixture
+uses real GSF and framework-res APKs: GSF parse or signing failure is reported,
+then the platform factory recovers; missing parse/signing mappings stop before
+that recovery, retaining earlier enable effects and preserving system code.
 system inputs still verify afresh before
 sequential selection, so system parse/verification timing remains incomplete
 (#918). Adoption
@@ -893,7 +896,7 @@ collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only data inputs (46.56s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only data inputs (46.36s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

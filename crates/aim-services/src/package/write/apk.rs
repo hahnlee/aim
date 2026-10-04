@@ -188,11 +188,21 @@ impl Apks {
     }
 
     pub fn parsed_path(&self, path: &str, flags: i32) -> Result<AndroidPackage, String> {
-        let host = (self.files)(path).ok_or_else(|| format!("{path}: not readable"))?;
-        let package =
-            parse::parse(&host, path, flags, &self.platform).map_err(|e| e.to_string())?;
-        AndroidPackage::read_cache_entry(&package.to_cache_entry().bytes)
-            .map_err(|s| format!("the parser's entry does not read: status {s}"))
+        self.checked_parsed_path(path, flags)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn checked_parsed_path(
+        &self,
+        path: &str,
+        flags: i32,
+    ) -> Result<AndroidPackage, parse::Error> {
+        let host = (self.files)(path)
+            .ok_or_else(|| parse::Error::Unsupported(format!("{path}: not mapped")))?;
+        let package = parse::parse(&host, path, flags, &self.platform)?;
+        AndroidPackage::read_cache_entry(&package.to_cache_entry().bytes).map_err(|s| {
+            parse::Error::Unsupported(format!("the parser's entry does not read: status {s}"))
+        })
     }
 }
 
