@@ -1164,6 +1164,127 @@ fn native_package_parcels_match_original_read_write() {
             info.version_code
         );
     }
+    let apex_settings = aim_services::package::settings::Settings {
+        packages: apex_image
+            .packages
+            .iter()
+            .map(|code| aim_services::package::settings::Package {
+                name: code.parsed.package_name.clone(),
+                code_path: code.info.module_path.clone(),
+                app_id: -1,
+                version_code: code.info.version_code,
+                flags: 1,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    for (index, _) in apex_inventory.packages.as_ref().unwrap().iter().enumerate() {
+        assert_eq!(
+            fs::read(directory.join(format!("apex-uid-{index}.original"))).unwrap(),
+            (-1i32).to_le_bytes()
+        );
+    }
+    let config = aim_services::package::system_config::SystemConfig::default();
+    let owner = aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &apex_settings,
+        36,
+        &apex_image,
+    )
+    .unwrap();
+    assert_eq!(owner.settings.packages, apex_settings.packages);
+    assert_eq!(
+        owner.identities,
+        aim_services::package::owner::shared_users::Bootstrap::new(&config)
+    );
+    let mut ids = owner.identities.ids.clone();
+    assert_eq!(
+        ids.acquire(aim_services::package::owner::app_ids::Owner::Package(
+            "first.apk".into()
+        ))
+        .unwrap(),
+        10000
+    );
+    assert!(aim_services::package::scan::SigningScan::new(&config, &apex_settings, 36).is_err());
+    for changed in 0..4 {
+        let mut invalid = apex_settings.clone();
+        match changed {
+            0 => invalid.packages[0].app_id = 10000,
+            1 => invalid.packages[0].code_path = "/data/app/foreign.apex".into(),
+            2 => invalid.packages[0].version_code += 1,
+            _ => invalid.packages.push(invalid.packages[0].clone()),
+        }
+        assert!(
+            aim_services::package::scan::SigningScan::new_after_apex(
+                &config,
+                &invalid,
+                36,
+                &apex_image
+            )
+            .is_err()
+        );
+    }
+    let mut with_disabled = apex_settings.clone();
+    with_disabled
+        .disabled_system_packages
+        .push(apex_settings.packages[0].clone());
+    let disabled_owner = aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &with_disabled,
+        36,
+        &apex_image,
+    )
+    .unwrap();
+    let mut expected_disabled = with_disabled.clone();
+    aim_services::package::owner::key_sets::restore(&mut expected_disabled).unwrap();
+    assert!(
+        disabled_owner.settings == expected_disabled,
+        "disabled APEX settings changed outside keyset restoration"
+    );
+    assert_eq!(disabled_owner.identities, owner.identities);
+    with_disabled.disabled_system_packages[0].app_id = 10000;
+    assert!(
+        aim_services::package::scan::SigningScan::new_after_apex(
+            &config,
+            &with_disabled,
+            36,
+            &apex_image
+        )
+        .is_err()
+    );
+    let mut mixed = apex_settings.clone();
+    mixed
+        .packages
+        .push(aim_services::package::settings::Package {
+            name: "installed.apk".into(),
+            code_path: "/data/app/installed.apk".into(),
+            app_id: 10000,
+            ..Default::default()
+        });
+    let mixed_owner =
+        aim_services::package::scan::SigningScan::new_after_apex(&config, &mixed, 36, &apex_image)
+            .unwrap();
+    let mut expected_mixed = mixed.clone();
+    aim_services::package::owner::key_sets::restore(&mut expected_mixed).unwrap();
+    assert!(
+        mixed_owner.settings == expected_mixed,
+        "mixed settings changed outside keyset restoration"
+    );
+    assert_eq!(
+        mixed_owner.identities.ids.get(10000),
+        Some(&aim_services::package::owner::app_ids::Owner::Package(
+            "installed.apk".into()
+        ))
+    );
+    let mut next = mixed_owner.identities.ids.clone();
+    assert_eq!(
+        next.acquire(aim_services::package::owner::app_ids::Owner::Package(
+            "next.apk".into()
+        ))
+        .unwrap(),
+        10001
+    );
     let mut updated_apex = apex_inventory.clone();
     let mut info = updated_apex.packages.as_ref().unwrap()[0].clone();
     info.factory = false;
@@ -1622,6 +1743,7 @@ fn native_scan_objects(
                 compatibility: &|_: &aim_services::package::pkg::AndroidPackage| Ok(36),
             },
             apex_settings: &Default::default(),
+            apex_image: &Default::default(),
             first_api_level: 36,
             vendor_sdk: 36,
             abi_policy: &abi,

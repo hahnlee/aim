@@ -248,6 +248,7 @@ pub enum RestoreError {
     Settings(Error),
     Conflict(Rejected),
     KeySets(String),
+    Apex(String),
 }
 
 impl Bootstrap {

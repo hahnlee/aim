@@ -453,10 +453,84 @@ impl SigningScan {
         settings: &Settings,
         first_api_level: i32,
     ) -> Result<Self, RestoreError> {
+        Self::with_identities(
+            config,
+            settings,
+            first_api_level,
+            Bootstrap::restore(config, settings)?,
+        )
+    }
+
+    /// APEX containers are committed with INVALID_UID, not registered in
+    /// AppIdSettingMap. Only verified original inventory identities may bypass
+    /// APK UID restoration; the complete Settings graph remains authoritative.
+    pub fn new_after_apex(
+        config: &SystemConfig,
+        settings: &Settings,
+        first_api_level: i32,
+        apex: &super::ApexImage,
+    ) -> Result<Self, RestoreError> {
+        for package in &settings.disabled_system_packages {
+            let source = apex.packages.iter().find(|code| {
+                code.parsed.package_name == package.name
+                    && code.info.module_path == package.code_path
+            });
+            if let Some(source) = source {
+                let version = (i64::from(source.parsed.version_code_major) << 32)
+                    | i64::from(source.parsed.version_code as u32);
+                if package.app_id != -1 || package.shared_user || package.version_code != version {
+                    return Err(RestoreError::Apex(format!(
+                        "disabled APEX setting {} disagrees with scanned identity/version or INVALID_UID",
+                        package.name
+                    )));
+                }
+            } else if package.app_id < 0 {
+                return Err(RestoreError::Apex(format!(
+                    "disabled setting {} has no verified INVALID_UID owner",
+                    package.name
+                )));
+            }
+        }
+        let mut uid_settings = settings.clone();
+        uid_settings.packages.clear();
+        let mut names = BTreeSet::new();
+        for package in &settings.packages {
+            if !names.insert(&package.name) {
+                return Err(RestoreError::Settings(
+                    crate::package::owner::app_ids::Error::DuplicatePackage(package.name.clone()),
+                ));
+            }
+            let source = apex.packages.iter().find(|code| {
+                code.parsed.package_name == package.name
+                    && code.info.module_path == package.code_path
+            });
+            if let Some(source) = source {
+                let version = (i64::from(source.parsed.version_code_major) << 32)
+                    | i64::from(source.parsed.version_code as u32);
+                if package.app_id != -1 || package.shared_user || package.version_code != version {
+                    return Err(RestoreError::Apex(format!(
+                        "APEX setting {} disagrees with scanned identity/version or INVALID_UID",
+                        package.name
+                    )));
+                }
+            } else {
+                uid_settings.packages.push(package.clone());
+            }
+        }
+        let identities = Bootstrap::restore(config, &uid_settings)?;
+        Self::with_identities(config, settings, first_api_level, identities)
+    }
+
+    fn with_identities(
+        config: &SystemConfig,
+        settings: &Settings,
+        first_api_level: i32,
+        identities: Bootstrap,
+    ) -> Result<Self, RestoreError> {
         let mut restored = settings.clone();
         crate::package::owner::key_sets::restore(&mut restored).map_err(RestoreError::KeySets)?;
         Ok(Self {
-            identities: Bootstrap::restore(config, settings)?,
+            identities,
             settings: restored,
             libraries: Registry::new(config),
             update_ownership: Default::default(),

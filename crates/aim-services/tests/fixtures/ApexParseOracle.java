@@ -25,6 +25,8 @@ public final class ApexParseOracle {
                     java.nio.file.Files.write(new java.io.File(directory, "apex-parse-" + i + ".original").toPath(), PackageCacher.toCacheEntryStatic(parsed));
                     var info = pm.getPackageInfo(parsed.getPackageName(), 0x48000000L, 0);
                     if (info == null || info.signingInfo == null) throw new AssertionError("missing original APEX signer: " + path);
+                    if (info.applicationInfo == null || info.applicationInfo.uid != -1) throw new AssertionError("APEX acquired an application UID: " + path);
+                    java.nio.file.Files.write(new java.io.File(directory, "apex-uid-" + i + ".original").toPath(), java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(info.applicationInfo.uid).array());
                     var signing = android.os.Parcel.obtain();
                     try {
                         info.signingInfo.writeToParcel(signing, 0);

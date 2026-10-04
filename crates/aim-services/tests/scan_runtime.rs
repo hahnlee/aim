@@ -504,6 +504,7 @@ fn saved_scan_libraries_match_original_pms() {
             FirstBootSystemInputs {
                 seinfo: common::seinfo::scan(),
                 apex_settings: &Default::default(),
+                apex_image: &Default::default(),
                 first_api_level: first_api,
                 vendor_sdk,
                 abi_policy: &abi_policy,
@@ -713,6 +714,7 @@ fn saved_scan_libraries_match_original_pms() {
         FirstBootSystemInputs {
             seinfo: common::seinfo::scan(),
             apex_settings: &Default::default(),
+            apex_image: &Default::default(),
             first_api_level: first_api,
             vendor_sdk,
             abi_policy: &abi_policy,

@@ -16,8 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Boot/image owners' inputs, resolved before starting the package scan.
 pub struct FirstBootSystemInputs<'a> {
     pub seinfo: super::SeInfoScan<'a>,
-    /// Settings/UIDs prepared by the preceding APEX scan, not saved APK state.
+    /// Settings prepared by the preceding UID-free APEX scan, not saved APK state.
     pub apex_settings: &'a crate::package::settings::Settings,
+    /// Verified original container inputs establishing UID-free ownership.
+    pub apex_image: &'a super::ApexImage,
     pub first_api_level: i32,
     pub vendor_sdk: i32,
     pub abi_policy: &'a AbiPolicy,
@@ -101,25 +103,33 @@ impl SystemImageScan {
             .iter()
             .chain(&inputs.apex_settings.disabled_system_packages)
             .any(|package| {
-                !package.code_path.ends_with(".apex") && !package.code_path.ends_with(".capex")
+                !inputs.apex_image.packages.iter().any(|code| {
+                    code.info.module_path == package.code_path
+                        && code.parsed.package_name == package.name
+                })
             })
         {
             return Err(fail(
                 String::new(),
                 String::new(),
                 "apex",
-                "initial APEX ownership contains APK settings".into(),
+                "initial APEX setting has no verified container owner".into(),
             ));
         }
-        let mut owner = SigningScan::new(config, inputs.apex_settings, inputs.first_api_level)
-            .map_err(|error| {
-                fail(
-                    String::new(),
-                    String::new(),
-                    "settings",
-                    format!("cannot initialize scan ownership: {error:?}"),
-                )
-            })?;
+        let mut owner = SigningScan::new_after_apex(
+            config,
+            inputs.apex_settings,
+            inputs.first_api_level,
+            inputs.apex_image,
+        )
+        .map_err(|error| {
+            fail(
+                String::new(),
+                String::new(),
+                "settings",
+                format!("cannot initialize scan ownership: {error:?}"),
+            )
+        })?;
         let batch = scan_system_image(&mut owner, image, apks, config, inputs, None)?;
         Ok(Self {
             owner,

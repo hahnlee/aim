@@ -79,9 +79,11 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let next_id = AtomicU8::new(1);
     let domain_ids = || Ok([next_id.fetch_add(1, Ordering::SeqCst); 16]);
     let apex_settings = Default::default();
+    let apex_image = Default::default();
     let inputs = |new_domain_id| FirstBootSystemInputs {
         seinfo: common::seinfo::scan(),
         apex_settings: &apex_settings,
+        apex_image: &apex_image,
         first_api_level: 36,
         vendor_sdk: 36,
         abi_policy: &abi_policy,
@@ -1979,21 +1981,58 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     );
     assert_eq!(adoption, before);
 
+    let apex_host = std::fs::read_dir(original.join("system/apex"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "apex"))
+        .unwrap();
+    let apex_path = format!(
+        "/system/apex/{}",
+        apex_host.file_name().unwrap().to_str().unwrap()
+    );
+    std::fs::create_dir_all(fixture.0.join("system/apex")).unwrap();
+    std::os::unix::fs::symlink(
+        &apex_host,
+        fixture.0.join(apex_path.trim_start_matches('/')),
+    )
+    .unwrap();
+    let inventory = aim_services::package::bootstrap::ApexInventory {
+        packages: Some(vec![aim_services::package::bootstrap::ApexPackage {
+            module_name: None,
+            module_path: apex_path.clone(),
+            preinstalled_path: apex_path,
+            version_code: 0,
+            factory: true,
+            active: true,
+            active_changed: false,
+        }]),
+        active: Vec::new(),
+    };
+    let verified_apex = aim_services::package::scan::ApexImage::load(
+        &apks,
+        &inventory,
+        aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+    )
+    .unwrap();
+    let parsed_apex = &verified_apex.packages[0].parsed;
     let reserved = aim_services::package::settings::Settings {
         packages: vec![aim_services::package::settings::Package {
-            name: "fixture.apex.module".into(),
-            code_path: "/system/apex/fixture.apex".into(),
-            app_id: 10000,
+            name: parsed_apex.package_name.clone(),
+            code_path: verified_apex.packages[0].info.module_path.clone(),
+            app_id: -1,
+            version_code: (i64::from(parsed_apex.version_code_major) << 32)
+                | i64::from(parsed_apex.version_code as u32),
             ..Default::default()
         }],
         ..Default::default()
     };
     let mut with_apex = inputs(&domain_ids);
     with_apex.apex_settings = &reserved;
+    with_apex.apex_image = &verified_apex;
     let scan =
         SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config, with_apex)
             .unwrap();
-    assert_eq!(scan.packages[1].candidate.record.settings.app_id, 10001);
+    assert_eq!(scan.packages[1].candidate.record.settings.app_id, 10000);
     assert_eq!(scan.owner.settings.packages[0], reserved.packages[0]);
     let mut invalid_seed = reserved.clone();
     invalid_seed.packages[0].code_path = "/data/app/fixture".into();

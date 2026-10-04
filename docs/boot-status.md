@@ -508,16 +508,26 @@ membership without contributing active flags. Missing, unloaded, non-system,
 already-updated or already-disabled packages return the original false result;
 incomplete metadata/user/shared owners reject before mutation. The unchanged
 original-image scan gate exercises the actual transition and user alias behavior
-(68.00s). Native APEX Settings/UID admission, invoking this transition for inactive
-factory containers and notifyScanResult remain incomplete (#885), as does daemon
-orchestration (#836/#798). Actual original ART verifies production
+(68.00s). The initial APK scan now requires verified ApexImage identity/path inputs for
+its preceding APEX settings (#887). SigningScan.new_after_apex retains those
+settings with INVALID_UID (-1) while restoring only APK identities into UID
+slots. Original PMS MATCH_APEX reports -1 for all 42 containers. Unverified
+negative IDs, assigned APEX app IDs, duplicate identities and changed paths or
+versions reject; disabled APEX copies retain the same rule. Mixed APK/APEX
+settings preserve the APK slots and allocation cursor. The unchanged-original
+image initial scan verifies a parsed/signed container's -1 setting survives
+while the first APK receives UID 10000 (71.21s), replacing the old fixture's
+incorrect APEX UID reservation. These are supplied, controlled settings and
+UID-boundary checks; native APEX setting construction, loading its code and
+invoking the inactive-factory transition and notifyScanResult remain incomplete
+(#885), as does daemon orchestration (#836/#798). Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
-uninitialized owners and detached bytes (28.56s full package oracle, including
-APEX inventories, archive parsing/signing and static-library identity). All 433
-units pass (3.58s; one ignored/not run), including shared and nonshared disable
-owner gates. All integration targets compiled at the APEX input stage; the updated
-initial scan target passes. The full image/template build passes (13.5s; three
-rebuilt, 39 fresh).
+uninitialized owners and detached bytes (27.97s full package oracle, including
+APEX inventories, archive parsing/signing, actual container UIDs, mixed APK/APEX
+restoration and static-library identity). All 433 units pass (3.22s; one
+ignored/not run), including shared and nonshared disable owner gates. All
+integration targets compile; the updated initial scan target passes.
+The full image/template build passes (15.6 s; three rebuilt, 39 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
