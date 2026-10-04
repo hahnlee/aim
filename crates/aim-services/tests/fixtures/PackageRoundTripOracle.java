@@ -312,6 +312,8 @@ public final class PackageRoundTripOracle {
         owner.libraries = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".libraries").toPath());
         owner.transientState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".transient").toPath());
         stale.transientState = owner.transientState;
+        owner.hiddenApiPolicy = Integer.parseInt(new String(java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".hidden-policy").toPath()), java.nio.charset.StandardCharsets.UTF_8));
+        stale.hiddenApiPolicy = owner.hiddenApiPolicy;
         stale.userState = owner.userState;
         owner.setting = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".setting").toPath());
         stale.setting = owner.setting;
@@ -969,6 +971,23 @@ public final class PackageRoundTripOracle {
             if (!freshState.isHiddenUntilInstalled() || !freshState.isUpdatedSystemApp() || !freshState.isApkInUpdatedApex()
                     || !"com.example.apex".equals(freshState.getApexModuleName())) throw new AssertionError("combined transient setting shares mutable owner");
         }
+        var replica = lease.getPackageStateReplica(name, true);
+        if (replica != lease.getPackageStateReplica(name, true) || owner.hiddenApiReads != 1
+                || lease.getPackageStateReplica("missing", true) != null) throw new AssertionError("captured PackageState identity differs");
+        CapturedPackageStateOracle.verify(replica, lease.newScannedSetting(name, true));
+        int capturedPolicy = owner.hiddenApiPolicy;
+        owner.hiddenApiPolicy = capturedPolicy == 0 ? 2 : 0;
+        if (replica.getHiddenApiEnforcementPolicy() != capturedPolicy
+                || lease.getHiddenApiEnforcementPolicy(name, false) != capturedPolicy
+                || owner.hiddenApiReads != 1) throw new AssertionError("policy capture follows later owner mutation");
+        owner.hiddenApiPolicy = capturedPolicy;
+        var invalidPolicyOwner = new PageOwner(name, bytes, usageBytes, seinfoBytes, signingBytes);
+        invalidPolicyOwner.hiddenApiPolicy = 1;
+        try (var invalidPolicyLease = new dev.aim.server.PackageScanLease(
+                dev.aim.server.IPackageScanSnapshot.Stub.asInterface(invalidPolicyOwner))) {
+            try { invalidPolicyLease.getHiddenApiEnforcementPolicy(name, false); throw new AssertionError("invalid hidden API policy accepted"); }
+            catch (java.io.IOException expected) {}
+        }
         var assembled = lease.newScannedSetting(name, true);
         var assembledState = (com.android.server.pm.pkg.PackageState)assembled;
         var assembledPkg = (com.android.internal.pm.parsing.pkg.PackageImpl)assembledState.getAndroidPackage();
@@ -1107,6 +1126,9 @@ public final class PackageRoundTripOracle {
         catch (IllegalStateException expected) {}
         try { lease.getSetting(name, false); throw new AssertionError("closed setting lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.newSettingWithUsers(name, false, true); throw new AssertionError("closed assembly lease accepted"); } catch (IllegalStateException expected) {}
+        if (!replica.getPackageName().equals(name) || replica.getHiddenApiEnforcementPolicy() != owner.hiddenApiPolicy
+                || replica.getTransientState().getLastPackageUsageTimeInMills()[0] != -1) throw new AssertionError("PackageState depends on closed lease");
+        try { lease.getPackageStateReplica(name, true); throw new AssertionError("closed replica lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.newScannedSetting(name, true); throw new AssertionError("closed scanned setting lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getLibraries(name); throw new AssertionError("closed dependency lease accepted"); } catch (IllegalStateException expected) {}
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
@@ -1348,6 +1370,8 @@ public final class PackageRoundTripOracle {
         private final byte[] seinfo;
         private final byte[] signing;
         byte[] userState, user10, user11, user12, user13, user14, setting, factorySetting, libraries, transientState;
+        Integer hiddenApiPolicy;
+        int hiddenApiReads;
         int[] userInventory = {0, 10, 11, 12, 13, 14};
         int userReads;
         boolean signingTail;
@@ -1372,6 +1396,12 @@ public final class PackageRoundTripOracle {
         public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
         @Override
         public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && !disabled && name.equals(candidate) ? bytes.length : -1; }
+        @Override public int getHiddenApiEnforcementPolicy(String candidate, boolean disabled) throws android.os.RemoteException {
+            if (fail || hiddenApiPolicy == null) throw new android.os.RemoteException();
+            if (disabled || !name.equals(candidate)) throw new IllegalArgumentException("unknown package setting");
+            hiddenApiReads++;
+            return hiddenApiPolicy;
+        }
         @Override public byte[] getTransientState(String candidate, boolean disabled) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
             return missingOwner != 6 && !disabled && name.equals(candidate) ? transientState : null;

@@ -2,6 +2,18 @@ package com.android.server.pm;
 
 /** Pinned Settings keyset branch port; mutations run on original PackageKeySetData. */
 public final class CapturedKeySetOracle {
+    public static void verifyReplica(com.android.server.pm.pkg.PackageStateInternal replica,
+            com.android.server.pm.pkg.PackageStateInternal original) {
+        var expected = original.getKeySetData();
+        var keys = replica.getKeySetData();
+        if (keys.getProperSigningKeySet() != expected.getProperSigningKeySet()
+                || !java.util.Arrays.equals(keys.getUpgradeKeySets(), expected.getUpgradeKeySets())
+                || !keys.getAliases().equals(expected.getAliases())) throw new AssertionError("replica keysets differ");
+        keys.removeAllUpgradeKeySets(); keys.removeAllDefinedKeySets();
+        var fresh = replica.getKeySetData();
+        if (!java.util.Arrays.equals(fresh.getUpgradeKeySets(), expected.getUpgradeKeySets())
+                || !fresh.getAliases().equals(expected.getAliases())) throw new AssertionError("mutable replica keysets escaped");
+    }
     public static void verifyCaptured(dev.aim.server.PackageSettingData data, boolean populated) {
         var keys = data.getKeySetData();
         if (!populated) {

@@ -46,6 +46,7 @@ pub struct SigningScan {
     pub(super) seinfo: Option<super::seinfo::Assignments>,
     pub(super) legacy_permissions: Option<super::legacy::Assignments>,
     pub(super) library_dependencies: Option<super::libraries::Assignments>,
+    pub(super) hidden_api_allowlist: BTreeSet<String>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
 }
@@ -472,6 +473,7 @@ impl SigningScan {
             seinfo: None,
             legacy_permissions: None,
             library_dependencies: None,
+            hidden_api_allowlist: config.hidden_api_allowlist.iter().cloned().collect(),
             first_api_level,
             parsed: Vec::new(),
         })
@@ -1828,6 +1830,50 @@ mod tests {
             p.write_interface_token(api::DESCRIPTOR);
             p
         };
+        let policy_request = |name: Option<&str>, disabled| {
+            let mut p = Parcel::new();
+            api::GetHiddenApiEnforcementPolicy {
+                package_name: name.map(str::to_owned),
+                disabled,
+            }
+            .write(&mut p);
+            p
+        };
+        let reply = remote
+            .transact(
+                api::GET_HIDDEN_API_ENFORCEMENT_POLICY,
+                &policy_request(Some("fixture"), false),
+                false,
+            )
+            .unwrap();
+        let mut r = reply.reader();
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 2);
+        assert_eq!(r.remaining(), 0);
+        for (name, factory) in [
+            (None, false),
+            (Some("missing"), false),
+            (Some("fixture"), true),
+        ] {
+            let reply = remote
+                .transact(
+                    api::GET_HIDDEN_API_ENFORCEMENT_POLICY,
+                    &policy_request(name, factory),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -3
+            );
+        }
+        let mut extra = policy_request(Some("fixture"), false);
+        extra.write_i32(0);
+        assert!(
+            remote
+                .transact(api::GET_HIDDEN_API_ENFORCEMENT_POLICY, &extra, false)
+                .is_err()
+        );
         let transient_request = |name: Option<&str>, disabled| {
             let mut p = Parcel::new();
             api::GetTransientState {
@@ -2386,6 +2432,18 @@ mod tests {
             reply.reader().read_exception().unwrap().unwrap();
         }
         assert!(old.upgrade().is_none());
+        let reply = remote
+            .transact(
+                api::GET_HIDDEN_API_ENFORCEMENT_POLICY,
+                &policy_request(Some("fixture"), false),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -5
+        );
+
         let reply = remote
             .transact(
                 api::GET_TRANSIENT_STATE,

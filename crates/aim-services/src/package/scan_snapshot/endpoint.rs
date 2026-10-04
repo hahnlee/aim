@@ -423,6 +423,27 @@ impl Service for Endpoint {
             return Ok(reply);
         };
         match call.code {
+            api::GET_HIDDEN_API_ENFORCEMENT_POLICY => {
+                let args = api::GetHiddenApiEnforcementPolicy::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                let Some(name) = args.package_name.as_deref() else {
+                    reply.write_exception(&Exception::illegal_argument("package name is null"));
+                    return Ok(reply);
+                };
+                match snapshot
+                    .owner()
+                    .hidden_api_enforcement_policy(name, args.disabled)
+                {
+                    Ok(Some(policy)) => {
+                        api::write_get_hidden_api_enforcement_policy_reply(&mut reply, policy)
+                    }
+                    Ok(None) => reply
+                        .write_exception(&Exception::illegal_argument("unknown package setting")),
+                    Err(error) => reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, error)),
+                }
+            }
             api::GET_TRANSIENT_STATE => {
                 let args = api::GetTransientState::read(&mut call.data)?;
                 if call.data.remaining() != 0 {

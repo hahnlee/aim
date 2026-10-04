@@ -22,10 +22,13 @@ public final class PackageScanLease implements AutoCloseable {
     private record SettingKey(String name, boolean factory) {}
     private final Map<SettingKey, PackageSettingData> settings = new HashMap<>();
     private final Map<SettingKey, PackageTransientState> transientStates = new HashMap<>();
+    private final Map<SettingKey, Integer> hiddenApiPolicies = new HashMap<>();
     private record UserKey(String name, boolean factory, int user) {}
     private final Map<UserKey, PackageUserStateData> users = new HashMap<>();
     private record ReplicaKey(UserKey user, boolean crossUserSuspensions) {}
     private final Map<ReplicaKey, PackageUserStateReplica> userReplicas = new HashMap<>();
+    private record StateKey(String name, boolean crossUserSuspensions) {}
+    private final Map<StateKey, PackageStateReplica> stateReplicas = new HashMap<>();
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
@@ -112,6 +115,8 @@ public final class PackageScanLease implements AutoCloseable {
         users.clear();
         settings.clear();
         transientStates.clear();
+        hiddenApiPolicies.clear();
+        stateReplicas.clear();
         userReplicas.clear();
     }
 
@@ -225,6 +230,12 @@ public final class PackageScanLease implements AutoCloseable {
             boolean crossUserSuspensions) throws RemoteException, IOException {
         PackageSettingData data = getSetting(name, factory);
         if (data == null) return null;
+        return com.android.server.pm.CapturedPackageSetting.withUsers(data,
+                capturedUsers(name, factory), version, factory, crossUserSuspensions);
+    }
+
+    private java.util.List<PackageUserStateData> capturedUsers(String name, boolean factory)
+            throws RemoteException, IOException {
         int[] ids = endpoint.getUserStateIds(name, factory);
         if (ids == null) throw new IOException("missing package user inventory");
         var inputs = new java.util.ArrayList<PackageUserStateData>(ids.length);
@@ -236,14 +247,24 @@ public final class PackageScanLease implements AutoCloseable {
             if (user == null) throw new IOException("missing explicit package user state");
             inputs.add(user);
         }
-        return com.android.server.pm.CapturedPackageSetting.withUsers(data, inputs, version, factory, crossUserSuspensions);
+        return java.util.List.copyOf(inputs);
     }
 
     /** Collected active code, saved owners and finalized dependency metadata. */
     public synchronized com.android.server.pm.PackageSetting newScannedSetting(String name,
             boolean crossUserSuspensions) throws RemoteException, IOException {
-        var setting = newSettingWithUsers(name, false, crossUserSuspensions);
-        if (setting == null) return null;
+        var factory = scannedSettingFactory(name, crossUserSuspensions);
+        return factory == null ? null : factory.factory().get();
+    }
+
+    private record ScannedOwners(java.util.function.Supplier<com.android.server.pm.PackageSetting> factory,
+            java.util.List<PackageUserStateData> users) {}
+
+    private ScannedOwners scannedSettingFactory(
+            String name, boolean crossUserSuspensions) throws RemoteException, IOException {
+        PackageSettingData data = getSetting(name, false);
+        if (data == null) return null;
+        var userInputs = capturedUsers(name, false);
         PackageCode code = getCode(name, false);
         PackageSigningState saved = getSigningState(name, false);
         PackageUsageState times = getUsage(name);
@@ -253,13 +274,47 @@ public final class PackageScanLease implements AutoCloseable {
         if (code == null || saved == null || times == null || labels == null || dependencies == null || transientState == null) {
             throw new IOException("missing collected package owner");
         }
-        PackageObjects.restoreCollectedCode(setting, code, version, false);
-        PackageObjects.restoreSavedSigning(setting, saved, version, false);
-        PackageObjects.restoreUsage(setting, times, version);
-        PackageObjects.restoreSeInfo(setting, labels, version);
-        PackageObjects.restoreLibraries(setting, dependencies, version);
-        PackageObjects.restoreTransientState(setting, transientState, version, false);
-        return setting;
+        long capturedVersion = version;
+        java.util.function.Supplier<com.android.server.pm.PackageSetting> factory = () -> {
+            var setting = com.android.server.pm.CapturedPackageSetting.withUsers(data, userInputs,
+                    capturedVersion, false, crossUserSuspensions);
+            PackageObjects.restoreCollectedCode(setting, code, capturedVersion, false);
+            PackageObjects.restoreSavedSigning(setting, saved, capturedVersion, false);
+            PackageObjects.restoreUsage(setting, times, capturedVersion);
+            PackageObjects.restoreSeInfo(setting, labels, capturedVersion);
+            PackageObjects.restoreLibraries(setting, dependencies, capturedVersion);
+            PackageObjects.restoreTransientState(setting, transientState, capturedVersion, false);
+            return setting;
+        };
+        return new ScannedOwners(factory, userInputs);
+    }
+
+    public synchronized PackageStateReplica getPackageStateReplica(String name, boolean crossUserSuspensions)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        StateKey key = new StateKey(Objects.requireNonNull(name), crossUserSuspensions);
+        if (stateReplicas.containsKey(key)) return stateReplicas.get(key);
+        var factory = scannedSettingFactory(name, crossUserSuspensions);
+        if (factory == null) { stateReplicas.put(key, null); return null; }
+        var replicas = new java.util.LinkedHashMap<Integer, PackageUserStateReplica>();
+        for (var user : factory.users()) {
+            replicas.put(user.getUserId(), getUserStateReplica(name, false, user.getUserId(), crossUserSuspensions));
+        }
+        var replica = new PackageStateReplica(factory.factory(), replicas, getHiddenApiEnforcementPolicy(name, false));
+        stateReplicas.put(key, replica);
+        return replica;
+    }
+
+    public synchronized int getHiddenApiEnforcementPolicy(String name, boolean factory)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        SettingKey key = new SettingKey(Objects.requireNonNull(name), factory);
+        Integer cached = hiddenApiPolicies.get(key);
+        if (cached != null) return cached;
+        int policy = endpoint.getHiddenApiEnforcementPolicy(name, factory);
+        if (policy != 0 && policy != 2) throw new IOException("invalid captured hidden API policy");
+        hiddenApiPolicies.put(key, policy);
+        return policy;
     }
 
     public synchronized PackageTransientState getTransientState(String name, boolean factory)

@@ -43,6 +43,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedTransientOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/CapturedPackageStateOracle.java"),
+        )
         .arg("-classpath")
         .arg(&stubs)
         .arg(
@@ -121,6 +125,10 @@ fn native_package_parcels_match_original_read_write() {
         )
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
+        )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageStateReplica.java"),
         )
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
@@ -275,6 +283,16 @@ fn native_package_parcels_match_original_read_write() {
         let pkg = &loaded.package;
         let name = format!("scan-{}.native", pkg.uid);
         let facade = loaded.facade_entry().unwrap();
+        fs::write(
+            directory.join(format!("{name}.hidden-policy")),
+            snapshot
+                .owner()
+                .hidden_api_enforcement_policy(&pkg.package_name, false)
+                .unwrap()
+                .unwrap()
+                .to_string(),
+        )
+        .unwrap();
         let code = aim_services::package::scan_snapshot::endpoint::PackageCode::captured(
             &snapshot,
             &pkg.package_name,

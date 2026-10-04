@@ -26,4 +26,6 @@ interface IPackageScanSnapshot {
     byte[] getLibraryStateChunk(String packageName, int offset, int length);
     /** Runtime setting flags and APEX ownership, never inferred from saved flags. */
     byte[] getTransientState(String packageName, boolean disabled);
+    /** Native policy over this capture's code and image SystemConfig. */
+    int getHiddenApiEnforcementPolicy(String packageName, boolean disabled);
 }

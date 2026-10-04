@@ -744,8 +744,29 @@ pass (3.56s; one ignored/not run), all integration targets compile (5.97s), and
 the full boot build passes (66.0s; nine rebuilt nodes), including the original-PMS
 userdata template. No owned runtime processes or disposable data mounts remain;
 the reusable derived system image stays mounted read-only.
-Factory transient/dependency assembly, live APEX/hidden-state delivery and full
-PackageState facade publication remain #836; live query/write shadow differences
+Loaded active captures now expose a typed PackageStateReplica implementing the
+pinned PackageStateInternal interface. Each lease retains one record per package
+and suspension policy; its original parsed object and immutable user replicas
+retain identity. Original getters supply scalar/ABI/page-size semantics from a
+privately assembled setting. Returned arrays, MIME sets/maps and sparse user
+containers are detached; mutable signing, install, permission, keyset, library
+and transient owners are reconstructed from retained immutable inputs. Closing
+the lease releases its caches without invalidating a caller's retained replica.
+Hidden API enforcement is calculated by the native scan from captured code,
+system ownership and the image SystemConfig allowlist, with the original
+missing-code, platform-signing and system/non-SDK-request rules. Its generated
+snapshot method rejects unknown/null names, trailing requests and closed leases;
+the Java lease accepts only the original disabled/enabled policy values.
+All 403 native units pass (3.16s; one ignored/not run), and all integration targets
+compile. Original ART compares the active replica's scalar/array/collection
+getters against the assembled original setting, retained identities, missing-user
+defaults, later policy changes, mutable permission/keyset/usage/transient owners,
+invalid policies and use after lease close (20.12s full package oracle).
+Original Java linkage passes (4.33s); the actual first-system image scan passes
+(44.90s), and the full boot build passes (60.0s), including the original-PMS
+userdata template. No owned runtime processes or disposable data mounts remain.
+Factory/unloaded facade assembly, live APEX/hidden-state delivery and
+complete PackageState facade publication remain #836; live query/write shadow differences
 remain #865-#868.
 Original-state import,
 complete live user inventory, permission boot ordering, original writer requests,

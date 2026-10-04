@@ -6,6 +6,7 @@ import android.content.pm.overlay.OverlayPaths;
 import android.util.ArraySet;
 
 public interface PackageUserState {
+    PackageUserState DEFAULT = null;
     ArchiveState getArchiveState();
     long getCeDataInode();
     long getDeDataInode();
