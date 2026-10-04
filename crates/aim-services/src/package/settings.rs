@@ -8,7 +8,7 @@
 //! Not modelled yet: what only older platforms write (per-package
 //! `<enabled-components>`, `<disabled-components>`,
 //! `<domain-verification>`, the single-user
-//! preferred activities, `last-platform-version`, the pre-M `flags`), which
+//! preferred activities, the pre-M `flags`), which
 //! the original reads only to migrate.
 
 use aim_android_xml::Element;
@@ -398,6 +398,63 @@ impl Settings {
         Self::parse_with_config(root, &Default::default())
     }
 
+    /// Apply the version event before consuming its subtree. The original
+    /// creates its owner and assigns each field before reading the next one;
+    /// later attribute failures retain those earlier assignments.
+    pub fn read_version(&mut self, element: &Element) -> Result<(), String> {
+        fn find(settings: &mut Settings, uuid: Option<String>) -> &mut Version {
+            let index = settings
+                .versions
+                .iter()
+                .position(|v| v.volume_uuid == uuid)
+                .unwrap_or_else(|| {
+                    settings.versions.push(Version {
+                        volume_uuid: uuid,
+                        ..Default::default()
+                    });
+                    settings.versions.len() - 1
+                });
+            &mut settings.versions[index]
+        }
+        match element.name.as_str() {
+            "version" => {
+                let version = find(self, string(element, "volumeUuid"));
+                version.sdk_version = required(element, "sdkVersion", element.int("sdkVersion")?)?;
+                version.database_version =
+                    required(element, "databaseVersion", element.int("databaseVersion")?)?;
+                version.build_fingerprint = string(element, "buildFingerprint");
+                version.fingerprint = string(element, "fingerprint");
+            }
+            "last-platform-version" | "database-version" => {
+                // UUID_PRIVATE_INTERNAL is null; UUID_PRIMARY_PHYSICAL is this string.
+                find(self, None);
+                find(self, Some("primary_physical".into()));
+                // The default-value getters return the default for malformed
+                // values too, unlike the required getters on <version>.
+                if element.name == "last-platform-version" {
+                    find(self, None).sdk_version =
+                        element.int("internal").ok().flatten().unwrap_or(0);
+                    find(self, Some("primary_physical".into())).sdk_version =
+                        element.int("external").ok().flatten().unwrap_or(0);
+                    let build = string(element, "buildFingerprint");
+                    let fingerprint = string(element, "fingerprint");
+                    for uuid in [None, Some("primary_physical".into())] {
+                        let version = find(self, uuid);
+                        version.build_fingerprint = build.clone();
+                        version.fingerprint = fingerprint.clone();
+                    }
+                } else {
+                    find(self, None).database_version =
+                        element.int("internal").ok().flatten().unwrap_or(0);
+                    find(self, Some("primary_physical".into())).database_version =
+                        element.int("external").ok().flatten().unwrap_or(0);
+                }
+            }
+            _ => return Err(format!("not a settings version event: {}", element.name)),
+        }
+        Ok(())
+    }
+
     /// Settings already has platform/OEM shared UID owners before reading XML.
     pub fn parse_with_config(
         root: &Element,
@@ -455,21 +512,7 @@ impl Settings {
                 }
                 "domain-verifications" => s.domain_verification.read(e)?,
                 "domain-verifications-legacy" => s.domain_verification.read_legacy(e)?,
-                "version" => {
-                    let volume_uuid = string(e, "volumeUuid");
-                    s.versions.retain(|v| v.volume_uuid != volume_uuid);
-                    s.versions.push(Version {
-                        volume_uuid,
-                        sdk_version: required(e, "sdkVersion", e.int("sdkVersion")?)?,
-                        database_version: required(
-                            e,
-                            "databaseVersion",
-                            e.int("databaseVersion")?,
-                        )?,
-                        build_fingerprint: string(e, "buildFingerprint"),
-                        fingerprint: string(e, "fingerprint"),
-                    });
-                }
+                "version" | "last-platform-version" | "database-version" => s.read_version(e)?,
                 _ => {}
             }
         }
@@ -916,5 +959,64 @@ mod install_source_tests {
             unspecified_names.clone().normalized().unwrap(),
             unspecified_names
         );
+    }
+}
+
+#[cfg(test)]
+mod version_event_tests {
+    use super::*;
+
+    #[test]
+    fn assignments_survive_later_attribute_errors_and_repeated_versions_keep_the_owner() {
+        let mut settings = Settings::default();
+        let read = |settings: &mut Settings, xml: &str| {
+            settings.read_version(&aim_android_xml::read(xml.as_bytes()).unwrap())
+        };
+        read(&mut settings, "<version volumeUuid='v' sdkVersion='35' databaseVersion='7' buildFingerprint='old' fingerprint='old-partitions'/>").unwrap();
+        read(
+            &mut settings,
+            "<version volumeUuid='other' sdkVersion='34' databaseVersion='6'/>",
+        )
+        .unwrap();
+        assert!(read(&mut settings, "<version volumeUuid='v' sdkVersion='36' databaseVersion='broken' buildFingerprint='new'/>").is_err());
+        assert_eq!(
+            settings.versions[0],
+            Version {
+                volume_uuid: Some("v".into()),
+                sdk_version: 36,
+                database_version: 7,
+                build_fingerprint: Some("old".into()),
+                fingerprint: Some("old-partitions".into())
+            }
+        );
+        assert_eq!(settings.versions[1].volume_uuid.as_deref(), Some("other"));
+        assert!(
+            read(
+                &mut settings,
+                "<version volumeUuid='new' databaseVersion='1'/>"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            settings.versions[2],
+            Version {
+                volume_uuid: Some("new".into()),
+                ..Default::default()
+            }
+        );
+        read(
+            &mut settings,
+            "<last-platform-version internal='35' external='bad'/>",
+        )
+        .unwrap();
+        assert_eq!(settings.versions[3].sdk_version, 35);
+        assert_eq!(settings.versions[4].sdk_version, 0);
+        read(
+            &mut settings,
+            "<database-version internal='6' external='7'/>",
+        )
+        .unwrap();
+        assert_eq!(settings.versions[3].database_version, 6);
+        assert_eq!(settings.versions[4].database_version, 7);
     }
 }

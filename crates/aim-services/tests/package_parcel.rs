@@ -441,6 +441,115 @@ fn native_package_parcels_match_original_read_write() {
     for (index, bytes) in pull_inputs.iter().enumerate() {
         fs::write(directory.join(format!("pull-input-{index}")), bytes).unwrap();
     }
+    let version_text = [
+        "",
+        " \n",
+        "<packages/>",
+        "<packages/>broken",
+        "<packages><version volumeUuid='v' sdkVersion='36' databaseVersion='8'/></packages>",
+        "<packages><version volumeUuid='v' sdkVersion='36' databaseVersion='bad'/></packages>",
+        "<packages><version volumeUuid='v' sdkVersion='bad' databaseVersion='8'/></packages>",
+        "<packages><version volumeUuid='other' databaseVersion='8'/></packages>",
+        "<packages><version volumeUuid='v' sdkVersion='36' databaseVersion='8' fingerprint='new'/><",
+        "<packages><version volumeUuid='v' sdkVersion='36' databaseVersion='8'>",
+        "<packages><version volumeUuid='v' sdkVersion='36' databaseVersion='8'><version volumeUuid='other' sdkVersion='34' databaseVersion='6'/></version></packages>",
+        "<packages><unknown><version volumeUuid='v' sdkVersion='36' databaseVersion='8'/></unknown></packages>",
+        "<packages><last-platform-version internal='34' external='33' buildFingerprint='legacy' fingerprint='partitions'/><database-version internal='5' external='4'/></packages>",
+        "<packages><last-platform-version internal='34' external='bad'/></packages>",
+        "<packages><database-version internal='5' external='bad'/></packages>",
+    ];
+    let mut version_inputs: Vec<Vec<u8>> = version_text
+        .iter()
+        .map(|text| text.as_bytes().to_vec())
+        .collect();
+    for input in &version_text {
+        if let Ok(root) = aim_android_xml::read(input.as_bytes()) {
+            version_inputs.push(aim_android_xml::abx::write(&root).unwrap());
+        }
+    }
+    for (tag, fields) in [
+        (
+            "version",
+            vec![
+                ("volumeUuid", aim_android_xml::Value::Interned("v".into())),
+                ("sdkVersion", aim_android_xml::Value::Int(36)),
+                ("databaseVersion", aim_android_xml::Value::IntHex(8)),
+            ],
+        ),
+        (
+            "version",
+            vec![
+                ("volumeUuid", aim_android_xml::Value::Interned("v".into())),
+                ("sdkVersion", aim_android_xml::Value::Bool(true)),
+                ("databaseVersion", aim_android_xml::Value::Int(8)),
+            ],
+        ),
+        (
+            "last-platform-version",
+            vec![
+                ("internal", aim_android_xml::Value::Bool(true)),
+                ("external", aim_android_xml::Value::Long(34)),
+            ],
+        ),
+    ] {
+        let mut root = aim_android_xml::read(b"<packages/>").unwrap();
+        root.content
+            .push(aim_android_xml::Node::Element(aim_android_xml::Element {
+                name: tag.into(),
+                attrs: fields
+                    .into_iter()
+                    .map(|(name, value)| (name.into(), value))
+                    .collect(),
+                content: Vec::new(),
+            }));
+        version_inputs.push(aim_android_xml::abx::write(&root).unwrap());
+    }
+    eprintln!(
+        "original Settings version recovery cases: {}",
+        version_inputs.len()
+    );
+    let mut version_expected = Vec::new();
+    for (index, input) in version_inputs.iter().enumerate() {
+        let native = directory.join(format!("version-native-{index}"));
+        fs::create_dir_all(native.join("system")).unwrap();
+        let main = native.join("system/packages.xml");
+        let reserve = native.join("system/packages.xml.reservecopy");
+        fs::write(&main, input).unwrap();
+        fs::write(&reserve, "<packages/>").unwrap();
+        fs::write(directory.join(format!("version-input-{index}")), input).unwrap();
+        let mut state = aim_services::package::settings::Settings::default();
+        state
+            .versions
+            .push(aim_services::package::settings::Version {
+                volume_uuid: Some("v".into()),
+                sdk_version: 35,
+                database_version: 7,
+                build_fingerprint: Some("old".into()),
+                fingerprint: Some("old-partitions".into()),
+            });
+        let (_, report) = aim_services::package::owner::recovery::Plan::inspect(&native)
+            .unwrap()
+            .recover(&[], &mut state, read_version_events)
+            .unwrap();
+        let mut output = vec![report.first_boot.to_string()];
+        for uuid in [Some("v"), Some("other"), None, Some("primary_physical")] {
+            let version = state
+                .versions
+                .iter()
+                .find(|v| v.volume_uuid.as_deref() == uuid)
+                .cloned()
+                .unwrap_or_default();
+            output.push(format!(
+                "{},{},{},{}",
+                version.sdk_version,
+                version.database_version,
+                version.build_fingerprint.as_deref().unwrap_or("null"),
+                version.fingerprint.as_deref().unwrap_or("null")
+            ));
+        }
+        output.push(format!("{},{}", main.exists(), reserve.exists()));
+        version_expected.push(output.join("|"));
+    }
     let recovery_inputs: Vec<[Option<Vec<u8>>; 3]> = vec![
         [None, None, None],
         [None, None, Some(Vec::new())],
@@ -3554,6 +3663,13 @@ fn native_package_parcels_match_original_read_write() {
         fs::read_to_string(directory.join("empty-document-original")).unwrap(),
         "0=1\n1=1\n2=java.io.IOException\n3=1\n"
     );
+    for (index, expected) in version_expected.iter().enumerate() {
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("version-output-{index}"))).unwrap(),
+            *expected,
+            "original Settings version recovery {index}"
+        );
+    }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {
         let actual = fs::read_to_string(directory.join(format!("pull-output-{index}"))).unwrap();
@@ -4800,4 +4916,41 @@ fn pull_trace(bytes: &[u8]) -> String {
         events.push("error".into());
     }
     events.join("|")
+}
+
+// Version-owner comparison, not the complete incremental Settings frontend.
+fn read_version_events(
+    bytes: &[u8],
+    settings: &mut aim_services::package::settings::Settings,
+) -> Result<Option<aim_android_xml::Element>, String> {
+    use aim_android_xml::pull::{Event, Reader};
+    let mut reader = Reader::new(bytes)?;
+    let root = loop {
+        match reader.next()? {
+            Event::Start(element) => break element,
+            Event::EndDocument => return Ok(None),
+            _ => {}
+        }
+    };
+    let outer = reader.depth();
+    let mut skipped = None;
+    loop {
+        match reader.next()? {
+            Event::Start(element) if skipped.is_none() => {
+                if matches!(
+                    element.name.as_str(),
+                    "version" | "last-platform-version" | "database-version"
+                ) {
+                    settings.read_version(&element)?;
+                } else {
+                    skipped = Some(reader.depth());
+                }
+            }
+            Event::End(_) if reader.depth() <= outer => break,
+            Event::End(_) if skipped == Some(reader.depth()) => skipped = None,
+            Event::EndDocument => break,
+            _ => {}
+        }
+    }
+    Ok(Some(root))
 }

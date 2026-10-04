@@ -9,6 +9,7 @@ public final class ScanSettingsWriteOracle {
         verifyEmptyDocuments(cache.getParentFile());
         verifyRecoveryMatrix(cache.getParentFile());
         verifyPullMatrix(cache.getParentFile());
+        verifySettingsVersionRecovery(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -39,6 +40,33 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifySettingsVersionRecovery(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "version-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "version-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            var main = new java.io.File(system, "packages.xml");
+            var reserve = new java.io.File(system, "packages.xml.reservecopy");
+            java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            // Only the settings-read owner runs: these cases do not call runtime
+            // permissions, handlers or domain verification dependencies.
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            var seeded = settings.findOrCreateVersion("v");
+            seeded.sdkVersion = 35; seeded.databaseVersion = 7;
+            seeded.buildFingerprint = "old"; seeded.fingerprint = "old-partitions";
+            boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var output = new java.util.ArrayList<String>(); output.add(Boolean.toString(first));
+            for (String uuid : new String[]{"v", "other", null, "primary_physical"}) {
+                var version = settings.findOrCreateVersion(uuid);
+                output.add(version.sdkVersion + "," + version.databaseVersion + "," + version.buildFingerprint + "," + version.fingerprint);
+            }
+            output.add(main.exists() + "," + reserve.exists());
+            java.nio.file.Files.write(new java.io.File(directory, "version-output-" + index).toPath(),
+                String.join("|", output).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
     private static void verifyPullMatrix(java.io.File directory) throws Exception {

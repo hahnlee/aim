@@ -14,6 +14,19 @@ public final class Settings {
         java.util.UUID domainId, int targetSdk, byte[] restrictHash, boolean dontKill) {
         throw new RuntimeException("stub");
     }
+    Settings(java.io.File data, com.android.permission.persistence.RuntimePermissionsPersistence persistence,
+        com.android.server.pm.permission.LegacyPermissionDataProvider permissionData,
+        com.android.server.pm.verify.domain.DomainVerificationManagerInternal domains,
+        android.os.Handler handler, PackageManagerTracedLock lock) { throw new RuntimeException("stub"); }
+    boolean readSettingsLPw(Computer computer, java.util.List<android.content.pm.UserInfo> users,
+        android.util.ArrayMap<String, Long> firstInstallTimes) { throw new RuntimeException("stub"); }
+    public VersionInfo findOrCreateVersion(String uuid) { throw new RuntimeException("stub"); }
+    public static class VersionInfo {
+        int sdkVersion;
+        int databaseVersion;
+        String buildFingerprint;
+        String fingerprint;
+    }
     public Settings(java.util.Map<String, PackageSetting> packages) { throw new RuntimeException("stub"); }
     String addRenamedPackageLPw(String name, String original) { throw new RuntimeException("stub"); }
     String getRenamedPackageLPr(String name) { throw new RuntimeException("stub"); }
