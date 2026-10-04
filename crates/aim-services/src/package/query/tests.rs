@@ -503,3 +503,70 @@ fn library_optional_owners_preserve_raw_null_empty_and_nested_values() {
     );
     assert_eq!(field(&dependencies[1], "certDigests"), &certificates);
 }
+
+#[test]
+fn queued_comparison_uses_publication_history_for_intermediate_apk_state() {
+    let mut first = state();
+    let ps = first.packages.get_mut(APP).unwrap();
+    ps.category_override = -1;
+    Arc::make_mut(ps.pkg.as_mut().unwrap()).category = -1;
+    let first = Arc::new(first);
+    let mut intermediate = (*first).clone();
+    Arc::make_mut(
+        intermediate
+            .packages
+            .get_mut(APP)
+            .unwrap()
+            .pkg
+            .as_mut()
+            .unwrap(),
+    )
+    .version_code += 1;
+    let intermediate = Arc::new(intermediate);
+    let mut latest = (*intermediate).clone();
+    latest.packages.get_mut(APP).unwrap().category_override = 7;
+    let latest = Arc::new(latest);
+    let current = latest.clone();
+    let prior = intermediate.clone();
+    let model = PackageModel::from_states(
+        Box::new(move |_, _| Some(current.clone())),
+        Some(Box::new(move |_, context| {
+            assert_eq!(context.packages[APP].pkg.as_ref().unwrap().version_code, 7);
+            Some(prior.clone())
+        })),
+    );
+    model.writes.observe(&first, 0);
+    let sent = Instant::now();
+    let mut parcel = Parcel::new();
+    pm::GetApplicationInfo {
+        package_name: Some(APP.into()),
+        flags: 0,
+        user_id: 0,
+    }
+    .write(&mut parcel);
+    let make_call = || ShadowCall {
+        service: "package",
+        descriptor: pm::DESCRIPTOR,
+        code: pm::GET_APPLICATION_INFO,
+        flags: 0,
+        sender_pid: 1,
+        sender_euid: 1000,
+        seq: 1,
+        sent,
+        dropped: 0,
+        data: Reader::new(parcel.data(), parcel.objects()),
+    };
+    let Answer::Reply(current) = model.answer(&mut make_call()) else {
+        panic!("current query was not answered")
+    };
+    assert_eq!(
+        decoded(pm::GET_APPLICATION_INFO, &current),
+        get_application_info(&latest, 1000, APP, 0)
+    );
+    let Answer::Reply(before) = model.answer_before(&mut make_call()).unwrap() else {
+        panic!("previous query was not answered")
+    };
+    let expected = get_application_info(&intermediate, 1000, APP, 0);
+    assert_eq!(decoded(pm::GET_APPLICATION_INFO, &before), expected);
+    assert_ne!(expected, get_application_info(&first, 1000, APP, 0));
+}

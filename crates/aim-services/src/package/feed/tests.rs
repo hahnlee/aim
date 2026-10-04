@@ -69,6 +69,16 @@ fn package_record_with_mime(
     shared_user_app_id: Option<i32>,
     groups: &[(Option<String>, Vec<Option<String>>)],
 ) -> Vec<u8> {
+    package_record_metadata(name, shared_user_app_id, groups, 42, -1)
+}
+
+fn package_record_metadata(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+    version: i64,
+    category: i32,
+) -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_string16(Some(name));
     p.write_i32(10_100);
@@ -80,9 +90,9 @@ fn package_record_with_mime(
     p.write_string16(None);
     p.write_string16(Some("default:targetSdkVersion=36"));
     p.write_string16(None);
-    p.write_i64(42);
+    p.write_i64(version);
     p.write_i32(36);
-    p.write_i32(-1);
+    p.write_i32(category);
     p.write_i32(2);
     p.write_i64(1_000);
     p.write_i64(2_000);
@@ -509,4 +519,55 @@ fn mime_feed_rejects_absent_collection_owners_and_duplicate_names() {
     );
     let groups = vec![(None, Vec::new()), (None, Vec::new())];
     assert!(record::package(&package_record_with_mime("app", None, &groups)).is_err());
+}
+
+#[test]
+fn publication_history_keeps_intermediate_updates_before_worker_observation() {
+    let start = Instant::now();
+    let mut inner = Inner::default();
+    let mut publish = |seconds, version, category| {
+        inner.begin(false);
+        let bytes = package_record_metadata("example", None, &[], version, category);
+        inner
+            .put(key(PACKAGE, "example"), bytes.len(), &bytes)
+            .unwrap();
+        let digest = records_digest(&inner.records);
+        inner
+            .end_with_clock(&digest, seconds, || {
+                start + Duration::from_secs(seconds as u64)
+            })
+            .unwrap()
+    };
+    let first = publish(0, 1, -1);
+    let intermediate = publish(2, 2, -1);
+    let latest = publish(4, 2, 7);
+    drop(publish);
+    let before = inner.state_before(start + Duration::from_secs(3)).unwrap();
+    assert!(Arc::ptr_eq(&before, &intermediate));
+    assert_eq!(before.packages["example"].version_code, 2);
+    assert_eq!(before.packages["example"].category_override, -1);
+    assert_eq!(first.packages["example"].version_code, 1);
+    assert_eq!(latest.packages["example"].category_override, 7);
+    assert!(inner.state_before(start).is_none());
+    assert!(Arc::ptr_eq(
+        &inner.state_before(start + Duration::from_secs(2)).unwrap(),
+        &first
+    ));
+    assert_eq!(
+        inner
+            .end_with_clock(&[0; 32], 5, || start + Duration::from_secs(5))
+            .err(),
+        Some(Failed::Drifted)
+    );
+    assert_eq!(inner.history.len(), 3);
+    let digest = records_digest(&inner.records);
+    inner
+        .end_with_clock(&digest, 16, || start + Duration::from_secs(16))
+        .unwrap();
+    assert_eq!(inner.history.len(), 2);
+    assert!(inner.state_before(start + Duration::from_secs(3)).is_none());
+    assert!(Arc::ptr_eq(
+        &inner.state_before(start + Duration::from_secs(6)).unwrap(),
+        &latest
+    ));
 }

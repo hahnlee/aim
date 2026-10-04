@@ -18,7 +18,7 @@
 mod record;
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -90,6 +90,8 @@ struct Inner {
     /// A record coming in chunks: its key, length and bytes so far.
     partial: Option<(Key, usize, Vec<u8>)>,
     state: Option<Arc<State>>,
+    /// Complete publications, including those a shadow worker has not read.
+    history: VecDeque<(Instant, Arc<State>)>,
     /// The tokens asked for, the nonce read before each, and when.
     asked: Vec<(i64, Option<i64>, Instant)>,
     /// When the published state's batch was asked for: its snapshot is
@@ -123,6 +125,12 @@ impl Feed {
     /// The last state published.
     pub fn state(&self) -> Option<Arc<State>> {
         self.inner.lock().unwrap().state.clone()
+    }
+
+    /// The latest complete publication before `at`. A queued shadow call
+    /// can predate the state the comparison worker first observes.
+    pub fn state_before(&self, at: Instant) -> Option<Arc<State>> {
+        self.inner.lock().unwrap().state_before(at)
     }
 
     /// A state at least as new as the original's now: the last one if the
@@ -286,6 +294,23 @@ impl Inner {
     /// state's nonce is the one read before `token` was asked for: the
     /// batch's snapshot was taken after that.
     fn end(&mut self, digest: &[u8], token: i64) -> Result<Arc<State>, Failed> {
+        self.end_with_clock(digest, token, Instant::now)
+    }
+
+    fn state_before(&self, at: Instant) -> Option<Arc<State>> {
+        self.history
+            .iter()
+            .rev()
+            .find(|(published, _)| *published < at)
+            .map(|(_, state)| state.clone())
+    }
+
+    fn end_with_clock(
+        &mut self,
+        digest: &[u8],
+        token: i64,
+        clock: impl FnOnce() -> Instant,
+    ) -> Result<Arc<State>, Failed> {
         self.ended = Some((token, false));
         self.asked.retain(|(t, ..)| *t >= token);
         if digest != records_digest(&self.records) {
@@ -297,6 +322,15 @@ impl Inner {
         let generation = self.state.as_ref().map_or(1, |s| s.generation + 1);
         let state = Arc::new(build(&self.records, generation, nonce).map_err(Failed::Unreadable)?);
         self.state = Some(state.clone());
+        let now = clock();
+        self.history.push_back((now, state.clone()));
+        // Keep ten seconds and the newest publication older than that,
+        // matching the write model's observation window.
+        while self.history.len() > 1
+            && now.duration_since(self.history[1].0) > Duration::from_secs(10)
+        {
+            self.history.pop_front();
+        }
         self.asked_at = asked_at;
         self.ended = Some((token, true));
         Ok(state)

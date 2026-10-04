@@ -92,10 +92,12 @@ type Source<'a> = Option<&'a PackageState>;
 /// Where the model's state comes from: a state at least as new as the
 /// original's at the instant given (`feed::Feed::fresh_since`), or none.
 pub type States = Box<dyn Fn(Instant, Duration) -> Option<Arc<State>> + Send + Sync>;
+type BeforeStates = Box<dyn Fn(Instant, &State) -> Option<Arc<State>> + Send + Sync>;
 
 /// `package` and `package_native`, modelled over the feed's state.
 pub struct PackageModel {
     states: States,
+    states_before: Option<BeforeStates>,
     /// Intent resolution, and the apps filter of each state.
     resolver: Resolver,
     /// The same for the states answered from again, kept apart so that
@@ -110,8 +112,13 @@ pub struct PackageModel {
 
 impl PackageModel {
     pub fn new(states: States) -> Arc<PackageModel> {
+        Self::from_states(states, None)
+    }
+
+    fn from_states(states: States, states_before: Option<BeforeStates>) -> Arc<PackageModel> {
         Arc::new(PackageModel {
             states,
+            states_before,
             resolver: Resolver::default(),
             before: Resolver::default(),
             writes: Writes::default(),
@@ -133,20 +140,30 @@ pub fn start(
     files: super::write::Files,
 ) -> Result<Arc<PackageModel>, String> {
     let platform = super::parse::Platform::load(image, Default::default())?;
-    let join = Mutex::new(Join {
+    let join = Arc::new(Mutex::new(Join {
         framework: system_config::Framework::load(image)?,
         image: image.to_path_buf(),
         props,
         device: None,
         system: system.clone(),
         last: None,
+        before_last: None,
         parsed: HashMap::new(),
-    });
-    let feed = Feed::start(system, Some(dump));
-    let model = PackageModel::new(Box::new(move |since, t| {
-        let fed = feed.fresh_since(since, t)?;
-        join.lock().unwrap().state(fed)
+        before_parsed: HashMap::new(),
     }));
+    let feed = Feed::start(system, Some(dump));
+    let current_feed = feed.clone();
+    let current_join = join.clone();
+    let model = PackageModel::from_states(
+        Box::new(move |since, t| {
+            let fed = current_feed.fresh_since(since, t)?;
+            current_join.lock().unwrap().state(fed)
+        }),
+        Some(Box::new(move |at, context| {
+            let fed = feed.state_before(at)?;
+            join.lock().unwrap().before_state(fed, context)
+        })),
+    );
     model.writes.watch_sessions(system);
     model
         .writes
@@ -166,8 +183,10 @@ struct Join {
     system: Arc<crate::system::System>,
     /// The last fed state and the state made of it.
     last: Option<(Arc<State>, Arc<State>)>,
+    before_last: Option<(Arc<State>, Arc<State>)>,
     /// Parsed packages by their parcel's address, with the parcel.
     parsed: HashMap<usize, (Arc<[u8]>, Arc<AndroidPackage>)>,
+    before_parsed: HashMap<usize, (Arc<[u8]>, Arc<AndroidPackage>)>,
 }
 
 impl Join {
@@ -190,6 +209,35 @@ impl Join {
         {
             return Some(m.clone());
         }
+        let state = self.join(fed.clone(), &unlocked, false)?;
+        self.last = Some((fed, state.clone()));
+        Some(state)
+    }
+
+    fn before_state(&mut self, fed: Arc<State>, context: &State) -> Option<Arc<State>> {
+        // Historical package state uses already-observed user context;
+        // querying the current UserManager would introduce future input.
+        let mut unlocked = Vec::new();
+        for &id in fed.users.keys() {
+            if context.users.get(&id)?.unlocking_or_unlocked {
+                unlocked.push(id);
+            }
+        }
+        if let Some((raw, state)) = &self.before_last
+            && Arc::ptr_eq(raw, &fed)
+            && state
+                .users
+                .values()
+                .all(|u| u.unlocking_or_unlocked == unlocked.contains(&u.id))
+        {
+            return Some(state.clone());
+        }
+        let state = self.join(fed.clone(), &unlocked, true)?;
+        self.before_last = Some((fed, state.clone()));
+        Some(state)
+    }
+
+    fn join(&mut self, fed: Arc<State>, unlocked: &[i32], historical: bool) -> Option<Arc<State>> {
         if self.device.is_none() {
             match system_config::system(&self.image, &self.props, &self.framework) {
                 Ok(device) => self.device = Some(device),
@@ -210,12 +258,17 @@ impl Join {
         for user in state.users.values_mut() {
             user.unlocking_or_unlocked = unlocked.contains(&user.id);
         }
+        let cache = if historical {
+            &mut self.before_parsed
+        } else {
+            &mut self.parsed
+        };
         let mut parsed = HashMap::new();
         let packages = state.packages.values_mut();
         for ps in packages.chain(state.disabled_system_packages.values_mut()) {
             let Some(parcel) = &ps.parcel else { continue };
             let key = parcel.as_ptr() as usize;
-            let pkg = match self.parsed.remove(&key) {
+            let pkg = match cache.remove(&key) {
                 Some((_, pkg)) => Some(pkg),
                 // A parcel that does not read leaves its package without
                 // one: its answers differ, with the parcel in the dump.
@@ -226,10 +279,8 @@ impl Join {
             }
             ps.pkg = pkg;
         }
-        self.parsed = parsed;
-        let state = Arc::new(state);
-        self.last = Some((fed, state.clone()));
-        Some(state)
+        *cache = parsed;
+        Some(Arc::new(state))
     }
 }
 
@@ -246,7 +297,12 @@ impl ShadowModel for PackageModel {
     }
 
     fn answer_before(&self, call: &mut ShadowCall<'_>) -> Option<Answer> {
-        let state = self.writes.state_before(call.sent)?;
+        let context = self.writes.state_before(call.sent)?;
+        let state = self
+            .states_before
+            .as_ref()
+            .and_then(|states| states(call.sent, &context))
+            .unwrap_or(context);
         match self.query(&self.before, &state, call) {
             Answer::NotModelled => None,
             answer => Some(answer),

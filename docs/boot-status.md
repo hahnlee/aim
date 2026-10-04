@@ -312,21 +312,25 @@ cache bytes and restoring the category restores the complete original bytes.
 The feed now serializes parsed code inside the unfiltered snapshot and uses
 content hashes for all records: retaining an AndroidPackage object's identity
 cannot suppress a changed code record. Original Java linkage passes (5.06s);
-device-services builds in the full boot build (64.8s), including the original-PMS
-userdata template. A disposable 90-second original-PMS shadow
-publishes the changed live feed without read/publication errors: final generation
-75 contains 285 active packages and five disabled factories. It exits successfully
-and leaves no owned processes or mounted data. Its 22,853 shadow calls include
-21,525 matches, 470 classified races, 16 differences and 842 not modelled; six
-write checks also differ. Category differences still reproduce (#865): this run
-has eight GMS category mismatches, so code-record freshness alone does not resolve them.
-Enabled-state/eligibility/write differences are #866, provider eligibility #867
-and install-parse lifecycle comparison #868. Additional disposable shadow
-instrumentation confirms the mismatching native category 7 comes from a saved
-category override 7, with parsed category -1 and no GMS fallback. The final fed
-GMS code and override are both -1; the query/snapshot timing remains under #865,
-not a proved category-computation defect. Instrumentation has been removed and
-both diagnostic boots exit cleanly without owned processes or mounted data.
+device-services builds in the full boot build, including the original-PMS
+userdata template. The final disposable 90-second original-PMS shadow with
+publication history and separate current/historical caches exits successfully
+without read/publication/configuration errors or owned processes/data mounts.
+Final generation 76 retains 285 active packages and five disabled factories.
+Its 21,714 calls include 20,447 matches, 428 classified races, 17 differences
+and 822 not modelled; write checks include 49 matches, two differences and two
+not modelled. Eleven GMS getPackageInfo category mismatches (-1/7) remain (#865),
+so publication history does not establish category parity. Enabled-state and
+eligibility/write differences remain #866, provider eligibility #867 and
+install-parse lifecycle comparison #868. Temporary owner/publication diagnostics
+show the original feed publishing a new APK with override -1 before subsequently
+publishing override 7; a queued worker can skip that intermediate publication.
+The retained image's PackageInfoUtils dex confirms the native computation's
+base-category/fallback/saved-override order. All diagnostic instrumentation was
+removed; the diagnostic boots exited without owned processes or data mounts.
+An implementation using a shared current/historical parse cache produced hundreds
+of live differences and was replaced: historical comparison must not evict the
+current cache or rebuild the same previous joined state on every call.
 FallbackCategoryProvider's newly constructed AssetManager includes system asset
 overlays. Native selection retains GoogleConfigOverlay's 387-entry CSV; removing
 those overlays caused widespread live category differences and was reverted.
@@ -347,6 +351,20 @@ optional/certificate reproduction. This is original-PMS feed validation, not
 native PMS conformance. Native-to-SystemServer lease bootstrap and complete
 facade import remain #836. Live policy delivery, overlay effects and
 factory graph handling remain #707/#808/#836.
+The feed retains complete publications independently of the shadow worker:
+a ten-second history plus the newest older publication selects only states
+published strictly before the call. This preserves an intermediate new-APK state
+when a queued comparison worker observed only the old APK and then the later
+category override. Historical joins use already-observed user unlock context;
+missing user context rejects, and current UserManager is never queried for past
+state. Current and historical parsed-package/join caches remain separate, so a
+comparison cannot evict the current cache or repeatedly rebuild the same prior
+state. Deterministic tests verify intermediate version/category selection,
+strict timestamps, failed-digest exclusion and bounded retention, plus complete
+previous-response equality when the worker missed the intermediate version.
+All 400 units pass (5.34s; one ignored/not run), all integration targets compile
+(14.51s), and the full boot build passes (15.5s; three rebuilt nodes).
+
 The original PlatformCompat install-time native-library policy
 is now queried through the system-server bridge (package name and target
 SDK, without PMS lookup). On a disposable original-PMS boot (2026-10-02,
