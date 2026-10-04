@@ -176,8 +176,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .iter()
         .map(|code| apks.scan_file_time(&code.parsed).unwrap())
         .collect();
-    let mut scan =
-        SystemImageScan::first_boot(|| Ok(image), &apks, &config, inputs(&domain_ids)).unwrap();
+    let mut scan = SystemImageScan::first_boot_parsed(
+        || Image::parse(&apks, &[]),
+        &apks,
+        &config,
+        inputs(&domain_ids),
+    )
+    .unwrap();
     assert!(scan.rejected.is_empty());
     scan.owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
     for group in scan.owner.identities.shared_users.values() {
@@ -763,8 +768,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         let mut owner =
             aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
         let batch = owner
-            .scan_saved_system_image(
-                Image::load(&apks, &[]).unwrap(),
+            .scan_saved_parsed_system_image(
+                Image::parse(&apks, &[]).unwrap(),
                 &apks,
                 &config,
                 inputs(&domain_ids),
@@ -772,6 +777,63 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             )
             .unwrap();
         if keep_data {
+            // A fresh verifier cannot read this mapped certificate source.
+            // The parser still reads the original APK through its code directory;
+            // non-strict KeepData must refresh metadata without collecting it.
+            let root = fixture.0.clone();
+            let bad_signing = Apks {
+                files: Box::new(move |path| {
+                    Some(root.join(if path == "/product/priv-app/GSF/GSF.apk" {
+                        "product/priv-app/GSF"
+                    } else {
+                        path.trim_start_matches('/')
+                    }))
+                }),
+                platform: Platform::load(&original, Default::default()).unwrap(),
+            };
+            assert!(Image::load(&bad_signing, &[]).is_err());
+            let mut retained =
+                aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+            let unchecked = retained
+                .scan_saved_parsed_system_image(
+                    Image::parse(&bad_signing, &[]).unwrap(),
+                    &bad_signing,
+                    &config,
+                    inputs(&domain_ids),
+                    saved_inputs(),
+                )
+                .unwrap();
+            assert_eq!(unchecked.packages.len(), 1);
+            assert_eq!(unchecked.retained_data.len(), 1);
+            assert!(unchecked.retained_data[0].record.signing.unknown);
+            assert!(unchecked.retained_code[0].signing.unknown);
+            assert_eq!(retained.settings.packages[1], active);
+            assert_eq!(
+                unchecked.retained_data[0].record.settings.signatures,
+                factory.signatures
+            );
+            assert!(data_code.exists());
+            let mut strict = SystemConfig::default();
+            strict
+                .preinstall_packages_with_strict_signature_check
+                .insert(factory.name.clone());
+            let mut rejected =
+                aim_services::package::scan::SigningScan::new(&strict, &settings, 36).unwrap();
+            assert!(matches!(rejected.scan_saved_parsed_system_image(
+                Image::parse(&bad_signing, &[]).unwrap(), &bad_signing, &strict,
+                inputs(&domain_ids), saved_inputs(),
+            ), Err(SigningError::Rejected(error)) if error.phase == "system-source" && error.message.ends_with("(-110)")));
+            assert!(
+                rejected.disabled_loaded_packages()[&factory.name]
+                    .collected_signing
+                    .unknown
+            );
+            assert_eq!(
+                rejected.settings.disabled_system_packages[0].signatures,
+                factory.signatures
+            );
+            assert_eq!(rejected.settings.packages[1], active);
+            assert!(data_code.exists());
             assert_eq!(batch.packages.len(), 1);
             assert_eq!(batch.retained_data.len(), 1);
             assert_eq!(batch.retained_data[0].record.settings.name, factory.name);

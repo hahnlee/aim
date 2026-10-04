@@ -123,8 +123,8 @@ impl BootOwners<'_> {
         policy: ScanPolicy<'_>,
     ) -> Result<SystemImageScan, BootError> {
         self.with_scan_inputs(apks, policy, |inputs| {
-            SystemImageScan::first_boot(
-                || Image::load(apks, &self.apex.scan_apexes()),
+            SystemImageScan::first_boot_parsed(
+                || Image::parse(apks, &self.apex.scan_apexes()),
                 apks,
                 self.config,
                 inputs,
@@ -152,8 +152,9 @@ impl BootOwners<'_> {
                 })
             })?;
             let image =
-                Image::load(apks, &self.apex.scan_apexes()).map_err(SigningError::Rejected)?;
-            let system = owner.scan_saved_system_image(image, apks, self.config, inputs, saved)?;
+                Image::parse(apks, &self.apex.scan_apexes()).map_err(SigningError::Rejected)?;
+            let system =
+                owner.scan_saved_parsed_system_image(image, apks, self.config, inputs, saved)?;
             Ok(SavedSystemPhase { apex, system })
         })
     }

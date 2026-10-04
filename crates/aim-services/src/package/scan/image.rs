@@ -284,6 +284,13 @@ impl Image {
     }
 }
 
+impl Image<()> {
+    /// Physical system inventory before the sequential owner collects signing.
+    pub fn parse(apks: &Apks, apexes: &[Apex]) -> Result<Self, Error> {
+        Image::load_directories(apks, directories(apexes)?, &|_, _| Ok(())).map(|(image, _)| image)
+    }
+}
+
 /// Physical data APK inventory before known-package validation or reconciliation.
 /// Rejections retain the outer scan path for the removal owner.
 #[derive(Debug)]

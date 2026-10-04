@@ -50,6 +50,14 @@ fn image_scan_keeps_locations_duplicates_and_rejections_without_settings() {
     };
     let image = Image::load(&apks, &[]).unwrap();
     assert_eq!(image.packages.len(), 3);
+    let parsed = Image::parse(&apks, &[]).unwrap();
+    assert_eq!(parsed.rejected, image.rejected);
+    assert_eq!(parsed.packages.len(), image.packages.len());
+    for (raw, verified) in parsed.packages.iter().zip(&image.packages) {
+        assert_eq!(raw.location, verified.location);
+        assert_eq!(raw.parsed, verified.parsed);
+    }
+
     let saved: Vec<_> = image
         .packages
         .iter()

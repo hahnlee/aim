@@ -868,7 +868,7 @@ The sequential initial-system and data scan now resolve the current selected/
 original-rename setting, volume VersionInfo, upgrade state and strict data
 allowlist before collecting signing. Scan settings persist those volume owners
 in original ArrayMap order, replacing legacy version tags, before the keyset
-commit. The first-system scan fixture passes (8.79s), including settings commit
+commit. The first-system scan fixture passes (9.12s), including settings commit
 and reopening the persisted owner. Updated-system KeepData selection now fully
 verifies strict-allowlisted factory APKs instead of copying input signing, after
 committing the disabled metadata refresh. That refresh accepts uncollected
@@ -896,16 +896,26 @@ mapping/serialization/owner failures stop the scan. A source-conformance fixture
 uses real GSF and framework-res APKs: GSF parse or signing failure is reported,
 then the platform factory recovers; missing parse/signing mappings stop before
 that recovery, retaining earlier enable effects and preserving system code.
-System inputs still verify afresh before
-sequential selection, so system parse/verification timing remains incomplete
-(#918). Adoption
+Image::parse now returns uncollected Code<()> system inputs as well. The boot
+bridge supplies these to first_boot_parsed and scan_saved_parsed_system_image;
+platform signing is established by the actual framework scan rather than an
+inventory verification pass. The shared sequential loop begins with UNKNOWN
+signing, collects normal admissions after current owner selection, and leaves
+non-strict KeepData factories uncollected. A real GSF source mapped to a directory
+fails the explicit fresh verifier but passes parsed inventory and non-strict
+KeepData metadata refresh; strict KeepData fails with -110 after committing the
+UNKNOWN factory package. Parsed and verified system inventories preserve all
+locations, rejections and parsed fields (0.71s). Explicit fresh-verification
+loaders remain diagnostic APIs. Initial request-stage shared UID preparation
+still follows collection in native code, unlike the original (#923); full
+collection/request/error timing remains incomplete (#918/#914). Adoption
 when both incoming and original settings exist remains #919. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only data inputs (45.59s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only system and data inputs (39.41s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

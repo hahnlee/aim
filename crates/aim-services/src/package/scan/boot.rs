@@ -60,6 +60,17 @@ pub struct SystemImagePackages {
 }
 
 impl SigningScan {
+    pub fn scan_saved_parsed_system_image(
+        &mut self,
+        image: Image<()>,
+        apks: &Apks,
+        config: &SystemConfig,
+        inputs: FirstBootSystemInputs<'_>,
+        saved: SavedSystemScanInputs<'_>,
+    ) -> Result<SystemImagePackages, SigningError> {
+        scan_system_image(self, image, apks, config, inputs, Some(saved))
+    }
+
     pub fn scan_saved_system_image(
         &mut self,
         image: Image,
@@ -88,6 +99,24 @@ impl SystemImageScan {
     /// The loader preserves physical directory order without a parser feed.
     pub fn first_boot(
         load_image: impl FnOnce() -> Result<Image, Error>,
+        apks: &Apks,
+        config: &SystemConfig,
+        inputs: FirstBootSystemInputs<'_>,
+    ) -> Result<Self, SigningError> {
+        Self::first_boot_inputs(load_image, apks, config, inputs)
+    }
+
+    pub fn first_boot_parsed(
+        load_image: impl FnOnce() -> Result<Image<()>, Error>,
+        apks: &Apks,
+        config: &SystemConfig,
+        inputs: FirstBootSystemInputs<'_>,
+    ) -> Result<Self, SigningError> {
+        Self::first_boot_inputs(load_image, apks, config, inputs)
+    }
+
+    fn first_boot_inputs<S>(
+        load_image: impl FnOnce() -> Result<Image<S>, Error>,
         apks: &Apks,
         config: &SystemConfig,
         inputs: FirstBootSystemInputs<'_>,
@@ -123,9 +152,9 @@ impl SystemImageScan {
     }
 }
 
-fn scan_system_image(
+fn scan_system_image<S>(
     owner: &mut SigningScan,
-    image: Image,
+    image: Image<S>,
     apks: &Apks,
     config: &SystemConfig,
     inputs: FirstBootSystemInputs<'_>,
@@ -139,20 +168,19 @@ fn scan_system_image(
             message,
         })
     };
-    let mut platform = image
+    if !image
         .packages
         .iter()
-        .find(|code| code.location.kind == Kind::Framework && code.parsed.package_name == "android")
-        .ok_or_else(|| {
-            fail(
-                "android".into(),
-                "/system/framework".into(),
-                "framework",
-                "framework package was not loaded".into(),
-            )
-        })?
-        .signing
-        .clone();
+        .any(|code| code.location.kind == Kind::Framework && code.parsed.package_name == "android")
+    {
+        return Err(fail(
+            "android".into(),
+            "/system/framework".into(),
+            "framework",
+            "framework package was not loaded".into(),
+        ));
+    }
+    let mut platform = crate::package::sign::SigningDetails::unknown();
     let should_stop_system_packages = apks
         .platform
         .framework_boolean("config_stopSystemPackagesByDefault")
@@ -166,7 +194,14 @@ fn scan_system_image(
         .map(|s| s.old_stub_packages.clone())
         .unwrap_or_default();
     let mut platform_loaded = false;
-    for mut code in image.packages {
+    for input in image.packages {
+        // Parser inputs have UNKNOWN signing until this selected scan owner
+        // collects certificates. Disabled factory refresh precedes collection.
+        let mut code = Code {
+            location: input.location,
+            parsed: input.parsed,
+            signing: crate::package::sign::SigningDetails::unknown(),
+        };
         owner.refresh_init_apex(&code);
         let identity =
             Identity::select_for_location(&code.parsed, &owner.settings, true, &code.location);

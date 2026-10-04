@@ -497,8 +497,8 @@ fn saved_scan_libraries_match_original_pms() {
         .restore_legacy_permissions_from_data(&boot.data.join("data"), &original, &config)
         .unwrap();
     let resumed_packages = resumed
-        .scan_saved_system_image(
-            Image::load(&apks, &apexes).unwrap(),
+        .scan_saved_parsed_system_image(
+            Image::parse(&apks, &apexes).unwrap(),
             &apks,
             &config,
             FirstBootSystemInputs {
