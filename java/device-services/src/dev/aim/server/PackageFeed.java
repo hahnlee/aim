@@ -280,7 +280,7 @@ final class PackageFeed extends IPackageFeed.Stub {
             }
             for (SharedUserApi user : snapshot.getSharedUsers().values()) {
                 records.put(new Key(SHARED_USER, user.getName()), sharedUser(user));
-                records.put(new Key(SHARED_PROCESSES, user.getName()), com.android.server.pm.SharedProcessFeed.capture(user));
+                records.put(new Key(SHARED_PROCESSES, user.getName()), com.android.server.pm.SharedProcessFeed.capture(user, snapshot.getPackageStates()));
             }
         }
         for (int user : users) {

@@ -1,6 +1,7 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public class PackageSetting extends SettingBase {
+    public PackageSetting snapshot() { throw new RuntimeException("stub"); }
     public PackageSetting setLeavingSharedUser(boolean value) { throw new RuntimeException("stub"); }
     public boolean isLeavingSharedUser() { throw new RuntimeException("stub"); }
     public com.android.server.pm.pkg.PackageUserStateImpl getOrCreateUserState(int id) { throw new RuntimeException("stub"); }

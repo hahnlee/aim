@@ -18,7 +18,10 @@ public final class SharedProcessesOracle {
         if (bytes != null) out.write(bytes);
     }
     private static void write(File root, String phase, SharedUserSetting group) throws Exception {
-        Files.write(new File(root, phase + ".aggregate").toPath(), SharedProcessFeed.capture((com.android.server.pm.pkg.SharedUserApi)(Object)group.snapshot()));
+        var snapshot = (com.android.server.pm.pkg.SharedUserApi)(Object)group.snapshot();
+        var current = new java.util.HashMap<String, com.android.server.pm.pkg.PackageState>();
+        for (var member : snapshot.getPackageStates()) current.put(member.getPackageName(), member);
+        Files.write(new File(root, phase + ".aggregate").toPath(), SharedProcessFeed.capture(snapshot, current));
         try (var out = new DataOutputStream(new FileOutputStream(new File(root, phase + ".original")))) {
             var processes = group.processes;
             out.writeInt(processes.size());

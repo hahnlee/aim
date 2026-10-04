@@ -187,6 +187,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/SharedUserData.java"))
         .arg(
             aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/SharedProcessFeed.java"),
+        )
+        .arg(
+            aim_paths::root()
                 .join("crates/aim-services/tests/fixtures/RetainedSharedUserOracle.java"),
         )
         .arg(
@@ -2204,6 +2208,28 @@ fn native_package_parcels_match_original_read_write() {
     publishable
         .complete_runtime_at_boot(&captured_usage, BTreeMap::new())
         .unwrap();
+    let process_orders = publishable
+        .identities
+        .shared_users
+        .iter()
+        .map(|(name, group)| {
+            (
+                name.clone(),
+                if name == "shared.fixture" {
+                    vec![
+                        ("original.fixture".into(), false),
+                        ("original.fixture".into(), true),
+                    ]
+                } else {
+                    assert_eq!(group.member_count(), 0);
+                    vec![]
+                },
+            )
+        })
+        .collect();
+    publishable
+        .complete_shared_process_instances(process_orders)
+        .unwrap();
     let captured_apex = aim_services::package::scan_snapshot::Store::new(
         publishable.clone(),
         captured_usage.clone(),
@@ -2851,6 +2877,53 @@ fn native_package_parcels_match_original_read_write() {
     assert_eq!(shared_adopted.read_i32().unwrap(), 10000);
     assert_eq!(shared_adopted.read_i32().unwrap(), 10000);
     assert_eq!(shared_adopted.remaining(), 0);
+    let shared_process_members =
+        aim_services::package::scan::OriginalSharedProcesses::read_original_record(
+            &fs::read(directory.join("apex-shared-process-members.original")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        shared_process_members.members,
+        ["original.fixture", "original.fixture"]
+    );
+    assert_eq!(
+        shared_process_members
+            .member_settings
+            .iter()
+            .filter(|p| p.retained)
+            .count(),
+        1
+    );
+    assert_eq!(
+        shared_process_members
+            .member_settings
+            .iter()
+            .filter(|p| !p.retained)
+            .count(),
+        1
+    );
+    for member in &shared_process_members.member_settings {
+        assert_eq!(member.app_id, 10000);
+        assert_eq!(member.has_code, !member.retained);
+        assert_eq!(
+            member.path,
+            if member.retained {
+                "/system/apex/original.fixture.apex"
+            } else {
+                "/system/apex/incoming.fixture.apex"
+            }
+        );
+    }
+
+    let removed_process_members =
+        aim_services::package::scan::OriginalSharedProcesses::read_original_record(
+            &fs::read(directory.join("apex-shared-process-removed.original")).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(removed_process_members.member_settings.len(), 1);
+    assert!(removed_process_members.member_settings[0].retained);
+    assert!(!removed_process_members.member_settings[0].has_code);
+    assert!(removed_process_members.records.is_empty());
 
     let mut inactive = aim_services::package::scan::ApexImage {
         packages: vec![apex_image.packages[0].clone()],

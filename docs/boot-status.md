@@ -665,7 +665,21 @@ pair (-1/10000) through original PackageImpl/PackageSetting; a foreign setting U
 rejects. The complete oracle passes without syscall tracing (31.89s), 440 units
 pass (one ignored/not run), checked host/image/template builds pass (68.3s, then
 23.8s for the final host refresh), all integration targets compile, and complete initial scan passes (67.58s).
-Shared process projections still require instance-aware inputs (#905).
+Shared process inputs now distinguish current and retained setting instances by
+same-snapshot object identity, alongside path/version/appId/code-presence
+fingerprints (#905). The native owner keeps both same-name entries, imports the
+actual incremental aggregate, and rebuilds in the original reverse ArraySet order,
+skipping the prior unparsed setting. Exact current removal leaves the retained
+member and an empty rebuilt aggregate; stale settings and forged member roles
+reject without changing prior captures. A real native shared-adoption Store
+snapshot accepts the two process inputs. The original ART oracle validates cached
+PackageSetting snapshot identity, two distinct same-name members and the
+retained-only removal capture (30.58s). Unit tests pass 441 with one ignored/not
+run; the image/template build passes (65.7s), all integration targets compile,
+and the complete initial scan passes (68.05s). The original shared process
+union/overwrite/rebuild/removal and immutable facade snapshot oracle also passes
+(11.42s). Native daemon publication remains
+incomplete (#836); these process owners do not replace the live PMS.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
 Files.write IOException, not evidence of an external kill. Crash reporting also

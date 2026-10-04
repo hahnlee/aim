@@ -702,7 +702,15 @@ fn shared_aggregate_batches_require_matching_complete_group_records() {
         let mut p = Parcel::new();
         p.write_string16(Some(name));
         p.write_i32(app_id);
-        strings(&mut p, members);
+        p.write_i32(members.len() as i32);
+        for member in members {
+            p.write_string16(Some(member));
+            p.write_bool(false);
+            p.write_string16(Some("/data/app/member"));
+            p.write_i64(1);
+            p.write_i32(app_id);
+            p.write_bool(false);
+        }
         p.write_i32(0);
         p.data().to_vec()
     }

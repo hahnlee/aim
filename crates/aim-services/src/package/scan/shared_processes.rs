@@ -3,11 +3,27 @@ use super::SigningScan;
 use crate::package::owner::shared_processes::Processes;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OriginalSharedMember {
+    pub name: String,
+    pub retained: bool,
+    pub path: String,
+    pub version: i64,
+    pub app_id: i32,
+    pub has_code: bool,
+}
+impl OriginalSharedMember {
+    fn key(&self) -> (String, bool) {
+        (self.name.clone(), self.retained)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct OriginalSharedProcesses {
     pub name: String,
     pub app_id: i32,
     pub members: Vec<String>,
+    pub member_settings: Vec<OriginalSharedMember>,
     pub records: Vec<crate::package::pkg::Process>,
 }
 impl OriginalSharedProcesses {
@@ -28,8 +44,33 @@ impl OriginalSharedProcesses {
         let name = required(&mut r)?;
         let app_id = r.read_i32()?;
         let mut members = Vec::new();
+        let mut member_settings = Vec::new();
+        fn boolean(r: &mut Reader<'_>) -> aim_binder_host::parcel::Result<bool> {
+            match r.read_i32()? {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(BAD_VALUE),
+            }
+        }
         for _ in 0..count(&mut r)? {
-            members.push(required(&mut r)?);
+            let name = required(&mut r)?;
+            let retained = boolean(&mut r)?;
+            let path = required(&mut r)?;
+            let version = r.read_i64()?;
+            let app_id = r.read_i32()?;
+            let has_code = boolean(&mut r)?;
+            if retained && has_code {
+                return Err(BAD_VALUE);
+            }
+            members.push(name.clone());
+            member_settings.push(OriginalSharedMember {
+                name,
+                retained,
+                path,
+                version,
+                app_id,
+                has_code,
+            });
         }
         let mut records = Vec::new();
         for _ in 0..count(&mut r)? {
@@ -64,7 +105,12 @@ impl OriginalSharedProcesses {
         }
         if r.remaining() != 0
             || bytes.len() % 4 != 0
-            || members.iter().collect::<BTreeSet<_>>().len() != members.len()
+            || member_settings
+                .iter()
+                .map(OriginalSharedMember::key)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != members.len()
             || Processes::capture_original(records.clone()).is_err()
         {
             return Err(BAD_VALUE);
@@ -73,6 +119,7 @@ impl OriginalSharedProcesses {
             name,
             app_id,
             members,
+            member_settings,
             records,
         })
     }
@@ -81,21 +128,23 @@ impl OriginalSharedProcesses {
 struct Member {
     path: String,
     version: i64,
+    app_id: i32,
     // None is unparsed; parsed code separately retains a nullable process map.
     code: Option<std::sync::Arc<super::LoadedPackage>>,
 }
-type Members = BTreeMap<String, Member>;
+type MemberKey = (String, bool);
+type Members = BTreeMap<MemberKey, Member>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Assignments {
-    orders: BTreeMap<String, Vec<String>>,
+    orders: BTreeMap<String, Vec<MemberKey>>,
     inputs: BTreeMap<String, (i32, Members)>,
     owners: BTreeMap<String, Processes>,
 }
 
 fn build(
     scan: &SigningScan,
-    orders: BTreeMap<String, Vec<String>>,
+    orders: BTreeMap<String, Vec<MemberKey>>,
     mut imported: Option<BTreeMap<String, Processes>>,
 ) -> Result<Assignments, String> {
     if !scan.capture_ready() {
@@ -107,24 +156,42 @@ fn build(
     let mut inputs = BTreeMap::new();
     let mut owners = BTreeMap::new();
     for (name, group) in &scan.identities.shared_users {
-        let members: BTreeMap<_, _> = scan
+        let mut members: BTreeMap<_, _> = scan
             .settings
             .packages
             .iter()
             .filter(|p| p.shared_app_id() == Some(group.app_id))
             .map(|p| {
                 (
-                    p.name.clone(),
+                    (p.name.clone(), false),
                     Member {
                         path: p.code_path.clone(),
                         version: p.version_code,
+                        app_id: p.app_id,
                         code: scan.loaded.get(&p.name).cloned(),
                     },
                 )
             })
             .collect();
-        if members.keys().map(String::as_str).collect::<BTreeSet<_>>()
-            != group.package_names().collect()
+        for member in group.package_names().collect::<BTreeSet<_>>() {
+            if let Some(retained) = group.retained_setting(member) {
+                let p = &retained.package;
+                members.insert(
+                    (member.to_owned(), true),
+                    Member {
+                        path: p.code_path.clone(),
+                        version: p.version_code,
+                        app_id: p.app_id,
+                        code: None,
+                    },
+                );
+            }
+        }
+        if members.len() != group.member_count()
+            || members
+                .keys()
+                .filter(|(_, retained)| !retained)
+                .any(|(name, _)| !group.has_package(name))
         {
             return Err(format!("shared process membership owner differs: {name}"));
         }
@@ -170,7 +237,8 @@ impl SigningScan {
         source: &crate::package::model::State,
     ) -> Result<(), String> {
         let orders = self.original_member_orders(source)?;
-        self.complete_shared_processes(orders)
+        self.shared_processes = Some(build(self, orders, None)?);
+        Ok(())
     }
 
     pub fn capture_original_shared_processes(
@@ -208,7 +276,7 @@ impl SigningScan {
     fn original_member_orders(
         &self,
         source: &crate::package::model::State,
-    ) -> Result<BTreeMap<String, Vec<String>>, String> {
+    ) -> Result<BTreeMap<String, Vec<MemberKey>>, String> {
         if source
             .shared_users
             .keys()
@@ -230,12 +298,55 @@ impl SigningScan {
                 .filter(|p| p.shared_user.as_deref() == Some(name))
                 .map(|p| &p.name)
                 .collect();
-            if original.packages.iter().collect::<BTreeSet<_>>() != source_members {
+            let aggregate = source
+                .shared_process_inputs
+                .get(name)
+                .ok_or_else(|| format!("missing original shared member settings: {name}"))?;
+            if aggregate.name != *name
+                || aggregate.app_id != group.app_id
+                || aggregate.members != original.packages
+                || aggregate
+                    .member_settings
+                    .iter()
+                    .map(|p| &p.name)
+                    .collect::<Vec<_>>()
+                    != original.packages.iter().collect::<Vec<_>>()
+                || aggregate
+                    .member_settings
+                    .iter()
+                    .filter(|p| !p.retained)
+                    .map(|p| &p.name)
+                    .collect::<BTreeSet<_>>()
+                    != source_members
+                || aggregate.member_settings.len() != group.member_count()
+                || aggregate
+                    .member_settings
+                    .iter()
+                    .map(OriginalSharedMember::key)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    != aggregate.member_settings.len()
+            {
                 return Err(format!(
                     "original shared process membership differs: {name}"
                 ));
             }
-            for member in &original.packages {
+            for entry in &aggregate.member_settings {
+                let member = &entry.name;
+                if entry.retained {
+                    let retained = group.retained_setting(member).ok_or_else(|| {
+                        format!("unknown retained shared process member: {member}")
+                    })?;
+                    let p = &retained.package;
+                    if entry.has_code
+                        || entry.path != p.code_path
+                        || entry.version != p.version_code
+                        || entry.app_id != p.app_id
+                    {
+                        return Err(format!("retained shared process setting differs: {member}"));
+                    }
+                    continue;
+                }
                 let setting = self
                     .settings
                     .packages
@@ -253,6 +364,10 @@ impl SigningScan {
                     || input.app_id != setting.app_id
                     || input.path != setting.code_path
                     || input.version_code != setting.version_code
+                    || entry.path != setting.code_path
+                    || entry.version != setting.version_code
+                    || entry.app_id != setting.app_id
+                    || entry.has_code != self.loaded.contains_key(member)
                 {
                     return Err(format!(
                         "original shared process setting identity differs: {member}"
@@ -272,7 +387,12 @@ impl SigningScan {
             }
             orders.insert(
                 name.clone(),
-                original.packages.iter().rev().cloned().collect(),
+                aggregate
+                    .member_settings
+                    .iter()
+                    .rev()
+                    .map(OriginalSharedMember::key)
+                    .collect(),
             );
         }
         Ok(orders)
@@ -283,6 +403,24 @@ impl SigningScan {
     pub fn complete_shared_processes(
         &mut self,
         orders: BTreeMap<String, Vec<String>>,
+    ) -> Result<(), String> {
+        self.complete_shared_process_instances(
+            orders
+                .into_iter()
+                .map(|(group, members)| {
+                    (
+                        group,
+                        members.into_iter().map(|name| (name, false)).collect(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Distinct current and retained settings may have the same package name.
+    pub fn complete_shared_process_instances(
+        &mut self,
+        orders: BTreeMap<String, Vec<(String, bool)>>,
     ) -> Result<(), String> {
         let candidate = build(self, orders, None)?;
         self.shared_processes = Some(candidate);
@@ -423,8 +561,139 @@ mod tests {
                 },
             );
         }
+        for (name, group) in &source.shared_users {
+            let member_settings = group
+                .packages
+                .iter()
+                .map(|name| {
+                    let p = &source.packages[name];
+                    OriginalSharedMember {
+                        name: name.clone(),
+                        retained: false,
+                        path: p.path.clone(),
+                        version: p.version_code,
+                        app_id: p.app_id,
+                        has_code: p.pkg.is_some(),
+                    }
+                })
+                .collect();
+            source.shared_process_inputs.insert(
+                name.clone(),
+                OriginalSharedProcesses {
+                    name: name.clone(),
+                    app_id: group.app_id,
+                    members: group.packages.clone(),
+                    member_settings,
+                    records: vec![],
+                },
+            );
+        }
         source
     }
+    #[test]
+    fn same_name_retained_member_is_distinct_and_survives_current_removal() {
+        let mut scan = scan();
+        let old = scan.settings.packages[0].clone();
+        let group = scan.identities.shared_users.get_mut("fixture").unwrap();
+        group
+            .retain_unparsed_setting(crate::package::owner::app_ids::DetachedSetting {
+                package: old.clone(),
+                users: Default::default(),
+                user_aliases: Default::default(),
+                legacy: None,
+                install_fixed: None,
+                runtime: None,
+            })
+            .unwrap();
+        group.add_package("a", old.flags, old.private_flags);
+        scan.settings.packages[0].code_path = "/data/app/new-a".into();
+        scan.settings.packages[0].version_code = 2;
+        load(&mut scan, "a", 1);
+        let mut source = original_source(&scan);
+        let retained = OriginalSharedMember {
+            name: "a".into(),
+            retained: true,
+            path: old.code_path,
+            version: old.version_code,
+            app_id: old.app_id,
+            has_code: false,
+        };
+        source
+            .shared_users
+            .get_mut("fixture")
+            .unwrap()
+            .packages
+            .insert(0, "a".into());
+        let input = source.shared_process_inputs.get_mut("fixture").unwrap();
+        input.members.insert(0, "a".into());
+        input.member_settings.insert(0, retained.clone());
+        input.records = scan.loaded["a"].package.processes.as_ref().unwrap().clone();
+        scan.capture_original_shared_processes(&source).unwrap();
+        scan.rebuild_shared_processes_from_original_members(&source)
+            .unwrap();
+        assert_eq!(
+            scan.shared_processes("fixture")
+                .unwrap()
+                .unwrap()
+                .records()
+                .len(),
+            1
+        );
+        let sealed = scan.clone();
+        for field in 0..5 {
+            let mut bad = source.clone();
+            let member = &mut bad
+                .shared_process_inputs
+                .get_mut("fixture")
+                .unwrap()
+                .member_settings[0];
+            match field {
+                0 => member.retained = false,
+                1 => member.path.push_str("changed"),
+                2 => member.version += 1,
+                3 => member.app_id += 1,
+                _ => member.has_code = true,
+            }
+            assert!(scan.capture_original_shared_processes(&bad).is_err());
+            assert_eq!(scan, sealed);
+        }
+        assert!(scan.complete_shared_processes(orders(&scan)).is_err());
+        scan.settings.packages.retain(|p| p.name != "a");
+        scan.loaded.remove("a");
+        scan.identities
+            .shared_users
+            .get_mut("fixture")
+            .unwrap()
+            .remove_package("a");
+        assert!(scan.shared_processes("fixture").is_err());
+        source.packages.remove("a");
+        source.shared_users.get_mut("fixture").unwrap().packages = vec!["a".into(), "b".into()];
+        let input = source.shared_process_inputs.get_mut("fixture").unwrap();
+        input.members = vec!["a".into(), "b".into()];
+        input
+            .member_settings
+            .retain(|p| p.retained || p.name != "a");
+        input.records.clear();
+        scan.rebuild_shared_processes_from_original_members(&source)
+            .unwrap();
+        assert!(
+            scan.shared_processes("fixture")
+                .unwrap()
+                .unwrap()
+                .records()
+                .is_empty()
+        );
+        assert_eq!(
+            sealed
+                .shared_processes("fixture")
+                .unwrap()
+                .unwrap()
+                .records()
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn original_incremental_aggregate_is_imported_without_rebuild() {
         let mut scan = scan();
@@ -445,6 +714,7 @@ mod tests {
                     name: name.clone(),
                     app_id: group.app_id,
                     members: group.packages.clone(),
+                    member_settings: source.shared_process_inputs[name].member_settings.clone(),
                     records: if name == "fixture" {
                         aggregate.records().to_vec()
                     } else {
@@ -510,6 +780,11 @@ mod tests {
         p.write_i32(10100);
         p.write_i32(1);
         p.write_string16(Some("a"));
+        p.write_bool(false);
+        p.write_string16(Some("/data/app/a"));
+        p.write_i64(1);
+        p.write_i32(10100);
+        p.write_bool(true);
         p.write_i32(1);
         p.write_string16(Some("worker"));
         p.write_string16(Some("worker"));
@@ -568,6 +843,18 @@ mod tests {
             .get_mut("fixture")
             .unwrap()
             .packages
+            .reverse();
+        reversed
+            .shared_process_inputs
+            .get_mut("fixture")
+            .unwrap()
+            .members
+            .reverse();
+        reversed
+            .shared_process_inputs
+            .get_mut("fixture")
+            .unwrap()
+            .member_settings
             .reverse();
         scan.rebuild_shared_processes_from_original_members(&reversed)
             .unwrap();

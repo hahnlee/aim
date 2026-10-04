@@ -56,7 +56,7 @@ mod legacy;
 mod libraries;
 mod hidden_api;
 mod shared_processes;
-pub use shared_processes::OriginalSharedProcesses;
+pub use shared_processes::{OriginalSharedMember, OriginalSharedProcesses};
 mod replica_runtime;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 pub use removal::RemovedSetting;

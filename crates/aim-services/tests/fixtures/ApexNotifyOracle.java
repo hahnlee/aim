@@ -208,6 +208,8 @@ public final class ApexNotifyOracle {
         boolean removedUid = settings.removePackageAndAppIdLPw("original.fixture");
         if (removedUid || group.getPackageStates().size() != 1 || settings.getSettingLPr(10000) != group)
             throw new AssertionError("original retained shared member was pruned");
+        java.nio.file.Files.write(new java.io.File(directory, "apex-shared-process-removed.original").toPath(),
+            SharedProcessFeed.capture((com.android.server.pm.pkg.SharedUserApi)(Object)group.snapshot(), java.util.Map.of()));
         out = android.os.Parcel.obtain();
         try {
             out.writeInt(group.getPackageStates().size()); out.writeBoolean(removedUid);

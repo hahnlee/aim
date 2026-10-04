@@ -10,6 +10,11 @@ public final class RetainedSharedUserOracle {
     public static void verify(java.io.File directory, PackageSetting old,
             PackageSetting adopted, SharedUserSetting group) throws Exception {
         verifyCollectedUid(directory, adopted);
+        var capturedGroup = (SharedUserApi)(Object)group.snapshot();
+        var capturedCurrent = (com.android.server.pm.pkg.PackageState)(Object)adopted.snapshot();
+        byte[] processes = com.android.server.pm.SharedProcessFeed.capture(capturedGroup,
+            java.util.Map.of(adopted.getPackageName(), capturedCurrent));
+        java.nio.file.Files.write(new java.io.File(directory, "apex-shared-process-members.original").toPath(), processes);
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-instance.record").toPath());
         Parcel in = Parcel.obtain();
         try {
