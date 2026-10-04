@@ -47,6 +47,7 @@ mod seinfo;
 mod legacy;
 mod libraries;
 mod hidden_api;
+mod shared_processes;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 pub use removal::RemovedSetting;
 pub use seinfo::{SeInfoCompatibility, SeInfoScan, SeInfoSetting, SeInfoState};

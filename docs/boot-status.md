@@ -765,6 +765,35 @@ invalid policies and use after lease close (20.12s full package oracle).
 Original Java linkage passes (4.33s); the actual first-system image scan passes
 (44.90s), and the full boot build passes (60.0s), including the original-PMS
 userdata template. No owned runtime processes or disposable data mounts remain.
+Shared UID process aggregation now has a native owner ported from
+SharedUserSetting.addProcesses/updateProcesses and ParsedProcessImpl.addStateFrom.
+The value's process name selects the aggregate; the enclosing map key does not.
+Denied permissions union in original ArraySet hash/collision order, class values
+overwrite by package with ArrayMap ordering, and incoming memory/tagging/embedded
+DEX modes replace the previous values. The original immutable empty class-map
+failure rejects a native candidate before publication; null process names also
+reject atomically. Complete captures require every known group and every active
+member, including unparsed entries, in the owning operation's actual iteration
+order. Both shared-UID membership and code/process inputs are retained; changed
+inputs reject queries and snapshot publication until recomputed. Old captures
+remain usable. Sorted package names do not substitute for original identity-set
+iteration. The disposable original ART snapshot/usage/shared-owner oracle passes
+(12.19s): exact process fields/ordering after additions, no-op input, incoming
+updates, original exported reverse iteration, member removal, absent removal and
+empty rebuild, plus the original immutable-empty-map error. The retained image
+has no SharedUserSetting.getProcesses convenience method; the oracle accesses its
+original declared processes field, checked against the image. All 407 units pass
+(3.19s; one ignored/not run), including complete/duplicate/foreign inventories,
+atomic rejection, parsed/unparsed distinctions and stale code/membership checks.
+All integration targets compile (13.87s); original Java linkage passes (8.84s),
+the actual first-system image scan passes (50.66s), and the final full build passes
+(18.5s; three host nodes rebuilt, 39 fresh). The original-PMS userdata template
+also rebuilt successfully in the preceding full build (61.9s). No owned runtime
+processes or disposable test mounts remain.
+Import/live member-order producers and full SharedUserApi capture/export remain
+#870/#836. Original ART also exposed invalid native cache states: null feature
+flag arrays (#871) and null process names (#872) are rejected by original
+constructors; the wider native cache boundaries remain to be repaired.
 Factory/unloaded facade assembly, live APEX/hidden-state delivery and
 complete PackageState facade publication remain #836; live query/write shadow differences
 remain #865-#868.

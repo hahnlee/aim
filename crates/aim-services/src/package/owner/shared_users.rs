@@ -56,6 +56,9 @@ pub(in crate::package) fn saved_signatures(details: &SigningDetails) -> Result<S
 }
 
 impl SharedUser {
+    pub(in crate::package) fn package_names(&self) -> impl Iterator<Item = &str> {
+        self.packages.keys().map(String::as_str)
+    }
     pub(in crate::package) fn has_package(&self, name: &str) -> bool {
         self.packages.contains_key(name)
     }

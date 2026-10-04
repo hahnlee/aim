@@ -34,6 +34,7 @@ mod removal;
 pub mod resources;
 pub mod seinfo;
 pub mod shared_users;
+pub mod shared_processes;
 mod signing;
 pub mod update_ownership;
 pub mod usage;

@@ -95,6 +95,7 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
         return Err(fail("scan metadata is not finalized"));
     }
     owner.validate_seinfo().map_err(Error::Invalid)?;
+    owner.validate_shared_processes().map_err(Error::Invalid)?;
     owner
         .validate_library_dependencies()
         .map_err(Error::Invalid)?;
