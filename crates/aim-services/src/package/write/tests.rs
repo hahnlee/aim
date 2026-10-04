@@ -555,8 +555,17 @@ fn an_install_s_signers_are_verified_from_its_apks() {
     let source = root.join(GSF);
     let guest = "/data/app/example/nonstandard-base.apk";
     let split = "/data/app/example/nonstandard-feature.apk";
+    let missing = "/data/app/example/missing.apk";
+    let missing_host = root.join("missing-code-owner-fixture.apk");
+    assert!(!missing_host.exists());
     let apks = apk::Apks {
-        files: Box::new(move |p| ([guest, split].contains(&p)).then(|| source.clone())),
+        files: Box::new(move |p| {
+            if p == missing {
+                Some(missing_host.clone())
+            } else {
+                ([guest, split].contains(&p)).then(|| source.clone())
+            }
+        }),
         platform: crate::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
     let mut pkg = AndroidPackage {
@@ -573,7 +582,27 @@ fn an_install_s_signers_are_verified_from_its_apks() {
         "null parsed split APK path"
     );
     pkg.split_code_paths = Some(vec![Some("/data/app/example/unreadable.apk".into())]);
-    assert!(apks.signatures(&pkg).unwrap_err().contains("not readable"));
+    assert!(matches!(
+        apks.checked_signing_details(&pkg),
+        Err(apk::ApkSigningError::Input(_))
+    ));
+    pkg.split_code_paths = Some(vec![Some(missing.into())]);
+    let Err(apk::ApkSigningError::Invalid(error)) = apks.checked_signing_details(&pkg) else {
+        panic!("mapped missing split must be a package failure");
+    };
+    assert_eq!(
+        error.code,
+        crate::package::sign::INSTALL_PARSE_FAILED_NO_CERTIFICATES
+    );
+    pkg.split_code_paths = None;
+    pkg.base_apk_path = Some(missing.into());
+    let Err(apk::ApkSigningError::Invalid(error)) = apks.checked_signing_details(&pkg) else {
+        panic!("mapped missing base must be a package failure");
+    };
+    assert_eq!(
+        error.code,
+        crate::package::sign::INSTALL_PARSE_FAILED_NO_CERTIFICATES
+    );
     assert_eq!(
         signatures.scheme_version,
         crate::package::sign::SIGNING_BLOCK_V3

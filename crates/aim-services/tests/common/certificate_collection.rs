@@ -121,6 +121,47 @@ pub fn verify(boot: &Boot, apks: &Apks, record: &Record) {
             index += 1;
         }
     }
+    for shape in ["missing-base", "missing-split", "directory-base"] {
+        for target in [28, 30, 36] {
+            for skip in [false, true] {
+                let mut parsed = record.parsed.clone();
+                parsed.path = Some("/data/local/tmp/collection".into());
+                parsed.target_sdk_version = target;
+                parsed.base_apk_path = Some(format!(
+                    "/data/local/tmp/collection{}",
+                    match shape {
+                        "missing-base" => "/absent.apk",
+                        "directory-base" => "",
+                        _ => "/base.apk",
+                    }
+                ));
+                parsed.split_code_paths = (shape == "missing-split")
+                    .then(|| vec![Some("/data/local/tmp/collection/absent.apk".into())]);
+                let cache = format!("/data/local/tmp/collection-io-{index}.cache");
+                fs::write(
+                    (apks.files)(&cache).unwrap(),
+                    parsed.to_cache_entry().unwrap().bytes,
+                )
+                .unwrap();
+                let error = apks
+                    .collect_signing_details(
+                        &parsed,
+                        CertificateCollection {
+                            saved: None,
+                            database_version: 3,
+                            force_collect: false,
+                            skip_verify: skip,
+                            pre_n_mr1_upgrade: false,
+                        },
+                    )
+                    .unwrap_err();
+                assert!(error.ends_with("(-103)"), "{shape}: {error}");
+                expected.push_str(&format!("{index} error -103\n"));
+                rows.push_str(&format!("{cache}\tabsent\t3\tfalse\t{skip}\tfalse\t0\n"));
+                index += 1;
+            }
+        }
+    }
     fs::write(boot.data.join("data/local/tmp/collection-cases"), rows).unwrap();
     let original = run(boot.command().args([
         "shell",

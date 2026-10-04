@@ -1301,6 +1301,39 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             );
             assert_ne!(partial, before);
             assert!(data_code.exists());
+            // A signing source lost after parsing rejects the data APK, cleans
+            // its outer scan path and recovers the retained factory.
+            let mut missing_source = raw.clone();
+            missing_source.parsed.base_apk_path = Some(format!(
+                "{}/absent.apk",
+                raw.parsed.path.as_deref().unwrap()
+            ));
+            let mut missing_owner = before.clone();
+            let missing = missing_owner
+                .scan_data_image(
+                    DataImage {
+                        packages: vec![DataCode {
+                            scan_path: valid_candidate.scan_path.clone(),
+                            code: missing_source,
+                        }],
+                        rejected: Vec::new(),
+                    },
+                    &apks,
+                    loop_inputs(),
+                )
+                .unwrap();
+            assert!(missing.packages.is_empty());
+            assert_eq!(missing.removed.len(), 1);
+            assert!(
+                matches!(&missing.removed[0].1, SigningError::Rejected(e) if e.phase == "certificates" && e.message.ends_with("(-103)"))
+            );
+            assert_eq!(missing.recovered.len(), 1);
+            assert!(!data_code.exists());
+            assert_eq!(
+                missing.recovered[0].candidate.record.settings.code_path,
+                factory.code_path
+            );
+            std::fs::write(&data_code, b"disposable retained code").unwrap();
             // An unchanged original signed APK with the wrong identity at this data
             // location is rejected, removed, then the selected GSF factory recovers.
             std::fs::remove_file(physical_data.join("base.apk")).unwrap();

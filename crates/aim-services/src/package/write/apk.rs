@@ -152,11 +152,18 @@ impl Apks {
         let sources = paths
             .iter()
             .map(|path| {
-                let host = (self.files)(path).ok_or_else(|| format!("{path}: not readable"))?;
-                FileSource::open(&host).map_err(|e| format!("{path}: {e}"))
+                let host = (self.files)(path)
+                    .ok_or_else(|| ApkSigningError::Input(format!("{path}: not mapped")))?;
+                // ApkSignatureVerifier catches source IO as a package parse
+                // failure. A native mapping failure remains an owner error.
+                FileSource::open(&host).map_err(|e| {
+                    ApkSigningError::Invalid(sign::Error {
+                        code: sign::INSTALL_PARSE_FAILED_NO_CERTIFICATES,
+                        message: format!("Failed to collect certificates from {path}: {e}"),
+                    })
+                })
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ApkSigningError::Input)?;
+            .collect::<Result<Vec<_>, _>>()?;
         let apk = |i: usize| Apk {
             path: &paths[i],
             data: &sources[i],

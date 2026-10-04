@@ -28,9 +28,13 @@ public final class AppIdsOracle {
                     setting.setSigningDetails(cached);
                 }
                 parsed.setSigningDetails(android.content.pm.SigningDetails.UNKNOWN);
-                ScanPackageUtils.collectCertificatesLI(setting, parsed, version,
-                        Boolean.parseBoolean(fields[3]), Boolean.parseBoolean(fields[4]), Boolean.parseBoolean(fields[5]));
-                System.out.println(index++ + " " + collectionTrace(parsed.getSigningDetails()));
+                try {
+                    ScanPackageUtils.collectCertificatesLI(setting, parsed, version,
+                            Boolean.parseBoolean(fields[3]), Boolean.parseBoolean(fields[4]), Boolean.parseBoolean(fields[5]));
+                    System.out.println(index++ + " " + collectionTrace(parsed.getSigningDetails()));
+                } catch (PackageManagerException error) {
+                    System.out.println(index++ + " error " + error.error);
+                }
             }
             return;
         }
