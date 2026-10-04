@@ -613,8 +613,16 @@ Another attempt fails earlier with ENOSPC while the host has 1.4 GiB available
 (#903). After freeing only this task worktree's incremental caches, an ART run
 with syscall tracing passes (33.39s), including fresh groups in a complete captured
 inventory. These failures remain recorded; SIGKILL is not claimed fixed.
-Full daemon boot orchestration/publication remains #836/#885. Original/renamed
-identity adoption remains #890. First shared code uses the supplied
+Full daemon boot orchestration/publication remains #836/#885. Retained renamed
+APEX identities now use the saved declared system rename map for source admission
+and verified active/factory restoration (#890). Code keeps its manifest identity
+while settings, loaded code and permission owners retain the original internal
+name and INVALID_UID. Without the matching saved map, negative-UID restoration
+rejects. Typed original rename-map and Settings.updatePackageSetting owners agree
+with native code names and populated legacy/fixed state (ART 33.93s); 437 units
+pass (one ignored/not run), the host image build passes (19.7s), and the complete
+initial scan passes (66.93s). Initial
+original-package adoption and its exact UID-slot/transfer ownership remain #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while

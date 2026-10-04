@@ -1896,6 +1896,89 @@ fn native_package_parcels_match_original_read_write() {
             .unwrap();
         scan.capture_install_permissions_fixed(fixed).unwrap();
     };
+    let mut renamed_image = aim_services::package::scan::ApexImage {
+        packages: vec![apex_image.packages[0].clone()],
+    };
+    let manifest_name = renamed_image.packages[0].parsed.package_name.clone();
+    let old_name = "aim.fixture.original.apex";
+    let mut old_image = aim_services::package::scan::ApexImage {
+        packages: renamed_image.packages.clone(),
+    };
+    old_image.packages[0].parsed.package_name = old_name.into();
+    old_image.packages[0].parsed.manifest_package_name = Some(old_name.into());
+    let mut renamed =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    renamed
+        .scan_initial_apex(&apex_apks, &config, &scan_inputs(&old_image))
+        .unwrap();
+    renamed.settings.packages[0].real_name = Some(manifest_name.clone());
+    renamed
+        .settings
+        .renamed_packages
+        .push((manifest_name.clone(), old_name.into()));
+    renamed_image.packages[0].parsed.original_packages = Some(vec![Some(old_name.into())]);
+    capture_apex_legacy(&mut renamed);
+    let legacy = renamed
+        .legacy_permissions(old_name, false)
+        .unwrap()
+        .unwrap();
+    let restored = aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &renamed.settings,
+        36,
+        &renamed_image,
+    )
+    .unwrap();
+    assert_eq!(restored.settings, renamed.settings);
+    let mut no_mapping = renamed.settings.clone();
+    no_mapping.renamed_packages.clear();
+    assert!(
+        aim_services::package::scan::SigningScan::new_after_apex(
+            &config,
+            &no_mapping,
+            36,
+            &renamed_image,
+        )
+        .is_err()
+    );
+    let renamed_results = renamed
+        .scan_initial_apex(&apex_apks, &config, &scan_inputs(&renamed_image))
+        .unwrap();
+    assert_eq!(renamed_results[0].package.package_name, old_name);
+    assert_eq!(renamed_results[0].package.uid, -1);
+    assert_eq!(renamed.settings.packages.len(), 1);
+    let retained = &renamed.settings.packages[0];
+    assert_eq!(retained.name, old_name);
+    assert_eq!(retained.real_name.as_deref(), Some(manifest_name.as_str()));
+    assert_eq!(
+        renamed
+            .legacy_permissions(old_name, false)
+            .unwrap()
+            .unwrap(),
+        legacy
+    );
+    assert_eq!(
+        renamed.install_permissions_fixed(old_name, false).unwrap(),
+        Some(true)
+    );
+    let mut renamed_record = aim_binder_host::parcel::Parcel::new();
+    aim_service_aidl::write_byte_array(
+        &mut renamed_record,
+        Some(&renamed_results[0].package.to_cache_entry().unwrap().bytes),
+    );
+    renamed_record.write_string16(Some(old_name));
+    renamed_record.write_string16(Some(&manifest_name));
+    renamed_record.write_string16(Some(&retained.code_path));
+    renamed_record.write_i32(retained.flags);
+    renamed_record.write_i32(retained.private_flags);
+    renamed_record.write_i32(retained.target_sdk_version);
+    aim_service_aidl::write_byte_array(&mut renamed_record, Some(&legacy.bytes()));
+    renamed_record.write_bool(true);
+    fs::write(
+        directory.join("apex-retained-rename.input"),
+        renamed_record.data(),
+    )
+    .unwrap();
     let mut fresh_captured =
         aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
     capture_apex_legacy(&mut fresh_captured);

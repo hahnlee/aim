@@ -35,6 +35,7 @@ public final class ApexNotifyOracle {
         verifyNegativeUidConversion(directory);
         verifyConversionEligibility(directory);
         verifyLegacyConstructors(directory);
+        verifyRetainedRename(directory);
         verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
@@ -140,6 +141,42 @@ public final class ApexNotifyOracle {
             }
             if (in.dataAvail() != 0) throw new AssertionError("conversion cases tail");
         } finally { in.recycle(); original.recycle(); }
+    }
+    private static void verifyRetainedRename(java.io.File directory) throws Exception {
+        var in = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-retained-rename.input").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(in.createByteArray());
+            String oldName = in.readString(), realName = in.readString(), path = in.readString();
+            int flags = in.readInt(), privateFlags = in.readInt(), target = in.readInt();
+            byte[] nativeLegacy = in.createByteArray(); boolean fixed = in.readBoolean();
+            if (in.dataAvail() != 0 || !oldName.equals(pkg.getPackageName())
+                    || !realName.equals(pkg.getManifestPackageName()) || pkg.getUid() != -1)
+                throw new AssertionError("retained renamed APEX code differs");
+            var settings = new Settings(java.util.Map.of());
+            settings.addRenamedPackageLPw(realName, oldName);
+            if (!oldName.equals(settings.getRenamedPackageLPr(realName)))
+                throw new AssertionError("original rename owner differs");
+            var retained = new PackageSetting(oldName, realName, new java.io.File(path),
+                flags, privateFlags, new java.util.UUID(0, 0));
+            retained.setAppId(-1); retained.setInstallPermissionsFixed(true);
+            int[] users = {10, 0, 11};
+            bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.original").toPath());
+            retained.getLegacyPermissionState().copyFrom(dev.aim.server.PackageLegacyPermissions.restore(10042, users, bytes));
+            Settings.updatePackageSetting(retained, null, null, null, new java.io.File(path),
+                null, null, null, flags, privateFlags, null, null, null, null, null, null,
+                java.util.Set.of(), new java.util.UUID(0, 1), target, null, false);
+            if (!oldName.equals(retained.getPackageName()) || !realName.equals(retained.getRealName())
+                    || retained.getAppId() != -1 || retained.isInstallPermissionsFixed() != fixed
+                    || !java.util.Arrays.equals(nativeLegacy,
+                        dev.aim.server.PackageLegacyPermissions.capture(-1, users, retained.getLegacyPermissionState())))
+                throw new AssertionError("retained renamed APEX setting differs");
+            pkg.setPackageName(realName); pkg.setPackageName(oldName);
+            if (!oldName.equals(pkg.getPackageName()) || !realName.equals(pkg.getManifestPackageName()))
+                throw new AssertionError("original parsed rename differs");
+        } finally { in.recycle(); }
     }
     private static void verifyLegacyConstructors(java.io.File directory) throws Exception {
         int[] users = {10, 0, 11};

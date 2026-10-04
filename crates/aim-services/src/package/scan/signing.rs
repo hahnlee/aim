@@ -528,7 +528,7 @@ impl SigningScan {
         };
         for package in &settings.disabled_system_packages {
             let source = apex.packages.iter().find(|code| {
-                code.parsed.package_name == package.name
+                Identity::select_for_apex(&code.parsed, settings).internal_name == package.name
                     && code.info.module_path == package.code_path
             });
             if let Some(source) = source {
@@ -573,7 +573,7 @@ impl SigningScan {
                 ));
             }
             let source = apex.packages.iter().find(|code| {
-                code.parsed.package_name == package.name
+                Identity::select_for_apex(&code.parsed, settings).internal_name == package.name
                     && code.info.module_path == package.code_path
             });
             if let Some(source) = source {
@@ -596,7 +596,8 @@ impl SigningScan {
         for package in settings.packages.iter().filter(|p| {
             p.shared_user
                 && apex.packages.iter().any(|code| {
-                    code.parsed.package_name == p.name && code.info.module_path == p.code_path
+                    Identity::select_for_apex(&code.parsed, settings).internal_name == p.name
+                        && code.info.module_path == p.code_path
                 })
         }) {
             let group = identities
@@ -1032,9 +1033,11 @@ impl SigningScan {
         record: &Record,
         source: &super::ApexCode,
     ) -> Result<SigningOutcome, SigningError> {
+        let identity = Identity::select_for_apex(&source.parsed, &self.settings);
         if !record.parsed.is2(crate::package::pkg::booleans2::APEX)
             || record.settings.app_id != -1
-            || record.settings.name != source.parsed.package_name
+            || record.identity != identity
+            || record.settings.name != identity.internal_name
             || record.settings.code_path != source.info.module_path
         {
             return Err(SigningError::Rejected(Error {

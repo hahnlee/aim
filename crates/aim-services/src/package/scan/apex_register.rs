@@ -107,11 +107,10 @@ impl SigningScan {
                 .iter()
                 .find(|p| p.name == identity.internal_name)
                 .cloned();
-            if identity.real_name.is_some()
-                || Identity::original_setting(&parsed, &self.settings, &|name| {
-                    self.has_scanned_package(name)
-                })
-                .is_some()
+            if Identity::original_setting(&parsed, &self.settings, &|name| {
+                self.has_scanned_package(name)
+            })
+            .is_some()
             {
                 return Err(fail(
                     "apex-identity",
