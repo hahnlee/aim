@@ -266,6 +266,7 @@ struct Lease {
     snapshot: Option<Arc<Snapshot>>,
     code: BTreeMap<(String, bool), Arc<Vec<u8>>>,
     settings: BTreeMap<(String, bool), Arc<Vec<u8>>>,
+    runtimes: BTreeMap<(String, bool), Arc<Vec<u8>>>,
     libraries: BTreeMap<String, Arc<Vec<u8>>>,
     shared_users: BTreeMap<String, Arc<Vec<u8>>>,
     users: BTreeMap<(String, bool, i32), Arc<Vec<u8>>>,
@@ -308,6 +309,26 @@ impl Lease {
         };
         let bytes = Arc::new(bytes);
         self.libraries.insert(key, bytes.clone());
+        Ok(Some(bytes))
+    }
+    fn runtime(
+        &mut self,
+        snapshot: &Snapshot,
+        name: Option<&str>,
+        factory: bool,
+    ) -> Result<Option<Arc<Vec<u8>>>, Exception> {
+        let name = name.ok_or_else(|| Exception::illegal_argument("package name is null"))?;
+        let key = (name.to_owned(), factory);
+        if let Some(bytes) = self.runtimes.get(&key) {
+            return Ok(Some(bytes.clone()));
+        }
+        let bytes = super::runtime_record::captured(snapshot, name, factory)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let bytes = Arc::new(bytes);
+        self.runtimes.insert(key, bytes.clone());
         Ok(Some(bytes))
     }
     fn setting(
@@ -396,6 +417,7 @@ impl Endpoint {
                 code: BTreeMap::new(),
                 users: BTreeMap::new(),
                 settings: BTreeMap::new(),
+                runtimes: BTreeMap::new(),
                 libraries: BTreeMap::new(),
                 shared_users: BTreeMap::new(),
             }),
@@ -432,6 +454,7 @@ impl Service for Endpoint {
             lease.code.clear();
             lease.users.clear();
             lease.settings.clear();
+            lease.runtimes.clear();
             lease.libraries.clear();
             lease.shared_users.clear();
             reply.write_no_exception();
@@ -580,6 +603,47 @@ impl Service for Endpoint {
                             let start = args.offset as usize;
                             let end = (start + args.length as usize).min(bytes.len());
                             api::write_get_library_state_chunk_reply(
+                                &mut reply,
+                                &Some(bytes[start..end].to_vec()),
+                            );
+                        }
+                        Err(error) => reply.write_exception(&error),
+                    }
+                }
+            }
+            api::GET_RUNTIME_STATE_LENGTH => {
+                let args = api::GetRuntimeStateLength::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                match lease.runtime(&snapshot, args.package_name.as_deref(), args.disabled) {
+                    Ok(bytes) => api::write_get_runtime_state_length_reply(
+                        &mut reply,
+                        bytes.map_or(-1, |p| p.len() as i32),
+                    ),
+                    Err(error) => reply.write_exception(&error),
+                }
+            }
+            api::GET_RUNTIME_STATE_CHUNK => {
+                let args = api::GetRuntimeStateChunk::read(&mut call.data)?;
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                if args.offset < 0 || args.length <= 0 || args.length as usize > MAX_CHUNK {
+                    reply.write_exception(&Exception::illegal_argument(
+                        "invalid package runtime chunk range",
+                    ));
+                } else {
+                    match lease.runtime(&snapshot, args.package_name.as_deref(), args.disabled) {
+                        Ok(None) => api::write_get_runtime_state_chunk_reply(&mut reply, &None),
+                        Ok(Some(bytes)) if args.offset as usize > bytes.len() => reply
+                            .write_exception(&Exception::illegal_argument(
+                                "package runtime offset exceeds length",
+                            )),
+                        Ok(Some(bytes)) => {
+                            let start = args.offset as usize;
+                            let end = (start + args.length as usize).min(bytes.len());
+                            api::write_get_runtime_state_chunk_reply(
                                 &mut reply,
                                 &Some(bytes[start..end].to_vec()),
                             );

@@ -28,7 +28,9 @@ public final class PackageScanLease implements AutoCloseable {
     private record ReplicaKey(UserKey user, boolean crossUserSuspensions) {}
     private final Map<ReplicaKey, PackageUserStateReplica> userReplicas = new HashMap<>();
     private record StateKey(String name, boolean crossUserSuspensions) {}
-    private final Map<StateKey, PackageStateReplica> stateReplicas = new HashMap<>();
+    private record PackageKey(String name, boolean factory, boolean crossUserSuspensions) {}
+    private final Map<PackageKey, PackageStateReplica> stateReplicas = new HashMap<>();
+    private final Map<SettingKey, PackageRuntimeState> runtimes = new HashMap<>();
     private final Map<String, SharedUserData> sharedUsers = new HashMap<>();
     private final Map<StateKey, SharedUserReplica> sharedReplicas = new HashMap<>();
     private java.util.List<String> sharedNames;
@@ -120,6 +122,7 @@ public final class PackageScanLease implements AutoCloseable {
         transientStates.clear();
         hiddenApiPolicies.clear();
         stateReplicas.clear();
+        runtimes.clear();
         userReplicas.clear();
         sharedUsers.clear();
         sharedReplicas.clear();
@@ -297,18 +300,132 @@ public final class PackageScanLease implements AutoCloseable {
 
     public synchronized PackageStateReplica getPackageStateReplica(String name, boolean crossUserSuspensions)
             throws RemoteException, IOException {
-        if (closed) throw new IllegalStateException("package scan lease is closed");
-        StateKey key = new StateKey(Objects.requireNonNull(name), crossUserSuspensions);
-        if (stateReplicas.containsKey(key)) return stateReplicas.get(key);
-        var factory = scannedSettingFactory(name, crossUserSuspensions);
-        if (factory == null) { stateReplicas.put(key, null); return null; }
-        var replicas = new java.util.LinkedHashMap<Integer, PackageUserStateReplica>();
-        for (var user : factory.users()) {
-            replicas.put(user.getUserId(), getUserStateReplica(name, false, user.getUserId(), crossUserSuspensions));
+        return getPackageStateReplica(name, false, crossUserSuspensions);
+    }
+
+    public synchronized com.android.server.pm.PackageSetting newCapturedSetting(String name, boolean factory,
+            boolean crossUserSuspensions) throws RemoteException, IOException {
+        var owners = capturedSettingFactory(name, factory, crossUserSuspensions);
+        return owners == null ? null : owners.factory().get();
+    }
+
+    private ScannedOwners capturedSettingFactory(String name, boolean factoryScope, boolean crossUserSuspensions)
+            throws RemoteException, IOException {
+        PackageSettingData data = getSetting(name, factoryScope);
+        if (data == null) return null;
+        var userInputs = capturedUsers(name, factoryScope);
+        PackageCode code = getCode(name, factoryScope);
+        PackageSigningState saved = getSigningState(name, factoryScope);
+        PackageRuntimeState runtime = getRuntimeState(name, factoryScope);
+        PackageTransientState transientState = getTransientState(name, factoryScope);
+        if (saved == null || runtime == null || transientState == null || runtime.hasCode() != (code != null)) {
+            throw new IOException("missing captured package owner");
         }
-        var replica = new PackageStateReplica(factory.factory(), replicas, getHiddenApiEnforcementPolicy(name, false));
+        long capturedVersion = version;
+        java.util.function.Supplier<com.android.server.pm.PackageSetting> factory = () -> {
+            var setting = com.android.server.pm.CapturedPackageSetting.withUsers(data, userInputs,
+                    capturedVersion, factoryScope, crossUserSuspensions);
+            if (code != null) PackageObjects.restoreCollectedCode(setting, code, capturedVersion, factoryScope);
+            PackageObjects.restoreSavedSigning(setting, saved, capturedVersion, factoryScope);
+            PackageObjects.restoreRuntime(setting, runtime, capturedVersion, factoryScope);
+            PackageObjects.restoreTransientState(setting, transientState, capturedVersion, factoryScope);
+            return setting;
+        };
+        return new ScannedOwners(factory, userInputs);
+    }
+
+    public synchronized PackageStateReplica getPackageStateReplica(String name, boolean factoryScope,
+            boolean crossUserSuspensions) throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        PackageKey key = new PackageKey(Objects.requireNonNull(name), factoryScope, crossUserSuspensions);
+        if (stateReplicas.containsKey(key)) return stateReplicas.get(key);
+        var owners = capturedSettingFactory(name, factoryScope, crossUserSuspensions);
+        if (owners == null) { stateReplicas.put(key, null); return null; }
+        var replicas = new java.util.LinkedHashMap<Integer, PackageUserStateReplica>();
+        for (var user : owners.users()) {
+            replicas.put(user.getUserId(), getUserStateReplica(name, factoryScope, user.getUserId(), crossUserSuspensions));
+        }
+        var replica = new PackageStateReplica(owners.factory(), replicas, getHiddenApiEnforcementPolicy(name, factoryScope));
         stateReplicas.put(key, replica);
         return replica;
+    }
+
+    public synchronized PackageRuntimeState getRuntimeState(String name, boolean factory)
+            throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        SettingKey key = new SettingKey(Objects.requireNonNull(name), factory);
+        if (runtimes.containsKey(key)) return runtimes.get(key);
+        int length = endpoint.getRuntimeStateLength(name, factory);
+        if (length == -1) { runtimes.put(key, null); return null; }
+        if (length <= 0 || (length & 3) != 0) throw new IOException("invalid package runtime length: " + length);
+        byte[] bytes = new byte[length];
+        for (int offset = 0; offset < length;) {
+            int requested = Math.min(CHUNK, length - offset);
+            byte[] chunk = endpoint.getRuntimeStateChunk(name, factory, offset, requested);
+            if (chunk == null || chunk.length != requested) throw new IOException("incomplete package runtime chunk");
+            System.arraycopy(chunk, 0, bytes, offset, requested); offset += requested;
+        }
+        Parcel in = Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            PackageRuntimeState state = PackageRuntimeState.read(in);
+            if (in.dataAvail() != 0 || state.getVersion() != version || !state.getPackageName().equals(name)
+                    || state.isFactory() != factory) throw new IOException("package runtime capture mismatch");
+            runtimes.put(key, state);
+            return state;
+        } finally { in.recycle(); }
+    }
+
+    /** Assemble every setting and shared UID from this one capture before publication. */
+    public synchronized PackageSnapshots.Data captureData(PackageSnapshots.Owner owner,
+            boolean crossUserSuspensions) throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        Objects.requireNonNull(owner);
+        var packages = capturePackageMap(false, crossUserSuspensions);
+        var disabled = capturePackageMap(true, crossUserSuspensions);
+        var shared = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.SharedUserApi>();
+        for (String name : getSharedUserNames()) {
+            var replica = getSharedUserReplica(name, crossUserSuspensions);
+            if (replica == null) throw new IOException("missing shared UID inventory owner");
+            for (var member : replica.getPackageStates()) {
+                if (packages.get(member.getPackageName()) != member) throw new IOException("shared UID member outside package inventory");
+            }
+            shared.put(name, replica);
+        }
+        var sharedIds = new java.util.HashSet<Integer>();
+        for (var group : shared.values()) {
+            if (!sharedIds.add(group.getAppId())) throw new IOException("duplicate shared UID identity");
+        }
+        validateSharedGroups(packages, shared, false);
+        validateSharedGroups(disabled, shared, true);
+        return new PackageSnapshots.Data(version, packages, disabled, shared, owner);
+    }
+
+    private void validateSharedGroups(java.util.Map<String, com.android.server.pm.pkg.PackageState> packages,
+            java.util.Map<String, com.android.server.pm.pkg.SharedUserApi> shared, boolean factory)
+            throws RemoteException, IOException {
+        for (var state : packages.values()) {
+            if (!state.hasSharedUser()) continue;
+            var signing = getSigningState(state.getPackageName(), factory);
+            var group = shared.get(signing.getSharedGroupName());
+            if (group == null || group.getAppId() != state.getSharedUserAppId()) {
+                throw new IOException("package shared UID outside group inventory");
+            }
+        }
+    }
+
+    private java.util.Map<String, com.android.server.pm.pkg.PackageState> capturePackageMap(
+            boolean factory, boolean crossUserSuspensions) throws RemoteException, IOException {
+        String[] names = endpoint.getPackageNames(factory);
+        if (names == null) throw new IOException("missing package setting inventory");
+        var result = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.PackageState>();
+        for (String name : names) {
+            if (name == null || result.containsKey(name)) throw new IOException("invalid package setting inventory");
+            var replica = getPackageStateReplica(name, factory, crossUserSuspensions);
+            if (replica == null) throw new IOException("missing package setting inventory owner");
+            result.put(name, replica);
+        }
+        return result;
     }
 
     public synchronized java.util.List<String> getSharedUserNames() throws RemoteException, IOException {

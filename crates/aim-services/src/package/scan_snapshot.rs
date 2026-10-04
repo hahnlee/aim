@@ -9,6 +9,7 @@ pub mod user_record;
 pub mod setting_record;
 pub mod library_record;
 pub mod shared_record;
+pub mod runtime_record;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -96,6 +97,9 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
         return Err(fail("scan metadata is not finalized"));
     }
     owner.validate_seinfo().map_err(Error::Invalid)?;
+    owner
+        .validate_replica_runtime(Some(usage))
+        .map_err(Error::Invalid)?;
     owner.validate_shared_processes().map_err(Error::Invalid)?;
     owner
         .validate_library_dependencies()

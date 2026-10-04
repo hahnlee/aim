@@ -192,6 +192,7 @@ public final class PackageRoundTripOracle {
 
     private static void verify(String[] args) throws Exception {
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
+        verifyScopedRuntime(new java.io.File(args[0]));
         verifyFallbackParsing();
         android.content.pm.FallbackCategoryProvider.loadFallbacks();
         for (String line : java.nio.file.Files.readAllLines(new java.io.File(args[0], "fallback-categories.txt").toPath())) {
@@ -301,6 +302,97 @@ public final class PackageRoundTripOracle {
         throw new AssertionError("inconsistent lineage accepted");
     }
 
+    private static void verifyScopedRuntime(java.io.File directory) throws Exception {
+        String name = "aim.unloaded.fixture";
+        var owner = new PageOwner(name, null, null, null,
+            java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-false.signing").toPath()));
+        owner.setting = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-false.setting").toPath());
+        owner.factorySetting = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-true.setting").toPath());
+        owner.runtime = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-false.runtime").toPath());
+        owner.factoryRuntime = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-true.runtime").toPath());
+        owner.transientState = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-false.transient").toPath());
+        owner.factoryTransient = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-true.transient").toPath());
+        owner.factorySigning = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-true.signing").toPath());
+        owner.userState = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-false.user").toPath());
+        owner.factoryUser = java.nio.file.Files.readAllBytes(new java.io.File(directory, "scoped-true.user").toPath());
+        owner.userInventory = new int[] {0}; owner.factoryUserId = 10;
+        owner.hiddenApiPolicy = 2; owner.factoryHiddenApiPolicy = 2;
+        var lease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner));
+        var retained = new java.util.ArrayList<dev.aim.server.PackageStateReplica>();
+        for (boolean factory : new boolean[] {false, true}) {
+            var runtime = lease.getRuntimeState(name, factory);
+            if (runtime.hasCode() || runtime.isFactory() != factory || runtime != lease.getRuntimeState(name, factory)) throw new AssertionError("scoped runtime identity");
+            var replica = lease.getPackageStateReplica(name, factory, true);
+            if (replica.getAndroidPackage() != null || replica.getPkg() != null || replica.getHiddenApiEnforcementPolicy() != 2
+                    || replica != lease.getPackageStateReplica(name, factory, true)) throw new AssertionError("unloaded code/replica identity");
+            var original = lease.newSettingWithUsers(name, factory, true);
+            original.getPkgState().setSeInfo(factory ? null : "active-label").setOverrideSeInfo(factory ? "" : "active-override");
+            original.getPkgState().setLastPackageUsageTimeInMills(factory ? 0 : 2, factory ? 17 : 71);
+            original.getPkgState().setUsesLibraryFiles(factory ? java.util.Arrays.asList(null, "/system/null-slot.jar") : java.util.List.of());
+            original.setSigningDetails(android.content.pm.SigningDetails.UNKNOWN);
+            CapturedPackageStateOracle.verify(replica, original);
+            if (replica.getTargetSdkVersion() != (factory ? 24 : 28) || replica.getVersionCode() != (factory ? 7 : 19)
+                    || replica.getUserStateOrDefault(factory ? 10 : 0).getEnabledState() != (factory ? 3 : 2)
+                    || replica.getUserStates().size() != 1 || replica.getSeInfo() != null && factory) throw new AssertionError("active/factory inputs mixed");
+            long[] times = runtime.getUsage(); times[0] = 999;
+            if (replica.getLastPackageUsageTime()[factory ? 0 : 2] != (factory ? 17 : 71)) throw new AssertionError("runtime usage escaped");
+            retained.add(replica);
+        }
+        if (retained.get(0) == retained.get(1)) throw new AssertionError("factory identity reused active");
+        var visibility = new dev.aim.server.PackageSnapshots.Owner() {
+            @Override public String getFilteredPackageName(long version, String name, int uid, int user) { throw new UnsupportedOperationException("visibility owner outside this unfiltered fixture"); }
+            @Override public boolean shouldFilter(long version, com.android.server.pm.pkg.PackageState state, int uid, int user) { throw new UnsupportedOperationException("visibility owner outside this unfiltered fixture"); }
+        };
+        var data = lease.captureData(visibility, true);
+        try (var snapshot = dev.aim.server.PackageSnapshots.unfiltered(data)) {
+            if (snapshot.getPackageStates().size() != 1 || snapshot.getDisabledSystemPackageStates().size() != 1
+                    || snapshot.getPackageStates().get(name) != retained.get(0)
+                    || snapshot.getDisabledSystemPackageStates().get(name) != retained.get(1)
+                    || !snapshot.getSharedUsers().isEmpty()) throw new AssertionError("complete scoped snapshot maps differ");
+            try { snapshot.getPackageStates().clear(); throw new AssertionError("mutable captured snapshot map"); } catch (UnsupportedOperationException expected) {}
+        }
+        for (String[] invalid : new String[][] { {name, name}, {null}, {"unknown"} }) {
+            owner.activeInventoryOverride = invalid;
+            try (var bad = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+                try { bad.captureData(visibility, true); throw new AssertionError("incomplete/invalid full package map accepted"); } catch (java.io.IOException expected) {}
+            }
+            owner.activeInventoryOverride = null;
+            owner.factoryInventoryOverride = invalid;
+            try (var bad = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+                try { bad.captureData(visibility, true); throw new AssertionError("incomplete/invalid factory map accepted"); } catch (java.io.IOException expected) {}
+            }
+            owner.factoryInventoryOverride = null;
+        }
+        owner.sharedInventoryOverride = new String[] {"unknown.shared"};
+        try (var bad = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+            try { bad.captureData(visibility, true); throw new AssertionError("incomplete shared map accepted"); } catch (java.io.IOException expected) {}
+        }
+        owner.sharedInventoryOverride = null;
+        owner.shortChunk = true;
+        try (var bad = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+            try { bad.getRuntimeState(name, true); throw new AssertionError("short runtime chunk accepted"); } catch (java.io.IOException expected) {}
+        }
+        owner.shortChunk = false;
+        owner.version = 2;
+        try (var bad = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+            try { bad.getRuntimeState(name, false); throw new AssertionError("wrong runtime version accepted"); } catch (java.io.IOException expected) {}
+        }
+        owner.version = 1;
+        byte[] saved = owner.factoryRuntime; owner.factoryRuntime = owner.runtime;
+        try (var bad = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+            try { bad.getRuntimeState(name, true); throw new AssertionError("wrong runtime scope accepted"); } catch (java.io.IOException expected) {}
+        }
+        owner.factoryRuntime = saved;
+        lease.close();
+        for (var replica : retained) { replica.getTransientState(); replica.getSigningDetails(); replica.getSharedLibraryDependencies(); replica.getUserStates(); }
+        try (var snapshot = dev.aim.server.PackageSnapshots.unfiltered(data)) {
+            if (snapshot.getPackageStates().get(name) != retained.get(0) || snapshot.getDisabledSystemPackageStates().get(name) != retained.get(1)) throw new AssertionError("full maps depend on closed lease");
+        }
+
+        try { lease.getRuntimeState(name, false); throw new AssertionError("closed runtime lease accepted"); } catch (IllegalStateException expected) {}
+        try { lease.getPackageStateReplica(name, true, true); throw new AssertionError("closed factory replica accepted"); } catch (IllegalStateException expected) {}
+    }
+
     private static void verifySnapshot(java.io.File file, String name, int uid) throws Exception {
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".snapshot").toPath());
         byte[] usageBytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".usage").toPath());
@@ -313,6 +405,8 @@ public final class PackageRoundTripOracle {
         owner.libraries = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".libraries").toPath());
         owner.transientState = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".transient").toPath());
         stale.transientState = owner.transientState;
+        owner.runtime = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".captured-runtime").toPath());
+        stale.runtime = owner.runtime;
         owner.hiddenApiPolicy = Integer.parseInt(new String(java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".hidden-policy").toPath()), java.nio.charset.StandardCharsets.UTF_8));
         stale.hiddenApiPolicy = owner.hiddenApiPolicy;
         stale.userState = owner.userState;
@@ -1397,6 +1491,7 @@ public final class PackageRoundTripOracle {
         Integer hiddenApiPolicy;
         int hiddenApiReads;
         int[] userInventory = {0, 10, 11, 12, 13, 14};
+        String[] activeInventoryOverride, factoryInventoryOverride, sharedInventoryOverride;
         int userReads;
         boolean signingTail;
         byte[] signingOverride;
@@ -1417,10 +1512,25 @@ public final class PackageRoundTripOracle {
         @Override
         public long getVersion() { return version; }
         @Override
-        public String[] getPackageNames(boolean disabled) { return disabled ? new String[0] : new String[] {name}; }
+        public String[] getPackageNames(boolean disabled) {
+            String[] override = disabled ? factoryInventoryOverride : activeInventoryOverride;
+            return override != null ? override.clone() : disabled && factorySetting == null ? new String[0] : new String[] {name};
+        }
         @Override
-        public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && !disabled && name.equals(candidate) ? bytes.length : -1; }
-        @Override public String[] getSharedUserNames() { return sharedUsers.keySet().toArray(new String[0]); }
+        public int getCodeLength(String candidate, boolean disabled) { return missingOwner != 1 && bytes != null && !disabled && name.equals(candidate) ? bytes.length : -1; }
+        byte[] runtime, factoryRuntime, factorySigning, factoryTransient, factoryUser;
+        int factoryUserId = -1;
+        Integer factoryHiddenApiPolicy;
+        @Override public int getRuntimeStateLength(String candidate, boolean disabled) {
+            byte[] value = disabled ? factoryRuntime : runtime;
+            return name.equals(candidate) && value != null ? value.length : -1;
+        }
+        @Override public byte[] getRuntimeStateChunk(String candidate, boolean disabled, int offset, int length) {
+            byte[] value = disabled ? factoryRuntime : runtime;
+            return name.equals(candidate) && value != null
+                ? java.util.Arrays.copyOfRange(value, offset, Math.min(value.length, offset + length) - (shortChunk ? 1 : 0)) : null;
+        }
+        @Override public String[] getSharedUserNames() { return sharedInventoryOverride == null ? sharedUsers.keySet().toArray(new String[0]) : sharedInventoryOverride.clone(); }
         @Override public int getSharedUserStateLength(String name) { byte[] value = sharedUsers.get(name); return value == null ? -1 : value.length; }
         @Override public byte[] getSharedUserStateChunk(String name, int offset, int length) {
             byte[] value = sharedUsers.get(name);
@@ -1428,13 +1538,13 @@ public final class PackageRoundTripOracle {
         }
         @Override public int getHiddenApiEnforcementPolicy(String candidate, boolean disabled) throws android.os.RemoteException {
             if (fail || hiddenApiPolicy == null) throw new android.os.RemoteException();
-            if (disabled || !name.equals(candidate)) throw new IllegalArgumentException("unknown package setting");
+            if (!name.equals(candidate) || disabled && factoryHiddenApiPolicy == null) throw new IllegalArgumentException("unknown package setting");
             hiddenApiReads++;
-            return hiddenApiPolicy;
+            return disabled ? factoryHiddenApiPolicy : hiddenApiPolicy;
         }
         @Override public byte[] getTransientState(String candidate, boolean disabled) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
-            return missingOwner != 6 && !disabled && name.equals(candidate) ? transientState : null;
+            return missingOwner != 6 && name.equals(candidate) ? (disabled ? factoryTransient : transientState) : null;
         }
         @Override public int getLibraryStateLength(String candidate) { return missingOwner != 5 && name.equals(candidate) ? libraries.length : -1; }
         @Override public byte[] getLibraryStateChunk(String candidate, int offset, int length) throws android.os.RemoteException {
@@ -1452,17 +1562,19 @@ public final class PackageRoundTripOracle {
         }
         @Override public int[] getUserStateIds(String candidate, boolean disabled) throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
-            return !disabled && name.equals(candidate) && userInventory != null ? userInventory.clone() : null;
+            if (!name.equals(candidate)) return null;
+            return disabled ? (factoryUserId < 0 ? null : new int[] {factoryUserId}) : (userInventory == null ? null : userInventory.clone());
         }
         @Override public int getUserStateLength(String candidate, boolean disabled, int userId) {
-            return !disabled && name.equals(candidate) && (userId == 0 || (userId >= 10 && userId <= 14))
-                ? userBytes(userId).length : -1;
+            if (!name.equals(candidate)) return -1;
+            if (disabled) return userId == factoryUserId && factoryUser != null ? factoryUser.length : -1;
+            return (userId == 0 || (userId >= 10 && userId <= 14)) && userBytes(userId) != null ? userBytes(userId).length : -1;
         }
         @Override public byte[] getUserStateChunk(String candidate, boolean disabled, int userId, int offset, int length)
                 throws android.os.RemoteException {
             if (fail) throw new android.os.RemoteException();
             userReads++;
-            byte[] state = userBytes(userId);
+            byte[] state = disabled ? factoryUser : userBytes(userId);
             int end = Math.min(state.length, offset + length) - (shortChunk ? 1 : 0);
             return java.util.Arrays.copyOfRange(state, offset, end);
         }
@@ -1488,7 +1600,7 @@ public final class PackageRoundTripOracle {
             if (fail) throw new android.os.RemoteException();
             signingReads++;
             if (candidate.equals("missing")) return null;
-            byte[] state = signingOverride == null ? signing : signingOverride;
+            byte[] state = disabled && factorySigning != null ? factorySigning : signingOverride == null ? signing : signingOverride;
             return signingTail ? java.util.Arrays.copyOf(state, state.length + 4) : state.clone();
         }
         @Override

@@ -36,6 +36,70 @@ impl DisabledUserStates {
     }
 }
 
+/// Explicit sparse owners and original active-user aliases at the import boundary.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CapturedUsers {
+    pub states: BTreeMap<i32, UserState>,
+    pub active_aliases: BTreeSet<i32>,
+}
+
+impl SigningScan {
+    pub fn capture_user_states(
+        &mut self,
+        values: BTreeMap<(String, bool), CapturedUsers>,
+    ) -> Result<(), String> {
+        let expected: BTreeSet<_> = self
+            .settings
+            .packages
+            .iter()
+            .map(|p| (p.name.clone(), false))
+            .chain(
+                self.settings
+                    .disabled_system_packages
+                    .iter()
+                    .map(|p| (p.name.clone(), true)),
+            )
+            .collect();
+        if values.keys().cloned().collect::<BTreeSet<_>>() != expected {
+            return Err("captured user inventory differs".into());
+        }
+        for ((name, factory), users) in &values {
+            if users.states.keys().any(|id| *id < 0)
+                || !*factory && !users.active_aliases.is_empty()
+            {
+                return Err("invalid captured user identity/alias scope".into());
+            }
+            for id in &users.active_aliases {
+                let active = values
+                    .get(&(name.clone(), false))
+                    .and_then(|u| u.states.get(id))
+                    .ok_or("captured user alias has no active owner")?;
+                if users.states.get(id) != Some(active) {
+                    return Err("captured user alias differs from active owner".into());
+                }
+            }
+        }
+        let mut active = BTreeMap::new();
+        let mut disabled = BTreeMap::new();
+        for ((name, factory), users) in values {
+            if factory {
+                disabled.insert(
+                    name,
+                    DisabledUserStates {
+                        users: users.states,
+                        aliases: users.active_aliases,
+                    },
+                );
+            } else {
+                active.insert(name, users.states);
+            }
+        }
+        self.scanned_users = active;
+        self.disabled_users = disabled;
+        Ok(())
+    }
+}
+
 /// Factory metadata is not an active signer/library admission. Its verified
 /// code is retained separately for the later updated-data signature gate.
 #[derive(Debug)]

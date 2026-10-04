@@ -93,9 +93,10 @@ final class CapturedPackageStateOracle {
         if (replica.getUserStateOrDefault(999) != com.android.server.pm.pkg.PackageUserStateInternal.DEFAULT) throw new AssertionError("missing user default differs");
         users.put(999, null);
         if (replica.getUserStates().size() != expected.getUserStates().size()) throw new AssertionError("mutable sparse users escaped");
+        long firstUsage = expected.getLastPackageUsageTime()[0];
         var usage = replica.getLastPackageUsageTime(); usage[0] = 999;
         replica.getTransientState().setLastPackageUsageTimeInMills(0, 999);
-        if (replica.getLastPackageUsageTime()[0] != -1) throw new AssertionError("mutable usage escaped capture");
+        if (replica.getLastPackageUsageTime()[0] != firstUsage) throw new AssertionError("mutable usage escaped capture");
         var hash = replica.getRestrictUpdateHash();
         if (hash != null && hash.length != 0) {
             byte first = hash[0]; hash[0]++;

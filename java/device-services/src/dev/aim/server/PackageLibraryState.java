@@ -17,7 +17,6 @@ public final class PackageLibraryState {
     private PackageLibraryState(Parcel in) {
         version = in.readLong(); name = Objects.requireNonNull(in.readString()); appId = in.readInt();
         files = Objects.requireNonNull(in.createStringArray());
-        for (String path : files) Objects.requireNonNull(path);
         libraries = Objects.requireNonNull(in.createByteArray());
         var decoded = getLibraries();
         Parcel out = Parcel.obtain();

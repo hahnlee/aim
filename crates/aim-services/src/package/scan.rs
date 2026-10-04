@@ -38,7 +38,7 @@ mod updated_boot;
 pub use boot::{
     FirstBootSystemInputs, SavedSystemScanInputs, SystemImagePackages, SystemImageScan,
 };
-pub use disabled::{DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
+pub use disabled::{CapturedUsers, DisabledSystemMetadata, UpdatedSystemScan, UpdatedSystemSource};
 pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
 mod removal;
 mod setting;
@@ -48,8 +48,10 @@ mod legacy;
 mod libraries;
 mod hidden_api;
 mod shared_processes;
+mod replica_runtime;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
 pub use removal::RemovedSetting;
+pub use replica_runtime::ReplicaRuntime;
 pub use seinfo::{SeInfoCompatibility, SeInfoScan, SeInfoSetting, SeInfoState};
 mod uids;
 mod validate;

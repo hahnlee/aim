@@ -143,6 +143,13 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/SharedUserReplica.java"),
         )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageRuntimeState.java"),
+        )
+        .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
+        )
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();
@@ -292,6 +299,8 @@ fn native_package_parcels_match_original_read_write() {
     }
     eprintln!("original cache entries: {}", files.len());
     let snapshot = native_scan_objects(&data.0);
+    let runtime_snapshot = runtime_fixture_snapshot(&snapshot);
+    scoped_runtime_objects(&directory);
     cache_validation_objects(
         &directory,
         &snapshot.owner().loaded_packages()["android"].package,
@@ -308,6 +317,18 @@ fn native_package_parcels_match_original_read_write() {
     for loaded in snapshot.owner().loaded_packages().values() {
         let pkg = &loaded.package;
         let name = format!("scan-{}.native", pkg.uid);
+        fs::write(
+            directory.join(format!("{name}.captured-runtime")),
+            aim_services::package::scan_snapshot::runtime_record::captured(
+                &runtime_snapshot,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+
         let facade = loaded.facade_entry().unwrap();
         fs::write(
             directory.join(format!("{name}.hidden-policy")),
@@ -1457,6 +1478,186 @@ fn native_scan_objects(
             Ok(aim_services::package::libraries::Policy::pinned(false))
         })
         .unwrap();
+    aim_services::package::scan_snapshot::Store::new(owner, usage)
+        .unwrap()
+        .capture()
+}
+
+fn scoped_runtime_objects(directory: &std::path::Path) {
+    use aim_service_aidl::WriteParcelable;
+    use aim_services::package::{
+        owner::{legacy_permissions::Migration, usage::Usage},
+        scan::{CapturedUsers, ReplicaRuntime, SigningScan},
+        scan_snapshot::{Store, endpoint::PackageSigningState},
+        settings,
+        system_config::SystemConfig,
+    };
+    use std::collections::BTreeMap;
+    let name = "aim.unloaded.fixture";
+    let active = settings::Package {
+        name: name.into(),
+        code_path: "/data/app/unloaded".into(),
+        app_id: 10123,
+        domain_set_id: Some("00000000-0000-0000-0000-000000000001".into()),
+        leaving_shared_user: Some(false),
+        target_sdk_version: 28,
+        flags: 1,
+        version_code: 19,
+        ..Default::default()
+    };
+    let factory = settings::Package {
+        code_path: "/system/app/unloaded".into(),
+        version_code: 7,
+        target_sdk_version: 24,
+        domain_set_id: None,
+        ..active.clone()
+    };
+    let mut settings = settings::Settings::default();
+    settings.packages.push(active);
+    settings.disabled_system_packages.push(factory);
+    let mut owner = SigningScan::new(&SystemConfig::default(), &settings, 29).unwrap();
+    let mut states = BTreeMap::new();
+    for factory in [false, true] {
+        let mut users = CapturedUsers::default();
+        let mut user = aim_services::package::restrictions::UserState::default();
+        user.enabled = if factory { 3 } else { 2 };
+        users.states.insert(if factory { 10 } else { 0 }, user);
+        states.insert((name.into(), factory), users);
+    }
+    owner.capture_user_states(states).unwrap();
+    owner
+        .capture_legacy_permissions(
+            &[0, 10],
+            BTreeMap::from([
+                ((name.into(), false), Migration::default()),
+                ((name.into(), true), Migration::default()),
+            ]),
+            owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Migration::default()))
+                .collect(),
+        )
+        .unwrap();
+    owner
+        .capture_install_permissions_fixed(BTreeMap::from([
+            ((name.into(), false), true),
+            ((name.into(), true), false),
+        ]))
+        .unwrap();
+    let mut usage = Usage::new([name]);
+    usage.notify(name, 2, 71);
+    let mut runtimes = BTreeMap::new();
+    for factory in [false, true] {
+        let mut times = if factory {
+            [0; 8]
+        } else {
+            *usage.times(name).unwrap()
+        };
+        if factory {
+            times[0] = 17;
+        }
+        runtimes.insert(
+            (name.into(), factory),
+            ReplicaRuntime {
+                usage: times,
+                seinfo: if factory {
+                    None
+                } else {
+                    Some("active-label".into())
+                },
+                override_seinfo: if factory {
+                    Some("".into())
+                } else {
+                    Some("active-override".into())
+                },
+                library_files: if factory {
+                    vec![None, Some("/system/null-slot.jar".into())]
+                } else {
+                    vec![]
+                },
+                libraries: vec![],
+            },
+        );
+    }
+    owner.capture_replica_runtime(runtimes).unwrap();
+    let snapshot = Store::new(owner, usage).unwrap().capture();
+    for factory in [false, true] {
+        let prefix = format!("scoped-{factory}");
+        fs::write(
+            directory.join(format!("{prefix}.setting")),
+            aim_services::package::scan_snapshot::setting_record::captured(
+                &snapshot, name, factory,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            directory.join(format!("{prefix}.runtime")),
+            aim_services::package::scan_snapshot::runtime_record::captured(
+                &snapshot, name, factory,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+        let mut signing = aim_binder_host::parcel::Parcel::new();
+        PackageSigningState::captured(&snapshot, name, factory)
+            .unwrap()
+            .unwrap()
+            .write_to(&mut signing);
+        fs::write(directory.join(format!("{prefix}.signing")), signing.data()).unwrap();
+        let mut transient = aim_binder_host::parcel::Parcel::new();
+        aim_services::package::scan_snapshot::endpoint::PackageTransientState::captured(
+            &snapshot, name, factory,
+        )
+        .unwrap()
+        .write_to(&mut transient);
+        fs::write(
+            directory.join(format!("{prefix}.transient")),
+            transient.data(),
+        )
+        .unwrap();
+        let user = if factory { 10 } else { 0 };
+        fs::write(
+            directory.join(format!("{prefix}.user")),
+            aim_services::package::scan_snapshot::user_record::captured(
+                &snapshot, name, factory, user,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn runtime_fixture_snapshot(
+    snapshot: &aim_services::package::scan_snapshot::Snapshot,
+) -> std::sync::Arc<aim_services::package::scan_snapshot::Snapshot> {
+    let mut owner = snapshot.owner().clone();
+    let usage = snapshot.usage().clone();
+    let runtimes = owner
+        .settings
+        .packages
+        .iter()
+        .map(|setting| {
+            let labels = owner.seinfo_state(&setting.name).unwrap().unwrap();
+            let (files, libraries) = owner.library_dependencies(&setting.name).unwrap().unwrap();
+            (
+                (setting.name.clone(), false),
+                aim_services::package::scan::ReplicaRuntime {
+                    usage: *usage.times(&setting.name).unwrap(),
+                    seinfo: labels.base.clone(),
+                    override_seinfo: labels.override_label.clone(),
+                    library_files: files.iter().cloned().map(Some).collect(),
+                    libraries: libraries.to_vec(),
+                },
+            )
+        })
+        .collect();
+    owner.capture_replica_runtime(runtimes).unwrap();
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()

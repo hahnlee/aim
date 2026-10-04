@@ -32,4 +32,7 @@ interface IPackageScanSnapshot {
     String[] getSharedUserNames();
     int getSharedUserStateLength(String sharedUserName);
     byte[] getSharedUserStateChunk(String sharedUserName, int offset, int length);
+    /** Explicit runtime owners for each active/factory setting, including unloaded code. */
+    int getRuntimeStateLength(String packageName, boolean disabled);
+    byte[] getRuntimeStateChunk(String packageName, boolean disabled, int offset, int length);
 }

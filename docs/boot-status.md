@@ -744,7 +744,7 @@ pass (3.56s; one ignored/not run), all integration targets compile (5.97s), and
 the full boot build passes (66.0s; nine rebuilt nodes), including the original-PMS
 userdata template. No owned runtime processes or disposable data mounts remain;
 the reusable derived system image stays mounted read-only.
-Loaded active captures now expose a typed PackageStateReplica implementing the
+Captured settings expose a typed PackageStateReplica implementing the
 pinned PackageStateInternal interface. Each lease retains one record per package
 and suspension policy; its original parsed object and immutable user replicas
 retain identity. Original getters supply scalar/ABI/page-size semantics from a
@@ -825,11 +825,35 @@ image scan passes (51.39s), and the full build passes (22.1s; three host nodes r
 39 fresh, including the retained original-PMS template). No owned runtime processes
 or disposable test mounts remain. Native PMS activation and acceptance remain
 unproved.
-Factory/unloaded facade assembly, live APEX/hidden-state delivery and
-complete PackageState facade publication remain #836; live query/write shadow differences
-remain #865-#868.
-Original-state import,
-complete live user inventory, permission boot ordering, original writer requests,
+PackageStateInternal assembly now covers active/factory settings and genuine
+unloaded code through explicit scoped runtime captures (#873). The native owner
+accepts the complete setting inventory atomically, retaining usage, nullable base/
+override seInfo, library objects and nullable file slots separately per scope.
+Identity/code changes or disagreement with assigned active usage/seInfo/libraries
+reject publication until recaptured. Generated snapshot methods 21/22 page these
+records with an explicit code-presence bit; Java rejects a missing code record
+for a loaded setting, restores actual runtime inputs through retained original
+setters, and caches replicas by name, scope and suspension policy. The image has
+no array-wide usage setter; its retained reason setters restore all eight values.
+A complete sparse user import now takes original factory-to-active aliases
+explicitly, rejects partial/foreign/negative inventories or differing alias
+values, and preserves independent factory states while updating actual aliases.
+The Java lease assembles complete active, factory and shared maps into
+PackageSnapshots.Data only after every listed owner resolves; duplicate/null names,
+missing records and shared members outside the active inventory reject the map.
+Original ART verifies unloaded active/factory getters against independently
+populated original runtime owners, distinct usage/version/SDK/user scopes, null
+seInfo, nullable library-file slots, detached usage, full immutable maps, malformed
+inventories, short chunks, version/scope mismatches and use after lease close
+(20.49s full package oracle). All 411 units pass (3.13s; one ignored/not run),
+including atomic import/stale publication, explicit user aliases and real Binder
+paging of large factory records retained across a newer publication. All integration
+targets compile, original Java linkage passes (4.47s), the actual first-system
+image scan passes (42.62s), and the full build passes (60.6s; ten rebuilt nodes),
+including the original-PMS userdata template. Live bootstrap/runtime/user producers,
+copy/update ownership, native visibility and publication into running SystemServer
+remain #873/#862/#836; live query/write differences remain #865-#868. Live APEX/
+hidden-state delivery, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.
 The native usage owner now reads PackageUsage's original v0/v1

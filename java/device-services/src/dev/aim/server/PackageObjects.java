@@ -100,6 +100,20 @@ public final class PackageObjects {
         setting.getPkgState().setOverrideSeInfo(state.getOverrideLabel());
     }
 
+    public static void restoreRuntime(com.android.server.pm.PackageSetting setting,
+            PackageRuntimeState state, long version, boolean factory) {
+        if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())
+                || state.getAppId() != setting.getAppId() || state.isFactory() != factory) {
+            throw new IllegalArgumentException("runtime capture mismatch");
+        }
+        setting.getPkgState().setSeInfo(state.getSeInfo()).setOverrideSeInfo(state.getOverrideSeInfo());
+        long[] usage = state.getUsage();
+        for (int reason = 0; reason < usage.length; reason++) {
+            setting.getPkgState().setLastPackageUsageTimeInMills(reason, usage[reason]);
+        }
+        restoreLibraries(setting, state.getLibraries(), version);
+    }
+
     public static PackageImpl fromCache(byte[] cache, byte[][] pastCertificates, int[] capabilities) {
         PackageImpl pkg = (PackageImpl) PackageCacher.fromCacheEntryStatic(cache);
         pkg.setSigningDetails(restoreSigning(pkg.getSigningDetails(), pastCertificates, capabilities));
