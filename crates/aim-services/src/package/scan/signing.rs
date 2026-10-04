@@ -1431,7 +1431,7 @@ impl SigningScan {
             self.settings.disabled_system_packages[at].shared_user_app_id = None;
         }
         self.settings.shared_users.retain(|g| g.name != name);
-        self.identities.shared_users.remove(name);
+        self.identities.remove_shared_user(name);
         Ok(true)
     }
 }

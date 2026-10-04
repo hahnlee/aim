@@ -552,9 +552,10 @@ impl Service for Endpoint {
                     snapshot
                         .owner()
                         .identities
-                        .shared_users
-                        .keys()
-                        .map(|name| Some(name.clone()))
+                        .ordered_shared_users()
+                        .map_err(|_| aim_binder_host::parcel::BAD_VALUE)?
+                        .into_iter()
+                        .map(|(name, _)| Some(name.to_owned()))
                         .collect(),
                 );
                 api::write_get_shared_user_names_reply(&mut reply, &names);

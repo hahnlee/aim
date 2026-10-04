@@ -4,6 +4,8 @@ public final class PackageRoundTripOracle {
     public static void main(String[] args) throws Exception {
         try {
             verify(args);
+            // Settings' test constructor starts the original non-daemon BackgroundThread.
+            System.exit(0);
         } catch (Throwable failure) {
             failure.printStackTrace(System.out);
             System.exit(1);
@@ -1196,6 +1198,7 @@ public final class PackageRoundTripOracle {
             catch (java.io.IOException expected) {}
         }
         var assembled = lease.newScannedSetting(name, true);
+        com.android.server.pm.ScanSettingsWriteOracle.write(file, lease, assembled);
         var assembledState = (com.android.server.pm.pkg.PackageState)assembled;
         var assembledPkg = (com.android.internal.pm.parsing.pkg.PackageImpl)assembledState.getAndroidPackage();
         if (assembledPkg.getUid() != uid || !assembledPkg.getPackageName().equals(name)

@@ -57,7 +57,7 @@ impl SigningScan {
                 .chain(&self.settings.disabled_system_packages)
                 .any(|p| p.shared_app_id() == Some(id));
         if !used {
-            self.identities.shared_users.remove(&name);
+            self.identities.remove_shared_user(&name);
             self.settings.shared_users.retain(|g| g.name != name);
             self.identities.ids.remove(id);
         }

@@ -1,6 +1,11 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public final class Settings {
+    void writePackageLPr(com.android.modules.utils.TypedXmlSerializer serializer,
+        java.util.ArrayList<android.content.pm.Signature> certificates, PackageSetting setting)
+        throws java.io.IOException { throw new RuntimeException("stub"); }
+    void writeDisabledSysPackageLPr(com.android.modules.utils.TypedXmlSerializer serializer,
+        PackageSetting setting) throws java.io.IOException { throw new RuntimeException("stub"); }
     static void updatePackageSetting(PackageSetting pkg, PackageSetting disabled,
         SharedUserSetting existingShared, SharedUserSetting shared, java.io.File path,
         String legacyLib, String primaryAbi, String secondaryAbi, int flags, int privateFlags,

@@ -199,6 +199,56 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         aim_services::package::scan_snapshot::Store::new(scan.owner.clone(), usage).unwrap();
     let original_capture = captures.capture();
     assert_eq!(original_capture.version(), 1);
+    // First native settings write starts with no package inventory and retains
+    // unrelated complete XML. The immutable captured scan is its sole source.
+    let settings_path = writable.join("system/packages.xml");
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings_path,
+        b"<packages><vendor-extension keep='true'/></packages>",
+    )
+    .unwrap();
+    let mut persistence = aim_services::package::owner::Store::open(&writable, &[0])
+        .unwrap()
+        .unwrap();
+    persistence.commit_scan_settings(&original_capture).unwrap();
+    let reopened = aim_services::package::owner::Store::open(&writable, &[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.state().settings, persistence.state().settings);
+    assert_eq!(
+        reopened.state().settings.packages.len(),
+        scan.packages.len()
+    );
+    for actual in &reopened.state().settings.packages {
+        let expected = &scan
+            .owner
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == actual.name)
+            .unwrap();
+        assert_eq!(actual.app_id, expected.app_id);
+        assert_eq!(actual.code_path, expected.code_path);
+        assert_eq!(actual.flags, expected.flags);
+        assert_eq!(actual.private_flags, expected.private_flags);
+        assert_eq!(actual.domain_set_id, expected.domain_set_id);
+        assert_eq!(
+            actual.signatures.as_ref().unwrap().signatures,
+            expected.signatures.as_ref().unwrap().signatures
+        );
+        assert_eq!(actual.key_set_data, expected.key_set_data);
+    }
+    let native_settings = std::fs::read(&settings_path).unwrap();
+    assert!(native_settings.starts_with(aim_android_xml::abx::MAGIC));
+    assert_eq!(
+        native_settings,
+        std::fs::read(settings_path.with_file_name("packages.xml.reservecopy")).unwrap()
+    );
+    let document = aim_android_xml::read(&native_settings).unwrap();
+    assert!(document.children().any(|e| e.name == "vendor-extension"));
+    persistence.commit_scan_settings(&original_capture).unwrap();
+    assert_eq!(std::fs::read(&settings_path).unwrap(), native_settings);
     let mut invalid_capture = scan.owner.clone();
     invalid_capture.settings.packages[0]
         .code_path

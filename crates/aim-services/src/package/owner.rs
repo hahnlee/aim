@@ -36,6 +36,7 @@ pub mod seinfo;
 pub mod shared_users;
 pub mod shared_processes;
 mod signing;
+mod scan_settings;
 pub mod update_ownership;
 pub mod usage;
 pub mod transient;
@@ -358,6 +359,19 @@ impl Store {
             current.packages.retain(|(name, _)| name != package);
         }
         result.map(|()| true)
+    }
+
+    /// Persist package/shared setting metadata from a validated immutable scan.
+    /// APEX code is omitted as in Settings.writeLPr. Permission/domain/version
+    /// owners must be reconciled already; users/list/publication follow separately.
+    pub fn commit_scan_settings(
+        &mut self,
+        snapshot: &super::scan_snapshot::Snapshot,
+    ) -> Result<(), WriteError> {
+        let scan = snapshot.owner();
+        let root =
+            scan_settings::replace(&self.settings_document, scan).map_err(WriteError::before)?;
+        self.commit_package_document_with_key_sets(root, Some(scan.settings.key_sets.clone()))
     }
 
     /// Persist an owner-authorized signing scan. This changes signature

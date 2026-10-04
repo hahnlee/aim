@@ -598,7 +598,7 @@ impl SigningScan {
             }
         }
         self.settings.shared_users.retain(|g| g.name != group_name);
-        self.identities.shared_users.remove(&group_name);
+        self.identities.remove_shared_user(&group_name);
         self.commit_converted_legacy(name, &group_name, id)?;
         self.rebind_apex_seinfo_after_conversion(name, id)?;
         self.unlink_apex_parsed_uid(name, id)?;

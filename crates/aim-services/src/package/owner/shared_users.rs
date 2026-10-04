@@ -326,6 +326,7 @@ pub struct Rejected {
 pub struct Bootstrap {
     pub ids: AppIds,
     pub shared_users: BTreeMap<String, SharedUser>,
+    shared_user_order: Vec<String>,
     pub rejected: Vec<Rejected>,
 }
 
@@ -351,6 +352,7 @@ impl Bootstrap {
             let app_id = self.ids.acquire(Owner::SharedUser(name.into()))?;
             self.shared_users
                 .insert(name.into(), SharedUser::new(app_id, flags, private_flags));
+            self.shared_user_order.push(name.into());
         }
         Ok(self.shared_users.get(name))
     }
@@ -361,6 +363,7 @@ impl Bootstrap {
         let mut boot = Self {
             ids: AppIds::default(),
             shared_users: BTreeMap::new(),
+            shared_user_order: Vec::new(),
             rejected: Vec::new(),
         };
         for (name, id) in [
@@ -461,10 +464,38 @@ impl Bootstrap {
             .map(|(name, _)| name.clone())
             .collect();
         for name in &removed {
-            let group = self.shared_users.remove(name).unwrap();
+            let group = self.remove_shared_user(name).unwrap();
             self.ids.remove(group.app_id);
         }
         removed
+    }
+
+    pub(in crate::package) fn remove_shared_user(&mut self, name: &str) -> Option<SharedUser> {
+        let removed = self.shared_users.remove(name);
+        if removed.is_some() {
+            self.shared_user_order.retain(|n| n != name);
+        }
+        removed
+    }
+
+    /// ArrayMap values: signed UTF-16 hash, stable within equal hashes.
+    pub(in crate::package) fn ordered_shared_users(
+        &self,
+    ) -> Result<Vec<(&str, &SharedUser)>, String> {
+        let names: BTreeSet<_> = self.shared_user_order.iter().collect();
+        if names.len() != self.shared_user_order.len()
+            || names.len() != self.shared_users.len()
+            || !self.shared_users.keys().all(|name| names.contains(name))
+        {
+            return Err("shared UID insertion order differs from its owners".into());
+        }
+        let mut groups: Vec<_> = self
+            .shared_user_order
+            .iter()
+            .map(|name| (name.as_str(), &self.shared_users[name]))
+            .collect();
+        groups.sort_by_key(|(name, _)| crate::package::info::java_hash(name));
+        Ok(groups)
     }
 
     fn register(
@@ -488,6 +519,7 @@ impl Bootstrap {
             .map_err(Rejection::Slot)?;
         self.shared_users
             .insert(name.into(), SharedUser::new(app_id, flags, private_flags));
+        self.shared_user_order.push(name.into());
         Ok(())
     }
 }
@@ -496,6 +528,62 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn array_map_order_preserves_collisions_restoration_and_capture() {
+        let mut boot = Bootstrap::new(&SystemConfig::default());
+        boot.get_shared_user("BB", 0, 0, true).unwrap();
+        boot.get_shared_user("Aa", 0, 0, true).unwrap();
+        let names = |boot: &Bootstrap| {
+            boot.ordered_shared_users()
+                .unwrap()
+                .into_iter()
+                .map(|(name, _)| name.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let collision_names = |boot: &Bootstrap| {
+            names(boot)
+                .into_iter()
+                .filter(|name| name == "Aa" || name == "BB")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(collision_names(&boot), ["BB", "Aa"]);
+        let prior = boot.clone();
+        boot.get_shared_user("BB", 1, 8, true).unwrap();
+        assert_eq!(boot, prior);
+        let removed = boot.remove_shared_user("BB").unwrap();
+        boot.ids.remove(removed.app_id);
+        boot.get_shared_user("BB", 0, 0, true).unwrap();
+        assert_eq!(collision_names(&boot), ["Aa", "BB"]);
+        assert_eq!(collision_names(&prior), ["BB", "Aa"]);
+        let ordered = boot.ordered_shared_users().unwrap();
+        assert!(
+            ordered
+                .windows(2)
+                .all(|pair| crate::package::info::java_hash(pair[0].0)
+                    <= crate::package::info::java_hash(pair[1].0))
+        );
+        let saved = Settings {
+            shared_users: ordered
+                .into_iter()
+                .map(|(name, group)| SavedGroup {
+                    name: name.into(),
+                    app_id: group.app_id,
+                    flags: 0,
+                    signatures: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let restored = Bootstrap::restore(&SystemConfig::default(), &saved).unwrap();
+        assert_eq!(names(&restored), names(&boot));
+        let mut missing = boot.clone();
+        missing.shared_user_order.pop();
+        assert!(missing.ordered_shared_users().is_err());
+        let mut duplicate = boot;
+        duplicate.shared_user_order.push("Aa".into());
+        assert!(duplicate.ordered_shared_users().is_err());
+    }
 
     #[test]
     fn retained_unparsed_members_keep_instance_flags_sdk_and_old_versions() {

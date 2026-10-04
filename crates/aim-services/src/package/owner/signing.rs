@@ -12,6 +12,9 @@ fn without_signatures(mut settings: Settings) -> Settings {
         .chain(&mut settings.disabled_system_packages)
     {
         package.signatures = None;
+        if let Some(signatures) = &mut package.install_source.initiating_package_signatures {
+            signatures.public_keys = None;
+        }
     }
     for group in &mut settings.shared_users {
         group.signatures = None;
@@ -41,6 +44,11 @@ pub(super) fn persisted(mut settings: Settings) -> Settings {
         )
     {
         signatures.public_keys = None;
+    }
+    for package in &mut settings.packages {
+        if let Some(signatures) = &mut package.install_source.initiating_package_signatures {
+            signatures.public_keys = None;
+        }
     }
     settings
 }
@@ -153,6 +161,14 @@ fn replace_scan(
             attribute(e, "userId", Some(Value::Int(package.app_id)));
         }
     }
+    rewrite_tables(&mut root, desired)?;
+    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
+        return Err("signature document did not preserve desired settings".into());
+    }
+    Ok(root)
+}
+
+pub(super) fn rewrite_tables(root: &mut Element, desired: &Settings) -> Result<(), String> {
     // Rebuild the complete table after removing groups: a removed group's
     // certificate definition may have been referenced by a retained package.
     let mut certificates = Vec::new();
@@ -194,68 +210,89 @@ fn replace_scan(
         if !seen.insert((owner.name.clone(), name)) {
             return Err("duplicate signature owner (#803)".into());
         }
-        let position = owner
-            .content
-            .iter()
-            .position(|n| matches!(n, Node::Element(e) if e.name == "sigs"));
-        owner
-            .content
-            .retain(|n| !matches!(n, Node::Element(e) if e.name == "sigs"));
-        if let Some(signatures) = signatures {
-            if signatures.signatures.is_empty() {
-                return Err("cannot persist unknown signing details".into());
-            }
-            let mut sigs = element("sigs");
-            attribute(
-                &mut sigs,
-                "count",
-                Some(Value::Int(
-                    signatures
-                        .signatures
-                        .len()
-                        .try_into()
-                        .map_err(|_| "too many signers")?,
-                )),
-            );
-            attribute(
-                &mut sigs,
-                "schemeVersion",
-                Some(Value::Int(signatures.scheme_version)),
-            );
-            for certificate in &signatures.signatures {
-                sigs.content
-                    .push(Node::Element(cert(certificate, None, &mut certificates)));
-            }
-            if let Some(past) = &signatures.past_signatures {
-                let mut lineage = element("pastSigs");
-                attribute(
-                    &mut lineage,
-                    "count",
-                    Some(Value::Int(
-                        past.len().try_into().map_err(|_| "too many past signers")?,
-                    )),
-                );
-                for (certificate, flags) in past {
-                    lineage.content.push(Node::Element(cert(
-                        certificate,
-                        Some(*flags),
-                        &mut certificates,
-                    )));
-                }
-                sigs.content.push(Node::Element(lineage));
-            }
-            owner.content.insert(
-                position
-                    .unwrap_or(owner.content.len())
-                    .min(owner.content.len()),
-                Node::Element(sigs),
-            );
+        write_signatures(owner, "sigs", signatures.as_ref(), &mut certificates)?;
+        if owner.name == "package" {
+            let package = desired
+                .packages
+                .iter()
+                .find(|p| owner.string("name").as_deref() == Some(p.name.as_str()))
+                .ok_or("unmodelled initiator signature owner (#909)")?;
+            write_signatures(
+                owner,
+                "install-initiator-sigs",
+                package
+                    .install_source
+                    .initiating_package_signatures
+                    .as_ref(),
+                &mut certificates,
+            )?;
         }
     }
-    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
-        return Err("signature document did not preserve desired settings".into());
+    Ok(())
+}
+
+pub(super) fn write_signatures(
+    owner: &mut Element,
+    tag: &str,
+    signatures: Option<&crate::package::settings::Signatures>,
+    certificates: &mut Vec<Vec<u8>>,
+) -> Result<(), String> {
+    let position = owner
+        .content
+        .iter()
+        .position(|n| matches!(n, Node::Element(e) if e.name == tag));
+    owner
+        .content
+        .retain(|n| !matches!(n, Node::Element(e) if e.name == tag));
+    if let Some(signatures) = signatures {
+        if signatures.signatures.is_empty() {
+            return Err("cannot persist unknown signing details".into());
+        }
+        let mut sigs = element(tag);
+        attribute(
+            &mut sigs,
+            "count",
+            Some(Value::Int(
+                signatures
+                    .signatures
+                    .len()
+                    .try_into()
+                    .map_err(|_| "too many signers")?,
+            )),
+        );
+        attribute(
+            &mut sigs,
+            "schemeVersion",
+            Some(Value::Int(signatures.scheme_version)),
+        );
+        for certificate in &signatures.signatures {
+            sigs.content
+                .push(Node::Element(cert(certificate, None, certificates)));
+        }
+        if let Some(past) = &signatures.past_signatures {
+            let mut lineage = element("pastSigs");
+            attribute(
+                &mut lineage,
+                "count",
+                Some(Value::Int(
+                    past.len().try_into().map_err(|_| "too many past signers")?,
+                )),
+            );
+            for (certificate, flags) in past {
+                lineage
+                    .content
+                    .push(Node::Element(cert(certificate, Some(*flags), certificates)));
+            }
+            sigs.content.push(Node::Element(lineage));
+        }
+        owner.content.insert(
+            position
+                .unwrap_or(owner.content.len())
+                .min(owner.content.len()),
+            Node::Element(sigs),
+        );
     }
-    Ok(root)
+    Ok(())
 }
 
 fn retain_signer(

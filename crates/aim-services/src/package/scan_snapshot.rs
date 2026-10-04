@@ -102,6 +102,10 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
         .ids
         .validate_detached()
         .map_err(Error::Invalid)?;
+    owner
+        .identities
+        .ordered_shared_users()
+        .map_err(Error::Invalid)?;
     owner.validate_seinfo().map_err(Error::Invalid)?;
     owner
         .validate_replica_runtime(Some(usage))

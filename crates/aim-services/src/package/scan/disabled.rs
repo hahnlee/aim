@@ -900,7 +900,7 @@ mod tests {
             owner.pending_metadata.clear();
             if shared {
                 let mut broken = owner.clone();
-                broken.identities.shared_users.remove("factory.uid");
+                broken.identities.remove_shared_user("factory.uid");
                 let before = broken.clone();
                 assert!(broken.disable_system_package("factory").is_err());
                 assert_eq!(broken, before);

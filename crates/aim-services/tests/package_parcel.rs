@@ -60,6 +60,10 @@ fn native_package_parcels_match_original_read_write() {
         .args(["--release", "17", "-d"])
         .arg(&classes)
         .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ScanSettingsWriteOracle.java"),
+        )
+        .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageTransientState.java"),
         )
@@ -374,6 +378,117 @@ fn native_package_parcels_match_original_read_write() {
     eprintln!("original cache entries: {}", files.len());
     let snapshot = native_scan_objects(&data.0);
     let runtime_snapshot = runtime_fixture_snapshot(&snapshot);
+    // Separate valid writer inputs: the original XML writers reject nullable
+    // MIME values and key aliases; existing oracle cases retain those failures.
+    let mut writer_owner = snapshot.owner().clone();
+    for setting in &mut writer_owner.settings.packages {
+        setting.mime_groups.retain(|(name, _)| name.is_some());
+        for (_, types) in &mut setting.mime_groups {
+            types.retain(Option::is_some);
+        }
+        setting
+            .key_set_data
+            .defined_key_sets
+            .retain(|(alias, _)| alias.is_some());
+    }
+    writer_owner.settings.key_sets.reference_counts = None;
+    aim_services::package::owner::key_sets::restore(&mut writer_owner.settings).unwrap();
+    let writer_snapshot =
+        aim_services::package::scan_snapshot::Store::new(writer_owner, snapshot.usage().clone())
+            .unwrap()
+            .capture();
+    let writer_data = directory.join("native-settings-writer");
+    fs::create_dir_all(writer_data.join("system")).unwrap();
+    fs::write(writer_data.join("system/packages.xml"), b"<packages/>").unwrap();
+    let mut writer_store = aim_services::package::owner::Store::open(&writer_data, &[0])
+        .unwrap()
+        .unwrap();
+    writer_store.commit_scan_settings(&writer_snapshot).unwrap();
+    let reindexed_data = directory.join("reindexed-settings-writer");
+    fs::create_dir_all(reindexed_data.join("system")).unwrap();
+    fs::write(
+        reindexed_data.join("system/packages.xml"),
+        fs::read(writer_data.join("system/packages.xml")).unwrap(),
+    )
+    .unwrap();
+    let mut reindexed = aim_services::package::owner::Store::open(&reindexed_data, &[0])
+        .unwrap()
+        .unwrap();
+    let mut desired = reindexed.state().settings.clone();
+    let first = &desired.packages[0].signatures.as_ref().unwrap().signatures[0];
+    let replacement = state
+        .settings
+        .packages
+        .iter()
+        .filter_map(|p| p.signatures.as_ref())
+        .flat_map(|s| s.signatures.iter())
+        .find(|cert| *cert != first)
+        .expect("original image has no distinct certificate fixture")
+        .clone();
+    desired.packages[0].signatures.as_mut().unwrap().signatures = vec![replacement];
+    reindexed.commit_signatures(&desired).unwrap();
+    fn describe(signatures: &aim_services::package::settings::Signatures) -> String {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+        let current = signatures
+            .signatures
+            .iter()
+            .map(|c| hex(c))
+            .collect::<Vec<_>>()
+            .join(",");
+        let past = signatures
+            .past_signatures
+            .as_ref()
+            .map_or("null".into(), |past| {
+                past.iter()
+                    .map(|(cert, flags)| format!("{}:{flags}", hex(cert)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+        format!("{}|{current}|{past}", signatures.scheme_version)
+    }
+    let mut expected_certificates = String::new();
+    for package in &desired.packages {
+        for (tag, signatures) in [
+            ("sigs", &package.signatures),
+            (
+                "install-initiator-sigs",
+                &package.install_source.initiating_package_signatures,
+            ),
+        ] {
+            if let Some(signatures) = signatures {
+                expected_certificates.push_str(&format!(
+                    "package/{}/{tag}={}\n",
+                    package.name,
+                    describe(signatures)
+                ));
+            }
+        }
+    }
+    for group in &desired.shared_users {
+        if let Some(signatures) = &group.signatures {
+            expected_certificates.push_str(&format!(
+                "shared-user/{}/sigs={}\n",
+                group.name,
+                describe(signatures)
+            ));
+        }
+    }
+    fs::write(
+        directory.join("reindexed-certificates.properties"),
+        expected_certificates,
+    )
+    .unwrap();
+
+    let mut writer_document =
+        aim_android_xml::read(&fs::read(writer_data.join("system/packages.xml")).unwrap()).unwrap();
+    // Global keyset ownership is checked by its separate original oracle.
+    writer_document
+        .content
+        .retain(|n| !matches!(n, aim_android_xml::Node::Element(e) if e.name == "keyset-settings"));
+    let writer_expected =
+        aim_services::package::settings::Settings::parse(&writer_document).unwrap();
     let mut static_identity = snapshot.owner().loaded_packages()["android"]
         .package
         .clone();
@@ -495,6 +610,17 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap()
         .unwrap();
         fs::write(directory.join(format!("{name}.setting")), setting_bytes).unwrap();
+        fs::write(
+            directory.join(format!("{name}.writer-setting")),
+            aim_services::package::scan_snapshot::setting_record::captured(
+                &writer_snapshot,
+                &pkg.package_name,
+                false,
+            )
+            .unwrap()
+            .unwrap(),
+        )
+        .unwrap();
         for variant in 0..49 {
             let factory = variant >= 24 && variant < 48;
             let mut owner = snapshot.owner().clone();
@@ -3308,6 +3434,24 @@ fn native_package_parcels_match_original_read_write() {
     aim_services::package::scan_snapshot::Store::new(imported, snapshot.usage().clone()).unwrap();
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
+            let original_settings = aim_services::package::settings::Settings::parse(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("{name}.settings-original"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(original_settings.packages.len(), 1);
+            let native_setting = writer_expected
+                .packages
+                .iter()
+                .find(|p| p.name == package)
+                .unwrap();
+            assert_eq!(
+                &original_settings.packages[0], native_setting,
+                "{name}: native setting persistence differs from original Settings writer"
+            );
+            assert_eq!(original_settings.shared_users, writer_expected.shared_users);
             for (suffix, apex) in [("apex-package-policy", true), ("apk-in-apex-policy", false)] {
                 let policy = AndroidPackage::read_cache_entry(
                     &fs::read(directory.join(format!("{name}.{suffix}"))).unwrap(),

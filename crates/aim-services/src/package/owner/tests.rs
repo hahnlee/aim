@@ -1316,3 +1316,158 @@ fn imported_keyset_references_survive_commits_until_restart() {
     assert!(reopened.key_sets.public_keys.is_empty());
     assert_eq!(reopened.key_sets.last_issued_key_set_id, 2);
 }
+
+#[test]
+fn initiating_signatures_share_the_reindexed_package_and_group_table() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' installInitiator='installer'><sigs count='1' schemeVersion='3'><cert index='0' key='aa'/></sigs><install-initiator-sigs count='1' schemeVersion='3'><cert index='0'/><pastSigs count='1'><cert index='1' key='bb' flags='7'/></pastSigs></install-initiator-sigs></package><shared-user name='group' userId='1000'><sigs count='1' schemeVersion='3'><cert index='1'/></sigs></shared-user></packages>").unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let mut desired = store.state.settings.clone();
+    desired.packages[0].signatures.as_mut().unwrap().signatures = vec![vec![0xcc]];
+    store.commit_signatures(&desired).unwrap();
+    assert_eq!(store.state.settings, desired);
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state.settings,
+        desired
+    );
+    let root = aim_android_xml::read(&fs::read(path).unwrap()).unwrap();
+    let package = root.children().find(|e| e.name == "package").unwrap();
+    let initiator = package
+        .children()
+        .find(|e| e.name == "install-initiator-sigs")
+        .unwrap();
+    assert_eq!(
+        initiator.children().next().unwrap().int("index").unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        initiator
+            .children()
+            .next()
+            .unwrap()
+            .bytes_hex("key")
+            .unwrap(),
+        Some(vec![0xaa])
+    );
+    let group = root.children().find(|e| e.name == "shared-user").unwrap();
+    assert_eq!(
+        group
+            .children()
+            .next()
+            .unwrap()
+            .children()
+            .next()
+            .unwrap()
+            .int("index")
+            .unwrap(),
+        Some(2)
+    );
+}
+
+#[test]
+fn captured_scan_settings_replace_package_metadata_and_reject_uncommitted_global_owners() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages><package name='example.app' codePath='/data/app/old' userId='10100' domainSetId='00000000-0000-0000-0000-000000000001' requiredCpuAbi='old' custom='keep'><keep value='nested'/></package><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings><extension value='global'/></packages>").unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let mut owner =
+        super::super::scan::SigningScan::new(&Default::default(), &store.state.settings, 36)
+            .unwrap();
+    let setting = &mut owner.settings.packages[0];
+    setting.code_path = "/data/app/new".into();
+    setting.primary_cpu_abi = None;
+    setting.cpu_abi_override = Some("arm64-v8a".into());
+    setting.flags = 2;
+    setting.private_flags = 8;
+    setting.version_code = i64::MAX;
+    setting.last_modified_time = -1;
+    setting.last_update_time = i64::MAX;
+    setting.target_sdk_version = 36;
+    setting.domain_set_id = Some("00000000-0000-0000-0000-000000000002".into());
+    setting.app_metadata_source = 1;
+    setting.app_metadata_file_path = Some("/data/app/new/metadata.pb".into());
+    setting.restrict_update_hash = Some(vec![1, 2, 3]);
+    setting.install_source.installer = Some("installer".into());
+    setting.install_source.installer_uid = 10123;
+    setting.install_source.package_source = 3;
+    setting.loading_progress = 0.5;
+    setting.loading_completed_time = 19;
+    setting.uses_sdk_libraries = vec![super::super::settings::UsesSdkLibrary {
+        name: "sdk".into(),
+        version_major: 17,
+        optional: false,
+    }];
+    setting.uses_static_libraries = vec![("static".into(), 23)];
+    setting.split_versions = vec![("archived-split".into(), 7)];
+    setting.add_mime_types("types".into(), ["text/plain".into()]);
+    let capture = |owner| {
+        super::super::scan_snapshot::Store::new(owner, super::usage::Usage::new(["example.app"]))
+            .unwrap()
+            .capture()
+    };
+    let snapshot = capture(owner.clone());
+    store.commit_scan_settings(&snapshot).unwrap();
+    let mut expected = owner.settings.clone();
+    expected.shared_users = owner
+        .identities
+        .ordered_shared_users()
+        .unwrap()
+        .into_iter()
+        .map(|(name, group)| super::super::settings::SharedUser {
+            name: name.into(),
+            app_id: group.app_id,
+            flags: 0,
+            signatures: group.signatures.clone(),
+        })
+        .collect();
+    assert_eq!(expected.shared_users.len(), 9);
+    assert_eq!(
+        signing::persisted(store.state.settings.clone()),
+        signing::persisted(expected)
+    );
+    let bytes = fs::read(&path).unwrap();
+    let root = aim_android_xml::read(&bytes).unwrap();
+    let package = root.children().find(|e| e.name == "package").unwrap();
+    assert_eq!(package.string("custom").as_deref(), Some("keep"));
+    assert!(package.attr("requiredCpuAbi").is_none());
+    assert!(package.children().any(|e| e.name == "keep"));
+    assert!(root.children().any(|e| e.name == "extension"));
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state.settings,
+        store.state.settings
+    );
+    let before = store.state.settings.clone();
+    let mut foreign_global = owner.clone();
+    foreign_global.settings.versions.push(Default::default());
+    assert!(
+        !store
+            .commit_scan_settings(&capture(foreign_global))
+            .unwrap_err()
+            .committed
+    );
+    let mut null_mime = owner.clone();
+    null_mime.settings.packages[0].add_nullable_mime_types(None, [Some("text/plain".into())]);
+    assert!(
+        !store
+            .commit_scan_settings(&capture(null_mime))
+            .unwrap_err()
+            .committed
+    );
+    let mut no_domain = owner.clone();
+    no_domain.settings.packages[0].domain_set_id = None;
+    assert!(
+        !store
+            .commit_scan_settings(&capture(no_domain))
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(store.state.settings, before);
+    // A complete but foreign document is not adopted by the retained owner.
+    fs::write(&path, b"<packages><package name='foreign' codePath='/data/app/foreign' userId='10199'/></packages>").unwrap();
+    assert!(!store.commit_scan_settings(&snapshot).unwrap_err().committed);
+    assert_eq!(store.state.settings, before);
+}

@@ -723,7 +723,26 @@ and runs admission, ex-system rescans and factory recovery with the same domain,
 seInfo and test-base owners. Earlier effects remain on the caller's owner after
 failure. The controlled Binder fixture verifies restored system followed by an
 empty data inventory (9.85s); it does not prove nonempty full-boot persistence or
-publication. Original PMS remains live; native CTS/apps/template/APEX/rollback
+publication. Native Store now persists a validated scan capture's complete
+active/disabled package metadata, live shared UID inventory, signatures and
+registered keysets into the original resilient ABX document (#798). Unowned
+global changes, missing domain IDs, unfinished captures and original-writer
+nullable MIME failures reject before writing. Unknown extensions survive and
+cleared ABI fallback fields do not reappear. Package, install-initiator and
+shared-group signatures share one rewritten certificate table (#909). Shared
+UIDs retain original ArrayMap signed UTF-16 hash order and collision insertion,
+including removal/recreation and restored inventories (#910). Original ART
+compares active native setting output with pinned Settings.writePackageLPr,
+reads reindexed real certificates through PackageSignatures.readXml and checks
+ArrayMap collision behavior (2026-10-05, 30.70s). Ordinary units pass 444 (3.13s;
+two ignored), all integration targets compile, and the host/image/template build
+passes (15.3s, three rebuilt, 39 fresh). The original-APK initial scan fixture
+also passes (67.87s), writing/reopening native settings and checking immutable
+input metadata, ABX/reserve equality and repeat-write stability. This is global setting persistence, not
+a complete Settings.writeLPr boot transaction: fresh-store creation, remaining
+global owners, user writers, packages.list and coherent publication still need
+integration. Full package ArrayMap order remains tracked in #911. Disabled
+serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
 acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
