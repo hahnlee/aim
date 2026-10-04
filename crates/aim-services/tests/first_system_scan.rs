@@ -845,6 +845,101 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         assert_eq!(expected, current.candidate.record.settings);
         assert_eq!(original.candidate.users, current.candidate.users);
     }
+    // prepareInitialScanRequest resolves both names independently. Source
+    // policy selects the old system setting even when the incoming setting
+    // is non-system; scanPackageNew copies the incoming UID/users unchanged.
+    let mut both = baseline.clone();
+    let incoming = both
+        .packages
+        .iter_mut()
+        .find(|p| p.name == "com.google.android.gsf")
+        .unwrap();
+    incoming.app_id = 10002;
+    incoming.shared_user = false;
+    incoming.shared_user_app_id = None;
+    incoming.flags &= !aim_services::package::settings::FLAG_SYSTEM;
+    let mut old = incoming.clone();
+    old.name = "fixture.original.gsf".into();
+    old.app_id = 10003;
+    old.flags |= aim_services::package::settings::FLAG_SYSTEM;
+    old.code_path = "/product/priv-app/PreviousGSF".into();
+    both.packages.push(old.clone());
+    let mut both_users = full_users.clone();
+    let mut old_users = both_users["com.google.android.gsf"].clone();
+    for state in old_users.values_mut() {
+        state.stopped = !state.stopped;
+    }
+    both_users.insert(old.name.clone(), old_users);
+    let mut both_image = Image::parse(&apks, &[]).unwrap();
+    let incoming_code = &mut both_image.packages[1].parsed;
+    incoming_code.shared_user_id = None;
+    incoming_code.original_packages = Some(vec![Some(old.name.clone())]);
+    let mut both_owner = aim_services::package::scan::SigningScan::new(&config, &both, 36).unwrap();
+    let result = both_owner
+        .scan_saved_parsed_system_image(
+            both_image,
+            &apks,
+            &config,
+            inputs(&domain_ids),
+            aim_services::package::scan::SavedSystemScanInputs {
+                users: &both_users,
+                ..saved_inputs()
+            },
+        )
+        .unwrap();
+    let accepted = &result.packages[1].candidate;
+    assert_eq!(accepted.record.settings.name, "com.google.android.gsf");
+    assert_eq!(accepted.record.settings.app_id, 10002);
+    assert_eq!(accepted.users, both_users["com.google.android.gsf"]);
+    assert_eq!(
+        both_owner
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == old.name),
+        Some(&old)
+    );
+    assert!(both_owner.settings.renamed_packages.is_empty());
+    assert!(!both_owner.loaded_packages().contains_key(&old.name));
+    assert!(
+        both_owner
+            .loaded_packages()
+            .contains_key("com.google.android.gsf")
+    );
+    // A disabled factory under the original name must not refresh the
+    // incoming name's factory through the currently single-name backend.
+    both.disabled_system_packages.push(old.clone());
+    let mut factory_owner =
+        aim_services::package::scan::SigningScan::new(&config, &both, 36).unwrap();
+    let mut both_image = Image::parse(&apks, &[]).unwrap();
+    both_image.packages[1].parsed.shared_user_id = None;
+    both_image.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
+    let error = factory_owner
+        .scan_saved_parsed_system_image(
+            both_image,
+            &apks,
+            &config,
+            inputs(&domain_ids),
+            aim_services::package::scan::SavedSystemScanInputs {
+                users: &both_users,
+                ..saved_inputs()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, SigningError::Fatal(error)
+        if error.phase == "system-source" && error.message.contains("#919")));
+    assert_eq!(
+        factory_owner.settings.disabled_system_packages,
+        vec![old.clone()]
+    );
+    assert_eq!(
+        factory_owner
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == old.name),
+        Some(&old)
+    );
     // Stub policy comes from a fixture compressed-sibling inventory.
     // The original signed APK remains an unchanged symlink target.
     let stub = fixture.0.join("product/priv-app/GSF-Stub");

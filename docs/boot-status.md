@@ -922,14 +922,22 @@ the AppIds/signing oracle passes (28.69s), including the 78 collection cases and
 259 saved signature owners. Its Settings test uses explicit process exit because
 the constructor starts BackgroundThread (#925). Broad source/admission failure
 continuation and full request/frontend ownership remain incomplete (#914/#918).
-Adoption
-when both incoming and original settings exist remains #919. Mapped APK signing
+Initial system source selection now resolves the original independently of an
+incoming setting, and uses the original name for disabled-factory lookup (#919).
+The normal unchanged-shared-UID admission still copies the incoming setting,
+as scanPackageNew does: a controlled request over unchanged GSF code verifies
+incoming UID 10002 and its user states survive while the original UID 10003,
+setting and unloaded identity remain unchanged, with no renamed-package entry.
+The complete first-system scan passes (10.36s). A disabled factory under the
+original name currently stops with an explicit native owner error before either
+factory is refreshed; distinct source/admission factory handling and shared-UID
+replacement remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only system and data inputs (39.58s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only system and data inputs (50.91s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

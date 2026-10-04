@@ -211,19 +211,21 @@ fn scan_system_image<S>(
             .iter()
             .find(|p| p.name == identity.internal_name)
             .cloned();
-        let original = if active.is_none() {
-            Identity::original_setting(&code.parsed, &owner.settings, &|name| {
-                owner.has_scanned_package(name)
-            })
-            .cloned()
-        } else {
-            None
-        };
+        let original = Identity::original_setting(&code.parsed, &owner.settings, &|name| {
+            owner.has_scanned_package(name)
+        })
+        .cloned();
+        // scanPackageForInitLI selects the original for source policy, while
+        // scanPackageNew retains the incoming setting for final admission.
+        let source_setting = original.as_ref().or(active.as_ref());
+        let disabled_name = source_setting
+            .map(|p| p.name.as_str())
+            .unwrap_or(&identity.internal_name);
         let factory = owner
             .settings
             .disabled_system_packages
             .iter()
-            .find(|p| p.name == identity.internal_name)
+            .find(|p| p.name == disabled_name)
             .cloned();
         match owner.prepare_initial_shared_user(&code) {
             Ok(()) => {}
@@ -239,10 +241,15 @@ fn scan_system_image<S>(
             }
             Err(error) => return Err(error),
         }
-        if active
-            .as_ref()
-            .is_some_and(|p| p.flags & crate::package::settings::FLAG_SYSTEM == 0)
-        {
+        if factory.is_some() && source_setting.is_some_and(|p| p.name != identity.internal_name) {
+            return Err(SigningError::Fatal(super::Error {
+                package: identity.internal_name,
+                path: code.location.path.clone(),
+                phase: "system-source",
+                message: "original-name factory selection requires distinct source and admission owners (#919)".into(),
+            }));
+        }
+        if source_setting.is_some_and(|p| p.flags & crate::package::settings::FLAG_SYSTEM == 0) {
             return Err(fail(
                 identity.internal_name,
                 code.location.path.clone(),
@@ -250,7 +257,7 @@ fn scan_system_image<S>(
                 "non-system promotion requires its removal/hide owner (#702)".into(),
             ));
         }
-        let updated = active.is_some() && factory.is_some();
+        let updated = source_setting.is_some() && factory.is_some();
         if !updated && owner.has_scanned_package(&identity.internal_name) {
             rejected.push(super::Rejected {
                 location: code.location.clone(),
