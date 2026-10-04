@@ -596,8 +596,25 @@ resolution unit passes. The checked image/template build passes in 63.2s, follow
 by a 2.2s host rebuild after constructor resolution was tightened (#900).
 Compile-only private constructors are accepted only for image classes with no
 constructors; executable constructor references resolve on their own class, never
-an ancestor. Full daemon boot orchestration/publication remains #836/#885; captured
-legacy constructor owners for fresh/group-changing scans remain #899/#889. Original/renamed identity adoption remains #890. First shared code uses the supplied
+an ancestor. Captured legacy owners now follow actual constructor transitions
+(#899/#889): newly allocated shared groups retain their empty constructor state
+on a later rejection; fresh or group-changing settings receive empty permissions
+and fixed=false unless the original non-shared disabled-factory branch inherits
+permissions. Retained settings rebind IDs without replacing their permissions or
+fixed bits. Actual group pruning removes its legacy owner, and factory disable
+copies the captured active owner and any known fixed bit. An absent import remains
+absent. Typed original Settings construction, factory copies and group pruning
+agree with the native populated/empty records in one passing ART run (44.22s).
+437 units pass (one ignored/not run), the checked image build passes (71.6s), and
+the complete initial scan passes (71.18s). Subsequent ART attempts fail with
+SIGKILL after the policy Binder reply, including one reaching the file-write
+phase (#902).
+Another attempt fails earlier with ENOSPC while the host has 1.4 GiB available
+(#903). After freeing only this task worktree's incremental caches, an ART run
+with syscall tracing passes (33.39s), including fresh groups in a complete captured
+inventory. These failures remain recorded; SIGKILL is not claimed fixed.
+Full daemon boot orchestration/publication remains #836/#885. Original/renamed
+identity adoption remains #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while

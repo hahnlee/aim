@@ -133,8 +133,11 @@ impl SigningScan {
                 parsed.is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
             )
             .map(str::to_owned);
+            self.validate_legacy_permissions()
+                .map_err(|message| fail("apex-legacy", message))?;
             let shared_id = match &shared_name {
                 Some(name) => {
+                    let new_group = !self.identities.shared_users.contains_key(name);
                     let group = self
                         .identities
                         .get_shared_user(name, 0, 0, true)
@@ -152,6 +155,10 @@ impl SigningScan {
                                 flags: group.flags,
                                 signatures: group.signatures.clone(),
                             });
+                    }
+                    if new_group {
+                        self.legacy_shared_constructor(name, group.app_id)
+                            .map_err(|message| fail("apex-legacy", message))?;
                     }
                     Some(group.app_id)
                 }
@@ -331,6 +338,15 @@ impl SigningScan {
             } else {
                 staged.settings.packages.push(package.clone());
             }
+            if previous.is_none() || replaces_shared {
+                staged
+                    .legacy_setting_constructor(&package.name, previous.is_some(), disabled_legacy)
+                    .map_err(|message| fail("apex-legacy", message))?;
+            } else {
+                staged
+                    .rebind_legacy_setting(&package.name)
+                    .map_err(|message| fail("apex-legacy", message))?;
+            }
             let mut record = Record {
                 settings: package,
                 parsed,
@@ -382,7 +398,12 @@ impl SigningScan {
             )?;
             let name = &completed.candidate.record.settings.name;
             if replaces_shared {
-                staged.detach_shared_member(previous.as_ref().unwrap())?;
+                let old = previous.as_ref().unwrap();
+                if staged.detach_shared_member(old)? {
+                    staged
+                        .prune_legacy_shared(old.shared_app_id().unwrap())
+                        .map_err(|message| fail("apex-legacy", message))?;
+                }
             }
             // The final code retains the scan UID; Settings registration assigns
             // shared application ownership only after code finalization.
@@ -398,11 +419,9 @@ impl SigningScan {
                     .unwrap()
                     .app_id = id;
             }
-            if let Some(migration) = disabled_legacy {
-                staged
-                    .commit_replaced_legacy(name, migration)
-                    .map_err(|message| fail("apex-legacy", message))?;
-            }
+            staged
+                .rebind_legacy_setting(name)
+                .map_err(|message| fail("apex-legacy", message))?;
             if source.info.factory && !source.info.active {
                 staged.disable_system_package(name)?;
             }

@@ -71,32 +71,101 @@ impl SigningScan {
             .ok_or_else(|| "disabled legacy migration owner is not captured".into())
     }
 
-    pub(super) fn commit_replaced_legacy(
+    /// A newly allocated SharedUserSetting owns an empty constructor state,
+    /// even when a later scan fails. Do not create an absent import inventory.
+    pub(super) fn legacy_shared_constructor(&mut self, name: &str, id: i32) -> Result<(), String> {
+        if let Some(owners) = &mut self.legacy_permissions {
+            if owners.shared_users.contains_key(name) {
+                return Err("new legacy shared owner already exists".into());
+            }
+            owners
+                .shared_users
+                .insert(name.into(), (id, Migration::default()));
+        }
+        self.validate_legacy_permissions()
+    }
+
+    /// New PackageSetting constructors start empty, except for the exact
+    /// disabled-factory inheritance branch resolved before construction.
+    pub(super) fn legacy_setting_constructor(
         &mut self,
         name: &str,
-        migration: Migration,
+        previous: bool,
+        inherited: Option<Migration>,
     ) -> Result<(), String> {
         let setting = self
             .settings
             .packages
             .iter()
             .find(|p| p.name == name)
-            .ok_or("replacement setting is missing")?;
-        let owners = self
-            .legacy_permissions
-            .as_mut()
-            .ok_or("legacy migration owner is not captured")?;
-        let key = (name.into(), false);
-        let active = owners
-            .packages
-            .get_mut(&key)
-            .ok_or("active legacy migration owner is missing")?;
-        *active = (setting.app_id, setting.shared_user, migration);
-        owners
-            .install_fixed
-            .get_or_insert_with(Default::default)
-            .insert(key, false);
+            .ok_or("new legacy setting is missing")?;
+        if let Some(owners) = &mut self.legacy_permissions {
+            let key = (name.into(), false);
+            if owners.packages.contains_key(&key) != previous {
+                return Err("new legacy setting owner inventory differs".into());
+            }
+            owners.packages.insert(
+                key.clone(),
+                (
+                    setting.app_id,
+                    setting.shared_user,
+                    inherited.unwrap_or_default(),
+                ),
+            );
+            owners
+                .install_fixed
+                .get_or_insert_with(Default::default)
+                .insert(key, false);
+        } else if inherited.is_some() {
+            return Err("inherited legacy owner is not captured".into());
+        }
         self.validate_legacy_permissions()
+    }
+
+    /// Retained settings and final registration change only the captured ID.
+    pub(super) fn rebind_legacy_setting(&mut self, name: &str) -> Result<(), String> {
+        let setting = self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or("retained legacy setting is missing")?;
+        if let Some(owners) = &mut self.legacy_permissions {
+            let active = owners
+                .packages
+                .get_mut(&(name.into(), false))
+                .ok_or("retained legacy owner is missing")?;
+            active.0 = setting.app_id;
+            active.1 = setting.shared_user;
+        }
+        self.validate_legacy_permissions()
+    }
+
+    pub(super) fn prune_legacy_shared(&mut self, id: i32) -> Result<(), String> {
+        if let Some(owners) = &mut self.legacy_permissions {
+            let name = owners
+                .shared_users
+                .iter()
+                .find(|(_, (value, _))| *value == id)
+                .map(|(name, _)| name.clone())
+                .ok_or("pruned legacy shared owner is missing")?;
+            owners.shared_users.remove(&name);
+        }
+        self.validate_legacy_permissions()
+    }
+
+    /// Called only after the complete inventory and disable preconditions
+    /// were checked, before copying the active PackageSetting.
+    pub(super) fn copy_disabled_legacy(&mut self, name: &str) {
+        if let Some(owners) = &mut self.legacy_permissions {
+            let active = owners.packages[&(name.into(), false)].clone();
+            owners.packages.insert((name.into(), true), active);
+            if let Some(values) = &mut owners.install_fixed {
+                if let Some(fixed) = values.get(&(name.into(), false)).copied() {
+                    values.insert((name.into(), true), fixed);
+                }
+            }
+        }
     }
 
     /// Conversion unlinks ownership without copying LegacyPermissionState or

@@ -472,9 +472,12 @@ impl SigningScan {
                 _ => return Err(reject("loaded factory shared UID owner is missing")),
             }
         }
+        self.validate_legacy_permissions()
+            .map_err(|message| reject(&message))?;
         let disabled = package.clone();
         let users = DisabledUserStates::copied(users);
         let loaded = self.loaded[name].clone();
+        self.copy_disabled_legacy(name);
         self.settings.disabled_system_packages.push(disabled);
         self.disabled_users.insert(name.into(), users);
         self.disabled_loaded.insert(name.into(), loaded);

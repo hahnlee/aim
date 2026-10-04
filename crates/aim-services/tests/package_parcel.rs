@@ -1852,6 +1852,82 @@ fn native_package_parcels_match_original_read_write() {
     let mut replacement_inputs = scan_inputs(&replacement_image);
     replacement_inputs.seinfo.policy = &unread;
     replacement_inputs.seinfo.compatibility = &shared_compatibility;
+    let capture_apex_legacy = |scan: &mut aim_services::package::scan::SigningScan| {
+        let packages = scan
+            .settings
+            .packages
+            .iter()
+            .map(|p| ((p.name.clone(), false), apex_legacy.clone()))
+            .chain(
+                scan.settings
+                    .disabled_system_packages
+                    .iter()
+                    .map(|p| ((p.name.clone(), true), apex_legacy.clone())),
+            )
+            .collect();
+        let fixed = scan
+            .settings
+            .packages
+            .iter()
+            .map(|p| ((p.name.clone(), false), true))
+            .chain(
+                scan.settings
+                    .disabled_system_packages
+                    .iter()
+                    .map(|p| ((p.name.clone(), true), true)),
+            )
+            .collect();
+        let groups = scan
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    if name == "aim.fixture.apex" {
+                        apex_legacy.clone()
+                    } else {
+                        Default::default()
+                    },
+                )
+            })
+            .collect();
+        scan.capture_legacy_permissions(&[10, 0, 11], packages, groups)
+            .unwrap();
+        scan.capture_install_permissions_fixed(fixed).unwrap();
+    };
+    let mut fresh_captured =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    capture_apex_legacy(&mut fresh_captured);
+    fresh_captured
+        .scan_initial_apex(&apex_apks, &config, &shared_inputs)
+        .unwrap();
+    let fresh_name = &shared_image.packages[0].parsed.package_name;
+    let empty_group = aim_services::package::owner::legacy_permissions::Migration::default()
+        .project(10000, &[10, 0, 11])
+        .unwrap();
+    assert_eq!(
+        fresh_captured
+            .legacy_permissions(fresh_name, false)
+            .unwrap()
+            .unwrap(),
+        empty_group
+    );
+    assert_eq!(
+        fresh_captured
+            .shared_legacy_permissions("aim.fixture.apex")
+            .unwrap()
+            .unwrap(),
+        empty_group
+    );
+    assert_eq!(
+        fresh_captured
+            .install_permissions_fixed(fresh_name, false)
+            .unwrap(),
+        Some(false)
+    );
+    let mut constructors = aim_binder_host::parcel::Parcel::new();
+    constructors.write_i32(2);
     let mut transitions = aim_binder_host::parcel::Parcel::new();
     transitions.write_i32(3);
     for disabled in [false, true] {
@@ -1861,6 +1937,7 @@ fn native_package_parcels_match_original_read_write() {
             shared_without_factory.clone()
         };
         replacement.settings.packages[0].pending_restore = true;
+        capture_apex_legacy(&mut replacement);
         let calls = shared_compatibility_calls.get();
         let result = replacement
             .scan_initial_apex(&replacement_apks, &config, &replacement_inputs)
@@ -1872,6 +1949,64 @@ fn native_package_parcels_match_original_read_write() {
             (10001, Some(10001))
         );
         assert!(setting.pending_restore);
+        let active_legacy = replacement
+            .legacy_permissions(&setting.name, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            active_legacy,
+            aim_services::package::owner::legacy_permissions::Migration::default()
+                .project(10001, &[10, 0, 11])
+                .unwrap()
+        );
+        assert_eq!(
+            replacement
+                .install_permissions_fixed(&setting.name, false)
+                .unwrap(),
+            Some(false)
+        );
+        let group_legacy = replacement
+            .shared_legacy_permissions("aim.fixture.replacement")
+            .unwrap()
+            .unwrap();
+        assert_eq!(group_legacy, active_legacy);
+        constructors.write_bool(disabled);
+        aim_service_aidl::write_byte_array(&mut constructors, Some(&active_legacy.bytes()));
+        constructors.write_bool(
+            replacement
+                .install_permissions_fixed(&setting.name, false)
+                .unwrap()
+                .unwrap(),
+        );
+        aim_service_aidl::write_byte_array(&mut constructors, Some(&group_legacy.bytes()));
+        if disabled {
+            let factory = replacement
+                .legacy_permissions(&setting.name, true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(factory, apex_legacy.project(10000, &[10, 0, 11]).unwrap());
+            constructors.write_bool(
+                replacement
+                    .install_permissions_fixed(&setting.name, true)
+                    .unwrap()
+                    .unwrap(),
+            );
+            aim_service_aidl::write_byte_array(&mut constructors, Some(&factory.bytes()));
+            let old = replacement
+                .shared_legacy_permissions("aim.fixture.apex")
+                .unwrap()
+                .unwrap();
+            assert_eq!(old, factory);
+            aim_service_aidl::write_byte_array(&mut constructors, Some(&old.bytes()));
+        } else {
+            assert_eq!(
+                replacement
+                    .shared_legacy_permissions("aim.fixture.apex")
+                    .unwrap(),
+                None
+            );
+        }
+
         assert_eq!(result[0].package.uid, -1);
         assert_eq!(replacement.identities.ids.get(10000).is_some(), disabled);
         if disabled {
@@ -1907,6 +2042,11 @@ fn native_package_parcels_match_original_read_write() {
         transitions.write_i32(setting.app_id);
         transitions.write_bool(replacement.identities.ids.get(10000).is_some());
     }
+    fs::write(
+        directory.join("apex-constructor-legacy.input"),
+        constructors.data(),
+    )
+    .unwrap();
     let mut unshared_image = aim_services::package::scan::ApexImage {
         packages: replacement_image.packages.clone(),
     };
@@ -2078,6 +2218,11 @@ fn native_package_parcels_match_original_read_write() {
         factory_user
     );
     let mut failed_replacement = shared_without_factory.clone();
+    capture_apex_legacy(&mut failed_replacement);
+    let prior_legacy = failed_replacement
+        .legacy_permissions(&name, false)
+        .unwrap()
+        .unwrap();
     let previous_packages = failed_replacement.settings.packages.clone();
     replacement_inputs.seinfo.compatibility = &reject_shared_compatibility;
     assert!(
@@ -2099,6 +2244,34 @@ fn native_package_parcels_match_original_read_write() {
         failed_replacement.identities.shared_users["aim.fixture.replacement"].app_id,
         10001
     );
+    assert_eq!(
+        failed_replacement
+            .legacy_permissions(&name, false)
+            .unwrap()
+            .unwrap(),
+        prior_legacy
+    );
+    assert_eq!(
+        failed_replacement
+            .install_permissions_fixed(&name, false)
+            .unwrap(),
+        Some(true)
+    );
+    let allocated_legacy = failed_replacement
+        .shared_legacy_permissions("aim.fixture.replacement")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        allocated_legacy,
+        aim_services::package::owner::legacy_permissions::Migration::default()
+            .project(10001, &[10, 0, 11])
+            .unwrap()
+    );
+    fs::write(
+        directory.join("apex-rejected-group-legacy.input"),
+        allocated_legacy.bytes(),
+    )
+    .unwrap();
     let original_notification = boot.command().args([
         "shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
@@ -2119,9 +2292,28 @@ fn native_package_parcels_match_original_read_write() {
     inactive.packages[0].info.active = false;
     let mut disabled =
         aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    capture_apex_legacy(&mut disabled);
     disabled
         .scan_initial_apex(&apex_apks, &config, &scan_inputs(&inactive))
         .unwrap();
+    let inactive_name = &inactive.packages[0].parsed.package_name;
+    assert_eq!(
+        disabled.legacy_permissions(inactive_name, false).unwrap(),
+        disabled.legacy_permissions(inactive_name, true).unwrap()
+    );
+    assert_eq!(
+        disabled
+            .install_permissions_fixed(inactive_name, false)
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        disabled
+            .install_permissions_fixed(inactive_name, true)
+            .unwrap(),
+        Some(false)
+    );
+
     assert_eq!(disabled.settings.disabled_system_packages.len(), 1);
     assert!(
         !disabled.settings.disabled_system_packages[0]

@@ -34,6 +34,7 @@ public final class ApexNotifyOracle {
         verifyChangedGroup(directory);
         verifyNegativeUidConversion(directory);
         verifyConversionEligibility(directory);
+        verifyLegacyConstructors(directory);
         verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
@@ -139,6 +140,56 @@ public final class ApexNotifyOracle {
             }
             if (in.dataAvail() != 0) throw new AssertionError("conversion cases tail");
         } finally { in.recycle(); original.recycle(); }
+    }
+    private static void verifyLegacyConstructors(java.io.File directory) throws Exception {
+        int[] users = {10, 0, 11};
+        byte[] populated = java.nio.file.Files.readAllBytes(new java.io.File(directory, "legacy-permissions.original").toPath());
+        var legacy = dev.aim.server.PackageLegacyPermissions.restore(10042, users, populated);
+        var in = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-constructor-legacy.input").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            if (in.readInt() != 2) throw new AssertionError("constructor case count");
+            for (int i = 0; i < 2; i++) {
+                boolean disabled = in.readBoolean();
+                var settings = new Settings(java.util.Map.of());
+                var oldGroup = settings.getSharedUserLPw("old", 0, 0, true);
+                oldGroup.getLegacyPermissionState().copyFrom(legacy);
+                var old = new PackageSetting("fixture", null, new java.io.File("/system/apex/fixture.apex"), 1, 0, new java.util.UUID(1, 1));
+                old.setPkg((com.android.server.pm.pkg.AndroidPackage)(Object)com.android.internal.pm.parsing.pkg.PackageImpl.forTesting("fixture"));
+                old.getLegacyPermissionState().copyFrom(legacy); old.setInstallPermissionsFixed(true);
+                settings.addPackageSettingLPw(old, oldGroup);
+                if (disabled && !settings.disableSystemPackageLPw("fixture", true)) throw new AssertionError("constructor factory disable failed");
+                var group = settings.getSharedUserLPw("new", 0, 0, true);
+                if (oldGroup.mAppId != 10000 || group.mAppId != 10001) throw new AssertionError("constructor allocation differs");
+                var replacement = Settings.createNewSetting("fixture", null,
+                    disabled ? settings.getDisabledSystemPkgLPr("fixture") : null, null, group,
+                    new java.io.File("/data/apex/active/fixture.apex"), null, null, null, 1, 1, 0,
+                    null, true, false, false, false, null, null, null, null, null, null, null,
+                    new java.util.UUID(1, 2), 36, null);
+                replacement.setAppId(-1);
+                oldGroup.removePackage(old); settings.checkAndPruneSharedUserLPw(oldGroup, false);
+                settings.addPackageSettingLPw(replacement, group);
+                if (!java.util.Arrays.equals(in.createByteArray(), dev.aim.server.PackageLegacyPermissions.capture(10001, users, replacement.getLegacyPermissionState()))
+                        || in.readBoolean() != replacement.isInstallPermissionsFixed()
+                        || !java.util.Arrays.equals(in.createByteArray(), dev.aim.server.PackageLegacyPermissions.capture(10001, users, group.getLegacyPermissionState())))
+                    throw new AssertionError("fresh constructor legacy differs");
+                if (disabled) {
+                    var factory = settings.getDisabledSystemPkgLPr("fixture");
+                    if (in.readBoolean() != factory.isInstallPermissionsFixed()
+                            || !java.util.Arrays.equals(in.createByteArray(), dev.aim.server.PackageLegacyPermissions.capture(10000, users, factory.getLegacyPermissionState()))
+                            || !java.util.Arrays.equals(in.createByteArray(), dev.aim.server.PackageLegacyPermissions.capture(10000, users, oldGroup.getLegacyPermissionState())))
+                        throw new AssertionError("retained factory/group legacy differs");
+                } else if (settings.getSettingLPr(10000) != null) throw new AssertionError("old group not pruned");
+            }
+            if (in.dataAvail() != 0) throw new AssertionError("constructor legacy tail");
+            var rejected = new Settings(java.util.Map.of());
+            rejected.getSharedUserLPw("old", 0, 0, true);
+            var allocated = rejected.getSharedUserLPw("new", 0, 0, true);
+            bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-rejected-group-legacy.input").toPath());
+            if (!java.util.Arrays.equals(bytes, dev.aim.server.PackageLegacyPermissions.capture(10001, users, allocated.getLegacyPermissionState())))
+                throw new AssertionError("rejected allocation constructor differs");
+        } finally { in.recycle(); }
     }
     private static void verifyChangedGroup(java.io.File directory) throws Exception {
         var in = android.os.Parcel.obtain();

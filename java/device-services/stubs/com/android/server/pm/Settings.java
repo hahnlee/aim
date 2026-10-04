@@ -18,6 +18,7 @@ public final class Settings {
     boolean checkAndPruneSharedUserLPw(SharedUserSetting shared, boolean skipCheck) { throw new RuntimeException("stub"); }
     boolean removePackageAndAppIdLPw(String name) { throw new RuntimeException("stub"); }
     boolean registerAppIdLPw(PackageSetting setting, boolean forceNew) throws Exception { throw new RuntimeException("stub"); }
+    SharedUserSetting getSharedUserLPw(String name, int flags, int privateFlags, boolean create) throws Exception { throw new RuntimeException("stub"); }
     SharedUserSetting addSharedUserLPw(String name, int uid, int flags, int privateFlags) { throw new RuntimeException("stub"); }
     boolean disableSystemPackageLPw(String name, boolean replaced) { throw new RuntimeException("stub"); }
     void addPackageSettingLPw(PackageSetting setting, SharedUserSetting shared) { throw new RuntimeException("stub"); }
