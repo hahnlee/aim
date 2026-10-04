@@ -449,8 +449,8 @@ exports Settings.getAllUsers' actual UserManagerService inventory, with partial
 users excluded, dying/pre-created users retained, and each user's original ADB
 installation restriction (#879). An uninitialized owner is distinct from an
 initialized empty list; strict decoding rejects malformed flags/counts, duplicate,
-negative or unordered IDs, null payloads and tails. The native setting admission
-uses these decoded policy inputs, preserving null/USER_ALL/explicit-target rules.
+negative or unordered IDs, null payloads and tails. Native setting admission tests
+consume these decoded policy inputs and verify null/USER_ALL/explicit-target rules.
 Feed kind 12 captures this same original user owner for live parity and retains
 it under each immutable feed generation. Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
