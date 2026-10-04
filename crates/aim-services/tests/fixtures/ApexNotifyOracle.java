@@ -2,6 +2,7 @@ package com.android.server.pm;
 
 public final class ApexNotifyOracle {
     public static void main(String[] args) throws Exception {
+        System.err.println("APEX_NOTIFY_MAIN");
         var directory = new java.io.File(args[0]);
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-notify.input").toPath());
         var owner = new ApexManager.ApexManagerImpl();
@@ -37,7 +38,9 @@ public final class ApexNotifyOracle {
         verifyLegacyConstructors(directory);
         verifyRetainedRename(directory);
         verifyOriginalAdoptionSlot(directory);
+        System.err.println("APEX_NOTIFY_SHARED_ADOPTION");
         verifySharedOriginalAdoption(directory);
+        System.err.println("APEX_NOTIFY_SHARED_ADOPTION_DONE");
         verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.

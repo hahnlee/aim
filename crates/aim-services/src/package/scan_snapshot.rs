@@ -168,6 +168,15 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
                             return Err(fail("package shared UID membership differs"));
                         }
                     }
+                    None if !setting.shared_user && setting.app_id == -1 => {
+                        let code = loaded
+                            .get(&setting.name)
+                            .filter(|code| code.package.is2(super::pkg::booleans2::APEX))
+                            .ok_or_else(|| fail("unregistered setting has no APEX code owner"))?;
+                        owner
+                            .validate_collected_uid(setting, &code.package, true)
+                            .map_err(Error::Invalid)?;
+                    }
                     _ => return Err(fail("package UID owner differs")),
                 }
             }
@@ -180,9 +189,11 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
                 .iter()
                 .find(|p| &p.name == name)
                 .ok_or_else(|| fail("loaded code has no setting"))?;
+            owner
+                .validate_collected_uid(setting, &code.package, active)
+                .map_err(Error::Invalid)?;
             if code.package.package_name != *name
                 || code.package.path.as_deref() != Some(setting.code_path.as_str())
-                || (active && code.package.uid != setting.app_id)
                 || code.package.signing_details.as_ref()
                     != Some(
                         &code

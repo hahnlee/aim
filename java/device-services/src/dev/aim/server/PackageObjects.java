@@ -27,7 +27,11 @@ public final class PackageObjects {
             PackageCode code, long version, boolean factory) {
         PackageImpl pkg = fromSnapshot(code, version, setting.getPackageName());
         var state = (com.android.server.pm.pkg.PackageState)setting;
-        if ((!factory && pkg.getUid() != setting.getAppId())
+        boolean uidMatches = pkg.isApex()
+            ? pkg.getUid() == -1 && (factory
+                || setting.getAppId() == (setting.hasSharedUser() ? state.getSharedUserAppId() : -1))
+            : factory || pkg.getUid() == setting.getAppId();
+        if (!uidMatches
                 || !Objects.equals(state.getPath(), new java.io.File(pkg.getPath()))
                 || state.getVersionCode() != pkg.getLongVersionCode()) {
             throw new IllegalArgumentException("package code setting mismatch");

@@ -39,7 +39,9 @@ impl SigningScan {
                 .find(|p| &p.name == name)
                 .ok_or_else(|| error(name, "library setting owner"))?;
             if loaded.package.package_name != *name
-                || loaded.package.uid != setting.app_id
+                || self
+                    .validate_collected_uid(setting, &loaded.package, true)
+                    .is_err()
                 || loaded.package.path.as_deref() != Some(setting.code_path.as_str())
             {
                 return Err(error(name, "library code setting identity"));
@@ -106,7 +108,9 @@ impl SigningScan {
             if &loaded.package != prior.code.as_ref()
                 || setting.signatures != prior.signatures
                 || loaded.package.package_name != *name
-                || loaded.package.uid != setting.app_id
+                || self
+                    .validate_collected_uid(setting, &loaded.package, true)
+                    .is_err()
                 || loaded.package.path.as_deref() != Some(setting.code_path.as_str())
                 || users.len() != prior.users.len()
                 || users.iter().any(|(id, state)| {

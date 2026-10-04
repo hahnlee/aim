@@ -9,6 +9,7 @@ import com.android.server.pm.pkg.SharedUserApi;
 public final class RetainedSharedUserOracle {
     public static void verify(java.io.File directory, PackageSetting old,
             PackageSetting adopted, SharedUserSetting group) throws Exception {
+        verifyCollectedUid(directory, adopted);
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-instance.record").toPath());
         Parcel in = Parcel.obtain();
         try {
@@ -45,4 +46,31 @@ public final class RetainedSharedUserOracle {
             } finally { out.recycle(); }
         } finally { in.recycle(); }
     }
+    private static void verifyCollectedUid(java.io.File directory, PackageSetting adopted) throws Exception {
+        Parcel settingFrame = Parcel.obtain(); Parcel codeFrame = Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-captured.setting").toPath());
+            settingFrame.unmarshall(bytes, 0, bytes.length); settingFrame.setDataPosition(0);
+            var data = PackageSettingData.read(settingFrame);
+            bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-shared-captured.code").toPath());
+            codeFrame.unmarshall(bytes, 0, bytes.length); codeFrame.setDataPosition(0);
+            var code = PackageCode.CREATOR.createFromParcel(codeFrame);
+            var restored = com.android.server.pm.CapturedPackageSetting.from(data, data.getVersion(), false);
+            PackageObjects.restoreCollectedCode(restored, code, data.getVersion(), false);
+            var restoredPkg = (com.android.internal.pm.parsing.pkg.PackageImpl)((com.android.server.pm.pkg.PackageStateInternal)(Object)restored).getPkg();
+            var adoptedPkg = (com.android.internal.pm.parsing.pkg.PackageImpl)((com.android.server.pm.pkg.PackageStateInternal)(Object)adopted).getPkg();
+            if (restored.getAppId() != adopted.getAppId() || restoredPkg.getUid() != adoptedPkg.getUid()
+                    || !restoredPkg.isApex() || restored.getAppId() != 10000 || restoredPkg.getUid() != -1) {
+                throw new AssertionError("shared APEX code/setting UID restoration differs");
+            }
+            restored.setAppId(10001);
+            try {
+                PackageObjects.restoreCollectedCode(restored, code, data.getVersion(), false);
+                throw new AssertionError("foreign shared APEX setting UID accepted");
+            } catch (IllegalArgumentException expected) {}
+            if (settingFrame.dataAvail() != 0 || codeFrame.dataAvail() != 0)
+                throw new AssertionError("APEX capture frame tail");
+        } finally { settingFrame.recycle(); codeFrame.recycle(); }
+    }
+
 }

@@ -83,6 +83,25 @@ impl SigningScan {
     pub(in crate::package) fn capture_ready(&self) -> bool {
         self.pending_metadata.is_empty()
     }
+    pub(in crate::package) fn validate_collected_uid(
+        &self,
+        setting: &crate::package::settings::Package,
+        code: &crate::package::pkg::AndroidPackage,
+        active: bool,
+    ) -> Result<(), String> {
+        if code.is2(crate::package::pkg::booleans2::APEX) {
+            // Code is finalized with INVALID_UID before shared registration.
+            if code.uid != -1
+                || active && !self.apex_origins.contains_key(&setting.name)
+                || active && setting.app_id != setting.shared_app_id().unwrap_or(-1)
+            {
+                return Err("APEX code/setting UID or accepted scan origin differs".into());
+            }
+        } else if active && code.uid != setting.app_id {
+            return Err("collected APK UID differs from setting".into());
+        }
+        Ok(())
+    }
     /// Called at boot after active scans finish; saved-only and disabled code
     /// do not stand in for the original active PackageSetting.getPkg().
     pub fn fix_shared_seinfo_target_sdks_at_boot(&mut self) -> Result<(), String> {
@@ -1431,6 +1450,51 @@ pub(super) fn selected_shared_user(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collected_uid_requires_original_apex_origin_and_registration_identity() {
+        use super::*;
+        let mut owner = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+        let mut setting = crate::package::settings::Package {
+            name: "container".into(),
+            app_id: -1,
+            ..Default::default()
+        };
+        let mut code = crate::package::pkg::AndroidPackage {
+            uid: -1,
+            booleans2: crate::package::pkg::booleans2::APEX,
+            ..Default::default()
+        };
+        assert!(owner.validate_collected_uid(&setting, &code, true).is_err());
+        owner
+            .apex_origins
+            .insert(setting.name.clone(), ScanOrigin::SystemDirectory);
+        owner.validate_collected_uid(&setting, &code, true).unwrap();
+        setting.app_id = 10000;
+        assert!(owner.validate_collected_uid(&setting, &code, true).is_err());
+        setting.shared_user = true;
+        setting.shared_user_app_id = Some(10000);
+        owner.validate_collected_uid(&setting, &code, true).unwrap();
+        setting.app_id = 10001;
+        assert!(owner.validate_collected_uid(&setting, &code, true).is_err());
+        // A retained converted factory keeps its positive registration ID.
+        setting.app_id = 10000;
+        setting.shared_user = false;
+        setting.shared_user_app_id = None;
+        owner
+            .validate_collected_uid(&setting, &code, false)
+            .unwrap();
+        code.uid = 10000;
+        assert!(
+            owner
+                .validate_collected_uid(&setting, &code, false)
+                .is_err()
+        );
+        code.booleans2 = 0;
+        setting.app_id = 10000;
+        owner.validate_collected_uid(&setting, &code, true).unwrap();
+        code.uid = -1;
+        assert!(owner.validate_collected_uid(&setting, &code, true).is_err());
+    }
     #[test]
     fn boot_shared_seinfo_uses_active_code_and_rejects_pending_metadata() {
         use super::*;

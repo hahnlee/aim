@@ -13,6 +13,23 @@ mod common {
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
+#[track_caller]
+fn assert_guest_success(boot: &Boot, output: &std::process::Output, stage: &str) {
+    if output.status.success() {
+        return;
+    }
+    let logs = boot
+        .command()
+        .args(["shell", "logcat", "-d", "-s", "AndroidRuntime:V"])
+        .output()
+        .unwrap();
+    panic!(
+        "{stage}: {}; stderr: {}; AndroidRuntime: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&logs.stdout)
+    );
+}
 #[test]
 #[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn native_package_parcels_match_original_read_write() {
@@ -1342,13 +1359,18 @@ fn native_package_parcels_match_original_read_write() {
         Ok([value; 16])
     };
     let policy_classpath = "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar";
-    let policy_output = run(boot.client(1000).args([
-        "/system/bin/app_process",
-        policy_classpath,
-        "/system/bin",
-        "dev.aim.server.PackageMigrationPolicyOracle",
-        "/data/local/tmp/package-parcels",
-    ]));
+    let policy_output = boot
+        .client(1000)
+        .args([
+            "/system/bin/app_process",
+            policy_classpath,
+            "/system/bin",
+            "dev.aim.server.PackageMigrationPolicyOracle",
+            "/data/local/tmp/package-parcels",
+        ])
+        .output()
+        .unwrap();
+    assert_guest_success(&boot, &policy_output, "migration policy");
     let bytes = fs::read(directory.join("migration-policy.original")).unwrap();
     let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
     let best_effort = aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_shared_uid_migration_best_effort_reply(&mut reader).unwrap().unwrap();
@@ -1362,13 +1384,18 @@ fn native_package_parcels_match_original_read_write() {
     } else {
         aim_services::package::scan::SharedUidMigration::NewInstallOnly
     };
-    let denied = run(boot.client(2000).args([
-        "/system/bin/app_process",
-        policy_classpath,
-        "/system/bin",
-        "dev.aim.server.PackageMigrationPolicyOracle",
-        "/data/local/tmp/package-parcels",
-    ]));
+    let denied = boot
+        .client(2000)
+        .args([
+            "/system/bin/app_process",
+            policy_classpath,
+            "/system/bin",
+            "dev.aim.server.PackageMigrationPolicyOracle",
+            "/data/local/tmp/package-parcels",
+        ])
+        .output()
+        .unwrap();
+    assert_guest_success(&boot, &denied, "denied migration policy");
     assert_eq!(
         String::from_utf8(denied.stdout).unwrap(),
         "MIGRATION_POLICY_DENIED\n"
@@ -2167,6 +2194,54 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
     let prior_shared_record = retained.clone();
+    let mut publishable = shared_adoption.clone();
+    publishable
+        .complete_library_dependencies(&|_, _| {
+            Ok(aim_services::package::libraries::Policy::pinned(false))
+        })
+        .unwrap();
+    let captured_usage = aim_services::package::owner::usage::Usage::new(["original.fixture"]);
+    publishable
+        .complete_runtime_at_boot(&captured_usage, BTreeMap::new())
+        .unwrap();
+    let captured_apex = aim_services::package::scan_snapshot::Store::new(
+        publishable.clone(),
+        captured_usage.clone(),
+    )
+    .unwrap()
+    .capture();
+    let mut wrong_setting_uid = publishable.clone();
+    wrong_setting_uid.settings.packages[0].app_id = 10001;
+    assert!(
+        aim_services::package::scan_snapshot::Store::new(wrong_setting_uid, captured_usage)
+            .is_err()
+    );
+    std::fs::write(
+        directory.join("apex-shared-captured.setting"),
+        aim_services::package::scan_snapshot::setting_record::captured(
+            &captured_apex,
+            "original.fixture",
+            false,
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    let code = aim_services::package::scan_snapshot::endpoint::PackageCode::captured(
+        &captured_apex,
+        "original.fixture",
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let mut code_frame = aim_binder_host::parcel::Parcel::new();
+    aim_service_aidl::WriteParcelable::write_to(&code, &mut code_frame);
+    std::fs::write(
+        directory.join("apex-shared-captured.code"),
+        code_frame.data(),
+    )
+    .unwrap();
+
     std::fs::write(
         directory.join("apex-shared-instance.record"),
         aim_services::package::scan_snapshot::shared_record::captured_owner(
@@ -2740,16 +2815,12 @@ fn native_package_parcels_match_original_read_write() {
         allocated_legacy.bytes(),
     )
     .unwrap();
-    let original_notification = boot.command().args([
-        "shell", "/system/bin/app_process",
+    let original_notification = boot.client(2000).args([
+        "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.ApexNotifyOracle", "/data/local/tmp/package-parcels",
     ]).output().unwrap();
-    assert!(
-        original_notification.status.success(),
-        "original APEX notification failed: {}",
-        String::from_utf8_lossy(&original_notification.stderr)
-    );
+    assert_guest_success(&boot, &original_notification, "original APEX notification");
     assert_eq!(
         String::from_utf8(original_notification.stdout).unwrap(),
         format!("APEX_NOTIFY {}\n", results.len())

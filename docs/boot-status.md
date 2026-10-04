@@ -654,14 +654,26 @@ replica preserves both object identities instead of resolving both through the
 current name cache. Missing retained runtime/legacy/fixed/leaving inputs reject.
 The original ART oracle compares retained flags, UID, sparse users, unparsed code,
 shared snapshot cardinality/SDK, detached containers and exact record roundtrip
-(34.84s); ordinary shared lease reads still pass. This verifies the retained
-member transport and replica builder, not publication of a full adopted APEX
-snapshot: Store and collected-code validation still require equal code/setting
-UIDs, while original shared APEX adoption has code UID -1 and setting UID 10000
-(#836). Shared process projections still require instance-aware inputs (#905).
-439 units pass (one ignored/not run); the checked image/template build passes
-(53.1s), all integration targets compile, and complete initial scan passes
-(68.25s). Transfer ownership remains
+(34.84s); ordinary shared lease reads still pass. Native Store, library dependency inputs and Java collected-code restoration now
+follow the original APEX UID sequence (#836): code remains INVALID_UID; active
+settings hold the shared group ID or INVALID_UID; no slot is allocated at -1.
+Native acceptance requires the original APEX scan origin; ordinary APK UID
+mismatches still reject, as do wrong shared registration IDs. Retained converted
+factory settings keep their prior positive registration IDs. The ART oracle
+builds a real native shared-adoption snapshot and restores its code/setting UID
+pair (-1/10000) through original PackageImpl/PackageSetting; a foreign setting UID
+rejects. The complete oracle passes without syscall tracing (31.89s), 440 units
+pass (one ignored/not run), checked host/image/template builds pass (68.3s, then
+23.8s for the final host refresh), all integration targets compile, and complete initial scan passes (67.58s).
+Shared process projections still require instance-aware inputs (#905).
+Failure-only AndroidRuntime log collection now exposes original crash-handler
+SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
+Files.write IOException, not evidence of an external kill. Crash reporting also
+fails service lookup with BinderProxy EBADF (#907). Prior failures without these
+logs remain causally unproven. Task-owned Rust compilation intermediates had
+accumulated under debug/deps; removing those rebuildable objects recovered host
+free space from about 1 GiB to 40 GiB before the passing untraced oracle. The host
+storage reserve and guest image capacity remain unchanged. Transfer ownership remains
 #890; native PMS is still inactive. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
