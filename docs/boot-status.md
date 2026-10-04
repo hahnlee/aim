@@ -731,18 +731,23 @@ nullable MIME failures reject before writing. Unknown extensions survive and
 cleared ABI fallback fields do not reappear. Package, install-initiator and
 shared-group signatures share one rewritten certificate table (#909). Shared
 UIDs retain original ArrayMap signed UTF-16 hash order and collision insertion,
-including removal/recreation and restored inventories (#910). Original ART
-compares active native setting output with pinned Settings.writePackageLPr,
-reads reindexed real certificates through PackageSignatures.readXml and checks
-ArrayMap collision behavior (2026-10-05, 30.70s). Ordinary units pass 444 (3.13s;
-two ignored), all integration targets compile, and the host/image/template build
-passes (15.3s, three rebuilt, 39 fresh). The original-APK initial scan fixture
-also passes (67.87s), writing/reopening native settings and checking immutable
+including removal/recreation and restored inventories (#910). Active and disabled
+package vectors preserve insertion slots through replacement/removal; native
+persistence emits stable signed Java hash order without mutating the captured
+owner (#911). Units cover colliding names, negative hashes, replacement,
+removal/recreation, restoration and old captures. Original ART compares the
+complete two-package/live-group inventory with pinned Settings.writePackageLPr
+and ArrayMap values order using one certificate table. Saved-setting signer
+lineage flags remain separate from parsed-code signing. The oracle also reads
+reindexed real certificates through PackageSignatures.readXml and checks
+ArrayMap signed hash/collision behavior (2026-10-05, 31.16s). Ordinary units pass
+445 (3.13s; two ignored), all integration targets compile, and the host/image/template
+build passes (14.3s, three rebuilt, 39 fresh). The original-APK initial scan fixture
+also passes (68.19s), writing/reopening native settings and checking immutable
 input metadata, ABX/reserve equality and repeat-write stability. This is global setting persistence, not
 a complete Settings.writeLPr boot transaction: fresh-store creation, remaining
 global owners, user writers, packages.list and coherent publication still need
-integration. Full package ArrayMap order remains tracked in #911. Disabled
-serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
+integration. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
 acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a

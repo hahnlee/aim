@@ -18,6 +18,7 @@ public final class ScanSettingsWriteOracle {
         setting.setSigningDetails(assembled.getSigningDetails());
         verifyReindexedCertificates(cache.getParentFile());
         verifyNativeSignatures(cache.getParentFile(), lease, setting);
+        writeInventory(cache.getParentFile(), lease);
         var settings = new Settings(java.util.Map.of());
         var certificates = new java.util.ArrayList<android.content.pm.Signature>();
         try (var output = new java.io.FileOutputStream(cache.getPath() + ".settings-original")) {
@@ -36,15 +37,64 @@ public final class ScanSettingsWriteOracle {
             xml.endTag(null, "packages"); xml.endDocument();
         }
     }
+    private static void writeInventory(java.io.File directory,
+            dev.aim.server.PackageScanLease lease) throws Exception {
+        var packages = new android.util.ArrayMap<String, PackageSetting>();
+        for (String filename : java.nio.file.Files.readAllLines(new java.io.File(directory, "settings-owner-order").toPath())) {
+            var parcel = android.os.Parcel.obtain(); PackageSetting setting;
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, filename).toPath());
+                parcel.unmarshall(bytes, 0, bytes.length); parcel.setDataPosition(0);
+                setting = CapturedPackageSetting.from(dev.aim.server.PackageSettingData.read(parcel), 1, false);
+                if (parcel.dataAvail() != 0) throw new AssertionError("inventory setting tail");
+            } finally { parcel.recycle(); }
+            var codeFile = new java.io.File(directory, filename.substring(0, filename.length() - ".writer-setting".length()));
+            var code = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(codeFile.toPath()));
+            setting.setPkg(code);
+            // SigningDetails on parsed code and on saved PackageSetting are
+            // distinct owners; persistence writes the latter's lineage flags.
+            var signingParcel = android.os.Parcel.obtain();
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(codeFile.getPath() + ".saved-signing").toPath());
+                signingParcel.unmarshall(bytes, 0, bytes.length); signingParcel.setDataPosition(0);
+                var signing = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(signingParcel);
+                if (signingParcel.dataAvail() != 0 || !setting.getPackageName().equals(signing.getPackageName()))
+                    throw new AssertionError("inventory saved signer owner differs");
+                setting.setSigningDetails(signing.getPackageSigningDetails());
+            } finally { signingParcel.recycle(); }
+            packages.put(setting.getPackageName(), setting);
+        }
+        var settings = new Settings(java.util.Map.of());
+        var certificates = new java.util.ArrayList<android.content.pm.Signature>();
+        try (var output = new java.io.FileOutputStream(new java.io.File(directory, "settings-inventory-original"))) {
+            var xml = android.util.Xml.resolveSerializer(output);
+            xml.startDocument(null, true); xml.startTag(null, "packages");
+            for (var setting : packages.values()) settings.writePackageLPr(xml, certificates, setting);
+            var groups = new android.util.ArrayMap<String, dev.aim.server.SharedUserData>();
+            for (String name : lease.getSharedUserNames()) groups.put(name, lease.getSharedUserData(name));
+            for (var entry : groups.entrySet()) {
+                var sigs = new PackageSignatures(); sigs.mSigningDetails = entry.getValue().getSigningDetails();
+                xml.startTag(null, "shared-user"); xml.attribute(null, "name", entry.getKey());
+                xml.attributeInt(null, "userId", entry.getValue().getAppId());
+                sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
+            }
+            xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
     private static void verifyArrayMapOrder() {
         var map = new android.util.ArrayMap<String, Integer>();
         map.put("BB", 1); map.put("Aa", 2);
         if (!new java.util.ArrayList<>(map.keySet()).get(0).equals("BB") || !new java.util.ArrayList<>(map.keySet()).get(1).equals("Aa"))
             throw new AssertionError("original ArrayMap collision insertion order");
+        map.put("z", 0); map.put("negative.hash.owner", 5);
+        if (!new java.util.ArrayList<>(map.keySet()).equals(java.util.List.of("negative.hash.owner", "z", "BB", "Aa")))
+            throw new AssertionError("original ArrayMap signed hash order");
         map.put("BB", 3);
-        if (!new java.util.ArrayList<>(map.keySet()).get(0).equals("BB")) throw new AssertionError("original ArrayMap lookup order");
+        if (!new java.util.ArrayList<>(map.keySet()).equals(java.util.List.of("negative.hash.owner", "z", "BB", "Aa")))
+            throw new AssertionError("original ArrayMap lookup order");
         map.remove("BB"); map.put("BB", 4);
-        if (!new java.util.ArrayList<>(map.keySet()).get(0).equals("Aa") || !new java.util.ArrayList<>(map.keySet()).get(1).equals("BB"))
+        if (!new java.util.ArrayList<>(map.keySet()).equals(java.util.List.of("negative.hash.owner", "z", "Aa", "BB")))
             throw new AssertionError("original ArrayMap collision recreation order");
     }
     private static void verifyNativeSignatures(java.io.File directory,

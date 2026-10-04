@@ -50,6 +50,10 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
             false,
         ),
     ] {
+        // The setting vectors retain insertion slots: replacement updates in
+        // place, removal erases the slot and new settings append. ArrayMap
+        // iterates signed Java hashes, retaining that order for collisions.
+        packages.sort_by_key(|package| crate::package::info::java_hash(&package.name));
         let mut names = BTreeSet::new();
         let mut kept = Vec::new();
         for package in packages.iter() {

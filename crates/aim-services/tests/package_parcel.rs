@@ -397,6 +397,17 @@ fn native_package_parcels_match_original_read_write() {
         aim_services::package::scan_snapshot::Store::new(writer_owner, snapshot.usage().clone())
             .unwrap()
             .capture();
+    fs::write(
+        directory.join("settings-owner-order"),
+        writer_snapshot
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .map(|setting| format!("scan-{}.native.writer-setting\n", setting.app_id))
+            .collect::<String>(),
+    )
+    .unwrap();
     let writer_data = directory.join("native-settings-writer");
     fs::create_dir_all(writer_data.join("system")).unwrap();
     fs::write(writer_data.join("system/packages.xml"), b"<packages/>").unwrap();
@@ -3432,6 +3443,15 @@ fn native_package_parcels_match_original_read_write() {
     let mut imported = snapshot.owner().clone();
     imported.capture_original_runtime(&original_inputs).unwrap();
     aim_services::package::scan_snapshot::Store::new(imported, snapshot.usage().clone()).unwrap();
+    let full_original = aim_services::package::settings::Settings::parse(
+        &aim_android_xml::read(&fs::read(directory.join("settings-inventory-original")).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        full_original, writer_expected,
+        "complete original settings inventory differs"
+    );
     for (name, package, entry) in expected {
         if name.starts_with("scan-") {
             let original_settings = aim_services::package::settings::Settings::parse(

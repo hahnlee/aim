@@ -1471,3 +1471,74 @@ fn captured_scan_settings_replace_package_metadata_and_reject_uncommitted_global
     assert!(!store.commit_scan_settings(&snapshot).unwrap_err().committed);
     assert_eq!(store.state.settings, before);
 }
+
+#[test]
+fn scan_settings_use_array_map_package_order_without_changing_captured_slots() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&path, b"<packages/>").unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let names = ["z", "BB", "Aa", "negative.hash.owner"];
+    let settings = super::super::settings::Settings {
+        packages: names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| super::super::settings::Package {
+                name: (*name).into(),
+                code_path: format!("/data/app/{name}"),
+                app_id: 10100 + index as i32,
+                category_hint: -1,
+                domain_set_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut owner =
+        super::super::scan::SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    let capture = |owner| {
+        super::super::scan_snapshot::Store::new(owner, super::usage::Usage::new(names))
+            .unwrap()
+            .capture()
+    };
+    let old = capture(owner.clone());
+    store.commit_scan_settings(&old).unwrap();
+    let ordered = |settings: &super::super::settings::Settings| {
+        settings
+            .packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut expected = names.to_vec();
+    expected.sort_by_key(|name| super::super::info::java_hash(name));
+    assert_eq!(ordered(&store.state.settings), expected);
+    assert_eq!(ordered(&old.owner().settings), names);
+    owner.settings.packages[1].version_code = 2;
+    store.commit_scan_settings(&capture(owner.clone())).unwrap();
+    assert_eq!(ordered(&store.state.settings), expected);
+    let removed = owner.settings.packages.remove(1);
+    owner.settings.packages.push(removed);
+    store.commit_scan_settings(&capture(owner)).unwrap();
+    expected.swap(2, 3); // BB/Aa share a hash; recreation moves BB after Aa.
+    assert_eq!(ordered(&store.state.settings), expected);
+    let restored =
+        super::super::scan::SigningScan::new(&Default::default(), &store.state.settings, 36)
+            .unwrap();
+    store.commit_scan_settings(&capture(restored)).unwrap();
+    assert_eq!(ordered(&store.state.settings), expected);
+    store.commit_scan_settings(&old).unwrap();
+    assert_eq!(ordered(&old.owner().settings), names);
+    assert_eq!(
+        store
+            .state
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == "BB")
+            .unwrap()
+            .version_code,
+        0
+    );
+}
