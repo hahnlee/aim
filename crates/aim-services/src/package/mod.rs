@@ -101,6 +101,11 @@ impl State {
         else {
             return Ok(None);
         };
+        Self::read_related(data, users, settings).map(Some)
+    }
+
+    fn read_related(data: &Path, users: &[u32], settings: Settings) -> Result<State, String> {
+        let system = data.join("system");
         let list = journaled(&system.join("packages.list"))?
             .map(|text| list::parse(&text))
             .transpose()?
@@ -113,12 +118,12 @@ impl State {
             .iter()
             .map(|&user| Ok((user, read_user(data, user, &settings)?)))
             .collect::<Result<_, String>>()?;
-        Ok(Some(State {
+        Ok(State {
             settings,
             list,
             access,
             users,
-        }))
+        })
     }
 }
 

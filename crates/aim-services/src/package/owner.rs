@@ -90,6 +90,7 @@ pub struct Store {
     state: State,
     restrictions: BTreeMap<u32, Element>,
     settings_document: Element,
+    settings_present: bool,
     preferred_users: BTreeSet<u32>,
     list_document: Option<String>,
 }
@@ -108,6 +109,27 @@ impl Store {
         if super::settings::Settings::parse(&settings_document)? != state.settings {
             return Err("settings changed while opening native owner".into());
         }
+        Self::from_state(data, users, state, settings_document, true).map(Some)
+    }
+
+    /// Claim an absent first-boot settings inventory without writing a seed
+    /// document. All related user/access/list files retain their real readers.
+    /// Any existing main, backup or reserve belongs to restoration instead.
+    pub fn create(data: &Path, users: &[u32]) -> Result<Self, String> {
+        require_missing_settings(data)?;
+        let state = State::read_related(data, users, Default::default())?;
+        let store = Self::from_state(data, users, state, element("packages"), false)?;
+        require_missing_settings(data)?;
+        Ok(store)
+    }
+
+    fn from_state(
+        data: &Path,
+        users: &[u32],
+        state: State,
+        settings_document: Element,
+        settings_present: bool,
+    ) -> Result<Self, String> {
         let mut restrictions = BTreeMap::new();
         for &user in users {
             let dir = data.join("system/users").join(user.to_string());
@@ -135,14 +157,15 @@ impl Store {
                 super::preferred::has_preferred_resolver(root).then_some(user)
             })
             .collect();
-        Ok(Some(Self {
+        Ok(Self {
             data: data.to_owned(),
             state,
             restrictions,
             settings_document,
+            settings_present,
             preferred_users,
             list_document,
-        }))
+        })
     }
 
     pub fn state(&self) -> &State {
@@ -464,13 +487,19 @@ impl Store {
         let bytes = abx::write(&root).map_err(WriteError::before)?;
         let path = self.data.join("system/packages.xml");
         let backup = self.data.join("system/packages-backup.xml");
-        prepare_document(&path, &backup, &self.settings_document, |root| {
-            super::settings::Settings::parse(root).map(|_| ())
-        })
-        .map_err(WriteError::before)?;
+        if self.settings_present {
+            prepare_document(&path, &backup, &self.settings_document, |root| {
+                super::settings::Settings::parse(root).map(|_| ())
+            })
+            .map_err(WriteError::before)?;
+        } else {
+            require_missing_settings(&self.data).map_err(WriteError::before)?;
+            fs::create_dir_all(path.parent().unwrap()).map_err(WriteError::before)?;
+        }
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             self.settings_document = root;
+            self.settings_present = true;
             self.state.settings = persisted;
         }
         result
@@ -606,6 +635,27 @@ fn remove(path: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
+}
+
+fn require_missing_settings(data: &Path) -> Result<(), String> {
+    let path = data.join("system/packages.xml");
+    for candidate in [
+        path.clone(),
+        data.join("system/packages-backup.xml"),
+        sibling(&path, ".reservecopy"),
+    ] {
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                return Err(format!(
+                    "{} already exists; restore its owner",
+                    candidate.display()
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", candidate.display())),
+        }
+    }
+    Ok(())
 }
 
 /// Refuse another writer's state. If only the reserve parsed, preserve

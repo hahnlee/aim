@@ -409,11 +409,8 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
     let writer_data = directory.join("native-settings-writer");
-    fs::create_dir_all(writer_data.join("system")).unwrap();
-    fs::write(writer_data.join("system/packages.xml"), b"<packages/>").unwrap();
-    let mut writer_store = aim_services::package::owner::Store::open(&writer_data, &[0])
-        .unwrap()
-        .unwrap();
+    let mut writer_store = aim_services::package::owner::Store::create(&writer_data, &[0]).unwrap();
+    assert!(!writer_data.join("system/packages.xml").exists());
     writer_store.commit_scan_settings(&writer_snapshot).unwrap();
     let reindexed_data = directory.join("reindexed-settings-writer");
     fs::create_dir_all(reindexed_data.join("system")).unwrap();

@@ -1542,3 +1542,98 @@ fn scan_settings_use_array_map_package_order_without_changing_captured_slots() {
         0
     );
 }
+
+#[test]
+fn fresh_settings_claim_is_read_only_and_rejects_existing_or_foreign_files() {
+    let data = Data::new();
+    let mut first = Store::create(&data.0, &[0, 10]).unwrap();
+    assert!(!data.0.join("system").exists());
+    assert!(Store::open(&data.0, &[0]).unwrap().is_none());
+    assert!(!first.settings_present);
+    assert_eq!(
+        first
+            .state
+            .users
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [0, 10]
+    );
+    let mut second = Store::create(&data.0, &[0]).unwrap();
+    let settings = super::super::settings::Settings {
+        packages: vec![super::super::settings::Package {
+            name: "first.app".into(),
+            app_id: 10100,
+            code_path: "/data/app/first".into(),
+            category_hint: -1,
+            domain_set_id: Some("00000000-0000-0000-0000-000000000001".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let owner = super::super::scan::SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    let capture = |owner| {
+        super::super::scan_snapshot::Store::new(owner, super::usage::Usage::new(["first.app"]))
+            .unwrap()
+            .capture()
+    };
+    let mut invalid = owner.clone();
+    invalid.settings.packages[0].domain_set_id = None;
+    assert!(
+        !first
+            .commit_scan_settings(&capture(invalid))
+            .unwrap_err()
+            .committed
+    );
+    assert!(!data.0.join("system").exists());
+    let snapshot = capture(owner);
+    first.commit_scan_settings(&snapshot).unwrap();
+    assert!(first.settings_present);
+    assert!(Store::create(&data.0, &[0]).is_err());
+    let path = data.0.join("system/packages.xml");
+    let bytes = fs::read(&path).unwrap();
+    assert!(
+        !second
+            .commit_scan_settings(&snapshot)
+            .unwrap_err()
+            .committed
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        signing::persisted(Store::open(&data.0, &[0]).unwrap().unwrap().state.settings),
+        signing::persisted(first.state.settings.clone())
+    );
+    first.commit_scan_settings(&snapshot).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    for name in [
+        "packages.xml",
+        "packages-backup.xml",
+        "packages.xml.reservecopy",
+    ] {
+        let other = Data::new();
+        fs::create_dir_all(other.0.join("system")).unwrap();
+        let file = other.0.join("system").join(name);
+        fs::write(&file, b"corrupt-owned-input").unwrap();
+        assert!(Store::create(&other.0, &[0]).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"corrupt-owned-input");
+    }
+}
+
+#[test]
+fn fresh_settings_claim_validates_related_user_files_and_preserves_documents() {
+    let data = Data::new();
+    let dir = data.0.join("system/users/0");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("package-restrictions.xml");
+    fs::write(&path, b"malformed").unwrap();
+    assert!(Store::create(&data.0, &[0]).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"malformed");
+    fs::write(&path, RESTRICTIONS).unwrap();
+    let owner = Store::create(&data.0, &[0]).unwrap();
+    assert_eq!(
+        owner.restrictions[&0],
+        aim_android_xml::read(RESTRICTIONS).unwrap()
+    );
+    assert_eq!(fs::read(&path).unwrap(), RESTRICTIONS);
+    assert!(!data.0.join("system/packages.xml").exists());
+}

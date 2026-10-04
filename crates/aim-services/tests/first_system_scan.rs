@@ -201,6 +201,14 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert_eq!(original_capture.version(), 1);
     // First native settings write starts with no package inventory and retains
     // unrelated complete XML. The immutable captured scan is its sole source.
+    let fresh_data = writable.join("fresh-owner");
+    let mut fresh = aim_services::package::owner::Store::create(&fresh_data, &[0]).unwrap();
+    assert!(!fresh_data.join("system/packages.xml").exists());
+    fresh.commit_scan_settings(&original_capture).unwrap();
+    let fresh_reopened = aim_services::package::owner::Store::open(&fresh_data, &[0])
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh.state().settings, fresh_reopened.state().settings);
     let settings_path = writable.join("system/packages.xml");
     std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
     std::fs::write(

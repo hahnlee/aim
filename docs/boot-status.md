@@ -740,14 +740,21 @@ complete two-package/live-group inventory with pinned Settings.writePackageLPr
 and ArrayMap values order using one certificate table. Saved-setting signer
 lineage flags remain separate from parsed-code signing. The oracle also reads
 reindexed real certificates through PackageSignatures.readXml and checks
-ArrayMap signed hash/collision behavior (2026-10-05, 31.16s). Ordinary units pass
-445 (3.13s; two ignored), all integration targets compile, and the host/image/template
-build passes (14.3s, three rebuilt, 39 fresh). The original-APK initial scan fixture
-also passes (68.19s), writing/reopening native settings and checking immutable
+ArrayMap signed hash/collision behavior (2026-10-05, 32.02s), now starting from
+an absent native settings file. Store::create claims first-boot absence without
+writing a seed document and uses the original related user/access/list readers.
+It rejects every existing main/backup/reserve artifact, including malformed
+files, and rechecks absence before first persistence; another claimant's write
+is rejected. Domain validation failures leave the directory unwritten, complete
+user XML survives, and a successful main commit changes the owner to restoration
+mode. Ordinary units pass 447 (3.15s; two ignored), all integration targets compile,
+and the host/image/template build passes (14.9s, three rebuilt, 39 fresh). The original-APK initial scan fixture
+also passes (68.36s), writing/reopening both fresh and existing native settings and checking immutable
 input metadata, ABX/reserve equality and repeat-write stability. This is global setting persistence, not
-a complete Settings.writeLPr boot transaction: fresh-store creation, remaining
-global owners, user writers, packages.list and coherent publication still need
-integration. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
+a complete Settings.writeLPr boot transaction: remaining global owners, user
+writers, packages.list and coherent publication still need integration. Retrying
+an initial failed write while distinguishing its own uncommitted artifacts from
+foreign files remains #912. Disabled serialization is not covered by the original ART writer comparison. Original PMS remains live; native CTS/apps/template/APEX/rollback
 acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a
