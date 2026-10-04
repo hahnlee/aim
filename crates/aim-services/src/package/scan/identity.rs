@@ -36,7 +36,7 @@ impl Identity {
                     let group = settings
                         .shared_users
                         .iter()
-                        .find(|g| g.app_id == old.app_id)?;
+                        .find(|g| Some(g.app_id) == old.shared_app_id())?;
                     if pkg.shared_user_id.as_deref() != Some(&group.name) {
                         return None;
                     }

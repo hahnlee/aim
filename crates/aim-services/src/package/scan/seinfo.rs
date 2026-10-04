@@ -96,7 +96,8 @@ fn active_inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String>
                 .find(|p| &p.name == name)
                 .ok_or_else(|| format!("seInfo code has no active setting: {name}"))?;
             let shared = if setting.shared_user {
-                let Some(Owner::SharedUser(group_name)) = owner.identities.ids.get(setting.app_id)
+                let Some(Owner::SharedUser(group_name)) =
+                    owner.identities.ids.get(setting.uid_owner_id())
                 else {
                     return Err(format!("seInfo shared UID owner differs: {name}"));
                 };
@@ -104,7 +105,9 @@ fn active_inputs(owner: &SigningScan) -> Result<BTreeMap<String, Input>, String>
                     .identities
                     .shared_users
                     .get(group_name)
-                    .filter(|group| group.app_id == setting.app_id && group.has_package(name))
+                    .filter(|group| {
+                        Some(group.app_id) == setting.shared_app_id() && group.has_package(name)
+                    })
                     .ok_or_else(|| format!("seInfo shared UID membership differs: {name}"))?;
                 Some((
                     group_name.clone(),

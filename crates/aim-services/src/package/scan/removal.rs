@@ -47,7 +47,7 @@ impl SigningScan {
                 "loaded package must be withdrawn before setting removal",
             ));
         }
-        let shared = match self.identities.ids.get(package.app_id) {
+        let shared = match self.identities.ids.get(package.uid_owner_id()) {
             Some(Owner::SharedUser(group_name)) if package.shared_user => {
                 let group = self
                     .identities
@@ -75,15 +75,15 @@ impl SigningScan {
                 .packages
                 .iter()
                 .chain(&self.settings.disabled_system_packages)
-                .any(|p| p.shared_user && p.app_id == package.app_id);
+                .any(|p| p.shared_app_id() == package.shared_app_id() && p.shared_user);
             if !used {
                 self.identities.shared_users.remove(&group_name);
                 self.settings.shared_users.retain(|g| g.name != group_name);
-                self.identities.ids.remove(package.app_id);
+                self.identities.ids.remove(package.uid_owner_id());
             }
             !used
         } else {
-            self.identities.ids.remove(package.app_id);
+            self.identities.ids.remove(package.uid_owner_id());
             true
         };
         self.scanned_users.remove(name);

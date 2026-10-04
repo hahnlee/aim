@@ -72,12 +72,12 @@ fn replace_scan(
             let members: Vec<_> = allowed
                 .packages
                 .iter_mut()
-                .filter(|p| p.shared_user && p.app_id == group.app_id)
+                .filter(|p| p.shared_app_id() == Some(group.app_id))
                 .collect();
             let disabled: Vec<_> = allowed
                 .disabled_system_packages
                 .iter_mut()
-                .filter(|p| p.shared_user && p.app_id == group.app_id)
+                .filter(|p| p.shared_app_id() == Some(group.app_id))
                 .collect();
             if members.len() != 1 || disabled.len() > 1 {
                 return Err("migration requires a single active shared UID member (#803)".into());
@@ -95,6 +95,7 @@ fn replace_scan(
             }
             for package in members.into_iter().chain(disabled) {
                 package.shared_user = false;
+                package.shared_user_app_id = None;
             }
             removed.insert(group.name.clone());
         }

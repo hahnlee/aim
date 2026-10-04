@@ -147,7 +147,7 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
                 return Err(fail("duplicate package setting"));
             }
             if active {
-                match owner.identities.ids.get(setting.app_id) {
+                match owner.identities.ids.get(setting.uid_owner_id()) {
                     Some(Owner::Package(name)) if !setting.shared_user && name == &setting.name => {
                     }
                     Some(Owner::SharedUser(name)) if setting.shared_user => {
@@ -156,7 +156,9 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
                             .shared_users
                             .get(name)
                             .ok_or_else(|| fail("missing shared UID owner"))?;
-                        if group.app_id != setting.app_id || !group.has_package(&setting.name) {
+                        if Some(group.app_id) != setting.shared_app_id()
+                            || !group.has_package(&setting.name)
+                        {
                             return Err(fail("package shared UID membership differs"));
                         }
                     }

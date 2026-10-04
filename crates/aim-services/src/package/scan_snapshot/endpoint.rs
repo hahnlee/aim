@@ -93,6 +93,7 @@ pub struct PackageSigningState {
     app_id: i32,
     disabled: bool,
     shared_group: Option<String>,
+    shared_app_id: i32,
     package: Option<crate::package::sign::SigningDetails>,
     shared: Option<crate::package::sign::SigningDetails>,
 }
@@ -114,7 +115,8 @@ impl PackageSigningState {
             return Ok(None);
         };
         let (shared_group, shared) = if setting.shared_user {
-            let Some(Owner::SharedUser(group_name)) = owner.identities.ids.get(setting.app_id)
+            let Some(Owner::SharedUser(group_name)) =
+                owner.identities.ids.get(setting.uid_owner_id())
             else {
                 return Err("signing shared UID owner differs".into());
             };
@@ -122,7 +124,7 @@ impl PackageSigningState {
                 .identities
                 .shared_users
                 .get(group_name)
-                .filter(|group| group.app_id == setting.app_id)
+                .filter(|group| Some(group.app_id) == setting.shared_app_id())
                 .ok_or("signing shared UID group is missing")?;
             (
                 Some(group_name.clone()),
@@ -141,6 +143,7 @@ impl PackageSigningState {
             app_id: setting.app_id,
             disabled,
             shared_group,
+            shared_app_id: setting.shared_app_id().unwrap_or(0),
             package: setting
                 .signatures
                 .as_ref()
@@ -182,6 +185,7 @@ impl WriteParcelable for PackageSigningState {
         p.write_i32(self.app_id);
         p.write_bool(self.disabled);
         p.write_string16(self.shared_group.as_deref());
+        p.write_i32(self.shared_app_id);
         write_signing(p, self.package.as_ref());
         write_signing(p, self.shared.as_ref());
     }

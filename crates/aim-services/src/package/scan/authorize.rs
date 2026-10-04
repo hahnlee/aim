@@ -50,14 +50,14 @@ pub(super) fn with_disabled(
         let group = settings
             .shared_users
             .iter()
-            .find(|g| g.app_id == package.app_id)
+            .find(|g| Some(g.app_id) == package.shared_app_id())
             .ok_or_else(|| format!("missing shared UID group {} (#803)", package.app_id))?;
         if let Some(details) = group.signatures.as_ref().filter(|s| known(s)) {
             let unknown = settings::Signatures::default();
             let members: Vec<_> = settings
                 .packages
                 .iter()
-                .filter(|p| p.shared_user && p.app_id == group.app_id)
+                .filter(|p| p.shared_app_id() == Some(group.app_id))
                 .map(|p| History::saved(p.signatures.as_ref().unwrap_or(&unknown)))
                 .collect();
             let group_history = History::saved(details);

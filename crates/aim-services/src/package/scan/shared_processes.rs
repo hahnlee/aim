@@ -111,7 +111,7 @@ fn build(
             .settings
             .packages
             .iter()
-            .filter(|p| p.shared_user && p.app_id == group.app_id)
+            .filter(|p| p.shared_app_id() == Some(group.app_id))
             .map(|p| {
                 (
                     p.name.clone(),
@@ -248,7 +248,7 @@ impl SigningScan {
                     format!("original shared process member is missing: {member}")
                 })?;
                 if !setting.shared_user
-                    || setting.app_id != group.app_id
+                    || setting.shared_app_id() != Some(group.app_id)
                     || input.name != *member
                     || input.app_id != setting.app_id
                     || input.path != setting.code_path

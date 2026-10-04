@@ -46,7 +46,7 @@ impl UidScan {
                         settings
                             .shared_users
                             .iter()
-                            .find(|g| g.app_id == p.app_id)
+                            .find(|g| Some(g.app_id) == p.shared_app_id())
                             .unwrap()
                             .name
                             .clone(),

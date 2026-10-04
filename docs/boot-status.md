@@ -538,8 +538,17 @@ scan gate passes (65.53s), including actual container registration, first APK UI
 notification rejection, and loader failure before any APK domain admission. Compatibility,
 user/domain and notification owners in these native phase fixtures are controlled;
 these results do not prove live original callbacks or complete facade publication.
-Declared APEX shared UID and original/renamed identity transitions reject explicitly
-(#889/#890). The generated, system-UID-guarded bootstrap bridge now delivers completed native
+Native Settings now distinguishes application appId from runtime sharedUserAppId
+(#893), preserving the separate group relationship through signing, seInfo,
+retained updates, disabled copies, removal and scalar/signing captures. Persisted
+sharedUserId still supplies both IDs until a runtime owner changes appId. The
+original ART oracle verifies native paired-ID records with appId 10123 and group
+1000, typed original signing restoration, and preservation of group 1000 when the
+original setting changes appId to INVALID_UID. Native owner checks retain active
+and disabled group references without reserving an independent package slot and
+reject missing/invalid groups. These are controlled relationship/capture cases;
+actual APEX shared UID and original/renamed identity admission still reject
+explicitly (#889/#890). The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original
 PackageImpl objects and signer capability flags, validates the complete frame
 before invoking the owner, and propagates transport and owner failures. The
@@ -547,13 +556,15 @@ original ART oracle uses a fresh original ApexManager implementation and verifie
 module and active-package mappings for all 42 results; it does not notify the
 running original PMS singleton. Missing counts, unaligned and trailing payloads
 reject. Complete daemon ordering remains #885/#836/#798; the running daemon still
-does not invoke native initialization. All 434 units pass (3.16s; one ignored/not
+does not invoke native initialization. All 435 units pass (one ignored/not
 run), including generated Binder notification and reply/error handling. Actual original ART also continues to verify the user/APEX
 inventory exporters, static-library identity, complete package parcels and signer
 lineage. The full image/template build, including the original-image API reference check,
 passes for the typed notification boundary. All integration targets compile after
-the deferred-loader API change, and its full build passes (16.9s; three rebuilt,
-39 fresh).
+the separate shared-ID capture change. Its original-image API reference check and
+full image/template build pass (67.2s; nine rebuilt, 33 fresh); subsequent host
+rebuilds also pass. The full original ART oracle passes in 29.50s, and the system
+scan regression passes in 65.25s.
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners

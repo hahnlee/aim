@@ -289,7 +289,7 @@ impl SigningScan {
                 .settings
                 .shared_users
                 .iter()
-                .find(|g| g.app_id == record.settings.app_id)
+                .find(|g| Some(g.app_id) == record.settings.shared_app_id())
                 .ok_or_else(reject)?
                 .name;
             Some((

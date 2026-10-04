@@ -75,7 +75,7 @@ public final class CapturedPackageSetting {
         var setting = new PackageSetting(data.getPackageName(), data.realName,
             new File(data.path), data.flags, data.privateFlags, domain);
         setting.setAppId(data.appId);
-        if (data.sharedUser) setting.setSharedUserAppId(data.appId);
+        if (data.sharedUser) setting.setSharedUserAppId(data.sharedUserAppId);
         setting.setLegacyNativeLibraryPath(data.legacyNativeLibraryPath);
         setting.setPrimaryCpuAbi(data.primaryCpuAbiRaw);
         setting.setSecondaryCpuAbi(data.secondaryCpuAbiRaw);

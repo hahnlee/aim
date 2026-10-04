@@ -26,18 +26,20 @@ pub(super) fn replace(
             .packages
             .iter()
             .chain(&allowed.disabled_system_packages)
-            .any(|p| p.shared_user && p.app_id == package.app_id)
+            .any(|p| p.shared_app_id() == package.shared_app_id() && p.shared_user)
     {
         let groups: Vec<_> = allowed
             .shared_users
             .iter()
-            .filter(|g| g.app_id == package.app_id)
+            .filter(|g| Some(g.app_id) == package.shared_app_id())
             .collect();
         if groups.len() != 1 {
             return Err("removed package has ambiguous shared UID ownership".into());
         }
         removed_group = Some(groups[0].name.clone());
-        allowed.shared_users.retain(|g| g.app_id != package.app_id);
+        allowed
+            .shared_users
+            .retain(|g| Some(g.app_id) != package.shared_app_id());
     }
     if persisted(allowed.clone()) != persisted(desired.clone()) {
         // The live scan registry can retain an installer name after its last

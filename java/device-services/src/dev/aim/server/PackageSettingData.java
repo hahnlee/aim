@@ -38,6 +38,7 @@ public final class PackageSettingData {
     public final int targetSdkVersion;
     public final int appId;
     public final boolean sharedUser;
+    public final int sharedUserAppId;
     public final boolean sdkLibrary;
     public final String volumeUuid;
     public final int categoryOverride;
@@ -71,6 +72,9 @@ public final class PackageSettingData {
         targetSdkVersion = in.readInt();
         appId = in.readInt();
         sharedUser = in.readBoolean();
+        sharedUserAppId = in.readInt();
+        if ((sharedUser && sharedUserAppId <= 0) || (!sharedUser && sharedUserAppId != 0))
+            throw new IllegalArgumentException("invalid shared user relationship");
         sdkLibrary = in.readBoolean();
         volumeUuid = in.readString();
         categoryOverride = in.readInt();

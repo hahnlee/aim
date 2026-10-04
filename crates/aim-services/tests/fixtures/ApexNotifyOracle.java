@@ -29,7 +29,31 @@ public final class ApexNotifyOracle {
         catch (IllegalArgumentException expected) {}
         try { ApexBootFeed.notifyScanResults(owner, new byte[0]); throw new AssertionError("missing count accepted"); }
         catch (IllegalArgumentException expected) {}
+        verifySharedIds(directory);
         System.out.println("APEX_NOTIFY " + count);
     }
     private ApexNotifyOracle() {}
+    private static void verifySharedIds(java.io.File directory) throws Exception {
+        var in = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "shared-id.setting").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var data = dev.aim.server.PackageSettingData.read(in);
+            if (in.dataAvail() != 0 || data.appId != 10123 || !data.sharedUser || data.sharedUserAppId != 1000)
+                throw new AssertionError("distinct scalar IDs differ");
+            var setting = new PackageSetting(data.getPackageName(), data.realName,
+                new java.io.File(data.path), data.flags, data.privateFlags, new java.util.UUID(1, 1));
+            setting.setAppId(data.appId); setting.setSharedUserAppId(data.sharedUserAppId);
+            bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "shared-id.signing").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var signing = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(in);
+            if (in.dataAvail() != 0 || signing.getAppId() != 10123 || signing.getSharedAppId() != 1000)
+                throw new AssertionError("distinct signing IDs differ");
+            dev.aim.server.PackageObjects.restoreSavedSigning(setting, signing, 1, false);
+            setting.setAppId(-1);
+            if (setting.getAppId() != -1 || !setting.hasSharedUser()
+                    || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != 1000)
+                throw new AssertionError("APEX app ID discarded shared relationship");
+        } finally { in.recycle(); }
+    }
 }

@@ -335,7 +335,7 @@ impl Bootstrap {
         AppIds::restore_seeded(settings, &boot.ids).map_err(RestoreError::Settings)?;
         for package in &settings.packages {
             if package.shared_user {
-                let name = match boot.ids.get(package.app_id) {
+                let name = match boot.ids.get(package.uid_owner_id()) {
                     Some(Owner::SharedUser(name)) => name.clone(),
                     _ => unreachable!("AppIds::restore validated shared UID ownership"),
                 };
@@ -362,7 +362,7 @@ impl Bootstrap {
             .iter()
             .chain(&settings.disabled_system_packages)
             .filter(|p| p.shared_user)
-            .map(|p| p.app_id)
+            .map(|p| p.uid_owner_id())
             .collect();
         self.prune_unreferenced(&used)
     }
@@ -410,6 +410,42 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use crate::package::settings::{Package, SharedUser as SavedGroup};
+
+    #[test]
+    fn runtime_shared_id_owns_membership_without_reserving_package_app_id() {
+        let mut settings = Settings {
+            packages: vec![Package {
+                name: "container".into(),
+                app_id: 10123,
+                shared_user: true,
+                shared_user_app_id: Some(1000),
+                flags: 1,
+                private_flags: 8,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut boot = Bootstrap::restore(&SystemConfig::default(), &settings).unwrap();
+        assert!(boot.shared_users["android.uid.system"].has_package("container"));
+        assert_eq!(boot.shared_users["android.uid.system"].flags, 1);
+        assert_eq!(boot.shared_users["android.uid.system"].private_flags, 8);
+        assert_eq!(boot.ids.get(10123), None);
+        assert_eq!(
+            boot.ids
+                .acquire(Owner::Package("first.apk".into()))
+                .unwrap(),
+            10000
+        );
+        settings.disabled_system_packages = settings.packages.clone();
+        settings.packages.clear();
+        boot.prune_unused(&settings);
+        assert!(boot.shared_users.contains_key("android.uid.system"));
+        settings.packages = settings.disabled_system_packages.clone();
+        settings.packages[0].shared_user_app_id = Some(9999);
+        assert!(Bootstrap::restore(&SystemConfig::default(), &settings).is_err());
+        settings.packages[0].shared_user_app_id = Some(-1);
+        assert!(Bootstrap::restore(&SystemConfig::default(), &settings).is_err());
+    }
 
     #[test]
     fn seinfo_sdk_tracks_first_code_boot_minimum_and_runtime_lifetime() {

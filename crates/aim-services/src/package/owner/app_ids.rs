@@ -100,7 +100,7 @@ impl AppIds {
                 });
             }
             if package.shared_user {
-                if !matches!(ids.get(package.app_id), Some(Owner::SharedUser(_))) {
+                if !matches!(ids.get(package.uid_owner_id()), Some(Owner::SharedUser(_))) {
                     return Err(Error::MissingSharedUser {
                         package: package.name.clone(),
                         app_id: package.app_id,

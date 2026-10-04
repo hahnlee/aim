@@ -32,6 +32,7 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     p.write_i32(s.target_sdk_version);
     p.write_i32(s.app_id);
     p.write_bool(s.shared_user);
+    p.write_i32(s.shared_app_id().unwrap_or(0));
     p.write_bool(s.is_sdk_library);
     p.write_string16(s.volume_uuid.as_deref());
     p.write_i32(s.category_hint);

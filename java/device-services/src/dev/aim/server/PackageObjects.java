@@ -41,7 +41,7 @@ public final class PackageObjects {
                 || state.getAppId() != setting.getAppId() || state.isDisabled() != factory
                 || (state.getSharedGroupName() != null) != setting.hasSharedUser()
                 || (setting.hasSharedUser() && ((com.android.server.pm.pkg.PackageState)setting)
-                        .getSharedUserAppId() != state.getAppId())) {
+                        .getSharedUserAppId() != state.getSharedAppId())) {
             throw new IllegalArgumentException("saved signing capture mismatch");
         }
         setting.setSigningDetails(state.getPackageSigningDetails());

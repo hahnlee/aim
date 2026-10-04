@@ -375,7 +375,7 @@ impl SigningScan {
             || record.identity.internal_name != record.settings.name
             || !self.parsed.iter().any(|(name, id, signing, leaving)| {
                 name == &record.settings.name
-                    && *id == record.settings.app_id
+                    && *id == record.settings.uid_owner_id()
                     && signing == &record.signing
                     && *leaving == record.parsed.is(booleans::LEAVING_SHARED_UID)
             })
@@ -626,7 +626,7 @@ impl SigningScan {
             self.settings
                 .shared_users
                 .iter()
-                .find(|g| g.app_id == original.app_id)
+                .find(|g| Some(g.app_id) == original.shared_app_id())
                 .map(|g| g.name.as_str())
         } else {
             None
@@ -647,7 +647,7 @@ impl SigningScan {
             Some(name) => Owner::SharedUser(name.into()),
             None => Owner::Package(original.name.clone()),
         };
-        if self.identities.ids.get(original.app_id) != Some(&owner) {
+        if self.identities.ids.get(original.uid_owner_id()) != Some(&owner) {
             return Err(reject("identity", "saved package no longer owns its UID"));
         }
         let users = saved_users
@@ -743,7 +743,7 @@ impl SigningScan {
             self.settings
                 .shared_users
                 .iter()
-                .find(|g| g.app_id == original.app_id)
+                .find(|g| Some(g.app_id) == original.shared_app_id())
                 .map(|g| g.name.as_str())
         } else {
             None
@@ -764,7 +764,7 @@ impl SigningScan {
             Some(name) => Owner::SharedUser(name.into()),
             None => Owner::Package(original.name.clone()),
         };
-        if self.identities.ids.get(original.app_id) != Some(&expected_owner) {
+        if self.identities.ids.get(original.uid_owner_id()) != Some(&expected_owner) {
             return Err(reject(
                 "identity",
                 "original setting no longer owns its UID",
@@ -1059,7 +1059,7 @@ impl SigningScan {
             .ok_or_else(|| reject("identity", "package has no saved identity (#804)".into()))?;
         let previous = &self.settings.packages[at];
         if previous.app_id != record.settings.app_id
-            || previous.shared_user != record.settings.shared_user
+            || previous.shared_app_id() != record.settings.shared_app_id()
             || previous.code_path != record.settings.code_path
             || record.identity.internal_name != previous.name
             || record.parsed.package_name != previous.name
@@ -1090,7 +1090,7 @@ impl SigningScan {
                 self.settings
                     .shared_users
                     .iter()
-                    .find(|g| g.app_id == previous.app_id)
+                    .find(|g| Some(g.app_id) == previous.shared_app_id())
                     .ok_or_else(|| {
                         reject("identity", "shared UID group disappeared (#803)".into())
                     })?
@@ -1143,7 +1143,9 @@ impl SigningScan {
                     let others: Vec<_> = self
                         .parsed
                         .iter()
-                        .filter(|(name, id, _, _)| name != &previous.name && *id == previous.app_id)
+                        .filter(|(name, id, _, _)| {
+                            name != &previous.name && *id == previous.uid_owner_id()
+                        })
                         .map(|(_, _, details, _)| details.clone())
                         .collect();
                     group
@@ -1224,7 +1226,7 @@ impl SigningScan {
             .retain(|(name, _, _, _)| name != &record.settings.name);
         self.parsed.push((
             record.settings.name.clone(),
-            record.settings.app_id,
+            record.settings.uid_owner_id(),
             record.signing.clone(),
             record.parsed.is(booleans::LEAVING_SHARED_UID),
         ));
@@ -1263,7 +1265,7 @@ impl SigningScan {
             .packages
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.shared_user && p.app_id == id)
+            .filter(|(_, p)| p.shared_app_id() == Some(id))
             .map(|(at, _)| at)
             .collect();
         let old: Vec<_> = self
@@ -1271,7 +1273,7 @@ impl SigningScan {
             .disabled_system_packages
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.shared_user && p.app_id == id)
+            .filter(|(_, p)| p.shared_app_id() == Some(id))
             .map(|(at, _)| at)
             .collect();
         if active.len() != 1 || old.len() > 1 {
@@ -1307,8 +1309,10 @@ impl SigningScan {
                 message: format!("shared UID migration failed: {e:?}"),
             })?;
         self.settings.packages[active[0]].shared_user = false;
+        self.settings.packages[active[0]].shared_user_app_id = None;
         if let Some(&at) = old.first() {
             self.settings.disabled_system_packages[at].shared_user = false;
+            self.settings.disabled_system_packages[at].shared_user_app_id = None;
         }
         self.settings.shared_users.retain(|g| g.name != name);
         self.identities.shared_users.remove(name);
@@ -2139,6 +2143,7 @@ mod tests {
                 assert_eq!(r.read_i32().unwrap(), 10100);
                 assert!(!r.read_bool().unwrap());
                 assert!(r.read_string16().unwrap().is_none());
+                assert_eq!(r.read_i32().unwrap(), 0);
                 // Saved UNKNOWN is not substituted with the collected code's signer.
                 assert!(!r.read_bool().unwrap());
                 assert!(!r.read_bool().unwrap());

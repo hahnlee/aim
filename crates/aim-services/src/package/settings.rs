@@ -93,8 +93,10 @@ pub struct Package {
     pub restrict_update_hash: Option<Vec<u8>>,
     pub scanned_as_stopped_system_app: bool,
     pub app_id: i32,
-    /// Whether `app_id` is a shared user's.
+    /// Whether the setting owns a shared-user relationship.
     pub shared_user: bool,
+    /// Separate runtime group ID when it differs from the persisted app ID.
+    pub shared_user_app_id: Option<i32>,
     pub is_sdk_library: bool,
     pub install_source: InstallSource,
     pub volume_uuid: Option<String>,
@@ -130,6 +132,17 @@ pub struct Package {
 }
 
 impl Package {
+    /// packages.xml uses one sharedUserId for both IDs; initial APEX scans
+    /// later change only appId to INVALID_UID, leaving the group relationship.
+    pub fn shared_app_id(&self) -> Option<i32> {
+        self.shared_user
+            .then(|| self.shared_user_app_id.unwrap_or(self.app_id))
+    }
+
+    pub fn uid_owner_id(&self) -> i32 {
+        self.shared_app_id().unwrap_or(self.app_id)
+    }
+
     /// PackageSetting.addMimeTypes: existing groups accumulate distinct types.
     pub fn add_mime_types(&mut self, name: String, values: impl IntoIterator<Item = String>) {
         self.add_nullable_mime_types(Some(name), values.into_iter().map(Some));

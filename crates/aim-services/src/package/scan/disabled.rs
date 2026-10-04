@@ -462,7 +462,7 @@ impl SigningScan {
             .get(name)
             .ok_or_else(|| reject("loaded factory user owner is missing"))?;
         if package.shared_user {
-            match self.identities.ids.get(package.app_id) {
+            match self.identities.ids.get(package.uid_owner_id()) {
                 Some(crate::package::owner::app_ids::Owner::SharedUser(group))
                     if self
                         .identities
@@ -564,7 +564,7 @@ impl SigningScan {
                 self.settings
                     .shared_users
                     .iter()
-                    .find(|g| g.app_id == active.app_id)
+                    .find(|g| Some(g.app_id) == active.shared_app_id())
                     .ok_or_else(|| reject("active shared UID owner is missing".into()))?
                     .name
                     .as_str(),
@@ -671,7 +671,7 @@ impl SigningScan {
                 self.settings
                     .shared_users
                     .iter()
-                    .find(|g| g.app_id == saved.app_id)
+                    .find(|g| Some(g.app_id) == saved.shared_app_id())
                     .ok_or_else(|| {
                         reject("identity", "disabled shared UID owner is missing".into())
                     })?

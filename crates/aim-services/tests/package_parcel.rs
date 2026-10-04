@@ -354,6 +354,7 @@ fn native_package_parcels_match_original_read_write() {
     .unwrap();
 
     scoped_runtime_objects(&directory);
+    distinct_shared_id_objects(&directory);
     cache_validation_objects(
         &directory,
         &snapshot.owner().loaded_packages()["android"].package,
@@ -2234,6 +2235,50 @@ fn native_scan_objects(
     aim_services::package::scan_snapshot::Store::new(owner, usage)
         .unwrap()
         .capture()
+}
+
+fn distinct_shared_id_objects(directory: &std::path::Path) {
+    use aim_service_aidl::WriteParcelable;
+    use aim_services::package::{
+        owner::usage::Usage,
+        scan::SigningScan,
+        scan_snapshot::{Store, endpoint::PackageSigningState},
+        settings,
+        system_config::SystemConfig,
+    };
+    let name = "aim.shared.identity.fixture";
+    let settings = settings::Settings {
+        packages: vec![settings::Package {
+            name: name.into(),
+            code_path: "/data/app/shared-identity".into(),
+            app_id: 10123,
+            shared_user: true,
+            shared_user_app_id: Some(1000),
+            ..Default::default()
+        }],
+        shared_users: vec![settings::SharedUser {
+            name: "android.uid.system".into(),
+            app_id: 1000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let owner = SigningScan::new(&SystemConfig::default(), &settings, 36).unwrap();
+    assert_eq!(owner.identities.ids.get(10123), None);
+    let snapshot = Store::new(owner, Usage::new([name])).unwrap().capture();
+    std::fs::write(
+        directory.join("shared-id.setting"),
+        aim_services::package::scan_snapshot::setting_record::captured(&snapshot, name, false)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let state = PackageSigningState::captured(&snapshot, name, false)
+        .unwrap()
+        .unwrap();
+    let mut out = aim_binder_host::parcel::Parcel::new();
+    state.write_to(&mut out);
+    std::fs::write(directory.join("shared-id.signing"), out.data()).unwrap();
 }
 
 fn scoped_runtime_objects(directory: &std::path::Path) {

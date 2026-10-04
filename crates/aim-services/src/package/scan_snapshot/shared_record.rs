@@ -17,7 +17,7 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
         .settings
         .packages
         .iter()
-        .filter(|p| p.shared_user && p.app_id == group.app_id)
+        .filter(|p| p.shared_app_id() == Some(group.app_id))
         .map(|p| p.name.as_str())
         .collect();
     if members

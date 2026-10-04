@@ -13,6 +13,7 @@ public final class PackageSigningState implements Parcelable {
     private final int appId;
     private final boolean disabled;
     private final String sharedGroup;
+    private final int sharedAppId;
     private final Signing packageSigning;
     private final Signing sharedSigning;
 
@@ -22,6 +23,9 @@ public final class PackageSigningState implements Parcelable {
         appId = in.readInt();
         disabled = in.readBoolean();
         sharedGroup = in.readString();
+        sharedAppId = in.readInt();
+        if ((sharedGroup == null && sharedAppId != 0) || (sharedGroup != null && sharedAppId <= 0))
+            throw new IllegalArgumentException("invalid shared signing relationship");
         packageSigning = Signing.read(in);
         sharedSigning = Signing.read(in);
         if (sharedGroup == null && sharedSigning != null) {
@@ -33,6 +37,7 @@ public final class PackageSigningState implements Parcelable {
     public String getPackageName() { return name; }
     public int getAppId() { return appId; }
     public boolean isDisabled() { return disabled; }
+    public int getSharedAppId() { return sharedAppId; }
     public String getSharedGroupName() { return sharedGroup; }
     public SigningDetails getPackageSigningDetails() { return Signing.details(packageSigning); }
     public SigningDetails getSharedSigningDetails() {
@@ -112,7 +117,7 @@ public final class PackageSigningState implements Parcelable {
         out.writeString(name);
         out.writeInt(appId);
         out.writeBoolean(disabled);
-        out.writeString(sharedGroup);
+        out.writeString(sharedGroup); out.writeInt(sharedAppId);
         Signing.write(out, packageSigning);
         Signing.write(out, sharedSigning);
     }
