@@ -450,6 +450,29 @@ impl System {
             .scan_first_boot(apks, policy)
     }
 
+    /// Scan restored system settings before data APK reconciliation. Mutations
+    /// remain with the supplied owner; this does not persist or publish it.
+    pub fn scan_package_saved_system(
+        &self,
+        owner: &mut crate::package::scan::SigningScan,
+        apks: &crate::package::write::Apks,
+        config: &crate::package::system_config::SystemConfig,
+        properties: &dyn Fn(&str) -> Option<String>,
+        policy: crate::package::bootstrap::ScanPolicy<'_>,
+        saved: crate::package::scan::SavedSystemScanInputs<'_>,
+    ) -> std::result::Result<
+        crate::package::bootstrap::SavedSystemPhase,
+        crate::package::bootstrap::BootError,
+    > {
+        use crate::package::bootstrap::{BootError, OwnerError};
+        let bridge = self
+            .package_bootstrap()
+            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))?;
+        bridge
+            .resolve_boot(config, properties)?
+            .scan_saved_system(owner, apks, policy, saved)
+    }
+
     /// Takes system_server's bridge (#430): maps the shared memory of its
     /// cache nonces, dropped again when system_server dies.
     pub fn attach_bridge(self: &Arc<Self>, handle: u32) -> Result<()> {

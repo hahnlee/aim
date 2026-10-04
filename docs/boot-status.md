@@ -685,14 +685,23 @@ bridge and immutable SystemConfig; caller image/ABI/installation policy remains
 explicit. The scan parses original containers, completes native APEX registration,
 notifies the original owner before APK directory loading, and uses that same
 bridge for domain IDs and seInfo compatibility. Owner/malformed notification
-failures abort without publishing a snapshot. The real Binder test with a
-controlled owner and an unchanged original framework APK passes (3.01s), including
-notification failure and denied-owner rejection. All 441 ordinary units pass;
-the new ignored scan test was run explicitly, while the other ignored test remains
-not run. All integration targets compile and the host build passes (14.6s).
-This entry point is not invoked
-by the default boot and does not complete saved/data reconciliation, metadata
-owners, facades or service publication. Original PMS remains live; native
+failures abort without publishing a snapshot. The same daemon bridge also accepts a restored SigningScan, saved user
+states and explicit resource/stub/incremental owners for the system phase of a
+saved boot. It registers APEX and completes the original notification before
+reading APK directories, then invokes the existing factory/version/signature and
+metadata reconciliation, returning retained factory/data candidates separately.
+The caller's mutated owner remains authoritative after earlier effects; the
+phase does not discard it on a later error. Initial and saved phases share their
+exact original input/callback construction. The expanded controlled-owner Binder
+scan test passes (7.31s): unchanged original framework APK, restored native settings,
+retained registration UID and per-user enabled/installed/hidden values, fresh
+original domain owner output, unloaded-to-loaded transition, old-owner isolation
+and missing-domain/notification/denied-owner rejection. Ordinary units pass 441
+(3.24s); the expanded
+ignored test ran explicitly, the other ignored test remains not run; all
+integration targets compile and the host build passes (13.0s). These entry points
+are not invoked by the default boot and do not complete data reconciliation,
+metadata owners, facades or service publication. Original PMS remains live; native
 CTS/apps/template/APEX/rollback acceptance remains unrun.
 Failure-only AndroidRuntime log collection now exposes original crash-handler
 SIGKILL after ENOSPC (#902/#903): the latest policy WRITE failure is a

@@ -416,7 +416,7 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(old.resolve_boot(&config, &|_| None).is_err());
     owner.apex_reply.store(0, Ordering::SeqCst);
     if run_scan {
-        verify_boot_scan(&system, &old, &owner, &config);
+        verify_boot_scan(&system, &native, &old, &owner, &config);
     }
     let mut parsed = crate::package::pkg::AndroidPackage {
         feature_flag_state: Some(Vec::new()),
@@ -817,6 +817,7 @@ fn late_bridge_death_preserves_replacement_nonce_mapping() {
 
 fn verify_boot_scan(
     system: &System,
+    native: &Arc<LocalProcess>,
     bridge: &crate::package::bootstrap::Bridge,
     owner: &Owner,
     config: &SystemConfig,
@@ -907,6 +908,73 @@ fn verify_boot_scan(
             .collect::<Vec<_>>(),
         [0]
     );
+    let mut users = BTreeMap::from([(
+        "android".into(),
+        scan.owner.scanned_user_states("android").unwrap().clone(),
+    )]);
+    users
+        .get_mut("android")
+        .unwrap()
+        .get_mut(&0)
+        .unwrap()
+        .enabled = 2;
+    users.get_mut("android").unwrap().insert(
+        10,
+        crate::package::restrictions::UserState {
+            installed: false,
+            hidden: true,
+            ..crate::package::restrictions::UserState::initialized()
+        },
+    );
+    let mut restored_settings = scan.owner.settings.clone();
+    restored_settings.packages[0].domain_set_id =
+        Some("11111111-1111-4111-8111-111111111111".into());
+    let mut restarted =
+        crate::package::scan::SigningScan::new(config, &restored_settings, 36).unwrap();
+    let prior = restarted.clone();
+    let resources = crate::package::owner::resources::CodeResources::new(
+        native.clone(),
+        data.0.join("data"),
+        None,
+    );
+    let stubs = std::collections::BTreeSet::new();
+    let incremental = std::collections::BTreeSet::new();
+    let saved = || crate::package::scan::SavedSystemScanInputs {
+        users: &users,
+        first_boot_or_upgrade: false,
+        old_stub_packages: &stubs,
+        incremental_packages: &incremental,
+        resources: &resources,
+    };
+    owner.domain_reply.store(1, Ordering::SeqCst);
+    assert!(
+        matches!(system.scan_package_saved_system(&mut restarted, &apks, config, &|_| None, policy(), saved()),
+        Err(crate::package::bootstrap::BootError::Scan(crate::package::scan::SigningError::Rejected(e))) if e.phase == "domain")
+    );
+    assert_eq!(restarted, prior);
+    owner.domain_reply.store(0, Ordering::SeqCst);
+    let phase = system
+        .scan_package_saved_system(&mut restarted, &apks, config, &|_| None, policy(), saved())
+        .unwrap();
+    assert!(phase.apex.is_empty());
+    assert_eq!(phase.system.packages.len(), 1);
+    assert!(phase.system.retained_data.is_empty());
+    assert_eq!(
+        restarted.settings.packages[0].app_id,
+        restored_settings.packages[0].app_id
+    );
+    assert_eq!(
+        restarted.settings.packages[0].domain_set_id.as_deref(),
+        Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    );
+    assert_eq!(prior.settings, restored_settings);
+    assert_eq!(
+        restarted.scanned_user_states("android").unwrap(),
+        &users["android"]
+    );
+    assert!(!prior.loaded_packages().contains_key("android"));
+    assert!(restarted.loaded_packages().contains_key("android"));
+
     owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
         system.scan_package_first_boot(&apks, config, &|_| None, policy()),
