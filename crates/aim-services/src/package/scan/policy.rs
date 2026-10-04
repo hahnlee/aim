@@ -288,6 +288,7 @@ mod tests {
             partition: Partition::Vendor,
             kind: super::super::Kind::App,
             apex: Some(super::super::Apex {
+                module_name: Some("module".into()),
                 mount_path: "/apex/module".into(),
                 partition: Partition::Vendor,
                 factory: false,

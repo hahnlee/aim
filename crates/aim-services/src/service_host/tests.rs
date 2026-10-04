@@ -90,6 +90,7 @@ struct Owner {
     legacy_reply: AtomicUsize,
     domain_reply: AtomicUsize,
     users_reply: AtomicUsize,
+    apex_reply: AtomicUsize,
     gid: i32,
 }
 impl Service for Owner {
@@ -153,6 +154,30 @@ impl Service for Owner {
                     (mode != 1).then_some(payload.data()),
                 );
                 if mode == 3 {
+                    reply.write_i32(99);
+                }
+            }
+            bootstrap::GET_APEX_BOOT_INVENTORY => {
+                let mode = self.apex_reply.load(Ordering::SeqCst);
+                let mut payload = Parcel::new();
+                payload.write_i32(if mode == 1 { 0 } else { -1 });
+                payload.write_i32(if mode == 1 { 0 } else { 1 });
+                if mode != 1 {
+                    payload.write_string16(Some("raw.module"));
+                    payload.write_string16(Some("/apex/mounted"));
+                    payload.write_string16(Some("/product/apex/factory.apex"));
+                    payload.write_bool(false);
+                    payload.write_string16(Some("/data/apex/active/updated.apex"));
+                    payload.write_bool(true);
+                }
+                if mode == 2 {
+                    payload.write_i32(99);
+                }
+                aim_service_aidl::write_byte_array(
+                    &mut reply,
+                    (mode != 3).then_some(payload.data()),
+                );
+                if mode == 4 {
                     reply.write_i32(99);
                 }
             }
@@ -318,6 +343,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         legacy_reply: AtomicUsize::new(0),
         domain_reply: AtomicUsize::new(0),
         users_reply: AtomicUsize::new(0),
+        apex_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3003,
@@ -331,6 +357,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         legacy_reply: AtomicUsize::new(0),
         domain_reply: AtomicUsize::new(0),
         users_reply: AtomicUsize::new(0),
+        apex_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 999,
@@ -412,6 +439,26 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         ));
     }
     owner.domain_reply.store(0, Ordering::SeqCst);
+    let apex = old.apex_inventory().unwrap();
+    assert_eq!(apex.packages, None);
+    let scan = apex.scan_apexes();
+    assert_eq!(scan.len(), 1);
+    assert_eq!(scan[0].module_name.as_deref(), Some("raw.module"));
+    assert_eq!(scan[0].partition, crate::package::scan::Partition::Product);
+    assert!(scan[0].active_changed && !scan[0].factory);
+    owner.apex_reply.store(1, Ordering::SeqCst);
+    assert_eq!(old.apex_inventory().unwrap().packages, Some(Vec::new()));
+    for mode in 2..=4 {
+        owner.apex_reply.store(mode, Ordering::SeqCst);
+        assert!(matches!(
+            old.apex_inventory(),
+            Err(crate::package::bootstrap::OwnerError::Transport(
+                aim_binder_host::parcel::BAD_VALUE
+            ))
+        ));
+    }
+    owner.apex_reply.store(0, Ordering::SeqCst);
+    assert_eq!(apex.active.len(), 1);
     let users = old.scan_users().unwrap();
     assert_eq!(
         users
@@ -450,6 +497,10 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
     owner.malformed_seinfo.store(false, Ordering::SeqCst);
     assert!(old.permission_gids(19001, &[0, 0]).is_err());
     owner.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        old.apex_inventory(),
+        Err(crate::package::bootstrap::OwnerError::Owner(_))
+    ));
     assert!(matches!(
         old.scan_users(),
         Err(crate::package::bootstrap::OwnerError::Owner(_))
@@ -497,6 +548,7 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         legacy_reply: AtomicUsize::new(0),
         domain_reply: AtomicUsize::new(0),
         users_reply: AtomicUsize::new(0),
+        apex_reply: AtomicUsize::new(0),
         calls: Mutex::new(vec![]),
         reject: AtomicBool::new(false),
         gid: 3004,

@@ -250,6 +250,7 @@ fn saved_scan_libraries_match_original_pms() {
             let original = attr("preinstalledModulePath");
             let (partition, _) = partition_path(&original).unwrap();
             Apex {
+                module_name: Some("module".into()),
                 mount_path: format!("/apex/{}", attr("moduleName")),
                 partition,
                 factory: attr("isFactory") == "true",

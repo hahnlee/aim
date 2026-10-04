@@ -13,4 +13,6 @@ interface IPackageBootstrapBridge {
     byte[] generateNewDomainId();
     /** Original resolved scan users, including pre-created users and ADB restrictions. */
     byte[] getPackageScanUsers();
+    /** Original all-package and active-mount APEX inventories, preserving owner order. */
+    byte[] getApexBootInventory();
 }

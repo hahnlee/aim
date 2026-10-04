@@ -10,6 +10,33 @@ public final class PackageRoundTripOracle {
         }
     }
 
+    private static android.apex.ApexInfo apexInfo(String name, String origin, String path, boolean factory, boolean active, boolean changed) {
+        var info = new android.apex.ApexInfo();
+        info.moduleName = name; info.modulePath = path; info.preinstalledModulePath = origin;
+        info.versionCode = 0x100000007L; info.isFactory = factory; info.isActive = active; info.activeApexChanged = changed;
+        return info;
+    }
+
+    private static void verifyOriginalApexInventory(java.io.File directory) throws Exception {
+        var factory = apexInfo("same.module", "/vendor/apex/factory.apex", "/vendor/apex/factory.apex", true, false, false);
+        var updated = apexInfo("same.module", "/vendor/apex/factory.apex", "/data/apex/active/updated.apex", false, true, true);
+        var nullable = apexInfo(null, "/system_ext/apex/nullable.apex", "/system_ext/apex/nullable.apex", true, true, false);
+        var unknown = apexInfo("unknown", "/systematic/apex/unknown.apex", "/data/apex/unknown.apex", false, true, false);
+        var active = java.util.List.of(new com.android.server.pm.ApexManager.ActiveApexInfo(nullable),
+            new com.android.server.pm.ApexManager.ActiveApexInfo(updated), new com.android.server.pm.ApexManager.ActiveApexInfo(unknown));
+        byte[] captured = com.android.server.pm.ApexBootFeed.capture(new android.apex.ApexInfo[] {factory, updated, nullable, unknown}, active);
+        updated.moduleName = "mutated"; updated.modulePath = "/data/apex/mutated.apex";
+        java.nio.file.Files.write(new java.io.File(directory, "apex-inventory.original").toPath(), captured);
+        java.nio.file.Files.write(new java.io.File(directory, "apex-inventory-null.original").toPath(), com.android.server.pm.ApexBootFeed.capture(null, java.util.List.of()));
+        java.nio.file.Files.write(new java.io.File(directory, "apex-inventory-empty.original").toPath(), com.android.server.pm.ApexBootFeed.capture(new android.apex.ApexInfo[0], java.util.List.of()));
+        java.nio.file.Files.write(new java.io.File(directory, "apex-inventory-live.original").toPath(), com.android.server.pm.ApexBootFeed.capture());
+        try { com.android.server.pm.ApexBootFeed.capture(null, null); throw new AssertionError("missing active owner accepted"); }
+        catch (NullPointerException expected) {}
+        factory.modulePath = null;
+        try { com.android.server.pm.ApexBootFeed.capture(new android.apex.ApexInfo[] {factory}, active); throw new AssertionError("missing APEX path accepted"); }
+        catch (NullPointerException expected) {}
+    }
+
     private static void verifyApexScanPolicy(java.io.File file) throws Exception {
         var pkg = (com.android.internal.pm.parsing.pkg.PackageImpl)
             PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(file.toPath()));
@@ -237,6 +264,7 @@ public final class PackageRoundTripOracle {
     private static void verify(String[] args) throws Exception {
         verifyOriginalDomainIds();
         verifyOriginalScanUsers(new java.io.File(args[0]));
+        verifyOriginalApexInventory(new java.io.File(args[0]));
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyScopedRuntime(new java.io.File(args[0]));
         verifyOriginalUserScopes(new java.io.File(args[0]));

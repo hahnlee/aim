@@ -87,6 +87,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanUsers.java"),
         )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/com/android/server/pm/ApexBootFeed.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(
             aim_paths::root()
@@ -928,6 +932,49 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    let apex = aim_services::package::bootstrap::ApexInventory::read_original_record(
+        &fs::read(directory.join("apex-inventory.original")).unwrap(),
+    )
+    .unwrap();
+    let all = apex.packages.as_ref().unwrap();
+    assert_eq!(all.len(), 4);
+    assert_eq!(all[0].module_name.as_deref(), Some("same.module"));
+    assert_eq!(all[1].module_name, all[0].module_name);
+    assert_eq!(all[1].module_path, "/data/apex/active/updated.apex");
+    assert_eq!(all[1].version_code, 0x100000007);
+    assert!(all[0].factory && !all[0].active && !all[0].active_changed);
+    assert!(!all[1].factory && all[1].active && all[1].active_changed);
+    assert_eq!(all[2].module_name, None);
+    let scan = apex.scan_apexes();
+    assert_eq!(scan.len(), 2);
+    assert_eq!(scan[0].module_name, None);
+    assert_eq!(scan[0].mount_path, "/apex/null");
+    assert_eq!(
+        scan[0].partition,
+        aim_services::package::scan::Partition::SystemExt
+    );
+    assert_eq!(
+        scan[1].partition,
+        aim_services::package::scan::Partition::Vendor
+    );
+    assert_eq!(scan[1].module_name.as_deref(), Some("same.module"));
+    assert!(scan[1].active_changed && !scan[1].factory);
+    for (phase, expected) in [("null", None), ("empty", Some(Vec::new()))] {
+        assert_eq!(
+            aim_services::package::bootstrap::ApexInventory::read_original_record(
+                &fs::read(directory.join(format!("apex-inventory-{phase}.original"))).unwrap()
+            )
+            .unwrap()
+            .packages,
+            expected
+        );
+    }
+    let live_apex = aim_services::package::bootstrap::ApexInventory::read_original_record(
+        &fs::read(directory.join("apex-inventory-live.original")).unwrap(),
+    )
+    .unwrap();
+    assert!(!live_apex.packages.as_ref().unwrap().is_empty());
+    assert!(!live_apex.scan_apexes().is_empty());
     let scan_users = aim_services::package::bootstrap::ScanUsers::read_original_record(
         &fs::read(directory.join("scan-users.original")).unwrap(),
     )

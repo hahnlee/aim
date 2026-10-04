@@ -11,6 +11,9 @@ use aim_binder_host::{
 };
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
+mod apex;
+pub use apex::{ActiveApex, ApexInventory, ApexPackage};
+
 pub struct Bridge {
     pub(crate) owner: Strong,
     test_base_on_bcp: bool,
@@ -75,6 +78,24 @@ impl ScanUsers {
 }
 
 impl Bridge {
+    pub fn apex_inventory(&self) -> Result<ApexInventory, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::GetApexBootInventory {}.write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::GET_APEX_BOOT_INVENTORY, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let bytes = bridge::read_get_apex_boot_inventory_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
+            .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        ApexInventory::read_original_record(&bytes).map_err(OwnerError::Transport)
+    }
+
     pub fn scan_users(&self) -> Result<ScanUsers, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetPackageScanUsers {}.write(&mut data);

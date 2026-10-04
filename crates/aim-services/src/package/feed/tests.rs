@@ -843,3 +843,29 @@ fn scan_user_publication_retains_owner_presence_and_rejects_foreign_keys() {
     put(&mut inner, SCAN_USERS, "foreign", &bytes);
     assert!(build(&inner.records, 3, None).is_err());
 }
+
+#[test]
+fn apex_inventory_publication_preserves_null_all_and_rejects_foreign_keys() {
+    let mut inner = Inner::default();
+    let frame = |all: i32| {
+        [all, 0]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    put(&mut inner, APEX_INVENTORY, "", &frame(-1));
+    let old = build(&inner.records, 1, None).unwrap();
+    assert_eq!(old.apex_inventory.as_ref().unwrap().packages, None);
+    put(&mut inner, APEX_INVENTORY, "", &frame(0));
+    assert_eq!(
+        build(&inner.records, 2, None)
+            .unwrap()
+            .apex_inventory
+            .unwrap()
+            .packages,
+        Some(Vec::new())
+    );
+    assert_eq!(old.apex_inventory.unwrap().packages, None);
+    put(&mut inner, APEX_INVENTORY, "foreign", &frame(0));
+    assert!(build(&inner.records, 3, None).is_err());
+}

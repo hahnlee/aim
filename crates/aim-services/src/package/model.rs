@@ -29,6 +29,7 @@ pub struct State {
     /// By name.
     pub shared_users: BTreeMap<String, SharedUser>,
     pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,
+    pub apex_inventory: Option<super::bootstrap::ApexInventory>,
     pub scan_users: Option<super::bootstrap::ScanUsers>,
     pub user_scopes: BTreeMap<(String, bool), super::scan::OriginalUserScope>,
     /// Complete scoped runtime owners exported by the original snapshot.

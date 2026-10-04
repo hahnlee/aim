@@ -25,7 +25,7 @@ pub enum Partition {
 }
 
 impl Partition {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::System => "system",
             Self::Vendor => "vendor",
@@ -42,6 +42,7 @@ impl Partition {
 /// is the preinstalled partition, including for an updated active APEX.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Apex {
+    pub module_name: Option<String>,
     pub mount_path: String,
     pub partition: Partition,
     pub factory: bool,
@@ -486,6 +487,7 @@ mod tests {
     #[test]
     fn partition_order_capabilities_and_apex_origin_are_preserved() {
         let apex = Apex {
+            module_name: Some("module".into()),
             mount_path: "/apex/module".into(),
             partition: Partition::Product,
             factory: false,

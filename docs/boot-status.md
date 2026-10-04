@@ -452,14 +452,32 @@ initialized empty list; strict decoding rejects malformed flags/counts, duplicat
 negative or unordered IDs, null payloads and tails. Native setting admission tests
 consume these decoded policy inputs and verify null/USER_ALL/explicit-target rules.
 Feed kind 12 captures this same original user owner for live parity and retains
-it under each immutable feed generation. Actual original ART verifies production
+it under each immutable feed generation. Generated getApexBootInventory and feed
+kind 13 now export the same original ApexManager all-package and active-mount
+inventories (#882), through a typed same-package helper. Factory and updated
+versions may share a module name; raw nullable names, original ordering, code and
+preinstalled paths, 64-bit versions and factory/active/changed flags remain
+separate. Null all-packages differs from an empty list. Strict native decoding
+rejects missing paths, invalid counts/booleans, null payloads and tails; Binder
+owner errors propagate. Native scan partition inputs use preinstalled partition
+path boundaries as InitAppsHelper does, preserve active-owner order and raw
+module names, and omit unrecognized origins. No mount-name inference is used.
+Real Binder tests cover decoded origin, malformed payload/envelope, owner errors
+and immutable old inputs; feed tests verify generation detachment. Original ART
+uses the original ActiveApexInfo constructor and actual ApexManager inventory,
+and confirms factory/update duplicates, null names, versions and detached bytes.
+Native APEX settings preparation, notifyScanResult, scan registration of module
+and update state (#881), and daemon scan orchestration remain incomplete
+(#836/#798). Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
-uninitialized owners and detached bytes (21.46s full package oracle). All 424 units
-pass (3.13s; one ignored/not run); original Java linkage passes (4.15s), and the
-full image/original-PMS template build passes (67.1s; six rebuilt, 36 fresh).
-A disposable default window boot reaches sys.boot_completed at 4.944s; generation
-65 contains one resolved scan user, 290 package user scopes, 16 shared-process
-aggregates and 290 runtime owners with no feed errors. No owned probe processes
+uninitialized owners and detached bytes (21.77s full package oracle, including
+APEX inventories). All 428 units pass (3.17s; one ignored/not run); all integration
+targets compile, and the full image/original-PMS template build, including original
+image ABI linkage, passes (70.4s; nine rebuilt, 33 fresh).
+A disposable default window boot reaches sys.boot_completed at 4.870s; generation
+60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
+290 package user scopes, 16 shared-process aggregates and 290 runtime owners
+with no feed errors. No owned probe processes
 or mounts remain. This is user policy inventory, not complete PackageUserState
 value export (#862). Original UserManager construction/facade boot ordering and
 permission/writer callbacks remain #858/#798; full native scan initialization and

@@ -50,6 +50,7 @@ const SHARED_PROCESSES: i32 = 9;
 const USER_SCOPE: i32 = 10;
 const DISABLED_SYSTEM_USER_SCOPE: i32 = 11;
 const SCAN_USERS: i32 = 12;
+const APEX_INVENTORY: i32 = 13;
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -406,6 +407,15 @@ fn build(
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
             }
+            APEX_INVENTORY => {
+                if !key.name.is_empty() {
+                    return Err("APEX inventory requires the singleton key".into());
+                }
+                state.apex_inventory = Some(
+                    crate::package::bootstrap::ApexInventory::read_original_record(bytes)
+                        .map_err(failed)?,
+                );
+            }
             SCAN_USERS => {
                 if !key.name.is_empty() {
                     return Err("scan users require the singleton key".into());
@@ -603,6 +613,18 @@ pub fn dump(state: &State) -> String {
                 .as_ref()
                 .map_or_else(|| "uninitialized".into(), |u| u.len().to_string()),
         }
+    );
+    let _ = writeln!(
+        s,
+        "apex_inventory={} active={}",
+        state.apex_inventory.as_ref().map_or_else(
+            || "missing".into(),
+            |a| a
+                .packages
+                .as_ref()
+                .map_or_else(|| "null".into(), |p| p.len().to_string())
+        ),
+        state.apex_inventory.as_ref().map_or(0, |a| a.active.len())
     );
     let active_runtime = state
         .runtime_inputs
