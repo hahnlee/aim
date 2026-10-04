@@ -107,8 +107,7 @@ impl SigningScan {
                 .iter()
                 .find(|p| p.name == identity.internal_name)
                 .cloned();
-            if parsed.shared_user_id.is_some()
-                || identity.real_name.is_some()
+            if identity.real_name.is_some()
                 || Identity::original_setting(&parsed, &self.settings, &|name| {
                     self.has_scanned_package(name)
                 })
@@ -116,20 +115,80 @@ impl SigningScan {
             {
                 return Err(fail(
                     "apex-identity",
-                    "APEX shared/original identity transition is not completed (#889/#890)".into(),
+                    "APEX original identity transition is not completed (#890)".into(),
                 ));
             }
-            if previous
-                .as_ref()
-                .is_some_and(|p| p.app_id != -1 || p.shared_user)
-            {
+            if previous.as_ref().is_some_and(|p| p.app_id != -1) {
                 return Err(fail(
                     "apex-identity",
                     "container replaces an application UID owner".into(),
                 ));
             }
+            let shared_name = super::signing::selected_shared_user(
+                previous.as_ref().is_some_and(|p| p.shared_user),
+                parsed.shared_user_id.as_deref(),
+                parsed.is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
+            )
+            .map(str::to_owned);
+            let shared_id = match &shared_name {
+                Some(name) => {
+                    let group = self
+                        .identities
+                        .get_shared_user(name, 0, 0, true)
+                        .map_err(|e| {
+                            fail("apex-identity", format!("cannot resolve shared UID: {e:?}"))
+                        })?
+                        .unwrap()
+                        .clone();
+                    if !self.settings.shared_users.iter().any(|g| g.name == *name) {
+                        self.settings
+                            .shared_users
+                            .push(crate::package::settings::SharedUser {
+                                name: name.clone(),
+                                app_id: group.app_id,
+                                flags: group.flags,
+                                signatures: group.signatures.clone(),
+                            });
+                    }
+                    Some(group.app_id)
+                }
+                None => None,
+            };
+            if previous
+                .as_ref()
+                .is_some_and(|p| p.shared_app_id() != shared_id)
+            {
+                return Err(fail(
+                    "apex-identity",
+                    "APEX shared UID replacement requires setting lifecycle (#889)".into(),
+                ));
+            }
             let updated = !source.info.factory || disabled.is_some();
-            let policy = container_policy(&source.info.module_path);
+            let mut policy = container_policy(&source.info.module_path);
+            if policy.needs_shared_uid_privilege_check(&parsed, &self.identities, inputs.vendor_sdk)
+            {
+                let platform = self
+                    .settings
+                    .packages
+                    .iter()
+                    .find(|p| p.name == "android")
+                    .and_then(|p| p.signatures.as_ref())
+                    .ok_or_else(|| {
+                        fail(
+                            "apex-policy",
+                            "platform setting signing owner is unavailable".into(),
+                        )
+                    })?;
+                let platform = crate::package::sign::SigningDetails::from_saved(platform)
+                    .map_err(|e| fail("apex-signatures", e))?;
+                policy.adjust_shared_uid_privilege(
+                    &parsed,
+                    &source.signing,
+                    &platform,
+                    &self.identities,
+                    inputs.vendor_sdk,
+                );
+            }
             policy
                 .apply(
                     &mut parsed,
@@ -211,7 +270,7 @@ impl SigningScan {
                     &identity,
                     &Uid {
                         app_id: -1,
-                        shared_user: None,
+                        shared_user: shared_name,
                     },
                     metadata,
                     users,
@@ -219,6 +278,7 @@ impl SigningScan {
             };
             let mut staged = self.clone();
             let mut package = setting.package;
+            package.shared_user_app_id = shared_id;
             package.transient.updated_system_app |= updated;
             package
                 .transient

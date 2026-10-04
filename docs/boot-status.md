@@ -546,9 +546,24 @@ original ART oracle verifies native paired-ID records with appId 10123 and group
 1000, typed original signing restoration, and preservation of group 1000 when the
 original setting changes appId to INVALID_UID. Native owner checks retain active
 and disabled group references without reserving an independent package slot and
-reject missing/invalid groups. These are controlled relationship/capture cases;
-actual APEX shared UID and original/renamed identity admission still reject
-explicitly (#889/#890). The generated, system-UID-guarded bootstrap bridge now delivers completed native
+reject missing/invalid groups. Native initial APEX registration now resolves a
+new or retained declared shared UID, keeps the container application ID at -1,
+and allocates only the group ID (#889). Signing and privilege policy use that
+owner; active and disabled container restoration validates the declared group.
+Changing an existing container's group still rejects explicitly (#889), as does
+original/renamed identity adoption (#890). First shared code uses the supplied
+compatibility owner for its scan label when no group member has loaded code,
+then seeds the group SDK when the first parsed member commits (#894). Retained
+loaded groups keep their SDK; compatibility failure rejects the candidate while
+preserving the original group allocation. The original ART oracle passes in
+29.89s, including typed original SELinuxMMAC labels and SharedUserSetting commit
+SDK, unchanged archive bytes with controlled shared identity, unread policy and
+a declared-target compatibility decision. The full initial scan regression
+passes in 69.96s, including grouped container registration and the first APK
+allocation at 10001 after group 10000. All integration targets compile, 435 units
+pass (one ignored/not run), and the current host/image build passes in 15.7s
+(three rebuilt, 39 fresh). These fixtures do not prove a live PlatformCompat call
+or a manifest-declared shared APEX in the original image. The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original
 PackageImpl objects and signer capability flags, validates the complete frame
 before invoking the owner, and propagates transport and owner failures. The

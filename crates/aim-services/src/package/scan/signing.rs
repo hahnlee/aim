@@ -485,6 +485,23 @@ impl SigningScan {
         first_api_level: i32,
         apex: &super::ApexImage,
     ) -> Result<Self, RestoreError> {
+        let group_matches = |package: &crate::package::settings::Package,
+                             source: &super::ApexCode| {
+            let declared = selected_shared_user(
+                package.shared_user,
+                source.parsed.shared_user_id.as_deref(),
+                source.parsed.is(booleans::LEAVING_SHARED_UID),
+            );
+            match package.shared_app_id() {
+                Some(id) => {
+                    id > 0
+                        && settings.shared_users.iter().any(|group| {
+                            group.app_id == id && declared == Some(group.name.as_str())
+                        })
+                }
+                None => declared.is_none(),
+            }
+        };
         for package in &settings.disabled_system_packages {
             let source = apex.packages.iter().find(|code| {
                 code.parsed.package_name == package.name
@@ -493,7 +510,10 @@ impl SigningScan {
             if let Some(source) = source {
                 let version = (i64::from(source.parsed.version_code_major) << 32)
                     | i64::from(source.parsed.version_code as u32);
-                if package.app_id != -1 || package.shared_user || package.version_code != version {
+                if package.app_id != -1
+                    || !group_matches(package, source)
+                    || package.version_code != version
+                {
                     return Err(RestoreError::Apex(format!(
                         "disabled APEX setting {} disagrees with scanned identity/version or INVALID_UID",
                         package.name
@@ -522,7 +542,10 @@ impl SigningScan {
             if let Some(source) = source {
                 let version = (i64::from(source.parsed.version_code_major) << 32)
                     | i64::from(source.parsed.version_code as u32);
-                if package.app_id != -1 || package.shared_user || package.version_code != version {
+                if package.app_id != -1
+                    || !group_matches(package, source)
+                    || package.version_code != version
+                {
                     return Err(RestoreError::Apex(format!(
                         "APEX setting {} disagrees with scanned identity/version or INVALID_UID",
                         package.name
@@ -532,7 +555,19 @@ impl SigningScan {
                 uid_settings.packages.push(package.clone());
             }
         }
-        let identities = Bootstrap::restore(config, &uid_settings)?;
+        let mut identities = Bootstrap::restore(config, &uid_settings)?;
+        for package in settings
+            .packages
+            .iter()
+            .filter(|p| p.app_id == -1 && p.shared_user)
+        {
+            let group = identities
+                .shared_users
+                .values_mut()
+                .find(|group| Some(group.app_id) == package.shared_app_id())
+                .ok_or_else(|| RestoreError::Apex("APEX shared UID owner is missing".into()))?;
+            group.add_package(&package.name, package.flags, package.private_flags);
+        }
         Self::with_identities(config, settings, first_api_level, identities)
     }
 

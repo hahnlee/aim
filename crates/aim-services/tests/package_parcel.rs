@@ -1349,20 +1349,6 @@ fn native_package_parcels_match_original_read_write() {
     let notification =
         aim_services::package::scan::ApexScanResult::notification_payload(&results).unwrap();
     fs::write(directory.join("apex-notify.input"), &notification).unwrap();
-    let original_notification = boot.command().args([
-        "shell", "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
-        "/system/bin", "com.android.server.pm.ApexNotifyOracle", "/data/local/tmp/package-parcels",
-    ]).output().unwrap();
-    assert!(
-        original_notification.status.success(),
-        "original APEX notification failed: {}",
-        String::from_utf8_lossy(&original_notification.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(original_notification.stdout).unwrap(),
-        format!("APEX_NOTIFY {}\n", results.len())
-    );
     let mut invalid_result = results[0].clone();
     invalid_result.package.uid = 10000;
     assert!(
@@ -1406,6 +1392,111 @@ fn native_package_parcels_match_original_read_write() {
                 .is_some()
         );
     }
+    let mut shared_image = aim_services::package::scan::ApexImage {
+        packages: vec![apex_image.packages[0].clone()],
+    };
+    shared_image.packages[0].parsed.shared_user_id = Some("aim.fixture.apex".into());
+    let unread = aim_services::package::owner::seinfo::Policy::unread();
+    let shared_compatibility_calls = std::cell::Cell::new(0);
+    let shared_compatibility = |pkg: &aim_services::package::pkg::AndroidPackage| {
+        shared_compatibility_calls.set(shared_compatibility_calls.get() + 1);
+        Ok(pkg.target_sdk_version)
+    };
+    let mut shared_inputs = scan_inputs(&shared_image);
+    shared_inputs.seinfo.policy = &unread;
+    shared_inputs.seinfo.compatibility = &shared_compatibility;
+    let mut shared =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    let shared_results = shared
+        .scan_initial_apex(&apex_apks, &config, &shared_inputs)
+        .unwrap();
+    assert_eq!(shared_compatibility_calls.get(), 1);
+    shared
+        .scan_initial_apex(&apex_apks, &config, &shared_inputs)
+        .unwrap();
+    assert_eq!(shared_compatibility_calls.get(), 1);
+    let reject_shared_compatibility = |_: &aim_services::package::pkg::AndroidPackage| {
+        Err("shared compatibility owner denied scan".into())
+    };
+    let mut rejected_inputs = scan_inputs(&shared_image);
+    rejected_inputs.seinfo.compatibility = &reject_shared_compatibility;
+    let mut rejected =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    assert!(
+        matches!(rejected.scan_initial_apex(&apex_apks, &config, &rejected_inputs),
+        Err(aim_services::package::scan::SigningError::Rejected(ref error))
+            if error.phase == "seinfo" && error.message == "shared compatibility owner denied scan")
+    );
+    assert!(rejected.settings.packages.is_empty());
+    assert!(rejected.loaded_packages().is_empty());
+    assert_eq!(
+        rejected.identities.shared_users["aim.fixture.apex"].app_id,
+        10000
+    );
+    let setting = &shared.settings.packages[0];
+    assert_eq!(setting.app_id, -1);
+    assert_eq!(setting.shared_app_id(), Some(10000));
+    assert_eq!(shared_results[0].package.uid, -1);
+    let group = &shared.identities.shared_users["aim.fixture.apex"];
+    assert_eq!(group.signatures, setting.signatures);
+    assert_eq!(
+        group.seinfo_target_sdk(),
+        shared_results[0].package.target_sdk_version
+    );
+    assert_eq!(shared.identities.ids.get(-1), None);
+    let restored = aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &shared.settings,
+        36,
+        &shared_image,
+    )
+    .unwrap();
+    let mut ids = restored.identities.ids.clone();
+    assert_eq!(
+        ids.acquire(aim_services::package::owner::app_ids::Owner::Package(
+            "next.apk".into()
+        ))
+        .unwrap(),
+        10001
+    );
+    let mut native = aim_binder_host::parcel::Parcel::new();
+    aim_service_aidl::write_byte_array(
+        &mut native,
+        Some(&shared_results[0].package.to_cache_entry().unwrap().bytes),
+    );
+    native.write_i32(setting.flags);
+    native.write_i32(setting.private_flags);
+    native.write_string16(shared.seinfo(&setting.name).unwrap());
+    native.write_i32(group.seinfo_target_sdk());
+    fs::write(directory.join("shared-apex.input"), native.data()).unwrap();
+    shared
+        .disable_system_package(&setting.name.clone())
+        .unwrap();
+    assert_eq!(
+        shared.settings.disabled_system_packages[0].shared_app_id(),
+        Some(10000)
+    );
+    aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &shared.settings,
+        36,
+        &shared_image,
+    )
+    .unwrap();
+    let original_notification = boot.command().args([
+        "shell", "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.ApexNotifyOracle", "/data/local/tmp/package-parcels",
+    ]).output().unwrap();
+    assert!(
+        original_notification.status.success(),
+        "original APEX notification failed: {}",
+        String::from_utf8_lossy(&original_notification.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(original_notification.stdout).unwrap(),
+        format!("APEX_NOTIFY {}\n", results.len())
+    );
     let mut inactive = aim_services::package::scan::ApexImage {
         packages: vec![apex_image.packages[0].clone()],
     };

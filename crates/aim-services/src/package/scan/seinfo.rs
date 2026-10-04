@@ -241,6 +241,17 @@ impl SigningScan {
         policy: &Policy,
         compatibility: &mut dyn FnMut(&AndroidPackage) -> Result<i32, String>,
     ) -> Result<(), String> {
+        self.assign_seinfo_for_scan_with_shared_target(name, setting, policy, compatibility, None)
+    }
+
+    pub(super) fn assign_seinfo_for_scan_with_shared_target(
+        &mut self,
+        name: &str,
+        setting: SeInfoSetting,
+        policy: &Policy,
+        compatibility: &mut dyn FnMut(&AndroidPackage) -> Result<i32, String>,
+        shared_target: Option<i32>,
+    ) -> Result<(), String> {
         if self.pending_metadata.contains(name) {
             return Err("scan metadata is not finalized".into());
         }
@@ -267,7 +278,7 @@ impl SigningScan {
             }
         };
         let (target, shared_privileged) = match &input.shared {
-            Some((_, target, privileged)) => (*target, *privileged),
+            Some((_, target, privileged)) => (shared_target.unwrap_or(*target), *privileged),
             None => (compatibility(&input.code.package)?, false),
         };
         let base = policy.label(

@@ -110,6 +110,19 @@ impl SigningScan {
                 }
             })?;
         let mut staged = self.clone();
+        let first_shared_code = candidate.record.settings.shared_app_id().is_some_and(|id| {
+            !self.settings.packages.iter().any(|setting| {
+                setting.shared_app_id() == Some(id) && self.loaded.contains_key(&setting.name)
+            })
+        });
+        let first_shared_member = candidate.record.settings.shared_app_id().and_then(|id| {
+            staged
+                .identities
+                .shared_users
+                .iter()
+                .find(|(_, group)| group.app_id == id && group.package_names().next().is_none())
+                .map(|(name, _)| name.clone())
+        });
         let (candidate, multi_arch_mismatch, copies) = match inputs.destination {
             Some(destination) => staged.finish_native_library_install(
                 candidate,
@@ -188,9 +201,30 @@ impl SigningScan {
             })
         })?;
         staged
-            .assign_seinfo_for_scan(name, setting, inputs.seinfo.policy, &mut |package| {
-                inputs.seinfo.compatibility.target_sdk(package)
-            })
+            .assign_seinfo_for_scan_with_shared_target(
+                name,
+                setting,
+                inputs.seinfo.policy,
+                &mut |package| inputs.seinfo.compatibility.target_sdk(package),
+                if first_shared_code {
+                    Some(
+                        inputs
+                            .seinfo
+                            .compatibility
+                            .target_sdk(&candidate.record.parsed)
+                            .map_err(|message| {
+                                SigningError::Rejected(super::Error {
+                                    package: name.clone(),
+                                    path: candidate.record.settings.code_path.clone(),
+                                    phase: "seinfo",
+                                    message,
+                                })
+                            })?,
+                    )
+                } else {
+                    None
+                },
+            )
             .map_err(|message| {
                 SigningError::Rejected(super::Error {
                     package: name.clone(),
@@ -199,6 +233,16 @@ impl SigningScan {
                     message,
                 })
             })?;
+        if let Some(group) = first_shared_member {
+            let group = staged.identities.shared_users.get_mut(&group).unwrap();
+            group.remove_package(name);
+            group.add_package_with_code(
+                name,
+                candidate.record.settings.flags,
+                candidate.record.settings.private_flags,
+                Some(candidate.record.parsed.target_sdk_version),
+            );
+        }
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,

@@ -2072,6 +2072,30 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     assert_eq!(registered.primary_cpu_abi, None);
     assert_eq!(registered.legacy_native_library_path, None);
 
+    let mut shared_apex = aim_services::package::scan::ApexImage {
+        packages: verified_apex.packages.clone(),
+    };
+    shared_apex.packages[0].parsed.shared_user_id = Some("fixture.apex.shared".into());
+    let mut shared_inputs = inputs(&domain_ids);
+    shared_inputs.apex_image = &shared_apex;
+    let shared_scan =
+        SystemImageScan::first_boot(|| Image::load(&apks, &[]), &apks, &config, shared_inputs)
+            .unwrap();
+    assert_eq!(shared_scan.owner.settings.packages[0].app_id, -1);
+    assert_eq!(
+        shared_scan.owner.settings.packages[0].shared_app_id(),
+        Some(10000)
+    );
+    assert_eq!(
+        shared_scan.packages[1].candidate.record.settings.app_id,
+        10001
+    );
+    assert_eq!(shared_scan.apex[0].package.uid, -1);
+    assert_eq!(
+        shared_scan.owner.identities.shared_users["fixture.apex.shared"].seinfo_target_sdk(),
+        shared_scan.apex[0].package.target_sdk_version
+    );
+
     let reject_notification = |_: &[aim_services::package::scan::ApexScanResult]| {
         Err("original owner denied scan results".into())
     };
