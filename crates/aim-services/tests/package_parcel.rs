@@ -2525,6 +2525,15 @@ fn native_package_parcels_match_original_read_write() {
         apex_legacy.project(-1, &[10, 0, 11]).unwrap().bytes()
     );
     assert_eq!(adopted.remaining(), 0);
+    let shared_adopted =
+        fs::read(directory.join("apex-shared-original-adoption.original")).unwrap();
+    let mut shared_adopted = aim_binder_host::parcel::Reader::new(&shared_adopted, &[]);
+    assert_eq!(shared_adopted.read_i32().unwrap(), 2);
+    assert_eq!(shared_adopted.read_i32().unwrap(), 0);
+    assert_eq!(shared_adopted.read_i32().unwrap(), 10000);
+    assert_eq!(shared_adopted.read_i32().unwrap(), 10000);
+    assert_eq!(shared_adopted.read_i32().unwrap(), 10000);
+    assert_eq!(shared_adopted.remaining(), 0);
 
     let mut inactive = aim_services::package::scan::ApexImage {
         packages: vec![apex_image.packages[0].clone()],

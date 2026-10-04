@@ -638,8 +638,13 @@ A rejected domain owner leaves the whole scan unchanged; rescan and active
 user/fixed-state mutations preserve the detached prior setting. Original ART
 compares both native positive/negative UID permission owners byte for byte (32.85s).
 438 units pass (one ignored/not run), host build passes (17.5s), and complete initial
-scan passes (67.79s). Original shared-UID setting-instance adoption and transfer
-ownership remain #890; native PMS is still inactive. First shared code uses the supplied
+scan passes (67.79s). A typed original shared-adoption probe (31.65s) retains
+both the prior unparsed setting and the adopted setting under the same internal
+package name: group cardinality is two, isSingleUser is false, the UID slot remains
+shared, final setting appIds are 10000, and the group SDK remains CUR_DEVELOPMENT
+(10000) despite the new code targeting 36. The native name-keyed shared-member map
+cannot represent those distinct instances (#905); shared original adoption stays
+an explicit rejection. Transfer ownership remains #890; native PMS is still inactive. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
