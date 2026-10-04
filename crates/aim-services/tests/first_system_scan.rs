@@ -1151,59 +1151,101 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 owner.transferred_packages().iter().collect::<Vec<_>>(),
                 vec![&old.name]
             );
-            let retained = retained_original(&owner, &old.name, shared);
-            assert_eq!(retained.package, before);
-            assert_eq!(retained.users, both_users[&old.name]);
-            let (&user, state) = retained.users.iter().next().unwrap();
-            assert!(retained.aliases_user(user));
-            let mut changed = state.clone();
-            changed.stopped = !changed.stopped;
-            owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
-            let usage = aim_services::package::owner::usage::Usage::new(
-                owner.settings.packages.iter().map(|p| p.name.as_str()),
-            );
-            let store =
-                aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
-            let capture = store.capture();
-            let mut foreign = owner.clone();
-            foreign
-                .identities
-                .ids
-                .replace(
-                    10003,
-                    aim_services::package::owner::app_ids::Owner::Package("foreign".into()),
-                )
-                .unwrap();
-            assert!(
+            if shared {
+                let retained = retained_original(&owner, &old.name, shared);
+                assert_eq!(retained.package, before);
+                assert_eq!(retained.users, both_users[&old.name]);
+                let (&user, state) = retained.users.iter().next().unwrap();
+                assert!(retained.aliases_user(user));
+                let mut changed = state.clone();
+                changed.stopped = !changed.stopped;
+                owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
+                let usage = aim_services::package::owner::usage::Usage::new(
+                    owner.settings.packages.iter().map(|p| p.name.as_str()),
+                );
+                let store =
+                    aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
+                let capture = store.capture();
+                let mut foreign = owner.clone();
+                foreign
+                    .identities
+                    .ids
+                    .replace(
+                        10003,
+                        aim_services::package::owner::app_ids::Owner::Package("foreign".into()),
+                    )
+                    .unwrap();
+                assert!(
+                    store
+                        .publish(&capture, foreign, capture.usage().clone())
+                        .is_err()
+                );
+                assert_eq!(store.capture().version(), capture.version());
+                owner
+                    .set_user_state(&old.name, user, changed.clone())
+                    .unwrap();
+                let retained = retained_original(&owner, &old.name, shared);
+                assert_eq!(retained.users[&user], changed);
+                assert_eq!(retained.package, before);
+                assert_ne!(
+                    retained_original(capture.owner(), &old.name, shared).users[&user],
+                    changed
+                );
+                let new_user = both_users[&old.name].keys().max().unwrap() + 1;
+                owner.set_user_state(&old.name, new_user, changed).unwrap();
+                assert!(
+                    !retained_original(&owner, &old.name, shared)
+                        .users
+                        .contains_key(&new_user)
+                );
                 store
-                    .publish(&capture, foreign, capture.usage().clone())
-                    .is_err()
-            );
-            assert_eq!(store.capture().version(), capture.version());
-            owner
-                .set_user_state(&old.name, user, changed.clone())
-                .unwrap();
-            let retained = retained_original(&owner, &old.name, shared);
-            assert_eq!(retained.users[&user], changed);
-            assert_eq!(retained.package, before);
-            assert_ne!(
-                retained_original(capture.owner(), &old.name, shared).users[&user],
-                changed
-            );
-            let new_user = both_users[&old.name].keys().max().unwrap() + 1;
-            owner.set_user_state(&old.name, new_user, changed).unwrap();
-            assert!(
-                !retained_original(&owner, &old.name, shared)
-                    .users
-                    .contains_key(&new_user)
-            );
-            store
-                .publish(&capture, owner, capture.usage().clone())
-                .unwrap();
-            assert_eq!(
-                retained_original(capture.owner(), &old.name, shared).package,
-                before
-            );
+                    .publish(&capture, owner, capture.usage().clone())
+                    .unwrap();
+                assert_eq!(
+                    retained_original(capture.owner(), &old.name, shared).package,
+                    before
+                );
+            } else {
+                assert!(owner.identities.ids.detached_setting(10003).is_none());
+                assert_eq!(
+                    owner.identities.ids.get(10003),
+                    Some(&aim_services::package::owner::app_ids::Owner::Package(
+                        old.name.clone()
+                    ))
+                );
+                let usage = aim_services::package::owner::usage::Usage::new(
+                    owner.settings.packages.iter().map(|p| p.name.as_str()),
+                );
+                let store =
+                    aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
+                let capture = store.capture();
+                let (&user, previous) = owner
+                    .scanned_user_states(&old.name)
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap();
+                let mut changed = previous.clone();
+                changed.stopped = !changed.stopped;
+                owner
+                    .set_user_state(&old.name, user, changed.clone())
+                    .unwrap();
+                assert_ne!(
+                    capture.owner().scanned_user_states(&old.name).unwrap()[&user],
+                    changed
+                );
+                store
+                    .publish(&capture, owner, capture.usage().clone())
+                    .unwrap();
+                assert!(
+                    capture
+                        .owner()
+                        .identities
+                        .ids
+                        .detached_setting(10003)
+                        .is_none()
+                );
+            }
         }
     }
     // Stub policy comes from a fixture compressed-sibling inventory.

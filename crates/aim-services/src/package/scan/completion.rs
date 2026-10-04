@@ -66,6 +66,26 @@ impl SigningScan {
         let candidate = staged.apply_original_system(code, metadata, saved_users)?;
         let candidate = staged.finish_init_apex(candidate, &code.location)?;
         let completed = staged.finish_scan_metadata(candidate, apks, inputs)?;
+        let setting = &completed.candidate.record.settings;
+        // insertPackageSettingLPw updates a registered APK slot to the final
+        // setting. APEX INVALID_UID admission leaves the prior slot in place.
+        if !setting.shared_user {
+            staged
+                .identities
+                .ids
+                .replace(
+                    setting.app_id,
+                    crate::package::owner::app_ids::Owner::Package(setting.name.clone()),
+                )
+                .map_err(|reason| {
+                    SigningError::Fatal(super::Error {
+                        package: setting.name.clone(),
+                        path: setting.code_path.clone(),
+                        phase: "package-finalization",
+                        message: format!("{reason:?}"),
+                    })
+                })?;
+        }
         *self = staged;
         Ok(completed)
     }

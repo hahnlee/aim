@@ -946,7 +946,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (12.26s), and release units pass 461 cases. Disabled loaded code now retains a
+creation (10.88s), and release units pass 461 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -965,16 +965,20 @@ applying new-install instant/preload flags, resets its signature wrapper to
 UNKNOWN and replaces its ABI/path/version metadata without changing the source
 metadata. Existing per-user state objects remain aliased to the original;
 mutations propagate to that instance. The full setting/helper comparison passes
-(68.15s). The focused original constructor also verifies sealed snapshot
-isolation and independence of newly created users (9.82s). Ordinary scan
-admission now shares the APEX prior-instance retention owner (#927): an independent
-UID slot keeps the original setting while the active package keeps its accepted
-copy; a shared UID keeps both setting instances. Existing users alias the accepted
-copy, newly created users do not, and older native captures remain unchanged.
-The complete first-system fixture verifies both UID forms through Store capture
-and publication, rejects a foreign UID owner without replacing its capture, and
-keeps the original slot untouched when final metadata fails. Removal releases a
-retained independent slot without changing prior captures. The actual original
+(68.15s). The focused original constructor/registration oracle also verifies
+sealed snapshot isolation, independence of new users and final UID-slot owners
+(11.47s). Ordinary scan admission shares the APEX prior-instance owner during
+candidate construction (#927), then matches Settings.addPackageSettingLPw:
+registered ordinary APK slots point to the final accepted setting, discarding the
+prior independent slot instance; INVALID_UID/APEX admission leaves the original
+slot intact; shared UIDs keep both setting instances in the group. The actual
+original registration oracle checks the active Settings map and UID slot for all
+four source/target combinations, including two same-name shared members. Existing
+users alias retained shared instances, new users do not, and older native captures
+stay unchanged. The first-system fixture verifies both UID forms through Store
+capture/publication, rejects a foreign UID owner without replacing its capture,
+and keeps the original slot untouched when metadata fails. Retained slot removal
+preserves prior captures. The actual original
 UID/signing oracle passes (28.87s); release units pass 461 cases. Shared-UID
 replacement, complete request execution parity and transfer publication outside
 the scan owner remain #919; daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing

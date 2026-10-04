@@ -3,7 +3,8 @@ package com.android.server.pm;
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
         if (args.length != 0 && args[0].equals("original-setting")) {
-            originalSetting();
+            try { originalSetting(); System.exit(0); }
+            catch (Throwable error) { error.printStackTrace(); System.exit(1); }
             return;
         }
         if (args.length != 0 && args[0].equals("final-flags")) {
@@ -240,7 +241,7 @@ public final class NewSettingOracle {
         }
     }
 
-    private static void originalSetting() {
+    private static void originalSetting() throws Exception {
         int cases = 0;
         for (boolean oldShared : new boolean[] {false, true}) {
             for (boolean newShared : new boolean[] {false, true}) {
@@ -303,6 +304,24 @@ public final class NewSettingOracle {
                         || !original.getLegacyNativeLibraryPath().equals("/system/old-lib")
                         || original.getVersionCode() != 1L || original.getRealName() != null) {
                     throw new AssertionError("adoption source metadata or user alias differs");
+                }
+                var settings = new Settings(java.util.Map.of());
+                SharedUserSetting oldGroup = oldShared
+                    ? settings.addSharedUserLPw("fixture.original-group", 10003, 0, 0) : null;
+                settings.registerAppIdLPw(original, false);
+                settings.addPackageSettingLPw(original, oldGroup);
+                if (!oldShared) {
+                    adopted.setAppId(-1);
+                    settings.addPackageSettingLPw(adopted, null);
+                    if (settings.getSettingLPr(10003) != original)
+                        throw new AssertionError("INVALID_UID creation replaced the old slot");
+                    adopted.setAppId(10003);
+                }
+                settings.addPackageSettingLPw(adopted, oldGroup);
+                if (settings.getPackagesLocked().get("fixture.original") != adopted
+                        || settings.getSettingLPr(10003) != (oldShared ? oldGroup : adopted)
+                        || (oldShared && oldGroup.getPackageStates().size() != 2)) {
+                    throw new AssertionError("final setting registration ownership");
                 }
                 cases++;
             }
