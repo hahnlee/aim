@@ -571,7 +571,14 @@ fn native_package_parcels_match_original_read_write() {
         .signatures
         .first()
         .unwrap();
-    let owner_default_inputs = common::settings_owner_defaults::inputs(cert);
+    let mut owner_default_inputs = common::settings_owner_defaults::inputs(cert);
+    let defaults_count = owner_default_inputs.len();
+    let permission_inputs = common::settings_owner_defaults::permission_inputs();
+    eprintln!(
+        "original incremental permission cases: {}",
+        permission_inputs.len()
+    );
+    owner_default_inputs.extend(permission_inputs);
     let mut owner_default_expected = Vec::new();
     for (index, input) in owner_default_inputs.iter().enumerate() {
         let native = directory.join(format!("owner-default-native-{index}"));
@@ -584,6 +591,9 @@ fn native_package_parcels_match_original_read_write() {
         let (_, report) = aim_services::package::owner::recovery::Plan::inspect(&native)
             .unwrap()
             .recover(&[], &mut state, |bytes, state| {
+                if index >= defaults_count {
+                    return read_version_events(bytes, state);
+                }
                 let root = aim_android_xml::read_next_optional(bytes)?;
                 if let Some(root) = &root {
                     *state = aim_services::package::settings::Settings::parse(root)?;
@@ -5020,7 +5030,7 @@ fn pull_trace(bytes: &[u8]) -> String {
     events.join("|")
 }
 
-// Version-owner comparison, not the complete incremental Settings frontend.
+// Version/permission owner comparison, not the complete Settings frontend.
 fn read_version_events(
     bytes: &[u8],
     settings: &mut aim_services::package::settings::Settings,
@@ -5044,6 +5054,8 @@ fn read_version_events(
                     "version" | "last-platform-version" | "database-version"
                 ) {
                     settings.read_version(&element)?;
+                } else if matches!(element.name.as_str(), "permissions" | "permission-trees") {
+                    settings.read_permissions(&mut reader, element.name == "permission-trees")?;
                 } else {
                     skipped = Some(reader.depth());
                 }

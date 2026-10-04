@@ -81,6 +81,37 @@ fn wrong(element: &mut Element) -> bool {
     })
 }
 
+pub fn permission_inputs() -> Vec<Vec<u8>> {
+    let mut inputs = Vec::new();
+    for body in [
+        "<permissions><item name='a' package='p'/></permissions><permissions><item name='b' package='q'/></permissions>",
+        "<permissions><item name='a' package='p' type='dynamic' icon='9' label='old'/><item name='a' package='q' protection='2'/></permissions>",
+        "<permission-trees><item name='a' package='p'/></permission-trees><permission-trees><item name='b' package='q'/></permission-trees>",
+        "<permissions><unknown><item name='hidden' package='p'/></unknown><item name='a' package='p'><item name='hidden' package='p'/></item><item name='a'/></permissions>",
+        "<permissions><item name='a' package='p' protection='bad' type='dynamic' icon='bad'/></permissions><permission-trees><item name='t' package='p'/></permission-trees>",
+    ] {
+        let xml = format!("<packages>{body}</packages>");
+        inputs.push(xml.as_bytes().to_vec());
+        inputs.push(
+            aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap()).unwrap(),
+        );
+    }
+    for tail in [
+        "<",
+        "<item name='b' package='q'><",
+        "<item name='b' package='q' broken=",
+        "</permissions><version volumeUuid='v' sdkVersion='bad'/>",
+    ] {
+        inputs.push(format!("<packages><permissions><item name='a' package='p' type='dynamic' icon='9' label='kept'/>{tail}").into_bytes());
+    }
+    let xml = b"<packages><permissions><item name='a' package='p' type='dynamic' icon='9' label='kept'/><item name='b' package='q'/></permissions></packages>";
+    let abx = aim_android_xml::abx::write(&aim_android_xml::read(xml).unwrap()).unwrap();
+    for end in 0..=abx.len() {
+        inputs.push(abx[..end].to_vec());
+    }
+    inputs
+}
+
 pub fn trace(settings: &Settings, first: bool, main: bool, reserve: bool) -> String {
     let mut packages: Vec<_> = settings
         .packages

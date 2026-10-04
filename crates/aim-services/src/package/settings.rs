@@ -456,6 +456,41 @@ impl Settings {
         Ok(())
     }
 
+    /// Consume a permission-definition container from its completed start event.
+    /// Each item changes its owner before skipping its subtree, so a later XML
+    /// failure leaves earlier definitions available to resilient-file retry.
+    pub fn read_permissions(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        trees: bool,
+    ) -> Result<(), String> {
+        use aim_android_xml::pull::Event;
+        let out = if trees {
+            &mut self.permission_trees
+        } else {
+            &mut self.permissions
+        };
+        let outer = reader.depth();
+        loop {
+            match reader.next()? {
+                Event::Start(item) => {
+                    read_permission(out, &item);
+                    let depth = reader.depth();
+                    loop {
+                        match reader.next()? {
+                            Event::End(_) if reader.depth() <= depth => break,
+                            Event::EndDocument => return Ok(()),
+                            _ => {}
+                        }
+                    }
+                }
+                Event::End(_) if reader.depth() <= outer => return Ok(()),
+                Event::EndDocument => return Ok(()),
+                _ => {}
+            }
+        }
+    }
+
     /// Settings already has platform/OEM shared UID owners before reading XML.
     pub fn parse_with_config(
         root: &Element,
@@ -486,8 +521,16 @@ impl Settings {
                         s.shared_users.push(u);
                     }
                 }
-                "permissions" => s.permissions = permissions(e)?,
-                "permission-trees" => s.permission_trees = permissions(e)?,
+                "permissions" => {
+                    for item in e.children() {
+                        read_permission(&mut s.permissions, item);
+                    }
+                }
+                "permission-trees" => {
+                    for item in e.children() {
+                        read_permission(&mut s.permission_trees, item);
+                    }
+                }
                 "renamed-package" => {
                     if let (Some(new), Some(old)) = (string(e, "new"), string(e, "old")) {
                         s.renamed_packages.push((new, old));
@@ -563,25 +606,24 @@ fn required<T>(e: &Element, name: &str, v: Option<T>) -> Result<T, String> {
     v.ok_or_else(|| format!("<{}> without {name}", e.name))
 }
 
-fn permissions(e: &Element) -> Result<Vec<Permission>, String> {
-    let mut out: Vec<Permission> = Vec::new();
-    for item in children(e, "item") {
-        let (Some(name), Some(package)) = (string(item, "name"), string(item, "package")) else {
-            continue;
-        };
-        let dynamic = string(item, "type").as_deref() == Some("dynamic");
-        let permission = Permission {
-            protection_level: fix_protection_level(defaulted(item.int("protection"), 0)),
-            dynamic: dynamic
-                .then(|| Ok::<_, String>((defaulted(item.int("icon"), 0), string(item, "label"))))
-                .transpose()?,
-            name,
-            package,
-        };
-        out.retain(|p| p.name != permission.name);
-        out.push(permission);
+fn read_permission(out: &mut Vec<Permission>, item: &Element) {
+    if item.name != "item" {
+        return;
     }
-    Ok(out)
+    let (Some(name), Some(package)) = (string(item, "name"), string(item, "package")) else {
+        return;
+    };
+    let permission = Permission {
+        protection_level: fix_protection_level(defaulted(item.int("protection"), 0)),
+        dynamic: (string(item, "type").as_deref() == Some("dynamic"))
+            .then(|| (defaulted(item.int("icon"), 0), string(item, "label"))),
+        name,
+        package,
+    };
+    match out.iter_mut().find(|p| p.name == permission.name) {
+        Some(old) => *old = permission,
+        None => out.push(permission),
+    }
 }
 
 // TypedXmlPullParser overloads with a default catch conversion failures too.
