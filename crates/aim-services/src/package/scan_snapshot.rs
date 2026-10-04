@@ -158,8 +158,8 @@ fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
             }
             if active {
                 match owner.identities.ids.get(setting.uid_owner_id()) {
-                    Some(Owner::Package(name)) if !setting.shared_user && name == &setting.name => {
-                    }
+                    Some(Owner::Package(_) | Owner::DetachedPackage(_))
+                        if owner.identities.ids.owns_package_slot(setting) => {}
                     Some(Owner::SharedUser(name)) if setting.shared_user => {
                         let group = owner
                             .identities

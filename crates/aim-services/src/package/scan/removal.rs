@@ -101,7 +101,11 @@ impl SigningScan {
                 }
                 Some(group_name.clone())
             }
-            Some(Owner::Package(owner)) if !package.shared_user && owner == name => None,
+            Some(Owner::Package(_) | Owner::DetachedPackage(_))
+                if self.identities.ids.owns_package_slot(&package) =>
+            {
+                None
+            }
             _ => return Err(fail("package UID slot disagrees with setting")),
         };
         self.detach_retained_user_aliases(name);
@@ -129,6 +133,31 @@ mod tests {
         let root = aim_android_xml::read(xml).unwrap();
         let settings = crate::package::settings::Settings::parse(&root).unwrap();
         SigningScan::new(&Default::default(), &settings, 36).unwrap()
+    }
+
+    #[test]
+    fn removing_adopted_setting_releases_retained_slot_without_changing_capture() {
+        let mut scan = owner(
+            b"<packages><package name='a' codePath='/system/app/a' userId='10100'/></packages>",
+        );
+        let original = scan.settings.packages[0].clone();
+        scan.retain_original_setting(&original, &Default::default())
+            .unwrap();
+        let capture = scan.clone();
+        let removed = scan.remove_package_setting("a").unwrap().unwrap();
+        assert!(removed.app_id_removed);
+        assert_eq!(removed.package, original);
+        assert!(scan.identities.ids.get(10100).is_none());
+        assert!(scan.identities.ids.detached_setting(10100).is_none());
+        assert_eq!(
+            capture
+                .identities
+                .ids
+                .detached_setting(10100)
+                .unwrap()
+                .package,
+            original
+        );
     }
 
     #[test]

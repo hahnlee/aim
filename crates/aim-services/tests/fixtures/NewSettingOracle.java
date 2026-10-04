@@ -290,10 +290,13 @@ public final class NewSettingOracle {
                         + " notLaunched=" + adopted.readUserState(10).isNotLaunched()
                         + " instant=" + adopted.getInstantApp(10) + " virtual=" + adopted.getVirtualPreload(10));
                 }
+                var snapshot = adopted.snapshot();
                 adopted.getOrCreateUserState(10).setInstalled(true).setStopped(false);
                 adopted.getOrCreateUserState(11).setInstalled(false);
                 if (!original.getInstalled(10) || original.readUserState(10).isStopped()
-                        || !original.getInstalled(11)
+                        || !original.getInstalled(11) || snapshot.getInstalled(10)
+                        || !snapshot.readUserState(10).isStopped()
+                        || snapshot.readUserState(10) == adopted.readUserState(10)
                         || original.getSigningDetails() != signatures
                         || !original.getPrimaryCpuAbiLegacy().equals("armeabi-v7a")
                         || !original.getSecondaryCpuAbiLegacy().equals("x86")

@@ -746,11 +746,14 @@ impl SigningScan {
                 "setting update requires replacing UID ownership (#804)",
             ));
         }
-        let owner = match group {
-            Some(name) => Owner::SharedUser(name.into()),
-            None => Owner::Package(original.name.clone()),
+        let owns_slot = match group {
+            Some(name) => {
+                self.identities.ids.get(original.uid_owner_id())
+                    == Some(&Owner::SharedUser(name.into()))
+            }
+            None => self.identities.ids.owns_package_slot(original),
         };
-        if self.identities.ids.get(original.uid_owner_id()) != Some(&owner) {
+        if !owns_slot {
             return Err(reject("identity", "saved package no longer owns its UID"));
         }
         let users = saved_users
@@ -792,6 +795,45 @@ impl SigningScan {
             users: setting.users,
             signing,
         })
+    }
+
+    /// The unsealed original constructor keeps the prior UID/group setting
+    /// instance and aliases its existing users to the accepted copy.
+    pub(super) fn retain_original_setting(
+        &mut self,
+        original: &crate::package::settings::Package,
+        users: &BTreeMap<i32, UserState>,
+    ) -> Result<(), String> {
+        let retained = crate::package::owner::app_ids::DetachedSetting {
+            package: original.clone(),
+            users: users.clone(),
+            user_aliases: users.keys().copied().collect(),
+            legacy: if self.legacy_permissions.is_some() {
+                self.legacy_permissions(&original.name, false)?
+            } else {
+                None
+            },
+            install_fixed: if self.legacy_permissions.is_some() {
+                self.install_permissions_fixed(&original.name, false)?
+            } else {
+                None
+            },
+            runtime: if self.replica_runtime.is_some() {
+                self.replica_runtime(&original.name, false)?.cloned()
+            } else {
+                None
+            },
+        };
+        if original.shared_user {
+            self.identities
+                .shared_users
+                .values_mut()
+                .find(|g| Some(g.app_id) == original.shared_app_id())
+                .ok_or("original shared owner is missing")?
+                .retain_unparsed_setting(retained)
+        } else {
+            self.identities.ids.detach(retained)
+        }
     }
 
     /// Adopt an unscanned original system package's setting and user states.
@@ -894,6 +936,8 @@ impl SigningScan {
             origin: ScanOrigin::SystemDirectory,
         };
         let mut next = self.clone();
+        next.retain_original_setting(original, users)
+            .map_err(|message| reject("identity", &message))?;
         let at = next
             .settings
             .packages
@@ -1462,6 +1506,57 @@ pub(super) fn selected_shared_user(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn original_shared_instance_keeps_existing_users_and_frozen_captures() {
+        use super::*;
+        let package = crate::package::settings::Package {
+            name: "original".into(),
+            app_id: 10003,
+            shared_user: true,
+            flags: crate::package::settings::FLAG_SYSTEM,
+            ..Default::default()
+        };
+        let settings = Settings {
+            packages: vec![package.clone()],
+            shared_users: vec![SharedUser {
+                name: "group".into(),
+                app_id: 10003,
+                flags: 0,
+                signatures: None,
+            }],
+            ..Default::default()
+        };
+        let users = BTreeMap::from([(10, UserState::default())]);
+        let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        owner.retain_original_setting(&package, &users).unwrap();
+        let group = owner.identities.shared_users.get_mut("group").unwrap();
+        group.add_package(&package.name, package.flags, package.private_flags);
+        assert_eq!(group.member_count(), 2);
+        let capture = owner.clone();
+        let changed = UserState {
+            stopped: true,
+            ..Default::default()
+        };
+        owner.update_disabled_user_aliases(
+            &package.name,
+            &BTreeMap::from([(10, changed.clone()), (11, changed.clone())]),
+        );
+        let retained = owner.identities.shared_users["group"]
+            .retained_setting(&package.name)
+            .unwrap();
+        assert_eq!(retained.package, package);
+        assert_eq!(retained.users, BTreeMap::from([(10, changed)]));
+        assert!(retained.aliases_user(10));
+        assert!(!retained.aliases_user(11));
+        assert_eq!(
+            capture.identities.shared_users["group"]
+                .retained_setting(&package.name)
+                .unwrap()
+                .users,
+            users
+        );
+    }
+
     #[test]
     fn collected_uid_requires_original_apex_origin_and_registration_identity() {
         use super::*;

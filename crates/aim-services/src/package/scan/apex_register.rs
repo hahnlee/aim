@@ -337,55 +337,9 @@ impl SigningScan {
             }
             let mut staged = self.clone();
             if let Some(original) = original.as_ref().filter(|p| p.app_id > 0) {
-                let legacy = if staged.legacy_permissions.is_some() {
-                    staged
-                        .legacy_permissions(&original.name, false)
-                        .map_err(|e| fail("apex-legacy", e))?
-                } else {
-                    None
-                };
-                let install_fixed = if staged.legacy_permissions.is_some() {
-                    staged
-                        .install_permissions_fixed(&original.name, false)
-                        .map_err(|e| fail("apex-legacy", e))?
-                } else {
-                    None
-                };
-                let runtime = if staged.replica_runtime.is_some() {
-                    staged
-                        .replica_runtime(&original.name, false)
-                        .map_err(|e| fail("apex-runtime", e))?
-                        .cloned()
-                } else {
-                    None
-                };
-                let retained = crate::package::owner::app_ids::DetachedSetting {
-                    package: original.clone(),
-                    users: setting.users.clone(),
-                    user_aliases: setting.users.keys().copied().collect(),
-                    legacy,
-                    install_fixed,
-                    runtime,
-                };
-                if original.shared_user {
-                    let group = staged
-                        .identities
-                        .shared_users
-                        .values_mut()
-                        .find(|g| Some(g.app_id) == original.shared_app_id())
-                        .ok_or_else(|| {
-                            fail("apex-identity", "original shared owner is missing".into())
-                        })?;
-                    group
-                        .retain_unparsed_setting(retained)
-                        .map_err(|e| fail("apex-identity", e))?;
-                } else {
-                    staged
-                        .identities
-                        .ids
-                        .detach(retained)
-                        .map_err(|e| fail("apex-identity", e))?;
-                }
+                staged
+                    .retain_original_setting(original, &setting.users)
+                    .map_err(|e| fail("apex-identity", e))?;
             }
             if replaces_shared {
                 let old = previous.as_ref().unwrap();

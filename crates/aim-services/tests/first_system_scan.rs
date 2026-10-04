@@ -1055,7 +1055,20 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     }
     // Ordinary original-name creation also derives ABI instead of borrowing
     // the old package's ABI. A later metadata failure cannot publish transfer.
-    for invalid_page_size in [false, true] {
+    fn retained_original<'a>(
+        owner: &'a aim_services::package::scan::SigningScan,
+        name: &str,
+        shared: bool,
+    ) -> &'a aim_services::package::owner::app_ids::DetachedSetting {
+        if shared {
+            owner.identities.shared_users["fixture.original.group"]
+                .retained_setting(name)
+                .unwrap()
+        } else {
+            owner.identities.ids.detached_setting(10003).unwrap()
+        }
+    }
+    for (invalid_page_size, shared) in [(false, false), (true, false), (false, true)] {
         let mut settings = both.clone();
         settings
             .packages
@@ -1066,6 +1079,23 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             .find(|p| p.name == old.name)
             .unwrap()
             .primary_cpu_abi = Some("armeabi-v7a".into());
+        if shared {
+            let original = settings
+                .packages
+                .iter_mut()
+                .find(|p| p.name == old.name)
+                .unwrap();
+            original.shared_user = true;
+            original.shared_user_app_id = Some(10003);
+            settings
+                .shared_users
+                .push(aim_services::package::settings::SharedUser {
+                    name: "fixture.original.group".into(),
+                    app_id: 10003,
+                    flags: 0,
+                    signatures: original.signatures.clone(),
+                });
+        }
         let before = settings
             .packages
             .iter()
@@ -1075,7 +1105,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         let mut owner =
             aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
         let mut image = Image::parse(&apks, &[]).unwrap();
-        image.packages[1].parsed.shared_user_id = None;
+        image.packages[1].parsed.shared_user_id = shared.then(|| "fixture.original.group".into());
         image.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
         let mut request = inputs(&domain_ids);
         if invalid_page_size {
@@ -1101,6 +1131,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             );
             assert!(owner.transferred_packages().is_empty());
             assert!(owner.settings.renamed_packages.is_empty());
+            assert!(owner.identities.ids.detached_setting(10003).is_none());
             assert_eq!(
                 owner.settings.packages.iter().find(|p| p.name == old.name),
                 Some(&before)
@@ -1119,6 +1150,59 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             assert_eq!(
                 owner.transferred_packages().iter().collect::<Vec<_>>(),
                 vec![&old.name]
+            );
+            let retained = retained_original(&owner, &old.name, shared);
+            assert_eq!(retained.package, before);
+            assert_eq!(retained.users, both_users[&old.name]);
+            let (&user, state) = retained.users.iter().next().unwrap();
+            assert!(retained.aliases_user(user));
+            let mut changed = state.clone();
+            changed.stopped = !changed.stopped;
+            owner.fix_shared_seinfo_target_sdks_at_boot().unwrap();
+            let usage = aim_services::package::owner::usage::Usage::new(
+                owner.settings.packages.iter().map(|p| p.name.as_str()),
+            );
+            let store =
+                aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
+            let capture = store.capture();
+            let mut foreign = owner.clone();
+            foreign
+                .identities
+                .ids
+                .replace(
+                    10003,
+                    aim_services::package::owner::app_ids::Owner::Package("foreign".into()),
+                )
+                .unwrap();
+            assert!(
+                store
+                    .publish(&capture, foreign, capture.usage().clone())
+                    .is_err()
+            );
+            assert_eq!(store.capture().version(), capture.version());
+            owner
+                .set_user_state(&old.name, user, changed.clone())
+                .unwrap();
+            let retained = retained_original(&owner, &old.name, shared);
+            assert_eq!(retained.users[&user], changed);
+            assert_eq!(retained.package, before);
+            assert_ne!(
+                retained_original(capture.owner(), &old.name, shared).users[&user],
+                changed
+            );
+            let new_user = both_users[&old.name].keys().max().unwrap() + 1;
+            owner.set_user_state(&old.name, new_user, changed).unwrap();
+            assert!(
+                !retained_original(&owner, &old.name, shared)
+                    .users
+                    .contains_key(&new_user)
+            );
+            store
+                .publish(&capture, owner, capture.usage().clone())
+                .unwrap();
+            assert_eq!(
+                retained_original(capture.owner(), &old.name, shared).package,
+                before
             );
         }
     }

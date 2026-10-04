@@ -152,6 +152,25 @@ impl AppIds {
         self.slots.get(&app_id)
     }
 
+    pub(in crate::package) fn owns_package_slot(
+        &self,
+        package: &crate::package::settings::Package,
+    ) -> bool {
+        if package.shared_user {
+            return false;
+        }
+        match self.get(package.app_id) {
+            Some(Owner::Package(name)) => name == &package.name,
+            Some(Owner::DetachedPackage(name)) => {
+                name == &package.name
+                    && self.detached_setting(package.app_id).is_some_and(|prior| {
+                        prior.package.name == package.name && prior.package.app_id == package.app_id
+                    })
+            }
+            _ => false,
+        }
+    }
+
     /// Preserve the exact prior non-shared setting without freeing its slot
     /// or changing allocation extent/cursor. Only its current owner can detach.
     pub(in crate::package) fn detach(&mut self, value: DetachedSetting) -> Result<(), String> {

@@ -946,7 +946,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (10.67s), and release units pass 459 cases. Disabled loaded code now retains a
+creation (12.26s), and release units pass 461 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -965,10 +965,19 @@ applying new-install instant/preload flags, resets its signature wrapper to
 UNKNOWN and replaces its ABI/path/version metadata without changing the source
 metadata. Existing per-user state objects remain aliased to the original;
 mutations propagate to that instance. The full setting/helper comparison passes
-(68.15s). Ordinary scan admission does not yet retain the prior setting instance
-and its user aliases (#927); the APEX retained-instance owner already has alias
-support. Shared-UID replacement, complete request execution parity and transfer
-publication outside the scan owner remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
+(68.15s). The focused original constructor also verifies sealed snapshot
+isolation and independence of newly created users (9.82s). Ordinary scan
+admission now shares the APEX prior-instance retention owner (#927): an independent
+UID slot keeps the original setting while the active package keeps its accepted
+copy; a shared UID keeps both setting instances. Existing users alias the accepted
+copy, newly created users do not, and older native captures remain unchanged.
+The complete first-system fixture verifies both UID forms through Store capture
+and publication, rejects a foreign UID owner without replacing its capture, and
+keeps the original slot untouched when final metadata fails. Removal releases a
+retained independent slot without changing prior captures. The actual original
+UID/signing oracle passes (28.87s); release units pass 461 cases. Shared-UID
+replacement, complete request execution parity and transfer publication outside
+the scan owner remain #919; daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
