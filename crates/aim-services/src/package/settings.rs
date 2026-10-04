@@ -583,6 +583,12 @@ fn permissions(e: &Element) -> Result<Vec<Permission>, String> {
     Ok(out)
 }
 
+// TypedXmlPullParser overloads with a default catch conversion failures too.
+// Only call this for attributes whose pinned owner supplies that default.
+fn defaulted<T>(value: Result<Option<T>, String>, default: T) -> T {
+    value.ok().flatten().unwrap_or(default)
+}
+
 /// The attributes `<package>` and `<updated-package>` share; `None`
 /// without a name or code path.
 fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
@@ -597,26 +603,26 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
         primary_cpu_abi: string(e, "primaryCpuAbi").or_else(|| string(e, "requiredCpuAbi")),
         secondary_cpu_abi: string(e, "secondaryCpuAbi"),
         cpu_abi_override: string(e, "cpuAbiOverride"),
-        version_code: e.long("version")?.unwrap_or(0),
-        target_sdk_version: e.int("targetSdkVersion")?.unwrap_or(0),
-        restrict_update_hash: e.bytes_base64("restrictUpdateHash")?,
-        scanned_as_stopped_system_app: e.bool("scannedAsStoppedSystemApp")?.unwrap_or(false),
-        last_modified_time: match e.long_hex("ft")?.unwrap_or(0) {
-            0 => e.long("ts")?.unwrap_or(0),
+        version_code: defaulted(e.long("version"), 0),
+        target_sdk_version: defaulted(e.int("targetSdkVersion"), 0),
+        restrict_update_hash: e.bytes_base64("restrictUpdateHash").ok().flatten(),
+        scanned_as_stopped_system_app: defaulted(e.bool("scannedAsStoppedSystemApp"), false),
+        last_modified_time: match defaulted(e.long_hex("ft"), 0) {
+            0 => defaulted(e.long("ts"), 0),
             ft => ft,
         },
-        last_update_time: e.long_hex("ut")?.unwrap_or(0),
+        last_update_time: defaulted(e.long_hex("ut"), 0),
         app_metadata_file_path: string(e, "appMetadataFilePath"),
-        app_metadata_source: e.int("appMetadataSource")?.unwrap_or(0),
+        app_metadata_source: defaulted(e.int("appMetadataSource"), 0),
         category_hint: CATEGORY_UNDEFINED,
         // readPackageLPw/readDisabledSysPackageLPw construct a fresh setting.
         leaving_shared_user: Some(false),
         ..Package::default()
     };
     // `userId` and `sharedUserId` are the app id's historical names.
-    p.app_id = e.int("userId")?.unwrap_or(0);
+    p.app_id = defaulted(e.int("userId"), 0);
     if p.app_id <= 0 {
-        p.app_id = e.int("sharedUserId")?.unwrap_or(0);
+        p.app_id = defaulted(e.int("sharedUserId"), 0);
         p.shared_user = p.app_id > 0;
     }
     Ok(Some(p))
@@ -626,7 +632,7 @@ fn package_attributes(e: &Element) -> Result<Option<Package>, String> {
 fn libraries(p: &mut Package, child: &Element) -> Result<bool, String> {
     match child.name.as_str() {
         "uses-static-lib" => {
-            let version = child.long("version")?.unwrap_or(-1);
+            let version = defaulted(child.long("version"), -1);
             if let Some(name) = string(child, "name").filter(|_| version >= 0) {
                 match p.uses_static_libraries.iter_mut().find(|(n, _)| *n == name) {
                     Some(lib) => lib.1 = version,
@@ -635,8 +641,8 @@ fn libraries(p: &mut Package, child: &Element) -> Result<bool, String> {
             }
         }
         "uses-sdk-lib" => {
-            let version_major = child.long("version")?.unwrap_or(-1);
-            let optional = child.bool("optional")?.unwrap_or(true);
+            let version_major = defaulted(child.long("version"), -1);
+            let optional = defaulted(child.bool("optional"), true);
             if let Some(name) = string(child, "name").filter(|_| version_major >= 0) {
                 let lib = UsesSdkLibrary {
                     name,
@@ -681,32 +687,40 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
         .ok()
         .flatten()
         .unwrap_or(0);
-    p.is_sdk_library = e.bool("isSdkLibrary")?.unwrap_or(false);
-    p.flags = e.int("publicFlags")?.unwrap_or(FLAG_SYSTEM);
-    p.private_flags = e.int("privateFlags")?.unwrap_or(0);
-    p.legacy_first_install_time = e.long_hex("it")?.unwrap_or(0);
+    p.is_sdk_library = defaulted(e.bool("isSdkLibrary"), false);
+    if let Some(public) = string(e, "publicFlags") {
+        // Settings parses these string attributes with Integer.parseInt,
+        // including ABX getAttributeValue formatting, and catches bad numbers.
+        p.flags = public.parse().unwrap_or(0);
+        p.private_flags = string(e, "privateFlags")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+    } else {
+        p.flags = FLAG_SYSTEM;
+    }
+    p.legacy_first_install_time = defaulted(e.long_hex("it"), 0);
     p.install_source = InstallSource {
         installer: string(e, "installer"),
-        installer_uid: e.int("installerUid")?.unwrap_or(INVALID_UID),
+        installer_uid: defaulted(e.int("installerUid"), INVALID_UID),
         update_owner: string(e, "updateOwner"),
         installer_attribution_tag: string(e, "installerAttributionTag"),
-        package_source: e.int("packageSource")?.unwrap_or(0),
-        is_orphaned: e.bool("isOrphaned")?.unwrap_or(false),
+        package_source: defaulted(e.int("packageSource"), 0),
+        is_orphaned: defaulted(e.bool("isOrphaned"), false),
         initiating_package: string(e, "installInitiator"),
-        initiating_package_uninstalled: e.bool("installInitiatorUninstalled")?.unwrap_or(false),
+        initiating_package_uninstalled: defaulted(e.bool("installInitiatorUninstalled"), false),
         initiating_package_signatures: None,
         originating_package: string(e, "installOriginator"),
     };
     p.install_source = p.install_source.normalized()?;
     p.volume_uuid = string(e, "volumeUuid");
-    p.category_hint = e.int("categoryHint")?.unwrap_or(CATEGORY_UNDEFINED);
-    p.update_available = e.bool("updateAvailable")?.unwrap_or(false);
-    p.force_queryable = e.bool("forceQueryable")?.unwrap_or(false);
-    p.pending_restore = e.bool("pendingRestore")?.unwrap_or(false);
-    p.debuggable = e.bool("debuggable")?.unwrap_or(false);
+    p.category_hint = defaulted(e.int("categoryHint"), CATEGORY_UNDEFINED);
+    p.update_available = defaulted(e.bool("updateAvailable"), false);
+    p.force_queryable = defaulted(e.bool("forceQueryable"), false);
+    p.pending_restore = defaulted(e.bool("pendingRestore"), false);
+    p.debuggable = defaulted(e.bool("debuggable"), false);
 
-    p.base_revision_code = e.int("baseRevisionCode")?.unwrap_or(0);
-    p.set_page_size_compat(e.int("pageSizeCompat")?.unwrap_or(0))?;
+    p.base_revision_code = defaulted(e.int("baseRevisionCode"), 0);
+    p.set_page_size_compat(defaulted(e.int("pageSizeCompat"), 0))?;
     p.domain_set_id = string(e, "domainSetId").filter(|id| !id.is_empty());
     for child in e.children() {
         if libraries(&mut p, child)? {
@@ -725,7 +739,7 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
                 }
             }
             "split-version" => {
-                let revision = child.int("version")?.unwrap_or(-1);
+                let revision = defaulted(child.int("version"), -1);
                 if let Some(name) = string(child, "name").filter(|_| revision >= 0) {
                     match p.split_versions.iter_mut().find(|(n, _)| *n == name) {
                         Some(split) => split.1 = revision,
@@ -787,14 +801,16 @@ fn identifier(e: &Element) -> Result<i64, String> {
 
 /// `readSharedUserLPw`: `None` for an entry the original drops.
 fn shared_user(e: &Element, certificates: &mut Certificates) -> Result<Option<SharedUser>, String> {
-    let (Some(name), Some(app_id)) = (string(e, "name"), e.int("userId")?.filter(|id| *id != 0))
-    else {
+    let (Some(name), Some(app_id)) = (
+        string(e, "name"),
+        Some(defaulted(e.int("userId"), 0)).filter(|id| *id != 0),
+    ) else {
         return Ok(None);
     };
     let mut u = SharedUser {
         name,
         app_id,
-        flags: if e.bool("system")?.unwrap_or(false) {
+        flags: if defaulted(e.bool("system"), false) {
             FLAG_SYSTEM
         } else {
             0

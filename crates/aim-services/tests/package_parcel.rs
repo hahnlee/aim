@@ -10,6 +10,7 @@ mod common {
     pub mod java;
     pub mod runtime;
     pub mod seinfo;
+    pub mod settings_defaults;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -550,6 +551,15 @@ fn native_package_parcels_match_original_read_write() {
         output.push(format!("{},{}", main.exists(), reserve.exists()));
         version_expected.push(output.join("|"));
     }
+    let defaults_inputs = common::settings_defaults::inputs();
+    let mut defaults_expected = Vec::new();
+    for (index, input) in defaults_inputs.iter().enumerate() {
+        let root = aim_android_xml::read_next(input).unwrap();
+        let settings = aim_services::package::settings::Settings::parse(&root).unwrap();
+        defaults_expected.push(common::settings_defaults::trace(&settings));
+        fs::write(directory.join(format!("defaults-input-{index}")), input).unwrap();
+    }
+    eprintln!("original Settings default cases: {}", defaults_inputs.len());
     let recovery_inputs: Vec<[Option<Vec<u8>>; 3]> = vec![
         [None, None, None],
         [None, None, Some(Vec::new())],
@@ -3662,6 +3672,21 @@ fn native_package_parcels_match_original_read_write() {
     assert_eq!(
         fs::read_to_string(directory.join("empty-document-original")).unwrap(),
         "0=1\n1=1\n2=java.io.IOException\n3=1\n"
+    );
+    let mut defaults_mismatches = Vec::new();
+    for (index, expected) in defaults_expected.iter().enumerate() {
+        let actual =
+            fs::read_to_string(directory.join(format!("defaults-output-{index}"))).unwrap();
+        if actual != *expected {
+            defaults_mismatches.push(format!(
+                "case {index}: original {actual:?}, native {expected:?}"
+            ));
+        }
+    }
+    assert!(
+        defaults_mismatches.is_empty(),
+        "Settings default mismatches:\n{}",
+        defaults_mismatches.join("\n")
     );
     for (index, expected) in version_expected.iter().enumerate() {
         assert_eq!(

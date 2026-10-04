@@ -27,6 +27,9 @@ public final class Settings {
         String buildFingerprint;
         String fingerprint;
     }
+    com.android.server.utils.WatchedArrayMap<String, PackageSetting> getPackagesLocked() { throw new RuntimeException("stub"); }
+    com.android.server.utils.WatchedArrayMap<String, PackageSetting> getDisabledSystemPackagesLocked() { throw new RuntimeException("stub"); }
+    java.util.Collection<SharedUserSetting> getAllSharedUsersLPw() { throw new RuntimeException("stub"); }
     public Settings(java.util.Map<String, PackageSetting> packages) { throw new RuntimeException("stub"); }
     String addRenamedPackageLPw(String name, String original) { throw new RuntimeException("stub"); }
     String getRenamedPackageLPr(String name) { throw new RuntimeException("stub"); }

@@ -6,6 +6,8 @@ public class PackageSetting extends SettingBase {
     public boolean isLeavingSharedUser() { throw new RuntimeException("stub"); }
     public com.android.server.pm.pkg.PackageUserStateImpl getOrCreateUserState(int id) { throw new RuntimeException("stub"); }
     public android.util.SparseArray<? extends com.android.server.pm.pkg.PackageUserStateInternal> getUserStates() { throw new RuntimeException("stub"); }
+    public String[] getSplitNames() { throw new RuntimeException("stub"); }
+    public int[] getSplitRevisionCodes() { throw new RuntimeException("stub"); }
     public String getRealName() { throw new RuntimeException("stub"); }
     public String getSecondaryCpuAbiLegacy() { throw new RuntimeException("stub"); }
     public String getAppMetadataFilePath() { throw new RuntimeException("stub"); }

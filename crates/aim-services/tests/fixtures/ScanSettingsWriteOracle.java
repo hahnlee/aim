@@ -10,6 +10,7 @@ public final class ScanSettingsWriteOracle {
         verifyRecoveryMatrix(cache.getParentFile());
         verifyPullMatrix(cache.getParentFile());
         verifySettingsVersionRecovery(cache.getParentFile());
+        verifySettingsDefaults(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -41,6 +42,64 @@ public final class ScanSettingsWriteOracle {
             }
             xml.endTag(null, "packages"); xml.endDocument();
         }
+    }
+    private static void verifySettingsDefaults(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "defaults-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "defaults-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            var main = new java.io.File(system, "packages.xml");
+            var reserve = new java.io.File(system, "packages.xml.reservecopy");
+            java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var active = new java.util.ArrayList<String>();
+            for (var setting : settings.getPackagesLocked().values()) active.add(defaultSetting(setting, true));
+            var disabled = new java.util.ArrayList<String>();
+            for (var setting : settings.getDisabledSystemPackagesLocked().values()) disabled.add(defaultSetting(setting, false));
+            var shared = new java.util.ArrayList<String>();
+            for (var setting : settings.getAllSharedUsersLPw()) shared.add(setting.getName() + ":" + setting.mAppId + ":" + setting.getFlags());
+            java.util.Collections.sort(active); java.util.Collections.sort(disabled); java.util.Collections.sort(shared);
+            String output = first + "|" + String.join(";", active) + "|" + String.join(";", disabled) + "|" + String.join(";", shared) + "|" + main.exists() + "," + reserve.exists();
+            java.nio.file.Files.write(new java.io.File(directory, "defaults-output-" + index).toPath(), output.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static String defaultSetting(PackageSetting setting, boolean active) {
+        var state = (com.android.server.pm.pkg.PackageState)setting;
+        var fields = new java.util.ArrayList<String>();
+        fields.add(setting.getPackageName()); fields.add(Integer.toString(setting.getAppId()));
+        fields.add(Long.toString(setting.getVersionCode())); fields.add(Integer.toString(state.getTargetSdkVersion()));
+        fields.add(Integer.toString(setting.getFlags())); fields.add(Integer.toString(setting.getPrivateFlags()));
+        byte[] hash = state.getRestrictUpdateHash(); fields.add(hash == null ? "null" : hex(hash));
+        fields.add(Boolean.toString(setting.isScannedAsStoppedSystemApp()));
+        fields.add(Long.toString(state.getLastModifiedTime())); fields.add(Long.toString(state.getLastUpdateTime()));
+        fields.add(Integer.toString(setting.getAppMetadataSource()));
+        if (active) {
+            var source = setting.getInstallSource();
+            fields.add(Integer.toString(source.mInstallerPackageUid)); fields.add(Integer.toString(source.mPackageSource));
+            fields.add(Boolean.toString(source.mIsOrphaned)); fields.add(Boolean.toString(source.mIsInitiatingPackageUninstalled));
+            fields.add(Integer.toString(setting.getCategoryOverride()));
+            fields.add(Boolean.toString(state.isUpdateAvailable())); fields.add(Boolean.toString(state.isForceQueryableOverride()));
+            fields.add(Boolean.toString(state.isPendingRestore())); fields.add(Boolean.toString(state.isDebuggable()));
+            fields.add(Integer.toString(setting.getBaseRevisionCode())); fields.add(Integer.toString(setting.getPageSizeAppCompatFlags()));
+            fields.add(String.format("%08x", Float.floatToRawIntBits(setting.getLoadingProgress())));
+            fields.add(Long.toString(setting.getLoadingCompletedTime()));
+        }
+        var libraries = new java.util.ArrayList<String>();
+        String[] names = setting.getUsesStaticLibraries(); long[] versions = setting.getUsesStaticLibrariesVersions();
+        for (int i = 0; i < names.length; i++) libraries.add(names[i] + ":" + versions[i]);
+        fields.add(String.join("/", libraries)); libraries.clear();
+        names = setting.getUsesSdkLibraries(); versions = setting.getUsesSdkLibrariesVersionsMajor(); boolean[] optional = setting.getUsesSdkLibrariesOptional();
+        for (int i = 0; i < names.length; i++) libraries.add(names[i] + ":" + versions[i] + ":" + optional[i]);
+        fields.add(String.join("/", libraries));
+        if (active) {
+            libraries.clear(); names = setting.getSplitNames(); int[] revisions = setting.getSplitRevisionCodes();
+            for (int i = 0; i < names.length; i++) libraries.add(names[i] + ":" + revisions[i]);
+            fields.add(String.join("/", libraries));
+        }
+        return String.join(",", fields);
     }
     private static void verifySettingsVersionRecovery(java.io.File directory) throws Exception {
         for (int index = 0; ; index++) {
