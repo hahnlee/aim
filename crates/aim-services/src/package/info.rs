@@ -301,7 +301,7 @@ pub struct ApplicationInfo {
     pub overlay_paths: Option<Vec<String>>,
     pub se_info: Option<String>,
     pub se_info_user: Option<String>,
-    pub shared_library_files: Option<Vec<String>>,
+    pub shared_library_files: Option<Vec<Option<String>>>,
     pub shared_library_infos: Option<Vec<SharedLibrary>>,
     pub optional_shared_library_infos: Option<Vec<SharedLibrary>>,
     pub data_dir: Option<String>,
@@ -481,7 +481,7 @@ impl ApplicationInfo {
         write_strings8(p, self.overlay_paths.as_deref());
         p.write_string8(self.se_info.as_deref());
         p.write_string8(self.se_info_user.as_deref());
-        write_strings8(p, self.shared_library_files.as_deref());
+        write_string8_array(p, self.shared_library_files.as_deref());
         write_libraries(p, self.shared_library_infos.as_deref());
         write_libraries(p, self.optional_shared_library_infos.as_deref());
         p.write_string8(self.data_dir.as_deref());

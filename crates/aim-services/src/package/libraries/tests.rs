@@ -134,6 +134,7 @@ fn graph_resolves_multihop_paths_and_nested_apk_dependencies() {
             "/data/app/c/base.apk",
             "/system/framework/builtin.jar"
         ]
+        .map(|p| Some(p.to_owned()))
     );
     let a = resolved.registry.get("a", VERSION_UNDEFINED).unwrap();
     assert_eq!(a.dependencies.len(), 1);
@@ -297,8 +298,11 @@ fn dependency_order_and_provider_files_preserve_first_occurrence() {
     });
     provider.is.system = true;
     provider.uses_library_files = vec![
-        "/system/framework/transitive.jar".into(),
-        "/data/app/provider/base.apk".into(),
+        None,
+        Some(String::new()),
+        None,
+        Some("/system/framework/transitive.jar".into()),
+        Some("/data/app/provider/base.apk".into()),
     ];
     registry.add_package(&provider, None).unwrap();
     registry.insert(SharedLibrary {
@@ -326,10 +330,13 @@ fn dependency_order_and_provider_files_preserve_first_occurrence() {
     assert_eq!(
         selection.files(&available).unwrap(),
         [
-            "/data/app/provider/base.apk",
-            "/data/app/provider/feature.apk",
-            "/system/framework/transitive.jar"
+            Some("/data/app/provider/base.apk"),
+            Some("/data/app/provider/feature.apk"),
+            None,
+            Some(""),
+            Some("/system/framework/transitive.jar")
         ]
+        .map(|p| p.map(str::to_owned))
     );
 }
 
@@ -648,6 +655,6 @@ fn raw_nullable_metadata_does_not_replace_a_missing_file_owner() {
     selection.libraries[0].path = Some("/system/framework/owner.jar".into());
     assert_eq!(
         selection.files(&BTreeMap::new()),
-        Ok(vec!["/system/framework/owner.jar".into()])
+        Ok(vec![Some("/system/framework/owner.jar".into())])
     );
 }

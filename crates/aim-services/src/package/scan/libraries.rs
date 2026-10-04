@@ -122,7 +122,7 @@ impl SigningScan {
     pub fn library_dependencies(
         &self,
         name: &str,
-    ) -> Result<Option<(&[String], &[crate::package::model::SharedLibrary])>, String> {
+    ) -> Result<Option<(&[Option<String>], &[crate::package::model::SharedLibrary])>, String> {
         self.validate_library_dependencies()?;
         let assigned = self
             .library_dependencies

@@ -872,9 +872,13 @@ An earlier probe excluding bpfloader never received the feed because netd repeat
 aborted and restarted zygote; the default boot configuration succeeds. No owned
 runtime processes or probe mounts remain. Native fresh-boot/runtime copy/update
 ownership, complete live user/alias export, native visibility and publication into
-running SystemServer remain #873/#862/#836. Nullable library file slots still lose
-their distinction in the older query read model (#874); the runtime path preserves
-them. Other live query/write differences remain #865-#868. Live APEX/
+running SystemServer remain #873/#862/#836. Nullable library file slots now retain their distinction through the query feed,
+native dependency owners and ApplicationInfo parcels (#874). Null, empty strings,
+paths and repeated null slots survive original ART decoding (19.38s package
+oracle); provider dependency deduplication retains the first null occurrence.
+All 414 units pass (3.50s; one ignored/not run), all integration targets compile,
+the actual first-system image scan passes (42.78s), and the host/image build
+passes (16.5s; three rebuilt, 39 fresh). Other live query/write differences remain #865-#868. Live APEX/
 hidden-state delivery, permission boot ordering, original writer requests,
 callbacks and full PackageState/SharedUserApi export remain #858/#836. The native
 service switch is not activated and original PMS remains active.

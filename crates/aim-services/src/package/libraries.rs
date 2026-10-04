@@ -29,7 +29,7 @@ pub struct ScanPackage {
     pub code: std::sync::Arc<super::pkg::AndroidPackage>,
     pub signatures: Option<super::settings::Signatures>,
     pub users: BTreeMap<i32, super::restrictions::UserState>,
-    pub uses_library_files: Vec<String>,
+    pub uses_library_files: Vec<Option<String>>,
     pub uses_library_infos: Vec<SharedLibrary>,
 }
 
@@ -37,8 +37,8 @@ trait LibraryPackage: Clone {
     fn code(&self) -> Option<&super::pkg::AndroidPackage>;
     fn unparsed_code(&self) -> bool;
     fn signatures(&self) -> Option<&super::settings::Signatures>;
-    fn files(&self) -> &[String];
-    fn set_files(&mut self, files: Vec<String>);
+    fn files(&self) -> &[Option<String>];
+    fn set_files(&mut self, files: Vec<Option<String>>);
     fn set_infos(&mut self, infos: Vec<SharedLibrary>);
     fn installed_users(&self) -> Vec<i32>;
     fn install_for_user(&mut self, id: i32) -> Result<(), ResolveError>;
@@ -54,10 +54,10 @@ impl LibraryPackage for PackageState {
     fn signatures(&self) -> Option<&super::settings::Signatures> {
         self.signatures.as_ref()
     }
-    fn files(&self) -> &[String] {
+    fn files(&self) -> &[Option<String>] {
         &self.uses_library_files
     }
-    fn set_files(&mut self, files: Vec<String>) {
+    fn set_files(&mut self, files: Vec<Option<String>>) {
         self.uses_library_files = files;
     }
     fn set_infos(&mut self, infos: Vec<SharedLibrary>) {
@@ -88,10 +88,10 @@ impl LibraryPackage for ScanPackage {
     fn signatures(&self) -> Option<&super::settings::Signatures> {
         self.signatures.as_ref()
     }
-    fn files(&self) -> &[String] {
+    fn files(&self) -> &[Option<String>] {
         &self.uses_library_files
     }
-    fn set_files(&mut self, files: Vec<String>) {
+    fn set_files(&mut self, files: Vec<Option<String>>) {
         self.uses_library_files = files;
     }
     fn set_infos(&mut self, infos: Vec<SharedLibrary>) {

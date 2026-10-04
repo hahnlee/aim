@@ -425,14 +425,7 @@ fn build(
                     .or(runtime.state.seinfo.as_deref());
                 if effective != package.seinfo.as_deref()
                     || runtime.state.libraries != package.uses_library_infos
-                    || runtime
-                        .state
-                        .library_files
-                        .iter()
-                        .cloned()
-                        .map(Option::unwrap_or_default)
-                        .collect::<Vec<_>>()
-                        != package.uses_library_files
+                    || runtime.state.library_files != package.uses_library_files
                     || runtime.transient.hidden_until_installed != package.is.hidden_until_installed
                     || runtime.transient.updated_system_app != package.is.updated_system_app
                     || runtime.transient.apk_in_updated_apex != package.is.apk_in_updated_apex
@@ -580,7 +573,12 @@ fn dump_package(s: &mut String, p: &PackageState) {
     for (key, value) in fields {
         let _ = writeln!(s, "    {key}={value}");
     }
-    list(s, "    usesLibraryFiles:", &p.uses_library_files);
+    if !p.uses_library_files.is_empty() {
+        let _ = writeln!(s, "    usesLibraryFiles:");
+        for file in &p.uses_library_files {
+            let _ = writeln!(s, "      {}", file.as_deref().unwrap_or("null"));
+        }
+    }
     for (id, u) in &p.users {
         let _ = writeln!(
             s,

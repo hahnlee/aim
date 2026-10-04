@@ -87,7 +87,7 @@ pub struct PackageState {
     pub uses_static_libraries: Vec<(String, i64)>,
     pub uses_sdk_libraries: Vec<UsesSdkLibrary>,
     /// `getUsesLibraryFiles`.
-    pub uses_library_files: Vec<String>,
+    pub uses_library_files: Vec<Option<String>>,
     /// `getSharedLibraryDependencies`, in order.
     pub uses_library_infos: Vec<SharedLibrary>,
     pub is: StateFlags,

@@ -33,6 +33,7 @@ public final class PackageRoundTripOracle {
         try {
             in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
             var info = android.content.pm.ApplicationInfo.CREATOR.createFromParcel(in);
+            if (!java.util.Arrays.equals(info.sharedLibraryFiles, new String[] {null, "", "/system/framework/lib.jar", null})) throw new AssertionError("nullable library file slots differ");
             if (in.dataAvail() != 0 || info.sharedLibraryInfos.size() != 3
                     || info.optionalSharedLibraryInfos.size() != 1) throw new AssertionError("library owner framing differs");
             for (int i = 0; i < 2; i++) {

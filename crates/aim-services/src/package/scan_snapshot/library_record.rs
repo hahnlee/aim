@@ -24,7 +24,7 @@ pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, Stri
     p.write_i32(setting.app_id);
     p.write_i32(i32::try_from(files.len()).map_err(|_| "too many library files")?);
     for path in files {
-        p.write_string16(Some(path));
+        p.write_string16(path.as_deref());
     }
     aim_service_aidl::write_byte_array(&mut p, Some(libraries.data()));
     if p.data().len() > i32::MAX as usize {

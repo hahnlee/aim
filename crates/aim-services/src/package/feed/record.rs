@@ -86,7 +86,7 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
             optional: r.read_bool()?,
         });
     }
-    s.uses_library_files = strings(r)?;
+    s.uses_library_files = read_string_list(r)?.unwrap_or_default();
     for _ in 0..count(r)? {
         s.uses_library_infos
             .push(super::super::library_parcel::read_feed(r)?);

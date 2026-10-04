@@ -132,23 +132,24 @@ impl Selection {
     pub fn files(
         &self,
         available: &BTreeMap<String, PackageState>,
-    ) -> Result<Vec<String>, ResolveError> {
+    ) -> Result<Vec<Option<String>>, ResolveError> {
         self.files_packages(available)
     }
 
     pub(super) fn files_packages<P: LibraryPackage>(
         &self,
         available: &BTreeMap<String, P>,
-    ) -> Result<Vec<String>, ResolveError> {
+    ) -> Result<Vec<Option<String>>, ResolveError> {
         let mut files = Vec::new();
-        let mut add = |path: &str| {
-            if !files.iter().any(|p| p == path) {
-                files.push(path.to_owned());
+        let mut add = |path: Option<&str>| {
+            let path = path.map(str::to_owned);
+            if !files.contains(&path) {
+                files.push(path);
             }
         };
         for library in &self.libraries {
             if let Some(path) = &library.path {
-                add(path);
+                add(Some(path));
             } else {
                 let provider = library
                     .package_name
@@ -158,19 +159,20 @@ impl Selection {
                 let pkg = provider
                     .code()
                     .ok_or(ResolveError::Incomplete("library provider APK"))?;
-                add(pkg
-                    .base_apk_path
-                    .as_deref()
-                    .ok_or(ResolveError::Incomplete("library base APK path"))?);
+                add(Some(
+                    pkg.base_apk_path
+                        .as_deref()
+                        .ok_or(ResolveError::Incomplete("library base APK path"))?,
+                ));
                 if let Some(paths) = &pkg.split_code_paths {
                     for path in paths {
-                        add(path
-                            .as_deref()
-                            .ok_or(ResolveError::Incomplete("library split APK path"))?);
+                        add(Some(path.as_deref().ok_or(ResolveError::Incomplete(
+                            "library split APK path",
+                        ))?));
                     }
                 }
                 for path in provider.files() {
-                    add(path);
+                    add(path.as_deref());
                 }
             }
         }

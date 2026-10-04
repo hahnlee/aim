@@ -79,6 +79,24 @@ fn package_record_metadata(
     version: i64,
     category: i32,
 ) -> Vec<u8> {
+    package_record_with_files(
+        name,
+        shared_user_app_id,
+        groups,
+        version,
+        category,
+        &[Some("/system/framework/lib.jar")],
+    )
+}
+
+fn package_record_with_files(
+    name: &str,
+    shared_user_app_id: Option<i32>,
+    groups: &[(Option<String>, Vec<Option<String>>)],
+    version: i64,
+    category: i32,
+    files: &[Option<&str>],
+) -> Vec<u8> {
     let mut p = Parcel::new();
     p.write_string16(Some(name));
     p.write_i32(10_100);
@@ -112,7 +130,10 @@ fn package_record_metadata(
     p.write_string16(Some("com.google.android.trichromelibrary"));
     p.write_i64(7);
     p.write_i32(0);
-    strings(&mut p, &["/system/framework/lib.jar"]);
+    p.write_i32(files.len() as i32);
+    for file in files {
+        p.write_string16(*file);
+    }
     p.write_i32(1);
     library(&mut p, "lib", Some("dep"));
     strings(&mut p, &["com.example.app.PERMISSION"]);
@@ -647,4 +668,30 @@ fn runtime_records_require_complete_matching_package_and_code_scopes() {
     invalid_bool[offset..offset + 4].copy_from_slice(&2i32.to_le_bytes());
     assert!(record::runtime(&invalid_bool).is_err());
     assert!(record::runtime(&runtime_record("p", false, 0)[..17]).is_err());
+}
+
+#[test]
+fn library_file_slots_survive_feed_and_application_queries() {
+    use crate::package::info::{self, Target};
+    let files = [None, Some(""), Some("/system/framework/lib.jar"), None];
+    let (package, _) =
+        record::package(&package_record_with_files("app", None, &[], 42, -1, &files)).unwrap();
+    let expected: Vec<_> = files.iter().map(|p| p.map(str::to_owned)).collect();
+    assert_eq!(package.uses_library_files, expected);
+    let system = crate::package::model::System::default();
+    let parsed = crate::package::pkg::AndroidPackage::default();
+    let user = crate::package::model::PackageUserState {
+        installed: true,
+        ..Default::default()
+    };
+    let target = Target {
+        sys: &system,
+        pkg: &parsed,
+        ps: &package,
+        state: &user,
+        user: 0,
+    };
+    let result =
+        info::generate_application_info(&target, info::flags::GET_SHARED_LIBRARY_FILES).unwrap();
+    assert_eq!(result.shared_library_files, Some(expected));
 }

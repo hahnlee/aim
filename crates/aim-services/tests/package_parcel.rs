@@ -1702,7 +1702,7 @@ fn runtime_fixture_snapshot(
                     usage: *usage.times(&setting.name).unwrap(),
                     seinfo: labels.base.clone(),
                     override_seinfo: labels.override_label.clone(),
-                    library_files: files.iter().cloned().map(Some).collect(),
+                    library_files: files.to_vec(),
                     libraries: libraries.to_vec(),
                 },
             )
@@ -2072,6 +2072,12 @@ fn write_library_owner_fixture(directory: &std::path::Path) {
         .push(Some(("dependent.consumer".into(), 41)));
     populated.dependencies.push(Some(nested));
     let info = ApplicationInfo {
+        shared_library_files: Some(vec![
+            None,
+            Some(String::new()),
+            Some("/system/framework/lib.jar".into()),
+            None,
+        ]),
         shared_library_infos: Some(vec![
             library("null", None, None),
             library("empty", Some(vec![]), Some(vec![])),

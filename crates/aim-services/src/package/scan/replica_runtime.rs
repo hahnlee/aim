@@ -222,10 +222,7 @@ impl SigningScan {
                     let (files, infos) = self
                         .library_dependencies(name)?
                         .ok_or("missing replica library owner")?;
-                    if files.iter().map(|p| Some(p.clone())).collect::<Vec<_>>()
-                        != value.library_files
-                        || infos != value.libraries
-                    {
+                    if files != value.library_files || infos != value.libraries {
                         return Err(format!("replica runtime libraries differ: {name}"));
                     }
                 }
