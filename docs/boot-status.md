@@ -567,7 +567,14 @@ so later active user changes preserve the old factory; retained updates keep the
 aliases. Original Settings.createNewSetting agrees on signer/legacy/fixed-bit
 inheritance, and the original component copy setters agree in a controlled user
 loop. This does not construct a live original UserManager in the standalone
-oracle. Best-effort leaving-shared-UID APEX conversion remains #898/#889;
+oracle. The original ART oracle also executes Settings.convertSharedUserSettingsLPw
+on a controlled shared setting at INVALID_UID: conversion keeps appId=-1,
+clears sharedUserAppId and replaces the group slot at 10000 with that same
+PackageSetting reference. Subsequent addPackageSettingLPw with no group keeps
+both the negative appId and the old slot reference (30.97s). This tests the
+conversion/registration owners, not InstallPackageHelper eligibility or a
+native migration. The checked image API and build pass (61.1s). Native
+best-effort leaving-shared-UID APEX conversion remains #898/#889;
 original/renamed identity adoption remains #890. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained

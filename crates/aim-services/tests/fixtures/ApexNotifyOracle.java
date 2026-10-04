@@ -32,6 +32,7 @@ public final class ApexNotifyOracle {
         verifySharedIds(directory);
         verifySharedApex(directory);
         verifyChangedGroup(directory);
+        verifyNegativeUidConversion();
         verifyDisabledInheritance(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
@@ -61,6 +62,22 @@ public final class ApexNotifyOracle {
             settings.addPackageSettingLPw(setting, registeredGroup);
             if (setting.getAppId() != registeredAppId || registeredAppId != 10000 || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != 10000 || pkg.getUid() != -1) throw new AssertionError("registered shared APEX IDs differ");
         } finally { in.recycle(); }
+    }
+    private static void verifyNegativeUidConversion() throws Exception {
+        var settings = new Settings(java.util.Map.of());
+        var group = settings.addSharedUserLPw("aim.fixture.leaving", 10000, 0, 0);
+        var setting = new PackageSetting("fixture", null, new java.io.File("/system/apex/fixture.apex"),
+            1, 0, new java.util.UUID(1, 1));
+        setting.setAppId(-1); setting.setSharedUserAppId(10000);
+        group.addPackage(setting);
+        settings.convertSharedUserSettingsLPw(group);
+        if (setting.getAppId() != -1
+                || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != -1
+                || settings.getSettingLPr(10000) != setting)
+            throw new AssertionError("negative APEX shared UID conversion differs");
+        settings.addPackageSettingLPw(setting, null);
+        if (setting.getAppId() != -1 || settings.getSettingLPr(10000) != setting)
+            throw new AssertionError("negative APEX converted slot changed at registration");
     }
     private static void verifyChangedGroup(java.io.File directory) throws Exception {
         var in = android.os.Parcel.obtain();
