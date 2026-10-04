@@ -219,9 +219,12 @@ tools; nothing of them is linked into the output or put in the image.
   only the members used. The stubs are dexed and checked against the
   image's jars on the boot and system server class paths
   (`aim_android_image::linkage`): every class, superclass, member and
-  constant a stub declares must be the image's. Then every class, field
-  and method the dexed code refers to outside itself must resolve in those
-  jars as ART resolves it. A changed internal API fails the build instead
+  constant a stub declares must be the image's. Java emits a constructor for
+  every class; a private compile-only constructor is ignored only when the
+  image class has no constructors (#900). Every constructor referenced by
+  executable code must still exist on its declaring class: constructors
+  are never inherited. Every other class, field and method the dexed code
+  refers to outside itself must resolve in those jars as ART resolves it. A changed internal API fails the build instead
   of the boot. The Java stubs' transaction codes are checked against the
   ones generated for the Rust side.
 - The jar holds one stored, aligned `classes.dex`, as the platform's do.

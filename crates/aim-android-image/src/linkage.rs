@@ -83,6 +83,12 @@ impl<'a> Classes<'a> {
         member: &(String, String),
         method: bool,
     ) -> Result<bool, String> {
+        // Constructors are resolved on their declaring class, never inherited.
+        if method && member.0 == "<init>" {
+            return Ok(self
+                .get(owner)?
+                .is_some_and(|class| class.methods.contains(member)));
+        }
         let mut pending = vec![owner.to_string()];
         let mut seen = HashSet::new();
         while let Some(next) = pending.pop() {
@@ -209,7 +215,24 @@ impl ClassPath {
                     out.push(format!("no field {name}->{field}:{ty}"));
                 }
             }
+            // Java always emits a class constructor. A private compile-only
+            // constructor may disappear from a shrunk image; executable method
+            // references are still checked independently by unresolved().
+            let private_constructors: HashSet<_> = stubs
+                .direct_methods(def)?
+                .into_iter()
+                .filter(|(_, access)| access & 0x2 != 0)
+                .map(|(id, _)| stubs.method(id))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, name, _)| name == "<init>")
+                .map(|(_, _, sig)| sig)
+                .collect();
+            let constructorless = !class.methods.iter().any(|(name, _)| name == "<init>");
             for (method, sig) in &stub.methods {
+                if method == "<init>" && constructorless && private_constructors.contains(sig) {
+                    continue;
+                }
                 if method != "<clinit>" && !class.methods.contains(&(method.clone(), sig.clone())) {
                     out.push(format!("no method {name}->{method}{sig}"));
                 }
@@ -225,5 +248,69 @@ impl ClassPath {
         }
         out.sort();
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructors_resolve_only_on_the_requested_class() {
+        let class = |parent: Option<&str>, methods: &[(&str, &str)]| Class {
+            superclass: parent.map(str::to_owned),
+            interfaces: Vec::new(),
+            fields: HashSet::new(),
+            methods: methods
+                .iter()
+                .map(|(n, s)| (n.to_string(), s.to_string()))
+                .collect(),
+        };
+        let mut classes = Classes {
+            dexes: Vec::new(),
+            index: HashMap::new(),
+            read: HashMap::from([
+                (
+                    "Base".into(),
+                    Some(class(None, &[("<init>", "()V"), ("method", "()V")])),
+                ),
+                (
+                    "Child".into(),
+                    Some(class(Some("Base"), &[("<init>", "(I)V")])),
+                ),
+                ("StaticOnly".into(), Some(class(Some("Base"), &[]))),
+            ]),
+        };
+        let member = |name: &str, sig: &str| (name.to_string(), sig.to_string());
+        assert!(
+            classes
+                .resolves("Base", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            classes
+                .resolves("Child", &member("<init>", "(I)V"), true)
+                .unwrap()
+        );
+        assert!(
+            !classes
+                .resolves("Child", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            !classes
+                .resolves("StaticOnly", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            !classes
+                .resolves("Missing", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            classes
+                .resolves("Child", &member("method", "()V"), true)
+                .unwrap()
+        );
     }
 }
