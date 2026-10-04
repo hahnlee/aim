@@ -1441,6 +1441,69 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     expected.settings.disabled_system_packages[0] = factory.record.settings;
     assert_eq!(factory_owner.settings, expected.settings);
 
+    let mut disabling = scan.owner.clone();
+    let active_before = disabling.settings.packages.clone();
+    let identities_before = disabling.identities.clone();
+    let loaded_before = disabling.loaded_packages()[&saved.name].clone();
+    assert!(!disabling.disable_system_package("missing-factory").unwrap());
+    assert!(disabling.disable_system_package(&saved.name).unwrap());
+    assert_eq!(
+        disabling.settings.disabled_system_packages,
+        vec![retained.candidate.record.settings.clone()]
+    );
+    assert!(
+        !disabling.settings.disabled_system_packages[0]
+            .transient
+            .updated_system_app
+    );
+    let mut expected_active = active_before;
+    expected_active
+        .iter_mut()
+        .find(|p| p.name == saved.name)
+        .unwrap()
+        .transient
+        .updated_system_app = true;
+    assert_eq!(disabling.settings.packages, expected_active);
+    assert_eq!(disabling.identities, identities_before);
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded_before,
+        &disabling.loaded_packages()[&saved.name]
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded_before,
+        &disabling.disabled_loaded_packages()[&saved.name]
+    ));
+    assert_eq!(
+        disabling.disabled_user_states(&saved.name),
+        Some(&retained.candidate.users)
+    );
+    let disabled_before = disabling.clone();
+    assert!(!disabling.disable_system_package(&saved.name).unwrap());
+    assert_eq!(disabling, disabled_before);
+    disabling
+        .set_user_state(
+            &saved.name,
+            0,
+            aim_services::package::restrictions::UserState {
+                first_install_time: 314,
+                ..retained.candidate.users[&0].clone()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        disabling.disabled_user_states(&saved.name).unwrap()[&0].first_install_time,
+        314
+    );
+    disabling
+        .set_user_state(&saved.name, 20, Default::default())
+        .unwrap();
+    assert!(
+        !disabling
+            .disabled_user_states(&saved.name)
+            .unwrap()
+            .contains_key(&20)
+    );
+
     let mut hot_owner = scan.owner.clone();
     hot_owner
         .settings

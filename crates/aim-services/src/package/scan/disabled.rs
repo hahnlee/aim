@@ -427,6 +427,61 @@ impl SigningScan {
         self.disabled_users.get(name).map(|state| &state.users)
     }
 
+    /// Settings.disableSystemPackageLPw(replaced=true): copy the loaded factory
+    /// before marking the active setting updated. Disabled shared membership is
+    /// retained by disabled_system_packages, without changing active UID flags.
+    pub fn disable_system_package(&mut self, name: &str) -> Result<bool, SigningError> {
+        let Some(at) = self.settings.packages.iter().position(|p| p.name == name) else {
+            return Ok(false);
+        };
+        let package = &self.settings.packages[at];
+        if self
+            .settings
+            .disabled_system_packages
+            .iter()
+            .any(|p| p.name == name)
+            || !self.loaded.contains_key(name)
+            || package.flags & crate::package::settings::FLAG_SYSTEM == 0
+            || package.transient.updated_system_app
+        {
+            return Ok(false);
+        }
+        let reject = |message: &str| {
+            SigningError::Rejected(Error {
+                package: name.into(),
+                path: package.code_path.clone(),
+                phase: "disable-system",
+                message: message.into(),
+            })
+        };
+        if self.pending_metadata.contains(name) {
+            return Err(reject("factory scan metadata is not finalized"));
+        }
+        let users = self
+            .scanned_users
+            .get(name)
+            .ok_or_else(|| reject("loaded factory user owner is missing"))?;
+        if package.shared_user {
+            match self.identities.ids.get(package.app_id) {
+                Some(crate::package::owner::app_ids::Owner::SharedUser(group))
+                    if self
+                        .identities
+                        .shared_users
+                        .get(group)
+                        .is_some_and(|owner| owner.has_package(name)) => {}
+                _ => return Err(reject("loaded factory shared UID owner is missing")),
+            }
+        }
+        let disabled = package.clone();
+        let users = DisabledUserStates::copied(users);
+        let loaded = self.loaded[name].clone();
+        self.settings.disabled_system_packages.push(disabled);
+        self.disabled_users.insert(name.into(), users);
+        self.disabled_loaded.insert(name.into(), loaded);
+        self.settings.packages[at].transient.updated_system_app = true;
+        Ok(true)
+    }
+
     /// disableSystemPackageLPw(replaced=true) retains aliases to the accepted
     /// factory's existing users. Settings/updated-system transition and
     /// resource effects belong to the surrounding disable owner (#702).
@@ -762,6 +817,94 @@ impl SigningScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabling_factory_requires_complete_owners_and_preserves_active_uid_membership() {
+        use crate::package::{
+            pkg::AndroidPackage,
+            settings::{Package, Settings, SharedUser},
+            sign::SigningDetails,
+        };
+        for shared in [false, true] {
+            let package = Package {
+                name: "factory".into(),
+                code_path: "/system/apex/factory.apex".into(),
+                app_id: 10000,
+                shared_user: shared,
+                flags: 1,
+                ..Default::default()
+            };
+            let settings = Settings {
+                packages: vec![package.clone()],
+                shared_users: if shared {
+                    vec![SharedUser {
+                        name: "factory.uid".into(),
+                        app_id: 10000,
+                        flags: 1,
+                        signatures: None,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            };
+            let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+            assert!(!owner.disable_system_package("factory").unwrap());
+            let signing = SigningDetails {
+                signatures: vec![vec![3]],
+                scheme_version: 3,
+                public_keys: Vec::new(),
+                past_signing_certificates: None,
+            };
+            let parsed = AndroidPackage {
+                package_name: "factory".into(),
+                feature_flag_state: Some(Vec::new()),
+                signing_details: Some(signing.parcel_details().unwrap()),
+                ..Default::default()
+            };
+            owner.loaded.insert(
+                "factory".into(),
+                std::sync::Arc::new(super::super::LoadedPackage::new(parsed, signing).unwrap()),
+            );
+            let before = owner.clone();
+            assert!(owner.disable_system_package("factory").is_err());
+            assert_eq!(owner, before);
+            owner
+                .scanned_users
+                .insert("factory".into(), Default::default());
+            owner.pending_metadata.insert("factory".into());
+            let before = owner.clone();
+            assert!(owner.disable_system_package("factory").is_err());
+            assert_eq!(owner, before);
+            owner.pending_metadata.clear();
+            if shared {
+                let mut broken = owner.clone();
+                broken.identities.shared_users.remove("factory.uid");
+                let before = broken.clone();
+                assert!(broken.disable_system_package("factory").is_err());
+                assert_eq!(broken, before);
+            }
+            for updated in [false, true] {
+                let mut ineligible = owner.clone();
+                if updated {
+                    ineligible.settings.packages[0].transient.updated_system_app = true;
+                } else {
+                    ineligible.settings.packages[0].flags &= !1;
+                }
+                let before = ineligible.clone();
+                assert!(!ineligible.disable_system_package("factory").unwrap());
+                assert_eq!(ineligible, before);
+            }
+            let identities = owner.identities.clone();
+            assert!(owner.disable_system_package("factory").unwrap());
+            assert_eq!(owner.settings.disabled_system_packages, vec![package]);
+            assert!(owner.settings.packages[0].transient.updated_system_app);
+            assert_eq!(owner.identities, identities);
+            let before = owner.clone();
+            assert!(!owner.disable_system_package("factory").unwrap());
+            assert_eq!(owner, before);
+        }
+    }
     #[test]
     fn original_scope_aliases_bind_complete_owned_values_and_reject_foreign_inputs() {
         use crate::package::settings::{Package, Settings};

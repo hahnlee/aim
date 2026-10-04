@@ -499,14 +499,25 @@ PackageImpl fields and SigningInfo parcels match original PackageParser2 and PMS
 including signer keys and lineage capabilities. Parsing uses the initial system
 flags for both factory and updated containers; updated scan flags clear SYSTEM_DIR
 after parsing. Null inventory is empty as in the original; missing archives and
-unsigned synthetic containers fail explicitly. Native APEX Settings/UID admission,
-inactive-factory disabling and notifyScanResult remain incomplete (#885), as does
-daemon orchestration (#836/#798). Actual original ART verifies production
+unsigned synthetic containers fail explicitly. Native disable_system_package now
+performs Settings.disableSystemPackageLPw(replaced=true)'s loaded-factory transition
+(#886): it copies the setting before marking active transient updated state,
+retains active UID/signing flags, shares the loaded code and existing user states,
+and excludes users added after the copy. Disabled settings retain shared UID
+membership without contributing active flags. Missing, unloaded, non-system,
+already-updated or already-disabled packages return the original false result;
+incomplete metadata/user/shared owners reject before mutation. The unchanged
+original-image scan gate exercises the actual transition and user alias behavior
+(68.00s). Native APEX Settings/UID admission, invoking this transition for inactive
+factory containers and notifyScanResult remain incomplete (#885), as does daemon
+orchestration (#836/#798). Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
 uninitialized owners and detached bytes (28.56s full package oracle, including
-APEX inventories, archive parsing/signing and static-library identity). All 432
-units pass (3.82s; one ignored/not run). All integration targets compile.
-The full image/template build passes (18.0s; three rebuilt, 39 fresh).
+APEX inventories, archive parsing/signing and static-library identity). All 433
+units pass (3.58s; one ignored/not run), including shared and nonshared disable
+owner gates. All integration targets compiled at the APEX input stage; the updated
+initial scan target passes. The full image/template build passes (13.5s; three
+rebuilt, 39 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
