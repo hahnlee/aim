@@ -16,10 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Boot/image owners' inputs, resolved before starting the package scan.
 pub struct FirstBootSystemInputs<'a> {
     pub seinfo: super::SeInfoScan<'a>,
-    /// Settings prepared by the preceding UID-free APEX scan, not saved APK state.
-    pub apex_settings: &'a crate::package::settings::Settings,
     /// Verified original container inputs establishing UID-free ownership.
     pub apex_image: &'a super::ApexImage,
+    /// ApexManager.notifyScanResult must finish before any APK directory scan.
+    pub notify_apex_scan: &'a dyn Fn(&[super::ApexScanResult]) -> Result<(), String>,
     pub first_api_level: i32,
     pub vendor_sdk: i32,
     pub abi_policy: &'a AbiPolicy,
@@ -76,6 +76,7 @@ impl SigningScan {
 pub struct SystemImageScan {
     pub owner: SigningScan,
     pub packages: Vec<CompletedScanMetadata>,
+    pub apex: Vec<super::ApexScanResult>,
     pub rejected: Vec<super::Rejected>,
 }
 
@@ -97,43 +98,23 @@ impl SystemImageScan {
                 message,
             })
         };
-        if inputs
-            .apex_settings
-            .packages
-            .iter()
-            .chain(&inputs.apex_settings.disabled_system_packages)
-            .any(|package| {
-                !inputs.apex_image.packages.iter().any(|code| {
-                    code.info.module_path == package.code_path
-                        && code.parsed.package_name == package.name
-                })
-            })
-        {
-            return Err(fail(
-                String::new(),
-                String::new(),
-                "apex",
-                "initial APEX setting has no verified container owner".into(),
-            ));
-        }
-        let mut owner = SigningScan::new_after_apex(
-            config,
-            inputs.apex_settings,
-            inputs.first_api_level,
-            inputs.apex_image,
-        )
-        .map_err(|error| {
-            fail(
-                String::new(),
-                String::new(),
-                "settings",
-                format!("cannot initialize scan ownership: {error:?}"),
-            )
-        })?;
+        let mut owner = SigningScan::new(config, &Default::default(), inputs.first_api_level)
+            .map_err(|error| {
+                fail(
+                    String::new(),
+                    String::new(),
+                    "settings",
+                    format!("cannot initialize scan ownership: {error:?}"),
+                )
+            })?;
+        let apex = owner.scan_initial_apex(apks, config, &inputs)?;
+        (inputs.notify_apex_scan)(&apex)
+            .map_err(|message| fail(String::new(), String::new(), "apex-notification", message))?;
         let batch = scan_system_image(&mut owner, image, apks, config, inputs, None)?;
         Ok(Self {
             owner,
             packages: batch.packages,
+            apex,
             rejected: batch.rejected,
         })
     }
@@ -474,7 +455,7 @@ fn scan_system_image(
     })
 }
 
-fn initial_stopped(pkg: &AndroidPackage, config: &SystemConfig, enabled: bool) -> bool {
+pub(super) fn initial_stopped(pkg: &AndroidPackage, config: &SystemConfig, enabled: bool) -> bool {
     enabled
         && pkg.package_name != "android"
         && !pkg.is(crate::package::pkg::booleans::OVERLAY_IS_STATIC)

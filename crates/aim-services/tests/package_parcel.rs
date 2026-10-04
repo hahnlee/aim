@@ -9,6 +9,7 @@ mod common {
     pub mod zip;
     pub mod java;
     pub mod runtime;
+    pub mod seinfo;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -1285,6 +1286,199 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap(),
         10001
     );
+    let compatibility =
+        aim_services::package::scan::LibraryCompatibility::new(&config, &|_| None, true).unwrap();
+    let abi = aim_services::package::scan::AbiPolicy {
+        all: vec!["arm64-v8a".into()],
+        bit32: Vec::new(),
+        bit64: vec!["arm64-v8a".into()],
+        native32: Vec::new(),
+        native64: vec!["arm64-v8a".into()],
+        force_multi_arch_match: false,
+    };
+    let domain_counter = std::cell::Cell::new(1u8);
+    let domain = || {
+        let value = domain_counter.get();
+        domain_counter.set(value + 1);
+        Ok([value; 16])
+    };
+    let scan_inputs = |image| aim_services::package::scan::FirstBootSystemInputs {
+        seinfo: common::seinfo::scan(),
+        apex_image: image,
+        notify_apex_scan: &|_| Err("direct APEX phase does not notify".into()),
+        first_api_level: 36,
+        vendor_sdk: 36,
+        abi_policy: &abi,
+        compatibility: &compatibility,
+        preferred_abi: "arm64-v8a",
+        app_lib32_install_dir: "/data/app-lib",
+        platform_runtime_64bit: true,
+        install: aim_services::package::scan::NativeLibraryInstallPolicy {
+            page_size: 16384,
+            extract: false,
+            debuggable: false,
+            compat_16kb_disabled: false,
+            manifest_compat_disabled: false,
+        },
+        clock: aim_services::package::scan::ScanClock {
+            current_time: 0,
+            user_id: 0,
+            update_time: false,
+        },
+        factory_test: false,
+        users: aim_services::package::scan::UserPolicy {
+            install_user: Some(0),
+            users: None,
+            allow_install: true,
+            instant_app: false,
+            virtual_preload: false,
+            stopped_system_app: false,
+        },
+        new_domain_id: &domain,
+    };
+    let mut registered =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    let results = registered
+        .scan_initial_apex(&apex_apks, &config, &scan_inputs(&apex_image))
+        .unwrap();
+    assert_eq!(results.len(), apex_image.packages.len());
+    assert_eq!(registered.loaded_packages().len(), results.len());
+    assert_eq!(
+        registered.identities,
+        aim_services::package::owner::shared_users::Bootstrap::new(&config)
+    );
+    assert!(registered.settings.key_sets.public_keys.is_empty());
+    assert!(registered.settings.key_sets.key_sets.is_empty());
+    for result in &results {
+        let setting = registered
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == result.package.package_name)
+            .unwrap();
+        assert_eq!(setting.app_id, -1);
+        assert_eq!(result.package.uid, -1);
+        assert!(
+            result
+                .package
+                .is2(aim_services::package::pkg::booleans2::APEX)
+        );
+        assert_eq!(setting.transient.apex_module_name, result.info.module_name);
+        assert!(!setting.transient.apk_in_updated_apex);
+        assert_eq!(setting.key_set_data, Default::default());
+        assert!(setting.signatures.is_some());
+        assert_eq!(setting.primary_cpu_abi, None);
+        assert_eq!(setting.legacy_native_library_path, None);
+        assert!(
+            registered
+                .seinfo_state(&setting.name)
+                .unwrap()
+                .unwrap()
+                .base
+                .is_some()
+        );
+    }
+    let mut inactive = aim_services::package::scan::ApexImage {
+        packages: vec![apex_image.packages[0].clone()],
+    };
+    inactive.packages[0].info.active = false;
+    let mut disabled =
+        aim_services::package::scan::SigningScan::new(&config, &Default::default(), 36).unwrap();
+    disabled
+        .scan_initial_apex(&apex_apks, &config, &scan_inputs(&inactive))
+        .unwrap();
+    assert_eq!(disabled.settings.disabled_system_packages.len(), 1);
+    assert!(
+        !disabled.settings.disabled_system_packages[0]
+            .transient
+            .updated_system_app
+    );
+    assert!(disabled.settings.packages[0].transient.updated_system_app);
+    assert!(std::sync::Arc::ptr_eq(
+        &disabled.loaded_packages()[&disabled.settings.packages[0].name],
+        &disabled.disabled_loaded_packages()[&disabled.settings.packages[0].name]
+    ));
+    let mut rejected_source = aim_services::package::scan::ApexImage {
+        packages: inactive.packages.clone(),
+    };
+    rejected_source.packages[0].info.module_name = None;
+    let reject_domain = || Err("domain owner denied APEX registration".into());
+    let before = disabled.clone();
+    let mut rejected_inputs = scan_inputs(&rejected_source);
+    rejected_inputs.new_domain_id = &reject_domain;
+    assert!(
+        matches!(disabled.scan_initial_apex(&apex_apks, &config, &rejected_inputs),
+        Err(aim_services::package::scan::SigningError::Rejected(ref error)) if error.phase == "apex-domain")
+    );
+    let mut refreshed = before;
+    refreshed.settings.disabled_system_packages[0]
+        .transient
+        .apex_module_name = None;
+    assert!(
+        disabled == refreshed,
+        "rejected container changed owners beyond original disabled-module refresh"
+    );
+    let update_guest = "/data/apex/active/native-fixture.apex";
+    let original_file = aim_paths::original_image().join(
+        inactive.packages[0]
+            .info
+            .module_path
+            .trim_start_matches('/'),
+    );
+    let updated_file = directory.join("updated-container.apex");
+    std::os::unix::fs::symlink(original_file, &updated_file).unwrap();
+    let original_root = aim_paths::original_image();
+    let update_apks = aim_services::package::write::Apks {
+        files: Box::new(move |path| {
+            Some(if path == update_guest {
+                updated_file.clone()
+            } else {
+                original_root.join(path.trim_start_matches('/'))
+            })
+        }),
+        platform: aim_services::package::parse::Platform::load(
+            &aim_paths::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
+    };
+    let mut update_info = inactive.packages[0].info.clone();
+    update_info.module_path = update_guest.into();
+    update_info.factory = false;
+    update_info.active = true;
+    let update_inventory = aim_services::package::bootstrap::ApexInventory {
+        packages: Some(vec![update_info]),
+        active: Vec::new(),
+    };
+    let update_image = aim_services::package::scan::ApexImage::load(
+        &update_apks,
+        &update_inventory,
+        aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+    )
+    .unwrap();
+    disabled
+        .scan_initial_apex(&update_apks, &config, &scan_inputs(&update_image))
+        .unwrap();
+    let active = &disabled.settings.packages[0];
+    assert_eq!(active.code_path, update_guest);
+    assert_eq!(active.app_id, -1);
+    assert!(active.transient.updated_system_app);
+    assert!(!active.transient.apk_in_updated_apex);
+    assert_ne!(
+        active.code_path,
+        disabled.settings.disabled_system_packages[0].code_path
+    );
+    assert_eq!(
+        disabled.disabled_loaded_packages()[&active.name]
+            .package
+            .path,
+        Some(inactive.packages[0].info.module_path.clone())
+    );
+    assert_eq!(
+        disabled.loaded_packages()[&active.name].package.path,
+        Some(update_guest.into())
+    );
+    assert!(disabled.settings.key_sets.public_keys.is_empty());
     let mut updated_apex = apex_inventory.clone();
     let mut info = updated_apex.packages.as_ref().unwrap()[0].clone();
     info.factory = false;
@@ -1742,8 +1936,11 @@ fn native_scan_objects(
                 policy: &policy,
                 compatibility: &|_: &aim_services::package::pkg::AndroidPackage| Ok(36),
             },
-            apex_settings: &Default::default(),
             apex_image: &Default::default(),
+            notify_apex_scan: &|results| {
+                assert!(results.is_empty());
+                Ok(())
+            },
             first_api_level: 36,
             vendor_sdk: 36,
             abi_policy: &abi,

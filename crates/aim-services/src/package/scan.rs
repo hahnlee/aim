@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 
 mod apex;
 mod apex_image;
+mod apex_register;
 pub use apex_image::{ApexCode, ApexImage};
+pub use apex_register::ApexScanResult;
 mod authorize;
 mod enrich;
 pub use enrich::{ScanClock, ScanTime};

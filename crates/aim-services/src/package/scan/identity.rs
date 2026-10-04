@@ -62,6 +62,10 @@ impl Identity {
         Self::select_with_static_rename(pkg, settings, system, location.apex.is_none())
     }
 
+    pub(super) fn select_for_apex(pkg: &AndroidPackage, settings: &Settings) -> Self {
+        Self::select_with_static_rename(pkg, settings, true, false)
+    }
+
     pub(super) fn select_for_parse_flags(
         pkg: &AndroidPackage,
         settings: &Settings,

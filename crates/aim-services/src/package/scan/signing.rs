@@ -43,6 +43,7 @@ pub struct SigningScan {
     pub(super) loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) pending_metadata: BTreeSet<String>,
+    apex_origins: BTreeMap<String, ScanOrigin>,
     pub(super) seinfo: Option<super::seinfo::Assignments>,
     pub(super) legacy_permissions: Option<super::legacy::Assignments>,
     pub(super) library_dependencies: Option<super::libraries::Assignments>,
@@ -162,6 +163,7 @@ impl SigningScan {
         self.scanned_users.remove(&record.settings.name);
         self.loaded.remove(&record.settings.name);
         self.pending_metadata.remove(&record.settings.name);
+        self.apex_origins.remove(&record.settings.name);
     }
     /// Apply page-size scan policy after ABI/path and installation ownership.
     /// Alignment errors retain existing flags and are returned for reporting.
@@ -428,20 +430,33 @@ impl SigningScan {
     ) -> Result<NewPackageOutcome, SigningError> {
         let record = &mut candidate.record;
         let at = self.accepted_slot(record, "metadata")?;
-        let flags = physical_parse_flags(&record.settings.code_path).map_err(|message| {
-            SigningError::Rejected(Error {
-                package: record.settings.name.clone(),
-                path: record.settings.code_path.clone(),
-                phase: "location",
-                message,
-            })
-        })?;
+        let system_directory = if record.parsed.is2(crate::package::pkg::booleans2::APEX) {
+            if self.apex_origins.get(&record.settings.name) != Some(&record.origin) {
+                return Err(SigningError::Rejected(Error {
+                    package: record.settings.name.clone(),
+                    path: record.settings.code_path.clone(),
+                    phase: "location",
+                    message: "APEX metadata has no original scan origin".into(),
+                }));
+            }
+            record.origin == ScanOrigin::SystemDirectory
+        } else {
+            physical_parse_flags(&record.settings.code_path).map_err(|message| {
+                SigningError::Rejected(Error {
+                    package: record.settings.name.clone(),
+                    path: record.settings.code_path.clone(),
+                    phase: "location",
+                    message,
+                })
+            })? & parse::PARSE_IS_SYSTEM_DIR
+                != 0
+        };
         super::enrich::apply(
             &mut record.settings,
             &record.parsed,
             &mut candidate.users,
             time,
-            flags & parse::PARSE_IS_SYSTEM_DIR != 0,
+            system_directory,
         );
         self.settings.packages[at] = record.settings.clone();
         self.update_disabled_user_aliases(&record.settings.name, &candidate.users);
@@ -546,6 +561,7 @@ impl SigningScan {
             loaded: BTreeMap::new(),
             disabled_loaded: BTreeMap::new(),
             pending_metadata: BTreeSet::new(),
+            apex_origins: BTreeMap::new(),
             seinfo: None,
             legacy_permissions: None,
             library_dependencies: None,
@@ -938,11 +954,45 @@ impl SigningScan {
         self.apply_candidate(record, disabled, true)
     }
 
+    pub(super) fn apply_apex_candidate(
+        &mut self,
+        record: &Record,
+        source: &super::ApexCode,
+    ) -> Result<SigningOutcome, SigningError> {
+        if !record.parsed.is2(crate::package::pkg::booleans2::APEX)
+            || record.settings.app_id != -1
+            || record.settings.name != source.parsed.package_name
+            || record.settings.code_path != source.info.module_path
+        {
+            return Err(SigningError::Rejected(Error {
+                package: record.settings.name.clone(),
+                path: record.settings.code_path.clone(),
+                phase: "apex-origin",
+                message: "container record disagrees with original scan source".into(),
+            }));
+        }
+        let outcome =
+            self.apply_candidate_with_flags(record, None, false, Some(source.scan_parse_flags))?;
+        self.apex_origins
+            .insert(record.settings.name.clone(), record.origin);
+        Ok(outcome)
+    }
+
     fn apply_candidate(
         &mut self,
         record: &Record,
         disabled: Option<&Record>,
         admit_member: bool,
+    ) -> Result<SigningOutcome, SigningError> {
+        self.apply_candidate_with_flags(record, disabled, admit_member, None)
+    }
+
+    fn apply_candidate_with_flags(
+        &mut self,
+        record: &Record,
+        disabled: Option<&Record>,
+        admit_member: bool,
+        apex_parse_flags: Option<i32>,
     ) -> Result<SigningOutcome, SigningError> {
         let check = self
             .libraries
@@ -977,7 +1027,13 @@ impl SigningScan {
                 }));
             }
         }
-        self.reconcile(record, check.as_ref(), disabled, admit_member)
+        self.reconcile(
+            record,
+            check.as_ref(),
+            disabled,
+            admit_member,
+            apex_parse_flags,
+        )
     }
 
     fn reconcile(
@@ -986,6 +1042,7 @@ impl SigningScan {
         signature_check: Option<&crate::package::settings::Package>,
         disabled: Option<&Record>,
         admit_member: bool,
+        apex_parse_flags: Option<i32>,
     ) -> Result<SigningOutcome, SigningError> {
         let fail = |phase, message| Error {
             package: record.settings.name.clone(),
@@ -1012,8 +1069,11 @@ impl SigningScan {
                 "saved code or UID ownership changed (#804)".into(),
             ));
         }
-        let flags =
-            physical_parse_flags(&record.settings.code_path).map_err(|e| reject("location", e))?;
+        let flags = match apex_parse_flags {
+            Some(flags) => flags,
+            None => physical_parse_flags(&record.settings.code_path)
+                .map_err(|e| reject("location", e))?,
+        };
         let origin = if flags & parse::PARSE_IS_SYSTEM_DIR != 0 {
             ScanOrigin::SystemDirectory
         } else {

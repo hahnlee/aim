@@ -78,12 +78,24 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     };
     let next_id = AtomicU8::new(1);
     let domain_ids = || Ok([next_id.fetch_add(1, Ordering::SeqCst); 16]);
-    let apex_settings = Default::default();
     let apex_image = Default::default();
+    let notified_apex = std::cell::Cell::new(0);
+    let notify_apex = |results: &[aim_services::package::scan::ApexScanResult]| {
+        for result in results {
+            assert_eq!(result.package.uid, -1);
+            assert!(
+                result
+                    .package
+                    .is2(aim_services::package::pkg::booleans2::APEX)
+            );
+        }
+        notified_apex.set(results.len());
+        Ok(())
+    };
     let inputs = |new_domain_id| FirstBootSystemInputs {
         seinfo: common::seinfo::scan(),
-        apex_settings: &apex_settings,
         apex_image: &apex_image,
+        notify_apex_scan: &notify_apex,
         first_api_level: 36,
         vendor_sdk: 36,
         abi_policy: &abi_policy,
@@ -2015,32 +2027,48 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     )
     .unwrap();
     let parsed_apex = &verified_apex.packages[0].parsed;
-    let reserved = aim_services::package::settings::Settings {
-        packages: vec![aim_services::package::settings::Package {
-            name: parsed_apex.package_name.clone(),
-            code_path: verified_apex.packages[0].info.module_path.clone(),
-            app_id: -1,
-            version_code: (i64::from(parsed_apex.version_code_major) << 32)
-                | i64::from(parsed_apex.version_code as u32),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
     let mut with_apex = inputs(&domain_ids);
-    with_apex.apex_settings = &reserved;
     with_apex.apex_image = &verified_apex;
     let scan =
         SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config, with_apex)
             .unwrap();
     assert_eq!(scan.packages[1].candidate.record.settings.app_id, 10000);
-    assert_eq!(scan.owner.settings.packages[0], reserved.packages[0]);
-    let mut invalid_seed = reserved.clone();
-    invalid_seed.packages[0].code_path = "/data/app/fixture".into();
-    let mut inputs_with_apk = inputs(&domain_ids);
-    inputs_with_apk.apex_settings = &invalid_seed;
-    assert!(
-        matches!(SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config, inputs_with_apk), Err(SigningError::Rejected(ref error)) if error.phase == "apex")
+    let registered = &scan.owner.settings.packages[0];
+    assert_eq!(registered.name, parsed_apex.package_name);
+    assert_eq!(registered.app_id, -1);
+    assert_eq!(
+        registered.code_path,
+        verified_apex.packages[0].info.module_path
     );
+    assert!(
+        scan.owner.loaded_packages()[&registered.name]
+            .package
+            .is2(aim_services::package::pkg::booleans2::APEX)
+    );
+    assert_eq!(
+        scan.owner.loaded_packages()[&registered.name].package.uid,
+        -1
+    );
+    assert_eq!(scan.apex.len(), 1);
+    assert_eq!(notified_apex.get(), 1);
+    assert!(registered.signatures.is_some());
+    assert_eq!(registered.key_set_data, Default::default());
+    assert_eq!(registered.primary_cpu_abi, None);
+    assert_eq!(registered.legacy_native_library_path, None);
+
+    let reject_notification = |_: &[aim_services::package::scan::ApexScanResult]| {
+        Err("original owner denied scan results".into())
+    };
+    let mut rejected_notification = inputs(&domain_ids);
+    rejected_notification.apex_image = &verified_apex;
+    rejected_notification.notify_apex_scan = &reject_notification;
+    let domains_before = next_id.load(Ordering::SeqCst);
+    assert!(
+        matches!(SystemImageScan::first_boot(Image::load(&apks, &[]).unwrap(), &apks, &config,
+        rejected_notification), Err(SigningError::Rejected(ref error)) if error.phase == "apex-notification")
+    );
+    // One domain belongs to the completed container; no APK admission followed.
+    assert_eq!(next_id.load(Ordering::SeqCst), domains_before + 1);
 
     let mut early = Image::load(&apks, &[]).unwrap();
     let mut overlay = early.packages.remove(1);

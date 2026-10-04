@@ -508,26 +508,40 @@ membership without contributing active flags. Missing, unloaded, non-system,
 already-updated or already-disabled packages return the original false result;
 incomplete metadata/user/shared owners reject before mutation. The unchanged
 original-image scan gate exercises the actual transition and user alias behavior
-(68.00s). The initial APK scan now requires verified ApexImage identity/path inputs for
-its preceding APEX settings (#887). SigningScan.new_after_apex retains those
-settings with INVALID_UID (-1) while restoring only APK identities into UID
-slots. Original PMS MATCH_APEX reports -1 for all 42 containers. Unverified
-negative IDs, assigned APEX app IDs, duplicate identities and changed paths or
-versions reject; disabled APEX copies retain the same rule. Mixed APK/APEX
-settings preserve the APK slots and allocation cursor. The unchanged-original
-image initial scan verifies a parsed/signed container's -1 setting survives
-while the first APK receives UID 10000 (71.21s), replacing the old fixture's
-incorrect APEX UID reservation. These are supplied, controlled settings and
-UID-boundary checks; native APEX setting construction, loading its code and
-invoking the inactive-factory transition and notifyScanResult remain incomplete
-(#885), as does daemon orchestration (#836/#798). Actual original ART verifies production
-export from original UserInfo objects, pre-created/restricted flags, empty versus
-uninitialized owners and detached bytes (27.97s full package oracle, including
-APEX inventories, archive parsing/signing, actual container UIDs, mixed APK/APEX
-restoration and static-library identity). All 433 units pass (3.22s; one
-ignored/not run), including shared and nonshared disable owner gates. All
-integration targets compile; the updated initial scan target passes.
-The full image/template build passes (15.6 s; three rebuilt, 39 fresh).
+(67.72s). SigningScan.new_after_apex retains verified container settings at
+INVALID_UID (-1) without reserving APK slots (#887). Original PMS MATCH_APEX
+reports -1 for all 42 containers; mixed APK/APEX restoration preserves APK slots
+and their allocation cursor and rejects unknown negative IDs and mismatched
+identity/path/version inputs.
+Native initial APEX registration now constructs Settings and loads verified code
+before APK admission (#888). Policy uses the actual container code partition,
+always sets SYSTEM/APEX and does not inherit an updated container's preinstalled
+partition mask. Original scan parse flags determine signature/time origin,
+including updated /data/apex containers; APK physical-path rules remain separate.
+New containers retain INVALID_UID, raw module ownership and full signer details;
+retained containers preserve their user owners. The APEX ABI branch leaves payload
+libraries to apexd, and APEX keysets never enter the persistent pool. Completed
+page/code/application/seInfo metadata enters loaded ownership, and inactive
+factories invoke the actual disable transition. Original typed notification
+records are retained separately from APK results. First boot requires the caller's
+notification to succeed before APK registration; rejection aborts the phase.
+The full original ART package oracle passes (33.48s): all 42 original archives
+parse, verify and complete native registration without APK UID allocation, with
+loaded code, signatures and assigned seInfo. Controlled inactive-factory and
+updated-container views use unchanged original archive bytes in disposable paths,
+preserve disabled code and UID-free active ownership, and verify that a later
+domain rejection preserves only the original disabled-module refresh. The initial
+scan gate passes (67.72s), including actual container registration, first APK UID
+10000 and notification rejection before any APK domain admission. Compatibility,
+user/domain and notification owners in these native phase fixtures are controlled;
+these results do not prove live original callbacks or complete facade publication.
+Declared APEX shared UID and original/renamed identity transitions reject explicitly
+(#889/#890). The actual typed ApexManager.notifyScanResult bridge and complete boot
+ordering remain #885/#836/#798; the running daemon still does not invoke native
+initialization. All 434 units pass (5.59s; one ignored/not run), and all integration
+targets compile. Actual original ART also continues to verify the user/APEX
+inventory exporters, static-library identity, complete package parcels and signer
+lineage. The full image/template build passes (17.4s; three rebuilt, 39 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
@@ -1254,8 +1268,10 @@ rejection retention and absent/empty framework failure.
 `SystemImageScan::first_boot` now consumes that physical image order through
 native scan ownership: shared-UID privilege and manifest/library policy,
 constructor library/MIME/domain inputs, UID/signing reconciliation, bundled ABI,
-page policy, actual code time and final application flags. APEX settings/UIDs
-must come from the preceding APEX owner; an APK in that input rejects. The
+page policy, actual code time and final application flags. Native APEX registration
+now supplies its Settings and loaded code from verified original containers (#888);
+its notification owner must succeed before APK admission. Containers retain
+INVALID_UID and reserve no APK slots. The
 original platform is available to policy only after its scan completes. Required
 framework booleans resolve through the image's static overlays and reject missing
 or non-boolean resources. SystemConfig now reads initial-package-state exemptions

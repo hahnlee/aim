@@ -216,6 +216,11 @@ impl SigningScan {
     ) -> Result<NewPackageOutcome, SigningError> {
         let record = &mut candidate.record;
         let at = self.accepted_slot(record, "keysets")?;
+        // APEX settings are not persisted; registering their keys would orphan
+        // the pool, as commitReconciledScanResultLocked explicitly excludes them.
+        if record.parsed.is2(crate::package::pkg::booleans2::APEX) {
+            return Ok(candidate);
+        }
         let fail = |message| {
             SigningError::Fatal(super::Error {
                 package: record.settings.name.clone(),
