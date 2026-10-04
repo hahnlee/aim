@@ -52,9 +52,8 @@ impl SigningScan {
         let used = retained
             || self
                 .settings
-                .packages
+                .disabled_system_packages
                 .iter()
-                .chain(&self.settings.disabled_system_packages)
                 .any(|p| p.shared_app_id() == Some(id));
         if !used {
             self.identities.remove_shared_user(&name);
@@ -158,6 +157,43 @@ mod tests {
                 .package,
             original
         );
+    }
+
+    #[test]
+    fn old_shared_pruning_uses_members_even_when_request_setting_stays_in_map() {
+        for (other, disabled) in [(false, false), (true, false), (false, true)] {
+            let xml = format!(
+                "<packages><shared-user name='old' userId='10100'/><package name='incoming' codePath='/system/app/incoming' sharedUserId='10100'/>{}{}</packages>",
+                if other {
+                    "<package name='other' codePath='/system/app/other' sharedUserId='10100'/>"
+                } else {
+                    ""
+                },
+                if disabled {
+                    "<updated-package name='incoming' codePath='/system/app/incoming' sharedUserId='10100'/>"
+                } else {
+                    ""
+                },
+            );
+            let mut scan = owner(xml.as_bytes());
+            let request = scan.settings.packages[0].clone();
+            let capture = scan.clone();
+            assert_eq!(
+                scan.detach_shared_member(&request).unwrap(),
+                !other && !disabled
+            );
+            assert_eq!(scan.settings.packages[0], request);
+            assert_eq!(scan.identities.ids.get(10100).is_some(), other || disabled);
+            assert_eq!(
+                scan.settings.shared_users.iter().any(|g| g.name == "old"),
+                other || disabled
+            );
+            if other || disabled {
+                assert!(!scan.identities.shared_users["old"].has_package("incoming"));
+            }
+            assert!(capture.identities.shared_users["old"].has_package("incoming"));
+            assert!(capture.identities.ids.get(10100).is_some());
+        }
     }
 
     #[test]

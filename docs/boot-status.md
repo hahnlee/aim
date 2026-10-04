@@ -558,7 +558,9 @@ preserving labels across this scan-to-registration setting ID transition.
 Changing an existing container's declared group now creates a fresh setting,
 preserves pendingRestore and withdraws the old loaded scan only within the staged
 candidate. Successful completion removes the old group membership and prunes its
-UID only when no active or disabled reference remains (#889). A non-shared replacement with a disabled factory now copies its saved signer
+UID only when no active/retained member instance or disabled reference remains
+(#889/#928); an incoming request left in the Settings map does not keep that
+group alive. A non-shared replacement with a disabled factory now copies its saved signer
 and captured LegacyPermissionState; only the enumerated users' enabled/disabled
 component sets are copied, with fresh constructor defaults for other user fields.
 Missing migration/component owners reject before commit. A fresh setting records
@@ -946,7 +948,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (11.21s), and release units pass 462 cases. Disabled loaded code now retains a
+creation (11.16s), and release units pass 463 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -966,8 +968,8 @@ UNKNOWN and replaces its ABI/path/version metadata without changing the source
 metadata. Existing per-user state objects remain aliased to the original;
 mutations propagate to that instance. The full setting/helper comparison passes
 (68.15s). The focused original constructor/registration oracle also verifies
-sealed snapshot isolation, independence of new users and final UID-slot owners
-(11.47s). Ordinary scan admission shares the APEX prior-instance owner during
+sealed snapshot isolation, independence of new users and final UID-slot owners,
+plus three old shared-group removal cases (10.02s). Ordinary scan admission shares the APEX prior-instance owner during
 candidate construction (#927), then matches Settings.addPackageSettingLPw:
 registered ordinary APK slots point to the final accepted setting, discarding the
 prior independent slot instance; INVALID_UID/APEX admission leaves the original
@@ -979,7 +981,7 @@ stay unchanged. The first-system fixture verifies both UID forms through Store
 capture/publication, rejects a foreign UID owner without replacing its capture,
 and keeps the original slot untouched when metadata fails. Retained slot removal
 preserves prior captures. The actual original
-UID/signing oracle passes (28.87s); release units pass 462 cases. When an incoming
+UID/signing oracle passes (28.87s); release units pass 463 cases. When an incoming
 independent setting declares the original setting's shared UID, initial system
 scan now recreates/adopts the original setting instead of rejecting the changed
 relationship (#919). UID 10003, old users and the prior shared member stay with
@@ -991,9 +993,16 @@ UID, non-system and updated scopes reject the binding. Native fixtures verify
 successful recreation, Store capture/publication and final metadata failure
 without a retained member or renamed/transfer record. These are controlled native
 requests, not complete original PMS request-execution comparisons. Recreation
-from an incoming shared setting, old-group cleanup/pruning, complete request
-parity and transfer publication outside the scan owner remain #919; daemon
-frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
+from an incoming shared setting still requires its displaced/unparsed incoming
+owner representation (#929). The old-group pruning primitive now counts actual
+active/retained members and disabled references instead of all active Settings
+map references (#928). Original ART and native owner fixtures verify last-member
+pruning, another active member and a disabled-system member while keeping the
+incoming setting in the Settings map. In the pruned case its old UID slot is
+absent; with another/disabled member the group stays but the incoming setting is
+not a member. Native capture/replica and restore handling of that displaced
+setting remain #929; full request parity and transfer publication remain #919,
+and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime

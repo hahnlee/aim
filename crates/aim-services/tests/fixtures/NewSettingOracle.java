@@ -327,6 +327,39 @@ public final class NewSettingOracle {
             }
         }
         System.out.println("original setting adoption contracts: " + cases + " cases");
+        sharedRequestRemoval();
+    }
+
+    private static void sharedRequestRemoval() throws Exception {
+        int cases = 0;
+        for (int keep = 0; keep < 3; keep++) {
+            var settings = new Settings(java.util.Map.of());
+            var oldGroup = settings.addSharedUserLPw("fixture.old-group", 10002, 0, 0);
+            var incoming = member("fixture.incoming", 1, 0).setAppId(10002)
+                .setSharedUserAppId(10002);
+            incoming.setPkg((com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.internal.pm.parsing.pkg.PackageImpl.forTesting("fixture.incoming"));
+            settings.addPackageSettingLPw(incoming, oldGroup);
+            if (keep == 1) {
+                var other = member("fixture.other", 1, 0).setAppId(10002)
+                    .setSharedUserAppId(10002);
+                settings.addPackageSettingLPw(other, oldGroup);
+            } else if (keep == 2 && !settings.disableSystemPackageLPw("fixture.incoming", true)) {
+                throw new AssertionError("disabled group fixture was not registered");
+            }
+            if (!oldGroup.removePackage(incoming))
+                throw new AssertionError("old shared request member was missing");
+            boolean removed = settings.checkAndPruneSharedUserLPw(oldGroup, false);
+            if (removed != (keep == 0)
+                    || settings.getPackagesLocked().get("fixture.incoming") != incoming
+                    || (keep == 0 && settings.getSettingLPr(10002) != null)
+                    || (keep != 0 && settings.getSettingLPr(10002) != oldGroup)
+                    || oldGroup.getPackageStates().contains(incoming)) {
+                throw new AssertionError("old shared pruning differs: " + keep);
+            }
+            cases++;
+        }
+        System.out.println("old shared request removal contracts: " + cases + " cases");
     }
 
     private static PackageSetting member(String name, int flags, int privateFlags) {
