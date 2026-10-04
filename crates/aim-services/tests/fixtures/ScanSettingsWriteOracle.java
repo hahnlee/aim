@@ -69,7 +69,12 @@ public final class ScanSettingsWriteOracle {
                 throw new AssertionError("configured permission identity replaced: " + index);
             var output = new java.util.ArrayList<String>(); output.add(Boolean.toString(first));
             var signatures = new java.util.ArrayList<String>();
-            for (var setting : settings.getPackagesLocked().values()) signatures.add(setting.getPackageName() + ":" + signatureTrace(setting.getSigningDetails()));
+            for (var setting : settings.getPackagesLocked().values()) {
+                var details = setting.getSigningDetails(); var current = details.getSignatures();
+                var flags = new java.util.ArrayList<String>();
+                if (current != null) for (var certificate : current) flags.add(Integer.toString(certificate.getFlags()));
+                signatures.add(setting.getPackageName() + ":" + signatureTrace(details) + ":" + (current == null ? "null" : String.join(",", flags)));
+            }
             java.util.Collections.sort(signatures); output.add(String.join(";", signatures));
             for (var list : java.util.List.of(settings.mPermissions.getPermissions(), settings.mPermissions.getPermissionTrees())) {
                 var permissions = new java.util.ArrayList<String>();
@@ -132,7 +137,14 @@ public final class ScanSettingsWriteOracle {
         if (current != null) for (var cert : current) flags.add(Integer.toString(cert.getFlags()));
         var entries = new java.util.ArrayList<String>();
         for (var cert : table) entries.add(cert == null ? "null" : hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
-        return status + "|" + signatureTrace(owner.mSigningDetails) + "|" + (current == null ? "null" : String.join(",", flags)) + "|" + String.join(",", entries);
+        var keys = new java.util.ArrayList<String>();
+        var publicKeys = owner.mSigningDetails.getPublicKeys();
+        if (publicKeys != null) for (var key : publicKeys) {
+            var bytesOut = new java.io.ByteArrayOutputStream();
+            var stream = new java.io.ObjectOutputStream(bytesOut); stream.writeObject(key); stream.close();
+            keys.add(key.getClass().getName() + ":" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytesOut.toByteArray())));
+        }
+        return status + "|" + signatureTrace(owner.mSigningDetails) + "|" + (current == null ? "null" : String.join(",", flags)) + "|" + String.join(",", entries) + "|" + (publicKeys == null ? "null" : String.join(",", keys));
     }
     private static void verifySettingsDefaults(java.io.File directory) throws Exception {
         for (int index = 0; ; index++) {

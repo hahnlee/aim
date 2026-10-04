@@ -314,9 +314,19 @@ pub struct UsesSdkLibrary {
 pub struct Signatures {
     pub scheme_version: i32,
     pub signatures: Vec<Vec<u8>>,
+    /// Current Signature capability flags; an empty vector means all zero.
+    pub current_flags: Vec<i32>,
     /// Java-serialized public keys from the feed or native verified SPKI.
     pub public_keys: Option<Vec<Option<super::pkg::Serialized>>>,
     pub past_signatures: Option<Vec<(Vec<u8>, i32)>>,
+}
+
+pub(in crate::package) fn current_flags(flags: Vec<i32>) -> Vec<i32> {
+    if flags.iter().any(|flags| *flags != 0) {
+        flags
+    } else {
+        Vec::new()
+    }
 }
 
 /// `PackageKeySetData`.
@@ -929,9 +939,10 @@ fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Sig
         match child.name.as_str() {
             "cert" => {
                 if read < count
-                    && let Some((key, _, _)) = certificate(child, certificates)?
+                    && let Some((key, flags, _)) = certificate(child, certificates)?
                 {
                     s.signatures.push(key);
+                    s.current_flags.push(flags);
                 }
                 read += 1;
             }
@@ -958,6 +969,7 @@ fn signatures(e: &Element, certificates: &mut Certificates) -> Result<Option<Sig
             _ => {}
         }
     }
+    s.current_flags = current_flags(s.current_flags);
     Ok(Some(s))
 }
 

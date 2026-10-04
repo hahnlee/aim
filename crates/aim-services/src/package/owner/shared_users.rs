@@ -46,6 +46,7 @@ pub(in crate::package) fn saved_signatures(details: &SigningDetails) -> Result<S
     Ok(Signatures {
         scheme_version: details.scheme_version,
         signatures: details.signatures.clone(),
+        current_flags: Vec::new(),
         past_signatures: details.past_signing_certificates.clone(),
         public_keys: Some(
             sign::serialize_public_keys(&details.public_keys)?

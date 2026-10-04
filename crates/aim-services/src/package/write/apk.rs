@@ -61,6 +61,7 @@ impl Apks {
         Ok(Signatures {
             scheme_version: details.scheme_version,
             signatures: details.signatures,
+            current_flags: Vec::new(),
             public_keys: Some(
                 sign::serialize_public_keys(&details.public_keys)?
                     .into_iter()

@@ -290,6 +290,9 @@ fn signing(r: &mut Reader<'_>) -> Result<Option<Signatures>> {
     };
     Ok(Some(Signatures {
         scheme_version,
+        current_flags: super::super::settings::current_flags(
+            current.iter().map(|(_, flags)| *flags).collect(),
+        ),
         signatures: current.into_iter().map(|(der, _)| der).collect(),
         public_keys,
         past_signatures: signatures(r)?,

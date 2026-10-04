@@ -15,7 +15,7 @@ fn signing(p: &mut Parcel, scheme: i32, signers: &[&[u8]], past: Option<&[(&[u8]
     p.write_i32(signers.len() as i32);
     for s in signers {
         write_byte_array(p, Some(s));
-        p.write_i32(0);
+        p.write_i32(5);
     }
     p.write_i32(1);
     p.write_string16(Some("sun.security.rsa.RSAPublicKeyImpl"));
@@ -299,6 +299,7 @@ fn reads_a_package_record() {
     );
     assert_eq!(p.installed_permissions, ["com.example.app.PERMISSION"]);
     let signatures = p.signatures.as_ref().unwrap();
+    assert_eq!(signatures.current_flags, vec![5]);
     assert_eq!(signatures.scheme_version, 3);
     assert_eq!(signatures.signatures, [vec![1, 2]]);
     assert_eq!(

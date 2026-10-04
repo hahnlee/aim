@@ -569,6 +569,7 @@ mod tests {
 
     fn signed(ps: &mut PackageState, key: u8) {
         ps.signatures = Some(Signatures {
+            current_flags: Vec::new(),
             scheme_version: 3,
             signatures: vec![vec![key]],
             public_keys: None,

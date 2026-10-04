@@ -35,20 +35,17 @@ impl SignatureReader {
         }
         let mut past = None;
         let current = self.list(reader, count, false, &mut past)?;
-        let flags = current.iter().map(|(_, flags)| *flags).collect();
+        let flags: Vec<_> = current.iter().map(|(_, flags)| *flags).collect();
         let signatures: Vec<_> = current.into_iter().map(|(key, _)| key).collect();
         // SigningDetails.Builder derives public keys only after reading the
         // complete list. Invalid DER clears SigningDetails, not its read table.
-        *target = if super::super::sign::saved_certificates_valid(&signatures) {
-            Some(Signatures {
-                scheme_version: defaulted(start.int("schemeVersion"), 0),
-                signatures,
-                past_signatures: past,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
+        *target = super::super::sign::saved_certificate_keys(&signatures)?.map(|keys| Signatures {
+            scheme_version: defaulted(start.int("schemeVersion"), 0),
+            signatures,
+            current_flags: super::current_flags(flags.clone()),
+            public_keys: Some(keys.into_iter().map(Some).collect()),
+            past_signatures: past,
+        });
         Ok(Some(flags))
     }
 

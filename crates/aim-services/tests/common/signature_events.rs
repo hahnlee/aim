@@ -71,6 +71,12 @@ pub fn read(
         Ok::<_, String>("ok")
     })();
     let status = result.unwrap_or("error");
+    if let Some(signing) = target {
+        let stored: Vec<_> = (0..signing.signatures.len())
+            .map(|i| signing.current_flags.get(i).copied().unwrap_or(0))
+            .collect();
+        assert_eq!(&stored, flags);
+    }
     let table = owner
         .certificates()
         .iter()
@@ -89,8 +95,21 @@ pub fn read(
     } else {
         "null".into()
     };
+    let keys = target
+        .as_ref()
+        .and_then(|s| s.public_keys.as_ref())
+        .map(|keys| {
+            keys.iter()
+                .map(|key| {
+                    let key = key.as_ref().unwrap();
+                    format!("{}:{}", key.class, hex(&Sha256::digest(&key.bytes)))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "null".into());
     format!(
-        "{status}|{}|{current}|{table}",
+        "{status}|{}|{current}|{table}|{keys}",
         super::settings_owner_defaults::signature(target.as_ref())
     )
 }

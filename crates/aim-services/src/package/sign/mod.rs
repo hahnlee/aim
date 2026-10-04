@@ -36,11 +36,19 @@ pub(crate) use serialize::canonical_public_keys;
 pub use serialize::decode_public_key as deserialize_public_key;
 pub use serialize::public_keys as serialize_public_keys;
 
-pub(crate) fn saved_certificates_valid(certificates: &[Vec<u8>]) -> bool {
-    certificates.iter().all(|bytes| {
-        asn1::Certificate::parse(bytes)
-            .is_ok_and(|cert| canonical_public_keys(&[cert.public_key.to_vec()]).is_ok())
-    })
+pub(crate) fn saved_certificate_keys(
+    certificates: &[Vec<u8>],
+) -> Result<Option<Vec<super::pkg::Serialized>>, String> {
+    let mut keys = Vec::new();
+    for bytes in certificates {
+        let Ok(certificate) = asn1::Certificate::parse(bytes) else {
+            return Ok(None);
+        };
+        keys.push(certificate.public_key.to_vec());
+    }
+    // A missing native serialization implementation is not an invalid guest
+    // certificate: report it rather than publishing SigningDetails.UNKNOWN.
+    serialize_public_keys(&keys).map(Some)
 }
 #[cfg(test)]
 mod tests;

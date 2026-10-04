@@ -36,6 +36,7 @@ pub fn inputs(cert: &[u8]) -> Vec<Vec<u8>> {
             "<packages><package {header}>{body}</package></packages>"
         ));
     }
+    documents.push(format!("<packages><package {header}><sigs count='1' schemeVersion='3'><cert index='0' key='{cert}'/><pastSigs count='1'><cert index='0' key='{cert}' flags='7'/></pastSigs></sigs></package><package name='q' codePath='/system/q' userId='10002' domainSetId='00000000-0000-0000-0000-000000000002'><sigs count='1' schemeVersion='3'><cert index='1'/></sigs></package></packages>"));
     for tag in ["permissions", "permission-trees"] {
         for attrs in ["protection='bad' icon='9'", "protection='2' icon='bad'"] {
             documents.push(format!("<packages><{tag}><item name='perm' package='p' type='dynamic' label='label' {attrs}/></{tag}></packages>"));
@@ -164,7 +165,19 @@ pub fn trace(settings: &Settings, first: bool, main: bool, reserve: bool) -> Str
     let mut packages: Vec<_> = settings
         .packages
         .iter()
-        .map(|p| format!("{}:{}", p.name, signature(p.signatures.as_ref())))
+        .map(|p| {
+            let flags = p
+                .signatures
+                .as_ref()
+                .map(|s| {
+                    (0..s.signatures.len())
+                        .map(|i| s.current_flags.get(i).copied().unwrap_or(0).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "null".into());
+            format!("{}:{}:{flags}", p.name, signature(p.signatures.as_ref()))
+        })
         .collect();
     packages.sort();
     let permissions = |entries: &[aim_services::package::settings::Permission]| {
