@@ -936,8 +936,17 @@ and path use the original setting; the old shared UID still comes from the
 incoming installed setting. Controlled unchanged-GSF requests verify both
 KeepData (original factory UID 10003 and UNKNOWN code signing, no incoming
 admission) and RestoreFactory (enable original UID 10003 before admitting incoming
-UID 10002 and its user states). The complete first-system scan passes
-(10.96s), and release units pass 459 cases. Disabled loaded code now retains a
+UID 10002 and its user states). With no incoming setting, KeepData retains the
+original factory without active admission; RestoreFactory now creates the accepted
+package from the enabled original, retaining UID 10003 and its user states,
+recording the incoming name as realName and renaming the parsed package to the
+original internal name. Both restored and ordinary original-name creation derive
+ABI afresh from the null installed-setting request instead of reusing the
+original's saved ABI. Successful creation records renamed and transferred
+packages; a final metadata rejection preserves the original setting without
+publishing either record. The controlled first-system scan covers all four
+incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
+creation (10.67s), and release units pass 459 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -947,15 +956,15 @@ renaming PackageImpl. A complete native Store/capture/publish test accepts the
 selected pair and rejects a changed parsed name. The original Android parcel
 oracle passes (24.29s), comparing original PackageSetting.setPkg with restoration
 of known and UNKNOWN code under a different setting name, plus scope/version/name
-rejections (including a foreign factory UID) and exact frame roundtrips. Original admission when there is no
-incoming setting, shared-UID replacement and complete request execution parity
-remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
+rejections (including a foreign factory UID) and exact frame roundtrips.
+Shared-UID replacement, complete request execution parity and transfer publication
+outside the scan owner remain #919. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
 comparison passes for 243 active/3 disabled packages, 16 shared UIDs and 23
 libraries, with saved sequential loops covering 240 system and 3 selected data
-APKs from parsed-only system and data inputs (39.92s). This is an owner diagnostic, not native `package` default boot or
+APKs from parsed-only system and data inputs (39.36s). This is an owner diagnostic, not native `package` default boot or
 CTS acceptance. The normal AST importer now derives public keys after completing the current
 certificate list. Invalid DER clears prior package/shared UID signing after
 table mutations; missing counts retain existing targets, and each initiator

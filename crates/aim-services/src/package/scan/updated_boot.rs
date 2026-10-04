@@ -180,21 +180,20 @@ impl SigningScan {
             )
             .map_err(reject)?;
         let identity = Identity::select_for_location(&parsed, &self.settings, true, &code.location);
-        let admission = self.settings.packages.iter()
+        let admission = self
+            .settings
+            .packages
+            .iter()
             .find(|p| p.name == identity.internal_name)
-            .cloned()
-            .ok_or_else(|| SigningError::Fatal(Error {
-                package: identity.internal_name,
-                path: code.location.path.clone(),
-                phase: "updated-system-boot",
-                message: "factory restoration without an incoming setting requires original admission (#919)".into(),
-            }))?;
+            .cloned();
         let (flags, private_flags) = application_flags(&parsed, false);
         let update = SettingUpdate {
             code_path: code.location.path.clone(),
-            legacy_native_library_path: admission.legacy_native_library_path.clone(),
-            primary_cpu_abi: admission.primary_cpu_abi.clone(),
-            secondary_cpu_abi: admission.secondary_cpu_abi.clone(),
+            legacy_native_library_path: admission
+                .as_ref()
+                .and_then(|p| p.legacy_native_library_path.clone()),
+            primary_cpu_abi: admission.as_ref().and_then(|p| p.primary_cpu_abi.clone()),
+            secondary_cpu_abi: admission.as_ref().and_then(|p| p.secondary_cpu_abi.clone()),
             flags,
             private_flags,
             uses_sdk_libraries: super::boot::sdk_libraries(&parsed).map_err(reject)?,
@@ -214,7 +213,7 @@ impl SigningScan {
                 mode: AbiScanMode::Existing {
                     first_boot_or_upgrade,
                     old_was_stub,
-                    saved: Some(&admission),
+                    saved: admission.as_ref(),
                 },
                 system: true,
                 updated: false,
@@ -222,15 +221,36 @@ impl SigningScan {
             },
             ..inputs.completion
         };
-        let completed = self.scan_existing(
-            &code,
-            update,
-            saved_users,
-            all_users,
-            None,
-            apks,
-            completion,
-        )?;
+        let completed = if admission.is_some() {
+            self.scan_existing(
+                &code,
+                update,
+                saved_users,
+                all_users,
+                None,
+                apks,
+                completion,
+            )?
+        } else {
+            let metadata = super::SettingMetadata {
+                code_path: update.code_path,
+                legacy_native_library_path: None,
+                primary_cpu_abi: None,
+                secondary_cpu_abi: None,
+                version_code: (i64::from(code.parsed.version_code_major) << 32)
+                    | i64::from(code.parsed.version_code as u32),
+                flags: update.flags,
+                private_flags: update.private_flags,
+                last_modified_time: 0,
+                uses_sdk_libraries: update.uses_sdk_libraries,
+                uses_static_libraries: update.uses_static_libraries,
+                mime_groups: update.mime_groups,
+                domain_set_id: update.domain_set_id,
+                target_sdk_version: update.target_sdk_version,
+                restrict_update_hash: update.restrict_update_hash,
+            };
+            self.scan_original_system(&code, metadata, saved_users, apks, completion)?
+        };
         Ok(completed)
     }
 }

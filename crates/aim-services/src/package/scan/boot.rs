@@ -287,7 +287,7 @@ fn scan_system_image<S>(
         let previous = if updated {
             factory.as_ref()
         } else {
-            active.as_ref().or(original.as_ref())
+            active.as_ref()
         };
         let mut policy = ScanPolicy::for_location(&code.location);
         if !platform_loaded
@@ -499,13 +499,7 @@ fn scan_system_image<S>(
                     "original adoption requires restored user states".into(),
                 )
             })?;
-            let mut staged = owner.clone();
-            staged.refresh_init_apex(&code);
-            let candidate = staged.apply_original_system(&code, metadata, saved.users)?;
-            let candidate = staged.finish_init_apex(candidate, &code.location)?;
-            let completed = staged.finish_scan_metadata(candidate, apks, completion)?;
-            *owner = staged;
-            completed
+            owner.scan_original_system(&code, metadata, saved.users, apks, completion)?
         } else {
             owner.scan_new_system(&code, metadata, users, apks, completion)?
         };

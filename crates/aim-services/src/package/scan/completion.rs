@@ -51,6 +51,25 @@ impl SigningScan {
         Ok(completed)
     }
 
+    /// Original-name creation copies the original setting only after source
+    /// selection; ABI derivation belongs to the new (null installed) request.
+    pub fn scan_original_system(
+        &mut self,
+        code: &super::Code,
+        metadata: super::SettingMetadata,
+        saved_users: &BTreeMap<String, BTreeMap<i32, UserState>>,
+        apks: &Apks,
+        inputs: ScanMetadataCompletion<'_>,
+    ) -> Result<CompletedScanMetadata, SigningError> {
+        self.refresh_init_apex(code);
+        let mut staged = self.clone();
+        let candidate = staged.apply_original_system(code, metadata, saved_users)?;
+        let candidate = staged.finish_init_apex(candidate, &code.location)?;
+        let completed = staged.finish_scan_metadata(candidate, apks, inputs)?;
+        *self = staged;
+        Ok(completed)
+    }
+
     /// Stage a new system package through all metadata gates before admitting
     /// its final shared-UID member. A rejected independent allocation advances
     /// the original cleanup cursor; a new shared group survives until pruning.

@@ -909,8 +909,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     // The original's disabled ScanRequest copies that setting while retaining
     // the incoming parsed name. Source choice uses the original version/path;
     // restoration enables that owner before admitting the incoming setting.
-    for restore in [false, true] {
+    for (restore, incoming) in [(false, true), (true, true), (false, false), (true, false)] {
         let mut both = both.clone();
+        let mut selected_users = both_users.clone();
+        if !incoming {
+            both.packages.retain(|p| p.name != "com.google.android.gsf");
+            selected_users.remove("com.google.android.gsf");
+        }
         let source = both
             .packages
             .iter_mut()
@@ -922,10 +927,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         let source_before = source.clone();
         let mut factory = old.clone();
         factory.transient.updated_system_app = false;
+        if !incoming {
+            factory.primary_cpu_abi = Some("armeabi-v7a".into());
+        }
         both.disabled_system_packages.push(factory);
         let mut factory_owner =
             aim_services::package::scan::SigningScan::new(&config, &both, 36).unwrap();
-        let captured = both_users
+        let captured = selected_users
             .iter()
             .map(|(name, users)| {
                 (
@@ -939,7 +947,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             .chain(std::iter::once((
                 (old.name.clone(), true),
                 aim_services::package::scan::CapturedUsers {
-                    states: both_users[&old.name].clone(),
+                    states: selected_users[&old.name].clone(),
                     active_aliases: Default::default(),
                 },
             )))
@@ -955,20 +963,60 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 &config,
                 inputs(&domain_ids),
                 aim_services::package::scan::SavedSystemScanInputs {
-                    users: &both_users,
+                    users: &selected_users,
                     ..saved_inputs()
                 },
             )
             .unwrap();
-        assert!(factory_owner.settings.renamed_packages.is_empty());
-        assert!(!factory_owner.loaded_packages().contains_key(&old.name));
+        if incoming || !restore {
+            assert!(factory_owner.settings.renamed_packages.is_empty());
+            assert!(factory_owner.transferred_packages().is_empty());
+            assert!(!factory_owner.loaded_packages().contains_key(&old.name));
+        }
         if restore {
             assert!(result.retained_data.is_empty());
             assert!(factory_owner.settings.disabled_system_packages.is_empty());
             let accepted = &result.packages[1].candidate;
-            assert_eq!(accepted.record.settings.name, "com.google.android.gsf");
-            assert_eq!(accepted.record.settings.app_id, 10002);
-            assert_eq!(accepted.users, both_users["com.google.android.gsf"]);
+            if incoming {
+                assert_eq!(accepted.record.settings.name, "com.google.android.gsf");
+                assert_eq!(accepted.record.settings.app_id, 10002);
+                assert_eq!(accepted.users, selected_users["com.google.android.gsf"]);
+            } else {
+                assert_eq!(accepted.record.settings.name, old.name);
+                assert_eq!(accepted.record.parsed.package_name, old.name);
+                assert_eq!(accepted.record.settings.app_id, 10003);
+                assert_eq!(accepted.record.parsed.uid, 10003);
+                assert_eq!(
+                    accepted.record.settings.real_name.as_deref(),
+                    Some("com.google.android.gsf")
+                );
+                assert_eq!(accepted.users, selected_users[&old.name]);
+                assert_eq!(
+                    accepted.record.settings.primary_cpu_abi,
+                    baseline
+                        .packages
+                        .iter()
+                        .find(|p| p.name == "com.google.android.gsf")
+                        .unwrap()
+                        .primary_cpu_abi
+                );
+                assert_ne!(
+                    accepted.record.settings.primary_cpu_abi.as_deref(),
+                    Some("armeabi-v7a")
+                );
+                assert_eq!(
+                    factory_owner.settings.renamed_packages,
+                    vec![("com.google.android.gsf".into(), old.name.clone())]
+                );
+                assert_eq!(
+                    factory_owner
+                        .transferred_packages()
+                        .iter()
+                        .collect::<Vec<_>>(),
+                    vec![&old.name]
+                );
+                assert!(factory_owner.loaded_packages().contains_key(&old.name));
+            }
             let enabled = factory_owner
                 .settings
                 .packages
@@ -1002,6 +1050,75 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 !factory_owner
                     .loaded_packages()
                     .contains_key("com.google.android.gsf")
+            );
+        }
+    }
+    // Ordinary original-name creation also derives ABI instead of borrowing
+    // the old package's ABI. A later metadata failure cannot publish transfer.
+    for invalid_page_size in [false, true] {
+        let mut settings = both.clone();
+        settings
+            .packages
+            .retain(|p| p.name != "com.google.android.gsf");
+        settings
+            .packages
+            .iter_mut()
+            .find(|p| p.name == old.name)
+            .unwrap()
+            .primary_cpu_abi = Some("armeabi-v7a".into());
+        let before = settings
+            .packages
+            .iter()
+            .find(|p| p.name == old.name)
+            .unwrap()
+            .clone();
+        let mut owner =
+            aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+        let mut image = Image::parse(&apks, &[]).unwrap();
+        image.packages[1].parsed.shared_user_id = None;
+        image.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
+        let mut request = inputs(&domain_ids);
+        if invalid_page_size {
+            request.install.page_size = 8193;
+            // Put the independent-UID candidate at the metadata gate before
+            // framework admission, so this tests adoption's staged effects.
+            image.packages.swap(0, 1);
+        }
+        let result = owner.scan_saved_parsed_system_image(
+            image,
+            &apks,
+            &config,
+            request,
+            aim_services::package::scan::SavedSystemScanInputs {
+                users: &both_users,
+                ..saved_inputs()
+            },
+        );
+        if invalid_page_size {
+            assert!(
+                matches!(result, Err(SigningError::NativeLibrary { package, .. })
+                if package == old.name)
+            );
+            assert!(owner.transferred_packages().is_empty());
+            assert!(owner.settings.renamed_packages.is_empty());
+            assert_eq!(
+                owner.settings.packages.iter().find(|p| p.name == old.name),
+                Some(&before)
+            );
+        } else {
+            let result = result.unwrap();
+            let candidate = &result.packages[1].candidate;
+            assert_eq!(candidate.record.settings.name, old.name);
+            assert_eq!(candidate.record.settings.app_id, 10003);
+            assert_eq!(candidate.record.parsed.uid, 10003);
+            assert_eq!(candidate.users, both_users[&old.name]);
+            assert_ne!(
+                candidate.record.settings.primary_cpu_abi.as_deref(),
+                Some("armeabi-v7a")
+            );
+            assert_eq!(
+                owner.transferred_packages().iter().collect::<Vec<_>>(),
+                vec![&old.name]
             );
         }
     }

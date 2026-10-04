@@ -43,6 +43,7 @@ pub struct SigningScan {
     pub(super) loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) disabled_loaded: BTreeMap<String, Arc<super::LoadedPackage>>,
     pub(super) pending_metadata: BTreeSet<String>,
+    transferred_packages: BTreeSet<String>,
     apex_origins: BTreeMap<String, ScanOrigin>,
     pub(super) seinfo: Option<super::seinfo::Assignments>,
     pub(super) legacy_permissions: Option<super::legacy::Assignments>,
@@ -118,6 +119,10 @@ impl SigningScan {
             group.fix_seinfo_target_sdk_at_boot(&targets);
         }
         Ok(())
+    }
+
+    pub fn transferred_packages(&self) -> &BTreeSet<String> {
+        &self.transferred_packages
     }
 
     /// Native-parsed active code, admitted only after every scan metadata gate.
@@ -655,6 +660,7 @@ impl SigningScan {
             loaded: BTreeMap::new(),
             disabled_loaded: BTreeMap::new(),
             pending_metadata: BTreeSet::new(),
+            transferred_packages: BTreeSet::new(),
             apex_origins: BTreeMap::new(),
             seinfo: None,
             legacy_permissions: None,
@@ -847,7 +853,7 @@ impl SigningScan {
         };
         if group
             != selected_shared_user(
-                original.shared_user,
+                false,
                 code.parsed.shared_user_id.as_deref(),
                 code.parsed.is(booleans::LEAVING_SHARED_UID),
             )
@@ -905,6 +911,8 @@ impl SigningScan {
             record.identity.manifest_name.clone(),
             record.settings.name.clone(),
         ));
+        next.transferred_packages
+            .insert(record.settings.name.clone());
         next.update_disabled_user_aliases(&record.settings.name, &setting.users);
         *self = next;
         Ok(NewPackageOutcome {
