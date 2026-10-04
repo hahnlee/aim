@@ -525,7 +525,7 @@ page/code/application/seInfo metadata enters loaded ownership, and inactive
 factories invoke the actual disable transition. Original typed notification
 records are retained separately from APK results. First boot requires the caller's
 notification to succeed before APK registration; rejection aborts the phase.
-The full original ART package oracle passes (33.48s): all 42 original archives
+The full original ART package oracle passes: all 42 original archives
 parse, verify and complete native registration without APK UID allocation, with
 loaded code, signatures and assigned seInfo. Controlled inactive-factory and
 updated-container views use unchanged original archive bytes in disposable paths,
@@ -536,12 +536,19 @@ scan gate passes (67.72s), including actual container registration, first APK UI
 user/domain and notification owners in these native phase fixtures are controlled;
 these results do not prove live original callbacks or complete facade publication.
 Declared APEX shared UID and original/renamed identity transitions reject explicitly
-(#889/#890). The actual typed ApexManager.notifyScanResult bridge and complete boot
-ordering remain #885/#836/#798; the running daemon still does not invoke native
-initialization. All 434 units pass (5.59s; one ignored/not run), and all integration
-targets compile. Actual original ART also continues to verify the user/APEX
+(#889/#890). The generated, system-UID-guarded bootstrap bridge now delivers completed native
+containers to original ApexManager.notifyScanResult (#891). It restores original
+PackageImpl objects and signer capability flags, validates the complete frame
+before invoking the owner, and propagates transport and owner failures. The
+original ART oracle uses a fresh original ApexManager implementation and verifies
+module and active-package mappings for all 42 results; it does not notify the
+running original PMS singleton. Missing counts, unaligned and trailing payloads
+reject. Complete daemon ordering remains #885/#836/#798; the running daemon still
+does not invoke native initialization. All 434 units pass (3.19s; one ignored/not
+run), including generated Binder notification and reply/error handling. Actual original ART also continues to verify the user/APEX
 inventory exporters, static-library identity, complete package parcels and signer
-lineage. The full image/template build passes (17.4s; three rebuilt, 39 fresh).
+lineage. The full image/template build, including the original-image API reference check,
+passes for the added typed notification boundary.
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners

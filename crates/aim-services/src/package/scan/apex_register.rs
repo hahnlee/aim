@@ -14,6 +14,50 @@ use crate::package::{
 pub struct ApexScanResult {
     pub info: ApexPackage,
     pub package: AndroidPackage,
+    pub signing: crate::package::sign::SigningDetails,
+}
+
+impl ApexScanResult {
+    pub fn notification_payload(results: &[Self]) -> Result<Vec<u8>, String> {
+        let mut out = aim_binder_host::parcel::Parcel::new();
+        out.write_i32(i32::try_from(results.len()).map_err(|_| "APEX result count overflow")?);
+        for result in results {
+            let pkg = &result.package;
+            if !pkg.is2(crate::package::pkg::booleans2::APEX)
+                || pkg.uid != -1
+                || pkg.path.as_deref() != Some(&result.info.module_path)
+                || ((i64::from(pkg.version_code_major) << 32) | i64::from(pkg.version_code as u32))
+                    != result.info.version_code
+                || pkg.signing_details.as_ref() != Some(&result.signing.parcel_details()?)
+            {
+                return Err(
+                    "APEX notification differs from completed code/signing ownership".into(),
+                );
+            }
+            let info = &result.info;
+            out.write_string16(info.module_name.as_deref());
+            out.write_string16(Some(&info.module_path));
+            out.write_string16(Some(&info.preinstalled_path));
+            out.write_i64(info.version_code);
+            out.write_bool(info.factory);
+            out.write_bool(info.active);
+            out.write_bool(info.active_changed);
+            aim_service_aidl::write_byte_array(&mut out, Some(&pkg.to_cache_entry()?.bytes));
+            match &result.signing.past_signing_certificates {
+                None => out.write_i32(-1),
+                Some(past) => {
+                    out.write_i32(
+                        i32::try_from(past.len()).map_err(|_| "APEX signer count overflow")?,
+                    );
+                    for (certificate, flags) in past {
+                        aim_service_aidl::write_byte_array(&mut out, Some(certificate));
+                        out.write_i32(*flags);
+                    }
+                }
+            }
+        }
+        Ok(out.data().to_vec())
+    }
 }
 
 impl SigningScan {
@@ -246,6 +290,7 @@ impl SigningScan {
             results.push(ApexScanResult {
                 info: source.info.clone(),
                 package: completed.candidate.record.parsed,
+                signing: completed.candidate.record.signing,
             });
             *self = staged;
         }

@@ -101,6 +101,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/ApexParseOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ApexNotifyOracle.java"),
+        )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(
             aim_paths::root()
@@ -1341,6 +1345,29 @@ fn native_package_parcels_match_original_read_write() {
     let results = registered
         .scan_initial_apex(&apex_apks, &config, &scan_inputs(&apex_image))
         .unwrap();
+    let notification =
+        aim_services::package::scan::ApexScanResult::notification_payload(&results).unwrap();
+    fs::write(directory.join("apex-notify.input"), &notification).unwrap();
+    let original_notification = boot.command().args([
+        "shell", "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.ApexNotifyOracle", "/data/local/tmp/package-parcels",
+    ]).output().unwrap();
+    assert!(
+        original_notification.status.success(),
+        "original APEX notification failed: {}",
+        String::from_utf8_lossy(&original_notification.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(original_notification.stdout).unwrap(),
+        format!("APEX_NOTIFY {}\n", results.len())
+    );
+    let mut invalid_result = results[0].clone();
+    invalid_result.package.uid = 10000;
+    assert!(
+        aim_services::package::scan::ApexScanResult::notification_payload(&[invalid_result])
+            .is_err()
+    );
     assert_eq!(results.len(), apex_image.packages.len());
     assert_eq!(registered.loaded_packages().len(), results.len());
     assert_eq!(

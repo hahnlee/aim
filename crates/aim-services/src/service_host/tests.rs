@@ -157,6 +157,14 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::NOTIFY_APEX_SCAN_RESULTS => {
+                let bytes = aim_service_aidl::read_byte_array(&mut call.data)?.unwrap();
+                assert_eq!(bytes, 0i32.to_le_bytes());
+                assert_eq!(call.data.remaining(), 0);
+                if self.apex_reply.load(Ordering::SeqCst) == 4 {
+                    reply.write_i32(99);
+                }
+            }
             bootstrap::GET_APEX_BOOT_INVENTORY => {
                 let mode = self.apex_reply.load(Ordering::SeqCst);
                 let mut payload = Parcel::new();
@@ -439,6 +447,21 @@ fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_fail
         ));
     }
     owner.domain_reply.store(0, Ordering::SeqCst);
+    old.notify_apex_scan(&[]).unwrap();
+    owner.apex_reply.store(4, Ordering::SeqCst);
+    assert!(matches!(
+        old.notify_apex_scan(&[]),
+        Err(crate::package::bootstrap::OwnerError::Transport(
+            aim_binder_host::parcel::BAD_VALUE
+        ))
+    ));
+    owner.apex_reply.store(0, Ordering::SeqCst);
+    owner.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        old.notify_apex_scan(&[]),
+        Err(crate::package::bootstrap::OwnerError::Owner(_))
+    ));
+    owner.reject.store(false, Ordering::SeqCst);
     let apex = old.apex_inventory().unwrap();
     assert_eq!(apex.packages, None);
     let scan = apex.scan_apexes();

@@ -121,6 +121,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return com.android.server.pm.ApexBootFeed.capture();
     }
 
+    @Override
+    public void notifyApexScanResults(byte[] scanResults) {
+        enforceSystemUid();
+        com.android.server.pm.ApexBootFeed.notifyScanResults(scanResults);
+    }
+
     private static void enforceSystemUid() {
         if (Binder.getCallingUid() != Process.SYSTEM_UID) {
             throw new SecurityException("the package bridge serves the system uid only");

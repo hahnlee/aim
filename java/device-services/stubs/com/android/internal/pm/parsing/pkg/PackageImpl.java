@@ -23,6 +23,7 @@ public abstract class PackageImpl implements ParsedPackage {
     public PackageImpl addLibraryName(String name) { throw new RuntimeException("stub"); }
     public int getCategory() { throw new RuntimeException("stub"); }
     public PackageImpl setCategory(int value) { throw new RuntimeException("stub"); }
+    public boolean isApex() { throw new RuntimeException("stub"); }
     public int getUid() { throw new RuntimeException("stub"); }
     public android.content.pm.SigningDetails getSigningDetails() { throw new RuntimeException("stub"); }
     public PackageImpl setSigningDetails(android.content.pm.SigningDetails value) { throw new RuntimeException("stub"); }

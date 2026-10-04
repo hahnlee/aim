@@ -28,6 +28,7 @@ pub enum SeInfoError {
 
 #[derive(Debug)]
 pub enum OwnerError {
+    Code(String),
     Transport(i32),
     Owner(Exception),
 }
@@ -78,6 +79,31 @@ impl ScanUsers {
 }
 
 impl Bridge {
+    pub fn notify_apex_scan(
+        &self,
+        results: &[super::scan::ApexScanResult],
+    ) -> Result<(), OwnerError> {
+        let payload =
+            super::scan::ApexScanResult::notification_payload(results).map_err(OwnerError::Code)?;
+        let mut data = Parcel::new();
+        bridge::NotifyApexScanResults {
+            scan_results: Some(payload),
+        }
+        .write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::NOTIFY_APEX_SCAN_RESULTS, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        bridge::read_notify_apex_scan_results_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        Ok(())
+    }
+
     pub fn apex_inventory(&self) -> Result<ApexInventory, OwnerError> {
         let mut data = Parcel::new();
         bridge::GetApexBootInventory {}.write(&mut data);

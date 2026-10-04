@@ -15,4 +15,6 @@ interface IPackageBootstrapBridge {
     byte[] getPackageScanUsers();
     /** Original all-package and active-mount APEX inventories, preserving owner order. */
     byte[] getApexBootInventory();
+    /** Completed native containers delivered to original ApexManager before APK scanning. */
+    void notifyApexScanResults(in byte[] scanResults);
 }
