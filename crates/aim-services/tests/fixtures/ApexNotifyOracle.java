@@ -31,6 +31,7 @@ public final class ApexNotifyOracle {
         catch (IllegalArgumentException expected) {}
         verifySharedIds(directory);
         verifySharedApex(directory);
+        verifyChangedGroup(directory);
         System.out.println("APEX_NOTIFY " + count);
         // The test-only Settings constructor starts BackgroundThread.
         System.exit(0);
@@ -58,6 +59,34 @@ public final class ApexNotifyOracle {
             var registeredGroup = settings.addSharedUserLPw("aim.fixture.apex", 10000, 0, 0);
             settings.addPackageSettingLPw(setting, registeredGroup);
             if (setting.getAppId() != registeredAppId || registeredAppId != 10000 || ((com.android.server.pm.pkg.PackageState)setting).getSharedUserAppId() != 10000 || pkg.getUid() != -1) throw new AssertionError("registered shared APEX IDs differ");
+        } finally { in.recycle(); }
+    }
+    private static void verifyChangedGroup(java.io.File directory) throws Exception {
+        var in = android.os.Parcel.obtain();
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-group-change.input").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            if (in.readInt() != 3) throw new AssertionError("group transition count differs");
+            for (int i = 0; i < 3; i++) {
+                boolean disabled = in.readBoolean(); int appId = in.readInt(); boolean keepsOld = in.readBoolean();
+                var settings = new Settings(java.util.Map.of());
+                var oldGroup = settings.addSharedUserLPw("old", 10000, 0, 0);
+                var newGroup = appId == -1 ? null : settings.addSharedUserLPw("new", 10001, 0, 0);
+                var code = com.android.internal.pm.parsing.pkg.PackageImpl.forTesting("fixture");
+                var old = new PackageSetting("fixture", null, new java.io.File("/system/apex/fixture.apex"), 1, 0, new java.util.UUID(1, 1));
+                old.setPkg((com.android.server.pm.pkg.AndroidPackage)(Object)code);
+                settings.addPackageSettingLPw(old, oldGroup);
+                if (disabled && !settings.disableSystemPackageLPw("fixture", true)) throw new AssertionError("factory did not disable");
+                oldGroup.removePackage(old);
+                settings.checkAndPruneSharedUserLPw(oldGroup, false);
+                var replacement = new PackageSetting("fixture", null, new java.io.File("/system/apex/fixture.apex"), 1, 0, new java.util.UUID(1, 2));
+                replacement.setAppId(-1); if (newGroup != null) replacement.setSharedUserAppId(10001);
+                replacement.setPkg((com.android.server.pm.pkg.AndroidPackage)(Object)code);
+                settings.addPackageSettingLPw(replacement, newGroup);
+                if (replacement.getAppId() != appId || (settings.getSettingLPr(10000) != null) != keepsOld)
+                    throw new AssertionError("changed group registration/pruning differs");
+            }
+            if (in.dataAvail() != 0) throw new AssertionError("group transition tail");
         } finally { in.recycle(); }
     }
     private static void verifySharedIds(java.io.File directory) throws Exception {

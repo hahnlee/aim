@@ -157,13 +157,14 @@ impl SigningScan {
                 }
                 None => None,
             };
-            if previous
+            let replaces_shared = previous
                 .as_ref()
-                .is_some_and(|p| p.shared_app_id() != shared_id)
-            {
+                .is_some_and(|p| p.shared_app_id() != shared_id);
+            if replaces_shared && shared_id.is_none() && disabled.is_some() {
                 return Err(fail(
                     "apex-identity",
-                    "APEX shared UID replacement requires setting lifecycle (#889)".into(),
+                    "non-shared replacement requires disabled permission/component owners (#889)"
+                        .into(),
                 ));
             }
             let updated = !source.info.factory || disabled.is_some();
@@ -232,7 +233,8 @@ impl SigningScan {
                 target_sdk_version: parsed.target_sdk_version,
                 restrict_update_hash: parsed.restrict_update_hash.clone(),
             };
-            let setting = if let Some(previous) = &previous {
+            let mut setting = if let Some(previous) = previous.as_ref().filter(|_| !replaces_shared)
+            {
                 let users = self.scanned_users.get(&previous.name).ok_or_else(|| {
                     fail(
                         "apex-users",
@@ -279,7 +281,16 @@ impl SigningScan {
                     users,
                 )
             };
+            if replaces_shared {
+                setting.package.pending_restore = previous.as_ref().unwrap().pending_restore;
+            }
             let mut staged = self.clone();
+            if replaces_shared {
+                let old = previous.as_ref().unwrap();
+                staged
+                    .withdraw_loaded_apex(old)
+                    .map_err(|message| fail("apex-origin", message))?;
+            }
             let mut package = setting.package;
             package.app_id = -1;
             package.shared_user_app_id = shared_id;
@@ -348,6 +359,9 @@ impl SigningScan {
                 },
             )?;
             let name = &completed.candidate.record.settings.name;
+            if replaces_shared {
+                staged.detach_shared_member(previous.as_ref().unwrap())?;
+            }
             // The final code retains the scan UID; Settings registration assigns
             // shared application ownership only after code finalization.
             if let Some(id) = shared_id {

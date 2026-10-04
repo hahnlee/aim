@@ -554,21 +554,31 @@ the shared container setting appId to the group ID while retaining sharedUserApp
 owner; active and disabled container restoration validates the declared group and the
 committed setting appId. seInfo retention validates the effective UID owner,
 preserving labels across this scan-to-registration setting ID transition.
-Changing an existing container's group still rejects explicitly (#889), as does
-original/renamed identity adoption (#890). First shared code uses the supplied
+Changing an existing container's declared group now creates a fresh setting,
+preserves pendingRestore and withdraws the old loaded scan only within the staged
+candidate. Successful completion removes the old group membership and prunes its
+UID only when no active or disabled reference remains (#889). A non-shared
+replacement with a disabled factory still rejects because its legacy permission
+and component owners are not supplied (#889); original/renamed identity adoption
+also rejects (#890). First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while
 preserving the original group allocation. The original ART oracle passes in
-29.29s, including typed original Settings.addPackageSettingLPw final registration,
+30.84s, including typed original Settings.addPackageSettingLPw final registration,
 SELinuxMMAC labels and SharedUserSetting commit SDK, unchanged archive bytes with
 controlled shared identity, unread policy and
-a declared-target compatibility decision. The full initial scan regression
-passes in 68.66s, including grouped container registration and the first APK
+a declared-target compatibility decision. Original Settings group removal/pruning
+and re-registration also agree for changed groups with and without disabled factory
+references, and for a non-shared replacement. Native scans use a disposable updated
+path to unchanged original archive bytes, preserve pendingRestore, query the new
+group's compatibility owner, restore distinct active/factory group identities and
+retain old settings/loaded code on seInfo rejection while keeping only the newly
+allocated empty group. The full initial scan regression
+passes in 67.99s, including grouped container registration and the first APK
 allocation at 10001 after group 10000. All integration targets compile, 435 units
 pass (one ignored/not run). The original-image API check and full image/template
-build pass in 60.8s (six rebuilt, 36 fresh); the final host build passes in 13.3s
-(three rebuilt, 39 fresh). These fixtures do not prove a live PlatformCompat call
+build pass in 67.4s (nine rebuilt, 33 fresh). These fixtures do not prove a live PlatformCompat call
 or a manifest-declared shared APEX in the original image. The generated, system-UID-guarded bootstrap bridge now delivers completed native
 containers to original ApexManager.notifyScanResult (#891). It restores original
 PackageImpl objects and signer capability flags, validates the complete frame

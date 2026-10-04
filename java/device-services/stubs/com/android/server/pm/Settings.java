@@ -13,6 +13,7 @@ public final class Settings {
     String addRenamedPackageLPw(String name, String original) { throw new RuntimeException("stub"); }
     String getRenamedPackageLPr(String name) { throw new RuntimeException("stub"); }
     void removeRenamedPackageLPw(String name) { throw new RuntimeException("stub"); }
+    boolean checkAndPruneSharedUserLPw(SharedUserSetting shared, boolean skipCheck) { throw new RuntimeException("stub"); }
     boolean removePackageAndAppIdLPw(String name) { throw new RuntimeException("stub"); }
     boolean registerAppIdLPw(PackageSetting setting, boolean forceNew) throws Exception { throw new RuntimeException("stub"); }
     SharedUserSetting addSharedUserLPw(String name, int uid, int flags, int privateFlags) { throw new RuntimeException("stub"); }

@@ -1470,6 +1470,7 @@ fn native_package_parcels_match_original_read_write() {
     native.write_i32(group.seinfo_target_sdk());
     native.write_i32(setting.app_id);
     fs::write(directory.join("shared-apex.input"), native.data()).unwrap();
+    let shared_without_factory = shared.clone();
     shared
         .disable_system_package(&setting.name.clone())
         .unwrap();
@@ -1485,6 +1486,161 @@ fn native_package_parcels_match_original_read_write() {
         &shared_image,
     )
     .unwrap();
+    let replacement_guest = "/data/apex/active/shared-replacement.apex";
+    let replacement_file = directory.join("shared-replacement.apex");
+    std::os::unix::fs::symlink(
+        aim_paths::original_image().join(
+            shared_image.packages[0]
+                .info
+                .module_path
+                .trim_start_matches('/'),
+        ),
+        &replacement_file,
+    )
+    .unwrap();
+    let original_root = aim_paths::original_image();
+    let replacement_apks = aim_services::package::write::Apks {
+        files: Box::new(move |path| {
+            Some(if path == replacement_guest {
+                replacement_file.clone()
+            } else {
+                original_root.join(path.trim_start_matches('/'))
+            })
+        }),
+        platform: aim_services::package::parse::Platform::load(
+            &aim_paths::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
+    };
+    let mut replacement_info = shared_image.packages[0].info.clone();
+    replacement_info.module_path = replacement_guest.into();
+    replacement_info.factory = false;
+    let mut replacement_image = aim_services::package::scan::ApexImage::load(
+        &replacement_apks,
+        &aim_services::package::bootstrap::ApexInventory {
+            packages: Some(vec![replacement_info]),
+            active: Vec::new(),
+        },
+        aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+    )
+    .unwrap();
+    replacement_image.packages[0].parsed.shared_user_id = Some("aim.fixture.replacement".into());
+    let mut replacement_inputs = scan_inputs(&replacement_image);
+    replacement_inputs.seinfo.policy = &unread;
+    replacement_inputs.seinfo.compatibility = &shared_compatibility;
+    let mut transitions = aim_binder_host::parcel::Parcel::new();
+    transitions.write_i32(3);
+    for disabled in [false, true] {
+        let mut replacement = if disabled {
+            shared.clone()
+        } else {
+            shared_without_factory.clone()
+        };
+        replacement.settings.packages[0].pending_restore = true;
+        let calls = shared_compatibility_calls.get();
+        let result = replacement
+            .scan_initial_apex(&replacement_apks, &config, &replacement_inputs)
+            .unwrap();
+        assert_eq!(shared_compatibility_calls.get(), calls + 1);
+        let setting = &replacement.settings.packages[0];
+        assert_eq!(
+            (setting.app_id, setting.shared_app_id()),
+            (10001, Some(10001))
+        );
+        assert!(setting.pending_restore);
+        assert_eq!(result[0].package.uid, -1);
+        assert_eq!(replacement.identities.ids.get(10000).is_some(), disabled);
+        if disabled {
+            assert!(
+                !replacement.identities.shared_users["aim.fixture.apex"]
+                    .clone()
+                    .remove_package(&setting.name)
+            );
+        }
+        assert!(
+            replacement.identities.shared_users["aim.fixture.replacement"]
+                .clone()
+                .remove_package(&setting.name)
+        );
+        assert!(replacement.seinfo(&setting.name).unwrap().is_some());
+        aim_services::package::scan::SigningScan::new_after_apex(
+            &config,
+            &replacement.settings,
+            36,
+            &aim_services::package::scan::ApexImage {
+                packages: if disabled {
+                    vec![
+                        shared_image.packages[0].clone(),
+                        replacement_image.packages[0].clone(),
+                    ]
+                } else {
+                    replacement_image.packages.clone()
+                },
+            },
+        )
+        .unwrap();
+        transitions.write_bool(disabled);
+        transitions.write_i32(setting.app_id);
+        transitions.write_bool(replacement.identities.ids.get(10000).is_some());
+    }
+    let mut unshared_image = aim_services::package::scan::ApexImage {
+        packages: replacement_image.packages.clone(),
+    };
+    unshared_image.packages[0].parsed.shared_user_id = None;
+    let unshared_inputs = scan_inputs(&unshared_image);
+    let mut unshared = shared_without_factory.clone();
+    let result = unshared
+        .scan_initial_apex(&replacement_apks, &config, &unshared_inputs)
+        .unwrap();
+    assert_eq!(unshared.settings.packages[0].app_id, -1);
+    assert_eq!(unshared.settings.packages[0].shared_app_id(), None);
+    assert_eq!(result[0].package.uid, -1);
+    assert!(unshared.identities.ids.get(10000).is_none());
+    aim_services::package::scan::SigningScan::new_after_apex(
+        &config,
+        &unshared.settings,
+        36,
+        &unshared_image,
+    )
+    .unwrap();
+    transitions.write_bool(false);
+    transitions.write_i32(-1);
+    transitions.write_bool(false);
+    let before_disabled = shared.settings.packages.clone();
+    assert!(
+        shared
+            .scan_initial_apex(&replacement_apks, &config, &unshared_inputs)
+            .is_err()
+    );
+    assert_eq!(shared.settings.packages, before_disabled);
+    fs::write(
+        directory.join("apex-group-change.input"),
+        transitions.data(),
+    )
+    .unwrap();
+    let mut failed_replacement = shared_without_factory.clone();
+    let previous_packages = failed_replacement.settings.packages.clone();
+    replacement_inputs.seinfo.compatibility = &reject_shared_compatibility;
+    assert!(
+        matches!(failed_replacement.scan_initial_apex(&replacement_apks, &config, &replacement_inputs),
+        Err(aim_services::package::scan::SigningError::Rejected(ref error))
+            if error.phase == "seinfo" && error.message == "shared compatibility owner denied scan")
+    );
+    assert_eq!(failed_replacement.settings.packages, previous_packages);
+    assert_eq!(
+        failed_replacement.loaded_packages(),
+        shared_without_factory.loaded_packages()
+    );
+    assert!(
+        failed_replacement.identities.shared_users["aim.fixture.apex"]
+            .clone()
+            .remove_package(&previous_packages[0].name)
+    );
+    assert_eq!(
+        failed_replacement.identities.shared_users["aim.fixture.replacement"].app_id,
+        10001
+    );
     let original_notification = boot.command().args([
         "shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",

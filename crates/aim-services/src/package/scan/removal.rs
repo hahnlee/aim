@@ -22,6 +22,46 @@ impl SigningScan {
         self.settings.renamed_packages.len() != before
     }
 
+    /// Commit removal from an old group after a replacement setting is accepted.
+    /// Disabled references keep the group and its UID slot alive.
+    pub(super) fn detach_shared_member(&mut self, package: &Package) -> Result<bool, SigningError> {
+        let Some(id) = package.shared_app_id() else {
+            return Ok(false);
+        };
+        let fail = |message: &str| {
+            SigningError::Fatal(Error {
+                package: package.name.clone(),
+                path: package.code_path.clone(),
+                phase: "shared-setting",
+                message: message.into(),
+            })
+        };
+        let Some(Owner::SharedUser(name)) = self.identities.ids.get(id) else {
+            return Err(fail("shared UID slot disagrees with setting"));
+        };
+        let name = name.clone();
+        let group = self
+            .identities
+            .shared_users
+            .get_mut(&name)
+            .ok_or_else(|| fail("shared UID owner is missing"))?;
+        if !group.remove_package(&package.name) {
+            return Err(fail("shared UID membership is missing"));
+        }
+        let used = self
+            .settings
+            .packages
+            .iter()
+            .chain(&self.settings.disabled_system_packages)
+            .any(|p| p.shared_app_id() == Some(id));
+        if !used {
+            self.identities.shared_users.remove(&name);
+            self.settings.shared_users.retain(|g| g.name != name);
+            self.identities.ids.remove(id);
+        }
+        Ok(!used)
+    }
+
     /// Remove the saved setting and its UID membership. The caller must first
     /// complete data/domain/keyset/filter/preferred cleanup and withdraw loaded
     /// code. Permission uninstall reconciliation follows this step (#822/#798).
@@ -64,24 +104,8 @@ impl SigningScan {
         };
         self.settings.packages.remove(at);
         self.installers.remove(name, &mut self.settings);
-        let app_id_removed = if let Some(group_name) = shared {
-            self.identities
-                .shared_users
-                .get_mut(&group_name)
-                .unwrap()
-                .remove_package(name);
-            let used = self
-                .settings
-                .packages
-                .iter()
-                .chain(&self.settings.disabled_system_packages)
-                .any(|p| p.shared_app_id() == package.shared_app_id() && p.shared_user);
-            if !used {
-                self.identities.shared_users.remove(&group_name);
-                self.settings.shared_users.retain(|g| g.name != group_name);
-                self.identities.ids.remove(package.uid_owner_id());
-            }
-            !used
+        let app_id_removed = if shared.is_some() {
+            self.detach_shared_member(&package)?
         } else {
             self.identities.ids.remove(package.uid_owner_id());
             true

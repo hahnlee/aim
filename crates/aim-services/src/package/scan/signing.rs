@@ -165,6 +165,30 @@ impl SigningScan {
         self.pending_metadata.remove(&record.settings.name);
         self.apex_origins.remove(&record.settings.name);
     }
+    pub(super) fn withdraw_loaded_apex(
+        &mut self,
+        old: &crate::package::settings::Package,
+    ) -> Result<(), String> {
+        let Some(code) = self.loaded.get(&old.name).cloned() else {
+            return Ok(());
+        };
+        let record = Record {
+            settings: old.clone(),
+            parsed: code.package.clone(),
+            signing: code.collected_signing.clone(),
+            identity: Identity {
+                manifest_name: old.name.clone(),
+                internal_name: old.name.clone(),
+                real_name: old.real_name.clone(),
+            },
+            origin: *self
+                .apex_origins
+                .get(&old.name)
+                .ok_or("retained loaded container has no scan origin")?,
+        };
+        self.withdraw_scanned_package(&record);
+        Ok(())
+    }
     /// Apply page-size scan policy after ABI/path and installation ownership.
     /// Alignment errors retain existing flags and are returned for reporting.
     pub fn finish_page_size_metadata(
