@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod common {
+    pub mod zip;
     pub mod java;
     pub mod runtime;
 }
@@ -94,6 +95,10 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/StaticLibraryIdentityOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/ApexParseOracle.java"),
         )
         .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
         .arg(
@@ -942,6 +947,20 @@ fn native_package_parcels_match_original_read_write() {
         permissions.bytes(),
     )
     .unwrap();
+    let mut apex_features = aim_services::package::parse::Platform::load(
+        &aim_paths::original_image(),
+        Default::default(),
+    )
+    .unwrap()
+    .features
+    .into_iter()
+    .collect::<Vec<_>>();
+    apex_features.sort();
+    fs::write(
+        directory.join("apex-parser-features.input"),
+        apex_features.join("\n"),
+    )
+    .unwrap();
     let original = boot.command().args([
         "shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
@@ -1065,6 +1084,164 @@ fn native_package_parcels_match_original_read_write() {
             expected
         );
     }
+    let apex_inventory = aim_services::package::bootstrap::ApexInventory::read_original_record(
+        &fs::read(directory.join("apex-inventory-parse.original")).unwrap(),
+    )
+    .unwrap();
+    let original_root = aim_paths::original_image();
+    let apex_apks = aim_services::package::write::Apks {
+        files: Box::new(move |path| Some(original_root.join(path.trim_start_matches('/')))),
+        platform: aim_services::package::parse::Platform::load(
+            &aim_paths::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
+    };
+    let apex_image = aim_services::package::scan::ApexImage::load(
+        &apex_apks,
+        &apex_inventory,
+        aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+    )
+    .unwrap();
+    assert_eq!(
+        apex_image.packages.len(),
+        apex_inventory.packages.as_ref().unwrap().len()
+    );
+    for (index, info) in apex_inventory.packages.as_ref().unwrap().iter().enumerate() {
+        let native = apex_image
+            .packages
+            .iter()
+            .find(|p| p.info.module_path == info.module_path)
+            .unwrap();
+        let mut parsed = native.parsed.clone();
+        let mut original = AndroidPackage::read_cache_entry(
+            &fs::read(directory.join(format!("apex-parse-{index}.original"))).unwrap(),
+        )
+        .unwrap();
+        normalize_maps(&mut parsed);
+        normalize_maps(&mut original);
+        assert!(
+            parsed == original,
+            "original APEX parse differs: {}",
+            info.module_path
+        );
+        assert_eq!(
+            native.scan_parse_flags,
+            aim_services::package::parse::PARSE_IS_SYSTEM_DIR
+        );
+        assert!(!native.signing.signatures.is_empty());
+        let mut signed = native.parsed.clone();
+        signed.signing_details = Some(native.signing.parcel_details().unwrap());
+        let mut signing = aim_binder_host::parcel::Parcel::new();
+        aim_services::package::info::write_signing_details(
+            &mut signing,
+            aim_services::package::info::signing_info(&signed).as_ref(),
+        );
+        assert_eq!(
+            signing.data(),
+            fs::read(directory.join(format!("apex-signing-{index}.original"))).unwrap()
+        );
+        let mut capabilities = aim_binder_host::parcel::Parcel::new();
+        capabilities.write_i32(
+            native
+                .signing
+                .past_signing_certificates
+                .as_ref()
+                .map_or(-1, |p| p.len() as i32),
+        );
+        if let Some(past) = &native.signing.past_signing_certificates {
+            for (_, flags) in past {
+                capabilities.write_i32(*flags);
+            }
+        }
+        assert_eq!(
+            capabilities.data(),
+            fs::read(directory.join(format!("apex-capabilities-{index}.original"))).unwrap()
+        );
+        assert_eq!(
+            (i64::from(native.parsed.version_code_major) << 32)
+                | i64::from(native.parsed.version_code as u32),
+            info.version_code
+        );
+    }
+    let mut updated_apex = apex_inventory.clone();
+    let mut info = updated_apex.packages.as_ref().unwrap()[0].clone();
+    info.factory = false;
+    updated_apex.packages = Some(vec![info]);
+    let updated = aim_services::package::scan::ApexImage::load(
+        &apex_apks,
+        &updated_apex,
+        aim_services::package::parse::PARSE_IS_SYSTEM_DIR,
+    )
+    .unwrap();
+    assert_eq!(updated.packages[0].scan_parse_flags, 0);
+    assert!(
+        updated.packages[0].parsed
+            == apex_image
+                .packages
+                .iter()
+                .find(|p| p.info.module_path == updated.packages[0].info.module_path)
+                .unwrap()
+                .parsed
+    );
+    let mut missing_apex = updated_apex.clone();
+    missing_apex.packages.as_mut().unwrap()[0].module_path =
+        "/system/apex/fixture-missing.apex".into();
+    assert_eq!(
+        aim_services::package::scan::ApexImage::load(
+            &apex_apks,
+            &missing_apex,
+            aim_services::package::parse::PARSE_IS_SYSTEM_DIR
+        )
+        .unwrap_err()
+        .phase,
+        "apex-parse"
+    );
+    let manifest = aim_apps::apk::Apk::open(
+        &(apex_apks.files)(&apex_image.packages[0].info.module_path).unwrap(),
+    )
+    .unwrap()
+    .file("AndroidManifest.xml")
+    .unwrap();
+    let unsigned_archive = directory.join("unsigned.apex");
+    fs::write(
+        &unsigned_archive,
+        common::zip::resource_apk(&manifest, None),
+    )
+    .unwrap();
+    let mut unsigned_inventory = updated_apex.clone();
+    unsigned_inventory.packages.as_mut().unwrap()[0].module_path =
+        "/data/local/tmp/package-parcels/unsigned.apex".into();
+    let unsigned_apks = aim_services::package::write::Apks {
+        files: Box::new(move |_| Some(unsigned_archive.clone())),
+        platform: aim_services::package::parse::Platform::load(
+            &aim_paths::original_image(),
+            Default::default(),
+        )
+        .unwrap(),
+    };
+    assert_eq!(
+        aim_services::package::scan::ApexImage::load(
+            &unsigned_apks,
+            &unsigned_inventory,
+            aim_services::package::parse::PARSE_IS_SYSTEM_DIR
+        )
+        .unwrap_err()
+        .phase,
+        "apex-signatures"
+    );
+    let mut null_apex = apex_inventory.clone();
+    null_apex.packages = None;
+    assert!(
+        aim_services::package::scan::ApexImage::load(
+            &apex_apks,
+            &null_apex,
+            aim_services::package::parse::PARSE_IS_SYSTEM_DIR
+        )
+        .unwrap()
+        .packages
+        .is_empty()
+    );
     let library_feed = fs::read(directory.join("library-feed-original.parcel")).unwrap();
     let mut reader = aim_binder_host::parcel::Reader::new(&library_feed, &[]);
     assert_eq!(reader.read_i32().unwrap(), 7);

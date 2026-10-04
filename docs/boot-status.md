@@ -492,14 +492,21 @@ The native full-scan gate also checks controlled parsed static-library DTOs on
 unchanged original verified APKs at ordinary and disposable APEX locations,
 including final loaded code and module ownership. This is identity-stage evidence,
 not a claim that those fixture APK manifests declare a static library.
-Native APEX settings preparation, notifyScanResult and daemon orchestration
-remain incomplete (#836/#798). Actual original ART verifies production
+Native APEX input preparation now reads the original ApexManager module paths
+before APK scanning (#884), preserving last metadata per unique path and stable
+factory-first ordering. All 42 original archives parse and verify; their complete
+PackageImpl fields and SigningInfo parcels match original PackageParser2 and PMS,
+including signer keys and lineage capabilities. Parsing uses the initial system
+flags for both factory and updated containers; updated scan flags clear SYSTEM_DIR
+after parsing. Null inventory is empty as in the original; missing archives and
+unsigned synthetic containers fail explicitly. Native APEX Settings/UID admission,
+inactive-factory disabling and notifyScanResult remain incomplete (#885), as does
+daemon orchestration (#836/#798). Actual original ART verifies production
 export from original UserInfo objects, pre-created/restricted flags, empty versus
-uninitialized owners and detached bytes (19.15s full package oracle, including
-APEX inventories and static-library identity). All 431 units pass (3.16s; one
-ignored/not run). Integration targets compiled after the bootstrap inventory
-addition. The full image/template build and original image ABI linkage pass
-(62.9s; nine rebuilt, 33 fresh).
+uninitialized owners and detached bytes (28.56s full package oracle, including
+APEX inventories, archive parsing/signing and static-library identity). All 432
+units pass (3.82s; one ignored/not run). All integration targets compile.
+The full image/template build passes (18.0s; three rebuilt, 39 fresh).
 A disposable default window boot reaches sys.boot_completed at 4.870s; generation
 60 contains 42 all-package and 42 active APEX inputs, one resolved scan user,
 290 package user scopes, 16 shared-process aggregates and 290 runtime owners
@@ -1211,8 +1218,8 @@ reconciliation. An APK inside an APEX retains its origin partition and
 PARSE_APK_IN_APEX without being classified as the APEX package itself (#880).
 Only explicit APEX-package scan policy sets that classification. A regression
 checks both setting and clearing it; the original ART PackageImpl/applyPolicy
-oracle confirms the same distinction (19.15s). The 431 native unit tests pass
-(3.16s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
+oracle confirms the same distinction (28.56s). The 432 native unit tests pass
+(3.82s; one integration test ignored and not run by that command). Unsupported parser behavior and signature failures abort
 the candidate; invalid directory candidates retain their rejection reason,
 and a missing framework package fails. On a disposable original-PMS boot
 (2026-10-02, boot completed), all 243 image APK candidates parsed and

@@ -10,6 +10,8 @@ use super::{
 use std::collections::BTreeMap;
 
 mod apex;
+mod apex_image;
+pub use apex_image::{ApexCode, ApexImage};
 mod authorize;
 mod enrich;
 pub use enrich::{ScanClock, ScanTime};
