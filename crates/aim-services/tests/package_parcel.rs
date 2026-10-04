@@ -16,6 +16,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn native_package_parcels_match_original_read_write() {
+    use std::collections::BTreeMap;
     let dir = std::env::temp_dir().join(format!("aim-pm-parcels-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
@@ -1896,6 +1897,144 @@ fn native_package_parcels_match_original_read_write() {
             .unwrap();
         scan.capture_install_permissions_fixed(fixed).unwrap();
     };
+    let mut adoption_image = aim_services::package::scan::ApexImage {
+        packages: vec![apex_image.packages[0].clone()],
+    };
+    adoption_image.packages[0].parsed.original_packages =
+        Some(vec![Some("original.fixture".into())]);
+    let mut original_setting = registered.settings.packages[0].clone();
+    original_setting.name = "original.fixture".into();
+    original_setting.app_id = 10000;
+    original_setting.code_path = "/system/apex/original.fixture.apex".into();
+    original_setting.version_code = 1;
+    let original_settings = aim_services::package::settings::Settings {
+        packages: vec![original_setting.clone()],
+        ..Default::default()
+    };
+    let original_users = BTreeMap::from([(
+        0,
+        aim_services::package::restrictions::UserState {
+            enabled: 2,
+            hidden: true,
+            first_install_time: 123,
+            ..aim_services::package::restrictions::UserState::initialized()
+        },
+    )]);
+    let mut adoption =
+        aim_services::package::scan::SigningScan::new(&config, &original_settings, 36).unwrap();
+    adoption
+        .capture_user_states(BTreeMap::from([(
+            ("original.fixture".into(), false),
+            aim_services::package::scan::CapturedUsers {
+                states: original_users.clone(),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+    capture_apex_legacy(&mut adoption);
+    let prior = adoption.clone();
+    let reject_adoption_domain = || Err("adoption domain owner rejected".into());
+    let mut rejected_adoption_inputs = scan_inputs(&adoption_image);
+    rejected_adoption_inputs.new_domain_id = &reject_adoption_domain;
+    assert!(
+        adoption
+            .scan_initial_apex(&apex_apks, &config, &rejected_adoption_inputs)
+            .is_err()
+    );
+    assert!(
+        adoption == prior,
+        "rejected adoption changed prior UID/settings owners"
+    );
+    let adopted_results = adoption
+        .scan_initial_apex(&apex_apks, &config, &scan_inputs(&adoption_image))
+        .unwrap();
+    assert_eq!(adopted_results[0].package.package_name, "original.fixture");
+    assert_eq!(adopted_results[0].package.uid, -1);
+    assert_eq!(adoption.settings.packages[0].app_id, -1);
+    assert_eq!(
+        adoption.settings.packages[0].real_name.as_deref(),
+        Some(adoption_image.packages[0].parsed.package_name.as_str())
+    );
+    assert_eq!(
+        adoption.scanned_user_states("original.fixture"),
+        Some(&original_users)
+    );
+    assert_eq!(
+        adoption.identities.ids.get(10000),
+        Some(
+            &aim_services::package::owner::app_ids::Owner::DetachedPackage(
+                "original.fixture".into()
+            )
+        )
+    );
+    let slot = adoption.identities.ids.detached_setting(10000).unwrap();
+    assert_eq!(slot.package, original_setting);
+    assert_eq!(slot.users, original_users);
+    assert_eq!(slot.install_fixed, Some(true));
+    assert_eq!(
+        slot.legacy.as_ref().unwrap(),
+        &apex_legacy.project(10000, &[10, 0, 11]).unwrap()
+    );
+    assert_eq!(
+        prior.identities.ids.get(10000),
+        Some(&aim_services::package::owner::app_ids::Owner::Package(
+            "original.fixture".into()
+        ))
+    );
+    assert_eq!(prior.identities.ids.detached_setting(10000), None);
+    let mut next_adoption_ids = adoption.identities.ids.clone();
+    assert_eq!(
+        next_adoption_ids
+            .acquire(aim_services::package::owner::app_ids::Owner::Package(
+                "next.apk".into()
+            ))
+            .unwrap(),
+        10001
+    );
+    let mut native_adoption = aim_binder_host::parcel::Parcel::new();
+    native_adoption.write_i32(slot.package.app_id);
+    native_adoption.write_i32(adoption.settings.packages[0].app_id);
+    aim_service_aidl::write_byte_array(
+        &mut native_adoption,
+        Some(&slot.legacy.as_ref().unwrap().bytes()),
+    );
+    aim_service_aidl::write_byte_array(
+        &mut native_adoption,
+        Some(
+            &adoption
+                .legacy_permissions("original.fixture", false)
+                .unwrap()
+                .unwrap()
+                .bytes(),
+        ),
+    );
+    fs::write(
+        directory.join("apex-original-adoption.input"),
+        native_adoption.data(),
+    )
+    .unwrap();
+    let captured_slot = slot.clone();
+    adoption
+        .scan_initial_apex(&apex_apks, &config, &scan_inputs(&adoption_image))
+        .unwrap();
+    adoption
+        .set_install_permissions_fixed("original.fixture", false, false)
+        .unwrap();
+    let mut changed_user = original_users[&0].clone();
+    changed_user.hidden = false;
+    adoption
+        .set_user_state("original.fixture", 0, changed_user)
+        .unwrap();
+    assert_eq!(
+        adoption.identities.ids.detached_setting(10000),
+        Some(&captured_slot)
+    );
+    assert_eq!(
+        adoption
+            .install_permissions_fixed("original.fixture", false)
+            .unwrap(),
+        Some(false)
+    );
     let mut renamed_image = aim_services::package::scan::ApexImage {
         packages: vec![apex_image.packages[0].clone()],
     };

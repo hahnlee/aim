@@ -1033,7 +1033,15 @@ impl SigningScan {
         record: &Record,
         source: &super::ApexCode,
     ) -> Result<SigningOutcome, SigningError> {
-        let identity = Identity::select_for_apex(&source.parsed, &self.settings);
+        let mut identity = Identity::select_for_apex(&source.parsed, &self.settings);
+        if let Some(original) =
+            Identity::original_setting(&source.parsed, &self.settings, &|name| {
+                self.has_scanned_package(name)
+            })
+        {
+            identity.internal_name = original.name.clone();
+            identity.real_name = Some(identity.manifest_name.clone());
+        }
         if !record.parsed.is2(crate::package::pkg::booleans2::APEX)
             || record.settings.app_id != -1
             || record.identity != identity

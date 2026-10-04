@@ -171,6 +171,9 @@ public final class ApexNotifyOracle {
             out.writeInt(old.getAppId()); out.writeInt(adopted.getAppId());
             out.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(10000, users, old.getLegacyPermissionState()));
             out.writeByteArray(dev.aim.server.PackageLegacyPermissions.capture(-1, users, adopted.getLegacyPermissionState()));
+            bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "apex-original-adoption.input").toPath());
+            if (!java.util.Arrays.equals(bytes, out.marshall()))
+                throw new AssertionError("native adopted and detached UID permission owners differ");
             java.nio.file.Files.write(new java.io.File(directory, "apex-original-adoption.original").toPath(), out.marshall());
         } finally { out.recycle(); }
     }

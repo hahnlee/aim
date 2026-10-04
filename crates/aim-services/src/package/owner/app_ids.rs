@@ -13,11 +13,15 @@ pub const LAST_APPLICATION_UID: i32 = 19999;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Owner {
     Package(String),
+    DetachedPackage(String),
     SharedUser(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    DetachedOwner {
+        name: String,
+    },
     Occupied {
         app_id: i32,
         existing: Owner,
@@ -41,9 +45,21 @@ pub enum Error {
 
 /// Clone supplies a candidate or immutable version; operations never
 /// mutate persisted settings or an older published snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A UID slot can retain the prior setting after a distinct copied setting
+/// replaces it in Settings.mPackages. Captured imports remain optional.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetachedSetting {
+    pub package: crate::package::settings::Package,
+    pub users: BTreeMap<i32, crate::package::restrictions::UserState>,
+    pub legacy: Option<super::legacy_permissions::State>,
+    pub install_fixed: Option<bool>,
+    pub runtime: Option<crate::package::scan::ReplicaRuntime>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppIds {
     slots: BTreeMap<i32, Owner>,
+    detached: BTreeMap<i32, std::sync::Arc<DetachedSetting>>,
     non_system_size: i64,
     first_available: i32,
 }
@@ -52,6 +68,7 @@ impl Default for AppIds {
     fn default() -> Self {
         Self {
             slots: BTreeMap::new(),
+            detached: BTreeMap::new(),
             non_system_size: 0,
             first_available: FIRST_APPLICATION_UID,
         }
@@ -117,9 +134,64 @@ impl AppIds {
         self.slots.get(&app_id)
     }
 
+    /// Preserve the exact prior non-shared setting without freeing its slot
+    /// or changing allocation extent/cursor. Only its current owner can detach.
+    pub(in crate::package) fn detach(&mut self, value: DetachedSetting) -> Result<(), String> {
+        let id = value.package.app_id;
+        if id <= 0
+            || value.package.shared_user
+            || self.get(id) != Some(&Owner::Package(value.package.name.clone()))
+            || self.detached.contains_key(&id)
+            || value.users.keys().any(|id| *id < 0)
+            || value
+                .legacy
+                .as_ref()
+                .is_some_and(|state| state.app_id() != id)
+        {
+            return Err("detached setting differs from registered UID owner".into());
+        }
+        self.slots
+            .insert(id, Owner::DetachedPackage(value.package.name.clone()));
+        self.detached.insert(id, std::sync::Arc::new(value));
+        Ok(())
+    }
+
+    pub fn detached_setting(&self, app_id: i32) -> Option<&DetachedSetting> {
+        self.detached.get(&app_id).map(std::sync::Arc::as_ref)
+    }
+
+    pub(in crate::package) fn validate_detached(&self) -> Result<(), String> {
+        for (id, owner) in &self.slots {
+            if let Owner::DetachedPackage(name) = owner {
+                let value = self
+                    .detached_setting(*id)
+                    .ok_or("detached UID setting is missing")?;
+                if value.package.app_id != *id
+                    || value.package.name != *name
+                    || value.package.shared_user
+                    || value
+                        .legacy
+                        .as_ref()
+                        .is_some_and(|state| state.app_id() != *id)
+                {
+                    return Err("detached UID setting identity differs".into());
+                }
+            }
+        }
+        if self.detached.iter().any(|(id, value)| {
+            self.get(*id) != Some(&Owner::DetachedPackage(value.package.name.clone()))
+        }) {
+            return Err("detached setting has no registered UID slot".into());
+        }
+        Ok(())
+    }
+
     /// Matches registerExistingAppId, including preserved IDs outside
     /// the automatic allocation range. Validation belongs to Settings.
     pub fn register_existing(&mut self, app_id: i32, owner: Owner) -> Result<(), Error> {
+        if let Owner::DetachedPackage(name) = &owner {
+            return Err(Error::DetachedOwner { name: name.clone() });
+        }
         if let Some(existing) = self.get(app_id) {
             return Err(Error::Occupied {
                 app_id,
@@ -137,6 +209,9 @@ impl AppIds {
     }
 
     pub fn acquire(&mut self, owner: Owner) -> Result<i32, Error> {
+        if let Owner::DetachedPackage(name) = &owner {
+            return Err(Error::DetachedOwner { name: name.clone() });
+        }
         let extent = i64::from(FIRST_APPLICATION_UID) + self.non_system_size;
         let mut candidate = i64::from(self.first_available);
         for (&id, _) in self.slots.range(self.first_available..) {
@@ -163,6 +238,7 @@ impl AppIds {
     /// array extent remains; a fresh restore resets the runtime cursor.
     pub fn remove(&mut self, app_id: i32) -> Option<Owner> {
         let old = self.slots.remove(&app_id);
+        self.detached.remove(&app_id);
         self.first_available = self.first_available.max(app_id.wrapping_add(1));
         old
     }
@@ -170,12 +246,16 @@ impl AppIds {
     /// Shared-user migration replaces slot ownership without assigning
     /// a new ID. Existing array holes are valid replacement positions.
     pub fn replace(&mut self, app_id: i32, owner: Owner) -> Result<(), Error> {
+        if let Owner::DetachedPackage(name) = &owner {
+            return Err(Error::DetachedOwner { name: name.clone() });
+        }
         if app_id >= FIRST_APPLICATION_UID
             && i64::from(app_id) - i64::from(FIRST_APPLICATION_UID) >= self.non_system_size
         {
             return Err(Error::OutsideArray { app_id });
         }
         self.slots.insert(app_id, owner);
+        self.detached.remove(&app_id);
         Ok(())
     }
 }
@@ -187,6 +267,54 @@ mod tests {
 
     fn owner(name: &str) -> Owner {
         Owner::Package(name.into())
+    }
+
+    #[test]
+    fn detached_slots_preserve_snapshots_and_exact_removal_replacement() {
+        let mut ids = AppIds::default();
+        ids.register_existing(10000, owner("old")).unwrap();
+        let retained = DetachedSetting {
+            package: Package {
+                name: "old".into(),
+                app_id: 10000,
+                ..Default::default()
+            },
+            users: BTreeMap::new(),
+            legacy: None,
+            install_fixed: None,
+            runtime: None,
+        };
+        let original = ids.clone();
+        let mut foreign = retained.clone();
+        foreign.package.app_id = 10001;
+        assert!(ids.detach(foreign).is_err());
+        assert_eq!(ids, original);
+        ids.detach(retained.clone()).unwrap();
+        ids.validate_detached().unwrap();
+        assert_eq!(original.get(10000), Some(&owner("old")));
+        assert_eq!(original.detached_setting(10000), None);
+        assert_eq!(ids.detached_setting(10000), Some(&retained));
+        assert!(ids.detach(retained.clone()).is_err());
+        let captured = ids.clone();
+        assert_eq!(ids.acquire(owner("next")), Ok(10001));
+        assert_eq!(
+            ids.remove(10000),
+            Some(Owner::DetachedPackage("old".into()))
+        );
+        assert_eq!(ids.detached_setting(10000), None);
+        assert_eq!(captured.detached_setting(10000), Some(&retained));
+        let mut replaced = captured.clone();
+        replaced.replace(10000, owner("replacement")).unwrap();
+        assert_eq!(replaced.detached_setting(10000), None);
+        replaced.validate_detached().unwrap();
+        assert_eq!(captured.detached_setting(10000), Some(&retained));
+        let mut invalid = captured.clone();
+        invalid.detached.clear();
+        assert!(invalid.validate_detached().is_err());
+        let fake = Owner::DetachedPackage("fake".into());
+        assert!(ids.acquire(fake.clone()).is_err());
+        assert!(ids.register_existing(10002, fake.clone()).is_err());
+        assert!(ids.replace(10001, fake).is_err());
     }
 
     #[test]

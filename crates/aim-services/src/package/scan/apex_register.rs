@@ -94,32 +94,49 @@ impl SigningScan {
                     .apex_module_name
                     .clone_from(&source.info.module_name);
             }
-            let identity = Identity::select_for_apex(&parsed, &self.settings);
-            let previous = self
+            let mut identity = Identity::select_for_apex(&parsed, &self.settings);
+            let mut previous = self
                 .settings
                 .packages
                 .iter()
                 .find(|p| p.name == identity.internal_name)
                 .cloned();
+            let original = if previous.is_none() {
+                Identity::original_setting(&parsed, &self.settings, &|name| {
+                    self.has_scanned_package(name)
+                })
+                .cloned()
+            } else {
+                None
+            };
+            if let Some(original) = &original {
+                if original.shared_user
+                    || super::signing::selected_shared_user(
+                        false,
+                        parsed.shared_user_id.as_deref(),
+                        parsed.is(crate::package::pkg::booleans::LEAVING_SHARED_UID),
+                    )
+                    .is_some()
+                {
+                    return Err(fail(
+                        "apex-identity",
+                        "original adoption shared-setting instances are not represented (#890)"
+                            .into(),
+                    ));
+                }
+                identity.internal_name = original.name.clone();
+                identity.real_name = Some(identity.manifest_name.clone());
+                previous = Some(original.clone());
+            }
             let disabled = self
                 .settings
                 .disabled_system_packages
                 .iter()
                 .find(|p| p.name == identity.internal_name)
                 .cloned();
-            if Identity::original_setting(&parsed, &self.settings, &|name| {
-                self.has_scanned_package(name)
-            })
-            .is_some()
-            {
-                return Err(fail(
-                    "apex-identity",
-                    "APEX original identity transition is not completed (#890)".into(),
-                ));
-            }
             if previous
                 .as_ref()
-                .is_some_and(|p| p.app_id != p.shared_app_id().unwrap_or(-1))
+                .is_some_and(|p| original.is_none() && p.app_id != p.shared_app_id().unwrap_or(-1))
             {
                 return Err(fail(
                     "apex-identity",
@@ -240,8 +257,15 @@ impl SigningScan {
                 target_sdk_version: parsed.target_sdk_version,
                 restrict_update_hash: parsed.restrict_update_hash.clone(),
             };
-            let mut setting = if let Some(previous) = previous.as_ref().filter(|_| !replaces_shared)
-            {
+            let mut setting = if let Some(original) = &original {
+                let users = self.scanned_users.get(&original.name).ok_or_else(|| {
+                    fail(
+                        "apex-users",
+                        "original setting user owner is not captured".into(),
+                    )
+                })?;
+                NewSetting::adopt(original, users, &identity.manifest_name, metadata)
+            } else if let Some(previous) = previous.as_ref().filter(|_| !replaces_shared) {
                 let users = self.scanned_users.get(&previous.name).ok_or_else(|| {
                     fail(
                         "apex-users",
@@ -312,6 +336,41 @@ impl SigningScan {
                 setting.package.pending_restore = previous.as_ref().unwrap().pending_restore;
             }
             let mut staged = self.clone();
+            if let Some(original) = original.as_ref().filter(|p| p.app_id > 0) {
+                let legacy = if staged.legacy_permissions.is_some() {
+                    staged
+                        .legacy_permissions(&original.name, false)
+                        .map_err(|e| fail("apex-legacy", e))?
+                } else {
+                    None
+                };
+                let install_fixed = if staged.legacy_permissions.is_some() {
+                    staged
+                        .install_permissions_fixed(&original.name, false)
+                        .map_err(|e| fail("apex-legacy", e))?
+                } else {
+                    None
+                };
+                let runtime = if staged.replica_runtime.is_some() {
+                    staged
+                        .replica_runtime(&original.name, false)
+                        .map_err(|e| fail("apex-runtime", e))?
+                        .cloned()
+                } else {
+                    None
+                };
+                staged
+                    .identities
+                    .ids
+                    .detach(crate::package::owner::app_ids::DetachedSetting {
+                        package: original.clone(),
+                        users: setting.users.clone(),
+                        legacy,
+                        install_fixed,
+                        runtime,
+                    })
+                    .map_err(|e| fail("apex-identity", e))?;
+            }
             if replaces_shared {
                 let old = previous.as_ref().unwrap();
                 staged.detach_disabled_user_aliases(&old.name);
@@ -346,6 +405,7 @@ impl SigningScan {
                     .rebind_legacy_setting(&package.name)
                     .map_err(|message| fail("apex-legacy", message))?;
             }
+            let identity_manifest = identity.manifest_name.clone();
             let mut record = Record {
                 settings: package,
                 parsed,
@@ -423,6 +483,16 @@ impl SigningScan {
                 .map_err(|message| fail("apex-legacy", message))?;
             if source.info.factory && !source.info.active {
                 staged.disable_system_package(name)?;
+            }
+            if original.is_some() {
+                staged
+                    .settings
+                    .renamed_packages
+                    .retain(|(new, _)| new != &identity_manifest);
+                staged
+                    .settings
+                    .renamed_packages
+                    .push((identity_manifest, name.clone()));
             }
             results.push(ApexScanResult {
                 info: source.info.clone(),

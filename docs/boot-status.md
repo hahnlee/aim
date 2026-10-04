@@ -625,9 +625,21 @@ initial scan passes (66.93s). A separate typed original ART probe (32.37s) pins
 initial original-package adoption: createNewSetting clones the original setting;
 APEX registration gives the adopted copy appId=-1 but getSettingLPr(10000) still
 returns the distinct prior positive-UID setting. Both retain independent populated
-legacy permission state and fixed=true. The native name-only UID map does not yet
-represent these two distinct setting owners (#904); initial original-package
-adoption and transfer ownership remain #890. First shared code uses the supplied
+legacy permission state and fixed=true. Native UID slots now represent a distinct
+DetachedPackage owner with an immutable prior setting, explicit captured users,
+optional permission/fixed/runtime imports (#904). Detachment validates the current
+non-shared owner, leaves allocation extent/cursor unchanged, rejects forged detached
+owners, and preserves older cloned versions. Exact slot removal or replacement
+releases only the current detached record; snapshot validation rejects missing or
+foreign detached owners. Initial non-shared original APEX adoption now copies its
+supplied users and setting, rebinds copied legacy state to INVALID_UID, retains the
+prior positive slot and commits the rename map only after metadata succeeds (#890).
+A rejected domain owner leaves the whole scan unchanged; rescan and active
+user/fixed-state mutations preserve the detached prior setting. Original ART
+compares both native positive/negative UID permission owners byte for byte (32.85s).
+438 units pass (one ignored/not run), host build passes (17.5s), and complete initial
+scan passes (67.79s). Original shared-UID setting-instance adoption and transfer
+ownership remain #890; native PMS is still inactive. First shared code uses the supplied
 compatibility owner for its scan label when no group member has loaded code,
 then seeds the group SDK when the first parsed member commits (#894). Retained
 loaded groups keep their SDK; compatibility failure rejects the candidate while

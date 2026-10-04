@@ -231,6 +231,9 @@ fn from_settings(
                             restored.packages.get_mut(&(target, factory && own_id > 0))
                         }
                         Owner::SharedUser(target) => restored.shared_users.get_mut(&target),
+                        Owner::DetachedPackage(_) => {
+                            return Err("detached UID in XML restoration".into());
+                        }
                     }
                     .ok_or("visible legacy permission owner is missing")?;
                     for root in &perms {
