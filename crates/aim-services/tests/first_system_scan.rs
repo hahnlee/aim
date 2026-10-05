@@ -1400,7 +1400,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     .collect();
                 owner.complete_runtime_at_boot(&usage, retained).unwrap();
                 let store =
-                    aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
+                    aim_services::package::scan_snapshot::Store::new_replica(owner.clone(), usage)
+                        .unwrap();
                 let capture = store.capture();
                 let index = usize::from(shared) * 3 + keep as usize;
                 common::snapshot_oracle::export(

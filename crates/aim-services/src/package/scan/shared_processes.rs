@@ -230,6 +230,9 @@ fn build(
 }
 
 impl SigningScan {
+    pub(in crate::package) fn has_shared_processes(&self) -> bool {
+        self.shared_processes.is_some()
+    }
     /// PackageFeed keeps SharedUserApi's forward ArraySet order. The original
     /// updateProcesses rebuild visits that same set in reverse (android-16 r1).
     pub fn rebuild_shared_processes_from_original_members(

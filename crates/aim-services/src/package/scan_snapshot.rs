@@ -46,17 +46,31 @@ impl Snapshot {
 
 pub struct Store {
     current: Mutex<Arc<Snapshot>>,
+    replica: bool,
 }
 
 impl Store {
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
+        Self::create(owner, usage, false)
+    }
+
+    pub fn new_replica(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
+        Self::create(owner, usage, true)
+    }
+
+    fn create(owner: SigningScan, usage: Usage, replica: bool) -> Result<Self, Error> {
         validate(&owner, &usage)?;
+        let snapshot = Arc::new(Snapshot {
+            version: 1,
+            owner,
+            usage,
+        });
+        if replica {
+            validate_replica(&snapshot)?;
+        }
         Ok(Self {
-            current: Mutex::new(Arc::new(Snapshot {
-                version: 1,
-                owner,
-                usage,
-            })),
+            current: Mutex::new(snapshot),
+            replica,
         })
     }
 
@@ -87,9 +101,72 @@ impl Store {
             owner,
             usage,
         });
+        if self.replica {
+            validate_replica(&next)?;
+        }
         *current = next.clone();
         Ok(next)
     }
+}
+
+fn validate_replica(snapshot: &Snapshot) -> Result<(), Error> {
+    let owner = snapshot.owner();
+    if !owner.has_legacy_permissions() || !owner.has_shared_processes() {
+        return Err(Error::Invalid(
+            "replica requires legacy and shared process owners".into(),
+        ));
+    }
+    let missing = || Error::Invalid("replica setting input is missing".into());
+    for (settings, factory) in [
+        (&owner.settings.packages, false),
+        (&owner.settings.disabled_system_packages, true),
+    ] {
+        for setting in settings {
+            let name = &setting.name;
+            owner
+                .install_permissions_fixed(name, factory)
+                .map_err(Error::Invalid)?
+                .ok_or_else(missing)?;
+            setting_record::captured(snapshot, name, factory)
+                .map_err(Error::Invalid)?
+                .ok_or_else(missing)?;
+            runtime_record::captured(snapshot, name, factory)
+                .map_err(Error::Invalid)?
+                .ok_or_else(missing)?;
+            endpoint::PackageSigningState::captured(snapshot, name, factory)
+                .map_err(Error::Invalid)?
+                .ok_or_else(missing)?;
+            let ids = user_record::ids(snapshot, name, factory)
+                .map_err(Error::Invalid)?
+                .ok_or_else(missing)?;
+            for id in ids {
+                user_record::captured(snapshot, name, factory, id)
+                    .map_err(Error::Invalid)?
+                    .ok_or_else(missing)?;
+            }
+            owner
+                .hidden_api_enforcement_policy(name, factory)
+                .map_err(Error::Invalid)?
+                .ok_or_else(missing)?;
+            endpoint::PackageCode::captured(snapshot, name, factory).map_err(Error::Invalid)?;
+            if !factory && owner.loaded_packages().contains_key(name) {
+                owner
+                    .seinfo_state(name)
+                    .map_err(Error::Invalid)?
+                    .ok_or_else(missing)?;
+                owner
+                    .library_dependencies(name)
+                    .map_err(Error::Invalid)?
+                    .ok_or_else(missing)?;
+            }
+        }
+    }
+    for name in owner.identities.shared_users.keys() {
+        shared_record::captured(snapshot, name)
+            .map_err(Error::Invalid)?
+            .ok_or_else(missing)?;
+    }
+    Ok(())
 }
 
 fn validate(owner: &SigningScan, usage: &Usage) -> Result<(), Error> {
@@ -261,6 +338,91 @@ mod tests {
             36,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn replica_publication_requires_every_setting_owner_on_every_version() {
+        use std::collections::BTreeMap;
+        let complete = |users: bool, fixed: bool, runtime: bool| {
+            let mut owner = owner();
+            if users {
+                owner
+                    .capture_user_states(BTreeMap::from([(
+                        ("fixture".into(), false),
+                        super::super::scan::CapturedUsers {
+                            states: Default::default(),
+                            active_aliases: Default::default(),
+                        },
+                    )]))
+                    .unwrap();
+            }
+            let groups = owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect();
+            owner
+                .capture_legacy_permissions(
+                    &[0],
+                    BTreeMap::from([(("fixture".into(), false), Default::default())]),
+                    groups,
+                )
+                .unwrap();
+            if fixed {
+                owner
+                    .capture_install_permissions_fixed(BTreeMap::from([(
+                        ("fixture".into(), false),
+                        true,
+                    )]))
+                    .unwrap();
+            }
+            let orders = owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), vec![]))
+                .collect();
+            owner.complete_shared_processes(orders).unwrap();
+            if runtime {
+                owner
+                    .capture_replica_runtime(BTreeMap::from([(
+                        ("fixture".into(), false),
+                        super::super::scan::ReplicaRuntime {
+                            usage: [0; 8],
+                            seinfo: None,
+                            override_seinfo: None,
+                            library_files: vec![],
+                            libraries: vec![],
+                        },
+                    )]))
+                    .unwrap();
+            }
+            owner
+        };
+        assert!(Store::new_replica(owner(), Usage::new(["fixture"])).is_err());
+        let store =
+            Store::new_replica(complete(true, true, true), Usage::new(["fixture"])).unwrap();
+        let base = store.capture();
+        for candidate in [
+            complete(false, true, true),
+            complete(true, false, true),
+            complete(true, true, false),
+        ] {
+            assert!(Store::new(candidate.clone(), Usage::new(["fixture"])).is_ok());
+            assert!(Store::new_replica(candidate.clone(), Usage::new(["fixture"])).is_err());
+            assert!(
+                store
+                    .publish(&base, candidate, Usage::new(["fixture"]))
+                    .is_err()
+            );
+            assert!(Arc::ptr_eq(&base, &store.capture()));
+        }
+        let next = store
+            .publish(&base, complete(true, true, true), Usage::new(["fixture"]))
+            .unwrap();
+        assert_eq!(next.version(), 2);
+        assert_eq!(base.version(), 1);
     }
 
     #[test]

@@ -1038,8 +1038,8 @@ markers. Shared process ownership validates the displacement binding and exclude
 the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
 and removal; the complete first-system scan, including Java assembly and six
-original-service boots from native-written settings, passes (99.41s). The full package
-Parcel oracle passes (32.01s); release units pass 465 cases (0.49s), with three
+original-service boots from native-written settings, passes (86.62s). The full package
+Parcel oracle passes (32.01s); release units pass 466 cases (0.47s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
 validation accounts for the original pending-package drop after proving the
@@ -1067,7 +1067,7 @@ captures. Setting removal stages all changes so a missing group input leaves
 the earlier owner unchanged. APEX replacement uses the same group cleanup once.
 The complete first-system scan now passes the six native accepted captures through
 generated Binder Proxy/Stub and original ART's PackageScanLease.captureData
-as part of the complete first-system test (99.41s). Pruned/active/disabled old
+as part of the complete first-system test (86.62s). Pruned/active/disabled old
 groups and independent/shared original targets
 preserve the incoming unparsed setting outside group membership, the loaded
 original's real-name/UID binding, distinct current/retained original instances,
@@ -1089,11 +1089,19 @@ owner (#934), matching InstallPackageHelper's realPkgName commit branch. All six
 independent/shared and pruned/active/disabled cases produce exactly that one
 transfer; an earlier metadata failure produces neither a transfer nor loaded
 original code. Transfer recording occurs only after metadata completion. The
-expanded first-system test passes (99.41s), and release units pass 465 cases
-(0.49s), with three ignored/not run. This does not compare the complete later boot
+expanded first-system test passes (86.62s), and release units pass 466 cases
+(0.47s), with three ignored/not run. This does not compare the complete later boot
 scan request stream. Full original request parity and transfer publication remain
 #919,
-and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
+and daemon frontend publication remains #798/#836. A complete-replica Store
+constructor now requires captured legacy/fixed permissions, sparse users, scoped
+runtime and shared process owners before the first version is visible (#935).
+Every later publication enforces the same contract, including loaded seInfo and
+library dependencies and scalar/signing/code/user/shared record projections.
+Incomplete updates preserve the prior version; partial diagnostic Stores retain
+their existing behavior. All six accepted displaced graphs use this complete
+constructor before original ART assembles them. This is a publication prerequisite;
+the live daemon producer and SystemServer replica connection remain unwired. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
