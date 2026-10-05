@@ -5,6 +5,7 @@ use super::{
     scan::SigningScan,
 };
 pub mod endpoint;
+pub mod query_state;
 pub mod user_record;
 pub mod setting_record;
 pub mod library_record;

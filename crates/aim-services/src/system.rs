@@ -126,6 +126,7 @@ struct PackageBootstrapState {
 struct PackageBootstrap {
     bridge: Arc<crate::package::bootstrap::Bridge>,
     snapshots: Option<crate::package::scan_snapshot::Store>,
+    queries: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
 }
 
 /// Told of a bridge attached, with its handle.
@@ -457,6 +458,7 @@ impl System {
         current.current = Some(PackageBootstrap {
             bridge: bridge.clone(),
             snapshots: None,
+            queries: None,
         });
         self.process.link_to_death(
             &bridge.owner,
@@ -584,20 +586,129 @@ impl System {
         };
         let snapshot =
             result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))?;
+        current.queries = None;
         state.version = snapshot.version();
         Ok(snapshot)
     }
 
-    /// Finish native boot dependencies/runtime before the complete publication gate.
-    /// Original policy calls run without holding the publication lock.
+    /// Publish the complete package and query owners as one native generation.
+    pub fn publish_package_scan_with_queries(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: Option<&Arc<crate::package::scan_snapshot::Snapshot>>,
+        owner: crate::package::scan::SigningScan,
+        usage: crate::package::owner::usage::Usage,
+        context: crate::package::scan_snapshot::query_state::Context,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        use crate::package::scan_snapshot::{Store, query_state::Capture};
+        let fail =
+            |message: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let version = state
+            .version
+            .checked_add(1)
+            .ok_or_else(|| fail("package query version exhausted".into()))?;
+        let current = state
+            .current
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .ok_or_else(|| fail("package query bootstrap owner changed".into()))?;
+        match (&current.snapshots, base) {
+            (Some(store), Some(base)) if Arc::ptr_eq(&store.capture(), base) => {}
+            (None, None) => {}
+            _ => return Err(fail("package query publication base differs".into())),
+        }
+        let store = Store::new_replica_at_version(owner, usage, version)
+            .map_err(|error| fail(format!("package query scan validation failed: {error:?}")))?;
+        let capture = Capture::new(store.capture(), context).map_err(fail)?;
+        current.snapshots = Some(store);
+        current.queries = Some(capture.clone());
+        state.version = version;
+        Ok(capture)
+    }
+
+    pub fn publish_package_queries(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        scan: &Arc<crate::package::scan_snapshot::Snapshot>,
+        context: crate::package::scan_snapshot::query_state::Context,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        let fail =
+            |message: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
+        let capture =
+            crate::package::scan_snapshot::query_state::Capture::new(scan.clone(), context)
+                .map_err(fail)?;
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .ok_or_else(|| fail("package query bootstrap owner changed".into()))?;
+        if !current
+            .snapshots
+            .as_ref()
+            .is_some_and(|store| Arc::ptr_eq(&store.capture(), scan))
+        {
+            return Err(fail("package query scan owner changed".into()));
+        }
+        if current.queries.is_some() {
+            return Err(fail("package query owner already published".into()));
+        }
+        current.queries = Some(capture.clone());
+        Ok(capture)
+    }
+
+    pub fn capture_package_queries(
+        &self,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        self.package_bootstrap
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .and_then(|current| current.queries.clone())
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native package query owners are unavailable",
+                )
+            })
+    }
+
+    /// Finish native boot dependencies/runtime before publication.
     pub fn complete_package_scan(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         base: Option<&Arc<crate::package::scan_snapshot::Snapshot>>,
-        mut owner: crate::package::scan::SigningScan,
+        owner: crate::package::scan::SigningScan,
         usage: crate::package::owner::usage::Usage,
         retained: std::collections::BTreeMap<(String, bool), crate::package::scan::OriginalRuntime>,
     ) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
+        let owner = self.complete_package_owner(bridge, owner, &usage, retained)?;
+        self.publish_package_scan(bridge, base, owner, usage)
+    }
+
+    pub fn complete_package_scan_with_queries(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: Option<&Arc<crate::package::scan_snapshot::Snapshot>>,
+        owner: crate::package::scan::SigningScan,
+        usage: crate::package::owner::usage::Usage,
+        retained: std::collections::BTreeMap<(String, bool), crate::package::scan::OriginalRuntime>,
+        context: crate::package::scan_snapshot::query_state::Context,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        let owner = self.complete_package_owner(bridge, owner, &usage, retained)?;
+        self.publish_package_scan_with_queries(bridge, base, owner, usage, context)
+    }
+
+    // Original policy calls run without holding the publication lock.
+    fn complete_package_owner(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        mut owner: crate::package::scan::SigningScan,
+        usage: &crate::package::owner::usage::Usage,
+        retained: std::collections::BTreeMap<(String, bool), crate::package::scan::OriginalRuntime>,
+    ) -> Result<crate::package::scan::SigningScan> {
         let fail =
             |message: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
         self.check_package_bootstrap(bridge)?;
@@ -627,9 +738,9 @@ impl System {
             })
             .map_err(|error| fail(format!("boot library completion failed: {error:?}")))?;
         owner
-            .complete_runtime_at_boot(&usage, retained)
+            .complete_runtime_at_boot(usage, retained)
             .map_err(|error| fail(format!("boot runtime completion failed: {error}")))?;
-        self.publish_package_scan(bridge, base, owner, usage)
+        Ok(owner)
     }
 
     pub fn capture_package_scan(&self) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {

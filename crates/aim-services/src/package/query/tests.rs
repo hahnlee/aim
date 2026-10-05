@@ -570,3 +570,55 @@ fn queued_comparison_uses_publication_history_for_intermediate_apk_state() {
     assert_eq!(decoded(pm::GET_APPLICATION_INFO, &before), expected);
     assert_ne!(expected, get_application_info(&first, 1000, APP, 0));
 }
+
+#[test]
+fn native_uid_slots_preserve_detached_and_shared_member_states() {
+    use crate::package::model::UidOwner;
+    let mut state = state();
+    let mut old = state.packages[APP].clone();
+    old.app_id = 10102;
+    old.users.get_mut(&0).unwrap().installed = false;
+    state.uid_owners = Some(
+        [
+            (10102, UidOwner::Package(Box::new(old.clone()))),
+            (1000, UidOwner::SharedUser("android.uid.system".into())),
+        ]
+        .into(),
+    );
+    let mut member = old;
+    member.users.get_mut(&0).unwrap().installed = true;
+    state
+        .shared_users
+        .get_mut("android.uid.system")
+        .unwrap()
+        .native_packages = Some(vec![member]);
+    let packages = |uid| {
+        let reply = call(&state, 1000, false, pm::GET_PACKAGES_FOR_UID, |p| {
+            pm::GetPackagesForUid { uid }.write(p)
+        });
+        let mut r = Reader::new(reply.data(), reply.objects());
+        pm::read_get_packages_for_uid_reply(&mut r)
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(packages(10100), None);
+    assert_eq!(packages(10102), None);
+    assert_eq!(packages(1000), Some(vec![Some(APP.into())]));
+    let reply = call(&state, 1000, true, native::GET_NAMES_FOR_UIDS, |p| {
+        native::GetNamesForUids {
+            uids: Some(vec![10100, 10102, 1000]),
+        }
+        .write(p)
+    });
+    let mut r = Reader::new(reply.data(), reply.objects());
+    assert_eq!(
+        native::read_get_names_for_uids_reply(&mut r)
+            .unwrap()
+            .unwrap(),
+        Some(vec![
+            Some(String::new()),
+            Some(APP.into()),
+            Some("shared:android.uid.system".into())
+        ])
+    );
+}

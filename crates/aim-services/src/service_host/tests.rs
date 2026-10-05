@@ -452,6 +452,184 @@ fn scan_version(lease: &Strong) -> Result<i64, Exception> {
     api::read_get_version_reply(&mut reply.reader()).unwrap()
 }
 
+fn query_context(
+    scan: &Arc<crate::package::scan_snapshot::Snapshot>,
+) -> crate::package::scan_snapshot::query_state::Context {
+    query_context_for(scan.owner(), scan.version())
+}
+fn query_context_for(
+    owner: &crate::package::scan::SigningScan,
+    version: u64,
+) -> crate::package::scan_snapshot::query_state::Context {
+    use crate::package::{
+        bootstrap::{ApexInventory, ScanUsers},
+        model,
+        scan::User,
+        scan_snapshot::query_state::{Context, PackageInputs, UserInputs},
+    };
+    let mut packages = BTreeMap::new();
+    for (settings, factory) in [
+        (&owner.settings.packages, false),
+        (&owner.settings.disabled_system_packages, true),
+    ] {
+        for setting in settings {
+            let stored = if factory {
+                owner.disabled_user_states(&setting.name)
+            } else {
+                owner.scanned_user_states(&setting.name)
+            }
+            .unwrap();
+            let ids: std::collections::BTreeSet<_> =
+                stored.keys().copied().chain([0, 10]).collect();
+            packages.insert(
+                (setting.name.clone(), factory),
+                PackageInputs {
+                    app_id: setting.app_id,
+                    path: setting.code_path.clone(),
+                    version: setting.version_code,
+                    installed_permissions: vec!["fixture.permission".into()],
+                    domain_verification: None,
+                    uri_relative_filter_groups: vec![],
+                    filter_application_query: true,
+                    syncable_authorities: vec![],
+                    users: ids
+                        .into_iter()
+                        .map(|id| {
+                            (
+                                id,
+                                UserInputs {
+                                    gids: vec![7],
+                                    granted_permissions: vec!["fixture.permission".into()],
+                                    domain_selection: None,
+                                },
+                            )
+                        })
+                        .collect(),
+                },
+            );
+        }
+    }
+    let mut retained_packages = BTreeMap::new();
+    let identities = &owner.identities;
+    let detached = identities.ids.owners().filter_map(|(id, _)| {
+        identities
+            .ids
+            .detached_setting(id)
+            .map(|setting| (id, setting))
+    });
+    let shared = identities.shared_users.values().flat_map(|group| {
+        group
+            .retained_settings()
+            .map(|(_, setting)| (group.app_id, setting))
+    });
+    for (id, old) in detached.chain(shared) {
+        let setting = &old.package;
+        retained_packages.insert(
+            (id, setting.name.clone()),
+            PackageInputs {
+                app_id: setting.app_id,
+                path: setting.code_path.clone(),
+                version: setting.version_code,
+                installed_permissions: vec!["fixture.permission".into()],
+                domain_verification: None,
+                uri_relative_filter_groups: vec![],
+                filter_application_query: true,
+                syncable_authorities: vec![],
+                users: old
+                    .users
+                    .keys()
+                    .copied()
+                    .chain([0, 10])
+                    .map(|id| {
+                        (
+                            id,
+                            UserInputs {
+                                gids: vec![7],
+                                granted_permissions: vec!["fixture.permission".into()],
+                                domain_selection: None,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        );
+    }
+    Context {
+        scan_version: version,
+        nonce: Some(version as i64),
+        system: model::System {
+            sdk_sandbox_package: Some(None),
+            ..Default::default()
+        },
+        platform: model::Platform::default(),
+        users: [0, 10]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    model::User {
+                        id,
+                        profile_group_id: id,
+                        unlocking_or_unlocked: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+        apex_inventory: ApexInventory {
+            packages: Some(vec![]),
+            active: vec![],
+        },
+        scan_users: ScanUsers {
+            users: Some(
+                [0, 10]
+                    .into_iter()
+                    .map(|id| User {
+                        id,
+                        pre_created: false,
+                        adb_install_disallowed: false,
+                    })
+                    .collect(),
+            ),
+        },
+        cross_user_suspensions: false,
+        packages,
+        retained_packages,
+    }
+}
+fn query_names(process: &Arc<LocalProcess>) -> Result<Option<String>, Exception> {
+    use aim_service_aidl::android_content_pm_ipackagemanagernative as api;
+    let mut p = Parcel::new();
+    p.write_interface_token(api::DESCRIPTOR);
+    p.write_i32(1);
+    p.write_i32(10100);
+    let reply = find(process, "query_native")
+        .transact(api::GET_NAMES_FOR_UIDS, &p, false)
+        .unwrap();
+    let mut r = reply.reader();
+    r.read_exception().unwrap()?;
+    assert_eq!(r.read_i32().unwrap(), 1);
+    let name = r.read_string16().unwrap();
+    assert_eq!(r.remaining(), 0);
+    Ok(name)
+}
+fn query_uid(process: &Arc<LocalProcess>, name: &str, user: i32) -> Result<i32, Exception> {
+    use aim_service_aidl::android_content_pm_ipackagemanagernative as api;
+    let mut p = Parcel::new();
+    api::GetPackageUid {
+        package_name: Some(name.into()),
+        flags: 0,
+        user_id: user,
+    }
+    .write(&mut p);
+    let reply = find(process, "query_native")
+        .transact(api::GET_PACKAGE_UID, &p, false)
+        .unwrap();
+    let mut r = reply.reader();
+    let uid = api::read_get_package_uid_reply(&mut r).unwrap()?;
+    assert_eq!(r.remaining(), 0);
+    Ok(uid)
+}
 fn replica_owner() -> crate::package::scan::SigningScan {
     use crate::package::{
         scan::{CapturedUsers, ReplicaRuntime, SigningScan},
@@ -620,6 +798,9 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     }));
     let node = native.add_service(Arc::new(ServiceHost::new(native.clone(), &system)));
     register(&native, "host", node);
+    let (_, queries) = crate::package::service::PackageQueries::from_system(&system);
+    register(&native, "query_native", native.add_service(queries));
+    assert!(query_names(&first).is_err_and(|error| error.code == -5));
     assert!(system.package_bootstrap().is_err());
     assert!(capture_scan(&first).is_err_and(|error| error.code == -5));
     assert!(capture_scan(&foreign).is_err_and(|error| error.code == -1));
@@ -696,6 +877,49 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     let published = system
         .publish_package_scan(&old, None, replica_owner(), usage())
         .unwrap();
+    let mut bad = query_context(&published);
+    bad.packages.clear();
+    assert!(
+        system
+            .publish_package_queries(&old, &published, bad)
+            .is_err()
+    );
+    let mut bad = query_context(&published);
+    bad.system.sdk_sandbox_package = None;
+    assert!(
+        system
+            .publish_package_queries(&old, &published, bad)
+            .is_err()
+    );
+    for kind in 0..4 {
+        let mut bad = query_context(&published);
+        let package = bad.packages.get_mut(&("fixture".into(), false)).unwrap();
+        match kind {
+            0 => package.app_id += 1,
+            1 => package.path.push_str("/foreign"),
+            2 => package.version += 1,
+            _ => {
+                package.users.remove(&0);
+            }
+        }
+        assert!(
+            system
+                .publish_package_queries(&old, &published, bad)
+                .is_err()
+        );
+    }
+    let query_capture = system
+        .publish_package_queries(&old, &published, query_context(&published))
+        .unwrap();
+    assert!(Arc::ptr_eq(query_capture.scan(), &published));
+    assert_eq!(query_capture.state().generation, published.version());
+    assert!(query_capture.state().packages["fixture"].users[&0].data_exists);
+    assert_eq!(query_names(&first).unwrap(), Some("fixture".into()));
+    assert!(
+        system
+            .publish_package_queries(&old, &published, query_context(&published))
+            .is_err()
+    );
     let old_lease = capture_scan(&second).unwrap();
     assert_eq!(scan_version(&old_lease).unwrap(), 1);
     assert!(
@@ -712,10 +936,43 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
             .publish_package_scan(&old, None, replica_owner(), usage())
             .is_err()
     );
+    assert!(Arc::ptr_eq(
+        &query_capture,
+        &system.capture_package_queries().unwrap()
+    ));
     let advanced = system
         .publish_package_scan(&old, Some(&published), replica_owner(), usage())
         .unwrap();
     assert_eq!(advanced.version(), 2);
+    assert!(query_names(&first).is_err_and(|error| error.code == -5));
+    assert!(
+        system
+            .publish_package_queries(&old, &published, query_context(&published))
+            .is_err()
+    );
+    assert!(
+        system
+            .publish_package_queries(&old, &advanced, query_context(&published))
+            .is_err()
+    );
+    let mut next_context = query_context(&advanced);
+    next_context
+        .packages
+        .get_mut(&("fixture".into(), false))
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .gids = vec![99];
+    let new_query = system
+        .publish_package_queries(&old, &advanced, next_context)
+        .unwrap();
+    assert_eq!(new_query.state().packages["fixture"].users[&0].gids, [99]);
+    assert_eq!(
+        query_capture.state().packages["fixture"].users[&0].gids,
+        [7]
+    );
+    assert_eq!(query_names(&first).unwrap(), Some("fixture".into()));
     assert!(
         system
             .publish_package_scan(&old, Some(&published), replica_owner(), usage())
@@ -723,6 +980,42 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     );
     assert_eq!(scan_version(&old_lease).unwrap(), 1);
     assert_eq!(scan_version(&capture_scan(&first).unwrap()).unwrap(), 2);
+    let mut atomic_context = query_context(&advanced);
+    atomic_context.scan_version += 1;
+    let mut bad = atomic_context.clone();
+    bad.packages.clear();
+    assert!(
+        system
+            .publish_package_scan_with_queries(&old, Some(&advanced), replica_owner(), usage(), bad)
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(
+        &advanced,
+        &system.capture_package_scan().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &new_query,
+        &system.capture_package_queries().unwrap()
+    ));
+    let atomic = system
+        .publish_package_scan_with_queries(
+            &old,
+            Some(&advanced),
+            replica_owner(),
+            usage(),
+            atomic_context,
+        )
+        .unwrap();
+    assert_eq!(atomic.scan().version(), advanced.version() + 1);
+    assert!(Arc::ptr_eq(
+        atomic.scan(),
+        &system.capture_package_scan().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &atomic,
+        &system.capture_package_queries().unwrap()
+    ));
+    assert_eq!(query_names(&first).unwrap(), Some("fixture".into()));
     let mut malformed = Parcel::new();
     host::CapturePackageScan {}.write(&mut malformed);
     malformed.write_i32(99);
@@ -1675,9 +1968,38 @@ fn verify_boot_scan(
     assert_eq!(complete, untouched);
     assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
-    let published = system
-        .complete_package_scan(bridge, Some(&base), complete, usage, BTreeMap::new())
+    let context = query_context_for(&complete, base.version() + 1);
+    let mut bad = context.clone();
+    bad.packages.remove(&("android".into(), false));
+    let old_query = system.capture_package_queries().unwrap();
+    assert!(
+        system
+            .complete_package_scan_with_queries(
+                bridge,
+                Some(&base),
+                complete.clone(),
+                usage.clone(),
+                BTreeMap::new(),
+                bad
+            )
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
+    assert!(Arc::ptr_eq(
+        &old_query,
+        &system.capture_package_queries().unwrap()
+    ));
+    let query = system
+        .complete_package_scan_with_queries(
+            bridge,
+            Some(&base),
+            complete,
+            usage,
+            BTreeMap::new(),
+            context,
+        )
         .unwrap();
+    let published = query.scan().clone();
     assert_eq!(published.version(), base.version() + 1);
     assert!(published.owner().loaded_packages().contains_key("android"));
     let bytes =
@@ -1693,6 +2015,22 @@ fn verify_boot_scan(
         &published,
         &system.capture_package_scan().unwrap()
     ));
+    let android = &query.state().packages["android"];
+    let loaded = &published.owner().loaded_packages()["android"];
+    assert_eq!(android.pkg.as_deref(), Some(&loaded.package));
+    assert_eq!(
+        android.signatures,
+        published
+            .owner()
+            .settings
+            .packages
+            .iter()
+            .find(|s| s.name == "android")
+            .unwrap()
+            .signatures
+    );
+    assert_eq!(android.pkg.as_ref().unwrap().uid, 1000);
+    assert_eq!(query_uid(client, "android", 0).unwrap(), 1000);
     let lease = capture_scan(client).unwrap();
     assert_eq!(scan_version(&lease).unwrap(), published.version() as i64);
     {

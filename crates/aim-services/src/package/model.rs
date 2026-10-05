@@ -28,6 +28,8 @@ pub struct State {
     pub disabled_system_packages: BTreeMap<String, PackageState>,
     /// By name.
     pub shared_users: BTreeMap<String, SharedUser>,
+    /// Native AppIdSettingMap slots; None is the original shadow-feed model.
+    pub uid_owners: Option<BTreeMap<i32, UidOwner>>,
     pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,
     pub apex_inventory: Option<super::bootstrap::ApexInventory>,
     pub scan_users: Option<super::bootstrap::ScanUsers>,
@@ -69,6 +71,8 @@ pub struct PackageState {
     pub app_id: i32,
     /// The shared user's name (`getSharedUser`; `hasSharedUser`).
     pub shared_user: Option<String>,
+    /// Declared relationship can outlive its registered shared UID group.
+    pub shared_user_app_id: Option<i32>,
     /// The code path.
     pub path: String,
     pub volume_uuid: Option<String>,
@@ -293,6 +297,12 @@ pub struct OverlayPaths {
     pub overlay_paths: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum UidOwner {
+    Package(Box<PackageState>),
+    SharedUser(String),
+}
+
 /// `SharedUserApi`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SharedUser {
@@ -304,6 +314,8 @@ pub struct SharedUser {
     pub seinfo_target_sdk_version: i32,
     /// Its packages' names.
     pub packages: Vec<String>,
+    /// Native current and retained instances, including distinct same-name owners.
+    pub native_packages: Option<Vec<PackageState>>,
     pub signatures: Option<Signatures>,
 }
 

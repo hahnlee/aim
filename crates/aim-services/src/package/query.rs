@@ -808,14 +808,11 @@ impl Query<'_> {
     /// shared user: filtered when every package of it is.
     fn shared_filtered(
         &self,
-        packages: &[String],
+        shared: &crate::package::model::SharedUser,
         user: i32,
         including_uninstalled: bool,
     ) -> Result<bool, NotModelled> {
-        let states: Vec<&PackageState> = packages
-            .iter()
-            .filter_map(|n| self.state.packages.get(n))
-            .collect();
+        let states: Vec<&PackageState> = apps_filter::shared_packages(self.state, shared).collect();
         let mut filter = true;
         for ps in states.iter().rev() {
             if !filter {
@@ -910,7 +907,9 @@ impl Query<'_> {
     fn package_names_for_app_id(&self, app_id: i32) -> Vec<String> {
         match setting(self.state, app_id) {
             Some(Setting::Package(ps)) => vec![ps.name.clone()],
-            Some(Setting::Shared(su)) => su.packages.clone(),
+            Some(Setting::Shared(su)) => apps_filter::shared_packages(self.state, su)
+                .map(|ps| ps.name.clone())
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -1348,9 +1347,8 @@ impl Query<'_> {
                     return Ok(None);
                 }
                 let mut names = Vec::new();
-                for n in &su.packages {
-                    if let Some(ps) = self.state.packages.get(n)
-                        && user_state(ps, user).installed
+                for ps in apps_filter::shared_packages(self.state, su) {
+                    if user_state(ps, user).installed
                         && !self.filtered(Some(ps), self.calling_uid, user)?
                     {
                         names.push(Some(ps.name.clone()));
@@ -1375,7 +1373,7 @@ impl Query<'_> {
         }
         let user = user_id(self.calling_uid);
         Ok(match setting(self.state, app_id(uid)) {
-            Some(Setting::Shared(su)) => (!self.shared_filtered(&su.packages, user, true)?)
+            Some(Setting::Shared(su)) => (!self.shared_filtered(su, user, true)?)
                 .then(|| format!("{}:{}", su.name, su.app_id)),
             Some(Setting::Package(ps)) => {
                 (!self.filtered_including_uninstalled(Some(ps), user)?).then(|| ps.name.clone())
@@ -1402,8 +1400,9 @@ impl Query<'_> {
                 return Err(NotModelled("a sandbox or isolated uid's name"));
             }
             names[i] = match setting(self.state, app_id(uid)) {
-                Some(Setting::Shared(su)) => (!self.shared_filtered(&su.packages, user, true)?)
-                    .then(|| format!("shared:{}", su.name)),
+                Some(Setting::Shared(su)) => {
+                    (!self.shared_filtered(su, user, true)?).then(|| format!("shared:{}", su.name))
+                }
                 Some(Setting::Package(ps)) => {
                     (!self.filtered_including_uninstalled(Some(ps), user)?).then(|| ps.name.clone())
                 }

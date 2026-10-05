@@ -66,6 +66,13 @@ impl SharedUser {
         self.packages.len() + self.retained.len()
     }
 
+    pub fn retained_settings(
+        &self,
+    ) -> impl Iterator<Item = (&str, &super::app_ids::DetachedSetting)> {
+        self.retained
+            .iter()
+            .map(|(name, setting)| (name.as_str(), setting.as_ref()))
+    }
     pub fn retained_setting(&self, name: &str) -> Option<&super::app_ids::DetachedSetting> {
         self.retained.get(name).map(std::sync::Arc::as_ref)
     }

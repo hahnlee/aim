@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn export(directory: &Path, snapshot: &Snapshot) {
+pub fn export(directory: &Path, snapshot: &std::sync::Arc<Snapshot>) {
     fs::create_dir_all(directory.join("group")).unwrap();
     fs::write(directory.join("version"), snapshot.version().to_string()).unwrap();
     for (settings, factory, scope) in [
@@ -93,6 +93,7 @@ pub fn export(directory: &Path, snapshot: &Snapshot) {
         names.sort();
         fs::write(directory.join(format!("{scope}-names")), names.join("\n")).unwrap();
     }
+    super::query_projection::export(directory, snapshot);
     let groups: Vec<_> = snapshot
         .owner()
         .identities

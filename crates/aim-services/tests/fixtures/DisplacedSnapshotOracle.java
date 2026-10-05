@@ -38,6 +38,8 @@ public final class DisplacedSnapshotOracle {
                     || original.getAppId() != 10003
                     || !INCOMING.equals(((com.android.server.pm.pkg.PackageStateInternal) original).getRealName()))
                 throw new AssertionError("displaced identities differ: " + index);
+            verifyQueries(new File(directory, "active"), snapshot.getPackageStates());
+            verifyQueries(new File(directory, "factory"), snapshot.getDisabledSystemPackageStates());
             // Cases cover independent/shared targets; each has pruned/active/disabled old groups.
             int keep = index % 3;
             boolean shared = index >= 3;
@@ -68,6 +70,52 @@ public final class DisplacedSnapshotOracle {
             catch (java.io.IOException expected) {}
         }
         verifyStore(directory, new File(directory.getParentFile(), directory.getName() + "-next"), visibility);
+    }
+    private static void verifyQueries(File directory, java.util.Map<String, ? extends com.android.server.pm.pkg.PackageState> states) throws Exception {
+        for (var s : states.values()) {
+            File root = new File(directory, s.getPackageName());
+            var p = android.os.Parcel.obtain();
+            try {
+                p.writeString(s.getPackageName()); p.writeInt(s.getAppId()); p.writeString(s.getPath().getPath());
+                p.writeString(s.getVolumeUuid()); p.writeString(s.getPrimaryCpuAbi()); p.writeString(s.getSecondaryCpuAbi());
+                p.writeString(s.getCpuAbiOverride()); p.writeString(s.getSeInfo()); p.writeString(s.getApexModuleName());
+                p.writeLong(s.getVersionCode()); p.writeInt(s.getTargetSdkVersion()); p.writeInt(s.getCategoryOverride());
+                p.writeInt(s.getHiddenApiEnforcementPolicy()); p.writeLong(s.getLastModifiedTime()); p.writeLong(s.getLastUpdateTime());
+                p.writeByteArray(s.getRestrictUpdateHash());
+                for (boolean value : new boolean[] { s.isSystem(),s.isPrivileged(),s.isOem(),s.isVendor(),s.isProduct(),s.isSystemExt(),s.isOdm(),s.isUpdatedSystemApp(),
+                        s.isApex(),s.isApkInUpdatedApex(),s.isHiddenUntilInstalled(),s.isDefaultToDeviceProtectedStorage(),s.isForceQueryableOverride(),
+                        s.isScannedAsStoppedSystemApp(),s.isUpdateAvailable(),s.isInstallPermissionsFixed(),s.isPendingRestore(),s.isDebuggable(),
+                        ((com.android.server.pm.pkg.PackageStateInternal)s).isLoading() }) p.writeInt(value ? 1 : 0);
+                s.getSigningInfo().writeToParcel(p, 0);
+                compareQuery(new File(root, "query-package"), p.marshall());
+            } finally { p.recycle(); }
+            for (String id : Files.readAllLines(new File(root, "query-users").toPath())) {
+                var u = s.getUserStateOrDefault(Integer.parseInt(id));
+                p = android.os.Parcel.obtain();
+                try {
+                    p.writeLong(u.getCeDataInode()); p.writeLong(u.getDeDataInode());
+                    for (boolean value : new boolean[] { u.isInstalled(),u.isStopped(),u.isNotLaunched(),u.isHidden(),u.isInstantApp(),u.isVirtualPreload(),u.isQuarantined(),u.dataExists(),u.isSuspended() }) p.writeInt(value ? 1 : 0);
+                    p.writeInt(u.getDistractionFlags()); p.writeInt(u.getEnabledState()); p.writeString(u.getLastDisableAppCaller());
+                    queryStrings(p, u.getEnabledComponents() == null ? java.util.List.of() : new java.util.TreeSet<>(u.getEnabledComponents()));
+                    queryStrings(p, u.getDisabledComponents() == null ? java.util.List.of() : new java.util.TreeSet<>(u.getDisabledComponents()));
+                    p.writeInt(u.getInstallReason()); p.writeInt(u.getUninstallReason()); p.writeString(u.getHarmfulAppWarning());
+                    p.writeString(u.getSplashScreenTheme()); p.writeLong(u.getFirstInstallTimeMillis()); p.writeInt(u.getMinAspectRatio());
+                    var paths = u.getAllOverlayPaths(); p.writeInt(paths == null ? 0 : 1);
+                    if (paths != null) { queryStrings(p, paths.getResourceDirs()); queryStrings(p, paths.getOverlayPaths()); }
+                    compareQuery(new File(root, "query-user-" + id), p.marshall());
+                } finally { p.recycle(); }
+            }
+        }
+    }
+    private static void queryStrings(android.os.Parcel p, java.util.Collection<String> values) {
+        p.writeInt(values.size()); for (String value : values) p.writeString(value);
+    }
+    private static void compareQuery(File expected, byte[] actual) throws Exception {
+        byte[] nativeBytes = Files.readAllBytes(expected.toPath());
+        if (!Arrays.equals(nativeBytes, actual)) {
+            int at = 0; while (at < Math.min(nativeBytes.length, actual.length) && nativeBytes[at] == actual[at]) at++;
+            throw new AssertionError("native query projection differs: " + expected + " byte " + at + " lengths " + nativeBytes.length + "/" + actual.length);
+        }
     }
     private static void verifyStore(File first, File next, dev.aim.server.PackageSnapshots.Owner visibility) throws Exception {
         Owner[] source = { new Owner(first) };

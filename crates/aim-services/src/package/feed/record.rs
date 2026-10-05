@@ -133,7 +133,9 @@ pub fn package(bytes: &[u8]) -> Result<(PackageState, Option<i32>)> {
         s.syncable_authorities
             .push((provider, string(r)?.unwrap_or_default()));
     }
-    Ok((s, bit(0).then_some(shared_user_app_id)))
+    s.shared_user_app_id = bit(0).then_some(shared_user_app_id);
+    let shared_id = s.shared_user_app_id;
+    Ok((s, shared_id))
 }
 
 fn user_state(r: &mut Reader<'_>) -> Result<PackageUserState> {

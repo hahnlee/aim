@@ -148,6 +148,9 @@ impl AppIds {
         Ok(ids)
     }
 
+    pub fn owners(&self) -> impl Iterator<Item = (i32, &Owner)> {
+        self.slots.iter().map(|(id, owner)| (*id, owner))
+    }
     pub fn get(&self, app_id: i32) -> Option<&Owner> {
         self.slots.get(&app_id)
     }

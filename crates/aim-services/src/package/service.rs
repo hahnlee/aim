@@ -3,7 +3,9 @@
 //! registered by guest-init: native scanning, mutation side effects and
 //! the SystemServer facade must pass the C gates first (#798).
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::RwLock;
 
 use aim_binder_host::local::{Call, Reply, Service};
 use aim_binder_host::parcel::{EX_UNSUPPORTED_OPERATION, Exception, Parcel, UNKNOWN_TRANSACTION};
@@ -11,6 +13,7 @@ use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 use aim_service_aidl::android_content_pm_ipackagemanagernative as native;
 
 use super::apps_filter::NotModelled;
+#[cfg(test)]
 use super::model::State;
 use super::query::Query;
 use super::resolve::Resolver;
@@ -19,21 +22,60 @@ use super::resolve::Resolver;
 /// captures one immutable snapshot; publication does not invalidate
 /// Binder references already held by clients.
 pub struct PackageQueries {
-    state: Arc<RwLock<Arc<State>>>,
+    source: Source,
     resolver: Arc<Resolver>,
     native: bool,
 }
 
+enum Source {
+    Native(
+        Arc<
+            dyn Fn() -> Result<Arc<super::scan_snapshot::query_state::Capture>, Exception>
+                + Send
+                + Sync,
+        >,
+    ),
+    #[cfg(test)]
+    Fixture(Arc<RwLock<Arc<State>>>),
+}
 impl PackageQueries {
+    pub fn from_system(system: &Arc<crate::system::System>) -> (Arc<Self>, Arc<Self>) {
+        let system = Arc::downgrade(system);
+        let source = Arc::new(move || {
+            system
+                .upgrade()
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native system owner is unavailable",
+                    )
+                })?
+                .capture_package_queries()
+        });
+        let resolver = Arc::new(Resolver::default());
+        (
+            Arc::new(Self {
+                source: Source::Native(source.clone()),
+                resolver: resolver.clone(),
+                native: false,
+            }),
+            Arc::new(Self {
+                source: Source::Native(source),
+                resolver,
+                native: true,
+            }),
+        )
+    }
+    #[cfg(test)]
     pub fn new(state: Arc<RwLock<Arc<State>>>) -> (Arc<Self>, Arc<Self>) {
         let resolver = Arc::new(Resolver::default());
         let package = Arc::new(Self {
-            state: state.clone(),
+            source: Source::Fixture(state.clone()),
             resolver: resolver.clone(),
             native: false,
         });
         let package_native = Arc::new(Self {
-            state,
+            source: Source::Fixture(state),
             resolver,
             native: true,
         });
@@ -65,7 +107,24 @@ impl Service for PackageQueries {
         call.data.enforce_interface(self.descriptor())?;
         call.data.set_position(position);
         let uid = call.sender_euid as i32;
-        let state = self.state.read().unwrap().clone();
+        let capture = match &self.source {
+            Source::Native(source) => match source() {
+                Ok(capture) => Some(capture),
+                Err(error) => {
+                    let mut reply = Parcel::new();
+                    reply.write_exception(&error);
+                    return Ok(reply);
+                }
+            },
+            #[cfg(test)]
+            Source::Fixture(_) => None,
+        };
+        let state = match (&self.source, &capture) {
+            (Source::Native(_), Some(capture)) => capture.state().clone(),
+            #[cfg(test)]
+            (Source::Fixture(state), _) => state.read().unwrap().clone(),
+            _ => unreachable!(),
+        };
         let resolved = (!self.native)
             .then(|| self.resolver.query(&state, call.code, uid, &mut call.data))
             .flatten();
@@ -200,9 +259,12 @@ mod tests {
             read.read_string16().unwrap()
         };
         assert_eq!(name().as_deref(), Some("example.app"));
-        let mut next = (**package.state.read().unwrap()).clone();
+        let Source::Fixture(state) = &package.source else {
+            unreachable!()
+        };
+        let mut next = (**state.read().unwrap()).clone();
         next.packages.clear();
-        *package.state.write().unwrap() = Arc::new(next);
+        *state.write().unwrap() = Arc::new(next);
         assert_eq!(name().as_deref(), Some(""));
         let mut enabled = Parcel::new();
         enabled.write_interface_token(pm::DESCRIPTOR);

@@ -5,6 +5,7 @@ mod common {
     pub mod java;
     pub mod runtime;
     pub mod snapshot_oracle;
+    pub mod query_projection;
 }
 
 use aim_services::package::{

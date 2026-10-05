@@ -90,6 +90,14 @@ pub enum Setting<'a> {
 
 /// The setting of an app id.
 pub fn setting(state: &State, app_id: i32) -> Option<Setting<'_>> {
+    if let Some(owners) = &state.uid_owners {
+        return match owners.get(&app_id)? {
+            super::model::UidOwner::Package(package) => Some(Setting::Package(package)),
+            super::model::UidOwner::SharedUser(name) => {
+                state.shared_users.get(name).map(Setting::Shared)
+            }
+        };
+    }
     if let Some(su) = state.shared_users.values().find(|s| s.app_id == app_id) {
         return Some(Setting::Shared(su));
     }
@@ -101,13 +109,19 @@ pub fn setting(state: &State, app_id: i32) -> Option<Setting<'_>> {
 }
 
 /// A shared user's packages.
-fn shared_packages<'a>(
+pub(crate) fn shared_packages<'a>(
     state: &'a State,
     su: &'a SharedUser,
 ) -> impl Iterator<Item = &'a PackageState> {
-    su.packages
+    su.native_packages
         .iter()
-        .filter_map(|name| state.packages.get(name))
+        .flat_map(|packages| packages.iter())
+        .chain(su.packages.iter().filter_map(|name| {
+            su.native_packages
+                .is_none()
+                .then(|| state.packages.get(name))
+                .flatten()
+        }))
 }
 
 /// `AppsFilterImpl`'s settled relations, by app id.

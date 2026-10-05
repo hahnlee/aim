@@ -1233,8 +1233,24 @@ including those checks, native-written original ABX reads and six seeded
 original-service boots, passes (90.92s). It requires both SDK and signing
 owners; missing owners and uninitialized replicas fail explicitly. The fixture
 injects the original verifier as its controlled signing owner; production uses
-the native owner described above. The facade is not registered, and native
-visibility/version-page refresh and default native activation remain unproved;
+the native owner described above. The C query endpoints now capture the native System's query owner instead of
+accepting an independent production model state (#951). Query projection binds
+package identities and external permission/domain/compatibility inputs to one
+scan version. Atomic scan/query publication validates both before replacing
+either; staged scan publication invalidates the old query owner until a matching
+context is supplied. Controlled native Binder and real framework-APK tests pass,
+including failed-publication preservation and older captures. Native query UID
+lookup now uses the captured AppIds slots, preserving detached settings and
+same-name retained shared members separately from current packages (#952).
+Declared shared IDs survive pruning of their live group. Original ART matches
+core package getters and per-user defaults/overlays/signing on all six actual
+native displaced graphs; the complete first-system fixture passes (103.25s).
+Release units pass (476; four ignored), including missing UID slots and retained
+member installation filtering; explicit service-host tests pass (six, 2.96s).
+This compares controlled external permission/domain/compatibility inputs, not a
+running production context producer. Full original UID-query/visibility parity
+and production external-owner publication remain unproved. The facade is not registered, and
+native visibility/version-page refresh and default native activation remain unproved;
 original debug-build application remains unrun (#946). System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes
 runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
