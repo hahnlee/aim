@@ -1411,6 +1411,25 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                         .join(format!("case-{index}")),
                     &capture,
                 );
+                let next_store = aim_services::package::scan_snapshot::Store::new_replica(
+                    owner.clone(),
+                    capture.usage().clone(),
+                )
+                .unwrap();
+                let next = next_store
+                    .publish(
+                        &next_store.capture(),
+                        owner.clone(),
+                        capture.usage().clone(),
+                    )
+                    .unwrap();
+                common::snapshot_oracle::export(
+                    &fixture
+                        .0
+                        .join("snapshot-oracle/captures")
+                        .join(format!("case-{index}-next")),
+                    &next,
+                );
                 displaced_case += 1;
                 for (settings, factory) in [
                     (&owner.settings.packages, false),

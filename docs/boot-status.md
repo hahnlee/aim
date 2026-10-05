@@ -662,7 +662,7 @@ Proxy/Stub and PackageScanLease.captureData on original ART: the snapshot contai
 one active setting and two distinct same-name shared members (one loaded, one
 unparsed), preserves both after lease close, and returns detached member
 containers. Removing the current member from the advertised package inventory
-still rejects assembly. The complete package Parcel oracle passes (32.01s), and
+still rejects assembly. The complete package Parcel oracle passes (26.20s), and
 the checked Java/image/template build passes (56.0s). This verifies that captured
 graph; the six displaced-request captureData graphs also pass (below). Native
 daemon publication remains #836/#798. The displaced-setting owner and recovery
@@ -1038,8 +1038,8 @@ markers. Shared process ownership validates the displacement binding and exclude
 the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
 and removal; the complete first-system scan, including Java assembly and six
-original-service boots from native-written settings, passes (86.62s). The full package
-Parcel oracle passes (32.01s); release units pass 466 cases (0.47s), with three
+original-service boots from native-written settings, passes (88.02s). The full package
+Parcel oracle passes (26.20s); release units pass 466 cases (0.47s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
 validation accounts for the original pending-package drop after proving the
@@ -1067,14 +1067,14 @@ captures. Setting removal stages all changes so a missing group input leaves
 the earlier owner unchanged. APEX replacement uses the same group cleanup once.
 The complete first-system scan now passes the six native accepted captures through
 generated Binder Proxy/Stub and original ART's PackageScanLease.captureData
-as part of the complete first-system test (86.62s). Pruned/active/disabled old
+as part of the complete first-system test (88.02s). Pruned/active/disabled old
 groups and independent/shared original targets
 preserve the incoming unparsed setting outside group membership, the loaded
 original's real-name/UID binding, distinct current/retained original instances,
 and factory inventory. Captured replicas remain usable after lease close. Each
 case rejects an advertised inventory missing the accepted original. The full
 original ART Parcel oracle, including shared APEX adoption/replacement, passes
-(32.01s). Original Settings.readLPw now reads the actual native-written ABX for
+(26.20s). Original Settings.readLPw now reads the actual native-written ABX for
 all six cases: missing groups drop incoming settings, surviving groups rejoin
 them, and original UID/factory inventories match. Each actual file is also
 injected byte-for-byte into the stopped disposable data image, with old resilient
@@ -1089,7 +1089,7 @@ owner (#934), matching InstallPackageHelper's realPkgName commit branch. All six
 independent/shared and pruned/active/disabled cases produce exactly that one
 transfer; an earlier metadata failure produces neither a transfer nor loaded
 original code. Transfer recording occurs only after metadata completion. The
-expanded first-system test passes (86.62s), and release units pass 466 cases
+expanded first-system test passes (88.02s), and release units pass 466 cases
 (0.47s), with three ignored/not run. This does not compare the complete later boot
 scan request stream. Full original request parity and transfer publication remain
 #919,
@@ -1123,8 +1123,24 @@ bootstrap/publication test passes (0.68s). The production host build passes
 (15.3s; three rebuilt, 39 fresh). The
 full image/original-PMS template build passes (65.1s; nine rebuilt, 33 fresh). This
 connects complete native publication to the service-host transport; the running
-boot flow does not yet invoke publication, and SystemServer does not yet request
-these leases as its query owner. System.complete_package_scan now resolves
+boot flow does not yet invoke publication, and the default SystemServer bootstrap
+does not yet invoke the replica consumer. PackageBootstrapBridge.captureSnapshots
+now binds a Java PackageSnapshots.Store to IServiceHost.capturePackageScan and
+requires a complete initial refresh before returning it (#939). The Store
+publishes only after complete assembly and successful lease close, reuses
+same-version replicas, rejects backwards versions and preserves earlier scopes.
+Missing endpoints and capture/assembly/close failures keep the prior Data graph.
+PackageScanLease also closes an endpoint when its initial version read fails or
+returns a nonpositive version, preserving close failures as suppressed errors.
+For all six accepted displaced native graphs, the fixture exports authentic
+native versions 1 and 2. Original ART's generated Proxy/Stub page sources verify
+initial/same/newer refresh, failed newer assembly, close failure/retry, stale and
+invalid versions, initial version/close failure, missing endpoints and retained
+old-scope identity as part of the first-system test (88.02s). The full original
+ART Parcel oracle passes (26.20s), and the image/original-PMS template build
+passes (57.6s; six rebuilt, 36 fresh). This remains a
+controlled Java page source over actual native records; the live daemon producer,
+facade registration and native visibility callbacks remain #798/#836. System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes
 runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
 and publishes through that same bridge/base gate (#937). Original policy calls

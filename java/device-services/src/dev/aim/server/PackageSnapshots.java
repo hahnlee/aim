@@ -1,6 +1,8 @@
 package dev.aim.server;
 
 import android.os.UserHandle;
+import android.os.RemoteException;
+import java.io.IOException;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.PackageState;
 import com.android.server.pm.pkg.PackageStateInternal;
@@ -18,6 +20,58 @@ public final class PackageSnapshots {
     public interface Owner {
         String getFilteredPackageName(long version, String name, int callingUid, int userId);
         boolean shouldFilter(long version, PackageState state, int callingUid, int userId);
+    }
+
+    @FunctionalInterface
+    public interface Source {
+        IPackageScanSnapshot capture() throws RemoteException;
+    }
+
+    /** One service-host lifetime; a new host Binder requires a new Store. */
+    public static final class Store {
+        private final Source source;
+        private final Owner owner;
+        private final boolean crossUserSuspensions;
+        private volatile Data current;
+
+        public Store(Source source, Owner owner, boolean crossUserSuspensions) {
+            this.source = Objects.requireNonNull(source);
+            this.owner = Objects.requireNonNull(owner);
+            this.crossUserSuspensions = crossUserSuspensions;
+        }
+
+        public synchronized long refresh() throws RemoteException, IOException {
+            var endpoint = source.capture();
+            if (endpoint == null) throw new IOException("missing native snapshot endpoint");
+            Data next;
+            try (var lease = new PackageScanLease(endpoint)) {
+                long version = lease.getVersion();
+                if (current != null) {
+                    if (version < current.version) throw new IOException("native snapshot version moved backwards");
+                    if (version == current.version) return version;
+                }
+                next = lease.captureData(owner, crossUserSuspensions);
+            }
+            current = next;
+            return next.version;
+        }
+
+        private Data capture() {
+            Data data = current;
+            if (data == null) throw new IllegalStateException("native package replica is unavailable");
+            return data;
+        }
+
+        public long getVersion() { return capture().version; }
+
+        public PackageManagerLocal.UnfilteredSnapshot unfiltered() {
+            return PackageSnapshots.unfiltered(capture());
+        }
+
+        public PackageManagerLocal.FilteredSnapshot filtered(int callingUid,
+                UserHandle user, PackageState uncommitted) {
+            return PackageSnapshots.filtered(capture(), callingUid, user, uncommitted);
+        }
     }
 
     /** Records must be immutable and keep their identity for the same version. */

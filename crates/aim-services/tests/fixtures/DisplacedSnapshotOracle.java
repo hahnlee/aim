@@ -60,10 +60,69 @@ public final class DisplacedSnapshotOracle {
             try { lease.captureData(visibility, true); throw new AssertionError("missing accepted original allowed"); }
             catch (java.io.IOException expected) {}
         }
+        verifyStore(directory, new File(directory.getParentFile(), directory.getName() + "-next"), visibility);
+    }
+    private static void verifyStore(File first, File next, dev.aim.server.PackageSnapshots.Owner visibility) throws Exception {
+        Owner[] source = { new Owner(first) };
+        var store = new dev.aim.server.PackageSnapshots.Store(
+                () -> source[0] == null ? null : dev.aim.server.IPackageScanSnapshot.Stub.asInterface(source[0]), visibility, true);
+        try { store.unfiltered(); throw new AssertionError("uninitialized store accepted"); }
+        catch (IllegalStateException expected) {}
+        long version = source[0].getVersion();
+        if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("initial refresh differs");
+        try (var old = store.unfiltered()) {
+            var original = old.getPackageStates().get(ORIGINAL);
+            source[0] = new Owner(first);
+            if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("same-version lease leaked");
+            try (var same = store.unfiltered()) {
+                if (same.getPackageStates().get(ORIGINAL) != original) throw new AssertionError("same-version identity changed");
+            }
+            source[0] = new Owner(next);
+            source[0].omitOriginal = true;
+            try { store.refresh(); throw new AssertionError("partial newer graph published"); }
+            catch (java.io.IOException expected) {}
+            if (store.getVersion() != version || source[0].closes != 1) throw new AssertionError("failed capture changed store");
+            source[0] = new Owner(next);
+            source[0].failClose = true;
+            try { store.refresh(); throw new AssertionError("failed close published graph"); }
+            catch (IllegalStateException expected) {}
+            if (store.getVersion() != version || source[0].closes != 1) throw new AssertionError("failed close changed store");
+            source[0] = new Owner(next);
+            if (store.refresh() != version + 1 || source[0].closes != 1) throw new AssertionError("newer retry differs");
+            try (var newer = store.unfiltered()) {
+                if (newer.getPackageStates().get(ORIGINAL) == original) throw new AssertionError("different versions reused a replica");
+                if (old.getPackageStates().get(ORIGINAL) != original) throw new AssertionError("old scope changed");
+            }
+            source[0] = new Owner(first);
+            try { store.refresh(); throw new AssertionError("backwards version accepted"); }
+            catch (java.io.IOException expected) {}
+            if (source[0].closes != 1) throw new AssertionError("stale lease leaked");
+            source[0] = new Owner(next);
+            source[0].failVersion = true;
+            source[0].failClose = true;
+            try { store.refresh(); throw new AssertionError("failed initial version accepted"); }
+            catch (IllegalStateException expected) {
+                if (expected.getSuppressed().length != 1) throw new AssertionError("initial close failure lost");
+            }
+            if (source[0].closes != 1) throw new AssertionError("initial failure lease leaked");
+            source[0] = new Owner(next);
+            source[0].versionOverride = 0L;
+            try { store.refresh(); throw new AssertionError("invalid version accepted"); }
+            catch (IllegalStateException expected) {}
+            if (source[0].closes != 1) throw new AssertionError("invalid version lease leaked");
+            source[0] = null;
+            try { store.refresh(); throw new AssertionError("missing endpoint accepted"); }
+            catch (java.io.IOException expected) {}
+            if (store.getVersion() != version + 1 || old.getPackageStates().get(ORIGINAL) != original)
+                throw new AssertionError("rejected refresh replaced state");
+        }
     }
     private static final class Owner extends dev.aim.server.IPackageScanSnapshot.Stub {
         private final File directory;
         boolean omitOriginal;
+        boolean failVersion;
+        boolean failClose;
+        Long versionOverride;
         int closes;
         Owner(File directory) { this.directory = directory; }
         private byte[] read(String path) {
@@ -77,7 +136,10 @@ public final class DisplacedSnapshotOracle {
         private int length(String path) { byte[] bytes = read(path); return bytes == null ? -1 : bytes.length; }
         private byte[] chunk(String path, int offset, int length) { return Arrays.copyOfRange(java.util.Objects.requireNonNull(read(path)), offset, offset + length); }
         @Override public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
-        @Override public long getVersion() { return Long.parseLong(lines("version")[0]); }
+        @Override public long getVersion() {
+            if (failVersion) throw new IllegalStateException("fixture version failure");
+            return versionOverride == null ? Long.parseLong(lines("version")[0]) : versionOverride;
+        }
         @Override public String[] getPackageNames(boolean factory) {
             return Arrays.stream(lines(factory ? "factory-names" : "active-names")).filter(n -> factory || !omitOriginal || !n.equals(ORIGINAL)).toArray(String[]::new);
         }
@@ -100,6 +162,6 @@ public final class DisplacedSnapshotOracle {
         @Override public byte[] getSeInfo(String n) { throw new UnsupportedOperationException("scoped runtime owns seInfo"); }
         @Override public int getLibraryStateLength(String n) { throw new UnsupportedOperationException("scoped runtime owns libraries"); }
         @Override public byte[] getLibraryStateChunk(String n, int o, int l) { throw new UnsupportedOperationException("scoped runtime owns libraries"); }
-        @Override public void close() { closes++; }
+        @Override public void close() { closes++; if (failClose) throw new IllegalStateException("fixture close failure"); }
     }
 }

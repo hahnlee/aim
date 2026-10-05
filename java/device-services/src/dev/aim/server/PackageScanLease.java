@@ -38,7 +38,14 @@ public final class PackageScanLease implements AutoCloseable {
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
         this.endpoint = Objects.requireNonNull(endpoint);
-        version = endpoint.getVersion();
+        try {
+            version = endpoint.getVersion();
+            if (version <= 0) throw new IllegalStateException("invalid native snapshot version");
+        } catch (RemoteException | RuntimeException failure) {
+            try { endpoint.close(); }
+            catch (RemoteException | RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
+            throw failure;
+        }
     }
 
     public long getVersion() { return version; }

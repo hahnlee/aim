@@ -49,6 +49,17 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         IServiceHost.Stub.asInterface(host).attachPackageBootstrapBridge(new PackageBootstrapBridge(domains));
     }
 
+    /** Capture a complete native replica before exposing the facade's scopes. */
+    public static PackageSnapshots.Store captureSnapshots(PackageSnapshots.Owner owner,
+            boolean crossUserSuspensions) throws RemoteException, java.io.IOException {
+        IBinder binder = ServiceManager.checkService("aim.service_host");
+        if (binder == null) throw new IllegalStateException("native service host is unavailable");
+        var host = IServiceHost.Stub.asInterface(binder);
+        var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions);
+        snapshots.refresh();
+        return snapshots;
+    }
+
     @Override
     public boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk) {
         enforceSystemUid();
