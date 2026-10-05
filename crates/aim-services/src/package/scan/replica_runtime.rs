@@ -130,6 +130,45 @@ fn identities(owner: &SigningScan) -> BTreeMap<(String, bool), Identity> {
 }
 
 impl SigningScan {
+    pub(super) fn remove_setting_runtime(&mut self, name: &str) {
+        if let Some(assigned) = &mut self.replica_runtime {
+            let key = (name.into(), false);
+            assigned.identities.remove(&key);
+            assigned.values.remove(&key);
+        }
+    }
+
+    pub(super) fn original_setting_runtime(
+        &self,
+        setting: &crate::package::settings::Package,
+    ) -> Result<Option<ReplicaRuntime>, String> {
+        let Some(assigned) = &self.replica_runtime else {
+            return Ok(None);
+        };
+        let key = (setting.name.clone(), false);
+        let current = identities(self);
+        let identity = current
+            .get(&key)
+            .ok_or("original runtime setting is missing")?;
+        if self
+            .settings
+            .packages
+            .iter()
+            .find(|p| p.name == setting.name)
+            != Some(setting)
+            || identity.code.is_some()
+            || assigned.identities.get(&key) != Some(identity)
+        {
+            return Err("original runtime setting identity differs".into());
+        }
+        assigned
+            .values
+            .get(&key)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| "original runtime input is missing".into())
+    }
+
     /// Import an entire original snapshot's runtime inventory after matching
     /// the native scan's settings and code scope. A rejected source changes nothing.
     pub fn capture_original_runtime(
@@ -367,6 +406,32 @@ mod tests {
             })
             .collect()
     }
+    #[test]
+    fn original_runtime_retention_checks_its_source_before_full_recompletion() {
+        let mut owner = owner();
+        let original = owner.settings.packages[0].clone();
+        let mut other = original.clone();
+        other.name = "other".into();
+        other.app_id += 1;
+        owner.settings.packages.push(other);
+        let mut runtime = values();
+        runtime.insert(
+            ("other".into(), false),
+            runtime[&("p".into(), false)].clone(),
+        );
+        owner.capture_replica_runtime(runtime.clone()).unwrap();
+        owner.settings.packages[1].version_code += 1;
+        assert!(owner.validate_replica_runtime(None).is_err());
+        assert_eq!(
+            owner.original_setting_runtime(&original).unwrap(),
+            Some(runtime[&("p".into(), false)].clone())
+        );
+        owner.settings.packages[0].version_code += 1;
+        assert!(owner.original_setting_runtime(&original).is_err());
+        let changed = owner.settings.packages[0].clone();
+        assert!(owner.original_setting_runtime(&changed).is_err());
+    }
+
     #[test]
     fn scoped_inventory_rejects_partial_foreign_and_stale_owners_atomically() {
         let mut owner = owner();

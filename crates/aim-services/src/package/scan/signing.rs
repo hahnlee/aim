@@ -959,11 +959,7 @@ impl SigningScan {
             } else {
                 None
             },
-            runtime: if self.replica_runtime.is_some() {
-                self.replica_runtime(&original.name, false)?.cloned()
-            } else {
-                None
-            },
+            runtime: self.original_setting_runtime(original)?,
         };
         if original.shared_user {
             self.identities

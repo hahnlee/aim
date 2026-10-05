@@ -141,17 +141,24 @@ impl SigningScan {
         self.validate_legacy_permissions()
     }
 
-    pub(super) fn prune_legacy_shared(&mut self, id: i32) -> Result<(), String> {
+    pub(super) fn remove_legacy_shared(&mut self, name: &str) -> Result<(), String> {
         if let Some(owners) = &mut self.legacy_permissions {
-            let name = owners
+            owners
                 .shared_users
-                .iter()
-                .find(|(_, (value, _))| *value == id)
-                .map(|(name, _)| name.clone())
-                .ok_or("pruned legacy shared owner is missing")?;
-            owners.shared_users.remove(&name);
+                .remove(name)
+                .ok_or("removed legacy shared owner is missing")?;
         }
-        self.validate_legacy_permissions()
+        Ok(())
+    }
+
+    pub(super) fn remove_setting_legacy(&mut self, name: &str) {
+        if let Some(owners) = &mut self.legacy_permissions {
+            let key = (name.into(), false);
+            owners.packages.remove(&key);
+            if let Some(fixed) = &mut owners.install_fixed {
+                fixed.remove(&key);
+            }
+        }
     }
 
     /// Called only after the complete inventory and disable preconditions
@@ -402,6 +409,47 @@ mod tests {
         settings::{Package, Settings, SharedUser},
     };
     use std::sync::Arc;
+
+    #[test]
+    fn failed_group_input_removal_preserves_the_complete_setting_owner() {
+        let settings = Settings {
+            packages: vec![Package {
+                name: "fixture".into(),
+                app_id: 10043,
+                shared_user: true,
+                ..Default::default()
+            }],
+            shared_users: vec![SharedUser {
+                name: "group".into(),
+                app_id: 10043,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let groups = owner
+            .identities
+            .shared_users
+            .keys()
+            .map(|name| (name.clone(), Migration::default()))
+            .collect();
+        owner
+            .capture_legacy_permissions(
+                &[0],
+                BTreeMap::from([(("fixture".into(), false), Migration::default())]),
+                groups,
+            )
+            .unwrap();
+        owner
+            .legacy_permissions
+            .as_mut()
+            .unwrap()
+            .shared_users
+            .remove("group");
+        let prior = owner.clone();
+        assert!(owner.remove_package_setting("fixture").is_err());
+        assert_eq!(owner, prior);
+    }
 
     #[test]
     fn setting_and_shared_migration_captures_are_distinct_and_publish_atomically() {

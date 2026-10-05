@@ -1036,8 +1036,8 @@ UNKNOWN signing restoration, rejection after loading code and three malformed
 markers. Shared process ownership validates the displacement binding and excludes
 the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
-and removal; the complete first-system scan passes (13.77s). The full package
-Parcel oracle passes (25.25s); release units pass 463 cases (0.49s), with three
+and removal; the complete first-system scan passes (15.51s). The full package
+Parcel oracle passes (32.01s); release units pass 465 cases (0.49s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
 validation accounts for the original pending-package drop after proving the
@@ -1051,7 +1051,20 @@ setting removal clears the accepted displacement binding, keeps other/disabled
 UID owners, returns the original removal result when the old slot is already
 absent, and rejects a foreign UID owner without changing state. Original ART
 checks deletion and repeated deletion after each of its six recreation cases;
-previous native captures retain their incoming signing records. Complete Java
+previous native captures retain their incoming signing records. Complete native
+replica-input fixtures now capture every active/factory setting's users,
+legacy/fixed permission inputs and saved runtime before recreation, resolve
+loaded library/runtime owners after scanning, and emit scalar/runtime/user
+records for all six shared-origin transitions (#930–#932). Original-setting
+retention checks the exact unparsed source and its runtime identity even when
+an earlier scan has made unrelated whole-scan assignments stale; final captures
+still require the full runtime inventory to match. Actual shared-group pruning
+removes its captured legacy owner, and active setting removal forgets its own
+legacy/fixed/runtime inputs while preserving factory scopes and previous
+captures. Setting removal stages all changes so a missing group input leaves
+the earlier owner unchanged. APEX replacement uses the same group cleanup once.
+The complete first-system scan passes (15.51s), and the full original ART Parcel
+oracle, including shared APEX adoption/replacement, passes (32.01s). Complete Java
 snapshot assembly, a full original reboot of native-written displaced data and
 other displaced-setting mutations remain #929. Full original
 request parity and transfer publication remain #919,

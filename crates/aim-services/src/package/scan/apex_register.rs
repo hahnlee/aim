@@ -430,7 +430,7 @@ impl SigningScan {
                 let old = previous.as_ref().unwrap();
                 if staged.detach_shared_member(old)? {
                     staged
-                        .prune_legacy_shared(old.shared_app_id().unwrap())
+                        .validate_legacy_permissions()
                         .map_err(|message| fail("apex-legacy", message))?;
                 }
             }

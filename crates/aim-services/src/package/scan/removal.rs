@@ -59,6 +59,8 @@ impl SigningScan {
                 .iter()
                 .any(|p| p.shared_app_id() == Some(id));
         if !used {
+            self.remove_legacy_shared(&name)
+                .map_err(|message| fail(&message))?;
             self.identities.remove_shared_user(&name);
             self.settings.shared_users.retain(|g| g.name != name);
             self.identities.ids.remove(id);
@@ -71,6 +73,16 @@ impl SigningScan {
     /// code. Permission uninstall reconciliation follows this step (#822/#798).
     /// No persistence, keystore work or query publication is implicit here.
     pub fn remove_package_setting(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<RemovedSetting>, SigningError> {
+        let mut staged = self.clone();
+        let result = staged.remove_package_setting_inner(name)?;
+        *self = staged;
+        Ok(result)
+    }
+
+    fn remove_package_setting_inner(
         &mut self,
         name: &str,
     ) -> Result<Option<RemovedSetting>, SigningError> {
@@ -125,6 +137,8 @@ impl SigningScan {
         };
         self.forget_displaced_shared_setting(name);
         self.scanned_users.remove(name);
+        self.remove_setting_legacy(name);
+        self.remove_setting_runtime(name);
         Ok(Some(RemovedSetting {
             package,
             app_id_removed,

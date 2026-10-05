@@ -1161,6 +1161,73 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             .clone();
         let mut owner =
             aim_services::package::scan::SigningScan::new(&config, &settings, 36).unwrap();
+        if incoming_shared && !invalid_page_size {
+            let scopes: Vec<_> = owner
+                .settings
+                .packages
+                .iter()
+                .map(|p| (p, false))
+                .chain(
+                    owner
+                        .settings
+                        .disabled_system_packages
+                        .iter()
+                        .map(|p| (p, true)),
+                )
+                .collect();
+            let users = scopes
+                .iter()
+                .map(|(p, factory)| {
+                    (
+                        (p.name.clone(), *factory),
+                        aim_services::package::scan::CapturedUsers {
+                            states: both_users
+                                .get(&p.name)
+                                .unwrap_or(&both_users["com.google.android.gsf"])
+                                .clone(),
+                            active_aliases: Default::default(),
+                        },
+                    )
+                })
+                .collect();
+            let migrations = scopes
+                .iter()
+                .map(|(p, factory)| ((p.name.clone(), *factory), Default::default()))
+                .collect();
+            let fixed = scopes
+                .iter()
+                .map(|(p, factory)| ((p.name.clone(), *factory), true))
+                .collect();
+            let runtime = scopes
+                .iter()
+                .map(|(p, factory)| {
+                    (
+                        (p.name.clone(), *factory),
+                        aim_services::package::scan::ReplicaRuntime {
+                            usage: [0; 8],
+                            seinfo: None,
+                            override_seinfo: None,
+                            library_files: vec![],
+                            libraries: vec![],
+                        },
+                    )
+                })
+                .collect();
+            let groups = owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect();
+            let user_ids: Vec<_> = both_users[&old.name].keys().copied().collect();
+            // Explicit saved constructor-state inputs for complete replica transport.
+            owner.capture_user_states(users).unwrap();
+            owner
+                .capture_legacy_permissions(&user_ids, migrations, groups)
+                .unwrap();
+            owner.capture_install_permissions_fixed(fixed).unwrap();
+            owner.capture_replica_runtime(runtime).unwrap();
+        }
         let mut image = Image::parse(&apks, &[]).unwrap();
         image.packages[1].parsed.shared_user_id = shared.then(|| "fixture.original.group".into());
         image.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
@@ -1288,9 +1355,86 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 let usage = aim_services::package::owner::usage::Usage::new(
                     owner.settings.packages.iter().map(|p| p.name.as_str()),
                 );
+                owner
+                    .complete_library_dependencies(&|_, _| {
+                        Ok(aim_services::package::libraries::Policy::pinned(false))
+                    })
+                    .unwrap();
+                let retained = owner
+                    .settings
+                    .packages
+                    .iter()
+                    .map(|p| (p, false))
+                    .filter(|(p, _)| !owner.loaded_packages().contains_key(&p.name))
+                    .chain(
+                        owner
+                            .settings
+                            .disabled_system_packages
+                            .iter()
+                            .map(|p| (p, true)),
+                    )
+                    .map(|(p, factory)| {
+                        (
+                            (p.name.clone(), factory),
+                            aim_services::package::scan::OriginalRuntime {
+                                name: p.name.clone(),
+                                app_id: p.app_id,
+                                path: p.code_path.clone(),
+                                version: p.version_code,
+                                has_code: false,
+                                transient: p.transient.clone(),
+                                state: aim_services::package::scan::ReplicaRuntime {
+                                    usage: [0; 8],
+                                    seinfo: None,
+                                    override_seinfo: None,
+                                    library_files: vec![],
+                                    libraries: vec![],
+                                },
+                            },
+                        )
+                    })
+                    .collect();
+                owner.complete_runtime_at_boot(&usage, retained).unwrap();
                 let store =
                     aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
                 let capture = store.capture();
+                for (settings, factory) in [
+                    (&owner.settings.packages, false),
+                    (&owner.settings.disabled_system_packages, true),
+                ] {
+                    for setting in settings {
+                        assert!(
+                            aim_services::package::scan_snapshot::setting_record::captured(
+                                &capture,
+                                &setting.name,
+                                factory
+                            )
+                            .unwrap()
+                            .is_some()
+                        );
+                        assert!(
+                            aim_services::package::scan_snapshot::runtime_record::captured(
+                                &capture,
+                                &setting.name,
+                                factory
+                            )
+                            .unwrap()
+                            .is_some()
+                        );
+                        for id in owner.scanned_user_states(&setting.name).unwrap().keys() {
+                            assert!(
+                                aim_services::package::scan_snapshot::user_record::captured(
+                                    &capture,
+                                    &setting.name,
+                                    factory,
+                                    *id
+                                )
+                                .unwrap()
+                                .is_some()
+                            );
+                        }
+                    }
+                }
                 assert_eq!(
                     aim_services::package::scan_snapshot::shared_record::captured(
                         &capture,
@@ -1489,6 +1633,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                         .users
                         .contains_key(&new_user)
                 );
+                if incoming_shared {
+                    owner
+                        .complete_library_dependencies(&|_, _| {
+                            Ok(aim_services::package::libraries::Policy::pinned(false))
+                        })
+                        .unwrap();
+                }
                 store
                     .publish(&capture, owner, capture.usage().clone())
                     .unwrap();
@@ -1525,6 +1676,13 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     capture.owner().scanned_user_states(&old.name).unwrap()[&user],
                     changed
                 );
+                if incoming_shared {
+                    owner
+                        .complete_library_dependencies(&|_, _| {
+                            Ok(aim_services::package::libraries::Policy::pinned(false))
+                        })
+                        .unwrap();
+                }
                 store
                     .publish(&capture, owner, capture.usage().clone())
                     .unwrap();
