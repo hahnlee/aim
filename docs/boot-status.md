@@ -665,7 +665,8 @@ containers. Removing the current member from the advertised package inventory
 still rejects assembly. The complete package Parcel oracle passes (32.01s), and
 the checked Java/image/template build passes (56.0s). This verifies that captured
 graph; the six displaced-request captureData graphs also pass (below). Native
-daemon publication remains #836/#798, and displaced reboot/mutations remain #929. Missing retained runtime/legacy/fixed/leaving inputs reject.
+daemon publication remains #836/#798. The displaced-setting owner and recovery
+contract is verified (#929, below); full request parity remains #919. Missing retained runtime/legacy/fixed/leaving inputs reject.
 The original ART oracle compares retained flags, UID, sparse users, unparsed code,
 shared snapshot cardinality/SDK, detached containers and exact record roundtrip
 (34.84s); ordinary shared lease reads still pass. Native Store, library dependency inputs and Java collected-code restoration now
@@ -1036,8 +1037,8 @@ UNKNOWN signing restoration, rejection after loading code and three malformed
 markers. Shared process ownership validates the displacement binding and excludes
 the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
-and removal; the complete first-system scan, including Java assembly, passes
-(22.35s). The full package
+and removal; the complete first-system scan, including Java assembly and six
+original-service boots from native-written settings, passes (85.20s). The full package
 Parcel oracle passes (32.01s); release units pass 465 cases (0.49s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
@@ -1066,15 +1067,25 @@ captures. Setting removal stages all changes so a missing group input leaves
 the earlier owner unchanged. APEX replacement uses the same group cleanup once.
 The complete first-system scan now passes the six native accepted captures through
 generated Binder Proxy/Stub and original ART's PackageScanLease.captureData
-(22.35s). Pruned/active/disabled old groups and independent/shared original targets
+as part of the complete first-system test (85.20s). Pruned/active/disabled old
+groups and independent/shared original targets
 preserve the incoming unparsed setting outside group membership, the loaded
 original's real-name/UID binding, distinct current/retained original instances,
 and factory inventory. Captured replicas remain usable after lease close. Each
 case rejects an advertised inventory missing the accepted original. The full
 original ART Parcel oracle, including shared APEX adoption/replacement, passes
-(32.01s). A full original reboot of native-written displaced data and
-other displaced-setting mutations remain #929. Full original
-request parity and transfer publication remain #919,
+(32.01s). Original Settings.readLPw now reads the actual native-written ABX for
+all six cases: missing groups drop incoming settings, surviving groups rejoin
+them, and original UID/factory inventories match. Each actual file is also
+injected byte-for-byte into the stopped disposable data image, with old resilient
+settings copies removed, before a complete original-service boot. All six boots
+reach sys.boot_completed, expose framework and GSF paths through cmd package,
+and persist both core package entries. Owned guest/keeper PIDs and mounts are
+checked after every stop. The mount point now sits under the temporary Data
+guard so sibling image/runtime artifacts are removed too (#933). This completes
+#929's owner/recovery acceptance; it does not compare the complete later boot
+scan request stream. Full original request parity and transfer publication remain
+#919,
 and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original

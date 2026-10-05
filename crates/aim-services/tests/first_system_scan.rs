@@ -1494,6 +1494,16 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     .unwrap()
                     .unwrap();
                 disk.commit_scan_settings(&capture).unwrap();
+                let persisted = fixture
+                    .0
+                    .join("snapshot-oracle/captures")
+                    .join(format!("case-{index}/persisted/system"));
+                std::fs::create_dir_all(&persisted).unwrap();
+                std::fs::copy(
+                    restart_path.join("system/packages.xml"),
+                    persisted.join("packages.xml"),
+                )
+                .unwrap();
                 let written = aim_android_xml::read(
                     &std::fs::read(restart_path.join("system/packages.xml")).unwrap(),
                 )

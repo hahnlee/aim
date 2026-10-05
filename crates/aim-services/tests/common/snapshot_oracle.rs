@@ -171,7 +171,8 @@ pub fn verify(directory: &Path) {
         )
         .arg(java::bootstrap_aidl(&root))
         .arg(java::snapshot_aidl(&root))
-        .arg(repo.join("crates/aim-services/tests/fixtures/DisplacedSnapshotOracle.java")));
+        .arg(repo.join("crates/aim-services/tests/fixtures/DisplacedSnapshotOracle.java"))
+        .arg(repo.join("crates/aim-services/tests/fixtures/NativeDisplacedReadOracle.java")));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();
     while let Some(dir) = pending.pop() {
@@ -211,9 +212,10 @@ pub fn verify(directory: &Path) {
     .unwrap();
     let boot_data = Data(std::env::temp_dir().join(format!("aim-dsp-{}", std::process::id())));
     fs::create_dir(&boot_data.0).unwrap();
+    let boot_dir = boot_data.0.join("g");
     let boot = Boot {
         ctl: repo.join("target/release/aimctl"),
-        data: boot_data.0.clone(),
+        data: boot_dir.clone(),
     };
     run(boot.command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -262,4 +264,90 @@ pub fn verify(directory: &Path) {
         String::from_utf8(output.stdout).unwrap(),
         "displaced full snapshot contracts: 6 cases\n"
     );
+    let output = boot.command().args(["shell", "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.NativeDisplacedReadOracle", "/data/local/tmp/displaced-snapshots"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "native displaced read oracle: {}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "native displaced read contracts: 6 cases\n"
+    );
+    drop(boot);
+    for index in 0..6 {
+        let mounted = aim_storage::data::DataImage::attach(&boot_dir, None).unwrap();
+        let system = mounted.dir().join("data/system");
+        for name in [
+            "packages.xml",
+            "packages-backup.xml",
+            "packages.xml.reservecopy",
+        ] {
+            let path = system.join(name);
+            if path.exists() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        let source = directory.join(format!(
+            "captures/case-{index}/persisted/system/packages.xml"
+        ));
+        fs::copy(&source, system.join("packages.xml")).unwrap();
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            fs::read(system.join("packages.xml")).unwrap()
+        );
+        mounted.detach().unwrap();
+        let reboot = Boot {
+            ctl: repo.join("target/release/aimctl"),
+            data: boot_dir.clone(),
+        };
+        run(reboot.command().args(["start", "--windows"]));
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let output = reboot
+                .command()
+                .args(["shell", "getprop", "sys.boot_completed"])
+                .output()
+                .unwrap();
+            if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native displaced restart did not boot: {index}"
+            );
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        for name in ["android", "com.google.android.gsf"] {
+            let output = run(reboot
+                .command()
+                .args(["shell", "cmd", "package", "path", name]));
+            assert!(
+                String::from_utf8_lossy(&output.stdout).starts_with("package:"),
+                "restarted package missing: {index}/{name}"
+            );
+        }
+        let restored = aim_services::package::State::read(&reboot.data.join("data"), &[0])
+            .unwrap()
+            .unwrap();
+        assert!(
+            restored
+                .settings
+                .packages
+                .iter()
+                .any(|p| p.name == "android")
+        );
+        assert!(
+            restored
+                .settings
+                .packages
+                .iter()
+                .any(|p| p.name == "com.google.android.gsf")
+        );
+        drop(reboot);
+    }
 }
