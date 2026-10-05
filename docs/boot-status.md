@@ -1276,10 +1276,20 @@ requires current code when selection is present. Factory and retained packages
 still require a separate domain owner. Release units pass 478 cases (four
 ignored/not run), including modern/legacy policy and byte-limit boundaries;
 explicit service-host tests pass six cases (2.94s), including real framework-APK
-selection publication and failure preservation. This is not an original
-collector execution comparison or attached domain lifecycle verification:
-install/update/restore transitions, compatibility-owner policy integration and
-native domain Binder registration remain unproved. The earlier original policy fixture
+selection publication and failure preservation. The original-ART parcel fixture
+now compares 84 collector results over seven native parsed-package inputs:
+modern/legacy and linked-app policies, wildcard/Unicode/invalid hosts, empty
+filters, the real 1 MiB bound and duplicate authority accounting, including
+exact ArraySet order. It runs the image's original collector with a controlled
+compatibility override and original mutable ApplicationSharedMemory owned by
+the disposable oracle process. The complete parcel fixture passes (28.56s);
+the image/original-PMS template build passes (53.1s; six rebuilt, 36 fresh).
+This does not verify attached domain lifecycle: install/update/restore
+transitions, compatibility-owner policy integration and native domain Binder
+registration remain unproved. Native cache boundaries also currently accept
+null activity aspect ratios which the original ParsedActivityImpl constructor
+rejects while unboxing (#958); the collector fixture supplies initialized zero
+floats. The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
 build passes (57.7s; nine rebuilt, 33 fresh).

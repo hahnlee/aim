@@ -270,6 +270,7 @@ public final class PackageRoundTripOracle {
 
     private static void verify(String[] args) throws Exception {
         verifyOriginalDomainIds();
+        DomainCollectorOracle.verify(new java.io.File(args[0]));
         verifyOriginalScanUsers(new java.io.File(args[0]));
         verifyOriginalApexInventory(new java.io.File(args[0]));
         com.android.server.pm.StaticLibraryIdentityOracle.verify(new java.io.File(args[0]));
