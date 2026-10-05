@@ -47,6 +47,14 @@ impl AndroidPackage {
             return Err("ParsedProcess name is null".into());
         }
 
+        if self
+            .activities
+            .iter()
+            .chain(&self.receivers)
+            .any(|a| a.max_aspect_ratio.is_none() || a.min_aspect_ratio.is_none())
+        {
+            return Err("ParsedActivity aspect ratio is null".into());
+        }
         Ok(())
     }
 

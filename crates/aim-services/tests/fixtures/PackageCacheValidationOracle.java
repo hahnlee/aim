@@ -3,7 +3,7 @@ import com.android.server.pm.parsing.PackageCacher;
 /** Original constructor decisions for corrupted native cache fields. */
 final class PackageCacheValidationOracle {
     static void verify(java.io.File root) throws Exception {
-        for (String name : new String[] {"empty", "populated", "empty-process-name"}) {
+        for (String name : new String[] {"empty", "populated", "empty-process-name", "activity-zero", "activity-nonzero", "receiver-zero", "receiver-nonzero"}) {
             byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(root, "cache-validation-" + name).toPath());
             var parsed = PackageCacher.fromCacheEntryStatic(bytes);
             if (!java.util.Arrays.equals(bytes, PackageCacher.toCacheEntryStatic(parsed))) {
@@ -15,7 +15,7 @@ final class PackageCacheValidationOracle {
                         || !"".equals(processes.get(null).getName())) throw new AssertionError("nullable map key and empty value name differ");
             }
         }
-        for (String name : new String[] {"null-array", "null-string", "null-process-name"}) {
+        for (String name : new String[] {"null-array", "null-string", "null-process-name", "activity-null-max", "activity-null-min", "receiver-null-max", "receiver-null-min"}) {
             byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(root, "cache-validation-" + name).toPath());
             try {
                 PackageCacher.fromCacheEntryStatic(bytes);

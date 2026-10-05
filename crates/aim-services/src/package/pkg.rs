@@ -823,8 +823,8 @@ impl Activity {
             lock_task_launch_mode: r.read_i32()?,
             screen_orientation: r.read_i32()?,
             resize_mode: r.read_i32()?,
-            max_aspect_ratio: float_value(r)?,
-            min_aspect_ratio: float_value(r)?,
+            max_aspect_ratio: Some(float_value(r)?.ok_or(BAD_VALUE)?),
+            min_aspect_ratio: Some(float_value(r)?.ok_or(BAD_VALUE)?),
             supports_size_changes: r.read_bool()?,
             requested_vr_component: s.string16(r)?,
             rotation_animation: r.read_i32()?,
@@ -1376,7 +1376,8 @@ mod tests {
         c.i(0).i(0).s(None).s(None).s(None).i(0).s(None);
         c.i(5).i(0).i(0).i(0).i(0).i(0).i(0).i(-1).i(0);
         c.i(VAL_FLOAT).p.write_f32(1.5);
-        c.i(VAL_NULL).i(0).s(None).i(-1).i(0);
+        c.i(VAL_FLOAT).p.write_f32(2.0);
+        c.i(0).s(None).i(-1).i(0);
         bundle(&mut c);
         c.i(0).i(-1).s(None).i(0);
         // apex system services, receivers, services, providers.
@@ -1563,7 +1564,10 @@ mod tests {
         );
         assert!(a.main.enabled && a.main.exported && a.main.direct_boot_aware);
         assert_eq!(a.launch_mode, 5);
-        assert_eq!((a.max_aspect_ratio, a.min_aspect_ratio), (Some(1.5), None));
+        assert_eq!(
+            (a.max_aspect_ratio, a.min_aspect_ratio),
+            (Some(1.5), Some(2.0))
+        );
         let meta = a.main.component.meta_data.as_ref().unwrap();
         assert_eq!(
             meta.0,

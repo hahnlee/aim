@@ -1282,14 +1282,18 @@ modern/legacy and linked-app policies, wildcard/Unicode/invalid hosts, empty
 filters, the real 1 MiB bound and duplicate authority accounting, including
 exact ArraySet order. It runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
-the disposable oracle process. The complete parcel fixture passes (28.56s);
+the disposable oracle process. The complete parcel fixture passes (28.02s);
 the image/original-PMS template build passes (53.1s; six rebuilt, 36 fresh).
 This does not verify attached domain lifecycle: install/update/restore
 transitions, compatibility-owner policy integration and native domain Binder
-registration remain unproved. Native cache boundaries also currently accept
-null activity aspect ratios which the original ParsedActivityImpl constructor
-rejects while unboxing (#958); the collector fixture supplies initialized zero
-floats. The earlier original policy fixture
+registration remain unproved. Native cache read/write and facade serialization
+now reject null max/min aspect ratios for activities and receivers, matching
+the original ParsedActivityImpl Float-unboxing failure (#958). The original
+parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
+independently null fields for both component kinds. Release units pass 478
+cases (four ignored/not run, 0.52s). The full build passes (three host nodes
+rebuilt, 39 fresh, 1.2s); the final host build is fresh (13 nodes, 0.2s).
+The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
 build passes (57.7s; nine rebuilt, 33 fresh).

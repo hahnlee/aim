@@ -5318,6 +5318,77 @@ fn cache_validation_objects(directory: &std::path::Path, original: &AndroidPacka
     fs::write(directory.join("cache-validation-null-string"), null).unwrap();
     invalid.feature_flag_state = Some(vec![None]);
     assert!(invalid.to_cache_entry().is_err());
+    for receiver in [false, true] {
+        let kind = if receiver { "receiver" } else { "activity" };
+        for (name, max, min) in [("zero", 0.0, 0.0), ("nonzero", 2.5, 1.25)] {
+            let mut pkg = empty.clone();
+            pkg.activities.clear();
+            pkg.receivers.clear();
+            let mut activity = aim_services::package::pkg::Activity {
+                max_aspect_ratio: Some(max),
+                min_aspect_ratio: Some(min),
+                known_activity_embedding_certs: Some(vec![]),
+                ..Default::default()
+            };
+            activity.main.component.meta_data = Some(aim_services::package::pkg::MetaData(vec![]));
+            activity.main.component.name = "fixture.Ratio".into();
+            activity.main.component.package_name = pkg.package_name.clone();
+            if receiver {
+                pkg.receivers.push(activity);
+            } else {
+                pkg.activities.push(activity);
+            }
+            let entry = pkg.to_cache_entry().unwrap();
+            assert_eq!(AndroidPackage::read_cache_entry(&entry.bytes).unwrap(), pkg);
+            fs::write(
+                directory.join(format!("cache-validation-{kind}-{name}")),
+                &entry.bytes,
+            )
+            .unwrap();
+            if name == "nonzero" {
+                for (label, field) in [("max", "maxAspectRatio"), ("min", "minAspectRatio")] {
+                    let scope = if receiver {
+                        "receivers[0]."
+                    } else {
+                        "activities[0]."
+                    };
+                    let positions: Vec<_> = entry
+                        .marks
+                        .iter()
+                        .filter(|(_, path)| path.starts_with(scope) && path.ends_with(field))
+                        .collect();
+                    assert_eq!(positions.len(), 1);
+                    let at = positions[0].0;
+                    assert_eq!(
+                        i32::from_le_bytes(entry.bytes[at..at + 4].try_into().unwrap()),
+                        7
+                    );
+                    let mut null = entry.bytes.clone();
+                    null[at..at + 4].copy_from_slice(&(-1i32).to_le_bytes());
+                    null.drain(at + 4..at + 8);
+                    null[..4].copy_from_slice(&((entry.pool_at - 4) as i32).to_le_bytes());
+                    assert!(AndroidPackage::read_cache_entry(&null).is_err());
+                    fs::write(
+                        directory.join(format!("cache-validation-{kind}-null-{label}")),
+                        null,
+                    )
+                    .unwrap();
+                    let mut invalid = pkg.clone();
+                    let a = if receiver {
+                        &mut invalid.receivers[0]
+                    } else {
+                        &mut invalid.activities[0]
+                    };
+                    if label == "max" {
+                        a.max_aspect_ratio = None;
+                    } else {
+                        a.min_aspect_ratio = None;
+                    }
+                    assert!(invalid.to_cache_entry().is_err());
+                }
+            }
+        }
+    }
     let mut process = empty.clone();
     process.processes = Some(vec![aim_services::package::pkg::Process {
         map_key: None,
