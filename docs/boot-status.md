@@ -1315,7 +1315,7 @@ the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 478
 cases (four ignored/not run, 0.47s). The current full build passes (nine nodes
-rebuilt, 33 fresh, 70.0s); the final host build is fresh (13 nodes, 0.2s).
+rebuilt, 33 fresh, 70.0s); the final host build is fresh (13 nodes, 0.3s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
