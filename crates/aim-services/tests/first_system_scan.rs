@@ -1303,6 +1303,98 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     reader.read_string16().unwrap().as_deref(),
                     Some(old.name.as_str())
                 );
+                let restart_path = writable.join(format!("displaced-restart-{shared}-{keep}"));
+                std::fs::create_dir_all(restart_path.join("system")).unwrap();
+                // Rename publication is a separate global owner; scan writes
+                // preserve its already committed record.
+                std::fs::write(restart_path.join("system/packages.xml"), format!(
+                    "<packages><renamed-package new='com.google.android.gsf' old='{}'/></packages>", old.name)).unwrap();
+                let mut disk = aim_services::package::owner::Store::open(&restart_path, &[0])
+                    .unwrap()
+                    .unwrap();
+                disk.commit_scan_settings(&capture).unwrap();
+                let written = aim_android_xml::read(
+                    &std::fs::read(restart_path.join("system/packages.xml")).unwrap(),
+                )
+                .unwrap();
+                assert!(written.children().any(|e| e.name == "package"
+                    && e.string("name").as_deref() == Some("com.google.android.gsf")));
+                let reopened = aim_services::package::owner::Store::open(&restart_path, &[0])
+                    .unwrap()
+                    .unwrap();
+                let restored = aim_services::package::scan::SigningScan::new(
+                    &config,
+                    &reopened.state().settings,
+                    36,
+                )
+                .unwrap();
+                assert_eq!(
+                    restored
+                        .settings
+                        .packages
+                        .iter()
+                        .any(|p| p.name == "com.google.android.gsf"),
+                    kept
+                );
+                assert_eq!(restored.identities.ids.get(10002).is_some(), kept);
+                if kept {
+                    assert_eq!(
+                        restored.identities.shared_users["fixture.incoming.group"].member_count(),
+                        if keep_member { 2 } else { 1 }
+                    );
+                }
+                assert!(restored.identities.ids.get(10003).is_some());
+                let mut foreign_uid = owner.clone();
+                foreign_uid
+                    .identities
+                    .ids
+                    .replace(
+                        10002,
+                        aim_services::package::owner::app_ids::Owner::Package(
+                            "fixture.foreign".into(),
+                        ),
+                    )
+                    .unwrap();
+                let unchanged = foreign_uid.clone();
+                assert!(
+                    foreign_uid
+                        .remove_package_setting("com.google.android.gsf")
+                        .is_err()
+                );
+                assert_eq!(foreign_uid, unchanged);
+                let mut removed = owner.clone();
+                let result = removed
+                    .remove_package_setting("com.google.android.gsf")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(Some(&result.package), incoming_before.as_ref());
+                assert_eq!(result.app_id_removed, !kept);
+                assert_eq!(removed.identities.ids.get(10002).is_some(), kept);
+                let removed_usage = aim_services::package::owner::usage::Usage::new(
+                    removed.settings.packages.iter().map(|p| p.name.as_str()),
+                );
+                let removed_capture =
+                    aim_services::package::scan_snapshot::Store::new(removed, removed_usage)
+                        .unwrap()
+                        .capture();
+                assert!(
+                    aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
+                        &removed_capture,
+                        "com.google.android.gsf",
+                        false
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert!(
+                    aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
+                        &capture,
+                        "com.google.android.gsf",
+                        false
+                    )
+                    .unwrap()
+                    .is_some()
+                );
                 let mut foreign = owner.clone();
                 foreign
                     .settings

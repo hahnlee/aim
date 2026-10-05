@@ -36,6 +36,9 @@ impl SigningScan {
                 message: message.into(),
             })
         };
+        let displaced = self
+            .is_displaced_shared_setting(package)
+            .map_err(|message| fail(&message))?;
         let Some(Owner::SharedUser(name)) = self.identities.ids.get(id) else {
             return Err(fail("shared UID slot disagrees with setting"));
         };
@@ -45,7 +48,7 @@ impl SigningScan {
             .shared_users
             .get_mut(&name)
             .ok_or_else(|| fail("shared UID owner is missing"))?;
-        if !group.remove_package(&package.name) {
+        if !group.remove_package(&package.name) && !displaced {
             return Err(fail("shared UID membership is missing"));
         }
         let retained = group.member_count() != 0;
@@ -88,6 +91,9 @@ impl SigningScan {
                 "loaded package must be withdrawn before setting removal",
             ));
         }
+        let displaced = self
+            .is_displaced_shared_setting(&package)
+            .map_err(|message| fail(&message))?;
         let shared = match self.identities.ids.get(package.uid_owner_id()) {
             Some(Owner::SharedUser(group_name)) if package.shared_user => {
                 let group = self
@@ -95,7 +101,7 @@ impl SigningScan {
                     .shared_users
                     .get(group_name)
                     .ok_or_else(|| fail("shared UID owner is missing"))?;
-                if !group.has_package(name) {
+                if !group.has_package(name) && !displaced {
                     return Err(fail("shared UID membership is missing"));
                 }
                 Some(group_name.clone())
@@ -105,6 +111,7 @@ impl SigningScan {
             {
                 None
             }
+            None if displaced => None,
             _ => return Err(fail("package UID slot disagrees with setting")),
         };
         self.detach_retained_user_aliases(name);
@@ -116,6 +123,7 @@ impl SigningScan {
             self.identities.ids.remove(package.uid_owner_id());
             true
         };
+        self.forget_displaced_shared_setting(name);
         self.scanned_users.remove(name);
         Ok(Some(RemovedSetting {
             package,

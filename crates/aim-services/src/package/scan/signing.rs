@@ -244,6 +244,10 @@ impl SigningScan {
         }
     }
 
+    pub(super) fn forget_displaced_shared_setting(&mut self, name: &str) {
+        self.displaced_shared_settings.remove(name);
+    }
+
     pub(in crate::package) fn validate_displaced_shared_settings(&self) -> Result<(), String> {
         for binding in self.displaced_shared_settings.values() {
             let setting = self

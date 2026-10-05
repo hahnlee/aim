@@ -10,6 +10,16 @@ pub(in crate::package::owner) fn replace_registered(
     original: &Element,
     desired: &Settings,
 ) -> Result<Element, String> {
+    replace_for_scan(original, desired, desired)
+}
+
+/// Scan writes can retain pending shared entries that readLPw later drops.
+/// The scan owner supplies and validates that separate read result.
+pub(in crate::package::owner) fn replace_for_scan(
+    original: &Element,
+    desired: &Settings,
+    restored: &Settings,
+) -> Result<Element, String> {
     validated_sets(desired)?;
     if !desired.key_sets.versioned
         || desired.key_sets.last_issued_key_id < 0
@@ -51,7 +61,7 @@ pub(in crate::package::owner) fn replace_registered(
         package.key_set_data = next.key_set_data.clone();
     }
     allowed.key_sets = desired.key_sets.clone();
-    if persisted(allowed) != persisted(desired.clone()) {
+    if persisted(allowed) != persisted(restored.clone()) {
         return Err("keyset commit changed unrelated settings (#798)".into());
     }
     let mut root = original.clone();
@@ -140,7 +150,7 @@ pub(in crate::package::owner) fn replace_registered(
     root.content
         .retain(|n| !matches!(n, Node::Element(e) if e.name == "keyset-settings"));
     root.content.push(Node::Element(global));
-    if persisted(Settings::parse(&root)?) != persisted(desired.clone()) {
+    if persisted(Settings::parse(&root)?) != persisted(restored.clone()) {
         return Err("keyset document did not preserve desired settings".into());
     }
     Ok(root)

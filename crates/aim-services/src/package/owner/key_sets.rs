@@ -6,7 +6,7 @@ use aim_android_xml::{Element, Node, Value};
 use std::collections::{BTreeMap, BTreeSet};
 mod persistence;
 mod registration;
-pub(super) use persistence::replace_registered;
+pub(super) use persistence::{replace_for_scan, replace_registered};
 pub use registration::{register, restore};
 
 /// Signing sets and defined aliases each hold a reference; upgrade sets do

@@ -948,7 +948,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (13.06s), and release units pass 463 cases. Disabled loaded code now retains a
+creation (12.17s), and release units pass 463 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -970,7 +970,8 @@ mutations propagate to that instance. The full setting/helper comparison passes
 (68.15s). The focused original constructor/registration oracle also verifies
 sealed snapshot isolation, independence of new users and final UID-slot owners,
 plus three old shared-group removal cases and six shared-to-independent/shared
-original recreation/registration cases (20.51s). Ordinary scan admission shares the APEX prior-instance owner during
+original recreation/registration/removal cases, plus six original readLPw recovery
+cases (9.34s). Ordinary scan admission shares the APEX prior-instance owner during
 candidate construction (#927), then matches Settings.addPackageSettingLPw:
 registered ordinary APK slots point to the final accepted setting, discarding the
 prior independent slot instance; INVALID_UID/APEX admission leaves the original
@@ -1022,8 +1023,22 @@ the emitted signing headers for all six successful shared-origin transitions;
 original ART validates two group-present/absent frames, exact reserialization,
 UNKNOWN signing restoration, rejection after loading code and three malformed
 markers. The full package Parcel oracle passes (24.48s); release units pass 463
-cases (0.53s). Complete Java snapshot assembly for displaced requests, persisted
-restart comparison and displaced-setting mutation handling remain #929. Full original
+cases (0.42s). Native scan persistence now writes the displaced incoming setting
+and its keyset references even if its shared group is absent; read-roundtrip
+validation accounts for the original pending-package drop after proving the
+private displaced binding. The scan keyset writer compares the restored inventory
+while preserving every written package's keyset nodes. Standalone keyset commits
+retain their existing full-inventory check. Disposable native write/reopen/UID
+restore fixtures verify all six shared-origin cases, and the original readLPw
+oracle verifies the corresponding absent/active/disabled group cases. A surviving
+group gains the saved incoming member on reread; an absent group drops it. Native
+setting removal clears the accepted displacement binding, keeps other/disabled
+UID owners, returns the original removal result when the old slot is already
+absent, and rejects a foreign UID owner without changing state. Original ART
+checks deletion and repeated deletion after each of its six recreation cases;
+previous native captures retain their incoming signing records. Complete Java
+snapshot assembly, a full original reboot of native-written displaced data and
+other displaced-setting mutations remain #929. Full original
 request parity and transfer publication remain #919,
 and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs

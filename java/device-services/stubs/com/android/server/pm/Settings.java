@@ -18,6 +18,7 @@ public final class Settings {
         com.android.server.pm.permission.LegacyPermissionDataProvider permissionData,
         com.android.server.pm.verify.domain.DomainVerificationManagerInternal domains,
         android.os.Handler handler, PackageManagerTracedLock lock) { throw new RuntimeException("stub"); }
+    boolean readLPw(Computer computer, java.util.List<android.content.pm.UserInfo> users) { throw new RuntimeException("stub"); }
     boolean readSettingsLPw(Computer computer, java.util.List<android.content.pm.UserInfo> users,
         android.util.ArrayMap<String, Long> firstInstallTimes) { throw new RuntimeException("stub"); }
     public VersionInfo findOrCreateVersion(String uuid) { throw new RuntimeException("stub"); }

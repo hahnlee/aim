@@ -15,6 +15,14 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
     if !scan.capture_ready() {
         return Err("cannot persist unfinished scan metadata".into());
     }
+    let mut displaced_without_group = BTreeSet::new();
+    for package in &scan.settings.packages {
+        if scan.is_displaced_shared_setting(package)?
+            && scan.identities.ids.get(package.uid_owner_id()).is_none()
+        {
+            displaced_without_group.insert(package.name.clone());
+        }
+    }
     let mut expected = scan.settings.clone();
     expected.shared_users = scan
         .identities
@@ -187,8 +195,15 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
         root.content.push(Node::Element(node));
     }
     write_versions(&mut root, &mut expected)?;
+    // writeLPr keeps the incoming table entry; readLPw drops its pending
+    // shared reference when the old group was pruned. Preserve the written
+    // package's keysets while validating the distinct restored inventory.
+    let written = expected.clone();
+    expected
+        .packages
+        .retain(|p| !displaced_without_group.contains(&p.name));
     if expected.key_sets.versioned {
-        root = key_sets::replace_registered(&root, &expected)?;
+        root = key_sets::replace_for_scan(&root, &written, &expected)?;
     }
     if signing::persisted(Settings::parse(&root)?) != signing::persisted(expected) {
         return Err("scan settings require an unresolved global owner or do not round trip".into());

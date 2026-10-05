@@ -329,6 +329,39 @@ public final class NewSettingOracle {
         System.out.println("original setting adoption contracts: " + cases + " cases");
         sharedRequestRemoval();
         sharedOriginalRecreation();
+        sharedOriginalRead();
+    }
+
+    private static void sharedOriginalRead() throws Exception {
+        int cases = 0;
+        for (boolean shared : new boolean[] {false, true}) {
+            for (int keep = 0; keep < 3; keep++) {
+                var data = java.nio.file.Files.createTempDirectory("aim-displaced-read-").toFile();
+                var system = new java.io.File(data, "system"); system.mkdirs();
+                String xml = "<packages><package name='fixture.incoming' codePath='/system/incoming' domainSetId='00000000-0000-0000-0000-000000000001' sharedUserId='10002'/>"
+                    + "<package name='fixture.original' codePath='/system/original' domainSetId='00000000-0000-0000-0000-000000000001' "
+                    + (shared ? "sharedUserId" : "userId") + "='10003'/>"
+                    + (shared ? "<shared-user name='fixture.original-group' userId='10003'/>" : "")
+                    + (keep == 0 ? "" : "<shared-user name='fixture.old-group' userId='10002'/>")
+                    + (keep == 1 ? "<package name='fixture.other' codePath='/system/other' domainSetId='00000000-0000-0000-0000-000000000001' sharedUserId='10002'/>" : "")
+                    + (keep == 2 ? "<updated-package name='fixture.incoming' codePath='/system/incoming' userId='10002'/>" : "")
+                    + "</packages>";
+                java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(),
+                    xml.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+                if (!settings.readLPw(null, java.util.List.of()))
+                    throw new AssertionError("displaced read became first boot");
+                var group = settings.getSettingLPr(10002);
+                if (settings.getPackagesLocked().containsKey("fixture.incoming") != (keep != 0)
+                        || (group != null) != (keep != 0)
+                        || settings.getSettingLPr(10003) == null
+                        || (keep != 0 && ((SharedUserSetting)group).getPackageStates().size() != (keep == 1 ? 2 : 1))) {
+                    throw new AssertionError("displaced shared read differs: " + shared + "/" + keep);
+                }
+                cases++;
+            }
+        }
+        System.out.println("displaced shared read contracts: " + cases + " cases");
     }
 
     private static void sharedOriginalRecreation() throws Exception {
@@ -373,6 +406,15 @@ public final class NewSettingOracle {
                             || !target.getPackageStates().contains(original)
                             || !target.getPackageStates().contains(adopted)))) {
                     throw new AssertionError("shared original recreation differs: " + shared + "/" + keep);
+                }
+                boolean uidRemoved = settings.removePackageAndAppIdLPw("fixture.incoming");
+                if (uidRemoved != (keep == 0)
+                        || settings.getPackagesLocked().containsKey("fixture.incoming")
+                        || settings.getPackagesLocked().get("fixture.original") != adopted
+                        || settings.getSettingLPr(10002) != (keep == 0 ? null : oldGroup)
+                        || settings.getSettingLPr(10003) != (shared ? target : adopted)
+                        || settings.removePackageAndAppIdLPw("fixture.incoming")) {
+                    throw new AssertionError("displaced incoming removal differs: " + shared + "/" + keep);
                 }
                 cases++;
             }
