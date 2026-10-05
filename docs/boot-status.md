@@ -948,7 +948,7 @@ original's saved ABI. Successful creation records renamed and transferred
 packages; a final metadata rejection preserves the original setting without
 publishing either record. The controlled first-system scan covers all four
 incoming-present/absent and KeepData/RestoreFactory combinations and ordinary
-creation (13.20s), and release units pass 463 cases. Disabled loaded code now retains a
+creation (13.06s), and release units pass 463 cases. Disabled loaded code now retains a
 private binding of the selected setting name, UID, path and version to its parsed
 name (#926). Snapshot validation and code capture require that binding for
 unequal names and reject foreign identities or active-scope use; copied captures
@@ -956,7 +956,7 @@ retain their original binding. The private code envelope carries both names and
 the factory scope and bound setting UID, and the Java lease/object restorer checks these without
 renaming PackageImpl. A complete native Store/capture/publish test accepts the
 selected pair and rejects a changed parsed name. The original Android parcel
-oracle passes (24.29s), comparing original PackageSetting.setPkg with restoration
+oracle passes (24.48s), comparing original PackageSetting.setPkg with restoration
 of known and UNKNOWN code under a different setting name, plus scope/version/name
 rejections (including a foreign factory UID) and exact frame roundtrips.
 An original ART constructor oracle now exercises Settings.createNewSetting with
@@ -1010,8 +1010,20 @@ UID-slot instance identities. The old-group pruning primitive counts actual
 active/retained members and disabled references (#928). On reread the original
 resolves saved shared references: an absent old group drops the incoming setting,
 while a surviving group registers it again. The native settings reader already
-drops unresolved shared references; complete restart comparison, Java replica
-assembly and displaced-setting mutation handling remain #929. Full original
+drops unresolved shared references. The private signing frame now preserves the
+saved shared UID separately from a possibly absent group and carries the accepted
+original name for displaced active settings. The native captured binding supplies
+that name; unbound settings still require their real UID/group owner. Java rejects
+factory scope, a nonpositive shared UID or an original name equal to the incoming
+name, and signing restoration requires that the displaced setting has no loaded
+code. Snapshot assembly checks the named original's loaded code and real name,
+and rejects continued old-group membership. Native first-system fixtures verify
+the emitted signing headers for all six successful shared-origin transitions;
+original ART validates two group-present/absent frames, exact reserialization,
+UNKNOWN signing restoration, rejection after loading code and three malformed
+markers. The full package Parcel oracle passes (24.48s); release units pass 463
+cases (0.53s). Complete Java snapshot assembly for displaced requests, persisted
+restart comparison and displaced-setting mutation handling remain #929. Full original
 request parity and transfer publication remain #919,
 and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs

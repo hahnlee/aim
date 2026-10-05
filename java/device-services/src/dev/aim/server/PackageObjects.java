@@ -48,7 +48,9 @@ public final class PackageObjects {
             PackageSigningState state, long version, boolean factory) {
         if (state.getVersion() != version || !state.getPackageName().equals(setting.getPackageName())
                 || state.getAppId() != setting.getAppId() || state.isDisabled() != factory
-                || (state.getSharedGroupName() != null) != setting.hasSharedUser()
+                || (state.getSharedGroupName() != null || state.getDisplacedOriginalName() != null) != setting.hasSharedUser()
+                || state.getDisplacedOriginalName() != null
+                    && ((com.android.server.pm.pkg.PackageState)setting).getAndroidPackage() != null
                 || (setting.hasSharedUser() && ((com.android.server.pm.pkg.PackageState)setting)
                         .getSharedUserAppId() != state.getSharedAppId())) {
             throw new IllegalArgumentException("saved signing capture mismatch");

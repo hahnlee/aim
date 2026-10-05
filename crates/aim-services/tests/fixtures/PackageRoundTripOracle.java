@@ -999,9 +999,10 @@ public final class PackageRoundTripOracle {
         try {
             malformedSigning.writeLong(1); malformedSigning.writeString(name); malformedSigning.writeInt(uid);
             malformedSigning.writeBoolean(false); malformedSigning.writeString(null);
+            malformedSigning.writeInt(0); malformedSigning.writeString(null);
             malformedSigning.writeBoolean(true); malformedSigning.writeInt(3); malformedSigning.writeInt(1);
-            malformedSigning.writeByteArray(new byte[]{3}); malformedSigning.writeInt(-1);
-            malformedSigning.writeBoolean(false);
+            malformedSigning.writeByteArray(new byte[]{3}); malformedSigning.writeInt(0);
+            malformedSigning.writeInt(-1); malformedSigning.writeBoolean(false);
             owner.signingOverride = malformedSigning.marshall();
         } finally { malformedSigning.recycle(); }
         try { lease.getSigningState(name, false); throw new AssertionError("invalid signing certificate accepted"); }
@@ -1051,6 +1052,7 @@ public final class PackageRoundTripOracle {
         try {
             unknownParcel.writeLong(1); unknownParcel.writeString(name); unknownParcel.writeInt(uid);
             unknownParcel.writeBoolean(false); unknownParcel.writeString(null);
+            unknownParcel.writeInt(0); unknownParcel.writeString(null);
             unknownParcel.writeBoolean(false); unknownParcel.writeBoolean(false);
             unknownParcel.setDataPosition(0);
             var unknown = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(unknownParcel);
@@ -1407,7 +1409,55 @@ public final class PackageRoundTripOracle {
         try { lease.getUserStateReplica(name, false, 10, true); throw new AssertionError("closed user replica lease accepted"); }
         catch (IllegalStateException expected) {}
     }
+    private static void verifyDisplacedSigning() {
+        String name = "fixture.incoming";
+        for (String group : new String[] {null, "fixture.old-group"}) {
+            var input = android.os.Parcel.obtain(); var output = android.os.Parcel.obtain();
+            try {
+                input.writeLong(1); input.writeString(name); input.writeInt(10002);
+                input.writeBoolean(false); input.writeString(group); input.writeInt(10002);
+                input.writeString("fixture.original"); input.writeBoolean(false); input.writeBoolean(false);
+                byte[] bytes = input.marshall(); input.setDataPosition(0);
+                var signing = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(input);
+                if (input.dataAvail() != 0 || !"fixture.original".equals(signing.getDisplacedOriginalName())
+                        || signing.getSharedAppId() != 10002
+                        || !java.util.Objects.equals(signing.getSharedGroupName(), group))
+                    throw new AssertionError("displaced signing identity differs");
+                var setting = new com.android.server.pm.PackageSetting(name, null,
+                    new java.io.File("/system/nonexistent/incoming"), 1, 0, new java.util.UUID(0, 1));
+                setting.setAppId(10002).setSharedUserAppId(10002);
+                dev.aim.server.PackageObjects.restoreSavedSigning(setting, signing, 1, false);
+                if (setting.getSigningDetails() != android.content.pm.SigningDetails.UNKNOWN)
+                    throw new AssertionError("displaced unknown signing changed");
+                signing.writeToParcel(output, 0);
+                if (!java.util.Arrays.equals(bytes, output.marshall()))
+                    throw new AssertionError("displaced signing roundtrip differs");
+                setting.setPkg((com.android.internal.pm.parsing.pkg.PackageImpl)
+                    com.android.internal.pm.parsing.pkg.PackageImpl.forTesting(name));
+                try {
+                    dev.aim.server.PackageObjects.restoreSavedSigning(setting, signing, 1, false);
+                    throw new AssertionError("parsed displaced setting accepted");
+                } catch (IllegalArgumentException expected) {}
+            } finally { input.recycle(); output.recycle(); }
+        }
+        for (int invalid = 0; invalid < 3; invalid++) {
+            var input = android.os.Parcel.obtain();
+            try {
+                input.writeLong(1); input.writeString(name); input.writeInt(10002);
+                input.writeBoolean(invalid == 0); input.writeString(null);
+                input.writeInt(invalid == 1 ? 0 : 10002);
+                input.writeString(invalid == 2 ? name : "fixture.original");
+                input.writeBoolean(false); input.writeBoolean(false); input.setDataPosition(0);
+                try {
+                    dev.aim.server.PackageSigningState.CREATOR.createFromParcel(input);
+                    throw new AssertionError("invalid displaced signing accepted: " + invalid);
+                } catch (IllegalArgumentException expected) {}
+            } finally { input.recycle(); }
+        }
+    }
+
     private static void verifyCurrentSignerFlags(java.io.File file) throws Exception {
+        verifyDisplacedSigning();
         byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(file.getPath() + ".flagged-signing").toPath());
         var in = android.os.Parcel.obtain(); var out = android.os.Parcel.obtain();
         try {

@@ -408,7 +408,21 @@ public final class PackageScanLease implements AutoCloseable {
             if (!state.hasSharedUser()) continue;
             var signing = getSigningState(state.getPackageName(), factory);
             var group = shared.get(signing.getSharedGroupName());
-            if (group == null || group.getAppId() != state.getSharedUserAppId()) {
+            if (signing.getDisplacedOriginalName() != null) {
+                var original = packages.get(signing.getDisplacedOriginalName());
+                if (factory || state.getAndroidPackage() != null || original == null
+                        || original.getAndroidPackage() == null
+                        || !(original instanceof com.android.server.pm.pkg.PackageStateInternal internal)
+                        || !state.getPackageName().equals(internal.getRealName())) {
+                    throw new IOException("displaced shared request outside original inventory");
+                }
+                if (group != null && group.getAppId() != state.getSharedUserAppId())
+                    throw new IOException("displaced shared UID differs from group");
+                if (group != null && group.getPackageStates().contains(state))
+                    throw new IOException("displaced shared request still belongs to group");
+                if (group == null && signing.getSharedGroupName() != null)
+                    throw new IOException("displaced shared group outside inventory");
+            } else if (group == null || group.getAppId() != state.getSharedUserAppId()) {
                 throw new IOException("package shared UID outside group inventory");
             }
         }

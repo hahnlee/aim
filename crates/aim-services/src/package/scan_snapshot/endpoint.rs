@@ -113,6 +113,7 @@ pub struct PackageSigningState {
     disabled: bool,
     shared_group: Option<String>,
     shared_app_id: i32,
+    displaced_original: Option<String>,
     package: Option<crate::package::sign::SigningDetails>,
     shared: Option<crate::package::sign::SigningDetails>,
 }
@@ -132,6 +133,7 @@ impl PackageSigningState {
             disabled: false,
             shared_group: Some(group_name.into()),
             shared_app_id: group.app_id,
+            displaced_original: None,
             package: setting
                 .signatures
                 .as_ref()
@@ -159,7 +161,16 @@ impl PackageSigningState {
         let Some(setting) = settings.iter().find(|setting| setting.name == name) else {
             return Ok(None);
         };
-        let (shared_group, shared) = if setting.shared_user {
+        let displaced_original = if disabled {
+            None
+        } else {
+            owner.displaced_shared_original(setting)?.map(str::to_owned)
+        };
+        let (shared_group, shared) = if displaced_original.is_some()
+            && owner.identities.ids.get(setting.uid_owner_id()).is_none()
+        {
+            (None, None)
+        } else if setting.shared_user {
             let Some(Owner::SharedUser(group_name)) =
                 owner.identities.ids.get(setting.uid_owner_id())
             else {
@@ -189,6 +200,7 @@ impl PackageSigningState {
             disabled,
             shared_group,
             shared_app_id: setting.shared_app_id().unwrap_or(0),
+            displaced_original,
             package: setting
                 .signatures
                 .as_ref()
@@ -232,6 +244,7 @@ impl WriteParcelable for PackageSigningState {
         p.write_bool(self.disabled);
         p.write_string16(self.shared_group.as_deref());
         p.write_i32(self.shared_app_id);
+        p.write_string16(self.displaced_original.as_deref());
         write_signing(p, self.package.as_ref());
         write_signing(p, self.shared.as_ref());
     }

@@ -14,6 +14,7 @@ public final class PackageSigningState implements Parcelable {
     private final boolean disabled;
     private final String sharedGroup;
     private final int sharedAppId;
+    private final String displacedOriginal;
     private final Signing packageSigning;
     private final Signing sharedSigning;
 
@@ -24,7 +25,12 @@ public final class PackageSigningState implements Parcelable {
         disabled = in.readBoolean();
         sharedGroup = in.readString();
         sharedAppId = in.readInt();
-        if ((sharedGroup == null && sharedAppId != 0) || (sharedGroup != null && sharedAppId <= 0))
+        displacedOriginal = in.readString();
+        if (displacedOriginal != null && (disabled || sharedAppId <= 0
+                || displacedOriginal.isEmpty() || displacedOriginal.equals(name)))
+            throw new IllegalArgumentException("invalid displaced original request");
+        if ((sharedGroup == null && sharedAppId != 0 && displacedOriginal == null)
+                || (sharedGroup != null && sharedAppId <= 0))
             throw new IllegalArgumentException("invalid shared signing relationship");
         packageSigning = Signing.read(in);
         sharedSigning = Signing.read(in);
@@ -39,6 +45,7 @@ public final class PackageSigningState implements Parcelable {
     public boolean isDisabled() { return disabled; }
     public int getSharedAppId() { return sharedAppId; }
     public String getSharedGroupName() { return sharedGroup; }
+    public String getDisplacedOriginalName() { return displacedOriginal; }
     public SigningDetails getPackageSigningDetails() { return Signing.details(packageSigning); }
     public SigningDetails getSharedSigningDetails() {
         return sharedGroup == null ? null : Signing.details(sharedSigning);
@@ -126,6 +133,7 @@ public final class PackageSigningState implements Parcelable {
         out.writeInt(appId);
         out.writeBoolean(disabled);
         out.writeString(sharedGroup); out.writeInt(sharedAppId);
+        out.writeString(displacedOriginal);
         Signing.write(out, packageSigning);
         Signing.write(out, sharedSigning);
     }

@@ -231,6 +231,19 @@ impl SigningScan {
         Ok(true)
     }
 
+    pub(in crate::package) fn displaced_shared_original<'a>(
+        &'a self,
+        setting: &crate::package::settings::Package,
+    ) -> Result<Option<&'a str>, String> {
+        if self.is_displaced_shared_setting(setting)? {
+            Ok(Some(
+                &self.displaced_shared_settings[&setting.name].original,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub(in crate::package) fn validate_displaced_shared_settings(&self) -> Result<(), String> {
         for binding in self.displaced_shared_settings.values() {
             let setting = self
@@ -2617,6 +2630,7 @@ mod tests {
                 assert!(!r.read_bool().unwrap());
                 assert!(r.read_string16().unwrap().is_none());
                 assert_eq!(r.read_i32().unwrap(), 0);
+                assert!(r.read_string16().unwrap().is_none());
                 // Saved UNKNOWN is not substituted with the collected code's signer.
                 assert!(!r.read_bool().unwrap());
                 assert!(!r.read_bool().unwrap());

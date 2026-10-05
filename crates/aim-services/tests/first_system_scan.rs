@@ -1276,6 +1276,33 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     .is_some(),
                     kept
                 );
+                let signing =
+                    aim_services::package::scan_snapshot::endpoint::PackageSigningState::captured(
+                        &capture,
+                        "com.google.android.gsf",
+                        false,
+                    )
+                    .unwrap()
+                    .unwrap();
+                let mut parcel = aim_binder_host::parcel::Parcel::new();
+                aim_service_aidl::WriteParcelable::write_to(&signing, &mut parcel);
+                let mut reader = aim_binder_host::parcel::Reader::new(parcel.data(), &[]);
+                assert_eq!(reader.read_i64().unwrap(), capture.version() as i64);
+                assert_eq!(
+                    reader.read_string16().unwrap().as_deref(),
+                    Some("com.google.android.gsf")
+                );
+                assert_eq!(reader.read_i32().unwrap(), 10002);
+                assert_eq!(reader.read_i32().unwrap(), 0);
+                assert_eq!(
+                    reader.read_string16().unwrap().as_deref(),
+                    kept.then_some("fixture.incoming.group")
+                );
+                assert_eq!(reader.read_i32().unwrap(), 10002);
+                assert_eq!(
+                    reader.read_string16().unwrap().as_deref(),
+                    Some(old.name.as_str())
+                );
                 let mut foreign = owner.clone();
                 foreign
                     .settings
