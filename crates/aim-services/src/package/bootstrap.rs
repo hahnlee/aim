@@ -21,6 +21,7 @@ pub use scan::{
 pub struct Bridge {
     pub(crate) owner: Strong,
     test_base_on_bcp: bool,
+    pub(crate) signing_debuggable: bool,
 }
 
 #[derive(Debug)]
@@ -300,9 +301,34 @@ impl Bridge {
                 "package bootstrap classpath reply has trailing data",
             ));
         }
+        let mut data = Parcel::new();
+        bridge::IsSigningDebuggable {}.write(&mut data);
+        let reply = owner
+            .transact(bridge::IS_SIGNING_DEBUGGABLE, &data, false)
+            .map_err(|status| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("package signing build policy: status {status}"),
+                )
+            })?;
+        let mut reader = reply.reader();
+        let signing_debuggable =
+            bridge::read_is_signing_debuggable_reply(&mut reader).map_err(|status| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    format!("package signing build policy reply: status {status}"),
+                )
+            })??;
+        if reader.remaining() != 0 {
+            return Err(Exception::new(
+                EX_ILLEGAL_STATE,
+                "package signing build policy has trailing data",
+            ));
+        }
         Ok(Self {
             owner,
             test_base_on_bcp: on_bcp,
+            signing_debuggable,
         })
     }
 

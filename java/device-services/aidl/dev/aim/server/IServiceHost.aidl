@@ -28,4 +28,7 @@ interface IServiceHost {
     /** SDK data filesystem owner; serialized with the native package install lock. */
     void reconcilePackageSdkData(String volumeUuid, String packageName, in List<String> subDirNames,
             int userId, int appId, int previousAppId, String seInfo, int flags);
+    long addPackageSigningOverride(in byte[] oldDetails, in byte[] newDetails);
+    long removePackageSigningOverride(in byte[] oldDetails);
+    long clearPackageSigningOverrides();
 }

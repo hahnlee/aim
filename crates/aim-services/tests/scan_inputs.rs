@@ -45,6 +45,7 @@ fn image_scan_keeps_locations_duplicates_and_rejections_without_settings() {
     std::fs::create_dir(framework.join("vmdl1.tmp")).unwrap();
     let root = fixture.0.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(root.join(p.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
@@ -145,6 +146,7 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     let disappearing_source = source.clone();
     assert!(source.is_file(), "missing original signed APK");
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| [SYSTEM, UPDATE].contains(&p).then(|| source.clone())),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -251,6 +253,7 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     // a parsed manifest alone must never become a successful scan input.
     let reads = std::sync::atomic::AtomicUsize::new(0);
     let disappearing = Apks {
+        signing_overrides: None,
         files: Box::new(move |_| {
             (reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0)
                 .then(|| disappearing_source.clone())
@@ -271,6 +274,7 @@ fn shared_uid_scan_signatures_follow_commit_and_ota_order() {
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -356,6 +360,7 @@ fn ordered_signing_scan_commits_groups_and_preserves_prior_records_on_failure() 
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| {
             Some(image.join(if p == "/data/app/gsf/base.apk" {
                 "system_ext/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk"
@@ -561,6 +566,7 @@ fn single_shared_uid_migration_preserves_ids_and_requires_both_versions_to_leave
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -737,6 +743,7 @@ fn new_uid_scan_creates_manifest_groups_and_keeps_leaving_new_packages_independe
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -829,6 +836,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -1026,6 +1034,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         factory_test: true,
     };
     let unreadable = Apks {
+        signing_overrides: None,
         files: Box::new(|_| None),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -1481,6 +1490,7 @@ fn static_library_scan_checks_the_previous_version_and_commits_the_target() {
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
         platform: Platform::load(&root, Default::default()).unwrap(),
     };
@@ -1938,6 +1948,7 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
     std::fs::write(fixture.0.join("data/app/unrelated.txt"), b"not an APK").unwrap();
     let root = fixture.0.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
@@ -2035,6 +2046,7 @@ fn data_inventory_descends_containers_and_preserves_rejected_scan_paths() {
     }
     let source_root = fixture.0.clone();
     let unavailable = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             (!path.ends_with("base.apk")).then(|| source_root.join(path.trim_start_matches('/')))
         }),

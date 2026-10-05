@@ -39,10 +39,26 @@ public final class AppIdsOracle {
             System.out.println("SHARED PREPARED");
             return;
         }
+        if (args.length != 0 && args[0].equals("native-signing-denial")) {
+            int uid = Integer.parseInt(args[1]);
+            if (android.os.Process.myUid() != uid) throw new AssertionError("wrong caller");
+            if (android.os.Build.isDebuggable()) throw new AssertionError("requires release policy");
+            var owner = dev.aim.server.PackageBootstrapBridge.signingOwner();
+            for (int operation = 0; operation < 3; operation++) {
+                try {
+                    if (operation == 0) owner.add(android.content.pm.SigningDetails.UNKNOWN, android.content.pm.SigningDetails.UNKNOWN);
+                    else if (operation == 1) owner.remove(android.content.pm.SigningDetails.UNKNOWN);
+                    else owner.clear();
+                    throw new AssertionError("signing mutation allowed");
+                } catch (SecurityException expected) {
+                    if (uid == 1000 && !expected.getMessage().equals("This test API is only available on debuggable builds")) throw expected;
+                }
+            }
+            System.out.println("native signing denied " + uid);
+            return;
+        }
         if (args.length != 0 && args[0].equals("nullable-signing-keys")) {
-            var signing = ((com.android.internal.pm.parsing.pkg.PackageImpl)
-                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
-                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])))).getSigningDetails();
+            var signing = collectOverride(args[1], null, true, false, 0);
             var nullElement = new android.util.ArraySet<java.security.PublicKey>(); nullElement.add(null);
             var mixed = new android.util.ArraySet<java.security.PublicKey>();
             for (var key : signing.getPublicKeys()) mixed.add(key); mixed.add(null);
@@ -56,6 +72,8 @@ public final class AppIdsOracle {
                 new android.content.pm.SigningDetails(signing.getSignatures(), signing.getSignatureSchemeVersion(), mixed, signing.getPastSigningCertificates()),
             };
             for (int i = 0; i < cases.length; i++) {
+                java.nio.file.Files.write(java.nio.file.Path.of(args[2], "nullable-keys-" + i + ".owner"),
+                    dev.aim.server.PackageSigningDetails.encode(cases[i]));
                 var parcel = android.os.Parcel.obtain();
                 try {
                     cases[i].writeToParcel(parcel, 0);

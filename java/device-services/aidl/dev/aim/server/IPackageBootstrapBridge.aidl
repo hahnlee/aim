@@ -21,4 +21,6 @@ interface IPackageBootstrapBridge {
     boolean isSharedUidMigrationBestEffort();
     /** Original AndroidTestBaseUpdater change, using full parsed ApplicationInfo. */
     boolean isTestBaseLibraryChangeEnabled(in byte[] packageCache);
+    /** Pinned Build policy for native signing test APIs. */
+    boolean isSigningDebuggable();
 }

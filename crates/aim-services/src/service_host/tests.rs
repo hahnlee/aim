@@ -86,6 +86,7 @@ struct Owner {
     reject: AtomicBool,
     bcp_reads: AtomicUsize,
     bcp_present: bool,
+    signing_debuggable: AtomicBool,
     test_base_reply: AtomicUsize,
     malformed_bcp: AtomicBool,
     malformed_seinfo: AtomicBool,
@@ -117,6 +118,9 @@ impl Service for Owner {
                 if self.malformed_bcp.load(Ordering::SeqCst) {
                     reply.write_i32(99);
                 }
+            }
+            bootstrap::IS_SIGNING_DEBUGGABLE => {
+                reply.write_bool(self.signing_debuggable.load(Ordering::SeqCst))
             }
             bootstrap::IS_SHARED_UID_MIGRATION_BEST_EFFORT => reply.write_bool(false),
             bootstrap::IS_TEST_BASE_LIBRARY_CHANGE_ENABLED => {
@@ -271,6 +275,162 @@ fn attach(process: &Arc<LocalProcess>, bridge: Option<Binder>) -> Result<(), Exc
         .unwrap();
     host::read_attach_package_bootstrap_bridge_reply(&mut reply.reader()).unwrap()
 }
+fn signing_wire(details: &crate::package::sign::SigningDetails) -> Parcel {
+    let mut p = Parcel::new();
+    p.write_i32(1);
+    p.write_bool(details.unknown);
+    if details.unknown {
+        return p;
+    }
+    p.write_i32(details.signatures.len() as i32);
+    for (i, cert) in details.signatures.iter().enumerate() {
+        aim_service_aidl::write_byte_array(&mut p, Some(cert));
+        p.write_i32(details.current_flags.get(i).copied().unwrap_or(0));
+    }
+    p.write_i32(details.scheme_version);
+    p.write_i32(
+        details
+            .public_keys
+            .as_ref()
+            .map_or(-1, |keys| keys.len() as i32),
+    );
+    if let Some(keys) = &details.public_keys {
+        for key in keys {
+            aim_service_aidl::write_byte_array(&mut p, key.as_deref());
+        }
+    }
+    p.write_i32(
+        details
+            .past_signing_certificates
+            .as_ref()
+            .map_or(-1, |past| past.len() as i32),
+    );
+    if let Some(past) = &details.past_signing_certificates {
+        for (cert, flags) in past {
+            aim_service_aidl::write_byte_array(&mut p, Some(cert));
+            p.write_i32(*flags);
+        }
+    }
+    p
+}
+fn signing_mutation(
+    process: &Arc<LocalProcess>,
+    code: u32,
+    details: &[&[u8]],
+) -> Result<i64, Exception> {
+    let mut data = Parcel::new();
+    data.write_interface_token(host::DESCRIPTOR);
+    for bytes in details {
+        aim_service_aidl::write_byte_array(&mut data, Some(bytes));
+    }
+    let reply = find(process, "host").transact(code, &data, false).unwrap();
+    let mut reader = reply.reader();
+    reader.read_exception().unwrap()?;
+    let version = reader.read_i64().unwrap();
+    assert_eq!(reader.remaining(), 0);
+    Ok(version)
+}
+fn verify_signing_transport(
+    system: &Arc<System>,
+    client: &Arc<LocalProcess>,
+    foreign: &Arc<LocalProcess>,
+    debug: bool,
+) -> Arc<crate::package::sign::Overrides> {
+    use crate::package::sign::{SigningDetails, read_override_details};
+    let mut encoded = Parcel::new();
+    encoded.write_i32(1);
+    encoded.write_bool(false);
+    encoded.write_i32(1);
+    aim_service_aidl::write_byte_array(&mut encoded, Some(&[1, 2]));
+    encoded.write_i32(23);
+    encoded.write_i32(3);
+    encoded.write_i32(-1);
+    encoded.write_i32(1);
+    aim_service_aidl::write_byte_array(&mut encoded, Some(&[3]));
+    encoded.write_i32(21);
+    let old = read_override_details(encoded.data()).unwrap();
+    let mut unknown = Parcel::new();
+    unknown.write_i32(1);
+    unknown.write_bool(true);
+    let signing = system.package_signing_overrides().unwrap();
+    for (token, tail) in [("wrong.interface", false), (host::DESCRIPTOR, true)] {
+        let mut data = Parcel::new();
+        data.write_interface_token(token);
+        if tail {
+            data.write_i32(99);
+        }
+        assert!(
+            find(client, "host")
+                .transact(host::CLEAR_PACKAGE_SIGNING_OVERRIDES, &data, false)
+                .is_err()
+        );
+    }
+    for (code, args) in [
+        (
+            host::ADD_PACKAGE_SIGNING_OVERRIDE,
+            vec![encoded.data(), unknown.data()],
+        ),
+        (host::REMOVE_PACKAGE_SIGNING_OVERRIDE, vec![encoded.data()]),
+        (host::CLEAR_PACKAGE_SIGNING_OVERRIDES, vec![]),
+    ] {
+        assert!(signing_mutation(foreign, code, &args).is_err_and(|e| e.code == -1));
+        if !debug {
+            assert!(signing_mutation(client, code, &args).is_err_and(|e| e.code == -1));
+        }
+    }
+    if debug {
+        let mut trailing = encoded.data().to_vec();
+        trailing.extend_from_slice(&99i32.to_le_bytes());
+        for bytes in [
+            trailing.as_slice(),
+            &[][..],
+            &[2, 0, 0, 0][..],
+            &encoded.data()[..encoded.data().len() - 1],
+        ] {
+            assert!(
+                signing_mutation(
+                    client,
+                    host::ADD_PACKAGE_SIGNING_OVERRIDE,
+                    &[bytes, unknown.data()]
+                )
+                .is_err_and(|e| e.code == -3)
+            );
+        }
+        assert_eq!(signing.snapshot().version, 1);
+        assert_eq!(
+            signing_mutation(
+                client,
+                host::ADD_PACKAGE_SIGNING_OVERRIDE,
+                &[encoded.data(), unknown.data()]
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(signing.apply(&old), SigningDetails::unknown());
+        assert_eq!(
+            signing_mutation(
+                client,
+                host::REMOVE_PACKAGE_SIGNING_OVERRIDE,
+                &[encoded.data()]
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(signing.apply(&old), old);
+        signing_mutation(
+            client,
+            host::ADD_PACKAGE_SIGNING_OVERRIDE,
+            &[encoded.data(), unknown.data()],
+        )
+        .unwrap();
+        assert_eq!(
+            signing_mutation(client, host::CLEAR_PACKAGE_SIGNING_OVERRIDES, &[]).unwrap(),
+            5
+        );
+        assert_eq!(signing.apply(&old), old);
+    }
+    signing
+}
 fn capture_scan(process: &Arc<LocalProcess>) -> Result<Strong, Exception> {
     let mut data = Parcel::new();
     host::CapturePackageScan {}.write(&mut data);
@@ -382,14 +542,23 @@ fn until(mut predicate: impl FnMut() -> bool) {
 }
 #[test]
 fn synchronous_package_bootstrap_preserves_replacement_and_propagates_owner_failures() {
-    exercise_bootstrap(false);
+    exercise_bootstrap(false, false);
 }
 #[test]
 #[ignore = "requires pinned original image; run explicitly"]
 fn native_boot_scan_uses_retained_original_bootstrap_owners() {
-    exercise_bootstrap(true);
+    exercise_bootstrap(true, false);
 }
-fn exercise_bootstrap(run_scan: bool) {
+#[test]
+fn signing_override_transport_uses_captured_debug_policy() {
+    exercise_bootstrap(false, true);
+}
+#[test]
+#[ignore = "requires pinned original image; run explicitly"]
+fn signing_override_transport_reaches_live_apk_collection() {
+    exercise_bootstrap(true, true);
+}
+fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     let driver = Driver::new();
     let open = |pid, euid| {
         LocalProcess::open(
@@ -455,9 +624,14 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(capture_scan(&first).is_err_and(|error| error.code == -5));
     assert!(capture_scan(&foreign).is_err_and(|error| error.code == -1));
     assert!(attach(&first, None).is_err());
+    assert!(
+        signing_mutation(&first, host::CLEAR_PACKAGE_SIGNING_OVERRIDES, &[])
+            .is_err_and(|e| e.code == -5)
+    );
     let owner = Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
         bcp_present: true,
+        signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
@@ -474,6 +648,7 @@ fn exercise_bootstrap(run_scan: bool) {
     let foreign_node = foreign.add_service(Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
         bcp_present: true,
+        signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
@@ -497,6 +672,13 @@ fn exercise_bootstrap(run_scan: bool) {
             .is_err()
     );
     let old = system.package_bootstrap().unwrap();
+    let signing = verify_signing_transport(&system, &first, &foreign, debuggable);
+    owner
+        .signing_debuggable
+        .store(!debuggable, Ordering::SeqCst);
+    assert!(attach(&first, Some(node)).is_err_and(|error| error.code == -5));
+    assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
+    owner.signing_debuggable.store(debuggable, Ordering::SeqCst);
     assert!(capture_scan(&first).is_err());
     let usage = || crate::package::owner::usage::Usage::new(["fixture"]);
     let incomplete = crate::package::scan::SigningScan::new(
@@ -557,7 +739,7 @@ fn exercise_bootstrap(run_scan: bool) {
             .is_err()
     );
 
-    assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 2);
     assert!(!late.load(Ordering::SeqCst));
     let config = SystemConfig::default();
     let boot = old.resolve_boot(&config, &|_| None).unwrap();
@@ -759,7 +941,7 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(old.library_compatibility(&config, &|_| None).is_ok());
     assert_eq!(
         owner.bcp_reads.load(Ordering::SeqCst),
-        if run_scan { 2 } else { 1 }
+        if run_scan { 3 } else { 2 }
     );
     assert!(attach(&first, Some(node)).is_err_and(|error| error.code == -1));
     assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
@@ -783,9 +965,25 @@ fn exercise_bootstrap(run_scan: bool) {
     }));
     assert!(attach(&first, Some(wrong)).is_err());
     assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
+    let mut marker = crate::package::sign::SigningDetails::unknown();
+    if debuggable {
+        marker.unknown = false;
+        marker.scheme_version = 7;
+        signing_mutation(
+            &first,
+            host::ADD_PACKAGE_SIGNING_OVERRIDE,
+            &[
+                signing_wire(&crate::package::sign::SigningDetails::unknown()).data(),
+                signing_wire(&marker).data(),
+            ],
+        )
+        .unwrap();
+    }
+    let signing_version = signing.snapshot().version;
     let replacement = second.add_service(Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
         bcp_present: false,
+        signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
@@ -800,6 +998,12 @@ fn exercise_bootstrap(run_scan: bool) {
     let previous_version = system.capture_package_scan().unwrap().version();
     attach(&second, Some(replacement)).unwrap();
     let current = system.package_bootstrap().unwrap();
+    assert!(Arc::ptr_eq(
+        &signing,
+        &system.package_signing_overrides().unwrap()
+    ));
+    assert_eq!(signing.snapshot().version, signing_version);
+    assert!(signing.apply(&crate::package::sign::SigningDetails::unknown()) == marker);
     assert!(!Arc::ptr_eq(&old, &current));
     assert!(system.check_package_bootstrap(&old).is_err());
     system.check_package_bootstrap(&current).unwrap();
@@ -899,6 +1103,11 @@ fn exercise_bootstrap(run_scan: bool) {
     let node = third.add_service(owner.clone());
     attach(&third, Some(node)).unwrap();
     let restarted = system.package_bootstrap().unwrap();
+    assert!(signing.apply(&crate::package::sign::SigningDetails::unknown()) == marker);
+    assert!(Arc::ptr_eq(
+        &signing,
+        &system.package_signing_overrides().unwrap()
+    ));
     let resumed = system
         .publish_package_scan(&restarted, None, replica_owner(), usage())
         .unwrap();
@@ -1101,7 +1310,11 @@ fn verify_boot_scan(
     let foreign = Arc::new(crate::package::bootstrap::Bridge::new(native.strong(handle)).unwrap());
     assert!(system.check_package_bootstrap(&foreign).is_err());
     let original = aim_paths::original_image();
-    let root = std::env::temp_dir().join(format!("aim-bootstrap-scan-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "aim-bootstrap-scan-{}-{}",
+        std::process::id(),
+        owner.signing_debuggable.load(Ordering::SeqCst)
+    ));
     std::fs::create_dir(&root).unwrap();
     struct Data(std::path::PathBuf);
     impl Drop for Data {
@@ -1117,7 +1330,8 @@ fn verify_boot_scan(
         framework.join("framework-res.apk"),
     )
     .unwrap();
-    let apks = Apks {
+    let mut apks = Apks {
+        signing_overrides: Some(system.package_signing_overrides().unwrap()),
         files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
@@ -1163,6 +1377,82 @@ fn verify_boot_scan(
         system.scan_package_first_boot(&foreign, &apks, config, &|_| None, policy()),
         Err(crate::package::bootstrap::BootError::Owner(_))
     ));
+    let signing = apks.signing_overrides.take().unwrap();
+    assert!(matches!(
+        system.scan_package_first_boot(bridge, &apks, config, &|_| None, policy()),
+        Err(crate::package::bootstrap::BootError::Owner(_))
+    ));
+    apks.signing_overrides = Some(Arc::new(crate::package::sign::Overrides::new(false)));
+    assert!(matches!(
+        system.scan_package_first_boot(bridge, &apks, config, &|_| None, policy()),
+        Err(crate::package::bootstrap::BootError::Owner(_))
+    ));
+    if signing.is_debuggable() {
+        let parsed = crate::package::pkg::AndroidPackage {
+            path: Some("/system/framework/framework-res.apk".into()),
+            base_apk_path: Some("/system/framework/framework-res.apk".into()),
+            target_sdk_version: 36,
+            ..Default::default()
+        };
+        apks.signing_overrides = Some(signing.clone());
+        let before = apks.signing_details(&parsed).unwrap();
+        let old = signing_wire(&before);
+        let mut absent = before.clone();
+        absent.public_keys = None;
+        let mut empty = before.clone();
+        empty.public_keys = Some(vec![]);
+        let mut known_empty = crate::package::sign::SigningDetails::unknown();
+        known_empty.unknown = false;
+        let mut null = before.clone();
+        null.public_keys = Some(vec![None]);
+        let mut mixed = before.clone();
+        mixed.public_keys.as_mut().unwrap().push(None);
+        let collect = || {
+            apks.collect_signing_details(
+                &parsed,
+                crate::package::write::CertificateCollection {
+                    saved: None,
+                    database_version: 3,
+                    force_collect: true,
+                    skip_verify: false,
+                    pre_n_mr1_upgrade: false,
+                },
+            )
+            .unwrap()
+        };
+        for replacement in [
+            absent,
+            empty,
+            before.clone(),
+            crate::package::sign::SigningDetails::unknown(),
+            known_empty,
+            null,
+            mixed,
+        ] {
+            let new = signing_wire(&replacement);
+            signing_mutation(
+                client,
+                host::ADD_PACKAGE_SIGNING_OVERRIDE,
+                &[old.data(), new.data()],
+            )
+            .unwrap();
+            assert!(
+                collect() == replacement,
+                "Binder signing owner differs in live collection"
+            );
+            signing_mutation(client, host::REMOVE_PACKAGE_SIGNING_OVERRIDE, &[old.data()]).unwrap();
+            assert!(collect() == before);
+            signing_mutation(
+                client,
+                host::ADD_PACKAGE_SIGNING_OVERRIDE,
+                &[old.data(), new.data()],
+            )
+            .unwrap();
+            signing_mutation(client, host::CLEAR_PACKAGE_SIGNING_OVERRIDES, &[]).unwrap();
+            assert!(collect() == before);
+        }
+    }
+    apks.signing_overrides = Some(signing);
     // Capture valid inventory before testing notification failure.
     owner.apex_reply.store(1, Ordering::SeqCst);
     let boot = bridge.resolve_boot(config, &|_| None).unwrap();

@@ -11,6 +11,17 @@ use aim_services::package::{
 use std::fs;
 
 pub fn verify(boot: &Boot, apks: &Apks, source: &Record, replacement: &Record) {
+    for uid in [1000, 19001] {
+        let output = run(boot.client(uid).args([
+            "/system/bin/app_process",
+            "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
+            "/system/bin", "com.android.server.pm.AppIdsOracle", "native-signing-denial", &uid.to_string(),
+        ]));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("native signing denied {uid}\n")
+        );
+    }
     let dir = boot.data.join("data/local/tmp/signing-overrides");
     fs::create_dir(&dir).unwrap();
     fs::copy(
@@ -43,7 +54,7 @@ pub fn verify(boot: &Boot, apks: &Apks, source: &Record, replacement: &Record) {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "override-collection",
@@ -202,7 +213,7 @@ fn verify_nullable_keys(
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "nullable-signing-keys",
@@ -230,6 +241,22 @@ fn verify_nullable_keys(
     ];
     let mut expected = String::new();
     for (i, a) in cases.iter().enumerate() {
+        let decoded = aim_services::package::sign::read_override_details(
+            &fs::read(dir.join(format!("nullable-keys-{i}.owner"))).unwrap(),
+        )
+        .unwrap();
+        // Public keys are an ArraySet: the wire retains its hash order, while
+        // the native owner may have been constructed in another set order.
+        assert!(
+            decoded.serialized_public_keys().unwrap() == a.serialized_public_keys().unwrap(),
+            "full signing public-key set {i}"
+        );
+        let mut expected_owner = a.clone();
+        expected_owner.public_keys = decoded.public_keys.clone();
+        assert!(
+            decoded == expected_owner,
+            "full production Java signing owner {i}"
+        );
         let owner = Overrides::new(true);
         owner.add(base.clone(), a.clone()).unwrap();
         assert_eq!(

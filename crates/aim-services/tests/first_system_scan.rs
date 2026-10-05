@@ -49,6 +49,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     .unwrap();
     let root = fixture.0.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
@@ -711,6 +712,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     early.parsed.shared_user_id = Some("fixture.rejected.shared".into());
     let root = fixture.0.clone();
     let bad_signing = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             Some(
                 root.join(if path == "/product/priv-app/EarlyReject/GSF.apk" {
@@ -764,6 +766,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         .shared_user_id = Some("fixture.rejected.shared".into());
     let root = fixture.0.clone();
     let unmapped = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             if path == "/product/priv-app/EarlyReject/GSF.apk" {
                 None
@@ -1873,6 +1876,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             // non-strict KeepData must refresh metadata without collecting it.
             let root = fixture.0.clone();
             let bad_signing = Apks {
+                signing_overrides: None,
                 files: Box::new(move |path| {
                     Some(root.join(if path == "/product/priv-app/GSF/GSF.apk" {
                         "product/priv-app/GSF"
@@ -2468,6 +2472,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 .unwrap();
             let root = fixture.0.clone();
             let bad_factory = Apks {
+                signing_overrides: None,
                 files: Box::new(move |path| {
                     Some(if path == base {
                         root.clone()
@@ -2510,6 +2515,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 .clone()
                 .unwrap();
             let unmapped_factory = Apks {
+                signing_overrides: None,
                 files: Box::new(move |path| {
                     (path != base).then(|| root.join(path.trim_start_matches('/')))
                 }),
@@ -2528,6 +2534,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             let bad_path = raw_factories.packages[1].location.path.clone();
             let root = fixture.0.clone();
             let bad_parse = Apks {
+                signing_overrides: None,
                 files: Box::new(move |path| {
                     Some(if path == bad_path {
                         empty_factory.clone()
@@ -2563,6 +2570,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             let bad_path = raw_factories.packages[1].location.path.clone();
             let root = fixture.0.clone();
             let unmapped_parse = Apks {
+                signing_overrides: None,
                 files: Box::new(move |path| {
                     (path != bad_path).then(|| root.join(path.trim_start_matches('/')))
                 }),
@@ -2751,6 +2759,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         factory_test: false,
     };
     let unreadable = Apks {
+        signing_overrides: None,
         files: Box::new(|_| None),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };
@@ -3455,6 +3464,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 let base = raw_factory.parsed.base_apk_path.clone().unwrap();
                 let root = fixture.0.clone();
                 let bad_source = Apks {
+                    signing_overrides: None,
                     files: Box::new(move |path| {
                         Some(if path == base {
                             root.clone()

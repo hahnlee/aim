@@ -1763,6 +1763,7 @@ fn native_package_parcels_match_original_read_write() {
     .unwrap();
     let original_root = aim_paths::original_image();
     let apex_apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(move |path| Some(original_root.join(path.trim_start_matches('/')))),
         platform: aim_services::package::parse::Platform::load(
             &aim_paths::original_image(),
@@ -2645,6 +2646,7 @@ fn native_package_parcels_match_original_read_write() {
     .unwrap();
     let original_root = aim_paths::original_image();
     let replacement_apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             Some(if path == replacement_guest {
                 replacement_file.clone()
@@ -3789,6 +3791,7 @@ fn native_package_parcels_match_original_read_write() {
     std::os::unix::fs::symlink(original_file, &updated_file).unwrap();
     let original_root = aim_paths::original_image();
     let update_apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             Some(if path == update_guest {
                 updated_file.clone()
@@ -3888,6 +3891,7 @@ fn native_package_parcels_match_original_read_write() {
     unsigned_inventory.packages.as_mut().unwrap()[0].module_path =
         "/data/local/tmp/package-parcels/unsigned.apex".into();
     let unsigned_apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(move |_| Some(unsigned_archive.clone())),
         platform: aim_services::package::parse::Platform::load(
             &aim_paths::original_image(),
@@ -4350,6 +4354,7 @@ fn native_scan_objects(
     )
     .unwrap();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| Some(root.join(path.trim_start_matches('/')))),
         platform: Platform::load(&original, Default::default()).unwrap(),
     };

@@ -166,7 +166,7 @@ pub fn verify(boot: &Boot, apks: &Apks, record: &Record) {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "collect-certificates",

@@ -102,6 +102,68 @@ impl ServiceHost {
         Ok(reply)
     }
 
+    fn mutate_package_signing(&self, call: &mut Call<'_>) -> Reply {
+        let (old, new) = match call.code {
+            host::ADD_PACKAGE_SIGNING_OVERRIDE => {
+                let args = host::AddPackageSigningOverride::read(&mut call.data)?;
+                (args.old_details, args.new_details)
+            }
+            host::REMOVE_PACKAGE_SIGNING_OVERRIDE => {
+                let args = host::RemovePackageSigningOverride::read(&mut call.data)?;
+                (args.old_details, None)
+            }
+            _ => {
+                host::ClearPackageSigningOverrides::read(&mut call.data)?;
+                (None, None)
+            }
+        };
+        if call.data.remaining() != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let result = self
+            .system
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable"))
+            .and_then(|system| {
+                system.mutate_package_signing(|owner| {
+                    let read = |bytes: Option<&[u8]>| {
+                        crate::package::sign::read_override_details(bytes.ok_or_else(|| {
+                            Exception::illegal_argument("missing signing details")
+                        })?)
+                        .map_err(|status| {
+                            Exception::illegal_argument(format!(
+                                "invalid signing details: status {status}"
+                            ))
+                        })
+                    };
+                    let result = match call.code {
+                        host::ADD_PACKAGE_SIGNING_OVERRIDE => {
+                            owner.add(read(old.as_deref())?, read(new.as_deref())?)
+                        }
+                        host::REMOVE_PACKAGE_SIGNING_OVERRIDE => {
+                            owner.remove(&read(old.as_deref())?)
+                        }
+                        _ => owner.clear(),
+                    };
+                    result.map_err(|message| Exception::new(EX_ILLEGAL_STATE, message))
+                })
+            });
+        let mut reply = Parcel::new();
+        match result {
+            Ok(version) => match call.code {
+                host::ADD_PACKAGE_SIGNING_OVERRIDE => {
+                    host::write_add_package_signing_override_reply(&mut reply, version)
+                }
+                host::REMOVE_PACKAGE_SIGNING_OVERRIDE => {
+                    host::write_remove_package_signing_override_reply(&mut reply, version)
+                }
+                _ => host::write_clear_package_signing_overrides_reply(&mut reply, version),
+            },
+            Err(error) => reply.write_exception(&error),
+        }
+        Ok(reply)
+    }
+
     fn attach_bridge(&self, call: &mut Call<'_>) -> Reply {
         let bridge = host::AttachBridge::read(&mut call.data)?.bridge;
         let (Some(Binder::Handle(handle)), Some(system)) = (bridge, self.system.upgrade()) else {
@@ -173,6 +235,9 @@ impl Service for ServiceHost {
             && call.code != host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
             && call.code != host::CAPTURE_PACKAGE_SCAN
             && call.code != host::RECONCILE_PACKAGE_SDK_DATA
+            && call.code != host::ADD_PACKAGE_SIGNING_OVERRIDE
+            && call.code != host::REMOVE_PACKAGE_SIGNING_OVERRIDE
+            && call.code != host::CLEAR_PACKAGE_SIGNING_OVERRIDES
         {
             return Err(UNKNOWN_TRANSACTION);
         }
@@ -182,6 +247,9 @@ impl Service for ServiceHost {
             if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
                 || call.code == host::CAPTURE_PACKAGE_SCAN
                 || call.code == host::RECONCILE_PACKAGE_SDK_DATA
+                || call.code == host::ADD_PACKAGE_SIGNING_OVERRIDE
+                || call.code == host::REMOVE_PACKAGE_SIGNING_OVERRIDE
+                || call.code == host::CLEAR_PACKAGE_SIGNING_OVERRIDES
             {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::security(
@@ -195,7 +263,14 @@ impl Service for ServiceHost {
             );
             return Ok(Parcel::new());
         }
-        if call.code == host::RECONCILE_PACKAGE_SDK_DATA {
+        if matches!(
+            call.code,
+            host::ADD_PACKAGE_SIGNING_OVERRIDE
+                | host::REMOVE_PACKAGE_SIGNING_OVERRIDE
+                | host::CLEAR_PACKAGE_SIGNING_OVERRIDES
+        ) {
+            self.mutate_package_signing(call)
+        } else if call.code == host::RECONCILE_PACKAGE_SDK_DATA {
             self.reconcile_package_sdk_data(call)
         } else if call.code == host::CAPTURE_PACKAGE_SCAN {
             self.capture_package_scan(call)

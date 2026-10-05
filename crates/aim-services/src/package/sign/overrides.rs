@@ -3,6 +3,74 @@
 use super::SigningDetails;
 use std::sync::{Arc, Mutex};
 
+/// Full versioned Java owner encoding; normal SigningDetails parcels omit flags.
+pub fn read_details(bytes: &[u8]) -> aim_binder_host::parcel::Result<SigningDetails> {
+    use aim_binder_host::parcel::{BAD_VALUE, Reader};
+    use aim_service_aidl::read_byte_array;
+    fn certificates(
+        r: &mut Reader<'_>,
+        count: i32,
+    ) -> aim_binder_host::parcel::Result<super::Lineage> {
+        if count < 0 || count as usize > r.remaining() / 8 {
+            return Err(BAD_VALUE);
+        }
+        (0..count)
+            .map(|_| Ok((read_byte_array(r)?.ok_or(BAD_VALUE)?, r.read_i32()?)))
+            .collect()
+    }
+    let mut r = Reader::new(bytes, &[]);
+    if r.read_i32()? != 1 {
+        return Err(BAD_VALUE);
+    }
+    let details = match r.read_i32()? {
+        1 => SigningDetails::unknown(),
+        0 => {
+            let count = r.read_i32()?;
+            let current = certificates(&mut r, count)?;
+            let scheme_version = r.read_i32()?;
+            let count = r.read_i32()?;
+            let public_keys = match count {
+                -1 => None,
+                n if n >= 0 && n as usize <= r.remaining() / 4 => Some(
+                    (0..n)
+                        .map(|_| {
+                            read_byte_array(&mut r)?
+                                .map(|key| {
+                                    super::canonical_public_keys(&[key])
+                                        .map_err(|_| BAD_VALUE)
+                                        .map(|mut keys| keys.remove(0))
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                _ => return Err(BAD_VALUE),
+            };
+            let count = r.read_i32()?;
+            let past_signing_certificates = if count == -1 {
+                None
+            } else {
+                Some(certificates(&mut r, count)?)
+            };
+            SigningDetails {
+                unknown: false,
+                signatures: current.iter().map(|(cert, _)| cert.clone()).collect(),
+                current_flags: crate::package::settings::current_flags(
+                    current.iter().map(|(_, flags)| *flags).collect(),
+                ),
+                scheme_version,
+                public_keys,
+                past_signing_certificates,
+            }
+        }
+        _ => return Err(BAD_VALUE),
+    };
+    if r.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok(details)
+}
+
 const DEBUG_ONLY: &str = "This test API is only available on debuggable builds";
 
 impl SigningDetails {
@@ -69,6 +137,9 @@ impl Overrides {
                 pairs: vec![],
             })),
         }
+    }
+    pub fn is_debuggable(&self) -> bool {
+        self.debuggable
     }
     pub fn snapshot(&self) -> Arc<OverrideSnapshot> {
         self.current.lock().unwrap().clone()

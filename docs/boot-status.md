@@ -1168,9 +1168,16 @@ blocking of SDK execution and owned code cleanup. The image/original-PMS templat
 build passes (37.1s; four rebuilt, 38 fresh); the final host build passes
 (3.6s; three rebuilt, 39 fresh). The explicit native bootstrap fixture passes
 (0.67s) with cleanup using the same System owner, and generated SDK/cleanup
-transport tests pass all three cases (0.01s). The three signing test APIs preserve original Build.isDebuggable
-enforcement and call original ApkSignatureVerifier. Native Apks certificate
-collection now accepts an explicit versioned signing override owner (#946).
+transport tests pass all three cases (0.01s). The three signing test APIs preserve
+original Build.isDebuggable enforcement and require an explicit signing owner.
+The production PackageLocal factory routes add/remove/clear through generated
+IServiceHost methods to the native System's service-lifetime Overrides owner
+(#946/#950). The pinned early bootstrap bridge supplies Build.isDebuggable;
+policy changes reject replacement before changing the current bridge. Same-policy
+replacement retains the owner, version and nonempty override table across bridge
+death/reconnection. Default Apks collection consumes its bound owner; System's
+three boot scan entries reject missing/foreign owners before scan effects.
+Native Apks certificate collection accepts this versioned signing override owner.
 The owner preserves prior immutable versions, add/replace/remove/clear and
 release-build denial; version exhaustion fails before mutation. For native
 verified SigningDetails, current signer flags are excluded from key equality,
@@ -1180,7 +1187,7 @@ SigningDetails hashes current signatures in array order even when equals ignores
 that order. Overrides apply once after each APK verifies and before base/split
 signer comparison; verification failures cannot be overridden, and saved signing
 cache reuse bypasses the map as original collectCertificatesLI does. The explicit
-app-ID/original-owner fixture passes (29.58s), including 169 original
+app-ID/original-owner fixture verifies 169 original
 SigningDetails.equals/ArrayMap lookup pairs, the original release verifier's
 unchanged results after add/remove/clear, cache/force/unsafe-collection choices,
 and missing APK failure on disposable code. A separately configured native debug
@@ -1194,25 +1201,41 @@ from certificates. Original constructors verify seven owners (including UNKNOWN,
 an empty owner with null keys, and a mixed key/null set), 49 equality/ArrayMap
 lookup pairs and exact Parcel bytes. Native PackageImpl cache roundtrips and
 actual APK verification followed by each of the seven override replacements
-also pass in the expanded app-ID/original-owner fixture (29.33s). The original
+also pass in the expanded app-ID/original-owner fixture. The original
 public-key serialization/deserialization fixture passes (10.64s). Null keys
 remain invalid at keyset registration instead of being silently removed; the
-signature comparison tool reports absent/null keys as mismatches. Release units
-pass 474 cases (0.50s), with three ignored/not run. All aim-services test targets
-compile; this compile gate does not count those tests as executed. The full
-image/original-PMS template build passes (35.5s; four rebuilt, 38 fresh), and the
-final host build passes (21.6s; one rebuilt, 41 fresh). This explicit owner is not
-connected to the Java test APIs or live scan orchestration yet. Nullable owner
-transport through the actual override endpoint remains part of #946/#950. Original ART verifies all
+signature comparison tool reports absent/null keys as mismatches. All aim-services
+test targets compile; compilation does not count those tests as executed.
+Full signing owners now
+use versioned Java encoding that retains current and past capability flags,
+UNKNOWN, nullable key sets/elements and nullable past arrays. Native decoding
+rejects malformed versions, lengths and trailing bytes; release policy and
+foreign-UID failures precede mutation. Original ART loads the production encoder
+from aim-services.jar and matches all seven full owners against native decoding,
+including original ArraySet hash ordering. The production Java signing factory's
+add/remove/clear calls reject actual system UID on release policy and actual app
+UID through the native Binder endpoint. The complete app-ID/original-owner
+fixture passes (160.78s, debug Rust build). A controlled debug bootstrap plus
+native Binder mutations verifies each of seven nullable owners through default
+collection of a real original APK, then remove/clear restoration; the explicit
+service-host fixture passes five cases (35.14s). Normal units pass 475 cases
+(3.31s), with four ignored/not run; the image/original-PMS template build passes
+(60.7s; nine rebuilt, 33 fresh). The final production host build passes
+(10.7s; three rebuilt, 39 fresh). UNKNOWN override collection retains the native
+PackageImpl UNKNOWN representation rather than requiring a known parcel body.
+The pinned original image remains a release build: original debug-build override
+application remains unrun (#946). Default native package activation and its
+conformance gates are still unproved. Original ART verifies all
 seven methods over each of the six authentic native graphs: current/old scope
 identity, explicit and Binder callers, distinct uncommitted replicas, required
 inputs and SDK argument/error identity. The complete first-system fixture,
 including those checks, native-written original ABX reads and six seeded
-original-service boots, passes (86.49s). Release units pass 470 cases (0.51s);
-production image/original-PMS template build passes (58.3s; six rebuilt, 36 fresh).
-The facade is not registered, and native visibility/version-page refresh,
-native signing override transport/nullable ownership and default activation
-remain unproved. System.complete_package_scan now resolves
+original-service boots, passes (90.92s). It requires both SDK and signing
+owners; missing owners and uninitialized replicas fail explicitly. The fixture
+injects the original verifier as its controlled signing owner; production uses
+the native owner described above. The facade is not registered, and native
+visibility/version-page refresh and default native activation remain unproved;
+original debug-build application remains unrun (#946). System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes
 runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
 and publishes through that same bridge/base gate (#937). Original policy calls

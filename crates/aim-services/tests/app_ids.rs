@@ -32,6 +32,13 @@ fn allocation_matches_the_original_runtime() {
         .arg(&stubs)
         .args(sources(
             &aim_paths::root().join("java/device-services/stubs"),
+        ))
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/api/PackageSigningDetails.java"),
+        )
+        .args(sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/sdk"),
         )));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
@@ -60,7 +67,10 @@ fn allocation_matches_the_original_runtime() {
         .arg(classes.join("com/android/server/pm/AppIdsOracle.class")));
     common::java::check_linkage(
         &dex.join("classes.dex"),
-        &["/system/framework/services.jar"],
+        &[
+            "/system/framework/services.jar",
+            "/system/framework/aim-services.jar",
+        ],
     )
     .unwrap();
     let boot = Boot {
@@ -92,7 +102,7 @@ fn allocation_matches_the_original_runtime() {
     let prepared = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "shared-prepare",
@@ -104,7 +114,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
     ]));
@@ -231,7 +241,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "identity",
@@ -280,7 +290,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "trust",
@@ -308,7 +318,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "join",
@@ -348,7 +358,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "ancestry",
@@ -392,7 +402,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "oem",
@@ -475,6 +485,7 @@ fn allocation_matches_the_original_runtime() {
     platform.density_dpi = Some(density);
     let data_files = boot.data.join("data");
     let apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             Some(if let Some(relative) = path.strip_prefix("/data/") {
                 data_files.join(relative)
@@ -744,7 +755,7 @@ fn allocation_matches_the_original_runtime() {
         let original = run(boot.command().args([
             "shell",
             "/system/bin/app_process",
-            "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+            "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
             "/system/bin",
             "com.android.server.pm.AppIdsOracle",
             mode,
@@ -865,7 +876,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "read-store-signatures",
@@ -1033,7 +1044,7 @@ fn allocation_matches_the_original_runtime() {
     let original = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar:/system/framework/aim-services.jar",
         "/system/bin",
         "com.android.server.pm.AppIdsOracle",
         "read-signatures",

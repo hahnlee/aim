@@ -348,6 +348,7 @@ fn compare_new_settings(original_only: bool) {
     let root = aim_paths::original_image();
     let image = root.clone();
     let apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(image.join(p.trim_start_matches('/')))),
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
@@ -686,6 +687,7 @@ fn compare_new_settings(original_only: bool) {
     let mut original = zip_output.lines().peekable();
     let data_root = boot.data.clone();
     let zip_apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
         files: Box::new(move |p| Some(data_root.join(p.trim_start_matches('/')))),
     };
@@ -1179,6 +1181,7 @@ fn compare_new_settings(original_only: bool) {
         ..Default::default()
     };
     let no_inventory = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(|_| None),
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
@@ -1300,6 +1303,7 @@ fn compare_new_settings(original_only: bool) {
     eprintln!("native ABI lifecycle matches original helper/setter routes in {cases} cases");
     let inventory = aim_paths::derived_image();
     let bundled_apks = aim_services::package::write::Apks {
+        signing_overrides: None,
         platform: aim_services::package::parse::Platform::load(&inventory, Default::default())
             .unwrap(),
         files: Box::new(move |p| Some(inventory.join(p.trim_start_matches('/')))),
@@ -1930,6 +1934,7 @@ fn compare_new_settings(original_only: bool) {
         },
     };
     let no_inventory = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(|_| None),
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };
@@ -2254,6 +2259,7 @@ fn compare_new_settings(original_only: bool) {
         let image = root.clone();
         let data_root = boot.data.clone();
         let mapped = aim_services::package::write::Apks {
+            signing_overrides: None,
             platform: aim_services::package::parse::Platform::load(&root, Default::default())
                 .unwrap(),
             files: Box::new(move |path| {
@@ -2412,6 +2418,7 @@ fn compare_new_settings(original_only: bool) {
         update_time: false,
     };
     let unreadable = aim_services::package::write::Apks {
+        signing_overrides: None,
         files: Box::new(|_| None),
         platform: aim_services::package::parse::Platform::load(&root, Default::default()).unwrap(),
     };

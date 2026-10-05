@@ -278,6 +278,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     let cluster_root = cluster.clone();
     let image_root = aim_paths::derived_image();
     let apks_reader = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             if path == "/data/app/provider" {
                 return Some(cluster_root.clone());
@@ -303,6 +304,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
         ..Settings::default()
     };
     let mut bad_reader = Apks {
+        signing_overrides: None,
         files: Box::new(|_| None),
         platform: Platform::load(&aim_paths::derived_image(), Default::default()).unwrap(),
     };

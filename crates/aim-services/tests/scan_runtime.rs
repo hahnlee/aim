@@ -269,6 +269,7 @@ fn saved_scan_libraries_match_original_pms() {
     assert_eq!(original.settings.shared_users.len(), 16);
     let data_files = boot.data.join("data");
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |path| {
             Some(if let Some(relative) = path.strip_prefix("/data/") {
                 data_files.join(relative)

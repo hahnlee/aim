@@ -114,6 +114,7 @@ pub struct System {
     bridge_listeners: Mutex<Vec<BridgeListener>>,
     package_bootstrap: Mutex<PackageBootstrapState>,
     package_install_lock: Mutex<()>,
+    package_signing: Mutex<Option<Arc<crate::package::sign::Overrides>>>,
 }
 
 #[derive(Default)]
@@ -207,6 +208,7 @@ impl System {
                 bridge_listeners: Mutex::new(Vec::new()),
                 package_bootstrap: Mutex::new(PackageBootstrapState::default()),
                 package_install_lock: Mutex::new(()),
+                package_signing: Mutex::new(None),
             }
         });
         let this = Arc::downgrade(&system);
@@ -434,6 +436,21 @@ impl System {
         let bridge = Arc::new(crate::package::bootstrap::Bridge::new(
             self.process.strong(handle),
         )?);
+        let mut signing = self.package_signing.lock().unwrap();
+        match signing.as_ref() {
+            Some(owner) if owner.is_debuggable() != bridge.signing_debuggable => {
+                return Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package signing build policy changed",
+                ));
+            }
+            None => {
+                *signing = Some(Arc::new(crate::package::sign::Overrides::new(
+                    bridge.signing_debuggable,
+                )))
+            }
+            _ => {}
+        }
         let this = Arc::downgrade(self);
         let attached = Arc::downgrade(&bridge);
         let mut current = self.package_bootstrap.lock().unwrap();
@@ -457,6 +474,29 @@ impl System {
             }),
         );
         Ok(())
+    }
+
+    pub fn package_signing_overrides(&self) -> Result<Arc<crate::package::sign::Overrides>> {
+        self.package_bootstrap()?;
+        self.package_signing.lock().unwrap().clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package signing owner is unavailable",
+            )
+        })
+    }
+
+    pub(crate) fn mutate_package_signing(
+        &self,
+        edit: impl FnOnce(&crate::package::sign::Overrides) -> Result<i64>,
+    ) -> Result<i64> {
+        let owner = self.package_signing_overrides()?;
+        if !owner.is_debuggable() {
+            return Err(Exception::security(
+                "This test API is only available on debuggable builds",
+            ));
+        }
+        edit(&owner)
     }
 
     pub fn package_bootstrap(&self) -> Result<Arc<crate::package::bootstrap::Bridge>> {
@@ -490,10 +530,25 @@ impl System {
     fn check_package_boot_scan(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
+        apks: &crate::package::write::Apks,
     ) -> std::result::Result<(), crate::package::bootstrap::BootError> {
         use crate::package::bootstrap::{BootError, OwnerError};
-        self.check_package_bootstrap(bridge)
-            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))
+        let result = (|| {
+            self.check_package_bootstrap(bridge)?;
+            let expected = self.package_signing_overrides()?;
+            if !apks
+                .signing_overrides
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &expected))
+            {
+                return Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package scan has a different signing owner",
+                ));
+            }
+            Ok(())
+        })();
+        result.map_err(|error| BootError::Owner(OwnerError::Owner(error)))
     }
 
     /// Publish only against the original policy owner used to complete this scan.
@@ -607,11 +662,11 @@ impl System {
         crate::package::scan::SystemImageScan,
         crate::package::bootstrap::BootError,
     > {
-        self.check_package_boot_scan(bridge)?;
+        self.check_package_boot_scan(bridge, apks)?;
         let scan = bridge
             .resolve_boot(config, properties)?
             .scan_first_boot(apks, policy)?;
-        self.check_package_boot_scan(bridge)?;
+        self.check_package_boot_scan(bridge, apks)?;
         Ok(scan)
     }
 
@@ -630,11 +685,11 @@ impl System {
         crate::package::bootstrap::SavedSystemPhase,
         crate::package::bootstrap::BootError,
     > {
-        self.check_package_boot_scan(bridge)?;
+        self.check_package_boot_scan(bridge, apks)?;
         let scan = bridge
             .resolve_boot(config, properties)?
             .scan_saved_system(owner, apks, policy, saved)?;
-        self.check_package_boot_scan(bridge)?;
+        self.check_package_boot_scan(bridge, apks)?;
         Ok(scan)
     }
 
@@ -661,7 +716,7 @@ impl System {
         crate::package::bootstrap::BootError,
     > {
         use crate::package::bootstrap::{BootError, DataBootInputs, SavedBootScan};
-        self.check_package_boot_scan(bridge)?;
+        self.check_package_boot_scan(bridge, apks)?;
         let boot = bridge.resolve_boot(config, properties)?;
         let data_users = saved.users;
         let first_boot_or_upgrade = saved.first_boot_or_upgrade;
@@ -701,7 +756,7 @@ impl System {
                 resources,
             },
         )?;
-        self.check_package_boot_scan(bridge)?;
+        self.check_package_boot_scan(bridge, apks)?;
         Ok(SavedBootScan { system, data })
     }
 

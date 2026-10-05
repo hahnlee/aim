@@ -21,6 +21,7 @@ pub type Files = Box<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 /// The guest's files and the platform the parser and the verifier
 /// depend on.
 pub struct Apks {
+    pub signing_overrides: Option<std::sync::Arc<sign::Overrides>>,
     pub files: Files,
     pub platform: Platform,
 }
@@ -102,7 +103,7 @@ impl Apks {
         pkg: &AndroidPackage,
         collection: CertificateCollection<'_>,
     ) -> Result<sign::SigningDetails, ApkSigningError> {
-        self.collect_signing_details_using(pkg, collection, None)
+        self.collect_signing_details_using(pkg, collection, self.signing_overrides.as_deref())
     }
 
     pub fn collect_signing_details_with_overrides(
@@ -142,7 +143,7 @@ impl Apks {
         &self,
         pkg: &AndroidPackage,
     ) -> Result<sign::SigningDetails, ApkSigningError> {
-        self.signing_details_with_verification(pkg, false, None)
+        self.signing_details_with_verification(pkg, false, self.signing_overrides.as_deref())
     }
 
     fn signing_details_with_verification(

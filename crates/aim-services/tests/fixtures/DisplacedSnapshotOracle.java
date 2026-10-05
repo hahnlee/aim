@@ -4,6 +4,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 public final class DisplacedSnapshotOracle {
+    private static final dev.aim.server.PackageLocal.SigningOwner signing = new dev.aim.server.PackageLocal.SigningOwner() {
+        public void add(android.content.pm.SigningDetails oldDetails, android.content.pm.SigningDetails newDetails) {
+            android.util.apk.ApkSignatureVerifier.addOverrideSigningDetails(oldDetails, newDetails);
+        }
+        public void remove(android.content.pm.SigningDetails oldDetails) { android.util.apk.ApkSignatureVerifier.removeOverrideSigningDetails(oldDetails); }
+        public void clear() { android.util.apk.ApkSignatureVerifier.clearOverrideSigningDetails(); }
+    };
     private static final String INCOMING = "com.google.android.gsf";
     private static final String ORIGINAL = "fixture.original.gsf";
     public static void main(String[] args) {
@@ -73,7 +80,7 @@ public final class DisplacedSnapshotOracle {
         verifyLocal(first);
         var local = new dev.aim.server.PackageLocal(store, (v, p, d, u, a, old, se, f) -> {
             throw new java.io.IOException("unused SDK owner in version fixture");
-        });
+        }, signing);
         try (var old = local.withUnfilteredSnapshot()) {
             var original = old.getPackageStates().get(ORIGINAL);
             source[0] = new Owner(first);
@@ -140,11 +147,13 @@ public final class DisplacedSnapshotOracle {
             observed[0] = new Object[] { volume, name, dirs, user, app, oldApp, seinfo, flags };
             if (fail[0]) throw failure;
         };
-        try { new dev.aim.server.PackageLocal(store, sdk); throw new AssertionError("uninitialized facade accepted"); }
+        try { new dev.aim.server.PackageLocal(store, sdk, signing); throw new AssertionError("uninitialized facade accepted"); }
         catch (IllegalStateException expected) {}
         store.refresh();
-        var local = new dev.aim.server.PackageLocal(store, sdk);
-        try { new dev.aim.server.PackageLocal(store, null); throw new AssertionError("missing SDK owner accepted"); }
+        var local = new dev.aim.server.PackageLocal(store, sdk, signing);
+        try { new dev.aim.server.PackageLocal(store, null, signing); throw new AssertionError("missing SDK owner accepted"); }
+        catch (NullPointerException expected) {}
+        try { new dev.aim.server.PackageLocal(store, sdk, null); throw new AssertionError("missing signing owner accepted"); }
         catch (NullPointerException expected) {}
         try (var scope = local.withFilteredSnapshot(1010001, android.os.UserHandle.of(10))) {
             if (scope.getPackageState(ORIGINAL) == null || caller[0] != 1010001 || caller[1] != 10)

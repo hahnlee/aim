@@ -99,11 +99,9 @@ impl SigningScan {
                 ApkSigningError::Input(message) => SigningError::Fatal(error(message)),
             })?;
         let mut parsed = code.parsed.clone();
-        parsed.signing_details = Some(
-            signing
-                .parcel_details()
-                .map_err(|message| SigningError::Fatal(error(message)))?,
-        );
+        parsed.signing_details = signing
+            .package_details()
+            .map_err(|message| SigningError::Fatal(error(message)))?;
         Ok(Code {
             location: code.location.clone(),
             parsed,

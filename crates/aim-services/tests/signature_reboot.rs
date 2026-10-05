@@ -664,6 +664,7 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     input.settings.disabled_system_packages.clear();
     let guest = boot.data.clone();
     let apks = Apks {
+        signing_overrides: None,
         files: Box::new(move |p| Some(guest.join(p.trim_start_matches('/')))),
         platform: Platform::load(&aim_paths::derived_image(), Default::default()).unwrap(),
     };

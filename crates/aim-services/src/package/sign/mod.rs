@@ -31,7 +31,7 @@ mod merge;
 mod overrides;
 pub use history::{History, INSTALLED_DATA, JoinType, ROLLBACK, SHARED_USER_ID};
 pub use merge::MergeRule;
-pub use overrides::{OverrideSnapshot, Overrides};
+pub use overrides::{OverrideSnapshot, Overrides, read_details as read_override_details};
 mod jar;
 mod serialize;
 pub(crate) use serialize::canonical_public_keys;

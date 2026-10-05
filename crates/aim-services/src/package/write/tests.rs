@@ -559,6 +559,7 @@ fn an_install_s_signers_are_verified_from_its_apks() {
     let missing_host = root.join("missing-code-owner-fixture.apk");
     assert!(!missing_host.exists());
     let apks = apk::Apks {
+        signing_overrides: None,
         files: Box::new(move |p| {
             if p == missing {
                 Some(missing_host.clone())

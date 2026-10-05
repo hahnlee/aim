@@ -78,6 +78,29 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         };
     }
 
+    public static PackageLocal.SigningOwner signingOwner() {
+        IBinder binder = ServiceManager.checkService("aim.service_host");
+        if (binder == null) throw new IllegalStateException("native service host is unavailable");
+        return signingOwner(IServiceHost.Stub.asInterface(binder));
+    }
+
+    private static PackageLocal.SigningOwner signingOwner(IServiceHost host) {
+        return new PackageLocal.SigningOwner() {
+            public void add(android.content.pm.SigningDetails oldDetails, android.content.pm.SigningDetails newDetails) {
+                try { host.addPackageSigningOverride(PackageSigningDetails.encode(oldDetails), PackageSigningDetails.encode(newDetails)); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+            public void remove(android.content.pm.SigningDetails oldDetails) {
+                try { host.removePackageSigningOverride(PackageSigningDetails.encode(oldDetails)); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+            public void clear() {
+                try { host.clearPackageSigningOverrides(); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
+        };
+    }
+
     public static PackageLocal captureLocal(PackageSnapshots.Owner owner,
             boolean crossUserSuspensions) throws RemoteException, java.io.IOException {
         IBinder binder = ServiceManager.checkService("aim.service_host");
@@ -85,7 +108,13 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         var host = IServiceHost.Stub.asInterface(binder);
         var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions);
         snapshots.refresh();
-        return new PackageLocal(snapshots, sdkDataOwner(host));
+        return new PackageLocal(snapshots, sdkDataOwner(host), signingOwner(host));
+    }
+
+    @Override
+    public boolean isSigningDebuggable() {
+        enforceSystemUid();
+        return android.os.Build.isDebuggable();
     }
 
     @Override

@@ -20,7 +20,6 @@ import android.content.pm.SigningDetails;
 import android.os.Binder;
 import android.os.Build;
 import android.os.UserHandle;
-import android.util.apk.ApkSignatureVerifier;
 import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.pkg.PackageState;
 import java.io.IOException;
@@ -35,12 +34,20 @@ public final class PackageLocal implements PackageManagerLocal {
                 int userId, int appId, int previousAppId, String seInfo, int flags) throws IOException;
     }
 
+    public interface SigningOwner {
+        void add(SigningDetails oldDetails, SigningDetails newDetails);
+        void remove(SigningDetails oldDetails);
+        void clear();
+    }
+
     private final PackageSnapshots.Store snapshots;
     private final SdkDataOwner sdkData;
+    private final SigningOwner signing;
 
-    public PackageLocal(PackageSnapshots.Store snapshots, SdkDataOwner sdkData) {
+    public PackageLocal(PackageSnapshots.Store snapshots, SdkDataOwner sdkData, SigningOwner signing) {
         this.snapshots = Objects.requireNonNull(snapshots);
         this.sdkData = Objects.requireNonNull(sdkData);
+        this.signing = Objects.requireNonNull(signing);
         snapshots.getVersion(); // A facade cannot expose an uninitialized replica.
     }
 
@@ -78,18 +85,18 @@ public final class PackageLocal implements PackageManagerLocal {
     @Override
     public void addOverrideSigningDetails(SigningDetails oldSigningDetails, SigningDetails newSigningDetails) {
         enforceDebuggable();
-        ApkSignatureVerifier.addOverrideSigningDetails(oldSigningDetails, newSigningDetails);
+        signing.add(oldSigningDetails, newSigningDetails);
     }
 
     @Override
     public void removeOverrideSigningDetails(SigningDetails oldSigningDetails) {
         enforceDebuggable();
-        ApkSignatureVerifier.removeOverrideSigningDetails(oldSigningDetails);
+        signing.remove(oldSigningDetails);
     }
 
     @Override
     public void clearOverrideSigningDetails() {
         enforceDebuggable();
-        ApkSignatureVerifier.clearOverrideSigningDetails();
+        signing.clear();
     }
 }

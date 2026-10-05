@@ -165,9 +165,11 @@ pub fn start(
         })),
     );
     model.writes.watch_sessions(system);
-    model
-        .writes
-        .read_apks(super::write::Apks { files, platform });
+    model.writes.read_apks(super::write::Apks {
+        signing_overrides: None,
+        files,
+        platform,
+    });
     Ok(model)
 }
 
