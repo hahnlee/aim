@@ -2028,6 +2028,51 @@ fn native_package_parcels_match_original_read_write() {
         ),
         Ok(false)
     );
+    let sandbox_filter = aim_services::package::apps_filter::AppsFilter::new(
+        &sandbox_state,
+        &aim_services::package::apps_filter::Config::default(),
+    );
+    let selected_name = selected.unwrap();
+    let selected_setting = state
+        .settings
+        .packages
+        .iter()
+        .find(|package| package.name == selected_name)
+        .unwrap();
+    let selected_target = aim_services::package::model::PackageState {
+        name: selected_name,
+        app_id: selected_setting.app_id,
+        ..Default::default()
+    };
+    assert_eq!(
+        aim_services::package::apps_filter::should_filter_application(
+            &sandbox_state,
+            &sandbox_filter,
+            Some(&selected_target),
+            client.app_id + 10000,
+            0,
+            false,
+            true,
+        ),
+        Ok(false)
+    );
+    let system_target = aim_services::package::model::PackageState {
+        name: "android".into(),
+        app_id: 1000,
+        ..Default::default()
+    };
+    assert_eq!(
+        aim_services::package::apps_filter::should_filter_application(
+            &sandbox_state,
+            &sandbox_filter,
+            Some(&system_target),
+            client.app_id + 10000,
+            0,
+            false,
+            true,
+        ),
+        Ok(false)
+    );
     let policy_output = boot
         .client(1000)
         .args([

@@ -2282,15 +2282,24 @@ an original null selection; sandbox same-app checks compare the selected name
 without requiring a parsed package or per-user inventory. Missing owners return
 an explicit unsupported error. Ordinary same-app checks retain parsed package
 and app-ID ownership. Malformed or foreign-key records reject publication;
-replacement/removal does not change older snapshots. Other sandbox targets still
-require unresolved owner inputs and return explicit unsupported errors.
-Release units pass 469 cases (0.51s). A real original-PMS Binder client runs under
+replacement/removal does not change older snapshots. Non-client sandbox targets
+now follow the original uninstall/archived and selected-package same-app checks,
+then AppsFilter's force-queryable and ordinary implicit grants (#942). Retained
+grants alone do not expose targets to sandboxes; full UID direction and user
+scope remain enforced. Missing selected owners and instant-app visibility still
+return explicit unsupported errors.
+Release units pass 470 cases (0.46s). A real original-PMS Binder client runs under
 the corresponding sandbox UID, checks its actual Process.myUid, retrieves the
 original GSF client ApplicationInfo and PackageInfo with the saved client UID,
 and sees null for a missing package. It exports the production SDK-owner capture
 and checks it against original PMS's selection; native decoding and same-app
-checks use that actual name. The full original ART Parcel test passes (26.00s);
-the image and original-PMS template build passes (63.5s; nine rebuilt, 33 fresh).
+checks use that actual name. The same original sandbox client retrieves the
+selected SDK package's ApplicationInfo/PackageInfo and android ApplicationInfo;
+the native visibility predicate admits those targets using the captured name and
+saved selected app ID. The full original ART Parcel test passes (38.46s). The
+image and original-PMS template build passes (63.5s; nine rebuilt, 33 fresh);
+subsequent native visibility changes rebuild all three host owners successfully
+(15.2s; 39 other nodes fresh).
 This owner feed is not the native boot scan producer. Native filtered replica
 callbacks and the native package activation gates remain #836/#798/#724.
 

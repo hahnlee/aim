@@ -19,6 +19,11 @@ public final class SandboxClientVisibilityOracle {
                     throw new AssertionError("SDK package owner differs");
             } finally { record.recycle(); }
             java.nio.file.Files.write(java.nio.file.Path.of(args[2]), captured);
+            if (selected == null || pm.getApplicationInfo(selected, 0, 0) == null
+                    || pm.getPackageInfo(selected, 0, 0) == null)
+                throw new AssertionError("selected sandbox package hidden");
+            if (pm.getApplicationInfo("android", 0, 0) == null)
+                throw new AssertionError("system package hidden from sandbox");
             var app = pm.getApplicationInfo(name, 0, 0);
             if (app == null || app.uid != clientUid) throw new AssertionError("sandbox client application hidden");
             var pkg = pm.getPackageInfo(name, 0, 0);

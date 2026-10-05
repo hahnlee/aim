@@ -517,7 +517,6 @@ pub fn should_filter_application(
         if ps.is_none() {
             return Ok(true);
         }
-        return Err(NotModelled("the SDK sandbox's visibility"));
     }
     if is_isolated(calling_uid) {
         calling_uid = isolated_owner(state, calling_uid)?;
@@ -813,6 +812,181 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_non_client_visibility_follows_uninstall_same_app_and_owned_grants() {
+        for user in [0, 10] {
+            let sandbox = uid(user, FIRST_SDK_SANDBOX_UID);
+            let mut state = State::default();
+            let mut target = PackageState {
+                name: "selected.sdk".into(),
+                app_id: 10005,
+                users: [(
+                    user,
+                    PackageUserState {
+                        installed: true,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let filter = AppsFilter::new(&state, &Config::default());
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    false,
+                    true
+                ),
+                Err(NotModelled("the SDK sandbox's package"))
+            );
+            state.system.sdk_sandbox_package = Some(Some(target.name.clone()));
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(false)
+            );
+            // Uninstall/archived filtering precedes even the selected owner's same-app check.
+            target.users.get_mut(&user).unwrap().installed = false;
+            for uninstall in [false, true] {
+                for archived_filter in [false, true] {
+                    assert_eq!(
+                        should_filter_application(
+                            &state,
+                            &filter,
+                            Some(&target),
+                            sandbox,
+                            user,
+                            uninstall,
+                            archived_filter
+                        ),
+                        Ok(uninstall)
+                    );
+                    target.users.get_mut(&user).unwrap().archive_state =
+                        Some(super::super::restrictions::ArchiveState {
+                            installer_title: String::new(),
+                            archive_time: 0,
+                            activities: vec![],
+                        });
+                    assert_eq!(
+                        should_filter_application(
+                            &state,
+                            &filter,
+                            Some(&target),
+                            sandbox,
+                            user,
+                            uninstall,
+                            archived_filter
+                        ),
+                        Ok(uninstall && archived_filter)
+                    );
+                    target.users.get_mut(&user).unwrap().archive_state = None;
+                }
+            }
+            target.users.get_mut(&user).unwrap().installed = true;
+            // A captured null selection still permits AppsFilter-owned relations.
+            state.system.sdk_sandbox_package = Some(None);
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(true)
+            );
+            state
+                .system
+                .implicit_access
+                .grant(sandbox, uid(user, target.app_id), true);
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(true)
+            );
+            state
+                .system
+                .implicit_access
+                .grant(sandbox, uid(user, target.app_id), false);
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(false)
+            );
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &filter,
+                    Some(&target),
+                    uid(user + 1, FIRST_SDK_SANDBOX_UID),
+                    user,
+                    false,
+                    true
+                ),
+                Ok(true)
+            );
+            state
+                .system
+                .implicit_access
+                .remove_package(target.app_id, &[user]);
+            target.is.force_queryable_override = true;
+            state.packages.insert(target.name.clone(), target.clone());
+            let forced = AppsFilter::new(&state, &Config::default());
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &forced,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Ok(false)
+            );
+            target.users.get_mut(&user).unwrap().instant_app = true;
+            assert_eq!(
+                should_filter_application(
+                    &state,
+                    &forced,
+                    Some(&target),
+                    sandbox,
+                    user,
+                    true,
+                    true
+                ),
+                Err(NotModelled("instant apps' visibility"))
+            );
+        }
+    }
+
+    #[test]
     fn sandbox_clients_are_visible_before_code_user_and_instant_checks() {
         let state = State::default();
         let filter = AppsFilter::new(&state, &Config::default());
@@ -868,7 +1042,7 @@ mod tests {
                         false,
                         true
                     ),
-                    Err(NotModelled("the SDK sandbox's visibility"))
+                    Err(NotModelled("the SDK sandbox's package"))
                 );
                 let mut other = client.clone();
                 other.app_id += 1;
@@ -882,7 +1056,7 @@ mod tests {
                         false,
                         true
                     ),
-                    Err(NotModelled("the SDK sandbox's visibility"))
+                    Err(NotModelled("the SDK sandbox's package"))
                 );
             }
         }
