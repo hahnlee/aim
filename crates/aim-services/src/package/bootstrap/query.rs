@@ -1,4 +1,4 @@
-//! Live permission GIDs and AppsFilter compatibility for native query capture (#953).
+//! Live permission definitions, grants, GIDs and AppsFilter compatibility for native query capture (#953).
 use super::{Bridge, OwnerError, PermissionGidError, bridge};
 use crate::package::{
     scan::SigningScan,
@@ -13,6 +13,7 @@ pub enum QueryContextError {
     Input(String),
     Compatibility(OwnerError),
     Gids(PermissionGidError),
+    Permissions(OwnerError),
 }
 
 impl Bridge {
@@ -46,8 +47,55 @@ impl Bridge {
         Ok(enabled)
     }
 
-    /// Validate the complete inventory before asking external owners. Grant,
-    /// installed-definition and domain inputs remain explicit separate owners.
+    pub fn installed_permissions(&self, name: &str) -> Result<Vec<String>, OwnerError> {
+        if name.is_empty() {
+            return Err(OwnerError::Code("missing permission package".into()));
+        }
+        let mut request = Parcel::new();
+        bridge::GetPackageInstalledPermissions {
+            package_name: Some(name.into()),
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_INSTALLED_PERMISSIONS, &request, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let names = bridge::read_get_package_installed_permissions_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        permission_names(names, reader.remaining())
+    }
+
+    pub fn granted_permissions(
+        &self,
+        name: &str,
+        app_id: i32,
+        user_id: i32,
+    ) -> Result<Vec<String>, OwnerError> {
+        if name.is_empty() || !(0..100_000).contains(&app_id) || user_id < 0 {
+            return Err(OwnerError::Code("invalid permission identity".into()));
+        }
+        let mut request = Parcel::new();
+        bridge::GetPackageGrantedPermissions {
+            package_name: Some(name.into()),
+            app_id,
+            user_id,
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::GET_PACKAGE_GRANTED_PERMISSIONS, &request, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let names = bridge::read_get_package_granted_permissions_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        permission_names(names, reader.remaining())
+    }
+
+    /// Validate the complete inventory before asking external owners.
+    /// Domain and global context inputs remain explicit separate owners.
     pub fn resolve_query_context(
         &self,
         owner: &SigningScan,
@@ -82,10 +130,10 @@ impl Bridge {
         validate(&packages, &context.packages, &context.users)?;
         validate(&retained, &context.retained_packages, &context.users)?;
         for (key, extra) in &mut context.packages {
-            self.resolve_package(packages[key].0, extra)?;
+            self.resolve_package(packages[key].0, packages[key].1, extra)?;
         }
         for (key, extra) in &mut context.retained_packages {
-            self.resolve_package(retained[key].0, extra)?;
+            self.resolve_package(retained[key].0, retained[key].1, extra)?;
         }
         Ok(context)
     }
@@ -93,12 +141,22 @@ impl Bridge {
     fn resolve_package(
         &self,
         setting: &settings::Package,
+        stored: &BTreeMap<i32, crate::package::restrictions::UserState>,
         extra: &mut PackageInputs,
     ) -> Result<(), QueryContextError> {
+        extra.installed_permissions = self
+            .installed_permissions(&setting.name)
+            .map_err(QueryContextError::Permissions)?;
         extra.filter_application_query = self
             .application_query_filtering(&setting.name, setting.target_sdk_version)
             .map_err(QueryContextError::Compatibility)?;
         for (id, user) in &mut extra.users {
+            user.granted_permissions = if stored.get(id).is_none_or(|state| state.installed) {
+                self.granted_permissions(&setting.name, setting.app_id, *id)
+                    .map_err(QueryContextError::Permissions)?
+            } else {
+                vec![]
+            };
             user.gids = self
                 .permission_gids(setting.app_id, &[*id])
                 .map_err(QueryContextError::Gids)?
@@ -146,4 +204,22 @@ fn validate<K: Ord>(
         }
     }
     Ok(())
+}
+
+fn permission_names(
+    names: Option<Vec<Option<String>>>,
+    remaining: usize,
+) -> Result<Vec<String>, OwnerError> {
+    if remaining != 0 {
+        return Err(OwnerError::Transport(BAD_VALUE));
+    }
+    let names = names.ok_or_else(|| OwnerError::Code("missing permission names".into()))?;
+    let names = names
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| OwnerError::Code("null permission name".into()))?;
+    if names.iter().collect::<BTreeSet<_>>().len() != names.len() {
+        return Err(OwnerError::Code("duplicate permission name".into()));
+    }
+    Ok(names)
 }

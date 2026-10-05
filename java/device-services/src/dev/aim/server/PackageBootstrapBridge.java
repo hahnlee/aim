@@ -194,6 +194,46 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public String[] getPackageInstalledPermissions(String packageName) {
+        enforceSystemUid();
+        if (packageName == null || packageName.isEmpty()) throw new IllegalArgumentException("missing permission package");
+        return permissionNames(permissionOwner().getInstalledPermissions(packageName));
+    }
+
+    @Override
+    public String[] getPackageGrantedPermissions(String packageName, int appId, int userId) {
+        enforceSystemUid();
+        if (packageName == null || packageName.isEmpty() || appId < 0 || appId >= 100000 || userId < 0)
+            throw new IllegalArgumentException("invalid permission identity");
+        var permissions = permissionOwner();
+        var local = com.android.server.LocalManagerRegistry.getManager(com.android.server.pm.PackageManagerLocal.class);
+        if (local == null) throw new IllegalStateException("package local owner is unavailable");
+        try (var snapshot = local.withUnfilteredSnapshot()) {
+            var state = snapshot.getPackageStates().get(packageName);
+            if (state == null || state.getAppId() != appId)
+                throw new IllegalStateException("permission UID owner differs");
+            String[] granted = permissionNames(permissions.getGrantedPermissions(packageName, userId));
+            try (var current = local.withUnfilteredSnapshot()) {
+                if (current.getPackageStates().get(packageName) != state)
+                    throw new IllegalStateException("permission package owner changed");
+            }
+            return granted;
+        }
+    }
+
+    private static PermissionManagerServiceInternal permissionOwner() {
+        var owner = LocalServices.getService(PermissionManagerServiceInternal.class);
+        if (owner == null) throw new IllegalStateException("permission owner is unavailable");
+        return owner;
+    }
+
+    private static String[] permissionNames(java.util.Set<String> names) {
+        if (names == null) throw new IllegalStateException("missing permission names");
+        for (String name : names) if (name == null) throw new IllegalStateException("null permission name");
+        return new java.util.TreeSet<>(names).toArray(new String[0]);
+    }
+
+    @Override
     public byte[] getLegacyPermissionState(int appId, int[] userIds) {
         enforceSystemUid();
         PackageLegacyPermissions.validate(appId, userIds);

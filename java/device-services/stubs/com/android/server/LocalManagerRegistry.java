@@ -5,5 +5,6 @@ package com.android.server;
 // An interface here: the image's class has no constructor left for a stub
 // class to declare, and a static call compiles to the same invoke-static.
 public interface LocalManagerRegistry {
+    static <T> void addManager(Class<T> managerClass, T manager) { throw new RuntimeException("stub"); }
     static <T> T getManager(Class<T> managerClass) { throw new RuntimeException("stub"); }
 }

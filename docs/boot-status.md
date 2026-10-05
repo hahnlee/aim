@@ -1248,21 +1248,29 @@ lookup now uses the captured AppIds slots, preserving detached settings and
 same-name retained shared members separately from current packages (#952).
 Declared shared IDs survive pruning of their live group. Original ART matches
 core package getters and per-user defaults/overlays/signing on all six actual
-native displaced graphs; the complete first-system fixture passes (103.25s).
+native displaced graphs; the complete first-system fixture passes (91.38s).
 Release units pass (476; four ignored), including missing UID slots and retained
-member installation filtering; explicit service-host tests pass (six, 2.96s).
-This compares controlled external permission/domain/compatibility inputs, not a
-running production context producer. Full original UID-query/visibility parity
-and production grant/domain/global owner publication remain unproved. Completion
-now validates complete active/factory/retained package and user identities before
-resolving permission GIDs and FILTER_APPLICATION_QUERY from the exact retained
-bootstrap bridge (#953). Both callbacks run outside the publication lock;
-missing owners, malformed/trailing replies and changed attachment reject without
-replacing either capture. Controlled Binder tests verify UID/name/SDK arguments
-and preservation on failure. Original ART compares the production Java policy
-with actual PlatformCompat at SDK 28/29/30/36, and verifies system/app caller
-checks and missing process-local permission-owner failure. Live SystemServer GID
-owner comparison and the running complete context producer remain unproved.
+member installation filtering; explicit service-host tests pass (six, 3.02s).
+Completion validates complete active/factory/retained package and user identities
+before resolving permission definitions, per-user grants, GIDs and
+FILTER_APPLICATION_QUERY from the retained bootstrap bridge (#953, #956).
+Owner callbacks run outside the publication lock; missing owners,
+malformed/trailing replies and changed attachment reject without replacing
+either capture. Uninstalled users receive no grants and do not invoke the grant
+owner. The original permission API resolves a current package by name, so the
+production bridge validates its appId and retains the exact PackageManagerLocal
+state across the grant callback; a changed state or UID rejects publication.
+Controlled Binder tests verify arguments, nullable/duplicate replies and atomic
+failure preservation. Original ART invokes the production Java bridge at system
+UID over six real native snapshot graphs, checks sorted permission replies,
+rejects mismatched and changed owners and nullable replies, and rejects actual
+app UID. Its permission service is a controlled fixture: live AccessChecking
+and SystemServer permission/GID integration, exact retained old-UID grant
+ownership, full original UID-query/visibility parity and production domain/global
+context publication remain unproved. The earlier original policy fixture
+compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
+compilation does not count them as executed. The image/original-PMS template
+build passes (57.7s; nine rebuilt, 33 fresh).
 The facade is not registered, and
 native visibility/version-page refresh and default native activation remain unproved;
 original debug-build application remains unrun (#946). System.complete_package_scan now resolves

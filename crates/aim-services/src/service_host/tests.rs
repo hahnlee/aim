@@ -136,6 +136,8 @@ struct Owner {
     signing_debuggable: AtomicBool,
     test_base_reply: AtomicUsize,
     query_reply: AtomicUsize,
+    permission_reply: AtomicUsize,
+    permission_calls: Mutex<Vec<(String, Option<(i32, i32)>)>>,
     gid_reply: AtomicUsize,
     query_calls: Mutex<Vec<(String, i32)>>,
     malformed_bcp: AtomicBool,
@@ -205,6 +207,35 @@ impl Service for Owner {
                 );
                 let sdk = call.data.read_i32()?;
                 reply.write_i32(i32::from(sdk >= 31));
+            }
+            bootstrap::GET_PACKAGE_INSTALLED_PERMISSIONS
+            | bootstrap::GET_PACKAGE_GRANTED_PERMISSIONS => {
+                let name = call.data.read_string16()?.unwrap();
+                let identity = if call.code == bootstrap::GET_PACKAGE_GRANTED_PERMISSIONS {
+                    Some((call.data.read_i32()?, call.data.read_i32()?))
+                } else {
+                    None
+                };
+                assert_eq!(call.data.remaining(), 0);
+                self.permission_calls.lock().unwrap().push((name, identity));
+                let mode = self.permission_reply.load(Ordering::SeqCst);
+                if mode == 1 {
+                    reply.write_i32(-1);
+                } else {
+                    reply.write_i32(if mode == 3 { 2 } else { 1 });
+                    let value = if identity.is_some() {
+                        "fixture.granted"
+                    } else {
+                        "fixture.installed"
+                    };
+                    reply.write_string16(if mode == 2 { None } else { Some(value) });
+                    if mode == 3 {
+                        reply.write_string16(Some(value));
+                    }
+                }
+                if mode == 4 {
+                    reply.write_i32(99);
+                }
             }
             bootstrap::GET_PERMISSION_GIDS_FOR_UID => {
                 self.calls.lock().unwrap().push(call.data.read_i32()?);
@@ -910,6 +941,8 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
+        permission_reply: AtomicUsize::new(0),
+        permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
         query_calls: Mutex::new(Vec::new()),
         malformed_bcp: AtomicBool::new(false),
@@ -930,6 +963,8 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
+        permission_reply: AtomicUsize::new(0),
+        permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
         query_calls: Mutex::new(Vec::new()),
         malformed_bcp: AtomicBool::new(false),
@@ -1003,6 +1038,62 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         )
     );
     assert_eq!(*owner.calls.lock().unwrap(), [10100, 1010100]);
+    assert_eq!(
+        resolved.packages[&("fixture".into(), false)].installed_permissions,
+        ["fixture.installed"]
+    );
+    assert_eq!(
+        resolved.packages[&("fixture".into(), false)].users[&0].granted_permissions,
+        ["fixture.granted"]
+    );
+    assert!(
+        owner
+            .permission_calls
+            .lock()
+            .unwrap()
+            .contains(&("fixture".into(), Some((10100, 10))))
+    );
+    for mode in [1, 2, 3, 4] {
+        owner.permission_reply.store(mode, Ordering::SeqCst);
+        assert!(old.installed_permissions("fixture").is_err());
+        assert!(old.granted_permissions("fixture", 10100, 0).is_err());
+        assert!(
+            old.resolve_query_context(published.owner(), context.clone())
+                .is_err()
+        );
+    }
+    owner.permission_reply.store(0, Ordering::SeqCst);
+    let mut uninstalled = published.owner().clone();
+    uninstalled
+        .capture_user_states(BTreeMap::from([(
+            ("fixture".into(), false),
+            crate::package::scan::CapturedUsers {
+                states: BTreeMap::from([(
+                    0,
+                    crate::package::restrictions::UserState {
+                        installed: false,
+                        ..Default::default()
+                    },
+                )]),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+    let inputs = query_context_for(&uninstalled, published.version());
+    owner.permission_calls.lock().unwrap().clear();
+    let captured = old.resolve_query_context(&uninstalled, inputs).unwrap();
+    assert!(
+        captured.packages[&("fixture".into(), false)].users[&0]
+            .granted_permissions
+            .is_empty()
+    );
+    assert!(
+        !owner
+            .permission_calls
+            .lock()
+            .unwrap()
+            .contains(&("fixture".into(), Some((10100, 0))))
+    );
     for mode in [1, 2] {
         owner.query_reply.store(mode, Ordering::SeqCst);
         assert!(
@@ -1425,6 +1516,8 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
+        permission_reply: AtomicUsize::new(0),
+        permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
         query_calls: Mutex::new(Vec::new()),
         malformed_bcp: AtomicBool::new(false),
@@ -2138,7 +2231,11 @@ fn verify_boot_scan(
         &old_query,
         &system.capture_package_queries().unwrap()
     ));
-    for malformed in [&owner.query_reply, &owner.gid_reply] {
+    for malformed in [
+        &owner.query_reply,
+        &owner.gid_reply,
+        &owner.permission_reply,
+    ] {
         malformed.store(1, Ordering::SeqCst);
         assert!(
             system
@@ -2185,6 +2282,14 @@ fn verify_boot_scan(
         &published,
         &system.capture_package_scan().unwrap()
     ));
+    assert_eq!(
+        query.state().packages["android"].installed_permissions,
+        ["fixture.installed"]
+    );
+    assert_eq!(
+        query.state().packages["android"].users[&0].granted_permissions,
+        ["fixture.granted"]
+    );
     assert_eq!(
         query.state().packages["android"].users[&0].gids,
         [owner.gid, owner.gid]

@@ -1,3 +1,5 @@
+package dev.aim.server;
+
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
@@ -13,8 +15,52 @@ public final class DisplacedSnapshotOracle {
     };
     private static final String INCOMING = "com.google.android.gsf";
     private static final String ORIGINAL = "fixture.original.gsf";
+    private static final CurrentLocal currentLocal = new CurrentLocal();
+    private static final Permissions permissions = new Permissions();
+    private static boolean permissionOwnersRegistered;
+    private static final class CurrentLocal implements com.android.server.pm.PackageManagerLocal {
+        dev.aim.server.PackageLocal delegate;
+        public UnfilteredSnapshot withUnfilteredSnapshot() { return delegate.withUnfilteredSnapshot(); }
+        public FilteredSnapshot withFilteredSnapshot() { return delegate.withFilteredSnapshot(); }
+        public FilteredSnapshot withFilteredSnapshot(int uid, android.os.UserHandle user) { return delegate.withFilteredSnapshot(uid, user); }
+        public void reconcileSdkData(String v, String p, java.util.List<String> d, int u, int a, int o, String s, int f) throws java.io.IOException { delegate.reconcileSdkData(v,p,d,u,a,o,s,f); }
+        public void addOverrideSigningDetails(android.content.pm.SigningDetails a, android.content.pm.SigningDetails b) { delegate.addOverrideSigningDetails(a,b); }
+        public void removeOverrideSigningDetails(android.content.pm.SigningDetails a) { delegate.removeOverrideSigningDetails(a); }
+        public void clearOverrideSigningDetails() { delegate.clearOverrideSigningDetails(); }
+    }
+    private static final class Permissions implements com.android.server.pm.permission.PermissionManagerServiceInternal {
+        int reads;
+        int mode;
+        Runnable replace;
+        public int[] getGidsForUid(int uid) { throw new AssertionError("unused GID owner"); }
+        public com.android.server.pm.permission.LegacyPermissionState getLegacyPermissionState(int id) { throw new AssertionError("unused legacy owner"); }
+        public java.util.Set<String> getInstalledPermissions(String name) {
+            if (!ORIGINAL.equals(name)) throw new AssertionError("permission definition identity differs");
+            return names("fixture.installed");
+        }
+        public java.util.Set<String> getGrantedPermissions(String name, int user) {
+            if (!ORIGINAL.equals(name) || (user != 0 && user != 10)) throw new AssertionError("grant identity differs");
+            reads++;
+            if (replace != null) { Runnable action = replace; replace = null; action.run(); }
+            return names("fixture.granted." + user);
+        }
+        private java.util.Set<String> names(String prefix) {
+            if (mode == 1) return null;
+            var names = new java.util.HashSet<String>();
+            names.add(prefix + ".z"); names.add(prefix + ".a");
+            if (mode == 2) names.add(null);
+            return names;
+        }
+    }
     public static void main(String[] args) {
         try {
+            if (args.length > 1) {
+                for (boolean grants : new boolean[] {false, true}) {
+                    try { permissionCall(grants, 10003, 0); throw new AssertionError("untrusted permission caller accepted"); }
+                    catch (SecurityException expected) {}
+                }
+                System.out.println("permission query owners denied"); System.exit(0);
+            }
             for (int i = 0; i < 6; i++) verify(new File(args[0], "case-" + i), i);
             System.out.println("displaced full snapshot contracts: 6 cases");
             System.exit(0);
@@ -176,6 +222,54 @@ public final class DisplacedSnapshotOracle {
                 throw new AssertionError("rejected refresh replaced state");
         }
     }
+    private static byte[] permissionCall(boolean grants, int app, int user) throws Exception {
+        var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+        try {
+            request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeString(ORIGINAL);
+            if (grants) { request.writeInt(app); request.writeInt(user); }
+            int code = grants ? dev.aim.server.IPackageBootstrapBridge.Stub.TRANSACTION_getPackageGrantedPermissions
+                    : dev.aim.server.IPackageBootstrapBridge.Stub.TRANSACTION_getPackageInstalledPermissions;
+            if (!new dev.aim.server.PackageBootstrapBridge().asBinder().transact(code, request, reply, 0))
+                throw new AssertionError("permission transaction unhandled");
+            byte[] bytes = reply.marshall(); reply.readException();
+            String prefix = grants ? "fixture.granted." + user : "fixture.installed";
+            if (!java.util.Arrays.equals(reply.createStringArray(), new String[] {prefix + ".a", prefix + ".z"}) || reply.dataAvail() != 0)
+                throw new AssertionError("permission names/order differ");
+            return bytes;
+        } finally { request.recycle(); reply.recycle(); }
+    }
+    private static void verifyPermissionOwners(File first, dev.aim.server.PackageLocal local,
+            dev.aim.server.PackageLocal replacement) throws Exception {
+        if (!permissionOwnersRegistered) {
+            try { permissionCall(false, 0, 0); throw new AssertionError("missing permission owner accepted"); }
+            catch (IllegalStateException expected) {}
+            com.android.server.LocalServices.addService(com.android.server.pm.permission.PermissionManagerServiceInternal.class, permissions);
+            try { permissionCall(true, 10003, 0); throw new AssertionError("missing package local owner accepted"); }
+            catch (IllegalStateException expected) {}
+            com.android.server.LocalManagerRegistry.addManager(com.android.server.pm.PackageManagerLocal.class, currentLocal);
+            permissionOwnersRegistered = true;
+        }
+        currentLocal.delegate = local;
+        Files.write(new File(first, "permission-installed.original").toPath(), permissionCall(false, 0, 0));
+        for (int user : new int[] {0, 10})
+            Files.write(new File(first, "permission-granted-" + user + ".original").toPath(), permissionCall(true, 10003, user));
+        int reads = permissions.reads;
+        try { permissionCall(true, 10004, 0); throw new AssertionError("foreign permission UID accepted"); }
+        catch (IllegalStateException expected) {}
+        if (permissions.reads != reads) throw new AssertionError("foreign UID reached permission owner");
+        permissions.replace = () -> currentLocal.delegate = replacement;
+        try { permissionCall(true, 10003, 0); throw new AssertionError("changed permission owner accepted"); }
+        catch (IllegalStateException expected) {}
+        currentLocal.delegate = local;
+        for (int mode : new int[] {1, 2}) {
+            permissions.mode = mode;
+            try { permissionCall(false, 0, 0); throw new AssertionError("null definition names accepted"); }
+            catch (IllegalStateException expected) {}
+            try { permissionCall(true, 10003, 0); throw new AssertionError("null grant names accepted"); }
+            catch (IllegalStateException expected) {}
+        }
+        permissions.mode = 0;
+    }
     private static void verifyLocal(File first) throws Exception {
         int[] caller = { -1, -1 };
         var visibility = new dev.aim.server.PackageSnapshots.Owner() {
@@ -216,6 +310,7 @@ public final class DisplacedSnapshotOracle {
         var other = new dev.aim.server.PackageSnapshots.Store(
                 () -> dev.aim.server.IPackageScanSnapshot.Stub.asInterface(new Owner(first)), visibility, true);
         other.refresh();
+        verifyPermissionOwners(first, local, new dev.aim.server.PackageLocal(other, sdk, signing));
         try (var old = local.withUnfilteredSnapshot(); var alternate = other.unfiltered()) {
             var uncommitted = alternate.getPackageStates().get(ORIGINAL);
             if (old.getPackageStates().get(ORIGINAL) == uncommitted) throw new AssertionError("fixture reused replica");

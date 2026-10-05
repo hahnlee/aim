@@ -25,4 +25,8 @@ interface IPackageBootstrapBridge {
     boolean isSigningDebuggable();
     /** AppsFilter FeatureConfig decision from original PlatformCompat. */
     boolean isApplicationQueryFilteringEnabled(String packageName, int targetSdk);
+    /** Installed definitions from the original permission front end. */
+    String[] getPackageInstalledPermissions(String packageName);
+    /** Grants from the exact expected current PackageManagerLocal UID owner. */
+    String[] getPackageGrantedPermissions(String packageName, int appId, int userId);
 }

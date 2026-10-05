@@ -252,9 +252,9 @@ pub fn verify(directory: &Path) {
         }
     }
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
-    let output = boot.command().args(["shell", "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:/system/framework/services.jar",
-        "/system/bin", "DisplacedSnapshotOracle", "/data/local/tmp/displaced-snapshots"]).output().unwrap();
+    let output = boot.client(1000).args(["/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar",
+        "/system/bin", "dev.aim.server.DisplacedSnapshotOracle", "/data/local/tmp/displaced-snapshots"]).output().unwrap();
     assert!(
         output.status.success(),
         "displaced snapshot oracle: {}\n{}\n{}",
@@ -266,6 +266,46 @@ pub fn verify(directory: &Path) {
         String::from_utf8(output.stdout).unwrap(),
         "displaced full snapshot contracts: 6 cases\n"
     );
+    let denied = boot.client(19001).args(["/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar",
+        "/system/bin", "dev.aim.server.DisplacedSnapshotOracle", "/data/local/tmp/displaced-snapshots", "denied"]).output().unwrap();
+    assert!(
+        denied.status.success(),
+        "permission query owner denial: {}",
+        String::from_utf8_lossy(&denied.stdout)
+    );
+    assert_eq!(
+        String::from_utf8(denied.stdout).unwrap(),
+        "permission query owners denied\n"
+    );
+    for index in 0..6 {
+        let root = guest.join(format!("case-{index}"));
+        let installed = fs::read(root.join("permission-installed.original")).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&installed, &[]);
+        let names = aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_get_package_installed_permissions_reply(&mut reader).unwrap().unwrap();
+        assert_eq!(
+            names,
+            Some(vec![
+                Some("fixture.installed.a".into()),
+                Some("fixture.installed.z".into())
+            ])
+        );
+        assert_eq!(reader.remaining(), 0);
+        for user in [0, 10] {
+            let granted =
+                fs::read(root.join(format!("permission-granted-{user}.original"))).unwrap();
+            let mut reader = aim_binder_host::parcel::Reader::new(&granted, &[]);
+            let names = aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_get_package_granted_permissions_reply(&mut reader).unwrap().unwrap();
+            assert_eq!(
+                names,
+                Some(vec![
+                    Some(format!("fixture.granted.{user}.a")),
+                    Some(format!("fixture.granted.{user}.z"))
+                ])
+            );
+            assert_eq!(reader.remaining(), 0);
+        }
+    }
     let output = boot.command().args(["shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:/system/framework/services.jar",
         "/system/bin", "com.android.server.pm.NativeDisplacedReadOracle", "/data/local/tmp/displaced-snapshots"]).output().unwrap();
