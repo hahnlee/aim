@@ -70,11 +70,15 @@ public final class DisplacedSnapshotOracle {
         catch (IllegalStateException expected) {}
         long version = source[0].getVersion();
         if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("initial refresh differs");
-        try (var old = store.unfiltered()) {
+        verifyLocal(first);
+        var local = new dev.aim.server.PackageLocal(store, (v, p, d, u, a, old, se, f) -> {
+            throw new java.io.IOException("unused SDK owner in version fixture");
+        });
+        try (var old = local.withUnfilteredSnapshot()) {
             var original = old.getPackageStates().get(ORIGINAL);
             source[0] = new Owner(first);
             if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("same-version lease leaked");
-            try (var same = store.unfiltered()) {
+            try (var same = local.withUnfilteredSnapshot()) {
                 if (same.getPackageStates().get(ORIGINAL) != original) throw new AssertionError("same-version identity changed");
             }
             source[0] = new Owner(next);
@@ -89,7 +93,7 @@ public final class DisplacedSnapshotOracle {
             if (store.getVersion() != version || source[0].closes != 1) throw new AssertionError("failed close changed store");
             source[0] = new Owner(next);
             if (store.refresh() != version + 1 || source[0].closes != 1) throw new AssertionError("newer retry differs");
-            try (var newer = store.unfiltered()) {
+            try (var newer = local.withUnfilteredSnapshot()) {
                 if (newer.getPackageStates().get(ORIGINAL) == original) throw new AssertionError("different versions reused a replica");
                 if (old.getPackageStates().get(ORIGINAL) != original) throw new AssertionError("old scope changed");
             }
@@ -115,6 +119,81 @@ public final class DisplacedSnapshotOracle {
             catch (java.io.IOException expected) {}
             if (store.getVersion() != version + 1 || old.getPackageStates().get(ORIGINAL) != original)
                 throw new AssertionError("rejected refresh replaced state");
+        }
+    }
+    private static void verifyLocal(File first) throws Exception {
+        int[] caller = { -1, -1 };
+        var visibility = new dev.aim.server.PackageSnapshots.Owner() {
+            public String getFilteredPackageName(long version, String name, int uid, int user) {
+                caller[0] = uid; caller[1] = user; return name;
+            }
+            public boolean shouldFilter(long version, com.android.server.pm.pkg.PackageState state, int uid, int user) {
+                caller[0] = uid; caller[1] = user; return false;
+            }
+        };
+        var store = new dev.aim.server.PackageSnapshots.Store(
+                () -> dev.aim.server.IPackageScanSnapshot.Stub.asInterface(new Owner(first)), visibility, true);
+        Object[][] observed = { null };
+        java.io.IOException failure = new java.io.IOException("fixture SDK data failure");
+        boolean[] fail = { false };
+        dev.aim.server.PackageLocal.SdkDataOwner sdk = (volume, name, dirs, user, app, oldApp, seinfo, flags) -> {
+            observed[0] = new Object[] { volume, name, dirs, user, app, oldApp, seinfo, flags };
+            if (fail[0]) throw failure;
+        };
+        try { new dev.aim.server.PackageLocal(store, sdk); throw new AssertionError("uninitialized facade accepted"); }
+        catch (IllegalStateException expected) {}
+        store.refresh();
+        var local = new dev.aim.server.PackageLocal(store, sdk);
+        try { new dev.aim.server.PackageLocal(store, null); throw new AssertionError("missing SDK owner accepted"); }
+        catch (NullPointerException expected) {}
+        try (var scope = local.withFilteredSnapshot(1010001, android.os.UserHandle.of(10))) {
+            if (scope.getPackageState(ORIGINAL) == null || caller[0] != 1010001 || caller[1] != 10)
+                throw new AssertionError("explicit local caller differs");
+        }
+        try (var scope = local.withFilteredSnapshot()) {
+            if (scope.getPackageState(ORIGINAL) == null
+                    || caller[0] != android.os.Binder.getCallingUid()
+                    || caller[1] != android.os.Binder.getCallingUserHandle().getIdentifier())
+                throw new AssertionError("Binder local caller differs");
+        }
+        var other = new dev.aim.server.PackageSnapshots.Store(
+                () -> dev.aim.server.IPackageScanSnapshot.Stub.asInterface(new Owner(first)), visibility, true);
+        other.refresh();
+        try (var old = local.withUnfilteredSnapshot(); var alternate = other.unfiltered()) {
+            var uncommitted = alternate.getPackageStates().get(ORIGINAL);
+            if (old.getPackageStates().get(ORIGINAL) == uncommitted) throw new AssertionError("fixture reused replica");
+            try (var scope = local.withFilteredSnapshot(uncommitted)) {
+                if (scope.getPackageState(ORIGINAL) != uncommitted
+                        || scope.getPackageStates().get(ORIGINAL) != uncommitted)
+                    throw new AssertionError("uncommitted local scope differs");
+            }
+        }
+        var dirs = java.util.List.of("sdk-a", "sdk-b");
+        local.reconcileSdkData(null, INCOMING, dirs, 10, 10042, 10041, "platform:targetSdkVersion=36", 3);
+        if (!java.util.Arrays.equals(observed[0], new Object[] { null, INCOMING, dirs, 10, 10042, 10041,
+                "platform:targetSdkVersion=36", 3 }) || observed[0][2] != dirs)
+            throw new AssertionError("SDK arguments changed");
+        fail[0] = true;
+        try { local.reconcileSdkData("volume", INCOMING, dirs, 0, 10042, -1, "default", 1);
+            throw new AssertionError("SDK failure swallowed"); }
+        catch (java.io.IOException expected) {
+            if (expected != failure) throw new AssertionError("SDK failure replaced");
+        }
+        var unknown = android.content.pm.SigningDetails.UNKNOWN;
+        Runnable[] overrides = {
+            () -> local.addOverrideSigningDetails(unknown, unknown),
+            () -> local.removeOverrideSigningDetails(unknown),
+            () -> local.clearOverrideSigningDetails(),
+        };
+        for (var operation : overrides) {
+            try {
+                operation.run();
+                if (!android.os.Build.isDebuggable()) throw new AssertionError("release signing override accepted");
+            } catch (SecurityException expected) {
+                if (android.os.Build.isDebuggable()
+                        || !"This test API is only available on debuggable builds".equals(expected.getMessage()))
+                    throw expected;
+            }
         }
     }
     private static final class Owner extends dev.aim.server.IPackageScanSnapshot.Stub {

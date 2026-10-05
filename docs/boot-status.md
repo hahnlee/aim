@@ -1140,7 +1140,24 @@ old-scope identity as part of the first-system test (88.02s). The full original
 ART Parcel oracle passes (27.20s), and the image/original-PMS template build
 passes (57.6s; six rebuilt, 36 fresh). This remains a
 controlled Java page source over actual native records; the live daemon producer,
-facade registration and native visibility callbacks remain #798/#836. System.complete_package_scan now resolves
+facade registration and native visibility callbacks remain #798/#836. PackageLocal
+now implements the pinned seven-method PackageManagerLocal interface over the
+published replica Store (#944), including explicit and Binder-derived filtered
+callers and an uncommitted ART scope. Construction rejects an uninitialized
+replica or missing SDK-data owner. SDK reconciliation forwards every argument and
+its IOException unchanged to the required owner; native SDK filesystem execution
+remains #945. The three signing test APIs preserve original Build.isDebuggable
+enforcement and call original ApkSignatureVerifier. Native certificate collection
+does not yet consume those override changes (#946). Original ART verifies all
+seven methods over each of the six authentic native graphs: current/old scope
+identity, explicit and Binder callers, distinct uncommitted replicas, required
+inputs and SDK argument/error identity. The complete first-system fixture,
+including those checks, native-written original ABX reads and six seeded
+original-service boots, passes (86.49s). Release units pass 470 cases (0.51s);
+production image/original-PMS template build passes (58.3s; six rebuilt, 36 fresh).
+The facade is not registered, and native visibility/version-page refresh,
+SDK execution, native signing override ownership and default activation remain
+unproved. System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes
 runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
 and publishes through that same bridge/base gate (#937). Original policy calls

@@ -3,6 +3,7 @@
 package android.os;
 
 public class Build {
+    public static boolean isDebuggable() { throw new RuntimeException("stub"); }
     public static final String[] SUPPORTED_64_BIT_ABIS = null;
     public static class VERSION_CODES {
         public static final int R = 30;

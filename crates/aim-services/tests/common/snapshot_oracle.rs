@@ -158,6 +158,7 @@ pub fn verify(directory: &Path) {
         "dev/aim/server/PackageRuntimeFeed.java",
         "dev/aim/server/PackageUserScopeFeed.java",
         "dev/aim/server/PackageSnapshots.java",
+        "dev/aim/server/PackageLocal.java",
     ];
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
