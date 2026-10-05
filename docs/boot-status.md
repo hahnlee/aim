@@ -1038,7 +1038,7 @@ markers. Shared process ownership validates the displacement binding and exclude
 the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
 and removal; the complete first-system scan, including Java assembly and six
-original-service boots from native-written settings, passes (85.20s). The full package
+original-service boots from native-written settings, passes (99.41s). The full package
 Parcel oracle passes (32.01s); release units pass 465 cases (0.49s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
@@ -1067,7 +1067,7 @@ captures. Setting removal stages all changes so a missing group input leaves
 the earlier owner unchanged. APEX replacement uses the same group cleanup once.
 The complete first-system scan now passes the six native accepted captures through
 generated Binder Proxy/Stub and original ART's PackageScanLease.captureData
-as part of the complete first-system test (85.20s). Pruned/active/disabled old
+as part of the complete first-system test (99.41s). Pruned/active/disabled old
 groups and independent/shared original targets
 preserve the incoming unparsed setting outside group membership, the loaded
 original's real-name/UID binding, distinct current/retained original instances,
@@ -1083,7 +1083,14 @@ reach sys.boot_completed, expose framework and GSF paths through cmd package,
 and persist both core package entries. Owned guest/keeper PIDs and mounts are
 checked after every stop. The mount point now sits under the temporary Data
 guard so sibling image/runtime artifacts are removed too (#933). This completes
-#929's owner/recovery acceptance; it does not compare the complete later boot
+#929's owner/recovery acceptance. Reopening the native data and replaying each
+saved rename now also records the accepted internal package in the transfer
+owner (#934), matching InstallPackageHelper's realPkgName commit branch. All six
+independent/shared and pruned/active/disabled cases produce exactly that one
+transfer; an earlier metadata failure produces neither a transfer nor loaded
+original code. Transfer recording occurs only after metadata completion. The
+expanded first-system test passes (99.41s), and release units pass 465 cases
+(0.49s), with three ignored/not run. This does not compare the complete later boot
 scan request stream. Full original request parity and transfer publication remain
 #919,
 and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing

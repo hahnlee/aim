@@ -265,6 +265,13 @@ impl SigningScan {
         &self.transferred_packages
     }
 
+    pub(super) fn complete_transferred_identity(&mut self, identity: &Identity) {
+        if identity.real_name.is_some() {
+            self.transferred_packages
+                .insert(identity.internal_name.clone());
+        }
+    }
+
     /// Native-parsed active code, admitted only after every scan metadata gate.
     /// Settings and user state remain in their owners; this is not a query replica.
     pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {

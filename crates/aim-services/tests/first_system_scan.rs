@@ -1513,7 +1513,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 let reopened = aim_services::package::owner::Store::open(&restart_path, &[0])
                     .unwrap()
                     .unwrap();
-                let restored = aim_services::package::scan::SigningScan::new(
+                let mut restored = aim_services::package::scan::SigningScan::new(
                     &config,
                     &reopened.state().settings,
                     36,
@@ -1535,6 +1535,46 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                     );
                 }
                 assert!(restored.identities.ids.get(10003).is_some());
+                assert!(restored.transferred_packages().is_empty());
+                let mut replay = Image::parse(&apks, &[]).unwrap();
+                replay.packages[1].parsed.shared_user_id =
+                    shared.then(|| "fixture.original.group".into());
+                replay.packages[1].parsed.original_packages = Some(vec![Some(old.name.clone())]);
+                assert!(replay.rejected.is_empty());
+                let mut rejected_replay = Image {
+                    packages: replay.packages.clone(),
+                    rejected: vec![],
+                };
+                rejected_replay.packages.swap(0, 1);
+                let mut rejected_inputs = inputs(&domain_ids);
+                rejected_inputs.install.page_size = 8193;
+                assert!(
+                    matches!(restored.scan_saved_parsed_system_image(rejected_replay, &apks, &config,
+                    rejected_inputs, aim_services::package::scan::SavedSystemScanInputs {
+                        users: &both_users, ..saved_inputs()
+                    }), Err(SigningError::NativeLibrary { package, .. }) if package == old.name)
+                );
+                assert!(restored.transferred_packages().is_empty());
+                assert!(!restored.loaded_packages().contains_key(&old.name));
+                let replayed = restored
+                    .scan_saved_parsed_system_image(
+                        replay,
+                        &apks,
+                        &config,
+                        inputs(&domain_ids),
+                        aim_services::package::scan::SavedSystemScanInputs {
+                            users: &both_users,
+                            ..saved_inputs()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(replayed.packages.len(), 2);
+                assert!(restored.transferred_packages().contains(&old.name));
+                assert_eq!(restored.transferred_packages().len(), 1);
+                assert_eq!(
+                    restored.loaded_packages()[&old.name].package.package_name,
+                    old.name
+                );
                 let mut foreign_uid = owner.clone();
                 foreign_uid
                     .identities

@@ -367,6 +367,7 @@ impl SigningScan {
                 Some(candidate.record.parsed.target_sdk_version),
             );
         }
+        staged.complete_transferred_identity(&candidate.record.identity);
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,
