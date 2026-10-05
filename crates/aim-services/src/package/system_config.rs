@@ -44,6 +44,7 @@ const TIRAMISU: i32 = 33;
 /// What a partition's files may configure (`SystemConfig.ALLOW_*`).
 const ALLOW_FEATURES: u32 = 0x1;
 const ALLOW_LIBS: u32 = 0x2;
+const ALLOW_APP_CONFIGS: u32 = 0x8;
 const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
 const ALLOW_ALL: u32 = !0;
 
@@ -57,6 +58,8 @@ pub struct SystemConfig {
     /// `mAvailableFeatures`, as added: name and version.
     pub features: Vec<(String, i32)>,
     pub hidden_api_allowlist: Vec<String>,
+    /// Domain verification's linked apps, in original ArraySet order.
+    pub linked_apps: Vec<String>,
     /// Initial system packages explicitly exempted from stopped state.
     pub initial_non_stopped_system_packages: BTreeSet<String>,
     /// Preinstalled packages requiring fresh factory signatures during boot.
@@ -100,14 +103,20 @@ impl SystemConfig {
         };
         // Vendor and ODM may add libraries and features; product and system_ext all of it
         // that matters here (the product's allowlist is a TODO upstream).
-        let vendor = ALLOW_FEATURES | ALLOW_LIBS;
+        let vendor = ALLOW_FEATURES
+            | ALLOW_LIBS
+            | if first_sdk <= 27 {
+                ALLOW_APP_CONFIGS
+            } else {
+                0
+            };
         partition("system", ALLOW_ALL, None);
         partition("vendor", vendor, prop("ro.boot.product.vendor.sku"));
         partition("odm", vendor, prop("ro.boot.product.hardware.sku"));
         partition("oem", ALLOW_FEATURES, None);
         partition(
             "product",
-            ALLOW_FEATURES | ALLOW_LIBS | ALLOW_HIDDENAPI_WHITELISTING,
+            ALLOW_FEATURES | ALLOW_LIBS | ALLOW_HIDDENAPI_WHITELISTING | ALLOW_APP_CONFIGS,
             prop("ro.boot.hardware.sku"),
         );
         partition("system_ext", ALLOW_ALL, None);
@@ -131,6 +140,8 @@ impl SystemConfig {
             }
         }
         c.read_native_libraries(root);
+        c.linked_apps
+            .sort_by_key(|name| super::info::java_hash(name));
         c.oem_defined_uids
             .sort_by_key(|(name, _)| super::info::java_hash(name));
         // readAllPermissionsFromEnvironment.
@@ -209,6 +220,14 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "app-link" if flags & ALLOW_APP_CONFIGS != 0 => {
+                    if let Some(package) = e.string("package") {
+                        let package = package.into_owned();
+                        if !self.linked_apps.contains(&package) {
+                            self.linked_apps.push(package);
+                        }
+                    }
+                }
                 "update-ownership" => {
                     if let (Some(package), Some(installer)) =
                         (e.string("package"), e.string("installer"))

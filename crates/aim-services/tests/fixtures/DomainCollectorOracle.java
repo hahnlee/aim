@@ -20,6 +20,7 @@ public final class DomainCollectorOracle {
         if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
         var context = android.app.ActivityThread.systemMain().getSystemUiContext();
         var compat = new Compat(context);
+        verifyConfiguration(directory);
         var config = new com.android.server.SystemConfig(false);
         var collector = new com.android.server.pm.verify.domain.DomainVerificationCollector(compat, config);
         byte[] expected = java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-collector.input").toPath());
@@ -53,6 +54,29 @@ public final class DomainCollectorOracle {
                 }
             }
             if (in.dataAvail() != 0) throw new AssertionError("trailing domain expectations");
+        } finally { in.recycle(); }
+    }
+    private static void verifyConfiguration(java.io.File directory) throws Exception {
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-config.input").toPath());
+        var in = android.os.Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            for (int sdk : new int[] {27, 28, 36}) {
+                var config = new com.android.server.SystemConfig(false);
+                String[] paths = {"system/etc/sysconfig", "system/etc/permissions", "vendor/etc/sysconfig", "vendor/etc/sysconfig/sku_demo", "odm/etc/permissions", "odm/etc/permissions/sku_demo", "oem/etc/sysconfig", "product/etc/sysconfig", "product/etc/sysconfig/sku_demo", "system_ext/etc/permissions", "apex/com.fixture/etc/permissions"};
+                // Pinned readAllPermissions partition flags, including pre-O-MR1 vendor policy.
+                int vendor = 0xc93 | (sdk <= 27 ? 0xc : 0);
+                int product = sdk <= 30 ? -1 : 0xfdf;
+                int[] flags = {-1, -1, vendor, vendor, vendor, vendor, 0x4a1, product, product, -1, 0x813};
+                for (int i = 0; i < paths.length; i++)
+                    config.readPermissions(android.util.Xml.newPullParser(), new java.io.File(directory, "domain-config/" + paths[i]), flags[i]);
+                String[] actual = config.getLinkedApps().toArray(new String[0]);
+                int count = in.readInt();
+                if (actual.length != count) throw new AssertionError("linked-app count differs sdk=" + sdk);
+                for (int i = 0; i < count; i++)
+                    if (!in.readString().equals(actual[i])) throw new AssertionError("linked-app order differs sdk=" + sdk + " index=" + i);
+            }
+            if (in.dataAvail() != 0) throw new AssertionError("trailing linked-app expectations");
         } finally { in.recycle(); }
     }
     private DomainCollectorOracle() {}

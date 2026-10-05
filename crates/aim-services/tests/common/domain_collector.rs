@@ -51,7 +51,81 @@ fn package(filters: Vec<IntentFilter>) -> AndroidPackage {
     pkg.activities.push(activity);
     pkg
 }
+fn configuration(directory: &Path) {
+    use aim_services::package::system_config::SystemConfig;
+    let root = directory.join("domain-config");
+    let entries = [
+        (
+            "system/etc/sysconfig",
+            "<app-link package='system'/><app-link package='Aa'/><app-link package='BB'/><app-link package=''/><app-link/><app-link package='Aa'/><app-link package=' '/>",
+        ),
+        (
+            "system/etc/permissions",
+            "<app-link package='system.permissions'/>",
+        ),
+        ("vendor/etc/sysconfig", "<app-link package='vendor'/>"),
+        (
+            "vendor/etc/sysconfig/sku_demo",
+            "<app-link package='vendor.sku'/>",
+        ),
+        ("odm/etc/permissions", "<app-link package='odm'/>"),
+        (
+            "odm/etc/permissions/sku_demo",
+            "<app-link package='odm.sku'/>",
+        ),
+        ("oem/etc/sysconfig", "<app-link package='oem.forbidden'/>"),
+        (
+            "product/etc/sysconfig",
+            "<app-link package='product'/><app-link package='BB'/>",
+        ),
+        (
+            "product/etc/sysconfig/sku_demo",
+            "<app-link package='product.sku'/>",
+        ),
+        (
+            "system_ext/etc/permissions",
+            "<app-link package='extension'/>",
+        ),
+        (
+            "apex/com.fixture/etc/permissions",
+            "<app-link package='apex.forbidden'/>",
+        ),
+    ];
+    for (path, xml) in entries {
+        fs::create_dir_all(root.join(path)).unwrap();
+        fs::write(
+            root.join(path).join("config.xml"),
+            format!("<config>{xml}</config>"),
+        )
+        .unwrap();
+    }
+    let mut expected = Parcel::new();
+    for sdk in [27, 28, 36] {
+        let config = SystemConfig::read(&root, &|name| match name {
+            "ro.product.first_api_level" => Some(sdk.to_string()),
+            "ro.boot.product.vendor.sku"
+            | "ro.boot.product.hardware.sku"
+            | "ro.boot.hardware.sku" => Some("demo".into()),
+            _ => None,
+        });
+        assert!(config.linked_apps.contains(&"product.sku".into()));
+        assert_eq!(config.linked_apps.contains(&"vendor.sku".into()), sdk <= 27);
+        assert!(
+            !config
+                .linked_apps
+                .iter()
+                .any(|name| name.ends_with("forbidden"))
+        );
+        expected.write_i32(config.linked_apps.len() as i32);
+        for name in config.linked_apps {
+            expected.write_string16(Some(&name));
+        }
+    }
+    fs::write(directory.join("domain-config.input"), expected.data()).unwrap();
+}
+
 pub fn export(directory: &Path) {
+    configuration(directory);
     let mut cases = vec![
         package(vec![
             filter(true, false, &["https"], &["seed.example"]),
