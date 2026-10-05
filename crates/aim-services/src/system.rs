@@ -112,7 +112,12 @@ pub struct System {
     /// Told of each bridge system_server hands over (a handle held for
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
-    package_bootstrap: Mutex<Option<Arc<crate::package::bootstrap::Bridge>>>,
+    package_bootstrap: Mutex<Option<PackageBootstrap>>,
+}
+
+struct PackageBootstrap {
+    bridge: Arc<crate::package::bootstrap::Bridge>,
+    snapshots: Option<crate::package::scan_snapshot::Store>,
 }
 
 /// Told of a bridge attached, with its handle.
@@ -398,7 +403,10 @@ impl System {
         let this = Arc::downgrade(self);
         let attached = Arc::downgrade(&bridge);
         let mut current = self.package_bootstrap.lock().unwrap();
-        *current = Some(bridge.clone());
+        *current = Some(PackageBootstrap {
+            bridge: bridge.clone(),
+            snapshots: None,
+        });
         self.process.link_to_death(
             &bridge.owner,
             Box::new(move || {
@@ -406,7 +414,7 @@ impl System {
                     let mut current = system.package_bootstrap.lock().unwrap();
                     if current
                         .as_ref()
-                        .is_some_and(|owner| Arc::ptr_eq(owner, &attached))
+                        .is_some_and(|owner| Arc::ptr_eq(&owner.bridge, &attached))
                     {
                         current.take();
                     }
@@ -420,11 +428,55 @@ impl System {
         self.package_bootstrap
             .lock()
             .unwrap()
-            .clone()
+            .as_ref()
+            .map(|owner| owner.bridge.clone())
             .ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     "package bootstrap bridge is unavailable",
+                )
+            })
+    }
+
+    /// Publish only against the original policy owner used to complete this scan.
+    pub fn publish_package_scan(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: Option<&Arc<crate::package::scan_snapshot::Snapshot>>,
+        owner: crate::package::scan::SigningScan,
+        usage: crate::package::owner::usage::Usage,
+    ) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
+        use crate::package::scan_snapshot::Store;
+        let fail =
+            |message: &str| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
+        let mut current = self.package_bootstrap.lock().unwrap();
+        let current = current
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .ok_or_else(|| fail("package scan bootstrap owner changed"))?;
+        let result = match (&current.snapshots, base) {
+            (Some(store), Some(base)) => store.publish(base, owner, usage),
+            (None, None) => Store::new_replica(owner, usage).map(|store| {
+                let capture = store.capture();
+                current.snapshots = Some(store);
+                capture
+            }),
+            _ => return Err(fail("package scan publication base differs")),
+        };
+        result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))
+    }
+
+    pub fn capture_package_scan(&self) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
+        self.package_bootstrap
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|owner| owner.snapshots.as_ref())
+            .map(|store| store.capture())
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "complete package scan is unavailable",
                 )
             })
     }

@@ -50,6 +50,29 @@ impl ServiceHost {
         Ok(reply)
     }
 
+    fn capture_package_scan(&self, call: &mut Call<'_>) -> Reply {
+        host::CapturePackageScan::read(&mut call.data)?;
+        if call.data.remaining() != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let result = self
+            .system
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable"))
+            .and_then(|system| system.capture_package_scan());
+        let mut reply = Parcel::new();
+        match result {
+            Ok(snapshot) => {
+                let binder = self.process.add_service(Arc::new(
+                    crate::package::scan_snapshot::endpoint::Endpoint::new(snapshot),
+                ));
+                host::write_capture_package_scan_reply(&mut reply, Some(binder));
+            }
+            Err(error) => reply.write_exception(&error),
+        }
+        Ok(reply)
+    }
+
     fn attach_bridge(&self, call: &mut Call<'_>) -> Reply {
         let bridge = host::AttachBridge::read(&mut call.data)?.bridge;
         let (Some(Binder::Handle(handle)), Some(system)) = (bridge, self.system.upgrade()) else {
@@ -119,13 +142,16 @@ impl Service for ServiceHost {
         if call.code != host::ATTACH_BRIDGE
             && call.code != host::REQUEST_NOTIFICATION_PERMISSION
             && call.code != host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
+            && call.code != host::CAPTURE_PACKAGE_SCAN
         {
             return Err(UNKNOWN_TRANSACTION);
         }
         // Only system_server's side calls it; the system uid is the one it
         // runs as.
         if call.sender_euid != SYSTEM_UID {
-            if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {
+            if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
+                || call.code == host::CAPTURE_PACKAGE_SCAN
+            {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::security(
                     "package bootstrap serves the system uid only",
@@ -138,7 +164,9 @@ impl Service for ServiceHost {
             );
             return Ok(Parcel::new());
         }
-        if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {
+        if call.code == host::CAPTURE_PACKAGE_SCAN {
+            self.capture_package_scan(call)
+        } else if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {
             self.attach_package_bootstrap(call)
         } else if call.code == host::ATTACH_BRIDGE {
             self.attach_bridge(call)

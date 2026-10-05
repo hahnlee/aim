@@ -270,6 +270,94 @@ fn attach(process: &Arc<LocalProcess>, bridge: Option<Binder>) -> Result<(), Exc
         .unwrap();
     host::read_attach_package_bootstrap_bridge_reply(&mut reply.reader()).unwrap()
 }
+fn capture_scan(process: &Arc<LocalProcess>) -> Result<Strong, Exception> {
+    let mut data = Parcel::new();
+    host::CapturePackageScan {}.write(&mut data);
+    let reply = find(process, "host")
+        .transact(host::CAPTURE_PACKAGE_SCAN, &data, false)
+        .unwrap();
+    let binder = host::read_capture_package_scan_reply(&mut reply.reader()).unwrap()?;
+    let Some(Binder::Handle(handle)) = binder else {
+        panic!("remote snapshot expected")
+    };
+    Ok(process.strong(handle))
+}
+
+fn scan_version(lease: &Strong) -> Result<i64, Exception> {
+    use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+    let mut data = Parcel::new();
+    api::GetVersion {}.write(&mut data);
+    let reply = lease.transact(api::GET_VERSION, &data, false).unwrap();
+    api::read_get_version_reply(&mut reply.reader()).unwrap()
+}
+
+fn replica_owner() -> crate::package::scan::SigningScan {
+    use crate::package::{
+        scan::{CapturedUsers, ReplicaRuntime, SigningScan},
+        settings::{Package, Settings},
+    };
+    let mut owner = SigningScan::new(
+        &SystemConfig::default(),
+        &Settings {
+            packages: vec![Package {
+                name: "fixture".into(),
+                app_id: 10100,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        36,
+    )
+    .unwrap();
+    owner
+        .capture_user_states(BTreeMap::from([(
+            ("fixture".into(), false),
+            CapturedUsers {
+                states: Default::default(),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+    owner
+        .capture_legacy_permissions(
+            &[0],
+            BTreeMap::from([(("fixture".into(), false), Default::default())]),
+            owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect(),
+        )
+        .unwrap();
+    owner
+        .capture_install_permissions_fixed(BTreeMap::from([(("fixture".into(), false), true)]))
+        .unwrap();
+    owner
+        .complete_shared_processes(
+            owner
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), vec![]))
+                .collect(),
+        )
+        .unwrap();
+    owner
+        .capture_replica_runtime(BTreeMap::from([(
+            ("fixture".into(), false),
+            ReplicaRuntime {
+                usage: [0; 8],
+                seinfo: None,
+                override_seinfo: None,
+                library_files: vec![],
+                libraries: vec![],
+            },
+        )]))
+        .unwrap();
+    owner
+}
+
 struct Processes {
     driver: Arc<Driver>,
     processes: Vec<Arc<LocalProcess>>,
@@ -363,6 +451,8 @@ fn exercise_bootstrap(run_scan: bool) {
     let node = native.add_service(Arc::new(ServiceHost::new(native.clone(), &system)));
     register(&native, "host", node);
     assert!(system.package_bootstrap().is_err());
+    assert!(capture_scan(&first).is_err_and(|error| error.code == -5));
+    assert!(capture_scan(&foreign).is_err_and(|error| error.code == -1));
     assert!(attach(&first, None).is_err());
     let owner = Arc::new(Owner {
         bcp_reads: AtomicUsize::new(0),
@@ -406,6 +496,66 @@ fn exercise_bootstrap(run_scan: bool) {
             .is_err()
     );
     let old = system.package_bootstrap().unwrap();
+    assert!(capture_scan(&first).is_err());
+    let usage = || crate::package::owner::usage::Usage::new(["fixture"]);
+    let incomplete = crate::package::scan::SigningScan::new(
+        &SystemConfig::default(),
+        &replica_owner().settings,
+        36,
+    )
+    .unwrap();
+    assert!(
+        system
+            .publish_package_scan(&old, None, incomplete.clone(), usage())
+            .is_err()
+    );
+    assert!(capture_scan(&first).is_err());
+    let published = system
+        .publish_package_scan(&old, None, replica_owner(), usage())
+        .unwrap();
+    let old_lease = capture_scan(&second).unwrap();
+    assert_eq!(scan_version(&old_lease).unwrap(), 1);
+    assert!(
+        system
+            .publish_package_scan(&old, Some(&published), incomplete, usage())
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(
+        &published,
+        &system.capture_package_scan().unwrap()
+    ));
+    assert!(
+        system
+            .publish_package_scan(&old, None, replica_owner(), usage())
+            .is_err()
+    );
+    let advanced = system
+        .publish_package_scan(&old, Some(&published), replica_owner(), usage())
+        .unwrap();
+    assert_eq!(advanced.version(), 2);
+    assert!(
+        system
+            .publish_package_scan(&old, Some(&published), replica_owner(), usage())
+            .is_err()
+    );
+    assert_eq!(scan_version(&old_lease).unwrap(), 1);
+    assert_eq!(scan_version(&capture_scan(&first).unwrap()).unwrap(), 2);
+    let mut malformed = Parcel::new();
+    host::CapturePackageScan {}.write(&mut malformed);
+    malformed.write_i32(99);
+    assert!(
+        find(&first, "host")
+            .transact(host::CAPTURE_PACKAGE_SCAN, &malformed, false)
+            .is_err()
+    );
+    let mut wrong = Parcel::new();
+    wrong.write_interface_token("wrong.interface");
+    assert!(
+        find(&first, "host")
+            .transact(host::CAPTURE_PACKAGE_SCAN, &wrong, false)
+            .is_err()
+    );
+
     assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
     assert!(!late.load(Ordering::SeqCst));
     let config = SystemConfig::default();
@@ -646,6 +796,25 @@ fn exercise_bootstrap(run_scan: bool) {
     attach(&second, Some(replacement)).unwrap();
     let current = system.package_bootstrap().unwrap();
     assert!(!Arc::ptr_eq(&old, &current));
+    assert!(capture_scan(&second).is_err());
+    assert!(
+        system
+            .publish_package_scan(&old, None, replica_owner(), usage())
+            .is_err()
+    );
+    assert!(
+        system
+            .publish_package_scan(&current, Some(&advanced), replica_owner(), usage())
+            .is_err()
+    );
+    let replacement_snapshot = system
+        .publish_package_scan(&current, None, replica_owner(), usage())
+        .unwrap();
+    let replacement_lease = capture_scan(&second).unwrap();
+    assert_eq!(replacement_snapshot.version(), 1);
+    assert_eq!(scan_version(&old_lease).unwrap(), 1);
+    assert_eq!(scan_version(&replacement_lease).unwrap(), 1);
+
     assert_eq!(current.remove_test_base(&parsed, true).unwrap(), None);
     assert_eq!(
         current.remove_test_base(&parsed, false).unwrap(),
@@ -666,6 +835,20 @@ fn exercise_bootstrap(run_scan: bool) {
         )
     });
     assert!(Arc::ptr_eq(&current, &system.package_bootstrap().unwrap()));
+    assert!(Arc::ptr_eq(
+        &replacement_snapshot,
+        &system.capture_package_scan().unwrap()
+    ));
+    assert_eq!(scan_version(&old_lease).unwrap(), 1);
+    {
+        use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+        let mut data = Parcel::new();
+        api::Close {}.write(&mut data);
+        let reply = old_lease.transact(api::CLOSE, &data, false).unwrap();
+        api::read_close_reply(&mut reply.reader()).unwrap().unwrap();
+        assert!(scan_version(&old_lease).is_err());
+    }
+
     assert!(matches!(
         old.legacy_permissions(19001, &[10, 0]),
         Err(crate::package::owner::legacy_permissions::Error::Transport(
@@ -689,6 +872,12 @@ fn exercise_bootstrap(run_scan: bool) {
     assert_eq!(current.permission_gids(19001, &[0]).unwrap(), [3004, 3004]);
     driver.release(second.proc_handle());
     until(|| system.package_bootstrap().is_err());
+    assert!(system.capture_package_scan().is_err());
+    assert!(
+        system
+            .publish_package_scan(&current, None, replica_owner(), usage())
+            .is_err()
+    );
     assert!(!late.load(Ordering::SeqCst));
 }
 

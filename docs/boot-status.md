@@ -1101,7 +1101,22 @@ library dependencies and scalar/signing/code/user/shared record projections.
 Incomplete updates preserve the prior version; partial diagnostic Stores retain
 their existing behavior. All six accepted displaced graphs use this complete
 constructor before original ART assembles them. This is a publication prerequisite;
-the live daemon producer and SystemServer replica connection remain unwired. This does not prove original-service adoption or CTS. Mapped APK signing
+the live daemon scan producer and SystemServer replica consumer remain unwired.
+System now retains the complete replica Store with the exact original bootstrap
+bridge that supplied its policy owners (#936). Publication checks that bridge
+and the captured base under one lock; incomplete/stale/foreign candidates leave
+the prior state intact. Bridge replacement clears the current Store, and death
+clears it only for that exact attachment. Generated IServiceHost.capturePackageScan
+exports a separate immutable IPackageScanSnapshot lease to the system UID;
+missing publication, wrong tokens and trailing arguments reject. Issued leases
+retain their captured version across newer publication and bridge replacement.
+The real native Binder test verifies missing/incomplete publication, old/new
+versions, caller/token/tail rejection, close, replacement and old/current bridge
+death. Release units pass 466 cases (0.52s), with three ignored/not run. The
+full image/original-PMS template build passes (65.1s; nine rebuilt, 33 fresh). This
+connects complete native publication to the service-host transport; the running
+boot flow does not yet invoke publication, and SystemServer does not yet request
+these leases as its query owner. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
@@ -1367,8 +1382,9 @@ native/Java DTO bytes. All 347 units pass (3.13s); all oracle classes link again
 the original image (2.84s), and device-services builds against original APIs
 (15.6s). Fixtures generate the private Java AIDL into their disposable directory;
 they do not depend on the builder's temporary work directory.
-These tests verify native Binder and original Java transport separately; the
-endpoint is not yet exported by the C bootstrap into SystemServer. Complete
+These tests verify native Binder and original Java transport separately. The
+service host can now export a complete published scan lease (#936), but the
+running bootstrap producer and SystemServer consumer are not yet connected. Complete
 PackageState DTO/adapters, metadata/visibility pages, lease/snapshot-scope wiring
 and actual permission/ART callbacks remain #836/#837/#833. The private bootstrap
 AIDL now queries the original LegacyPermissionDataProvider for an appId over an

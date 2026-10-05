@@ -1,6 +1,7 @@
 package dev.aim.server;
 
 import dev.aim.server.IBridge;
+import dev.aim.server.IPackageScanSnapshot;
 import dev.aim.server.IPackageBootstrapBridge;
 import dev.aim.server.INotificationPermissionCallback;
 
@@ -22,4 +23,6 @@ interface IServiceHost {
             INotificationPermissionCallback callback);
     /** Synchronous attach before native package scanning; no late listeners. */
     void attachPackageBootstrapBridge(IPackageBootstrapBridge bridge);
+    /** Lease on the current complete native package graph; unavailable before publication. */
+    IPackageScanSnapshot capturePackageScan();
 }
