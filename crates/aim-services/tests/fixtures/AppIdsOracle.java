@@ -39,6 +39,36 @@ public final class AppIdsOracle {
             System.out.println("SHARED PREPARED");
             return;
         }
+        if (args.length != 0 && args[0].equals("nullable-signing-keys")) {
+            var signing = ((com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                    java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[1])))).getSigningDetails();
+            var nullElement = new android.util.ArraySet<java.security.PublicKey>(); nullElement.add(null);
+            var mixed = new android.util.ArraySet<java.security.PublicKey>();
+            for (var key : signing.getPublicKeys()) mixed.add(key); mixed.add(null);
+            android.content.pm.SigningDetails[] cases = {
+                new android.content.pm.SigningDetails(signing.getSignatures(), signing.getSignatureSchemeVersion(), null, signing.getPastSigningCertificates()),
+                new android.content.pm.SigningDetails(signing.getSignatures(), signing.getSignatureSchemeVersion(), new android.util.ArraySet<java.security.PublicKey>(), signing.getPastSigningCertificates()),
+                signing,
+                android.content.pm.SigningDetails.UNKNOWN,
+                new android.content.pm.SigningDetails(new android.content.pm.Signature[0], 0, null, null),
+                new android.content.pm.SigningDetails(signing.getSignatures(), signing.getSignatureSchemeVersion(), nullElement, signing.getPastSigningCertificates()),
+                new android.content.pm.SigningDetails(signing.getSignatures(), signing.getSignatureSchemeVersion(), mixed, signing.getPastSigningCertificates()),
+            };
+            for (int i = 0; i < cases.length; i++) {
+                var parcel = android.os.Parcel.obtain();
+                try {
+                    cases[i].writeToParcel(parcel, 0);
+                    java.nio.file.Files.write(java.nio.file.Path.of(args[2], "nullable-keys-" + i + ".original"), parcel.marshall());
+                } finally { parcel.recycle(); }
+                for (int j = 0; j < cases.length; j++) {
+                    var map = new android.util.ArrayMap<android.content.pm.SigningDetails, Boolean>();
+                    map.put(cases[i], Boolean.TRUE);
+                    System.out.println(i + " " + j + " " + cases[i].equals(cases[j]) + " " + (map.get(cases[j]) != null));
+                }
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("override-collection")) {
             android.util.apk.ApkSignatureVerifier.clearOverrideSigningDetails();
             try {

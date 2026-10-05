@@ -69,16 +69,12 @@ impl Apks {
     /// full).
     pub fn signatures(&self, pkg: &AndroidPackage) -> Result<Signatures, String> {
         let details = self.signing_details(pkg)?;
+        let public_keys = details.serialized_public_keys()?;
         Ok(Signatures {
             scheme_version: details.scheme_version,
             signatures: details.signatures,
             current_flags: details.current_flags,
-            public_keys: Some(
-                sign::serialize_public_keys(&details.public_keys)?
-                    .into_iter()
-                    .map(Some)
-                    .collect(),
-            ),
+            public_keys,
             past_signatures: details.past_signing_certificates,
         })
     }

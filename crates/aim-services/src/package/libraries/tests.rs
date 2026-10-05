@@ -84,7 +84,7 @@ fn loaded_library_withdrawal_preserves_other_versions_and_builtins() {
                         current_flags: Vec::new(),
                         signatures: Vec::new(),
                         scheme_version: 0,
-                        public_keys: Vec::new(),
+                        public_keys: Some(Vec::new()),
                         past_signing_certificates: None,
                     },
                     origin: ScanOrigin::Data,

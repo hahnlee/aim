@@ -163,7 +163,16 @@ fn difference(ours: &SigningDetails, p: &Package, settings: &Settings) -> Option
             .filter_map(|k| ks.public_keys.iter().find(|(i, _)| i == k))
             .map(|(_, v)| v.as_slice())
             .collect();
-        let ours: HashSet<&[u8]> = ours.public_keys.iter().map(Vec::as_slice).collect();
+        let Some(ours) = &ours.public_keys else {
+            return Some("signing key set: null public-key set".into());
+        };
+        let Some(ours) = ours
+            .iter()
+            .map(|key| key.as_deref())
+            .collect::<Option<HashSet<&[u8]>>>()
+        else {
+            return Some("signing key set: null public key".into());
+        };
         if ours != theirs {
             return Some("signing key set: different public keys".into());
         }

@@ -159,6 +159,7 @@ pub fn verify(boot: &Boot, apks: &Apks, source: &Record, replacement: &Record) {
     let before = apks
         .collect_signing_details_with_overrides(&parsed, choice, &debug_owner)
         .unwrap();
+    verify_nullable_keys(boot, apks, &parsed, &before, &dir);
     let desired =
         SigningDetails::from_saved(replacement.settings.signatures.as_ref().unwrap()).unwrap();
     debug_owner.add(before.clone(), desired.clone()).unwrap();
@@ -187,5 +188,101 @@ pub fn verify(boot: &Boot, apks: &Apks, source: &Record, replacement: &Record) {
         apks.collect_signing_details_with_overrides(&parsed, choice, &debug_owner)
             .unwrap(),
         before
+    );
+}
+
+fn verify_nullable_keys(
+    boot: &Boot,
+    apks: &Apks,
+    parsed: &aim_services::package::pkg::AndroidPackage,
+    base: &SigningDetails,
+    dir: &std::path::Path,
+) {
+    use aim_services::package::info::{SigningInfo, write_signing_details};
+    let original = run(boot.command().args([
+        "shell",
+        "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/app-ids.dex:/system/framework/services.jar",
+        "/system/bin",
+        "com.android.server.pm.AppIdsOracle",
+        "nullable-signing-keys",
+        "/data/local/tmp/signing-overrides/source.cache",
+        "/data/local/tmp/signing-overrides",
+    ]));
+    let mut null = base.clone();
+    null.public_keys = None;
+    let mut empty = base.clone();
+    empty.public_keys = Some(vec![]);
+    let mut unknown_fields = SigningDetails::unknown();
+    unknown_fields.unknown = false;
+    let mut null_element = base.clone();
+    null_element.public_keys = Some(vec![None]);
+    let mut mixed = base.clone();
+    mixed.public_keys.as_mut().unwrap().push(None);
+    let cases = [
+        null,
+        empty,
+        base.clone(),
+        SigningDetails::unknown(),
+        unknown_fields,
+        null_element,
+        mixed,
+    ];
+    let mut expected = String::new();
+    for (i, a) in cases.iter().enumerate() {
+        let owner = Overrides::new(true);
+        owner.add(base.clone(), a.clone()).unwrap();
+        assert_eq!(
+            apks.collect_signing_details_with_overrides(
+                parsed,
+                CertificateCollection {
+                    saved: None,
+                    database_version: 3,
+                    force_collect: true,
+                    skip_verify: false,
+                    pre_n_mr1_upgrade: false,
+                },
+                &owner
+            )
+            .unwrap(),
+            *a
+        );
+        let dto = a.package_details().unwrap();
+        let mut replica = parsed.clone();
+        replica.signing_details = dto.clone();
+        let reread = aim_services::package::pkg::AndroidPackage::read_cache_entry(
+            &replica.to_cache_entry().unwrap().bytes,
+        )
+        .unwrap();
+        assert_eq!(reread.signing_details, dto);
+        let body = dto.map(|dto| SigningInfo {
+            scheme_version: dto.scheme_version,
+            signatures: dto.signatures.unwrap(),
+            public_keys: dto.public_keys,
+            past_signing_certificates: dto.past_signing_certificates,
+        });
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        write_signing_details(&mut parcel, body.as_ref());
+        assert_eq!(
+            parcel.data(),
+            fs::read(dir.join(format!("nullable-keys-{i}.original"))).unwrap(),
+            "nullable signing keys {i}"
+        );
+        for (j, b) in cases.iter().enumerate() {
+            let owner = Overrides::new(true);
+            let mut marker = base.clone();
+            marker.scheme_version = 127;
+            owner.add(a.clone(), marker).unwrap();
+            expected.push_str(&format!(
+                "{i} {j} {} {}\n",
+                a.equals_original(b),
+                owner.apply(b).scheme_version == 127
+            ));
+        }
+    }
+    assert_eq!(
+        String::from_utf8(original.stdout).unwrap(),
+        expected,
+        "nullable original signing equality/lookup"
     );
 }

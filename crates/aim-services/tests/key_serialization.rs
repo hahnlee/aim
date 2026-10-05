@@ -180,16 +180,11 @@ fn public_keys_match_and_deserialize_on_the_original_runtime() {
         },
     )
     .unwrap();
+    let public_keys = details.serialized_public_keys().unwrap();
     let signing = info::SigningInfo {
         scheme_version: details.scheme_version,
         signatures: details.signatures,
-        public_keys: Some(
-            serialize_public_keys(&details.public_keys)
-                .unwrap()
-                .into_iter()
-                .map(Some)
-                .collect(),
-        ),
+        public_keys,
         past_signing_certificates: details
             .past_signing_certificates
             .map(|certs| certs.into_iter().map(|(cert, _)| cert).collect()),

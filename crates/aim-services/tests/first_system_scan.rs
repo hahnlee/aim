@@ -139,8 +139,17 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
         rejected: Vec::new(),
     };
     let code = &mut declared.packages[1];
-    let keys =
-        aim_services::package::sign::serialize_public_keys(&code.signing.public_keys).unwrap();
+    let keys = aim_services::package::sign::serialize_public_keys(
+        &code
+            .signing
+            .public_keys
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|key| key.clone().unwrap())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
     code.parsed.key_set_mapping = Some(vec![(
         Some("next".into()),
         Some(keys.into_iter().map(Some).collect()),

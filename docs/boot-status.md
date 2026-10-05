@@ -1186,11 +1186,24 @@ unchanged results after add/remove/clear, cache/force/unsafe-collection choices,
 and missing APK failure on disposable code. A separately configured native debug
 owner verifies real APK add/remove/clear and override-before-split comparison;
 the pinned image's Build.isDebuggable is false, so original debug-build
-application remains unrun. Release units pass 474 cases (0.55s), three ignored/not
-run. This explicit owner is not connected to the Java test APIs or live scan
-orchestration yet. Nullable public-key replacement owners are not represented
-by the native verified-details model (#950); original constructor/equality and
-transport parity remain part of #946. Original ART verifies all
+application remains unrun. Native SigningDetails now preserves null, empty and
+populated public-key sets plus null entries (#950), with original signed-hash
+ArraySet ordering and duplicate elimination. Settings/PackageImpl/SigningDetails
+Parcel projections retain those states rather than deriving replacement keys
+from certificates. Original constructors verify seven owners (including UNKNOWN,
+an empty owner with null keys, and a mixed key/null set), 49 equality/ArrayMap
+lookup pairs and exact Parcel bytes. Native PackageImpl cache roundtrips and
+actual APK verification followed by each of the seven override replacements
+also pass in the expanded app-ID/original-owner fixture (29.33s). The original
+public-key serialization/deserialization fixture passes (10.64s). Null keys
+remain invalid at keyset registration instead of being silently removed; the
+signature comparison tool reports absent/null keys as mismatches. Release units
+pass 474 cases (0.50s), with three ignored/not run. All aim-services test targets
+compile; this compile gate does not count those tests as executed. The full
+image/original-PMS template build passes (35.5s; four rebuilt, 38 fresh), and the
+final host build passes (21.6s; one rebuilt, 41 fresh). This explicit owner is not
+connected to the Java test APIs or live scan orchestration yet. Nullable owner
+transport through the actual override endpoint remains part of #946/#950. Original ART verifies all
 seven methods over each of the six authentic native graphs: current/old scope
 identity, explicit and Binder callers, distinct uncommitted replicas, required
 inputs and SDK argument/error identity. The complete first-system fixture,

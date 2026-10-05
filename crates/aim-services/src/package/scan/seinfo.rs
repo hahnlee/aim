@@ -408,7 +408,7 @@ mod tests {
                 current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,
-                public_keys: vec![],
+                public_keys: Some(vec![]),
                 past_signing_certificates: None,
             };
             owner.loaded.insert(

@@ -243,7 +243,7 @@ mod tests {
             current_flags: Vec::new(),
             signatures: certs.iter().map(|c| vec![*c]).collect(),
             scheme_version: 3,
-            public_keys: vec![],
+            public_keys: Some(vec![]),
             past_signing_certificates: None,
         }
     }

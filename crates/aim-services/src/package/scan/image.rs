@@ -530,7 +530,7 @@ mod tests {
                 current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,
-                public_keys: vec![],
+                public_keys: Some(vec![]),
                 past_signing_certificates: Some(vec![(vec![1], 15), (vec![3], 31)]),
             },
         };
@@ -582,7 +582,11 @@ mod tests {
         assert_eq!(collected.uid, -1);
         assert_eq!(code.parsed.signing_details, Some(Default::default()));
 
-        code.signing.public_keys.push(vec![0]);
+        code.signing
+            .public_keys
+            .as_mut()
+            .unwrap()
+            .push(Some(vec![0]));
         let before = code.parsed.clone();
         assert!(code.collected_package().is_err());
         assert_eq!(code.parsed, before);

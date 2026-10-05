@@ -9,17 +9,15 @@ impl SigningDetails {
     /// SigningDetails.equals for native verified owners. Current capability flags
     /// do not participate; past certificates retain their order and flags.
     pub fn equals_original(&self, other: &Self) -> bool {
-        self.unknown == other.unknown
-            && self.scheme_version == other.scheme_version
+        self.scheme_version == other.scheme_version
             && self.signatures_match(other)
-            && self
-                .public_keys
-                .iter()
-                .all(|key| other.public_keys.contains(key))
-            && other
-                .public_keys
-                .iter()
-                .all(|key| self.public_keys.contains(key))
+            && match (&self.public_keys, &other.public_keys) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.iter().all(|key| b.contains(key)) && b.iter().all(|key| a.contains(key))
+                }
+                _ => false,
+            }
             && self.past_signing_certificates == other.past_signing_certificates
     }
 
@@ -124,7 +122,7 @@ mod tests {
             signatures: vec![vec![cert]],
             current_flags: vec![],
             scheme_version: 3,
-            public_keys: vec![vec![cert]],
+            public_keys: Some(vec![Some(vec![cert])]),
             past_signing_certificates: None,
         }
     }
@@ -133,7 +131,7 @@ mod tests {
         let owner = Overrides::new(true);
         let mut a = details(1);
         a.signatures.push(vec![2]);
-        a.public_keys.push(vec![2]);
+        a.public_keys.as_mut().unwrap().push(Some(vec![2]));
         let b = details(3);
         owner.add(a.clone(), b.clone()).unwrap();
         let mut reversed = a.clone();
@@ -141,7 +139,7 @@ mod tests {
         assert!(a.equals_original(&reversed));
         assert_eq!(owner.apply(&reversed), reversed);
         let mut reordered_keys = a.clone();
-        reordered_keys.public_keys.reverse();
+        reordered_keys.public_keys.as_mut().unwrap().reverse();
         assert_eq!(owner.apply(&reordered_keys), b);
         let mut past = details(1);
         past.past_signing_certificates = Some(vec![(vec![2], 8), (vec![1], 0)]);

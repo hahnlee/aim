@@ -800,7 +800,16 @@ fn saved_scan_libraries_match_original_pms() {
         assert_eq!(
             aim_services::package::sign::serialize_public_keys(&registered).unwrap(),
             aim_services::package::sign::serialize_public_keys(
-                &completed.candidate.record.signing.public_keys
+                &completed
+                    .candidate
+                    .record
+                    .signing
+                    .public_keys
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|key| key.clone().unwrap())
+                    .collect::<Vec<_>>()
             )
             .unwrap()
         );

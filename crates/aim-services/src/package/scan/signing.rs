@@ -1789,7 +1789,7 @@ mod tests {
             current_flags: Vec::new(),
             signatures: vec![vec![3]],
             scheme_version: 3,
-            public_keys: vec![],
+            public_keys: Some(vec![]),
             past_signing_certificates: None,
         };
         let code = |sdk| {
@@ -1965,7 +1965,7 @@ mod tests {
             current_flags: Vec::new(),
             signatures: vec![vec![3]],
             scheme_version: 3,
-            public_keys: vec![],
+            public_keys: Some(vec![]),
             past_signing_certificates: Some(vec![(vec![1], 21), (vec![3], 23)]),
         };
         let parsed = crate::package::pkg::AndroidPackage {
@@ -3255,7 +3255,7 @@ mod tests {
             current_flags: Vec::new(),
             signatures: vec![vec![3]],
             scheme_version: 3,
-            public_keys: vec![],
+            public_keys: Some(vec![]),
             past_signing_certificates: Some(vec![(vec![1], 21), (vec![3], 23)]),
         };
         let parsed = crate::package::pkg::AndroidPackage {

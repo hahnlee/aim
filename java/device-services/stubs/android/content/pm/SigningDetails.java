@@ -12,6 +12,7 @@ public final class SigningDetails {
     public boolean hasAncestor(SigningDetails old) { throw new RuntimeException("stub"); }
     public boolean hasAncestorOrSelf(SigningDetails old) { throw new RuntimeException("stub"); }
     public SigningDetails(Signature[] signatures, int signatureSchemeVersion) { throw new RuntimeException("stub"); }
+    public void writeToParcel(android.os.Parcel out, int flags) { throw new RuntimeException("stub"); }
     public int getSignatureSchemeVersion() { throw new RuntimeException("stub"); }
     public Signature[] getSignatures() { throw new RuntimeException("stub"); }
     public Signature[] getPastSigningCertificates() { throw new RuntimeException("stub"); }

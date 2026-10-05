@@ -935,7 +935,7 @@ mod tests {
                 current_flags: Vec::new(),
                 signatures: vec![vec![3]],
                 scheme_version: 3,
-                public_keys: Vec::new(),
+                public_keys: Some(Vec::new()),
                 past_signing_certificates: None,
             };
             let parsed = AndroidPackage {

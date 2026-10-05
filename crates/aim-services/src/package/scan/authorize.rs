@@ -101,7 +101,7 @@ mod tests {
             current_flags: Vec::new(),
             signatures: details.signatures.clone(),
             scheme_version: 3,
-            public_keys: vec![],
+            public_keys: Some(vec![]),
             past_signing_certificates: details.past_signatures.clone(),
         }
     }

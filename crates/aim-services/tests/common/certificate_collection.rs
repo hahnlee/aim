@@ -210,11 +210,19 @@ pub(super) fn trace(signing: &sign::SigningDetails) -> String {
                 .join(",")
         })
         .unwrap_or_else(|| "null".into());
-    let keys = sign::serialize_public_keys(&signing.public_keys)
+    let keys = signing
+        .serialized_public_keys()
         .unwrap()
-        .iter()
-        .map(|key| format!("{}:{}", key.class, digest(&key.bytes)))
-        .collect::<Vec<_>>()
-        .join(",");
+        .map(|keys| {
+            keys.iter()
+                .map(|key| {
+                    key.as_ref()
+                        .map(|key| format!("{}:{}", key.class, digest(&key.bytes)))
+                        .unwrap_or_else(|| "null".into())
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_else(|| "null".into());
     format!("{} {current} {past} {keys}", signing.scheme_version)
 }

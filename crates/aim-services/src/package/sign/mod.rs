@@ -119,8 +119,8 @@ pub struct SigningDetails {
     /// Current Signature capability flags; empty represents all zero.
     pub current_flags: Vec<i32>,
     pub scheme_version: i32,
-    /// The signers' public keys (`SubjectPublicKeyInfo`), each once.
-    pub public_keys: Vec<Vec<u8>>,
+    /// Original nullable public-key set (`SubjectPublicKeyInfo`), each once.
+    pub public_keys: Option<Vec<Option<Vec<u8>>>>,
     pub past_signing_certificates: Option<Lineage>,
 }
 
@@ -131,7 +131,7 @@ impl SigningDetails {
             signatures: Vec::new(),
             current_flags: Vec::new(),
             scheme_version: UNKNOWN,
-            public_keys: Vec::new(),
+            public_keys: None,
             past_signing_certificates: None,
         }
     }
@@ -141,7 +141,7 @@ impl SigningDetails {
             if !self.signatures.is_empty()
                 || !self.current_flags.is_empty()
                 || self.scheme_version != UNKNOWN
-                || !self.public_keys.is_empty()
+                || self.public_keys.is_some()
                 || self.past_signing_certificates.is_some()
             {
                 return Err("UNKNOWN signing has populated fields".into());
@@ -161,18 +161,23 @@ impl SigningDetails {
         Ok(super::pkg::SigningDetails {
             signatures: Some(self.signatures.clone()),
             scheme_version: self.scheme_version,
-            public_keys: Some(
-                serialize_public_keys(&self.public_keys)?
-                    .into_iter()
-                    .map(Some)
-                    .collect(),
-            ),
+            public_keys: self.serialized_public_keys()?,
             past_signing_certificates: self.past_signing_certificates.as_ref().map(|past| {
                 past.iter()
                     .map(|(certificate, _)| certificate.clone())
                     .collect()
             }),
         })
+    }
+
+    /// Preserve null versus empty when handing keys to Parcel/settings owners.
+    pub fn serialized_public_keys(
+        &self,
+    ) -> Result<Option<Vec<Option<super::pkg::Serialized>>>, String> {
+        self.public_keys
+            .as_deref()
+            .map(serialize::nullable_public_keys)
+            .transpose()
     }
 
     fn new(
@@ -192,7 +197,7 @@ impl SigningDetails {
             signatures,
             current_flags: Vec::new(),
             scheme_version,
-            public_keys,
+            public_keys: Some(public_keys.into_iter().map(Some).collect()),
             past_signing_certificates,
         })
     }

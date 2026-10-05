@@ -422,10 +422,19 @@ impl SigningScan {
             })
             .transpose()
             .map_err(fail)?;
+        let signing_keys = record
+            .signing
+            .public_keys
+            .as_ref()
+            .ok_or_else(|| fail("package has no signing public keys".into()))?
+            .iter()
+            .map(|key| key.clone().ok_or("null signing public key".to_owned()))
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(fail)?;
         crate::package::owner::key_sets::register(
             &mut self.settings,
             &record.settings.name,
-            &record.signing.public_keys,
+            &signing_keys,
             defined.as_deref(),
             &record.parsed.upgrade_key_sets,
         )

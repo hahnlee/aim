@@ -683,7 +683,7 @@ fn allocation_matches_the_original_runtime() {
             details.scheme_version,
             if current.is_empty() { "-" } else { &current },
             past,
-            details.public_keys.len()
+            details.public_keys.as_ref().map_or(0, Vec::len)
         )
     };
     for mode in ["merge", "group-merge", "override-equals"] {
@@ -1019,7 +1019,8 @@ fn allocation_matches_the_original_runtime() {
         let key_count = SigningDetails::from_saved(signatures)
             .unwrap()
             .public_keys
-            .len();
+            .as_ref()
+            .map_or(0, Vec::len);
         expected.push_str(&format!(
             "{} {} {} {} {} {key_count}\n",
             node.name,

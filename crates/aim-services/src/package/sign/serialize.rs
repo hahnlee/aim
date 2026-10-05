@@ -357,6 +357,27 @@ pub fn public_keys(keys: &[Vec<u8>]) -> Result<Vec<Serialized>, String> {
         .collect())
 }
 
+/// Original nullable ArraySet entries, sorted by signed hash with stable collisions.
+pub(super) fn nullable_public_keys(
+    keys: &[Option<Vec<u8>>],
+) -> Result<Vec<Option<Serialized>>, String> {
+    let mut values = Vec::new();
+    for entry in keys {
+        let value = match entry {
+            None => (None, 0),
+            Some(spki) => {
+                let (value, hash, _) = key(spki)?;
+                (Some(value), hash)
+            }
+        };
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    values.sort_by_key(|(_, hash)| *hash);
+    Ok(values.into_iter().map(|(key, _)| key).collect())
+}
+
 /// PublicKey.getEncoded and the same ArraySet ordering used in parcels.
 pub(crate) fn canonical_public_keys(keys: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> {
     Ok(ordered(keys)?

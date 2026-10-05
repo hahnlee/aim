@@ -195,7 +195,7 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
             .len(),
         2
     );
-    assert!(!active.signing.public_keys.is_empty());
+    assert!(!active.signing.public_keys.as_ref().unwrap().is_empty());
 
     // Cryptographic validity does not authorize reuse of saved code/UID
     // ownership with unrelated package or disabled-system certificates.
