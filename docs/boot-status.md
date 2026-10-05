@@ -662,10 +662,10 @@ Proxy/Stub and PackageScanLease.captureData on original ART: the snapshot contai
 one active setting and two distinct same-name shared members (one loaded, one
 unparsed), preserves both after lease close, and returns detached member
 containers. Removing the current member from the advertised package inventory
-still rejects assembly. The complete package Parcel oracle passes (25.25s), and
+still rejects assembly. The complete package Parcel oracle passes (32.01s), and
 the checked Java/image/template build passes (56.0s). This verifies that captured
-graph; native daemon publication and the displaced-request complete graph remain
-#836/#798/#929. Missing retained runtime/legacy/fixed/leaving inputs reject.
+graph; the six displaced-request captureData graphs also pass (below). Native
+daemon publication remains #836/#798, and displaced reboot/mutations remain #929. Missing retained runtime/legacy/fixed/leaving inputs reject.
 The original ART oracle compares retained flags, UID, sparse users, unparsed code,
 shared snapshot cardinality/SDK, detached containers and exact record roundtrip
 (34.84s); ordinary shared lease reads still pass. Native Store, library dependency inputs and Java collected-code restoration now
@@ -1036,7 +1036,8 @@ UNKNOWN signing restoration, rejection after loading code and three malformed
 markers. Shared process ownership validates the displacement binding and excludes
 the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
-and removal; the complete first-system scan passes (15.51s). The full package
+and removal; the complete first-system scan, including Java assembly, passes
+(22.35s). The full package
 Parcel oracle passes (32.01s); release units pass 465 cases (0.49s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
@@ -1063,9 +1064,15 @@ removes its captured legacy owner, and active setting removal forgets its own
 legacy/fixed/runtime inputs while preserving factory scopes and previous
 captures. Setting removal stages all changes so a missing group input leaves
 the earlier owner unchanged. APEX replacement uses the same group cleanup once.
-The complete first-system scan passes (15.51s), and the full original ART Parcel
-oracle, including shared APEX adoption/replacement, passes (32.01s). Complete Java
-snapshot assembly, a full original reboot of native-written displaced data and
+The complete first-system scan now passes the six native accepted captures through
+generated Binder Proxy/Stub and original ART's PackageScanLease.captureData
+(22.35s). Pruned/active/disabled old groups and independent/shared original targets
+preserve the incoming unparsed setting outside group membership, the loaded
+original's real-name/UID binding, distinct current/retained original instances,
+and factory inventory. Captured replicas remain usable after lease close. Each
+case rejects an advertised inventory missing the accepted original. The full
+original ART Parcel oracle, including shared APEX adoption/replacement, passes
+(32.01s). A full original reboot of native-written displaced data and
 other displaced-setting mutations remain #929. Full original
 request parity and transfer publication remain #919,
 and daemon frontend publication remains #798/#836. This does not prove original-service adoption or CTS. Mapped APK signing

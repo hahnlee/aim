@@ -2,6 +2,9 @@
 //! image, parser feed or persisted PackageSettings is changed or consulted.
 mod common {
     pub mod seinfo;
+    pub mod java;
+    pub mod runtime;
+    pub mod snapshot_oracle;
 }
 
 use aim_services::package::{
@@ -24,7 +27,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-#[ignore = "requires the pinned original image; run explicitly"]
+#[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
     let original = aim_paths::original_image();
     let dir = std::env::temp_dir().join(format!("aim-first-system-scan-{}", std::process::id()));
@@ -1068,6 +1071,7 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             owner.identities.ids.detached_setting(10003).unwrap()
         }
     }
+    let mut displaced_case = 0;
     for (invalid_page_size, shared, incoming, incoming_shared, keep) in [
         (false, false, false, false, 0),
         (true, false, false, false, 0),
@@ -1398,6 +1402,15 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 let store =
                     aim_services::package::scan_snapshot::Store::new(owner.clone(), usage).unwrap();
                 let capture = store.capture();
+                let index = usize::from(shared) * 3 + keep as usize;
+                common::snapshot_oracle::export(
+                    &fixture
+                        .0
+                        .join("snapshot-oracle/captures")
+                        .join(format!("case-{index}")),
+                    &capture,
+                );
+                displaced_case += 1;
                 for (settings, factory) in [
                     (&owner.settings.packages, false),
                     (&owner.settings.disabled_system_packages, true),
@@ -1697,6 +1710,8 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
             }
         }
     }
+    assert_eq!(displaced_case, 6);
+    common::snapshot_oracle::verify(&fixture.0.join("snapshot-oracle"));
     // Stub policy comes from a fixture compressed-sibling inventory.
     // The original signed APK remains an unchanged symlink target.
     let stub = fixture.0.join("product/priv-app/GSF-Stub");
