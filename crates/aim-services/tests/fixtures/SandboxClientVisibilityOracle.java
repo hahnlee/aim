@@ -9,6 +9,16 @@ public final class SandboxClientVisibilityOracle {
             int clientUid = Integer.parseInt(args[1]);
             if (Process.myUid() != clientUid + 10000) throw new AssertionError("sandbox uid differs");
             var pm = IPackageManager.Stub.asInterface(ServiceManager.getService("package"));
+            String selected = pm.getSdkSandboxPackageName();
+            byte[] captured = dev.aim.server.PackageSdkSandbox.capture();
+            var record = android.os.Parcel.obtain();
+            try {
+                record.unmarshall(captured, 0, captured.length);
+                record.setDataPosition(0);
+                if (!java.util.Objects.equals(selected, record.readString()) || record.dataAvail() != 0)
+                    throw new AssertionError("SDK package owner differs");
+            } finally { record.recycle(); }
+            java.nio.file.Files.write(java.nio.file.Path.of(args[2]), captured);
             var app = pm.getApplicationInfo(name, 0, 0);
             if (app == null || app.uid != clientUid) throw new AssertionError("sandbox client application hidden");
             var pkg = pm.getPackageInfo(name, 0, 0);

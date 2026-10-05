@@ -878,3 +878,56 @@ fn apex_inventory_publication_preserves_null_all_and_rejects_foreign_keys() {
     put(&mut inner, APEX_INVENTORY, "foreign", &frame(0));
     assert!(build(&inner.records, 3, None).is_err());
 }
+
+#[test]
+fn sandbox_package_publication_distinguishes_missing_null_and_selected_owner() {
+    let mut inner = Inner::default();
+    assert_eq!(
+        build(&inner.records, 1, None)
+            .unwrap()
+            .system
+            .sdk_sandbox_package,
+        None
+    );
+    let frame = |name: Option<&str>| {
+        let mut parcel = Parcel::new();
+        parcel.write_string16(name);
+        parcel.data().to_vec()
+    };
+    put(
+        &mut inner,
+        SDK_SANDBOX_PACKAGE,
+        "",
+        &frame(Some("selected.sdk")),
+    );
+    let old = build(&inner.records, 2, None).unwrap();
+    put(&mut inner, SDK_SANDBOX_PACKAGE, "", &frame(None));
+    assert_eq!(
+        build(&inner.records, 3, None)
+            .unwrap()
+            .system
+            .sdk_sandbox_package,
+        Some(None)
+    );
+    assert_eq!(
+        old.system.sdk_sandbox_package,
+        Some(Some("selected.sdk".into()))
+    );
+    inner.records.clear();
+    assert_eq!(
+        build(&inner.records, 4, None)
+            .unwrap()
+            .system
+            .sdk_sandbox_package,
+        None
+    );
+    put(&mut inner, SDK_SANDBOX_PACKAGE, "foreign", &frame(None));
+    assert!(build(&inner.records, 5, None).is_err());
+    inner.records.clear();
+    let mut trailing = frame(None);
+    trailing.extend(0i32.to_le_bytes());
+    for malformed in [Vec::new(), vec![0], trailing, vec![1, 0, 0, 0]] {
+        put(&mut inner, SDK_SANDBOX_PACKAGE, "", &malformed);
+        assert!(build(&inner.records, 6, None).is_err());
+    }
+}

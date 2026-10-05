@@ -483,7 +483,12 @@ pub fn instant_app_package_name(state: &State, mut calling_uid: i32) -> Result<O
 /// `ComputerEngine.isCallerSameApp`.
 pub fn is_caller_same_app(state: &State, package: Option<&str>, uid: i32) -> Result<bool> {
     if is_sdk_sandbox(uid) {
-        return Err(NotModelled("the SDK sandbox's package"));
+        let selected = state
+            .system
+            .sdk_sandbox_package
+            .as_ref()
+            .ok_or(NotModelled("the SDK sandbox's package"))?;
+        return Ok(package.is_some() && package == selected.as_deref());
     }
     Ok(package
         .and_then(|p| state.packages.get(p))
@@ -769,6 +774,42 @@ mod tests {
         }
         assert!(grants.transient(uid(11, 10001), uid(11, 10002)));
         assert!(grants.visible(uid(11, 10003), uid(11, 10001)));
+    }
+
+    #[test]
+    fn sandbox_same_app_uses_the_selected_owner_without_package_inventory() {
+        let mut state = State::default();
+        for user in [0, 10] {
+            for id in [FIRST_SDK_SANDBOX_UID, LAST_SDK_SANDBOX_UID] {
+                let caller = uid(user, id);
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), caller),
+                    Err(NotModelled("the SDK sandbox's package"))
+                );
+                state.system.sdk_sandbox_package = Some(None);
+                assert_eq!(is_caller_same_app(&state, None, caller), Ok(false));
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), caller),
+                    Ok(false)
+                );
+                state.system.sdk_sandbox_package = Some(Some("selected.sdk".into()));
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), caller),
+                    Ok(true)
+                );
+                assert_eq!(
+                    is_caller_same_app(&state, Some("other.sdk"), caller),
+                    Ok(false)
+                );
+                assert_eq!(is_caller_same_app(&state, None, caller), Ok(false));
+                // Ordinary callers still require parsed package ownership.
+                assert_eq!(
+                    is_caller_same_app(&state, Some("selected.sdk"), uid(user, 10001)),
+                    Ok(false)
+                );
+                state.system.sdk_sandbox_package = None;
+            }
+        }
     }
 
     #[test]

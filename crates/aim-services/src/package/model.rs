@@ -332,6 +332,8 @@ pub struct User {
 /// SystemConfig and the device's constants the info generators read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct System {
+    /// Original PMS selection; outer None means the owner was not captured.
+    pub sdk_sandbox_package: Option<Option<String>>,
     /// Native AppsFilter interaction grants, carried with each query snapshot.
     pub implicit_access: super::apps_filter::ImplicitAccess,
     /// `mAvailableFeatures`: name and version.

@@ -51,6 +51,17 @@ const USER_SCOPE: i32 = 10;
 const DISABLED_SYSTEM_USER_SCOPE: i32 = 11;
 const SCAN_USERS: i32 = 12;
 const APEX_INVENTORY: i32 = 13;
+const SDK_SANDBOX_PACKAGE: i32 = 14;
+
+/// The nullable SDK package selected by original PMS, without inventory inference.
+pub fn read_sdk_sandbox_package(bytes: &[u8]) -> aim_binder_host::parcel::Result<Option<String>> {
+    let mut reader = aim_binder_host::parcel::Reader::new(bytes, &[]);
+    let name = reader.read_string16()?;
+    if reader.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok(name)
+}
 
 /// A record's kind and key, ordered as `PackageFeed.Key` orders them: by
 /// kind, then as Java compares strings (by UTF-16 unit).
@@ -406,6 +417,13 @@ fn build(
                 state.system.force_system_packages_queryable = all;
                 state.system.force_queryable_packages = packages;
                 state.platform = platform;
+            }
+            SDK_SANDBOX_PACKAGE => {
+                if !key.name.is_empty() {
+                    return Err("SDK sandbox package requires the singleton key".into());
+                }
+                state.system.sdk_sandbox_package =
+                    Some(read_sdk_sandbox_package(bytes).map_err(failed)?);
             }
             APEX_INVENTORY => {
                 if !key.name.is_empty() {

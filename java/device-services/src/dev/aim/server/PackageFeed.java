@@ -103,6 +103,7 @@ final class PackageFeed extends IPackageFeed.Stub {
     private static final int DISABLED_SYSTEM_USER_SCOPE = 11;
     private static final int SCAN_USERS = 12;
     private static final int APEX_INVENTORY = 13;
+    private static final int SDK_SANDBOX_PACKAGE = 14;
     /** The largest chunk of a record in one transaction. */
     private static final int CHUNK = 128 * 1024;
     /** UserHandle.USER_ALL. */
@@ -289,6 +290,7 @@ final class PackageFeed extends IPackageFeed.Stub {
         records.put(new Key(SYSTEM, ""), system());
         records.put(new Key(SCAN_USERS, ""), PackageScanUsers.capture());
         records.put(new Key(APEX_INVENTORY, ""), com.android.server.pm.ApexBootFeed.capture());
+        records.put(new Key(SDK_SANDBOX_PACKAGE, ""), PackageSdkSandbox.capture());
         host.begin(reset);
         for (Map.Entry<Key, byte[]> e : records.entrySet()) {
             byte[] hash = sha256(e.getValue());

@@ -2272,20 +2272,27 @@ preflight: combined manifest/keyset/removal/keystore (19.31s), UID allocation
 (16.94s), and saved package scan (379.44s). Their owned process/mount cleanup
 checks pass. The failed oracle previously exposed original crash
 reporting's Binder EBADF, still unresolved (#831).
-Native ComputerEngine-style visibility now handles a sandbox's client before
+Native ComputerEngine-style visibility handles a sandbox's client before
 code, installed/archived and instant-app checks (#940), as the pinned original
 does. The target UID must match the sandbox's client UID in the requested user;
-a missing target is filtered. Other sandbox targets still require unresolved
-owner inputs and return explicit unsupported errors. Release units pass 467 cases
-(0.49s), including first/last sandbox app IDs, multiple users, missing targets,
-unparsed/uninstalled/instant clients and other-user/other-target rejection. A
-real original-PMS Binder client runs under the corresponding sandbox UID, checks
-its actual Process.myUid, retrieves the original GSF client ApplicationInfo and
-PackageInfo with the saved client UID, and sees null for a missing package. The
-full original ART Parcel test including that query passes (27.20s); the image
-and original-PMS template build passes (58.0s; nine rebuilt, 33 fresh). Native
-filtered replica callbacks and the native package activation gates remain
-#836/#798/#724.
+a missing target is filtered. The original feed also captures PMS's selected
+SDK sandbox package through its pinned IPackageManager API (#941), with a
+singleton nullable record. Query snapshots distinguish an uncaptured owner from
+an original null selection; sandbox same-app checks compare the selected name
+without requiring a parsed package or per-user inventory. Missing owners return
+an explicit unsupported error. Ordinary same-app checks retain parsed package
+and app-ID ownership. Malformed or foreign-key records reject publication;
+replacement/removal does not change older snapshots. Other sandbox targets still
+require unresolved owner inputs and return explicit unsupported errors.
+Release units pass 469 cases (0.51s). A real original-PMS Binder client runs under
+the corresponding sandbox UID, checks its actual Process.myUid, retrieves the
+original GSF client ApplicationInfo and PackageInfo with the saved client UID,
+and sees null for a missing package. It exports the production SDK-owner capture
+and checks it against original PMS's selection; native decoding and same-app
+checks use that actual name. The full original ART Parcel test passes (26.00s);
+the image and original-PMS template build passes (63.5s; nine rebuilt, 33 fresh).
+This owner feed is not the native boot scan producer. Native filtered replica
+callbacks and the native package activation gates remain #836/#798/#724.
 
 Native query snapshots now own AppsFilter's ordinary and update-retained
 interaction grants (#724). Full recipient/visible UIDs preserve direction and

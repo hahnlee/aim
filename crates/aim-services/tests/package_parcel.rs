@@ -231,6 +231,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/SandboxClientVisibilityOracle.java"),
         )
+        .arg(
+            aim_paths::root()
+                .join("java/device-services/src/dev/aim/server/PackageSdkSandbox.java"),
+        )
         .arg(common::java::bootstrap_aidl(&data.0))
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
@@ -1991,6 +1995,7 @@ fn native_package_parcels_match_original_read_write() {
             "SandboxClientVisibilityOracle",
             &client.name,
             &client.app_id.to_string(),
+            "/data/local/tmp/package-parcels/sdk-sandbox.original",
         ])
         .output()
         .unwrap();
@@ -1998,6 +2003,30 @@ fn native_package_parcels_match_original_read_write() {
     assert_eq!(
         String::from_utf8(visibility.stdout).unwrap(),
         format!("SDK_CLIENT {} {}\n", client.app_id, client.name)
+    );
+    let selected = aim_services::package::feed::read_sdk_sandbox_package(
+        &fs::read(directory.join("sdk-sandbox.original")).unwrap(),
+    )
+    .unwrap();
+    // This pinned boot has a selected SDK package; use its actual owner name.
+    assert!(selected.as_ref().is_some_and(|name| !name.is_empty()));
+    let mut sandbox_state = aim_services::package::model::State::default();
+    sandbox_state.system.sdk_sandbox_package = Some(selected.clone());
+    assert_eq!(
+        aim_services::package::apps_filter::is_caller_same_app(
+            &sandbox_state,
+            selected.as_deref(),
+            client.app_id + 10000,
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        aim_services::package::apps_filter::is_caller_same_app(
+            &sandbox_state,
+            Some(&client.name),
+            client.app_id + 10000,
+        ),
+        Ok(false)
     );
     let policy_output = boot
         .client(1000)
