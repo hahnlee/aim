@@ -5,6 +5,7 @@ package android.content.pm;
 import android.os.RemoteException;
 
 public interface IPackageManager extends android.os.IInterface {
+    ApplicationInfo getApplicationInfo(String packageName, long flags, int userId) throws RemoteException;
     PackageInfo getPackageInfo(String packageName, long flags, int userId) throws RemoteException;
     boolean isFirstBoot() throws RemoteException;
     boolean isDeviceUpgrading() throws RemoteException;

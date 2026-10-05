@@ -662,7 +662,7 @@ Proxy/Stub and PackageScanLease.captureData on original ART: the snapshot contai
 one active setting and two distinct same-name shared members (one loaded, one
 unparsed), preserves both after lease close, and returns detached member
 containers. Removing the current member from the advertised package inventory
-still rejects assembly. The complete package Parcel oracle passes (26.20s), and
+still rejects assembly. The complete package Parcel oracle passes (27.20s), and
 the checked Java/image/template build passes (56.0s). This verifies that captured
 graph; the six displaced-request captureData graphs also pass (below). Native
 daemon publication remains #836/#798. The displaced-setting owner and recovery
@@ -1039,7 +1039,7 @@ the incoming Settings-map entry from actual group members. All six successful
 shared-origin fixtures complete process assignments before capture, persistence
 and removal; the complete first-system scan, including Java assembly and six
 original-service boots from native-written settings, passes (88.02s). The full package
-Parcel oracle passes (26.20s); release units pass 466 cases (0.47s), with three
+Parcel oracle passes (27.20s); release units pass 466 cases (0.47s), with three
 ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
 validation accounts for the original pending-package drop after proving the
@@ -1074,7 +1074,7 @@ original's real-name/UID binding, distinct current/retained original instances,
 and factory inventory. Captured replicas remain usable after lease close. Each
 case rejects an advertised inventory missing the accepted original. The full
 original ART Parcel oracle, including shared APEX adoption/replacement, passes
-(26.20s). Original Settings.readLPw now reads the actual native-written ABX for
+(27.20s). Original Settings.readLPw now reads the actual native-written ABX for
 all six cases: missing groups drop incoming settings, surviving groups rejoin
 them, and original UID/factory inventories match. Each actual file is also
 injected byte-for-byte into the stopped disposable data image, with old resilient
@@ -1137,7 +1137,7 @@ native versions 1 and 2. Original ART's generated Proxy/Stub page sources verify
 initial/same/newer refresh, failed newer assembly, close failure/retry, stale and
 invalid versions, initial version/close failure, missing endpoints and retained
 old-scope identity as part of the first-system test (88.02s). The full original
-ART Parcel oracle passes (26.20s), and the image/original-PMS template build
+ART Parcel oracle passes (27.20s), and the image/original-PMS template build
 passes (57.6s; six rebuilt, 36 fresh). This remains a
 controlled Java page source over actual native records; the live daemon producer,
 facade registration and native visibility callbacks remain #798/#836. System.complete_package_scan now resolves
@@ -2272,6 +2272,21 @@ preflight: combined manifest/keyset/removal/keystore (19.31s), UID allocation
 (16.94s), and saved package scan (379.44s). Their owned process/mount cleanup
 checks pass. The failed oracle previously exposed original crash
 reporting's Binder EBADF, still unresolved (#831).
+Native ComputerEngine-style visibility now handles a sandbox's client before
+code, installed/archived and instant-app checks (#940), as the pinned original
+does. The target UID must match the sandbox's client UID in the requested user;
+a missing target is filtered. Other sandbox targets still require unresolved
+owner inputs and return explicit unsupported errors. Release units pass 467 cases
+(0.49s), including first/last sandbox app IDs, multiple users, missing targets,
+unparsed/uninstalled/instant clients and other-user/other-target rejection. A
+real original-PMS Binder client runs under the corresponding sandbox UID, checks
+its actual Process.myUid, retrieves the original GSF client ApplicationInfo and
+PackageInfo with the saved client UID, and sees null for a missing package. The
+full original ART Parcel test including that query passes (27.20s); the image
+and original-PMS template build passes (58.0s; nine rebuilt, 33 fresh). Native
+filtered replica callbacks and the native package activation gates remain
+#836/#798/#724.
+
 Native query snapshots now own AppsFilter's ordinary and update-retained
 interaction grants (#724). Full recipient/visible UIDs preserve direction and
 user scope; duplicate grants and self-grants follow original return values.

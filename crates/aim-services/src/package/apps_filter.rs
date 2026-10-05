@@ -503,6 +503,15 @@ pub fn should_filter_application(
     filter_archived: bool,
 ) -> Result<bool> {
     if is_sdk_sandbox(calling_uid) {
+        if ps.is_some_and(|target| {
+            uid(user, target.app_id)
+                == calling_uid - (FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID)
+        }) {
+            return Ok(false);
+        }
+        if ps.is_none() {
+            return Ok(true);
+        }
         return Err(NotModelled("the SDK sandbox's visibility"));
     }
     if is_isolated(calling_uid) {
@@ -539,7 +548,7 @@ mod tests {
 
     use super::super::intent::Intent;
     use super::super::intent_filter::{IntentFilter, ParsedIntentInfo};
-    use super::super::model::User;
+    use super::super::model::{PackageUserState, User};
     use super::super::pkg::{Activity, Component, Permission, UsesPermission};
     use super::super::settings::Signatures;
     use super::super::uri::Uri;
@@ -760,6 +769,82 @@ mod tests {
         }
         assert!(grants.transient(uid(11, 10001), uid(11, 10002)));
         assert!(grants.visible(uid(11, 10003), uid(11, 10001)));
+    }
+
+    #[test]
+    fn sandbox_clients_are_visible_before_code_user_and_instant_checks() {
+        let state = State::default();
+        let filter = AppsFilter::new(&state, &Config::default());
+        for user in [0, 10] {
+            for client_id in [FIRST_APPLICATION_UID, FIRST_SDK_SANDBOX_UID - 1] {
+                let sandbox = uid(
+                    user,
+                    client_id + FIRST_SDK_SANDBOX_UID - FIRST_APPLICATION_UID,
+                );
+                let client = PackageState {
+                    name: "sandbox.client".into(),
+                    app_id: client_id,
+                    users: [(
+                        user,
+                        PackageUserState {
+                            installed: false,
+                            instant_app: true,
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                };
+                for uninstall in [false, true] {
+                    for archived in [false, true] {
+                        assert_eq!(
+                            should_filter_application(
+                                &state,
+                                &filter,
+                                Some(&client),
+                                sandbox,
+                                user,
+                                uninstall,
+                                archived
+                            ),
+                            Ok(false)
+                        );
+                        assert_eq!(
+                            should_filter_application(
+                                &state, &filter, None, sandbox, user, uninstall, archived
+                            ),
+                            Ok(true)
+                        );
+                    }
+                }
+                assert_eq!(
+                    should_filter_application(
+                        &state,
+                        &filter,
+                        Some(&client),
+                        sandbox,
+                        user + 1,
+                        false,
+                        true
+                    ),
+                    Err(NotModelled("the SDK sandbox's visibility"))
+                );
+                let mut other = client.clone();
+                other.app_id += 1;
+                assert_eq!(
+                    should_filter_application(
+                        &state,
+                        &filter,
+                        Some(&other),
+                        sandbox,
+                        user,
+                        false,
+                        true
+                    ),
+                    Err(NotModelled("the SDK sandbox's visibility"))
+                );
+            }
+        }
     }
 
     #[test]

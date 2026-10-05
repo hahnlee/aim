@@ -227,6 +227,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageMigrationPolicyOracle.java"),
         )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/SandboxClientVisibilityOracle.java"),
+        )
         .arg(common::java::bootstrap_aidl(&data.0))
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
@@ -1971,6 +1975,30 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
     let policy_classpath = "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar";
+    let client = state
+        .settings
+        .packages
+        .iter()
+        .find(|package| package.name == "com.google.android.gsf")
+        .unwrap();
+    assert!((10000..20000).contains(&client.app_id));
+    let visibility = boot
+        .client((client.app_id + 10000) as u32)
+        .args([
+            "/system/bin/app_process",
+            policy_classpath,
+            "/system/bin",
+            "SandboxClientVisibilityOracle",
+            &client.name,
+            &client.app_id.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert_guest_success(&boot, &visibility, "SDK sandbox client visibility");
+    assert_eq!(
+        String::from_utf8(visibility.stdout).unwrap(),
+        format!("SDK_CLIENT {} {}\n", client.app_id, client.name)
+    );
     let policy_output = boot
         .client(1000)
         .args([
