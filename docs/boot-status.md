@@ -1033,8 +1033,12 @@ and rejects continued old-group membership. Native first-system fixtures verify
 the emitted signing headers for all six successful shared-origin transitions;
 original ART validates two group-present/absent frames, exact reserialization,
 UNKNOWN signing restoration, rejection after loading code and three malformed
-markers. The full package Parcel oracle passes (25.25s); release units pass 463
-cases (0.42s). Native scan persistence now writes the displaced incoming setting
+markers. Shared process ownership validates the displacement binding and excludes
+the incoming Settings-map entry from actual group members. All six successful
+shared-origin fixtures complete process assignments before capture, persistence
+and removal; the complete first-system scan passes (13.77s). The full package
+Parcel oracle passes (25.25s); release units pass 463 cases (0.49s), with three
+ignored/not run. Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
 validation accounts for the original pending-package drop after proving the
 private displaced binding. The scan keyset writer compares the restored inventory

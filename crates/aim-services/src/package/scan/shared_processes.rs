@@ -153,26 +153,26 @@ fn build(
     if orders.keys().collect::<BTreeSet<_>>() != scan.identities.shared_users.keys().collect() {
         return Err("shared process group inventory differs".into());
     }
+    scan.validate_displaced_shared_settings()?;
     let mut inputs = BTreeMap::new();
     let mut owners = BTreeMap::new();
     for (name, group) in &scan.identities.shared_users {
-        let mut members: BTreeMap<_, _> = scan
-            .settings
-            .packages
-            .iter()
-            .filter(|p| p.shared_app_id() == Some(group.app_id))
-            .map(|p| {
-                (
-                    (p.name.clone(), false),
+        let mut members = BTreeMap::new();
+        for package in &scan.settings.packages {
+            if package.shared_app_id() == Some(group.app_id)
+                && !scan.is_displaced_shared_setting(package)?
+            {
+                members.insert(
+                    (package.name.clone(), false),
                     Member {
-                        path: p.code_path.clone(),
-                        version: p.version_code,
-                        app_id: p.app_id,
-                        code: scan.loaded.get(&p.name).cloned(),
+                        path: package.code_path.clone(),
+                        version: package.version_code,
+                        app_id: package.app_id,
+                        code: scan.loaded.get(&package.name).cloned(),
                     },
-                )
-            })
-            .collect();
+                );
+            }
+        }
         for member in group.package_names().collect::<BTreeSet<_>>() {
             if let Some(retained) = group.retained_setting(member) {
                 let p = &retained.package;

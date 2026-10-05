@@ -1261,6 +1261,30 @@ fn first_system_scan_applies_ordered_policy_uid_and_final_metadata() {
                 }
             }
             if incoming_shared {
+                let process_orders = owner
+                    .identities
+                    .shared_users
+                    .iter()
+                    .map(|(name, group)| {
+                        let mut members: Vec<_> = owner
+                            .settings
+                            .packages
+                            .iter()
+                            .filter(|p| {
+                                p.shared_app_id() == Some(group.app_id)
+                                    && p.name != "com.google.android.gsf"
+                            })
+                            .map(|p| (p.name.clone(), false))
+                            .collect();
+                        if group.retained_setting(&old.name).is_some() {
+                            members.push((old.name.clone(), true));
+                        }
+                        (name.clone(), members)
+                    })
+                    .collect();
+                owner
+                    .complete_shared_process_instances(process_orders)
+                    .unwrap();
                 let usage = aim_services::package::owner::usage::Usage::new(
                     owner.settings.packages.iter().map(|p| p.name.as_str()),
                 );
