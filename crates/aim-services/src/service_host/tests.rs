@@ -794,6 +794,7 @@ fn exercise_bootstrap(run_scan: bool) {
         reject: AtomicBool::new(false),
         gid: 3004,
     }));
+    let previous_version = system.capture_package_scan().unwrap().version();
     attach(&second, Some(replacement)).unwrap();
     let current = system.package_bootstrap().unwrap();
     assert!(!Arc::ptr_eq(&old, &current));
@@ -812,9 +813,12 @@ fn exercise_bootstrap(run_scan: bool) {
         .publish_package_scan(&current, None, replica_owner(), usage())
         .unwrap();
     let replacement_lease = capture_scan(&second).unwrap();
-    assert_eq!(replacement_snapshot.version(), 1);
+    assert_eq!(replacement_snapshot.version(), previous_version + 1);
     assert_eq!(scan_version(&old_lease).unwrap(), 1);
-    assert_eq!(scan_version(&replacement_lease).unwrap(), 1);
+    assert_eq!(
+        scan_version(&replacement_lease).unwrap(),
+        (previous_version + 1) as i64
+    );
 
     assert_eq!(current.remove_test_base(&parsed, true).unwrap(), None);
     assert_eq!(
@@ -879,6 +883,27 @@ fn exercise_bootstrap(run_scan: bool) {
             .publish_package_scan(&current, None, replica_owner(), usage())
             .is_err()
     );
+    let third = open(94007, 1000);
+    let _third = Processes {
+        driver: driver.clone(),
+        processes: vec![third.clone()],
+    };
+    third.start();
+    owner.reject.store(false, Ordering::SeqCst);
+    let node = third.add_service(owner.clone());
+    attach(&third, Some(node)).unwrap();
+    let restarted = system.package_bootstrap().unwrap();
+    let resumed = system
+        .publish_package_scan(&restarted, None, replica_owner(), usage())
+        .unwrap();
+    assert_eq!(resumed.version(), previous_version + 2);
+    assert_eq!(
+        scan_version(&capture_scan(&third).unwrap()).unwrap(),
+        (previous_version + 2) as i64
+    );
+    driver.release(third.proc_handle());
+    until(|| system.package_bootstrap().is_err());
+    assert!(system.capture_package_scan().is_err());
     assert!(!late.load(Ordering::SeqCst));
 }
 

@@ -112,7 +112,13 @@ pub struct System {
     /// Told of each bridge system_server hands over (a handle held for
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
-    package_bootstrap: Mutex<Option<PackageBootstrap>>,
+    package_bootstrap: Mutex<PackageBootstrapState>,
+}
+
+#[derive(Default)]
+struct PackageBootstrapState {
+    current: Option<PackageBootstrap>,
+    version: u64,
 }
 
 struct PackageBootstrap {
@@ -198,7 +204,7 @@ impl System {
                 nonces: Mutex::new(None),
                 permissions: Mutex::new(Permissions::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
-                package_bootstrap: Mutex::new(None),
+                package_bootstrap: Mutex::new(PackageBootstrapState::default()),
             }
         });
         let this = Arc::downgrade(&system);
@@ -403,7 +409,7 @@ impl System {
         let this = Arc::downgrade(self);
         let attached = Arc::downgrade(&bridge);
         let mut current = self.package_bootstrap.lock().unwrap();
-        *current = Some(PackageBootstrap {
+        current.current = Some(PackageBootstrap {
             bridge: bridge.clone(),
             snapshots: None,
         });
@@ -413,10 +419,11 @@ impl System {
                 if let (Some(system), Some(attached)) = (this.upgrade(), attached.upgrade()) {
                     let mut current = system.package_bootstrap.lock().unwrap();
                     if current
+                        .current
                         .as_ref()
                         .is_some_and(|owner| Arc::ptr_eq(&owner.bridge, &attached))
                     {
-                        current.take();
+                        current.current.take();
                     }
                 }
             }),
@@ -428,6 +435,7 @@ impl System {
         self.package_bootstrap
             .lock()
             .unwrap()
+            .current
             .as_ref()
             .map(|owner| owner.bridge.clone())
             .ok_or_else(|| {
@@ -449,21 +457,30 @@ impl System {
         use crate::package::scan_snapshot::Store;
         let fail =
             |message: &str| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
-        let mut current = self.package_bootstrap.lock().unwrap();
-        let current = current
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let previous_version = state.version;
+        let current = state
+            .current
             .as_mut()
             .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
             .ok_or_else(|| fail("package scan bootstrap owner changed"))?;
         let result = match (&current.snapshots, base) {
             (Some(store), Some(base)) => store.publish(base, owner, usage),
-            (None, None) => Store::new_replica(owner, usage).map(|store| {
-                let capture = store.capture();
-                current.snapshots = Some(store);
-                capture
-            }),
+            (None, None) => previous_version
+                .checked_add(1)
+                .ok_or(crate::package::scan_snapshot::Error::VersionExhausted)
+                .and_then(|version| Store::new_replica_at_version(owner, usage, version))
+                .map(|store| {
+                    let capture = store.capture();
+                    current.snapshots = Some(store);
+                    capture
+                }),
             _ => return Err(fail("package scan publication base differs")),
         };
-        result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))
+        let snapshot =
+            result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))?;
+        state.version = snapshot.version();
+        Ok(snapshot)
     }
 
     /// Finish native boot dependencies/runtime before the complete publication gate.
@@ -516,6 +533,7 @@ impl System {
         self.package_bootstrap
             .lock()
             .unwrap()
+            .current
             .as_ref()
             .and_then(|owner| owner.snapshots.as_ref())
             .map(|store| store.capture())

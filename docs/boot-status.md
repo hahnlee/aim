@@ -1112,7 +1112,15 @@ missing publication, wrong tokens and trailing arguments reject. Issued leases
 retain their captured version across newer publication and bridge replacement.
 The real native Binder test verifies missing/incomplete publication, old/new
 versions, caller/token/tail rejection, close, replacement and old/current bridge
-death. Release units pass 466 cases (0.52s), with three ignored/not run. The
+death. The publication sequence now belongs to the daemon rather than the
+bridge attachment (#938): replacement and current bridge death retain the last
+successful version, and the next complete graph uses its successor. Rejected
+publication does not advance it. Zero and values above signed-long MAX reject;
+publishing at MAX fails without replacing the previous snapshot. The real Binder
+fixture verifies replacement, death/reconnection and old lease versions. Release
+units pass 466 cases (0.46s), with three ignored/not run; the explicit pinned-image
+bootstrap/publication test passes (0.68s). The production host build passes
+(15.3s; three rebuilt, 39 fresh). The
 full image/original-PMS template build passes (65.1s; nine rebuilt, 33 fresh). This
 connects complete native publication to the service-host transport; the running
 boot flow does not yet invoke publication, and SystemServer does not yet request

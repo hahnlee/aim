@@ -51,17 +51,33 @@ pub struct Store {
 
 impl Store {
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
-        Self::create(owner, usage, false)
+        Self::create(owner, usage, false, 1)
     }
 
     pub fn new_replica(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
-        Self::create(owner, usage, true)
+        Self::new_replica_at_version(owner, usage, 1)
     }
 
-    fn create(owner: SigningScan, usage: Usage, replica: bool) -> Result<Self, Error> {
+    pub(crate) fn new_replica_at_version(
+        owner: SigningScan,
+        usage: Usage,
+        version: u64,
+    ) -> Result<Self, Error> {
+        Self::create(owner, usage, true, version)
+    }
+
+    fn create(
+        owner: SigningScan,
+        usage: Usage,
+        replica: bool,
+        version: u64,
+    ) -> Result<Self, Error> {
+        if version == 0 || version > i64::MAX as u64 {
+            return Err(Error::VersionExhausted);
+        }
         validate(&owner, &usage)?;
         let snapshot = Arc::new(Snapshot {
-            version: 1,
+            version,
             owner,
             usage,
         });
@@ -94,6 +110,7 @@ impl Store {
         let version = current
             .version
             .checked_add(1)
+            .filter(|version| *version <= i64::MAX as u64)
             .ok_or(Error::VersionExhausted)?;
         validate(&owner, &usage)?;
         let next = Arc::new(Snapshot {
@@ -423,6 +440,28 @@ mod tests {
             .unwrap();
         assert_eq!(next.version(), 2);
         assert_eq!(base.version(), 1);
+        for version in [0, i64::MAX as u64 + 1] {
+            assert!(matches!(
+                Store::new_replica_at_version(
+                    complete(true, true, true),
+                    Usage::new(["fixture"]),
+                    version
+                ),
+                Err(Error::VersionExhausted)
+            ));
+        }
+        let limit = Store::new_replica_at_version(
+            complete(true, true, true),
+            Usage::new(["fixture"]),
+            i64::MAX as u64,
+        )
+        .unwrap();
+        let last = limit.capture();
+        assert!(matches!(
+            limit.publish(&last, complete(true, true, true), Usage::new(["fixture"])),
+            Err(Error::VersionExhausted)
+        ));
+        assert!(Arc::ptr_eq(&last, &limit.capture()));
     }
 
     #[test]
@@ -610,7 +649,7 @@ mod tests {
             1
         );
         let exhausted = Arc::new(Snapshot {
-            version: u64::MAX,
+            version: i64::MAX as u64,
             owner: owner(),
             usage: Usage::new(["fixture"]),
         });
