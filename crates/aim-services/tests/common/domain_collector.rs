@@ -124,8 +124,40 @@ fn configuration(directory: &Path) {
     fs::write(directory.join("domain-config.input"), expected.data()).unwrap();
 }
 
+fn signatures(directory: &Path) {
+    use aim_services::package::domain_verification::owner::signature_hash;
+    // Signature accepts bytes without requiring X.509 parsing for this digest API.
+    let a = vec![0, 1, 127, 128, 255];
+    let b = b"second signer".to_vec();
+    let cases = [
+        vec![],
+        vec![vec![]],
+        vec![a.clone()],
+        vec![a.clone(), b.clone()],
+        vec![b, a.clone()],
+        vec![a.clone(), a],
+    ];
+    let mut expected = Parcel::new();
+    expected.write_i32(cases.len() as i32);
+    for signatures in cases {
+        expected.write_i32(signatures.len() as i32);
+        for signature in &signatures {
+            expected.write_string16(Some(
+                &signature
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<String>(),
+            ));
+        }
+        expected.write_string16(Some(&signature_hash(&signatures)));
+    }
+    fs::write(directory.join("domain-signatures.input"), expected.data()).unwrap();
+}
+
 pub fn export(directory: &Path) {
     configuration(directory);
+    signatures(directory);
+    attachment_inputs(directory);
     let mut cases = vec![
         package(vec![
             filter(true, false, &["https"], &["seed.example"]),
@@ -210,4 +242,108 @@ pub fn export(directory: &Path) {
         }
     }
     fs::write(directory.join("domain-collector.input"), expected.data()).unwrap();
+}
+
+fn attachment_inputs(directory: &Path) {
+    let hosts: Vec<_> = (0..=8)
+        .map(|i| format!("h{i}.example"))
+        .chain(["h1024.example".into()])
+        .collect();
+    let refs: Vec<_> = hosts.iter().map(String::as_str).collect();
+    let code = package(vec![filter(true, true, &["https"], &refs)]);
+    fs::write(
+        directory.join("domain-owner.cache"),
+        code.to_cache_entry().unwrap().bytes,
+    )
+    .unwrap();
+    for case in 0..4 {
+        let section = if case < 2 { "active" } else { "restored" };
+        let signature = if case == 3 {
+            "mismatch".into()
+        } else {
+            aim_services::package::domain_verification::owner::signature_hash(&[])
+        };
+        let domains = hosts
+            .iter()
+            .enumerate()
+            .map(|(i, host)| {
+                let state = if i == 9 { 1024 } else { i };
+                format!("<domain name='{host}' state='{state}'/>")
+            })
+            .collect::<String>();
+        let xml = format!(
+            "<domain-verifications><{section}><package-state packageName='fixture.domains' id='00000000-0000-0000-0000-00000000000a' hasAutoVerifyDomains='true' signature='{signature}'><state>{domains}<domain name='gone.example' state='1'/></state><user-states><user-state userId='10' allowLinkHandling='false'><enabled-hosts><host name='h1.example'/><host name='gone.example'/></enabled-hosts></user-state></user-states></package-state></{section}></domain-verifications>"
+        );
+        fs::write(directory.join(format!("domain-owner-{case}.input")), xml).unwrap();
+    }
+}
+
+pub fn verify_attachment(directory: &Path) {
+    use aim_services::package::{
+        domain_verification::{
+            State,
+            owner::{Input, Owner},
+        },
+        system_config::SystemConfig,
+    };
+    let code =
+        AndroidPackage::read_cache_entry(&fs::read(directory.join("domain-owner.cache")).unwrap())
+            .unwrap();
+    for case in 0..4 {
+        let mut saved = State::default();
+        saved
+            .read(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-owner-{case}.input"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut config = SystemConfig::default();
+        if case == 1 {
+            config.linked_apps.push(code.package_name.clone());
+        }
+        let mut owner = Owner::new(saved, Default::default());
+        let args = |id| Input {
+            id,
+            name: &code.package_name,
+            code: Some(&code),
+            signatures: &[],
+            system: case == 1,
+            restrict_domains: true,
+            pre_verified: None,
+        };
+        owner
+            .add(args("00000000-0000-0000-0000-00000000000b"), &config)
+            .unwrap();
+        for stage in ["add", "migrate"] {
+            if stage == "migrate" {
+                owner
+                    .migrate(
+                        "00000000-0000-0000-0000-00000000000b",
+                        Some(&code),
+                        args("00000000-0000-0000-0000-00000000000c"),
+                        &config,
+                    )
+                    .unwrap();
+            }
+            let root = aim_android_xml::read(
+                &fs::read(directory.join(format!("domain-owner-{case}-{stage}.original"))).unwrap(),
+            )
+            .unwrap();
+            let mut original = State::default();
+            original
+                .read(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications")
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                owner.persisted(),
+                original,
+                "attached domain state case={case} stage={stage}"
+            );
+        }
+    }
 }

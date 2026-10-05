@@ -1654,6 +1654,7 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    common::domain_collector::verify_attachment(&directory);
     for active in [false, true] {
         let location = aim_services::package::scan::Location {
             path: if active {

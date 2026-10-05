@@ -1273,7 +1273,7 @@ ArraySet order and the 1 MiB UTF-16 estimate (#957). Active query publication
 checks each supplied user selection against the current native APK's complete
 web-host set, rejects duplicate hosts and invalid public selection states, and
 requires current code when selection is present. Factory and retained packages
-still require a separate domain owner. Release units pass 478 cases (four
+still require domain-owner publication. Release units pass 481 cases (four
 ignored/not run), including modern/legacy policy and byte-limit boundaries;
 explicit service-host tests pass six cases (2.94s), including real framework-APK
 selection publication and failure preservation. The original-ART parcel fixture
@@ -1287,19 +1287,35 @@ Missing package attributes are skipped; empty/space strings are retained and
 duplicates eliminated in signed Java ArraySet order. Original SystemConfig
 executes the same XML inputs with pinned partition flags for initial API
 27/28/36 and matches the native lists exactly. This supplies the native linked-app
-configuration owner; attached immutable-state transitions remain unproved. It runs the image's original collector with a controlled
+configuration owner. Native attached domain state now owns pending-first
+attachment, restore signature matching, legacy approvals, pre-verification,
+immutable linked-app approval and update state migration (#957). The owner
+returns verifier requests separately from broadcast delivery and explicitly
+reports the original missing-owner recovery path. Its logical persistence
+projection keeps pending/restored and legacy user state distinct. Production
+service registration and query-context publication are still unwired. It runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process. The complete parcel fixture passes (28.23s);
 the image/original-PMS template build passes (53.1s; six rebuilt, 36 fresh).
-This does not verify attached domain lifecycle: install/update/restore
-transitions, compatibility-owner policy integration and native domain Binder
-registration remain unproved. Native cache read/write and facade serialization
+The original ART fixture now invokes DomainVerificationService.addPackage and
+migrateState over one native parsed package and four persisted-state inputs: pending state, immutable
+system linked-app state, and restored state with matching/mismatched signatures.
+All eight persisted attached states match the native owner, including migrated
+state codes, filtered user hosts and link-handling booleans. Six signature-digest
+cases match original PackageUtils (zero/one/multiple signers, reversed order,
+duplicate signer and empty certificate bytes). The complete parcel fixture passes
+(28.50s, no skips); release units pass 481 cases (four ignored/not run, 0.47s).
+The full image/original-PMS template build passes (nine rebuilt, 33 fresh, 70.0s).
+URI-group migration, legacy/pre-verified transitions and missing-owner recovery
+are unit-tested/source-compared but have not run against the original service.
+Compatibility-owner integration, verifier delivery, production attached-state
+publication and native domain Binder registration remain unproved. Native cache read/write and facade serialization
 now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 478
-cases (four ignored/not run, 0.49s). The full build passes (three host nodes
-rebuilt, 39 fresh, 1.2s); the final host build is fresh (13 nodes, 0.2s).
+cases (four ignored/not run, 0.47s). The current full build passes (nine nodes
+rebuilt, 33 fresh, 70.0s); the final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

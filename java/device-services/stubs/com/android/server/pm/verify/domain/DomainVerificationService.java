@@ -6,5 +6,9 @@ public class DomainVerificationService extends com.android.server.SystemService 
         super(context); throw new RuntimeException("stub");
     }
     @Override public void onStart() { throw new RuntimeException("stub"); }
+    public void addPackage(com.android.server.pm.pkg.PackageStateInternal setting, android.content.pm.verify.domain.DomainSet preVerified) { throw new RuntimeException("stub"); }
+    public void migrateState(com.android.server.pm.pkg.PackageStateInternal oldSetting, com.android.server.pm.pkg.PackageStateInternal newSetting, android.content.pm.verify.domain.DomainSet preVerified) { throw new RuntimeException("stub"); }
+    public void readSettings(com.android.server.pm.Computer snapshot, com.android.modules.utils.TypedXmlPullParser parser) throws java.io.IOException { throw new RuntimeException("stub"); }
+    public void writeSettings(com.android.server.pm.Computer snapshot, com.android.modules.utils.TypedXmlSerializer serializer, boolean signatures, int user) throws java.io.IOException { throw new RuntimeException("stub"); }
     public java.util.UUID generateNewId() { throw new RuntimeException("stub"); }
 }

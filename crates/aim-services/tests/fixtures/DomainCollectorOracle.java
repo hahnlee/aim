@@ -21,6 +21,8 @@ public final class DomainCollectorOracle {
         var context = android.app.ActivityThread.systemMain().getSystemUiContext();
         var compat = new Compat(context);
         verifyConfiguration(directory);
+        verifySignatures(directory);
+        verifyAttachment(directory, context, compat);
         var config = new com.android.server.SystemConfig(false);
         var collector = new com.android.server.pm.verify.domain.DomainVerificationCollector(compat, config);
         byte[] expected = java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-collector.input").toPath());
@@ -78,6 +80,57 @@ public final class DomainCollectorOracle {
             }
             if (in.dataAvail() != 0) throw new AssertionError("trailing linked-app expectations");
         } finally { in.recycle(); }
+    }
+    private static void verifySignatures(java.io.File directory) throws Exception {
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-signatures.input").toPath());
+        var in = android.os.Parcel.obtain();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            int cases = in.readInt();
+            for (int i = 0; i < cases; i++) {
+                var signatures = new android.content.pm.Signature[in.readInt()];
+                for (int j = 0; j < signatures.length; j++)
+                    signatures[j] = new android.content.pm.Signature(java.util.HexFormat.of().parseHex(in.readString()));
+                String expected = in.readString();
+                if (!expected.equals(android.util.PackageUtils.computeSignaturesSha256Digest(signatures)))
+                    throw new AssertionError("domain backup signature digest differs case=" + i);
+            }
+            if (in.dataAvail() != 0) throw new AssertionError("trailing domain signature expectations");
+        } finally { in.recycle(); }
+    }
+    private static void verifyAttachment(java.io.File directory, android.content.Context context, Compat compat) throws Exception {
+        compat.restricted = true;
+        var code = (com.android.server.pm.pkg.AndroidPackage) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+            java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
+        for (int i = 0; i < 4; i++) {
+            var config = new com.android.server.SystemConfig(false);
+            if (i == 1) config.getLinkedApps().add("fixture.domains");
+            var service = new com.android.server.pm.verify.domain.DomainVerificationService(context, config, compat);
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-owner-" + i + ".input"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next();
+                service.readSettings(null, parser);
+            }
+            var oldSetting = domainSetting(code, i == 1, "00000000-0000-0000-0000-00000000000b");
+            service.addPackage((com.android.server.pm.pkg.PackageStateInternal) oldSetting, null);
+            writeDomains(directory, i, "add", service);
+            var newSetting = domainSetting(code, i == 1, "00000000-0000-0000-0000-00000000000c");
+            service.migrateState((com.android.server.pm.pkg.PackageStateInternal) oldSetting, (com.android.server.pm.pkg.PackageStateInternal) newSetting, null);
+            writeDomains(directory, i, "migrate", service);
+        }
+    }
+    private static com.android.server.pm.PackageSetting domainSetting(com.android.server.pm.pkg.AndroidPackage code, boolean system, String id) {
+        var setting = new com.android.server.pm.PackageSetting("fixture.domains", null, new java.io.File("/data/app/fixture.domains"), system ? 1 : 0, 0, java.util.UUID.fromString(id));
+        setting.setPkg(code);
+        setting.setSigningDetails(new android.content.pm.SigningDetails(new android.content.pm.Signature[0], 0, new android.util.ArraySet<>(), null));
+        return setting;
+    }
+    private static void writeDomains(java.io.File directory, int caseId, String stage, com.android.server.pm.verify.domain.DomainVerificationService service) throws Exception {
+        try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".original"))) {
+            var xml = android.util.Xml.resolveSerializer(output);
+            xml.startDocument(null, true); xml.startTag(null, "packages");
+            service.writeSettings(null, xml, false, -1);
+            xml.endTag(null, "packages"); xml.endDocument();
+        }
     }
     private DomainCollectorOracle() {}
 }
