@@ -16,6 +16,7 @@ public final class PackageMigrationPolicyOracle {
             } catch (SecurityException denied) {
                 if (android.os.Binder.getCallingUid() == android.os.Process.SYSTEM_UID) throw denied;
                 verifyDeniedTestBase();
+                verifyDeniedQueryOwners();
                 System.out.println("MIGRATION_POLICY_DENIED");
                 return;
             }
@@ -25,6 +26,7 @@ public final class PackageMigrationPolicyOracle {
                 try { reply.readException(); throw new AssertionError("untrusted policy caller accepted"); }
                 catch (SecurityException expected) {}
                 verifyDeniedTestBase();
+                verifyDeniedQueryOwners();
                 System.out.println("MIGRATION_POLICY_DENIED");
             } else {
                 System.err.println("MIGRATION_POLICY_MARSHALL");
@@ -39,6 +41,7 @@ public final class PackageMigrationPolicyOracle {
                 System.err.println("MIGRATION_POLICY_WRITE");
                 java.nio.file.Files.write(new java.io.File(args[0], "migration-policy.original").toPath(), bytes);
                 verifyTestBase(new java.io.File(args[0]));
+                verifyQueryOwners(new java.io.File(args[0]));
                 System.out.println("MIGRATION_POLICY " + (bestEffort ? 1 : 0));
             }
         } finally { request.recycle(); reply.recycle(); }
@@ -68,6 +71,56 @@ public final class PackageMigrationPolicyOracle {
                 if (reply.dataAvail() != 0 || enabled != compat.isChangeEnabled(133396946L, appInfo))
                     throw new AssertionError("original test-base policy differs");
                 java.nio.file.Files.write(new java.io.File(directory, "test-base-" + sdk + ".original").toPath(), bytes);
+            } finally { request.recycle(); reply.recycle(); }
+        }
+    }
+    private static void verifyQueryOwners(java.io.File directory) throws Exception {
+        var bridge = new PackageBootstrapBridge().asBinder();
+        var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
+                android.os.ServiceManager.getService("platform_compat"));
+        if (compat == null) throw new AssertionError("query compatibility owner absent");
+        for (int sdk : new int[] {28, 29, 30, 36}) {
+            var info = new android.content.pm.ApplicationInfo();
+            info.packageName = "fixture.query.compat"; info.targetSdkVersion = sdk;
+            var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+            try {
+                request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
+                request.writeString(info.packageName); request.writeInt(sdk);
+                if (!bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled, request, reply, 0))
+                    throw new AssertionError("query compatibility transaction unhandled");
+                byte[] bytes = reply.marshall(); reply.readException();
+                if (reply.readBoolean() != compat.getAppConfig(info).isChangeEnabled(135549675L) || reply.dataAvail() != 0)
+                    throw new AssertionError("query compatibility owner differs");
+                java.nio.file.Files.write(new java.io.File(directory, "query-compat-" + sdk + ".original").toPath(), bytes);
+            } finally { request.recycle(); reply.recycle(); }
+        }
+        // This client has no SystemServer-local permission owner.
+        var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+        try {
+            request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeInt(1000);
+            boolean denied = false;
+            try {
+                bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid, request, reply, 0);
+                reply.readException();
+            } catch (IllegalStateException expected) { denied = true; }
+            if (!denied) throw new AssertionError("missing local permission owner accepted");
+        } finally { request.recycle(); reply.recycle(); }
+    }
+    private static void verifyDeniedQueryOwners() throws Exception {
+        for (int code : new int[] {IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled,
+                IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid}) {
+            var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+            try {
+                request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
+                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled) {
+                    request.writeString("fixture.query.compat"); request.writeInt(30);
+                } else { request.writeInt(1000); }
+                try {
+                    if (!new PackageBootstrapBridge().asBinder().transact(code, request, reply, 0))
+                        throw new AssertionError("query owner denial transaction unhandled");
+                    reply.readException();
+                } catch (SecurityException expected) { continue; }
+                throw new AssertionError("untrusted query owner caller accepted");
             } finally { request.recycle(); reply.recycle(); }
         }
     }

@@ -13,7 +13,9 @@ use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 mod apex;
 mod scan;
+mod query;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
+pub use query::QueryContextError;
 pub use scan::{
     BootError, BootOwners, DataBootInputs, SavedBootScan, SavedSystemPhase, ScanPolicy,
 };
@@ -379,9 +381,16 @@ impl Bridge {
                 .owner
                 .transact(bridge::GET_PERMISSION_GIDS_FOR_UID, &data, false)
                 .map_err(PermissionGidError::Transport)?;
-            bridge::read_get_permission_gids_for_uid_reply(&mut reply.reader())
+            let mut reader = reply.reader();
+            let result = bridge::read_get_permission_gids_for_uid_reply(&mut reader)
                 .map_err(PermissionGidError::Transport)?
-                .map_err(PermissionGidError::Owner)
+                .map_err(PermissionGidError::Owner)?;
+            if reader.remaining() != 0 {
+                return Err(PermissionGidError::Transport(
+                    aim_binder_host::parcel::BAD_VALUE,
+                ));
+            }
+            Ok(result)
         })
     }
 }

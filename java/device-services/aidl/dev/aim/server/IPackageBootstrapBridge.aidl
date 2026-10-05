@@ -23,4 +23,6 @@ interface IPackageBootstrapBridge {
     boolean isTestBaseLibraryChangeEnabled(in byte[] packageCache);
     /** Pinned Build policy for native signing test APIs. */
     boolean isSigningDebuggable();
+    /** AppsFilter FeatureConfig decision from original PlatformCompat. */
+    boolean isApplicationQueryFilteringEnabled(String packageName, int targetSdk);
 }

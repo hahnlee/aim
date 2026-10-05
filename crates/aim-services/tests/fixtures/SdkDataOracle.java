@@ -45,11 +45,17 @@ public final class SdkDataOracle {
             request.userId = -1;
             String failure;
             try { installd.reconcileSdkData(request); throw new AssertionError("original invalid user accepted"); }
-            catch (Exception expected) { failure = expected.toString(); }
+            catch (android.os.ServiceSpecificException expected) { failure = expected.getMessage(); }
             try { owner.reconcile(null, PACKAGE, request.subDirNames, -1, 19001, 0, "default", 1);
                 throw new AssertionError("native invalid user accepted"); }
             catch (java.io.IOException expected) {
-                if (!failure.equals(expected.getMessage())) throw new AssertionError("SDK failure message differs: " + expected);
+                // ENFORCE_VALID_USER calls error(message), which returns the Binder worker's
+                // current errno. Independent requests can have different numeric codes.
+                String prefix = "android.os.ServiceSpecificException: " + failure + " (code ";
+                String message = expected.getMessage();
+                if (!message.startsWith(prefix) || !message.endsWith(")")
+                        || Integer.parseInt(message.substring(prefix.length(), message.length() - 1)) < 0)
+                    throw new AssertionError("SDK failure type/message differs: " + expected);
             }
             System.out.println("SDK_DATA"); System.exit(0);
         } catch (Throwable error) { error.printStackTrace(System.out); System.exit(1); }

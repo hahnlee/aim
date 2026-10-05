@@ -48,6 +48,19 @@ impl Service for Registry {
         "fixture.Registry"
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_os_iservicemanager as sm;
+        let position = call.data.position();
+        if call.code == sm::CHECK_SERVICE && call.data.enforce_interface(sm::DESCRIPTOR).is_ok() {
+            let name = call.data.read_string16()?.unwrap();
+            assert_eq!(call.data.remaining(), 0);
+            let mut reply = Parcel::new();
+            sm::write_check_service_reply(
+                &mut reply,
+                Some(self.nodes.lock().unwrap()[&name].binder()),
+            );
+            return Ok(reply);
+        }
+        call.data.set_position(position);
         let name = call.data.read_string16()?.unwrap();
         let mut reply = Parcel::new();
         match call.code {
@@ -81,6 +94,40 @@ fn find(process: &Arc<LocalProcess>, name: &str) -> Strong {
     };
     process.strong(handle)
 }
+struct SdkFailure(Mutex<Exception>);
+impl Service for SdkFailure {
+    fn descriptor(&self) -> &str {
+        "android.os.IInstalld"
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_os_iinstalld as api;
+        assert_eq!(call.sender_euid, 1000);
+        assert_eq!(call.code, api::RECONCILE_SDK_DATA);
+        call.data.enforce_interface(api::DESCRIPTOR)?;
+        assert_eq!(call.data.read_i32()?, 1);
+        let start = call.data.position();
+        let size = call.data.read_i32()?;
+        assert_eq!(call.data.read_string16()?, None);
+        assert_eq!(
+            call.data.read_string16()?.as_deref(),
+            Some("fixture.sdk.client")
+        );
+        assert_eq!(
+            aim_service_aidl::read_string_list(&mut call.data)?,
+            Some(vec![])
+        );
+        assert_eq!(call.data.read_i32()?, -1);
+        assert_eq!(call.data.read_i32()?, 19001);
+        assert_eq!(call.data.read_i32()?, 0);
+        assert_eq!(call.data.read_string16()?.as_deref(), Some("default"));
+        assert_eq!(call.data.read_i32()?, 1);
+        assert_eq!(call.data.position() - start, size as usize);
+        assert_eq!(call.data.remaining(), 0);
+        let mut reply = Parcel::new();
+        reply.write_exception(&self.0.lock().unwrap());
+        Ok(reply)
+    }
+}
 struct Owner {
     calls: Mutex<Vec<i32>>,
     reject: AtomicBool,
@@ -88,6 +135,9 @@ struct Owner {
     bcp_present: bool,
     signing_debuggable: AtomicBool,
     test_base_reply: AtomicUsize,
+    query_reply: AtomicUsize,
+    gid_reply: AtomicUsize,
+    query_calls: Mutex<Vec<(String, i32)>>,
     malformed_bcp: AtomicBool,
     malformed_seinfo: AtomicBool,
     legacy_reply: AtomicUsize,
@@ -134,6 +184,19 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED => {
+                let name = call.data.read_string16()?.unwrap();
+                let sdk = call.data.read_i32()?;
+                assert_eq!(call.data.remaining(), 0);
+                self.query_calls.lock().unwrap().push((name, sdk));
+                let mode = self.query_reply.load(Ordering::SeqCst);
+                if mode != 2 {
+                    reply.write_bool(sdk >= 30);
+                }
+                if mode == 1 {
+                    reply.write_i32(99);
+                }
+            }
             bootstrap::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
                 assert!(
                     call.data
@@ -148,6 +211,9 @@ impl Service for Owner {
                 reply.write_i32(2);
                 reply.write_i32(self.gid);
                 reply.write_i32(self.gid);
+                if self.gid_reply.load(Ordering::SeqCst) != 0 {
+                    reply.write_i32(99);
+                }
             }
             bootstrap::GET_LEGACY_PERMISSION_STATE => {
                 let app_id = call.data.read_i32()?;
@@ -798,6 +864,35 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     }));
     let node = native.add_service(Arc::new(ServiceHost::new(native.clone(), &system)));
     register(&native, "host", node);
+    let sdk_failure = Arc::new(SdkFailure(Mutex::new(Exception::new(
+        aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
+        "userId invalid: -1",
+    ))));
+    register(&first, "installd", first.add_service(sdk_failure.clone()));
+    for code in [0, 2, 22] {
+        sdk_failure.0.lock().unwrap().service_specific = code;
+        let mut request = Parcel::new();
+        host::ReconcilePackageSdkData {
+            volume_uuid: None,
+            package_name: Some("fixture.sdk.client".into()),
+            sub_dir_names: Some(vec![]),
+            user_id: -1,
+            app_id: 19001,
+            previous_app_id: 0,
+            se_info: Some("default".into()),
+            flags: 1,
+        }
+        .write(&mut request);
+        let reply = find(&first, "host")
+            .transact(host::RECONCILE_PACKAGE_SDK_DATA, &request, false)
+            .unwrap();
+        let mut reader = reply.reader();
+        let error = host::read_reconcile_package_sdk_data_reply(&mut reader)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error, *sdk_failure.0.lock().unwrap());
+        assert_eq!(reader.remaining(), 0);
+    }
     let (_, queries) = crate::package::service::PackageQueries::from_system(&system);
     register(&native, "query_native", native.add_service(queries));
     assert!(query_names(&first).is_err_and(|error| error.code == -5));
@@ -814,6 +909,9 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         bcp_present: true,
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
+        query_reply: AtomicUsize::new(0),
+        gid_reply: AtomicUsize::new(0),
+        query_calls: Mutex::new(Vec::new()),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
@@ -831,6 +929,9 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         bcp_present: true,
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
+        query_reply: AtomicUsize::new(0),
+        gid_reply: AtomicUsize::new(0),
+        query_calls: Mutex::new(Vec::new()),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
@@ -877,6 +978,50 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     let published = system
         .publish_package_scan(&old, None, replica_owner(), usage())
         .unwrap();
+    let context = query_context(&published);
+    let mut bad = context.clone();
+    bad.packages
+        .get_mut(&("fixture".into(), false))
+        .unwrap()
+        .path
+        .push_str("/foreign");
+    let reads = owner.query_calls.lock().unwrap().len();
+    assert!(old.resolve_query_context(published.owner(), bad).is_err());
+    assert_eq!(owner.query_calls.lock().unwrap().len(), reads);
+    let resolved = old
+        .resolve_query_context(published.owner(), context.clone())
+        .unwrap();
+    assert_eq!(
+        resolved.packages[&("fixture".into(), false)].users[&0].gids,
+        [3003, 3003]
+    );
+    assert_eq!(
+        owner.query_calls.lock().unwrap().last().unwrap(),
+        &(
+            "fixture".into(),
+            published.owner().settings.packages[0].target_sdk_version
+        )
+    );
+    assert_eq!(*owner.calls.lock().unwrap(), [10100, 1010100]);
+    for mode in [1, 2] {
+        owner.query_reply.store(mode, Ordering::SeqCst);
+        assert!(
+            old.resolve_query_context(published.owner(), context.clone())
+                .is_err()
+        );
+    }
+    owner.query_reply.store(0, Ordering::SeqCst);
+    owner.gid_reply.store(1, Ordering::SeqCst);
+    assert!(matches!(
+        old.permission_gids(10100, &[0]),
+        Err(crate::package::owner::permission_gids::PermissionGidError::Transport(_))
+    ));
+    assert!(
+        old.resolve_query_context(published.owner(), context)
+            .is_err()
+    );
+    owner.gid_reply.store(0, Ordering::SeqCst);
+    owner.calls.lock().unwrap().clear();
     let mut bad = query_context(&published);
     bad.packages.clear();
     assert!(
@@ -1088,6 +1233,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
             .unwrap()
             .enforce_native_dependencies
     );
+    owner.calls.lock().unwrap().clear();
     assert_eq!(
         old.permission_gids(19001, &[10, 0]).unwrap(),
         [3003, 3003, 3003, 3003]
@@ -1278,6 +1424,9 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         bcp_present: false,
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
+        query_reply: AtomicUsize::new(0),
+        gid_reply: AtomicUsize::new(0),
+        query_calls: Mutex::new(Vec::new()),
         malformed_bcp: AtomicBool::new(false),
         malformed_seinfo: AtomicBool::new(false),
         legacy_reply: AtomicUsize::new(0),
@@ -1989,6 +2138,27 @@ fn verify_boot_scan(
         &old_query,
         &system.capture_package_queries().unwrap()
     ));
+    for malformed in [&owner.query_reply, &owner.gid_reply] {
+        malformed.store(1, Ordering::SeqCst);
+        assert!(
+            system
+                .complete_package_scan_with_queries(
+                    bridge,
+                    Some(&base),
+                    complete.clone(),
+                    usage.clone(),
+                    BTreeMap::new(),
+                    context.clone()
+                )
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
+        assert!(Arc::ptr_eq(
+            &old_query,
+            &system.capture_package_queries().unwrap()
+        ));
+        malformed.store(0, Ordering::SeqCst);
+    }
     let query = system
         .complete_package_scan_with_queries(
             bridge,
@@ -2015,6 +2185,24 @@ fn verify_boot_scan(
         &published,
         &system.capture_package_scan().unwrap()
     ));
+    assert_eq!(
+        query.state().packages["android"].users[&0].gids,
+        [owner.gid, owner.gid]
+    );
+    assert_eq!(
+        query.state().packages["android"].filter_application_query,
+        Some(
+            published
+                .owner()
+                .settings
+                .packages
+                .iter()
+                .find(|p| p.name == "android")
+                .unwrap()
+                .target_sdk_version
+                >= 30
+        )
+    );
     let android = &query.state().packages["android"];
     let loaded = &published.owner().loaded_packages()["android"];
     assert_eq!(android.pkg.as_deref(), Some(&loaded.package));

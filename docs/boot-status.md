@@ -1156,19 +1156,23 @@ vold now calls original vold_prepare_subdirs after preparing each user's storage
 and propagates helper failure (#948); the missing call had left SDK CE/DE roots
 absent. On a disposable original-PMS boot, original ART verifies native SDK
 creation, CE/DE selection, same-UID pruning, SDK/cache directories, exact request
-bytes, invalid-user exception equivalence and actual UID 19001 denial. A direct
+bytes, invalid-user exception type/message and actual UID 19001 denial. Pinned
+installd's invalid-user guard returns its Binder worker's current errno, so
+independent direct/native requests can have different numeric codes (#955).
+Controlled generated/native Binder tests preserve each returned code (0, 2, 22)
+and message exactly. A direct
 original IInstalld control runs the same operations and agrees on final UID/GID.
 Both paths reject SDK UID migration after partial ownership changes: pinned
 installd's chown_app_dir changes the SDK root group to its UID, then its strict
 prepare rejects the group instead of AID_NOBODY (#949). This original failure is
 preserved, not converted to success. The full original ART Parcel oracle passes
-(25.45s); its failure diagnostics now include Java stdout (#947). Release units
-pass 472 cases (0.48s), with three ignored/not run, including shared install-lock
-blocking of SDK execution and owned code cleanup. The image/original-PMS template
-build passes (37.1s; four rebuilt, 38 fresh); the final host build passes
-(3.6s; three rebuilt, 39 fresh). The explicit native bootstrap fixture passes
-(0.67s) with cleanup using the same System owner, and generated SDK/cleanup
-transport tests pass all three cases (0.01s). The three signing test APIs preserve
+(26.88s), also checking known-empty signing with both null and empty public-key
+sets (#954), actual PlatformCompat query policy and absent permission-owner
+failure. Its diagnostics include Java stdout (#947). Release units pass 476 cases
+(0.45s), with four ignored/not run, including shared install-lock blocking of SDK
+execution and owned code cleanup. The image/original-PMS template build passes
+(57.1s; eight rebuilt, 34 fresh). Explicit service-host tests pass all six cases
+(2.93s), including framework-APK completion and exact SDK failure forwarding. The three signing test APIs preserve
 original Build.isDebuggable enforcement and require an explicit signing owner.
 The production PackageLocal factory routes add/remove/clear through generated
 IServiceHost methods to the native System's service-lifetime Overrides owner
@@ -1249,7 +1253,17 @@ Release units pass (476; four ignored), including missing UID slots and retained
 member installation filtering; explicit service-host tests pass (six, 2.96s).
 This compares controlled external permission/domain/compatibility inputs, not a
 running production context producer. Full original UID-query/visibility parity
-and production external-owner publication remain unproved. The facade is not registered, and
+and production grant/domain/global owner publication remain unproved. Completion
+now validates complete active/factory/retained package and user identities before
+resolving permission GIDs and FILTER_APPLICATION_QUERY from the exact retained
+bootstrap bridge (#953). Both callbacks run outside the publication lock;
+missing owners, malformed/trailing replies and changed attachment reject without
+replacing either capture. Controlled Binder tests verify UID/name/SDK arguments
+and preservation on failure. Original ART compares the production Java policy
+with actual PlatformCompat at SDK 28/29/30/36, and verifies system/app caller
+checks and missing process-local permission-owner failure. Live SystemServer GID
+owner comparison and the running complete context producer remain unproved.
+The facade is not registered, and
 native visibility/version-page refresh and default native activation remain unproved;
 original debug-build application remains unrun (#946). System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes

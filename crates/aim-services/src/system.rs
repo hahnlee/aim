@@ -698,6 +698,15 @@ impl System {
         context: crate::package::scan_snapshot::query_state::Context,
     ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
         let owner = self.complete_package_owner(bridge, owner, &usage, retained)?;
+        let context = bridge
+            .resolve_query_context(&owner, context)
+            .map_err(|error| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("package query owners failed: {error:?}"),
+                )
+            })?;
+        self.check_package_bootstrap(bridge)?;
         self.publish_package_scan_with_queries(bridge, base, owner, usage, context)
     }
 

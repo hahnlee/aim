@@ -903,19 +903,21 @@ fn native_package_parcels_match_original_read_write() {
         .unwrap();
     }
     // UNKNOWN is a singleton parcel tag, not an empty known signer array.
-    for unknown in [true, false] {
+    for (name, unknown, empty_keys) in [
+        ("unknown-signing.native", true, false),
+        ("empty-signing.native", false, false),
+        ("empty-key-set-signing.native", false, true),
+    ] {
         let mut pkg = snapshot.owner().loaded_packages()["android"]
             .package
             .clone();
         let mut signing = aim_services::package::sign::SigningDetails::unknown();
         signing.unknown = unknown;
+        if empty_keys {
+            signing.public_keys = Some(vec![]);
+        }
         pkg.signing_details = signing.package_details().unwrap();
         let facade = pkg.to_facade_entry(&signing).unwrap();
-        let name = if unknown {
-            "unknown-signing.native"
-        } else {
-            "empty-signing.native"
-        };
         fs::write(directory.join(name), &facade.cache.bytes).unwrap();
         expected.push((name.to_owned(), pkg.package_name, facade.cache));
     }
@@ -2163,6 +2165,12 @@ fn native_package_parcels_match_original_read_write() {
         let bytes = fs::read(directory.join(format!("test-base-{sdk}.original"))).unwrap();
         let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
         aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_test_base_library_change_enabled_reply(&mut reader).unwrap().unwrap();
+        assert_eq!(reader.remaining(), 0);
+    }
+    for sdk in [28, 29, 30, 36] {
+        let bytes = fs::read(directory.join(format!("query-compat-{sdk}.original"))).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_application_query_filtering_enabled_reply(&mut reader).unwrap().unwrap();
         assert_eq!(reader.remaining(), 0);
     }
     let migration_policy = if best_effort {

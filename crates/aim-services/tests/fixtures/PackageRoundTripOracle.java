@@ -295,13 +295,15 @@ public final class PackageRoundTripOracle {
                 if (pkg.getSigningDetails() != android.content.pm.SigningDetails.UNKNOWN)
                     throw new AssertionError("native UNKNOWN signing lost singleton identity");
             }
-            if (file.getName().equals("empty-signing.native")) {
+            if (file.getName().equals("empty-signing.native") || file.getName().equals("empty-key-set-signing.native")) {
                 var details = pkg.getSigningDetails();
+                boolean emptyKeys = file.getName().equals("empty-key-set-signing.native");
                 if (details == android.content.pm.SigningDetails.UNKNOWN
                         || details.getSignatureSchemeVersion() != 0
                         || details.getSignatures() == null || details.getSignatures().length != 0
-                        || details.getPublicKeys() == null || details.getPublicKeys().size() != 0)
-                    throw new AssertionError("empty known signing became UNKNOWN");
+                        || (emptyKeys ? details.getPublicKeys() == null || details.getPublicKeys().size() != 0
+                                : details.getPublicKeys() != null))
+                    throw new AssertionError("empty known signing/null key-set identity differs");
             }
             if (file.getName().startsWith("scan-")) {
                 verifyApexScanPolicy(file);
