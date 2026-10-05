@@ -20,6 +20,7 @@ public final class Parcel {
     public final int dataPosition() { throw new RuntimeException("stub"); }
     public final String readString8() { throw new RuntimeException("stub"); }
     public final String[] createString8Array() { throw new RuntimeException("stub"); }
+    public final void writeStringList(java.util.List<String> value) { throw new RuntimeException("stub"); }
     public final java.util.ArrayList<String> createStringArrayList() { throw new RuntimeException("stub"); }
     public final <T> T readParcelable(ClassLoader loader, Class<T> clazz) { throw new RuntimeException("stub"); }
     public final <T> java.util.ArrayList<T> readArrayList(ClassLoader loader, Class<? extends T> clazz) { throw new RuntimeException("stub"); }

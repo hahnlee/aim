@@ -151,6 +151,18 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
         }
         prepare_dir(path, *mode, *uid, *gid)?;
     }
+    // FsCrypt.cpp delegates per-user subdirectories to the original helper.
+    let status = std::process::Command::new("/system/bin/vold_prepare_subdirs")
+        .args([
+            "prepare",
+            uuid.unwrap_or(""),
+            &user.to_string(),
+            &flags.to_string(),
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("vold_prepare_subdirs: {status}")));
+    }
     Ok(dirs.into_iter().map(|d| d.0).collect())
 }
 

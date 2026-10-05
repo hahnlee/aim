@@ -5,7 +5,7 @@ use aim_binder_host::{
     parcel::{Binder, Exception, Parcel, UNKNOWN_TRANSACTION},
 };
 use aim_service_aidl::{android_os_iinstalld as installd, android_os_iservicemanager as sm};
-use aim_services::package::owner::resources::CodeResources;
+use aim_services::package::owner::{resources::CodeResources, sdk_data::SdkData};
 use std::{
     fs,
     path::PathBuf,
@@ -48,18 +48,61 @@ impl Service for Registry {
         Ok(reply)
     }
 }
+struct SdkRecord(SdkData);
+impl aim_service_aidl::ReadParcelable for SdkRecord {
+    fn read_from(
+        r: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        let start = r.position();
+        let size = r.read_i32()?;
+        let args = SdkData {
+            uuid: r.read_string16()?,
+            package_name: r.read_string16()?,
+            sub_dir_names: aim_service_aidl::read_string_list(r)?,
+            user_id: r.read_i32()?,
+            app_id: r.read_i32()?,
+            previous_app_id: r.read_i32()?,
+            se_info: r.read_string16()?,
+            flags: r.read_i32()?,
+        };
+        if size < 4 || r.position() - start != size as usize {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        Ok(Self(args))
+    }
+}
 struct Installer {
     data: PathBuf,
     calls: Mutex<Vec<(String, String)>>,
     reject_parent: Mutex<bool>,
     data_calls: Mutex<Vec<(String, i32, i32, i64)>>,
     reject_user: Mutex<Option<i32>>,
+    sdk_calls: Mutex<Vec<SdkData>>,
+    reject_sdk: Mutex<bool>,
 }
 impl Service for Installer {
     fn descriptor(&self) -> &str {
         installd::DESCRIPTOR
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == installd::RECONCILE_SDK_DATA {
+            assert_eq!(call.sender_euid, 1000);
+            let args = installd::ReconcileSdkData::<SdkRecord>::read(&mut call.data)?
+                .args
+                .unwrap()
+                .0;
+            assert_eq!(call.data.remaining(), 0);
+            self.sdk_calls.lock().unwrap().push(args);
+            let mut reply = Parcel::new();
+            if *self.reject_sdk.lock().unwrap() {
+                let mut error = Exception::new(-8, "SDK filesystem failure");
+                error.service_specific = 73;
+                reply.write_exception(&error);
+            } else {
+                installd::write_reconcile_sdk_data_reply(&mut reply);
+            }
+            return Ok(reply);
+        }
         if call.code == installd::DESTROY_APP_DATA {
             assert_eq!(call.sender_euid, 1000);
             let request = installd::DestroyAppData::read(&mut call.data)?;
@@ -441,6 +484,8 @@ fn generated_installer_calls_preserve_failure_and_retry_parent_cleanup() {
         reject_parent: Mutex::new(true),
         data_calls: Mutex::new(Vec::new()),
         reject_user: Mutex::new(Some(10)),
+        sdk_calls: Mutex::new(Vec::new()),
+        reject_sdk: Mutex::new(false),
     });
     let endpoint = manager.add_service(installer.clone());
     let Binder::Local(ptr) = manager.add_service(Arc::new(Registry(endpoint, "installd"))) else {
@@ -498,6 +543,30 @@ fn generated_installer_calls_preserve_failure_and_retry_parent_cleanup() {
             ("package".into(), "/data/app/~~native-proof".into()),
             ("package".into(), "/data/app/~~native-proof".into()),
         ]
+    );
+    let sdk = SdkData {
+        uuid: None,
+        package_name: Some("fixture.sdk.client".into()),
+        sub_dir_names: Some(vec![Some("sdk-α".into()), Some("sdk-b".into())]),
+        user_id: 10,
+        app_id: 19001,
+        previous_app_id: 19000,
+        se_info: Some("default:targetSdkVersion=36".into()),
+        flags: 3,
+    };
+    resources.reconcile_sdk_data(sdk.clone()).unwrap();
+    assert_eq!(*installer.sdk_calls.lock().unwrap(), [sdk.clone()]);
+    *installer.reject_sdk.lock().unwrap() = true;
+    let error = resources.reconcile_sdk_data(sdk.clone()).unwrap_err();
+    assert_eq!(
+        (error.code, error.service_specific, error.message.as_str()),
+        (-8, 73, "SDK filesystem failure")
+    );
+    *installer.reject_sdk.lock().unwrap() = false;
+    resources.reconcile_sdk_data(sdk.clone()).unwrap();
+    assert_eq!(
+        *installer.sdk_calls.lock().unwrap(),
+        [sdk.clone(), sdk.clone(), sdk]
     );
     use aim_services::package::{restrictions::UserState, scan::User, settings::Package};
     let package = Package {

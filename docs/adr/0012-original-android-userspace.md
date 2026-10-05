@@ -391,7 +391,9 @@ Details in [boot-status.md](../boot-status.md), "Java world".
   storage, the emulated volume as symlink views, no FUSE yet, #221), netd
   (INetd V17 bookkeeping, fwmarkd and DnsResolver, loopback only, #223) and
   apexd (IApexService from the pre-flattened `/apex`). lmkd is not started
-  (#222).
+  (#222). The replacement vold delegates per-user storage subdirectories to
+  original vold_prepare_subdirs, as pinned FsCrypt.cpp does, and propagates its
+  failure (#948); this retains original SDK CE/DE root modes, owners and labels.
 - **eBPF scope:** `bpf()` maps live in shared memory and pin into bpffs;
   programs and BTF load but never run (#224).
 - **Kernel features added to the contract:** per-process mount namespaces

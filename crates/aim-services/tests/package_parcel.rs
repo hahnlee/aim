@@ -27,8 +27,9 @@ fn assert_guest_success(boot: &Boot, output: &std::process::Output, stage: &str)
         .output()
         .unwrap();
     panic!(
-        "{stage}: {}; stderr: {}; AndroidRuntime: {}",
+        "{stage}: {}; stdout: {}; stderr: {}; AndroidRuntime: {}",
         output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&logs.stdout)
     );
@@ -56,7 +57,11 @@ fn native_package_parcels_match_original_read_write() {
         ))
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/api/PackageBootstrapBridge.java"),
+                .join("tests/api/sdk/PackageBootstrapBridge.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/api/sdk/PackageLocal.java"),
         )
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java")));
     run(Command::new(jdk.join("bin/javac"))
@@ -235,6 +240,7 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageSdkSandbox.java"),
         )
+        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SdkDataOracle.java"))
         .arg(common::java::bootstrap_aidl(&data.0))
         .arg(common::java::snapshot_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
@@ -2073,6 +2079,65 @@ fn native_package_parcels_match_original_read_write() {
         ),
         Ok(false)
     );
+    for (caller, denied) in [(1000, false), (19001, true)] {
+        let mut command = boot.client(caller);
+        command.args([
+            "/system/bin/app_process",
+            policy_classpath,
+            "/system/bin",
+            "SdkDataOracle",
+            "/data/local/tmp/package-parcels",
+        ]);
+        if denied {
+            command.arg("denied");
+        }
+        let result = command.output().unwrap();
+        assert_guest_success(&boot, &result, "native SDK data owner");
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            if denied { "SDK_DENIED\n" } else { "SDK_DATA\n" }
+        );
+    }
+    {
+        use aim_service_aidl::WriteParcelable;
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        aim_services::package::owner::sdk_data::SdkData {
+            uuid: None,
+            package_name: Some("fixture.native.sdk.client".into()),
+            sub_dir_names: Some(vec![Some("sdk-a".into()), Some("sdk-b".into())]),
+            user_id: 0,
+            app_id: 19001,
+            previous_app_id: 0,
+            se_info: Some("default".into()),
+            flags: 1,
+        }
+        .write_to(&mut parcel);
+        assert_eq!(
+            parcel.data(),
+            fs::read(directory.join("sdk-args.original")).unwrap()
+        );
+        for storage in ["misc_de", "misc_ce"] {
+            let path = boot
+                .data
+                .join("data")
+                .join(storage)
+                .join("0/sdksandbox/fixture.native.sdk.client/sdk-b");
+            let inode = aim_storage::guest_inode::read(&path).unwrap().unwrap();
+            assert_eq!(inode.uid, Some(29002));
+            assert_eq!(inode.gid, Some(29002));
+            let original = aim_storage::guest_inode::read(
+                &boot
+                    .data
+                    .join("data")
+                    .join(storage)
+                    .join("0/sdksandbox/fixture.original.sdk.client/sdk-b"),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(inode.uid, original.uid);
+            assert_eq!(inode.gid, original.gid);
+        }
+    }
     let policy_output = boot
         .client(1000)
         .args([

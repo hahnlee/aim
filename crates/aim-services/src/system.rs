@@ -113,6 +113,7 @@ pub struct System {
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
     package_bootstrap: Mutex<PackageBootstrapState>,
+    package_install_lock: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -205,6 +206,7 @@ impl System {
                 permissions: Mutex::new(Permissions::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
                 package_bootstrap: Mutex::new(PackageBootstrapState::default()),
+                package_install_lock: Mutex::new(()),
             }
         });
         let this = Arc::downgrade(&system);
@@ -399,6 +401,32 @@ impl System {
             table(&mut kept).insert(key, granted);
         }
         Ok(granted)
+    }
+
+    pub(crate) fn package_install_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.package_install_lock.lock().unwrap()
+    }
+
+    /// SDK filesystem work shares the package owner's install lock with code cleanup.
+    pub fn reconcile_package_sdk_data(
+        self: &Arc<Self>,
+        args: crate::package::owner::sdk_data::SdkData,
+    ) -> Result<()> {
+        use aim_service_aidl::android_os_iinstalld as installd;
+        let _install = self.package_install_guard();
+        let request = installd::ReconcileSdkData { args: Some(args) };
+        self.call(
+            "installd",
+            installd::RECONCILE_SDK_DATA,
+            |p| request.write(p),
+            |r| {
+                let result = installd::read_reconcile_sdk_data_reply(r)?;
+                if r.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                Ok(result)
+            },
+        )
     }
 
     /// Synchronous early package-owner attachment, independent of late listeners.

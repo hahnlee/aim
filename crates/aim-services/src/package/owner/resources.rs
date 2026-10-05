@@ -19,21 +19,38 @@ pub struct CodeResources {
     system: Arc<System>,
     data: PathBuf,
     parser_cache: Option<PathBuf>,
-    install_lock: Mutex<BTreeSet<String>>,
+    pending_cleanup: Mutex<BTreeSet<String>>,
 }
 
 impl CodeResources {
     pub fn new(process: Arc<LocalProcess>, data: PathBuf, parser_cache: Option<PathBuf>) -> Self {
+        Self::with_system(System::new(process, &[]), data, parser_cache)
+    }
+
+    /// Native boot supplies its existing System so all install operations share one lock.
+    pub(crate) fn with_system(
+        system: Arc<System>,
+        data: PathBuf,
+        parser_cache: Option<PathBuf>,
+    ) -> Self {
         Self {
-            system: System::new(process, &[]),
+            system,
             data,
             parser_cache,
-            install_lock: Mutex::new(BTreeSet::new()),
+            pending_cleanup: Mutex::new(BTreeSet::new()),
         }
     }
 
+    pub fn reconcile_sdk_data(
+        &self,
+        args: super::sdk_data::SdkData,
+    ) -> Result<(), aim_binder_host::parcel::Exception> {
+        self.system.reconcile_package_sdk_data(args)
+    }
+
     pub fn clean(&self, code_path: &str, incremental: bool) -> Result<(), String> {
-        let mut pending = self.install_lock.lock().unwrap();
+        let _install = self.system.package_install_guard();
+        let mut pending = self.pending_cleanup.lock().unwrap();
         clean(
             &self.data,
             self.parser_cache.as_deref(),
@@ -83,7 +100,7 @@ impl CodeResources {
         if users.is_empty() || users.iter().any(|u| u.id < 0 || !ids.insert(u.id)) {
             return Err("app storage deletion requires distinct resolved users".into());
         }
-        let _install = self.install_lock.lock().unwrap();
+        let _install = self.system.package_install_guard();
         for user in users {
             let request = installd::DestroyAppData {
                 uuid: package.volume_uuid.clone(),
@@ -234,6 +251,80 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn sdk_execution_and_code_cleanup_wait_for_the_same_install_owner() {
+        use aim_binder_driver::{Credentials, Device, Driver};
+        use std::{sync::mpsc, time::Duration};
+        let driver = Driver::new();
+        let process = LocalProcess::open(
+            &driver,
+            Device::Binder,
+            Credentials {
+                pid: 98001,
+                euid: 1000,
+                security_context: None,
+            },
+        );
+        let system = System::new(process.clone(), &[]);
+        let data = Data::new();
+        fs::create_dir(data.0.join("app")).unwrap();
+        let apk = data.0.join("app/owned.apk");
+        fs::write(&apk, b"disposable code").unwrap();
+        let resources = Arc::new(CodeResources::with_system(
+            system.clone(),
+            data.0.clone(),
+            None,
+        ));
+        let guard = system.package_install_guard();
+        let (started, ready) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let cleanup = {
+            let resources = resources.clone();
+            let started = started.clone();
+            let finished = finished.clone();
+            std::thread::spawn(move || {
+                started.send(()).unwrap();
+                resources.clean("/data/app/owned.apk", false).unwrap();
+                finished.send(()).unwrap();
+            })
+        };
+        let sdk = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            // No installd is registered: execution must fail after acquiring the lock.
+            assert!(
+                resources
+                    .reconcile_sdk_data(super::super::sdk_data::SdkData {
+                        uuid: None,
+                        package_name: Some("fixture.sdk.client".into()),
+                        sub_dir_names: Some(vec![]),
+                        user_id: 0,
+                        app_id: 19001,
+                        previous_app_id: 0,
+                        se_info: Some("default".into()),
+                        flags: 3,
+                    })
+                    .is_err()
+            );
+            finished.send(()).unwrap();
+        });
+        for _ in 0..2 {
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        assert_eq!(
+            done.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        assert!(apk.exists());
+        drop(guard);
+        for _ in 0..2 {
+            done.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        cleanup.join().unwrap();
+        sdk.join().unwrap();
+        assert!(!apk.exists());
+        driver.release(process.proc_handle());
     }
 
     #[test]

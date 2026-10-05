@@ -73,6 +73,35 @@ impl ServiceHost {
         Ok(reply)
     }
 
+    fn reconcile_package_sdk_data(&self, call: &mut Call<'_>) -> Reply {
+        let args = host::ReconcilePackageSdkData::read(&mut call.data)?;
+        if call.data.remaining() != 0 {
+            return Err(aim_binder_host::parcel::BAD_VALUE);
+        }
+        let result = self
+            .system
+            .upgrade()
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable"))
+            .and_then(|system| {
+                system.reconcile_package_sdk_data(crate::package::owner::sdk_data::SdkData {
+                    uuid: args.volume_uuid,
+                    package_name: args.package_name,
+                    sub_dir_names: args.sub_dir_names,
+                    user_id: args.user_id,
+                    app_id: args.app_id,
+                    previous_app_id: args.previous_app_id,
+                    se_info: args.se_info,
+                    flags: args.flags,
+                })
+            });
+        let mut reply = Parcel::new();
+        match result {
+            Ok(()) => host::write_reconcile_package_sdk_data_reply(&mut reply),
+            Err(error) => reply.write_exception(&error),
+        }
+        Ok(reply)
+    }
+
     fn attach_bridge(&self, call: &mut Call<'_>) -> Reply {
         let bridge = host::AttachBridge::read(&mut call.data)?.bridge;
         let (Some(Binder::Handle(handle)), Some(system)) = (bridge, self.system.upgrade()) else {
@@ -143,6 +172,7 @@ impl Service for ServiceHost {
             && call.code != host::REQUEST_NOTIFICATION_PERMISSION
             && call.code != host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
             && call.code != host::CAPTURE_PACKAGE_SCAN
+            && call.code != host::RECONCILE_PACKAGE_SDK_DATA
         {
             return Err(UNKNOWN_TRANSACTION);
         }
@@ -151,6 +181,7 @@ impl Service for ServiceHost {
         if call.sender_euid != SYSTEM_UID {
             if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
                 || call.code == host::CAPTURE_PACKAGE_SCAN
+                || call.code == host::RECONCILE_PACKAGE_SDK_DATA
             {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::security(
@@ -164,7 +195,9 @@ impl Service for ServiceHost {
             );
             return Ok(Parcel::new());
         }
-        if call.code == host::CAPTURE_PACKAGE_SCAN {
+        if call.code == host::RECONCILE_PACKAGE_SDK_DATA {
+            self.reconcile_package_sdk_data(call)
+        } else if call.code == host::CAPTURE_PACKAGE_SCAN {
             self.capture_package_scan(call)
         } else if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {
             self.attach_package_bootstrap(call)

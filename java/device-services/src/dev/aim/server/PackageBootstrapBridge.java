@@ -60,6 +60,34 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return snapshots;
     }
 
+    /** SDK data goes to the native install owner, never to original PMS. */
+    public static PackageLocal.SdkDataOwner sdkDataOwner() {
+        IBinder binder = ServiceManager.checkService("aim.service_host");
+        if (binder == null) throw new IllegalStateException("native service host is unavailable");
+        return sdkDataOwner(IServiceHost.Stub.asInterface(binder));
+    }
+
+    private static PackageLocal.SdkDataOwner sdkDataOwner(IServiceHost host) {
+        return (volume, name, dirs, user, app, previous, seinfo, flags) -> {
+            try {
+                host.reconcilePackageSdkData(volume, name, dirs, user, app, previous, seinfo, flags);
+            } catch (Exception failure) {
+                // InstallerException.from followed by PMS's IOException uses this exact message.
+                throw new java.io.IOException(failure.toString());
+            }
+        };
+    }
+
+    public static PackageLocal captureLocal(PackageSnapshots.Owner owner,
+            boolean crossUserSuspensions) throws RemoteException, java.io.IOException {
+        IBinder binder = ServiceManager.checkService("aim.service_host");
+        if (binder == null) throw new IllegalStateException("native service host is unavailable");
+        var host = IServiceHost.Stub.asInterface(binder);
+        var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions);
+        snapshots.refresh();
+        return new PackageLocal(snapshots, sdkDataOwner(host));
+    }
+
     @Override
     public boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk) {
         enforceSystemUid();

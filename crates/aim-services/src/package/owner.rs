@@ -32,6 +32,7 @@ pub mod permission_gids;
 pub mod legacy_permissions;
 mod removal;
 pub mod resources;
+pub mod sdk_data;
 pub mod seinfo;
 pub mod shared_users;
 pub mod shared_processes;

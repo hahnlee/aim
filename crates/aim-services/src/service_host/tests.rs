@@ -1081,7 +1081,7 @@ fn late_bridge_death_preserves_replacement_nonce_mapping() {
 }
 
 fn verify_boot_scan(
-    system: &System,
+    system: &Arc<System>,
     native: &Arc<LocalProcess>,
     client: &Arc<LocalProcess>,
     bridge: &Arc<crate::package::bootstrap::Bridge>,
@@ -1209,8 +1209,8 @@ fn verify_boot_scan(
     let mut restarted =
         crate::package::scan::SigningScan::new(config, &restored_settings, 36).unwrap();
     let prior = restarted.clone();
-    let resources = crate::package::owner::resources::CodeResources::new(
-        native.clone(),
+    let resources = crate::package::owner::resources::CodeResources::with_system(
+        system.clone(),
         data.0.join("data"),
         None,
     );
@@ -1430,4 +1430,74 @@ fn verify_boot_scan(
     owner.reject.store(false, Ordering::SeqCst);
     owner.apex_reply.store(0, Ordering::SeqCst);
     drop(data);
+}
+
+#[test]
+fn sdk_data_host_rejects_foreign_callers_bad_tokens_tails_and_missing_owner() {
+    use aim_binder_host::parcel::{BAD_VALUE, Reader};
+    let driver = Driver::new();
+    let process = LocalProcess::open(
+        &driver,
+        Device::Binder,
+        Credentials {
+            pid: 97001,
+            euid: 1000,
+            security_context: None,
+        },
+    );
+    let system = System::new(process.clone(), &[]);
+    let host = ServiceHost::new(process.clone(), &system);
+    drop(system);
+    let args = host::ReconcilePackageSdkData {
+        volume_uuid: None,
+        package_name: Some("fixture.sdk.client".into()),
+        sub_dir_names: Some(vec![Some("sdk-a".into())]),
+        user_id: 0,
+        app_id: 19001,
+        previous_app_id: 0,
+        se_info: Some("default".into()),
+        flags: 3,
+    };
+    let mut data = Parcel::new();
+    args.write(&mut data);
+    for (uid, expected) in [(1000, -5), (19001, -1)] {
+        let reply = host
+            .transact(&mut Call {
+                code: host::RECONCILE_PACKAGE_SDK_DATA,
+                flags: 0,
+                sender_pid: 97002,
+                sender_euid: uid,
+                data: Reader::new(data.data(), &[]),
+            })
+            .unwrap();
+        let error =
+            host::read_reconcile_package_sdk_data_reply(&mut Reader::new(reply.data(), &[]))
+                .unwrap()
+                .unwrap_err();
+        assert_eq!(error.code, expected);
+    }
+    data.write_i32(0);
+    assert!(matches!(
+        host.transact(&mut Call {
+            code: host::RECONCILE_PACKAGE_SDK_DATA,
+            flags: 0,
+            sender_pid: 97002,
+            sender_euid: 1000,
+            data: Reader::new(data.data(), &[]),
+        }),
+        Err(BAD_VALUE)
+    ));
+    let mut wrong = Parcel::new();
+    wrong.write_interface_token("fixture.Wrong");
+    assert!(
+        host.transact(&mut Call {
+            code: host::RECONCILE_PACKAGE_SDK_DATA,
+            flags: 0,
+            sender_pid: 97002,
+            sender_euid: 1000,
+            data: Reader::new(wrong.data(), &[]),
+        })
+        .is_err()
+    );
+    driver.release(process.proc_handle());
 }

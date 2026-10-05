@@ -1145,8 +1145,30 @@ now implements the pinned seven-method PackageManagerLocal interface over the
 published replica Store (#944), including explicit and Binder-derived filtered
 callers and an uncommitted ART scope. Construction rejects an uninitialized
 replica or missing SDK-data owner. SDK reconciliation forwards every argument and
-its IOException unchanged to the required owner; native SDK filesystem execution
-remains #945. The three signing test APIs preserve original Build.isDebuggable
+its IOException unchanged to the required owner. PackageBootstrapBridge now binds
+that owner to generated IServiceHost.reconcilePackageSdkData (#945). The native
+System serializes the exact eight-field stable Parcelable with its package
+install lock, shared by code/storage cleanup, and calls original installd through
+generated transaction codes. Only system UID callers are accepted; malformed
+requests and missing owners fail. Installer exceptions retain their original
+code/message and Java's original IOException message conversion. The replacement
+vold now calls original vold_prepare_subdirs after preparing each user's storage
+and propagates helper failure (#948); the missing call had left SDK CE/DE roots
+absent. On a disposable original-PMS boot, original ART verifies native SDK
+creation, CE/DE selection, same-UID pruning, SDK/cache directories, exact request
+bytes, invalid-user exception equivalence and actual UID 19001 denial. A direct
+original IInstalld control runs the same operations and agrees on final UID/GID.
+Both paths reject SDK UID migration after partial ownership changes: pinned
+installd's chown_app_dir changes the SDK root group to its UID, then its strict
+prepare rejects the group instead of AID_NOBODY (#949). This original failure is
+preserved, not converted to success. The full original ART Parcel oracle passes
+(25.45s); its failure diagnostics now include Java stdout (#947). Release units
+pass 472 cases (0.48s), with three ignored/not run, including shared install-lock
+blocking of SDK execution and owned code cleanup. The image/original-PMS template
+build passes (37.1s; four rebuilt, 38 fresh); the final host build passes
+(3.6s; three rebuilt, 39 fresh). The explicit native bootstrap fixture passes
+(0.67s) with cleanup using the same System owner, and generated SDK/cleanup
+transport tests pass all three cases (0.01s). The three signing test APIs preserve original Build.isDebuggable
 enforcement and call original ApkSignatureVerifier. Native certificate collection
 does not yet consume those override changes (#946). Original ART verifies all
 seven methods over each of the six authentic native graphs: current/old scope
@@ -1156,8 +1178,7 @@ including those checks, native-written original ABX reads and six seeded
 original-service boots, passes (86.49s). Release units pass 470 cases (0.51s);
 production image/original-PMS template build passes (58.3s; six rebuilt, 36 fresh).
 The facade is not registered, and native visibility/version-page refresh,
-SDK execution, native signing override ownership and default activation remain
-unproved. System.complete_package_scan now resolves
+native signing override ownership and default activation remain unproved. System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes
 runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
 and publishes through that same bridge/base gate (#937). Original policy calls

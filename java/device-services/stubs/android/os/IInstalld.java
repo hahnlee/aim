@@ -3,6 +3,7 @@
 package android.os;
 
 public interface IInstalld extends IInterface {
+    void reconcileSdkData(ReconcileSdkDataArgs args) throws RemoteException;
     void rmPackageDir(String packageName, String packageDir) throws RemoteException;
     void destroyAppData(String uuid, String packageName, int userId, int flags,
             long ceDataInode) throws RemoteException;
