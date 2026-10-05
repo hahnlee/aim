@@ -180,7 +180,7 @@ pub fn verify(boot: &Boot, apks: &Apks, record: &Record) {
     eprintln!("original certificate collection cases: {index}");
 }
 
-fn trace(signing: &sign::SigningDetails) -> String {
+pub(super) fn trace(signing: &sign::SigningDetails) -> String {
     let digest = |bytes: &[u8]| {
         Sha256::digest(bytes)
             .iter()

@@ -106,6 +106,25 @@ impl Apks {
         pkg: &AndroidPackage,
         collection: CertificateCollection<'_>,
     ) -> Result<sign::SigningDetails, ApkSigningError> {
+        self.collect_signing_details_using(pkg, collection, None)
+    }
+
+    pub fn collect_signing_details_with_overrides(
+        &self,
+        pkg: &AndroidPackage,
+        collection: CertificateCollection<'_>,
+        overrides: &sign::Overrides,
+    ) -> Result<sign::SigningDetails, String> {
+        self.collect_signing_details_using(pkg, collection, Some(overrides))
+            .map_err(|e| e.to_string())
+    }
+
+    fn collect_signing_details_using(
+        &self,
+        pkg: &AndroidPackage,
+        collection: CertificateCollection<'_>,
+        overrides: Option<&sign::Overrides>,
+    ) -> Result<sign::SigningDetails, ApkSigningError> {
         let modified = collection_file_time(&self.files, pkg, collection.pre_n_mr1_upgrade)
             .map_err(ApkSigningError::Input)?;
         if let Some(saved) = collection.saved
@@ -120,20 +139,21 @@ impl Apks {
         {
             return sign::SigningDetails::from_saved(signing).map_err(ApkSigningError::Input);
         }
-        self.signing_details_with_verification(pkg, collection.skip_verify)
+        self.signing_details_with_verification(pkg, collection.skip_verify, overrides)
     }
 
     pub(crate) fn checked_signing_details(
         &self,
         pkg: &AndroidPackage,
     ) -> Result<sign::SigningDetails, ApkSigningError> {
-        self.signing_details_with_verification(pkg, false)
+        self.signing_details_with_verification(pkg, false, None)
     }
 
     fn signing_details_with_verification(
         &self,
         pkg: &AndroidPackage,
         skip_verify: bool,
+        overrides: Option<&sign::Overrides>,
     ) -> Result<sign::SigningDetails, ApkSigningError> {
         let base = pkg
             .base_apk_path
@@ -170,15 +190,27 @@ impl Apks {
             v4: None,
         };
         let splits: Vec<Apk> = (1..sources.len()).map(apk).collect();
-        sign::package_signing_details(
-            &apk(0),
-            &splits,
-            pkg.static_shared_library_name.is_some(),
-            pkg.target_sdk_version,
-            skip_verify,
-            &Build::of(&self.platform),
-        )
-        .map_err(ApkSigningError::Invalid)
+        let build = Build::of(&self.platform);
+        let result = match overrides {
+            Some(owner) => sign::package_signing_details_with_overrides(
+                &apk(0),
+                &splits,
+                pkg.static_shared_library_name.is_some(),
+                pkg.target_sdk_version,
+                skip_verify,
+                &build,
+                owner,
+            ),
+            None => sign::package_signing_details(
+                &apk(0),
+                &splits,
+                pkg.static_shared_library_name.is_some(),
+                pkg.target_sdk_version,
+                skip_verify,
+                &build,
+            ),
+        };
+        result.map_err(ApkSigningError::Invalid)
     }
 
     /// The package the native parser makes of the APK at `ps`'s code path,

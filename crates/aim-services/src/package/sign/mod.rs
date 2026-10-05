@@ -28,8 +28,10 @@ mod block;
 mod crypto;
 mod history;
 mod merge;
+mod overrides;
 pub use history::{History, INSTALLED_DATA, JoinType, ROLLBACK, SHARED_USER_ID};
 pub use merge::MergeRule;
+pub use overrides::{OverrideSnapshot, Overrides};
 mod jar;
 mod serialize;
 pub(crate) use serialize::canonical_public_keys;
@@ -262,15 +264,63 @@ pub fn package_signing_details(
     skip_verify: bool,
     build: &Build,
 ) -> Result<SigningDetails, Error> {
+    package_signing_details_using(
+        base,
+        splits,
+        static_shared_library,
+        target_sdk,
+        skip_verify,
+        build,
+        None,
+    )
+}
+
+/// Apply the explicit test owner after each APK verifies, before split comparison.
+pub fn package_signing_details_with_overrides(
+    base: &Apk,
+    splits: &[Apk],
+    static_shared_library: bool,
+    target_sdk: i32,
+    skip_verify: bool,
+    build: &Build,
+    overrides: &Overrides,
+) -> Result<SigningDetails, Error> {
+    package_signing_details_using(
+        base,
+        splits,
+        static_shared_library,
+        target_sdk,
+        skip_verify,
+        build,
+        Some(overrides),
+    )
+}
+
+fn package_signing_details_using(
+    base: &Apk,
+    splits: &[Apk],
+    static_shared_library: bool,
+    target_sdk: i32,
+    skip_verify: bool,
+    build: &Build,
+    overrides: Option<&Overrides>,
+) -> Result<SigningDetails, Error> {
     let min_scheme = if static_shared_library {
         SIGNING_BLOCK_V2
     } else {
         minimum_signature_scheme(target_sdk)
     };
-    let details = verify(base, min_scheme, !skip_verify, build)?;
+    let collect = |apk: &Apk| {
+        let details = verify(apk, min_scheme, !skip_verify, build)?;
+        Ok::<_, Error>(match overrides {
+            Some(owner) => owner.apply(&details),
+            None => details,
+        })
+    };
+    let details = collect(base)?;
     if base.path != FRAMEWORK_RES {
         for split in splits {
-            if !verify(split, min_scheme, !skip_verify, build)?.signatures_match(&details) {
+            if !collect(split)?.signatures_match(&details) {
                 return Err(Error::new(
                     INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES,
                     format!("{} has mismatched certificates", split.path),

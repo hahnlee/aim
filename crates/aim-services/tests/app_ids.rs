@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 mod common {
     pub mod java;
     pub mod certificate_collection;
+    pub mod signing_overrides;
     pub mod runtime;
 }
 use common::java::sources;
@@ -485,6 +486,12 @@ fn allocation_matches_the_original_runtime() {
     };
     let inputs = aim_services::package::scan::Inputs::load(&state, &apks).unwrap();
     common::certificate_collection::verify(&boot, &apks, &inputs.active["com.google.android.gsf"]);
+    common::signing_overrides::verify(
+        &boot,
+        &apks,
+        &inputs.active["com.google.android.gsf"],
+        &inputs.active["android"],
+    );
     assert_eq!(inputs.active.len(), state.settings.packages.len());
     for (name, record) in &inputs.active {
         assert_eq!(&record.identity.internal_name, name);
@@ -679,11 +686,31 @@ fn allocation_matches_the_original_runtime() {
             details.public_keys.len()
         )
     };
-    for mode in ["merge", "group-merge"] {
+    for mode in ["merge", "group-merge", "override-equals"] {
         let mut expected = String::new();
         for (i, (a, saved)) in merged_cases.iter().enumerate() {
             for (j, (b, _)) in merged_cases.iter().enumerate() {
-                if mode == "merge" {
+                if mode == "override-equals" {
+                    let as_key = |i: usize, details: &SigningDetails| {
+                        if i == 0 {
+                            return SigningDetails::unknown();
+                        }
+                        let mut details = details.clone();
+                        details.scheme_version = 3;
+                        details
+                    };
+                    let a = as_key(i, a);
+                    let b = as_key(j, b);
+                    let owner = aim_services::package::sign::Overrides::new(true);
+                    let mut marker = a.clone();
+                    marker.scheme_version = 127;
+                    owner.add(a.clone(), marker).unwrap();
+                    expected.push_str(&format!(
+                        "{i} {j} {} {}\n",
+                        a.equals_original(&b),
+                        owner.apply(&b).scheme_version == 127
+                    ));
+                } else if mode == "merge" {
                     for (r, rule) in [
                         MergeRule::SelfCapability,
                         MergeRule::OtherCapability,

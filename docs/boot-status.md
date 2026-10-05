@@ -1169,8 +1169,28 @@ build passes (37.1s; four rebuilt, 38 fresh); the final host build passes
 (3.6s; three rebuilt, 39 fresh). The explicit native bootstrap fixture passes
 (0.67s) with cleanup using the same System owner, and generated SDK/cleanup
 transport tests pass all three cases (0.01s). The three signing test APIs preserve original Build.isDebuggable
-enforcement and call original ApkSignatureVerifier. Native certificate collection
-does not yet consume those override changes (#946). Original ART verifies all
+enforcement and call original ApkSignatureVerifier. Native Apks certificate
+collection now accepts an explicit versioned signing override owner (#946).
+The owner preserves prior immutable versions, add/replace/remove/clear and
+release-build denial; version exhaustion fails before mutation. For native
+verified SigningDetails, current signer flags are excluded from key equality,
+current signatures/public keys compare as sets, and ordered past certificates
+include capabilities. Lookup also retains original ArrayMap's hash behavior:
+SigningDetails hashes current signatures in array order even when equals ignores
+that order. Overrides apply once after each APK verifies and before base/split
+signer comparison; verification failures cannot be overridden, and saved signing
+cache reuse bypasses the map as original collectCertificatesLI does. The explicit
+app-ID/original-owner fixture passes (29.58s), including 169 original
+SigningDetails.equals/ArrayMap lookup pairs, the original release verifier's
+unchanged results after add/remove/clear, cache/force/unsafe-collection choices,
+and missing APK failure on disposable code. A separately configured native debug
+owner verifies real APK add/remove/clear and override-before-split comparison;
+the pinned image's Build.isDebuggable is false, so original debug-build
+application remains unrun. Release units pass 474 cases (0.55s), three ignored/not
+run. This explicit owner is not connected to the Java test APIs or live scan
+orchestration yet. Nullable public-key replacement owners are not represented
+by the native verified-details model (#950); original constructor/equality and
+transport parity remain part of #946. Original ART verifies all
 seven methods over each of the six authentic native graphs: current/old scope
 identity, explicit and Binder callers, distinct uncommitted replicas, required
 inputs and SDK argument/error identity. The complete first-system fixture,
@@ -1178,7 +1198,8 @@ including those checks, native-written original ABX reads and six seeded
 original-service boots, passes (86.49s). Release units pass 470 cases (0.51s);
 production image/original-PMS template build passes (58.3s; six rebuilt, 36 fresh).
 The facade is not registered, and native visibility/version-page refresh,
-native signing override ownership and default activation remain unproved. System.complete_package_scan now resolves
+native signing override transport/nullable ownership and default activation
+remain unproved. System.complete_package_scan now resolves
 native library dependencies from the exact retained bootstrap bridge, completes
 runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
 and publishes through that same bridge/base gate (#937). Original policy calls

@@ -39,6 +39,30 @@ public final class AppIdsOracle {
             System.out.println("SHARED PREPARED");
             return;
         }
+        if (args.length != 0 && args[0].equals("override-collection")) {
+            android.util.apk.ApkSignatureVerifier.clearOverrideSigningDetails();
+            try {
+                System.out.println("DEBUG " + android.os.Build.isDebuggable());
+                var before = collectOverride(args[1], null, true, false, 0);
+                var replacement = ((com.android.internal.pm.parsing.pkg.PackageImpl)
+                    com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                        java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[2])))).getSigningDetails();
+                System.out.println(collectionTrace(before));
+                android.util.apk.ApkSignatureVerifier.addOverrideSigningDetails(before, replacement);
+                System.out.println(collectionTrace(collectOverride(args[1], null, true, false, 0)));
+                System.out.println(collectionTrace(collectOverride(args[1], null, true, true, 0)));
+                System.out.println(collectionTrace(collectOverride(args[1], before, false, false, Long.parseLong(args[4]))));
+                System.out.println(collectionTrace(collectOverride(args[1], before, true, false, Long.parseLong(args[4]))));
+                try { collectOverride(args[3], null, true, false, 0); throw new AssertionError("missing APK accepted by override"); }
+                catch (PackageManagerException expected) { System.out.println("error " + expected.error); }
+                android.util.apk.ApkSignatureVerifier.removeOverrideSigningDetails(before);
+                System.out.println(collectionTrace(collectOverride(args[1], null, true, false, 0)));
+                android.util.apk.ApkSignatureVerifier.addOverrideSigningDetails(before, replacement);
+                android.util.apk.ApkSignatureVerifier.clearOverrideSigningDetails();
+                System.out.println(collectionTrace(collectOverride(args[1], null, true, false, 0)));
+            } finally { android.util.apk.ApkSignatureVerifier.clearOverrideSigningDetails(); }
+            return;
+        }
         if (args.length != 0 && args[0].equals("collect-certificates")) {
             if (new PrepareFailure("Failed collect during scanPackageForInitLI",
                     new java.io.IOException("source")).error != -110)
@@ -142,7 +166,7 @@ public final class AppIdsOracle {
             }
             return;
         }
-        if (args.length != 0 && (args[0].equals("merge") || args[0].equals("group-merge"))) {
+        if (args.length != 0 && (args[0].equals("merge") || args[0].equals("group-merge") || args[0].equals("override-equals"))) {
             byte[][] certs = new byte[4][];
             for (int c = 0; c < certs.length; c++) {
                 certs[c] = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(args[c + 1]));
@@ -156,7 +180,17 @@ public final class AppIdsOracle {
                 android.content.pm.Signature[] signers = realSignatures(current[i], null, certs);
                 for (var signer : signers) signer.setFlags(i + 1);
                 android.content.pm.Signature[] lineage = realSignatures(past[i], flags[i], certs);
-                cases[i] = new android.content.pm.SigningDetails(signers, i % 4 + 1, lineage);
+                cases[i] = new android.content.pm.SigningDetails(signers, args[0].equals("override-equals") ? 3 : i % 4 + 1, lineage);
+            }
+            if (args[0].equals("override-equals")) {
+                for (int i = 0; i < cases.length; i++) {
+                    for (int j = 0; j < cases.length; j++) {
+                        var overrides = new android.util.ArrayMap<android.content.pm.SigningDetails, Boolean>();
+                        overrides.put(cases[i], Boolean.TRUE);
+                        System.out.println(i + " " + j + " " + cases[i].equals(cases[j]) + " " + (overrides.get(cases[j]) != null));
+                    }
+                }
+                return;
             }
             if (args[0].equals("group-merge")) {
                 for (int i = 0; i < cases.length; i++) {
@@ -328,6 +362,21 @@ public final class AppIdsOracle {
         System.out.println(full.acquireAndRegisterNewAppId(b));
         full.removeSetting(19999);
         System.out.println(full.acquireAndRegisterNewAppId(b));
+    }
+    private static android.content.pm.SigningDetails collectOverride(String cache, android.content.pm.SigningDetails saved,
+            boolean force, boolean skip, long time) throws Exception {
+        var parsed = (com.android.internal.pm.parsing.pkg.PackageImpl)
+            com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(java.nio.file.Path.of(cache)));
+        var version = new Settings.VersionInfo(); version.databaseVersion = 3;
+        PackageSetting setting = null;
+        if (saved != null) {
+            setting = new PackageSetting(parsed.getPackageName(), null, new java.io.File(parsed.getPath()), 0, 0, new java.util.UUID(0, 1));
+            setting.setLastModifiedTime(time); setting.setSigningDetails(saved);
+        }
+        parsed.setSigningDetails(android.content.pm.SigningDetails.UNKNOWN);
+        ScanPackageUtils.collectCertificatesLI(setting, parsed, version, force, skip, false);
+        return parsed.getSigningDetails();
     }
     private static String collectionTrace(android.content.pm.SigningDetails signing) throws Exception {
         var current = new java.util.ArrayList<String>();
