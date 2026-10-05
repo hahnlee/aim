@@ -446,6 +446,28 @@ impl System {
             })
     }
 
+    pub(crate) fn check_package_bootstrap(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(bridge, &self.package_bootstrap()?) {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package scan bootstrap owner changed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_package_boot_scan(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+    ) -> std::result::Result<(), crate::package::bootstrap::BootError> {
+        use crate::package::bootstrap::{BootError, OwnerError};
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))
+    }
+
     /// Publish only against the original policy owner used to complete this scan.
     pub fn publish_package_scan(
         &self,
@@ -495,9 +517,7 @@ impl System {
     ) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
         let fail =
             |message: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
-        if !Arc::ptr_eq(bridge, &self.package_bootstrap()?) {
-            return Err(fail("package scan bootstrap owner changed".into()));
-        }
+        self.check_package_bootstrap(bridge)?;
         let policies = owner
             .loaded_packages()
             .iter()
@@ -545,10 +565,12 @@ impl System {
             })
     }
 
-    /// Prepare native first-boot code using this daemon's retained early owner.
+    /// Prepare native first-boot code using the caller's captured early owner.
+    /// Carry that same bridge through saved phases and completion/publication.
     /// The result is unpublished until reconciliation and snapshot gates finish.
     pub fn scan_package_first_boot(
         &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
         apks: &crate::package::write::Apks,
         config: &crate::package::system_config::SystemConfig,
         properties: &dyn Fn(&str) -> Option<String>,
@@ -557,19 +579,19 @@ impl System {
         crate::package::scan::SystemImageScan,
         crate::package::bootstrap::BootError,
     > {
-        use crate::package::bootstrap::{BootError, OwnerError};
-        let bridge = self
-            .package_bootstrap()
-            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))?;
-        bridge
+        self.check_package_boot_scan(bridge)?;
+        let scan = bridge
             .resolve_boot(config, properties)?
-            .scan_first_boot(apks, policy)
+            .scan_first_boot(apks, policy)?;
+        self.check_package_boot_scan(bridge)?;
+        Ok(scan)
     }
 
     /// Scan restored system settings before data APK reconciliation. Mutations
     /// remain with the supplied owner; this does not persist or publish it.
     pub fn scan_package_saved_system(
         &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
         owner: &mut crate::package::scan::SigningScan,
         apks: &crate::package::write::Apks,
         config: &crate::package::system_config::SystemConfig,
@@ -580,19 +602,19 @@ impl System {
         crate::package::bootstrap::SavedSystemPhase,
         crate::package::bootstrap::BootError,
     > {
-        use crate::package::bootstrap::{BootError, OwnerError};
-        let bridge = self
-            .package_bootstrap()
-            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))?;
-        bridge
+        self.check_package_boot_scan(bridge)?;
+        let scan = bridge
             .resolve_boot(config, properties)?
-            .scan_saved_system(owner, apks, policy, saved)
+            .scan_saved_system(owner, apks, policy, saved)?;
+        self.check_package_boot_scan(bridge)?;
+        Ok(scan)
     }
 
     /// Run restored system and data phases against one captured original owner.
     /// The caller retains mutations on failure; persistence/publication follows.
     pub fn scan_package_saved_boot(
         &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
         owner: &mut crate::package::scan::SigningScan,
         apks: &crate::package::write::Apks,
         config: &crate::package::system_config::SystemConfig,
@@ -610,10 +632,8 @@ impl System {
         crate::package::bootstrap::SavedBootScan,
         crate::package::bootstrap::BootError,
     > {
-        use crate::package::bootstrap::{BootError, DataBootInputs, OwnerError, SavedBootScan};
-        let bridge = self
-            .package_bootstrap()
-            .map_err(|error| BootError::Owner(OwnerError::Owner(error)))?;
+        use crate::package::bootstrap::{BootError, DataBootInputs, SavedBootScan};
+        self.check_package_boot_scan(bridge)?;
         let boot = bridge.resolve_boot(config, properties)?;
         let data_users = saved.users;
         let first_boot_or_upgrade = saved.first_boot_or_upgrade;
@@ -653,6 +673,7 @@ impl System {
                 resources,
             },
         )?;
+        self.check_package_boot_scan(bridge)?;
         Ok(SavedBootScan { system, data })
     }
 

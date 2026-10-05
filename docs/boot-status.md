@@ -1149,10 +1149,18 @@ The pinned-image bootstrap fixture scans the actual framework APK through saved
 system/data phases, supplies explicit fixture migration/fixed/process owners,
 then verifies complete publication and actual service-host Binder code access.
 Missing permission inputs and original policy rejection preserve the prior Store.
-That integration test passes (0.67s); ordinary release units pass 466 cases
-(0.48s), with three ignored/not run. The host build passes (16.1s; three rebuilt,
-39 fresh). This is an invoked native completion boundary in the bootstrap
-fixture, not the running NativeServices boot producer or native package activation. This does not prove original-service adoption or CTS. Mapped APK signing
+The daemon's initial, saved-system and saved-system/data scan APIs now require
+the caller's explicitly captured bootstrap bridge (#943), carrying the same
+identity to completion/publication. They reject missing or changed owners before
+policy reads and recheck that identity before returning a completed scan; they do
+not recapture a newer bridge between phases. The fixture rejects a distinct
+wrapper of the same Binder in all three entry points without changing the saved
+candidate. Actual Binder replacement/current-owner death fail the same identity
+check. The explicit pinned-image integration passes (0.66s); ordinary release
+units pass 470 cases (0.47s), with three ignored/not run. The host build passes
+(14.7s; three rebuilt, 39 fresh). This is an invoked native completion boundary in
+the bootstrap fixture, not the running NativeServices boot producer or native
+package activation. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime

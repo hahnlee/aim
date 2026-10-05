@@ -757,7 +757,10 @@ fn exercise_bootstrap(run_scan: bool) {
         Err(crate::package::owner::legacy_permissions::Error::Owner(_))
     ));
     assert!(old.library_compatibility(&config, &|_| None).is_ok());
-    assert_eq!(owner.bcp_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        owner.bcp_reads.load(Ordering::SeqCst),
+        if run_scan { 2 } else { 1 }
+    );
     assert!(attach(&first, Some(node)).is_err_and(|error| error.code == -1));
     assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
@@ -798,6 +801,8 @@ fn exercise_bootstrap(run_scan: bool) {
     attach(&second, Some(replacement)).unwrap();
     let current = system.package_bootstrap().unwrap();
     assert!(!Arc::ptr_eq(&old, &current));
+    assert!(system.check_package_bootstrap(&old).is_err());
+    system.check_package_bootstrap(&current).unwrap();
     assert!(capture_scan(&second).is_err());
     assert!(
         system
@@ -877,6 +882,7 @@ fn exercise_bootstrap(run_scan: bool) {
     assert_eq!(current.permission_gids(19001, &[0]).unwrap(), [3004, 3004]);
     driver.release(second.proc_handle());
     until(|| system.package_bootstrap().is_err());
+    assert!(system.check_package_bootstrap(&current).is_err());
     assert!(system.capture_package_scan().is_err());
     assert!(
         system
@@ -1088,6 +1094,12 @@ fn verify_boot_scan(
         scan::{AbiPolicy, NativeLibraryInstallPolicy, ScanClock},
         write::Apks,
     };
+    // A fresh wrapper around the same Binder is not the captured boot owner.
+    let Binder::Handle(handle) = bridge.owner.binder() else {
+        unreachable!()
+    };
+    let foreign = Arc::new(crate::package::bootstrap::Bridge::new(native.strong(handle)).unwrap());
+    assert!(system.check_package_bootstrap(&foreign).is_err());
     let original = aim_paths::original_image();
     let root = std::env::temp_dir().join(format!("aim-bootstrap-scan-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
@@ -1147,6 +1159,10 @@ fn verify_boot_scan(
         virtual_preload: false,
         stopped_system_app: false,
     };
+    assert!(matches!(
+        system.scan_package_first_boot(&foreign, &apks, config, &|_| None, policy()),
+        Err(crate::package::bootstrap::BootError::Owner(_))
+    ));
     // Capture valid inventory before testing notification failure.
     owner.apex_reply.store(1, Ordering::SeqCst);
     let boot = bridge.resolve_boot(config, &|_| None).unwrap();
@@ -1156,7 +1172,7 @@ fn verify_boot_scan(
     );
     owner.apex_reply.store(1, Ordering::SeqCst);
     let scan = system
-        .scan_package_first_boot(&apks, config, &|_| None, policy())
+        .scan_package_first_boot(bridge, &apks, config, &|_| None, policy())
         .unwrap();
     assert_eq!(scan.packages.len(), 1);
     assert_eq!(scan.packages[0].candidate.record.settings.name, "android");
@@ -1207,15 +1223,36 @@ fn verify_boot_scan(
         incremental_packages: &incremental,
         resources: &resources,
     };
+    assert!(matches!(
+        system.scan_package_saved_system(
+            &foreign,
+            &mut restarted,
+            &apks,
+            config,
+            &|_| None,
+            policy(),
+            saved()
+        ),
+        Err(crate::package::bootstrap::BootError::Owner(_))
+    ));
+    assert_eq!(restarted, prior);
     owner.domain_reply.store(1, Ordering::SeqCst);
     assert!(
-        matches!(system.scan_package_saved_system(&mut restarted, &apks, config, &|_| None, policy(), saved()),
+        matches!(system.scan_package_saved_system(bridge, &mut restarted, &apks, config, &|_| None, policy(), saved()),
         Err(crate::package::bootstrap::BootError::Scan(crate::package::scan::SigningError::Rejected(e))) if e.phase == "domain")
     );
     assert_eq!(restarted, prior);
     owner.domain_reply.store(0, Ordering::SeqCst);
     let phase = system
-        .scan_package_saved_system(&mut restarted, &apks, config, &|_| None, policy(), saved())
+        .scan_package_saved_system(
+            bridge,
+            &mut restarted,
+            &apks,
+            config,
+            &|_| None,
+            policy(),
+            saved(),
+        )
         .unwrap();
     assert!(phase.apex.is_empty());
     assert_eq!(phase.system.packages.len(), 1);
@@ -1238,8 +1275,27 @@ fn verify_boot_scan(
 
     let mut complete =
         crate::package::scan::SigningScan::new(config, &restored_settings, 36).unwrap();
+    let unscanned = complete.clone();
+    assert!(matches!(
+        system.scan_package_saved_boot(
+            &foreign,
+            &mut complete,
+            &apks,
+            config,
+            &|_| None,
+            policy(),
+            saved(),
+            &[],
+            &stubs,
+            &|_| Ok(false),
+            &BTreeMap::new(),
+        ),
+        Err(crate::package::bootstrap::BootError::Owner(_))
+    ));
+    assert_eq!(complete, unscanned);
     let completed = system
         .scan_package_saved_boot(
+            bridge,
             &mut complete,
             &apks,
             config,
@@ -1368,7 +1424,7 @@ fn verify_boot_scan(
 
     owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(
-        system.scan_package_first_boot(&apks, config, &|_| None, policy()),
+        system.scan_package_first_boot(bridge, &apks, config, &|_| None, policy()),
         Err(crate::package::bootstrap::BootError::Owner(_))
     ));
     owner.reject.store(false, Ordering::SeqCst);
