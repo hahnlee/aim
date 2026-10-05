@@ -22,6 +22,13 @@ public final class SharedUserReplica implements SharedUserApi {
             }
         }
     }
+    List<PackageStateReplica> getCurrentPackageStates() {
+        var current = new java.util.ArrayList<PackageStateReplica>();
+        for (int i = 0; i < members.size(); i++) {
+            if (state.getMembers().get(i).retained() == null) current.add(members.get(i));
+        }
+        return List.copyOf(current);
+    }
     @Override public String getName() { return state.getName(); }
     @Override public int getAppId() { return state.getAppId(); }
     @Override public boolean isPrivileged() { return state.isPrivileged(); }

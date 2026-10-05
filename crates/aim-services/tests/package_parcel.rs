@@ -2851,6 +2851,18 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap()
     .capture();
+    export_retained_snapshot(&directory, &captured_apex);
+    let retained_snapshot = boot.command().args([
+        "shell", "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
+        "/system/bin", "PackageRoundTripOracle", "retained-snapshot", "/data/local/tmp/package-parcels",
+    ]).output().unwrap();
+    assert_guest_success(&boot, &retained_snapshot, "retained full snapshot oracle");
+    assert_eq!(
+        String::from_utf8(retained_snapshot.stdout).unwrap(),
+        "retained full snapshot contracts: 1 case\n"
+    );
+
     let mut wrong_setting_uid = publishable.clone();
     wrong_setting_uid.settings.packages[0].app_id = 10001;
     assert!(
@@ -5249,4 +5261,94 @@ fn read_version_events(
         }
     }
     Ok(Some(root))
+}
+
+fn export_retained_snapshot(
+    directory: &std::path::Path,
+    snapshot: &aim_services::package::scan_snapshot::Snapshot,
+) {
+    use aim_service_aidl::WriteParcelable;
+    use aim_services::package::scan_snapshot::{
+        endpoint, runtime_record, setting_record, shared_record, user_record,
+    };
+    let name = "original.fixture";
+    let write = |suffix: &str, value: &[u8]| {
+        fs::write(directory.join(format!("retained-snapshot.{suffix}")), value).unwrap();
+    };
+    write(
+        "setting",
+        &setting_record::captured(snapshot, name, false)
+            .unwrap()
+            .unwrap(),
+    );
+    write(
+        "runtime",
+        &runtime_record::captured(snapshot, name, false)
+            .unwrap()
+            .unwrap(),
+    );
+    let mut parcel = aim_binder_host::parcel::Parcel::new();
+    endpoint::PackageCode::captured(snapshot, name, false)
+        .unwrap()
+        .unwrap()
+        .write_to(&mut parcel);
+    write("code", parcel.data());
+    let mut parcel = aim_binder_host::parcel::Parcel::new();
+    endpoint::PackageSigningState::captured(snapshot, name, false)
+        .unwrap()
+        .unwrap()
+        .write_to(&mut parcel);
+    write("signing", parcel.data());
+    let mut parcel = aim_binder_host::parcel::Parcel::new();
+    endpoint::PackageTransientState::captured(snapshot, name, false)
+        .unwrap()
+        .write_to(&mut parcel);
+    write("transient", parcel.data());
+    write(
+        "hidden",
+        snapshot
+            .owner()
+            .hidden_api_enforcement_policy(name, false)
+            .unwrap()
+            .unwrap()
+            .to_string()
+            .as_bytes(),
+    );
+    let ids: Vec<_> = snapshot
+        .owner()
+        .scanned_user_states(name)
+        .unwrap()
+        .keys()
+        .copied()
+        .collect();
+    write(
+        "users",
+        ids.iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    );
+    for id in ids {
+        write(
+            &format!("user-{id}"),
+            &user_record::captured(snapshot, name, false, id)
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let names: Vec<_> = snapshot
+        .owner()
+        .identities
+        .shared_users
+        .keys()
+        .cloned()
+        .collect();
+    write("groups", names.join("\n").as_bytes());
+    for (index, name) in names.iter().enumerate() {
+        write(
+            &format!("group-{index}"),
+            &shared_record::captured(snapshot, name).unwrap().unwrap(),
+        );
+    }
 }

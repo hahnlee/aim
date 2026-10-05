@@ -3,7 +3,12 @@ import com.android.server.pm.parsing.PackageCacher;
 public final class PackageRoundTripOracle {
     public static void main(String[] args) throws Exception {
         try {
-            verify(args);
+            if (args[0].equals("retained-snapshot")) {
+                verifyRetainedSnapshot(new java.io.File(args[1]));
+                System.out.println("retained full snapshot contracts: 1 case");
+            } else {
+                verify(args);
+            }
             // Settings' test constructor starts the original non-daemon BackgroundThread.
             System.exit(0);
         } catch (Throwable failure) {
@@ -411,6 +416,64 @@ public final class PackageRoundTripOracle {
         java.nio.file.Files.write(new java.io.File(directory, "scope-active.original").toPath(), dev.aim.server.PackageUserScopeFeed.capture(activeSnapshot, null, false));
         java.nio.file.Files.write(new java.io.File(directory, "scope-factory.original").toPath(), dev.aim.server.PackageUserScopeFeed.capture(factorySnapshot, activeSnapshot, true));
         java.nio.file.Files.write(new java.io.File(directory, "scope-independent.original").toPath(), dev.aim.server.PackageUserScopeFeed.capture(independentSnapshot, activeSnapshot, true));
+    }
+
+    private static void verifyRetainedSnapshot(java.io.File directory) throws Exception {
+        String name = "original.fixture";
+        java.util.function.Function<String, byte[]> read = suffix -> {
+            try { return java.nio.file.Files.readAllBytes(new java.io.File(directory, "retained-snapshot." + suffix).toPath()); }
+            catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
+        };
+        var owner = new PageOwner(name, read.apply("code"), null, null, read.apply("signing"));
+        owner.setting = read.apply("setting"); owner.runtime = read.apply("runtime");
+        owner.transientState = read.apply("transient");
+        owner.hiddenApiPolicy = Integer.parseInt(new String(read.apply("hidden"), java.nio.charset.StandardCharsets.UTF_8));
+        owner.userInventory = new String(read.apply("users"), java.nio.charset.StandardCharsets.UTF_8).lines().mapToInt(Integer::parseInt).toArray();
+        for (int id : owner.userInventory) {
+            switch (id) {
+                case 0 -> owner.userState = read.apply("user-0");
+                case 10 -> owner.user10 = read.apply("user-10");
+                case 11 -> owner.user11 = read.apply("user-11");
+                default -> throw new AssertionError("unexpected retained fixture user: " + id);
+            }
+        }
+        var groups = new String(read.apply("groups"), java.nio.charset.StandardCharsets.UTF_8).lines().toList();
+        for (int index = 0; index < groups.size(); index++) owner.sharedUsers.put(groups.get(index), read.apply("group-" + index));
+        var visibility = new dev.aim.server.PackageSnapshots.Owner() {
+            @Override public String getFilteredPackageName(long version, String candidate, int uid, int user) { throw new UnsupportedOperationException("unfiltered fixture"); }
+            @Override public boolean shouldFilter(long version, com.android.server.pm.pkg.PackageState state, int uid, int user) { throw new UnsupportedOperationException("unfiltered fixture"); }
+        };
+        dev.aim.server.PackageSnapshots.Data data;
+        try (var lease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+            data = lease.captureData(visibility, true);
+        }
+        owner.activeInventoryOverride = new String[0];
+        try (var lease = new dev.aim.server.PackageScanLease(dev.aim.server.IPackageScanSnapshot.Stub.asInterface(owner))) {
+            try {
+                lease.captureData(visibility, true);
+                throw new AssertionError("current shared member outside full inventory accepted");
+            } catch (java.io.IOException expected) {}
+        }
+        owner.activeInventoryOverride = null;
+        try (var snapshot = dev.aim.server.PackageSnapshots.unfiltered(data)) {
+            var current = snapshot.getPackageStates().get(name);
+            var group = snapshot.getSharedUsers().get("shared.fixture");
+            if (current == null || current.getAndroidPackage() == null || group == null
+                    || group.getPackageStates().size() != 2 || snapshot.getPackageStates().size() != 1
+                    || !snapshot.getDisabledSystemPackageStates().isEmpty())
+                throw new AssertionError("retained full snapshot inventory differs");
+            int live = 0, retained = 0;
+            for (var member : group.getPackageStates()) {
+                if (!name.equals(member.getPackageName()) || member.getSharedUserAppId() != 10000)
+                    throw new AssertionError("retained shared identity differs");
+                if (member == current) live++;
+                else if (member.getAndroidPackage() == null) retained++;
+                else throw new AssertionError("retained member has loaded code");
+            }
+            if (live != 1 || retained != 1) throw new AssertionError("retained shared instances collapsed");
+            group.getPackageStates().clear();
+            if (group.getPackageStates().size() != 2) throw new AssertionError("retained group escaped capture");
+        }
     }
 
     private static void verifyScopedRuntime(java.io.File directory) throws Exception {

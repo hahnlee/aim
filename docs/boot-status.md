@@ -654,7 +654,18 @@ same name (#905), carrying the retained setting, saved signing, legacy/fixed,
 explicit users, transient fields and captured runtime in independent framed
 records. Java reconstructs a distinct unparsed PackageStateReplica; the shared
 replica preserves both object identities instead of resolving both through the
-current name cache. Missing retained runtime/legacy/fixed/leaving inputs reject.
+current name cache. Full Java snapshot assembly now validates the current members
+against the active package map using the captured current/retained role, while
+keeping validated retained instances solely in their shared group. A complete
+native shared-APEX-adoption capture is decoded through the generated Binder
+Proxy/Stub and PackageScanLease.captureData on original ART: the snapshot contains
+one active setting and two distinct same-name shared members (one loaded, one
+unparsed), preserves both after lease close, and returns detached member
+containers. Removing the current member from the advertised package inventory
+still rejects assembly. The complete package Parcel oracle passes (25.25s), and
+the checked Java/image/template build passes (56.0s). This verifies that captured
+graph; native daemon publication and the displaced-request complete graph remain
+#836/#798/#929. Missing retained runtime/legacy/fixed/leaving inputs reject.
 The original ART oracle compares retained flags, UID, sparse users, unparsed code,
 shared snapshot cardinality/SDK, detached containers and exact record roundtrip
 (34.84s); ordinary shared lease reads still pass. Native Store, library dependency inputs and Java collected-code restoration now
@@ -956,7 +967,7 @@ retain their original binding. The private code envelope carries both names and
 the factory scope and bound setting UID, and the Java lease/object restorer checks these without
 renaming PackageImpl. A complete native Store/capture/publish test accepts the
 selected pair and rejects a changed parsed name. The original Android parcel
-oracle passes (24.48s), comparing original PackageSetting.setPkg with restoration
+oracle passes (25.25s), comparing original PackageSetting.setPkg with restoration
 of known and UNKNOWN code under a different setting name, plus scope/version/name
 rejections (including a foreign factory UID) and exact frame roundtrips.
 An original ART constructor oracle now exercises Settings.createNewSetting with
@@ -1022,7 +1033,7 @@ and rejects continued old-group membership. Native first-system fixtures verify
 the emitted signing headers for all six successful shared-origin transitions;
 original ART validates two group-present/absent frames, exact reserialization,
 UNKNOWN signing restoration, rejection after loading code and three malformed
-markers. The full package Parcel oracle passes (24.48s); release units pass 463
+markers. The full package Parcel oracle passes (25.25s); release units pass 463
 cases (0.42s). Native scan persistence now writes the displaced incoming setting
 and its keyset references even if its shared group is absent; read-roundtrip
 validation accounts for the original pending-package drop after proving the
