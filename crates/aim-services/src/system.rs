@@ -466,6 +466,52 @@ impl System {
         result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))
     }
 
+    /// Finish native boot dependencies/runtime before the complete publication gate.
+    /// Original policy calls run without holding the publication lock.
+    pub fn complete_package_scan(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: Option<&Arc<crate::package::scan_snapshot::Snapshot>>,
+        mut owner: crate::package::scan::SigningScan,
+        usage: crate::package::owner::usage::Usage,
+        retained: std::collections::BTreeMap<(String, bool), crate::package::scan::OriginalRuntime>,
+    ) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
+        let fail =
+            |message: String| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message);
+        if !Arc::ptr_eq(bridge, &self.package_bootstrap()?) {
+            return Err(fail("package scan bootstrap owner changed".into()));
+        }
+        let policies = owner
+            .loaded_packages()
+            .iter()
+            .map(|(name, code)| {
+                bridge
+                    .library_policy(name, code.package.target_sdk_version)
+                    .map(|policy| (name.clone(), policy))
+                    .map_err(|error| {
+                        fail(format!("boot library policy failed for {name}: {error:?}"))
+                    })
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+        owner
+            .complete_library_dependencies(&|name, _| {
+                policies
+                    .get(name)
+                    .map(|policy| crate::package::libraries::Policy {
+                        enforce_native_dependencies: policy.enforce_native_dependencies,
+                        sdk_library_independence: policy.sdk_library_independence,
+                    })
+                    .ok_or(crate::package::libraries::ResolveError::Incomplete(
+                        "boot library policy owner",
+                    ))
+            })
+            .map_err(|error| fail(format!("boot library completion failed: {error:?}")))?;
+        owner
+            .complete_runtime_at_boot(&usage, retained)
+            .map_err(|error| fail(format!("boot runtime completion failed: {error}")))?;
+        self.publish_package_scan(bridge, base, owner, usage)
+    }
+
     pub fn capture_package_scan(&self) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
         self.package_bootstrap
             .lock()

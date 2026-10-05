@@ -131,9 +131,10 @@ impl Service for Owner {
                 }
             }
             bootstrap::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
-                assert_eq!(
-                    call.data.read_string16()?.as_deref(),
-                    Some("fixture.package")
+                assert!(
+                    call.data
+                        .read_string16()?
+                        .is_some_and(|name| !name.is_empty())
                 );
                 let sdk = call.data.read_i32()?;
                 reply.write_i32(i32::from(sdk >= 31));
@@ -583,7 +584,7 @@ fn exercise_bootstrap(run_scan: bool) {
     assert!(old.resolve_boot(&config, &|_| None).is_err());
     owner.apex_reply.store(0, Ordering::SeqCst);
     if run_scan {
-        verify_boot_scan(&system, &native, &old, &owner, &config);
+        verify_boot_scan(&system, &native, &first, &old, &owner, &config);
     }
     let mut parsed = crate::package::pkg::AndroidPackage {
         feature_flag_state: Some(Vec::new()),
@@ -1051,7 +1052,8 @@ fn late_bridge_death_preserves_replacement_nonce_mapping() {
 fn verify_boot_scan(
     system: &System,
     native: &Arc<LocalProcess>,
-    bridge: &crate::package::bootstrap::Bridge,
+    client: &Arc<LocalProcess>,
+    bridge: &Arc<crate::package::bootstrap::Bridge>,
     owner: &Owner,
     config: &SystemConfig,
 ) {
@@ -1234,6 +1236,110 @@ fn verify_boot_scan(
         complete.scanned_user_states("android"),
         Some(&users["android"])
     );
+
+    // Complete actual native parsed-code results through the daemon publisher.
+    let usage = crate::package::owner::usage::Usage::new(["android"]);
+    let base = system.capture_package_scan().unwrap();
+    assert!(
+        system
+            .complete_package_scan(
+                bridge,
+                Some(&base),
+                complete.clone(),
+                usage.clone(),
+                BTreeMap::new()
+            )
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
+    complete
+        .capture_legacy_permissions(
+            &[0, 10],
+            BTreeMap::from([(("android".into(), false), Default::default())]),
+            complete
+                .identities
+                .shared_users
+                .keys()
+                .map(|name| (name.clone(), Default::default()))
+                .collect(),
+        )
+        .unwrap();
+    complete
+        .capture_install_permissions_fixed(BTreeMap::from([(("android".into(), false), false)]))
+        .unwrap();
+    complete
+        .complete_shared_processes(
+            complete
+                .identities
+                .shared_users
+                .iter()
+                .map(|(name, group)| {
+                    assert!(group.member_count() <= 1);
+                    let members: Vec<_> = complete
+                        .settings
+                        .packages
+                        .iter()
+                        .filter(|setting| setting.shared_app_id() == Some(group.app_id))
+                        .map(|setting| setting.name.clone())
+                        .collect();
+                    assert_eq!(members.len(), group.member_count());
+                    (name.clone(), members)
+                })
+                .collect(),
+        )
+        .unwrap();
+    let untouched = complete.clone();
+    owner.reject.store(true, Ordering::SeqCst);
+    assert!(
+        system
+            .complete_package_scan(
+                bridge,
+                Some(&base),
+                complete.clone(),
+                usage.clone(),
+                BTreeMap::new()
+            )
+            .is_err()
+    );
+    assert_eq!(complete, untouched);
+    assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
+    owner.reject.store(false, Ordering::SeqCst);
+    let published = system
+        .complete_package_scan(bridge, Some(&base), complete, usage, BTreeMap::new())
+        .unwrap();
+    assert_eq!(published.version(), base.version() + 1);
+    assert!(published.owner().loaded_packages().contains_key("android"));
+    let bytes =
+        crate::package::scan_snapshot::runtime_record::captured(&published, "android", false)
+            .unwrap()
+            .unwrap();
+    assert!(!bytes.is_empty());
+    assert_eq!(
+        published.owner().scanned_user_states("android"),
+        Some(&users["android"])
+    );
+    assert!(Arc::ptr_eq(
+        &published,
+        &system.capture_package_scan().unwrap()
+    ));
+    let lease = capture_scan(client).unwrap();
+    assert_eq!(scan_version(&lease).unwrap(), published.version() as i64);
+    {
+        use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+        let mut data = Parcel::new();
+        api::GetCodeLength {
+            package_name: Some("android".into()),
+            disabled: false,
+        }
+        .write(&mut data);
+        let reply = lease.transact(api::GET_CODE_LENGTH, &data, false).unwrap();
+        assert!(
+            api::read_get_code_length_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+                > 0
+        );
+    }
 
     owner.reject.store(true, Ordering::SeqCst);
     assert!(matches!(

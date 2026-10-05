@@ -1116,7 +1116,19 @@ death. Release units pass 466 cases (0.52s), with three ignored/not run. The
 full image/original-PMS template build passes (65.1s; nine rebuilt, 33 fresh). This
 connects complete native publication to the service-host transport; the running
 boot flow does not yet invoke publication, and SystemServer does not yet request
-these leases as its query owner. This does not prove original-service adoption or CTS. Mapped APK signing
+these leases as its query owner. System.complete_package_scan now resolves
+native library dependencies from the exact retained bootstrap bridge, completes
+runtime from native usage/seInfo/dependency owners plus explicit retained inputs,
+and publishes through that same bridge/base gate (#937). Original policy calls
+run without the publication lock; failure does not replace the previous version.
+The pinned-image bootstrap fixture scans the actual framework APK through saved
+system/data phases, supplies explicit fixture migration/fixed/process owners,
+then verifies complete publication and actual service-host Binder code access.
+Missing permission inputs and original policy rejection preserve the prior Store.
+That integration test passes (0.67s); ordinary release units pass 466 cases
+(0.48s), with three ignored/not run. The host build passes (16.1s; three rebuilt,
+39 fresh). This is an invoked native completion boundary in the bootstrap
+fixture, not the running NativeServices boot producer or native package activation. This does not prove original-service adoption or CTS. Mapped APK signing
 source IO classification is verified (#920). The runtime scan diagnostic now performs
 collection before its saved-record reconciliation as well: it retains original
 GSF current flags 23 and compares complete package settings. Original PMS runtime
