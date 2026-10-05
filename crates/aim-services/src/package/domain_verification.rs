@@ -4,6 +4,8 @@
 //! legacy per-user statuses, are separate from each package's domain set
 //! id and user restriction state.
 
+pub mod collector;
+
 use aim_android_xml::Element;
 
 use super::intent_filter::UriRelativeFilterGroup;

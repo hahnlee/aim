@@ -1127,15 +1127,19 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
             .publish_package_queries(&old, &published, bad)
             .is_err()
     );
-    for kind in 0..4 {
+    for kind in 0..5 {
         let mut bad = query_context(&published);
         let package = bad.packages.get_mut(&("fixture".into(), false)).unwrap();
         match kind {
             0 => package.app_id += 1,
             1 => package.path.push_str("/foreign"),
             2 => package.version += 1,
-            _ => {
+            3 => {
                 package.users.remove(&0);
+            }
+            _ => {
+                package.users.get_mut(&0).unwrap().domain_selection =
+                    Some((true, vec![("foreign.example".into(), 2)]));
             }
         }
         assert!(
@@ -2210,7 +2214,28 @@ fn verify_boot_scan(
     assert_eq!(complete, untouched);
     assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
-    let context = query_context_for(&complete, base.version() + 1);
+    let mut context = query_context_for(&complete, base.version() + 1);
+    use crate::package::domain_verification::collector::{self, Kind, Policy};
+    let web_hosts = collector::collect(
+        &complete.loaded_packages()["android"].package,
+        Policy {
+            restrict_domains: true,
+            linked_app: false,
+        },
+        Kind::Web,
+    );
+    for user in context
+        .packages
+        .get_mut(&("android".into(), false))
+        .unwrap()
+        .users
+        .values_mut()
+    {
+        user.domain_selection = Some((
+            true,
+            web_hosts.iter().map(|host| (host.clone(), 0)).collect(),
+        ));
+    }
     let mut bad = context.clone();
     bad.packages.remove(&("android".into(), false));
     let old_query = system.capture_package_queries().unwrap();

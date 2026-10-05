@@ -1351,6 +1351,7 @@ impl Resolver {
 
 mod chooser;
 mod domains;
+pub(crate) use domains::is_domain_name;
 
 #[cfg(test)]
 mod tests;

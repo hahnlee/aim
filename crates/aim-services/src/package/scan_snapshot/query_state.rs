@@ -211,6 +211,40 @@ fn package(
         owner.loaded_packages()
     }
     .get(&s.name);
+    if !factory {
+        let selected = extra
+            .users
+            .values()
+            .any(|user| user.domain_selection.is_some());
+        if selected {
+            let package = code.ok_or("domain selection requires current package code")?;
+            use crate::package::domain_verification::collector::{self, Kind, Policy};
+            // Web-domain collection uses the modern rules even for legacy apps.
+            let hosts = collector::collect(
+                &package.package,
+                Policy {
+                    restrict_domains: true,
+                    linked_app: false,
+                },
+                Kind::Web,
+            );
+            let expected: BTreeSet<_> = hosts.iter().map(String::as_str).collect();
+            for user in extra.users.values() {
+                if let Some((_, domains)) = &user.domain_selection {
+                    let actual: BTreeSet<_> =
+                        domains.iter().map(|(host, _)| host.as_str()).collect();
+                    if actual != expected
+                        || actual.len() != domains.len()
+                        || domains.iter().any(|(_, state)| !(0..=2).contains(state))
+                    {
+                        return Err(
+                            "query domain selection differs from current package code".into()
+                        );
+                    }
+                }
+            }
+        }
+    }
     let stored = if factory {
         owner.disabled_user_states(&s.name)
     } else {

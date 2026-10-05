@@ -1267,7 +1267,19 @@ rejects mismatched and changed owners and nullable replies, and rejects actual
 app UID. Its permission service is a controlled fixture: live AccessChecking
 and SystemServer permission/GID integration, exact retained old-UID grant
 ownership, full original UID-query/visibility parity and production domain/global
-context publication remain unproved. The earlier original policy fixture
+context publication remain unproved. Native domain collection now implements
+modern and legacy filter selection, linked-app policy, wildcard validity, Java
+ArraySet order and the 1 MiB UTF-16 estimate (#957). Active query publication
+checks each supplied user selection against the current native APK's complete
+web-host set, rejects duplicate hosts and invalid public selection states, and
+requires current code when selection is present. Factory and retained packages
+still require a separate domain owner. Release units pass 478 cases (four
+ignored/not run), including modern/legacy policy and byte-limit boundaries;
+explicit service-host tests pass six cases (2.94s), including real framework-APK
+selection publication and failure preservation. This is not an original
+collector execution comparison or attached domain lifecycle verification:
+install/update/restore transitions, compatibility-owner policy integration and
+native domain Binder registration remain unproved. The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
 build passes (57.7s; nine rebuilt, 33 fresh).
