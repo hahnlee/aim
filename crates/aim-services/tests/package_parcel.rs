@@ -714,8 +714,15 @@ fn native_package_parcels_match_original_read_write() {
         [None, None, Some(b"ABX\0\x10\x11".to_vec())],
         [Some(b"broken".to_vec()), None, None],
     ];
+    let mut recovery_cases = recovery_inputs.into_iter().map(|inputs| (inputs, [0u8; 3])).collect::<Vec<_>>();
+    recovery_cases.extend([
+        ([Some(b"<packages/>".to_vec()), None, None], [0, 1, 1]),
+        ([Some(b"<packages/>".to_vec()), None, None], [0, 0, 1]),
+        ([None, Some(b"<packages/>".to_vec()), None], [1, 0, 1]),
+        ([None, Some(b"<packages/>".to_vec()), None], [2, 0, 1]),
+    ]);
     let mut recovery_expected = Vec::new();
-    for (index, inputs) in recovery_inputs.iter().enumerate() {
+    for (index, (inputs, directories)) in recovery_cases.iter().enumerate() {
         let native = directory.join(format!("recovery-native-{index}"));
         fs::create_dir_all(native.join("system")).unwrap();
         let names = [
@@ -725,6 +732,12 @@ fn native_package_parcels_match_original_read_write() {
         ];
         let mut properties = String::new();
         for (slot, input) in inputs.iter().enumerate() {
+            if directories[slot] != 0 {
+                properties.push_str(&format!("{slot}={}\n", if directories[slot] == 1 {"directory"} else {"nonempty-directory"}));
+                let path = native.join("system").join(names[slot]); fs::create_dir(&path).unwrap();
+                if directories[slot] == 2 {fs::write(path.join("keep"), b"owned fixture").unwrap();}
+                continue;
+            }
             properties.push_str(&format!(
                 "{slot}={}\n",
                 input
@@ -760,17 +773,22 @@ fn native_package_parcels_match_original_read_write() {
                 Event::Removed(source) => format!("removed.{source:?}"),
                 Event::Failed { source, .. } => format!("failed.{source:?}"),
                 Event::NoStartTag(source) => format!("no-root.{source:?}"),
+                Event::OpenFailed(source) => format!("open-failed.{source:?}"),
+                Event::RemoveFailed(source) => format!("remove-failed.{source:?}"),
                 Event::Absent => "absent".into(),
             })
             .collect::<Vec<_>>()
             .join(",");
         let remains = names
             .iter()
-            .map(|name| match fs::read(native.join("system").join(name)) {
+            .map(|name| {
+                let path = native.join("system").join(name);
+                if path.is_dir() {return if path.read_dir().unwrap().next().is_some() {"nonempty-directory"} else {"directory"}.to_string();}
+                match fs::read(path) {
                 Ok(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
                 Err(error) => panic!("recovery output: {error}"),
-            })
+            }})
             .collect::<Vec<_>>()
             .join(";");
         recovery_expected.push(format!("{}|{events}|{remains}", report.first_boot));

@@ -2154,3 +2154,28 @@ fn domain_write_failures_publish_only_committed_disk_state() {
         store.state()
     );
 }
+
+#[test]
+fn exclusive_recovery_matches_directory_open_selection_and_cleanup() {
+    use recovery::{Event, Plan, Source};
+    let parse = |bytes: &[u8], settings: &mut crate::package::settings::Settings| {
+        let root = aim_android_xml::read(bytes)?; *settings = crate::package::settings::Settings::parse(&root)?; Ok(Some(root))
+    };
+    for nonempty in [false, true] {
+        let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap(); let paths = settings_paths(&data.0);
+        fs::create_dir(&paths[0]).unwrap(); if nonempty {fs::write(paths[0].join("keep"), b"owned fixture").unwrap();}
+        fs::write(&paths[1], b"<packages/>").unwrap(); fs::create_dir(&paths[2]).unwrap();
+        let (_, report) = Plan::inspect(&data.0).unwrap().recover(&[0], &mut Default::default(), parse).unwrap();
+        assert_eq!(report.events, vec![Event::Selected(Source::Backup), if nonempty {Event::RemoveFailed(Source::Main)} else {Event::Removed(Source::Main)}, Event::Removed(Source::Reserve)]);
+        assert_eq!(paths[0].exists(), nonempty); assert!(paths[1].is_file()); assert!(!paths[2].exists());
+    }
+    let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap(); let paths = settings_paths(&data.0);
+    fs::write(&paths[0], b"<packages/>").unwrap(); fs::create_dir(&paths[1]).unwrap(); fs::create_dir(&paths[2]).unwrap();
+    let (_, report) = Plan::inspect(&data.0).unwrap().recover(&[0], &mut Default::default(), parse).unwrap();
+    assert_eq!(report.events, vec![Event::OpenFailed(Source::Backup), Event::Selected(Source::Main)]); assert!(paths[1].is_dir() && paths[2].is_dir());
+    fs::remove_file(&paths[0]).unwrap(); fs::create_dir(&paths[0]).unwrap();
+    let error = Plan::inspect(&data.0).unwrap().recover(&[0], &mut Default::default(), parse).err().unwrap();
+    assert_eq!(error.events, vec![Event::OpenFailed(Source::Backup), Event::OpenFailed(Source::Main)]);
+    let plan = Plan::inspect(&data.0).unwrap(); fs::write(paths[1].join("foreign"), b"changed").unwrap();
+    assert!(plan.recover(&[0], &mut Default::default(), parse).is_err()); assert!(paths[1].join("foreign").is_file());
+}

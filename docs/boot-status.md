@@ -769,10 +769,20 @@ A late reserve-finalization failure publishes the committed main and the next
 write restores the reserve. Original ResilientAtomicFile agrees on partial main
 failure, empty retained reserve, descriptor-open failure and successful retry. Domain validation failures leave the directory unwritten, complete
 user XML survives, and a successful main commit changes the owner to restoration
-mode. An explicit exclusive recovery plan now claims regular settings inputs
-with pinned descriptors and exact bytes, then follows original backup/main/reserve
-selection and failRead cleanup (#912). Backup selection removes main/reserve
-before parsing; no-start-tag documents remain, whereas malformed reads remove
+mode. An explicit exclusive recovery plan claims regular settings inputs with
+pinned descriptors/exact bytes and directory roles with pinned identity/timestamps,
+then follows original backup/main/reserve selection and failRead cleanup (#912).
+Backup directories fail open and fall through to main; unused reserve directories
+are not parsed. Backup selection attempts main/reserve cleanup before parsing:
+empty directories are removed, while nonempty directory deletion failure is
+recorded and the directory is preserved, as original File.delete does. Selected
+main/reserve directories expose their open error. Four additional original ART
+cases verify directory selection/cleanup and resulting path kinds (full oracle
+42.17s, no skips), while native units verify external directory changes reject
+before cleanup (500 passed, 0.53s; five excluded). Production build passes
+(3 rebuilt, 39 fresh, 2.5s). Other nonregular/permission/open-I/O behavior and
+complete Settings frontend/boot orchestration remain #912/#914/#798.
+No-start-tag documents remain, whereas malformed reads remove
 the selected file and retry. Changed or replaced claimed files reject before
 cleanup. Optional XML root parsing distinguishes empty/whitespace and complete
 rootless ABX from truncated ABX. A real child process exits during its first

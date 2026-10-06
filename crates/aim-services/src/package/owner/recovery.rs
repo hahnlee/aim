@@ -6,7 +6,7 @@ use aim_android_xml::Element;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::PathBuf,
 };
 
@@ -23,6 +23,8 @@ pub enum Event {
     Removed(Source),
     Failed { source: Source, message: String },
     NoStartTag(Source),
+    OpenFailed(Source),
+    RemoveFailed(Source),
     Absent,
 }
 
@@ -42,6 +44,7 @@ struct Input {
     file: OwnedFile,
     source: Source,
     path: PathBuf,
+    directory: Option<(i64, i64, i64, i64)>,
 }
 
 /// Read-only claim of the canonical settings files. The exclusive boot owner
@@ -84,17 +87,20 @@ impl Plan {
                 events: Vec::new(),
                 message: error.to_string(),
             })?;
-            if !metadata.is_file() {
+            if !metadata.is_file() && !metadata.is_dir() {
                 return Err(Error {
                     events: Vec::new(),
-                    message: "settings input is not a regular file".into(),
+                    message: "unsupported nonregular settings input".into(),
                 });
             }
+            let directory = metadata.is_dir().then(|| directory_stamp(&metadata));
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes).map_err(|error| Error {
-                events: Vec::new(),
-                message: error.to_string(),
-            })?;
+            if directory.is_none() {
+                file.read_to_end(&mut bytes).map_err(|error| Error {
+                    events: Vec::new(),
+                    message: error.to_string(),
+                })?;
+            }
             inputs[index] = Some(Input {
                 file: OwnedFile {
                     file,
@@ -102,6 +108,7 @@ impl Plan {
                 },
                 source,
                 path,
+                directory,
             });
         }
         Ok(Self {
@@ -119,6 +126,10 @@ impl Plan {
             };
             match (&self.inputs[index], metadata) {
                 (None, None) => {}
+                (Some(input), Some(metadata))
+                    if metadata.is_dir()
+                        && input.file.same_file(&metadata)
+                        && input.directory == Some(directory_stamp(&metadata)) => {}
                 (Some(input), Some(metadata))
                     if metadata.is_file() && input.file.same_file(&metadata) =>
                 {
@@ -142,10 +153,21 @@ impl Plan {
             message,
         })?;
         if let Some(input) = &self.inputs[index] {
-            fs::remove_file(&input.path).map_err(|error| Error {
-                events: events.clone(),
-                message: error.to_string(),
-            })?;
+            let removed = if input.directory.is_some() {
+                fs::remove_dir(&input.path)
+            } else {
+                fs::remove_file(&input.path)
+            };
+            if let Err(error) = removed {
+                if input.directory.is_some() && error.raw_os_error() == Some(libc::ENOTEMPTY) {
+                    events.push(Event::RemoveFailed(input.source));
+                    return Ok(());
+                }
+                return Err(Error {
+                    events: events.clone(),
+                    message: error.to_string(),
+                });
+            }
             events.push(Event::Removed(input.source));
             self.inputs[index] = None;
         }
@@ -167,9 +189,35 @@ impl Plan {
                 events: events.clone(),
                 message,
             })?;
-            let selected = [1, 0, 2]
-                .into_iter()
-                .find(|index| self.inputs[*index].is_some());
+            let backup = self.inputs[1]
+                .as_ref()
+                .filter(|input| input.directory.is_none());
+            if self.inputs[1]
+                .as_ref()
+                .is_some_and(|input| input.directory.is_some())
+            {
+                events.push(Event::OpenFailed(Source::Backup));
+            }
+            let selected = if backup.is_some() {
+                Some(1)
+            } else {
+                [0, 2]
+                    .into_iter()
+                    .find(|index| self.inputs[*index].is_some())
+            };
+            if let Some(index) = selected
+                && self.inputs[index]
+                    .as_ref()
+                    .is_some_and(|input| input.directory.is_some())
+            {
+                events.push(Event::OpenFailed(
+                    self.inputs[index].as_ref().unwrap().source,
+                ));
+                return Err(Error {
+                    events,
+                    message: io::Error::from_raw_os_error(libc::EISDIR).to_string(),
+                });
+            }
             let Some(index) = selected else {
                 events.push(Event::Absent);
                 return self.finish(
@@ -256,12 +304,24 @@ impl Plan {
             message,
         })?;
         if !present {
-            store.first_write_files.extend(
-                self.inputs
-                    .iter_mut()
-                    .filter_map(|input| input.take().map(|input| input.file)),
-            );
+            store
+                .first_write_files
+                .extend(self.inputs.iter_mut().filter_map(|input| {
+                    input
+                        .take()
+                        .filter(|input| input.directory.is_none())
+                        .map(|input| input.file)
+                }));
         }
         Ok((store, report))
     }
+}
+
+fn directory_stamp(metadata: &fs::Metadata) -> (i64, i64, i64, i64) {
+    (
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
 }

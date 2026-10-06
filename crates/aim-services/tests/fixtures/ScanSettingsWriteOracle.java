@@ -317,7 +317,9 @@ public final class ScanSettingsWriteOracle {
             var files = new java.io.File[]{new java.io.File(root, "main"), new java.io.File(root, "backup"), new java.io.File(root, "reserve")};
             for (int slot = 0; slot < 3; slot++) {
                 files[slot].delete(); String value = inputs.getProperty(Integer.toString(slot));
-                if (!value.equals("missing")) {
+                if (value.equals("directory") || value.equals("nonempty-directory")) {
+                    files[slot].mkdir(); if (value.equals("nonempty-directory")) java.nio.file.Files.write(new java.io.File(files[slot], "keep").toPath(), new byte[] {1});
+                } else if (!value.equals("missing")) {
                     byte[] bytes = new byte[value.length() / 2];
                     for (int i = 0; i < bytes.length; i++) bytes[i] = (byte)Integer.parseInt(value.substring(i * 2, i * 2 + 2), 16);
                     java.nio.file.Files.write(files[slot].toPath(), bytes);
@@ -327,14 +329,15 @@ public final class ScanSettingsWriteOracle {
             var sources = new String[]{"Main", "Backup", "Reserve"};
             try (var atomic = new ResilientAtomicFile(files[0], files[1], files[2], 0660, "fixture", null)) {
                 while (true) {
-                    int selected = files[1].exists() ? 1 : files[0].exists() ? 0 : files[2].exists() ? 2 : -1;
+                    int selected = files[1].isFile() ? 1 : files[0].exists() ? 0 : files[2].exists() ? 2 : -1;
+                    if (files[1].isDirectory()) events.add("open-failed.Backup");
                     boolean main = files[0].exists(), reserve = files[2].exists();
                     var stream = atomic.openRead();
                     if (stream == null) { events.add("absent"); first = !failed; break; }
                     events.add("selected." + sources[selected]);
                     if (selected == 1) {
-                        if (main && !files[0].exists()) events.add("removed.Main");
-                        if (reserve && !files[2].exists()) events.add("removed.Reserve");
+                        if (main) events.add(!files[0].exists() ? "removed.Main" : "remove-failed.Main");
+                        if (reserve) events.add(!files[2].exists() ? "removed.Reserve" : "remove-failed.Reserve");
                     }
                     try {
                         var parser = android.util.Xml.resolvePullParser(stream); int event;
@@ -349,7 +352,7 @@ public final class ScanSettingsWriteOracle {
                 }
             }
             var remains = new java.util.ArrayList<String>();
-            for (var file : files) remains.add(file.exists() ? hex(java.nio.file.Files.readAllBytes(file.toPath())) : "missing");
+            for (var file : files) remains.add(file.isDirectory() ? (file.list().length == 0 ? "directory" : "nonempty-directory") : file.exists() ? hex(java.nio.file.Files.readAllBytes(file.toPath())) : "missing");
             String output = first + "|" + String.join(",", events) + "|" + String.join(";", remains);
             java.nio.file.Files.write(new java.io.File(directory, "recovery-output-" + index).toPath(), output.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
