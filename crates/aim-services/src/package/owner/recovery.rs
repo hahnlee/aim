@@ -22,11 +22,34 @@ pub enum Event {
     Selected(Source),
     Removed(Source),
     Failed { source: Source, message: String },
+    OwnerFailed { source: Source, message: String },
     NoStartTag(Source),
     OpenFailed(Source),
     RemoveFailed(Source),
     Absent,
 }
+
+/// Only errors in the guest settings input enter ResilientAtomicFile.failRead.
+/// Native owner/transport failures abort without deleting the selected input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadError {
+    File(String),
+    Owner(String),
+}
+
+impl From<String> for ReadError {
+    fn from(message: String) -> Self {
+        Self::File(message)
+    }
+}
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(message) | Self::Owner(message) => message.fmt(f),
+        }
+    }
+}
+impl std::error::Error for ReadError {}
 
 #[derive(Debug)]
 pub struct Error {
@@ -179,13 +202,26 @@ impl Plan {
         Ok(())
     }
 
-    /// The settings frontend owns incremental record mutations, including
-    /// effects before a failed read. This file owner never rolls them back.
+    /// For parsers whose errors describe guest input only. Native owner callbacks
+    /// use recover_with_owner. Neither entry rolls back earlier record mutations.
     pub fn recover(
-        mut self,
+        self,
         users: &[u32],
         settings: &mut Settings,
         mut parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, String>,
+    ) -> Result<(Store, Report), Error> {
+        self.recover_with_owner(users, settings, |bytes, settings| {
+            parse(bytes, settings).map_err(ReadError::File)
+        })
+    }
+
+    /// Native frontends classify unavailable owners separately from corrupt
+    /// input. Earlier parser/owner mutations remain observable on either error.
+    pub fn recover_with_owner(
+        mut self,
+        users: &[u32],
+        settings: &mut Settings,
+        mut parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
     ) -> Result<(Store, Report), Error> {
         let mut events = Vec::new();
         let mut failed = false;
@@ -267,7 +303,14 @@ impl Plan {
                         },
                     );
                 }
-                Err(message) => {
+                Err(ReadError::Owner(message)) => {
+                    events.push(Event::OwnerFailed {
+                        source,
+                        message: message.clone(),
+                    });
+                    return Err(Error { events, message });
+                }
+                Err(ReadError::File(message)) => {
                     failed = true;
                     events.push(Event::Failed { source, message });
                     self.remove(index, &mut events, false)?;

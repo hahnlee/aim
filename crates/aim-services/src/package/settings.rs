@@ -16,6 +16,7 @@ use super::domain_verification;
 use super::{children, string};
 
 mod signatures;
+pub use super::owner::recovery::ReadError;
 pub use signatures::SignatureReader;
 
 /// `ApplicationInfo.FLAG_SYSTEM`.
@@ -200,8 +201,8 @@ impl Package {
             &mut Self,
             &mut aim_android_xml::pull::Reader<'_>,
             &Element,
-        ) -> Result<bool, String>,
-    ) -> Result<(), String> {
+        ) -> Result<bool, ReadError>,
+    ) -> Result<(), ReadError> {
         use aim_android_xml::pull::Event;
         let outer = reader.depth();
         loop {
@@ -614,8 +615,8 @@ impl Settings {
             &mut Package,
             &mut aim_android_xml::pull::Reader<'_>,
             &Element,
-        ) -> Result<bool, String>,
-    ) -> Result<PackageReadOutcome, String> {
+        ) -> Result<bool, ReadError>,
+    ) -> Result<PackageReadOutcome, ReadError> {
         let Some(mut incoming) = package_header(start)? else {
             signatures::skip(reader)?;
             return Ok(PackageReadOutcome::InvalidHeader);
@@ -700,8 +701,8 @@ impl Settings {
             &mut SharedUser,
             &mut aim_android_xml::pull::Reader<'_>,
             &Element,
-        ) -> Result<bool, String>,
-    ) -> Result<SharedReadOutcome, String> {
+        ) -> Result<bool, ReadError>,
+    ) -> Result<SharedReadOutcome, ReadError> {
         use aim_android_xml::pull::Event;
         let (Some(name), app_id) = (string(start, "name"), defaulted(start.int("userId"), 0))
         else {
@@ -1570,7 +1571,9 @@ mod incremental_package_tests {
         let Event::Start(start) = reader.next()? else {
             panic!()
         };
-        settings.read_package(&mut reader, &start, ids, attempt, |_, _, _| Ok(false))
+        settings
+            .read_package(&mut reader, &start, ids, attempt, |_, _, _| Ok(false))
+            .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -1648,7 +1651,9 @@ mod incremental_package_tests {
         let Event::Start(start) = reader.next()? else {
             panic!()
         };
-        settings.read_shared_user(&mut reader, &start, ids, attempt, |_, _, _| Ok(false))
+        settings
+            .read_shared_user(&mut reader, &start, ids, attempt, |_, _, _| Ok(false))
+            .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -1822,10 +1827,13 @@ mod incremental_package_tests {
             .read_children(&mut reader, &mut signatures, &mut refs, |p, _, child| {
                 assert_eq!(child.name, "perms");
                 assert_eq!(p.uses_static_libraries, [("l".into(), 3)]);
-                Err("legacy permission owner failed".into())
+                Err(ReadError::Owner("legacy permission owner failed".into()))
             })
             .unwrap_err();
-        assert_eq!(error, "legacy permission owner failed");
+        assert_eq!(
+            error,
+            ReadError::Owner("legacy permission owner failed".into())
+        );
         assert_eq!(package.uses_static_libraries, [("l".into(), 3)]);
     }
 

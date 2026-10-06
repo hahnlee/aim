@@ -2201,3 +2201,65 @@ fn backup_cleanup_permission_failure_is_reported_without_aborting_the_read() {
     let error = plan.recover(&[0], &mut Default::default(), |_, _| Err("controlled parse failure".into())).err().unwrap();
     assert!(matches!(error.events.last(), Some(Event::Failed {source: Source::Backup, ..}))); assert!(paths.iter().all(|path| path.is_file())); drop(restore);
 }
+
+
+#[test]
+fn native_frontend_owner_failure_preserves_selected_input_and_prior_effects() {
+    use recovery::{Event, Plan, ReadError, Source};
+    for backup in [false, true] {
+        let data = Data::new();
+        let paths = settings_paths(&data.0);
+        fs::create_dir_all(data.0.join("system")).unwrap();
+        let bytes = b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><perms/></package></packages>";
+        for path in &paths { fs::write(path, bytes).unwrap(); }
+        if !backup { fs::remove_file(&paths[1]).unwrap(); }
+        let plan = Plan::inspect(&data.0).unwrap();
+        let mut settings = crate::package::settings::Settings::default();
+        let mut calls = 0;
+        let mut ids = crate::package::owner::app_ids::AppIds::default();
+        let mut attempt = crate::package::settings::PackageReadAttempt::default();
+        let error = plan.recover_with_owner(&[0], &mut settings, |bytes, state| {
+            use aim_android_xml::pull::{Event, Reader};
+            calls += 1;
+            state.find_or_create_version(None).sdk_version = 36;
+            let mut reader = Reader::new(bytes).map_err(ReadError::File)?;
+            reader.next().map_err(ReadError::File)?;
+            let Event::Start(start) = reader.next().map_err(ReadError::File)? else { panic!() };
+            state.read_package(&mut reader, &start, &mut ids, &mut attempt, |_, _, _| {
+                Err(ReadError::Owner("package policy bridge unavailable".into()))
+            })?;
+            Ok(Some(element("packages")))
+        }).err().unwrap();
+        let source = if backup { Source::Backup } else { Source::Main };
+        assert_eq!(calls, 1);
+        assert_eq!(settings.versions[0].sdk_version, 36);
+        assert_eq!(settings.packages[0].name, "p");
+        assert!(ids.get(10001).is_some());
+        assert_eq!(error.message, "package policy bridge unavailable");
+        assert_eq!(error.events.last(), Some(&Event::OwnerFailed { source, message: error.message.clone() }));
+        assert!(!error.events.iter().any(|event| matches!(event, Event::Failed { .. })));
+        assert_eq!(fs::read(&paths[if backup {1} else {0}]).unwrap(), bytes);
+        if backup {
+            // Backup openRead cleanup precedes the frontend, as in the original.
+            assert!(!paths[0].exists()); assert!(!paths[2].exists());
+        } else { assert!(paths[2].is_file()); }
+    }
+}
+
+#[test]
+fn classified_file_failure_still_removes_corrupt_input_and_retries_reserve() {
+    use recovery::{Event, Plan, ReadError, Source};
+    let data = Data::new(); let paths = settings_paths(&data.0);
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    fs::write(&paths[0], b"<packages><").unwrap();
+    fs::write(&paths[2], b"<packages/>").unwrap();
+    let mut settings = crate::package::settings::Settings::default();
+    let (_, report) = Plan::inspect(&data.0).unwrap().recover_with_owner(&[0], &mut settings, |bytes, state| {
+        let root = aim_android_xml::read_next_optional(bytes).map_err(ReadError::File)?;
+        if let Some(root) = &root { *state = crate::package::settings::Settings::parse(root).map_err(ReadError::File)?; }
+        Ok(root)
+    }).unwrap();
+    assert!(!report.first_boot); assert!(!paths[0].exists()); assert!(paths[2].is_file());
+    assert!(report.events.iter().any(|event| matches!(event, Event::Failed { source: Source::Main, .. })));
+    assert_eq!(report.events.last(), Some(&Event::Selected(Source::Reserve)));
+}

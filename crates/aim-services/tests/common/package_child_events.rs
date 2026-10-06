@@ -69,13 +69,11 @@ pub fn read(bytes: &[u8]) -> Package {
         loop {
             match reader.next()? {
                 Event::Start(start) if start.name == "package" => {
-                    settings.read_package(
-                        &mut reader,
-                        &start,
-                        &mut ids,
-                        &mut attempt,
-                        |_, _, _| Ok(false),
-                    )?;
+                    settings
+                        .read_package(&mut reader, &start, &mut ids, &mut attempt, |_, _, _| {
+                            Ok(false)
+                        })
+                        .map_err(|error| error.to_string())?;
                 }
                 Event::Start(_) => panic!("unexpected top-level fixture owner"),
                 Event::End(_) if reader.depth() == 1 => return Ok(()),

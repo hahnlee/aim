@@ -788,6 +788,7 @@ fn native_package_parcels_match_original_read_write() {
                 Event::Selected(source) => format!("selected.{source:?}"),
                 Event::Removed(source) => format!("removed.{source:?}"),
                 Event::Failed { source, .. } => format!("failed.{source:?}"),
+                Event::OwnerFailed { source, .. } => format!("owner-failed.{source:?}"),
                 Event::NoStartTag(source) => format!("no-root.{source:?}"),
                 Event::OpenFailed(source) => format!("open-failed.{source:?}"),
                 Event::RemoveFailed(source) => format!("remove-failed.{source:?}"),

@@ -907,10 +907,20 @@ original Settings.readLPw agrees on package/group inventory projections for 238
 additional text/ABX cases (registration order, collisions, same-ID flag retention,
 truncation and empty-reserve retry). These use no users and exclude group
 membership/aggregate flags, legacy permission and user-binding side effects.
-511 service units pass (5 excluded, 0.50s); full original ART oracle passes without
-skips (57.26s), retaining the 866 package-body/header cases. Production runtime
-build passes (3 rebuilt/39 fresh, 1.1s); previous image/template build passed
-(6 rebuilt/36 fresh, 72.1s). An original
+Package, body and shared-UID reader callbacks now return a shared typed ReadError.
+Exclusive recovery's recover_with_owner sends File failures through failRead
+cleanup/retry, while Owner failures emit OwnerFailed and return without deleting
+the selected input or retrying. An actual package-reader owner failure test retains
+its registered package, UID slot and earlier version mutation for main and backup
+selection. Backup openRead cleanup of unused main/reserve still precedes frontend
+execution, as in the original. A separate File-error test removes corrupted main
+and selects reserve. The string-error recover entry remains for file-only parsers;
+native callbacks use the typed entry. Full error-source classification in the
+remaining native frontend owners is still required (#914/#912).
+513 service units pass (5 excluded, 0.51s); full original ART oracle passes without
+skips (57.20s), retaining 866 package-body/header and 238 shared UID cases.
+Production runtime build passes (3 rebuilt/39 fresh, 23.9s); previous image/template
+build passed (6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier
 checks it against the pinned original. Only worktree incremental cache was removed
