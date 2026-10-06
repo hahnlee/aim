@@ -219,6 +219,33 @@ impl Owner {
         }
         Some(p)
     }
+    /// Caller schedules a settings write after each clear, even for a missing row.
+    pub fn clear_package(&mut self, name: &str) {
+        self.remove(name);
+        self.saved.clear_package(name);
+    }
+    pub fn clear_package_for_user(&mut self, name: &str, id: i32) {
+        for p in self
+            .attached
+            .iter_mut()
+            .chain(&mut self.saved.active)
+            .chain(&mut self.saved.restored)
+            .filter(|p| p.name == name)
+        {
+            p.users.retain(|u| u.id != id);
+        }
+    }
+    pub fn clear_user(&mut self, id: i32) {
+        for p in self
+            .attached
+            .iter_mut()
+            .chain(&mut self.saved.active)
+            .chain(&mut self.saved.restored)
+        {
+            p.users.retain(|u| u.id != id);
+        }
+        // The original does not remove its separate legacy migration owner.
+    }
     fn put(&mut self, p: Package) {
         self.remove(&p.name);
         self.ids.insert(p.id.clone(), p.name.clone());

@@ -111,6 +111,9 @@ public final class DomainCollectorOracle {
                 var parser = android.util.Xml.resolvePullParser(stream); parser.next();
                 service.readSettings(null, parser);
             }
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-cleanup-legacy.input"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next(); service.readLegacySettings(parser);
+            }
             var oldSetting = domainSetting(code, i == 1, "00000000-0000-0000-0000-00000000000b");
             service.addPackage((com.android.server.pm.pkg.PackageStateInternal) oldSetting, null);
             writeDomains(directory, i, "add", service);
@@ -119,6 +122,15 @@ public final class DomainCollectorOracle {
             service.migrateState((com.android.server.pm.pkg.PackageStateInternal) oldSetting, (com.android.server.pm.pkg.PackageStateInternal) newSetting, null);
             writeDomains(directory, i, "migrate", service);
             writeQueries(directory, i, "migrate", service, newSetting);
+            var connection = new DomainConnection(newSetting); service.setConnection(connection);
+            service.clearPackageForUser("fixture.domains", 10); writeDomains(directory, i, "package-user", service);
+            service.clearUser(10); writeDomains(directory, i, "user", service);
+            service.clearPackage("fixture.domains"); writeDomains(directory, i, "package", service);
+            service.clearPackage("pending.only"); service.clearPackage("restored.only");
+            writeDomains(directory, i, "pending-restored", service);
+            service.clearPackage("missing"); service.clearPackageForUser("missing", 10); service.clearUser(-1);
+            if (connection.writes != 8) throw new AssertionError("domain cleanup persistence requests differ: " + connection.writes);
+
         }
     }
     private static com.android.server.pm.PackageSetting domainSetting(com.android.server.pm.pkg.AndroidPackage code, boolean system, String id) {
@@ -146,6 +158,7 @@ public final class DomainCollectorOracle {
     private static final class DomainConnection implements com.android.server.pm.verify.domain.DomainVerificationManagerInternal.Connection {
         final DomainComputer computer;
         int user;
+        int writes;
         DomainConnection(com.android.server.pm.PackageSetting setting) { computer = new DomainComputer(setting); }
         public int getCallingUid() { return 1000; }
         public int getCallingUserId() { return user; }
@@ -156,7 +169,7 @@ public final class DomainCollectorOracle {
             if (!"fixture.domains".equals(name) || uid != 1000 || !doesUserExist(id)) throw new AssertionError("foreign domain visibility identity");
             return false;
         }
-        public void scheduleWriteSettings() { throw new AssertionError("unexpected query write"); }
+        public void scheduleWriteSettings() { writes++; }
     }
     private static void writeStates(android.os.Parcel out, java.util.Map<String, Integer> states) {
         var sorted = new java.util.TreeMap<>(states);
@@ -177,6 +190,7 @@ public final class DomainCollectorOracle {
                 out.writeInt(selection.isLinkHandlingAllowed() ? 1 : 0);
                 writeStates(out, selection.getHostToStateMap());
             }
+            if (connection.writes != 0) throw new AssertionError("query scheduled a settings write");
             java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".queries").toPath(), out.marshall());
         } finally { out.recycle(); }
     }

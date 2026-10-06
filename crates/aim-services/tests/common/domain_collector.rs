@@ -246,6 +246,7 @@ pub fn export(directory: &Path) {
 }
 
 fn attachment_inputs(directory: &Path) {
+    fs::write(directory.join("domain-cleanup-legacy.input"), "<domain-verifications-legacy><user-states packageName='fixture.domains'><user-state userId='10' state='2'/></user-states></domain-verifications-legacy>").unwrap();
     let hosts: Vec<_> = (0..=8)
         .map(|i| format!("h{i}.example"))
         .chain(["h1024.example".into()])
@@ -275,6 +276,19 @@ fn attachment_inputs(directory: &Path) {
         let xml = format!(
             "<domain-verifications><{section}><package-state packageName='fixture.domains' id='00000000-0000-0000-0000-00000000000a' hasAutoVerifyDomains='true' signature='{signature}'><state>{domains}<domain name='gone.example' state='1'/></state><user-states><user-state userId='10' allowLinkHandling='false'><enabled-hosts><host name='h1.example'/><host name='h3.example'/><host name='h6.example'/><host name='h1024.example'/><host name='gone.example'/></enabled-hosts></user-state></user-states></package-state></{section}></domain-verifications>"
         );
+        let extra = |name, id| {
+            format!(
+                "<package-state packageName='{name}' id='00000000-0000-0000-0000-{id}' hasAutoVerifyDomains='false'><user-states><user-state userId='10' allowLinkHandling='false'/><user-state userId='11' allowLinkHandling='true'/></user-states></package-state>"
+            )
+        };
+        let xml = xml.replace(
+            "</domain-verifications>",
+            &format!(
+                "<active>{}</active><restored>{}</restored></domain-verifications>",
+                extra("pending.only", "00000000000e"),
+                extra("restored.only", "00000000000f")
+            ),
+        );
         fs::write(directory.join(format!("domain-owner-{case}.input")), xml).unwrap();
     }
 }
@@ -296,6 +310,14 @@ pub fn verify_attachment(directory: &Path) {
             .read(
                 &aim_android_xml::read(
                     &fs::read(directory.join(format!("domain-owner-{case}.input"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        saved
+            .read_legacy(
+                &aim_android_xml::read(
+                    &fs::read(directory.join("domain-cleanup-legacy.input")).unwrap(),
                 )
                 .unwrap(),
             )
@@ -340,6 +362,12 @@ pub fn verify_attachment(directory: &Path) {
                         .unwrap(),
                 )
                 .unwrap();
+            if let Some(legacy) = root
+                .children()
+                .find(|e| e.name == "domain-verifications-legacy")
+            {
+                original.read_legacy(legacy).unwrap();
+            }
             let values = owner
                 .queries(&code, true, &config, [0, 10])
                 .unwrap()
@@ -367,11 +395,51 @@ pub fn verify_attachment(directory: &Path) {
                 "public domain queries case={case} stage={stage}"
             );
             assert_eq!(
-                owner.persisted(),
-                original,
+                canonical(owner.persisted()),
+                canonical(original),
                 "attached domain state case={case} stage={stage}"
             );
         }
+        for stage in ["package-user", "user", "package", "pending-restored"] {
+            match stage {
+                "package-user" => owner.clear_package_for_user("fixture.domains", 10),
+                "user" => owner.clear_user(10),
+                "package" => owner.clear_package("fixture.domains"),
+                _ => {
+                    owner.clear_package("pending.only");
+                    owner.clear_package("restored.only");
+                }
+            }
+            let root = aim_android_xml::read(
+                &fs::read(directory.join(format!("domain-owner-{case}-{stage}.original"))).unwrap(),
+            )
+            .unwrap();
+            let mut original = State::default();
+            original
+                .read(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications")
+                        .unwrap(),
+                )
+                .unwrap();
+            original
+                .read_legacy(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications-legacy")
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                canonical(owner.persisted()),
+                canonical(original),
+                "domain cleanup case={case} stage={stage}"
+            );
+        }
+        assert!(
+            owner
+                .package_by_id("00000000-0000-0000-0000-00000000000c")
+                .is_none()
+        );
     }
 }
 
@@ -452,4 +520,13 @@ pub fn verify_legacy(directory: &Path) {
             "legacy domain import case={index}"
         );
     }
+}
+
+// Persistence writes an ArraySet of package values; compare its logical maps.
+fn canonical(
+    mut state: aim_services::package::domain_verification::State,
+) -> aim_services::package::domain_verification::State {
+    state.active.sort_by(|a, b| a.name.cmp(&b.name));
+    state.restored.sort_by(|a, b| a.name.cmp(&b.name));
+    state
 }

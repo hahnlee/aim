@@ -1332,7 +1332,17 @@ unchanged scan/query/domain capture pointers after a rejected publication,
 bootstrap replacement clearing the current domain owner and retained old-domain
 capture isolation. first_system_scan and package_parcel compile; compilation is
 not execution. Automatic startup through this composite entry and native domain
-Binder registration remain unwired. The fixture runs the image's original collector with a controlled
+Binder registration remain unwired. The attached owner now implements
+clearPackage, clearPackageForUser and clearUser: current, pending and restored
+state are removed at the original scope, the UUID index follows package removal,
+and separate legacy migration state is retained. The original service executes
+sixteen cleanup-state comparisons across the four attachment scenarios, with
+pending/restored-only packages and users 10/11. It schedules one settings write
+for every clear request, including missing entries, while queries schedule none.
+The fixture also executes fresh legacy-user approval migration (status ALWAYS),
+inherited/immutable paths that skip it, and legacy state surviving user removal.
+Logical package maps are compared independently of the persistence writer's
+ArraySet value order. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1343,11 +1353,10 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(41.33s, no skips); release units pass 482 cases (four excluded from the default
-run, 0.50s). The final full build is fresh (42 nodes, 0.2s);
-the image/original-PMS template remains fresh. The original-ART result above is
-from the prior domain-import run; this retention change was verified natively.
-URI-group migration, legacy per-user/pre-verified transitions and missing-owner recovery
+(29.02s, no skips); release units pass 482 cases (four excluded from the default
+run, 0.46s). The full image/original-PMS template build passes (nine rebuilt,
+33 fresh, 60.2s); final host build is fresh (13 nodes, 0.2s).
+URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
 Binder registration remain unproved. Native cache read/write and facade serialization
@@ -1355,8 +1364,8 @@ now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 482
-cases (four excluded from the default run, 0.50s). The final full build is fresh
-(42 nodes, 0.2s).
+cases (four excluded from the default run, 0.46s). The full build passes
+(nine rebuilt, 33 fresh, 60.2s); final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
