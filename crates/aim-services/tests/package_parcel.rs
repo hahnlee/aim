@@ -17,6 +17,7 @@ mod common {
     pub mod shared_read_events;
     pub mod key_set_events;
     pub mod verifier_events;
+    pub mod legacy_domain_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -610,6 +611,12 @@ fn native_package_parcels_match_original_read_write() {
         common::verifier_events::read(bytes)
     }).collect();
     eprintln!("original verifier recovery cases: {}", verifier_event_inputs.len());
+    let legacy_domain_inputs = common::legacy_domain_events::inputs();
+    let legacy_domain_expected: Vec<_> = legacy_domain_inputs.iter().enumerate().map(|(index, bytes)| {
+        fs::write(directory.join(format!("legacy-domain-event-input-{index}")), bytes).unwrap();
+        common::legacy_domain_events::projection(&common::legacy_domain_events::read(bytes))
+    }).collect();
+    eprintln!("original legacy domain event cases: {}", legacy_domain_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -4314,6 +4321,11 @@ fn native_package_parcels_match_original_read_write() {
     }
     for (index, expected) in verifier_event_expected.iter().enumerate() {
         assert_eq!(fs::read_to_string(directory.join(format!("verifier-event-output-{index}"))).unwrap(), *expected, "original verifier read/retry {index}");
+    }
+    for (index, expected) in legacy_domain_expected.iter().enumerate() {
+        let root = aim_android_xml::read_next(&fs::read(directory.join(format!("legacy-domain-event-output-{index}"))).unwrap()).unwrap();
+        let mut state = aim_services::package::domain_verification::State::default(); state.read_legacy(&root).unwrap();
+        assert_eq!(common::legacy_domain_events::projection(&state), *expected, "original legacy domain event {index}");
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {

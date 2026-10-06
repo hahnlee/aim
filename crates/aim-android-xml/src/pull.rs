@@ -114,6 +114,15 @@ impl<'a> Reader<'a> {
         Ok(document.root)
     }
 
+    /// SettingsXml.moveToNext explicitly catches an XML exception and keeps
+    /// reading its cursor. Call only after recording that section's diagnostic;
+    /// unaccepted errors continue to prevent document export.
+    pub fn resume_document_after_section_error(&mut self) {
+        if let Some(document) = &mut self.document {
+            document.failed = false;
+        }
+    }
+
     /// END_TAG retains its element's depth until the next event, as Android does.
     pub fn depth(&self) -> i32 {
         self.depth

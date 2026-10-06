@@ -5,6 +5,8 @@
 //! id and user restriction state.
 
 pub mod collector;
+mod legacy_read;
+pub use legacy_read::SectionError;
 pub mod domain_set;
 pub mod enforcer;
 pub mod owner;
@@ -74,22 +76,11 @@ impl State {
 
     /// `DomainVerificationLegacySettings.readSettings`.
     pub fn read_legacy(&mut self, root: &Element) -> Result<(), String> {
-        for section in children(root, "user-states") {
-            let name = string(section, "packageName");
-            let index = match self.legacy.iter().position(|(key, _)| *key == name) {
-                Some(index) => index,
-                None => {
-                    self.legacy.push((name, Vec::new()));
-                    self.legacy.len() - 1
-                }
-            };
-            let users = &mut self.legacy[index].1;
-            for child in children(section, "user-state") {
-                let id = number(child, "userId", -1);
-                let status = number(child, "state", -1);
-                put(users, id, (id, status), |(id, _)| id);
-            }
-        }
+        let bytes = aim_android_xml::abx::write(root)?;
+        let mut reader = aim_android_xml::pull::Reader::new(&bytes)?;
+        reader.next()?;
+        let errors = self.read_legacy_events(&mut reader);
+        if let Some(error) = errors.first() { return Err(error.message.clone()); }
         Ok(())
     }
 }

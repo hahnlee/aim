@@ -666,6 +666,11 @@ impl Settings {
                         }
                     }
                     "verifier" => self.read_verifier(&start)?,
+                    "domain-verifications-legacy" => {
+                        for error in self.domain_verification.read_legacy_events(reader) {
+                            eprintln!("legacy domain SettingsXml depth {}: {}", error.depth, error.message);
+                        }
+                    }
                     "preferred-packages" | "read-external-storage" => {}
                     _ => {
                         if !read_record(self, reader, &start)? {
@@ -676,7 +681,6 @@ impl Settings {
                                     | "updated-package"
                                     | "keyset-settings"
                                     | "domain-verifications"
-                                    | "domain-verifications-legacy"
                                     | "preferred-activities"
                                     | "persistent-preferred-activities"
                                     | "crossProfile-intent-filters"

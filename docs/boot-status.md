@@ -996,12 +996,30 @@ the pinned image; an initial implicit no-arg constructor mismatch was corrected
 to the original long constructor. No identities are generated/spoofed and no
 original guest code is modified. Domain SettingsXml cursor/error/merge semantics
 and full remaining owner/bootstrap integration remain #914/#957/#798.
-17 XML tests and 524 service units pass (5 service tests excluded, 0.52s).
-Full original ART oracle passes without skips (58.87s), retaining package/shared
-UID/keyset/read-and-retirement/permission projections. Image/template build passes
-(6 rebuilt/36 fresh, 72.9s). The prior explicit retained-owner native framework-res
-scan passed (1.45s); it was not rerun for this verifier-owner change.
-Source: pinned frameworks/base core/java/android/content/pm/VerifierDeviceIdentity.java.
+Native legacy domain reads now follow DomainVerificationLegacySettings's shared
+SettingsXml cursor/depth stack. Unknown tags expose nested user-states/user-state
+starts; each user value changes before later reads, duplicate IDs replace, and
+malformed/default attributes use the original defaults. Section parser exceptions
+end that move without popping the original stack, retain prior state and return
+explicit depth/message diagnostics. Accepted section errors resume document
+capture, while unaccepted errors still prevent export; the dispatcher logs the
+section diagnostics. AST legacy import delegates to this same event owner rather
+than its previous direct-child-only traversal. Actual original legacy owner
+read/write agrees on 133 text/ABX cases: nested unknown tags, duplicates,
+null/empty package names, defaults, malformed text, trailing input and ABX
+truncation. The projection excludes empty/null SparseIntArray distinctions and
+legacy attached/info lifecycle; full modern domain cursor/merge and native
+bootstrap integration remain #957/#914/#798.
+17 XML tests and 526 service units pass (5 service tests excluded, 0.58s).
+Full original ART oracle passes without skips (62.29s), retaining prior verifier,
+package/shared/keyset/read-and-retirement/permission comparisons. The first run
+failed in the existing package oracle with ENOSPC (#903); removal of only this
+worktree's regenerable debug object files increased physical free space from
+2.2 to 7.3GiB before the successful retry. Image/template build passed
+(11 rebuilt/31 fresh, 78.1s), final runtime rebuild passed (3 rebuilt/39 fresh,
+1.5s). The prior retained-owner framework-res scan passed (1.45s) and was not
+rerun for this legacy-owner change. Source: pinned DomainVerificationLegacySettings.java
+and SettingsXml.java; verifier semantics use pinned VerifierDeviceIdentity.java.
  An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier

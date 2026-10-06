@@ -41,6 +41,7 @@ public final class ScanSettingsWriteOracle {
         verifySharedReadEvents(cache.getParentFile());
         verifyKeySetEvents(cache.getParentFile());
         verifyVerifierEvents(cache.getParentFile());
+        verifyLegacyDomainEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -71,6 +72,21 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyLegacyDomainEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "legacy-domain-event-input-" + index); if (!input.exists()) break;
+            var owner = new com.android.server.pm.verify.domain.DomainVerificationLegacySettings();
+            try (var stream = new java.io.FileInputStream(input)) {
+                var xml = android.util.Xml.resolvePullParser(stream);
+                while (xml.next() != 2) {}
+                owner.readSettings(xml);
+            }
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "legacy-domain-event-output-" + index))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true);
+                owner.writeSettings(xml); xml.endDocument();
+            }
         }
     }
     private static void verifyVerifierEvents(java.io.File directory) throws Exception {
