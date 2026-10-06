@@ -249,24 +249,25 @@ fn main_of(pkg: &AndroidPackage, kind: Kind, index: usize) -> &MainComponent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MimeGroupError {
     MissingGroup,
     NullType,
-    UriMatching,
+    UriMatching(super::domain_verification::uri_parcel::MatchError),
 }
 
 impl MimeGroupError {
     pub fn reply(self) -> Parcel {
         let mut reply = Parcel::new();
-        reply.write_exception(&aim_binder_host::parcel::Exception::new(
-            aim_binder_host::parcel::EX_NULL_POINTER,
-            match self {
-                Self::MissingGroup => "missing MIME group during component registration",
-                Self::NullType => "null MIME type during component registration",
-                Self::UriMatching => "URI filter matching exception during visibility construction",
-            },
-        ));
+        use aim_binder_host::parcel::{EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception};
+        let exception = match self {
+            Self::MissingGroup => Exception::new(EX_NULL_POINTER, "missing MIME group during component registration"),
+            Self::NullType => Exception::new(EX_NULL_POINTER, "null MIME type during component registration"),
+            Self::UriMatching(error) => error.binder_exception().unwrap_or_else(|| {
+                Exception::new(EX_UNSUPPORTED_OPERATION, "non-serializable URI matching exception")
+            }),
+        };
+        reply.write_exception(&exception);
         reply
     }
 }

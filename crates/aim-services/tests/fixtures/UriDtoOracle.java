@@ -76,17 +76,20 @@ final class UriDtoOracle {
             java.nio.file.Files.write(new java.io.File(directory, "uri-conversion-errors.original").toPath(), out.marshall());
             out.recycle(); out = android.os.Parcel.obtain();
             String[] uris = {"https://x/path?q=1#frag", "https://x", "mailto:x", "", "https://x?;", "#"};
-            out.writeInt(4 * 4 * 7 * uris.length);
-            for (String value : new String[] {null, "", "/path", "["}) for (int part : new int[] {-1, 0, 1, 2})
+            String[] patterns = {null, "", "/path", "[", "a**", "[a", "a{2,1}", "*", "a{", "a{z}"};
+            out.writeInt(patterns.length * 4 * 7 * uris.length);
+            for (String value : patterns) for (int part : new int[] {-1, 0, 1, 2})
                 for (int pattern : new int[] {-1, 0, 1, 2, 3, 4, 99}) for (String uri : uris) {
                     var parcel = new android.content.UriRelativeFilterParcel(); parcel.uriPart = part; parcel.patternType = pattern; parcel.filter = value;
                     out.writeInt(part); out.writeInt(pattern); out.writeString(value); out.writeString(uri);
-                    int result;
+                    int result; Throwable failure = null;
                     try { result = new android.content.UriRelativeFilter(parcel).matchData(android.net.Uri.parse(uri)) ? 1 : 0; }
-                    catch (NullPointerException error) { result = -1; }
-                    catch (IllegalArgumentException error) { result = -2; }
-                    catch (IndexOutOfBoundsException error) { result = -3; }
+                    catch (NullPointerException error) { result = -1; failure = error; }
+                    catch (IllegalArgumentException error) { result = -2; failure = error; }
+                    catch (IndexOutOfBoundsException error) { result = -3; failure = error; }
                     out.writeInt(result);
+                    out.writeString(failure == null ? null : failure.getClass().getName());
+                    out.writeString(failure == null ? null : failure.getMessage());
                 }
             java.nio.file.Files.write(new java.io.File(directory, "uri-null-match.original").toPath(), out.marshall());
         } finally { out.recycle(); }

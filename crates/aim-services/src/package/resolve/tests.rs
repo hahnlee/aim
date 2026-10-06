@@ -727,3 +727,36 @@ fn mime_owner_failures_do_not_publish_partial_resolvers() {
     ));
     assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
 }
+
+#[test]
+fn visibility_construction_retains_uri_matcher_errors_and_the_previous_resolver() {
+    let querying = package("querying", 10001, false, |pkg| {
+        pkg.queries_intents = vec![Intent {
+            action: Some(VIEW.into()), data: Some(Uri::parse("https://x/path")),
+            ..Intent::default()
+        }];
+    });
+    let target = package("target", 10002, false, |pkg| {
+        let mut intent = filter(VIEW, None, Some("https"), 0);
+        intent.filter.add_data_authority("x", None);
+        pkg.activities = vec![Activity {main: main("target", "target.View", vec![intent]), ..Activity::default()}];
+    });
+    let valid = Arc::new(State {packages: [("querying".into(), querying), ("target".into(), target)].into_iter().collect(), ..State::default()});
+    let resolver = Resolver::default(); let first = resolver.resolution(&valid).unwrap();
+    for (pattern, kind) in [(None, 0), (None, 1), (None, 3), (Some("*"), 3), (Some("["), 3)] {
+        let mut invalid = (*valid).clone();
+        let pkg = Arc::make_mut(invalid.packages.get_mut("target").unwrap().pkg.as_mut().unwrap());
+        let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0);
+        group.add_nullable(0, kind, pattern);
+        pkg.activities[0].main.component.intents[0].filter.add_uri_relative_filter_group(group);
+        let invalid = Arc::new(invalid);
+        let MimeGroupError::UriMatching(error) = resolver.resolution(&invalid).err().unwrap() else {panic!("lost URI matcher error")};
+        let request = Parcel::new();
+        let reply = resolver.query(&invalid, pm::QUERY_INTENT_ACTIVITIES, 1000, &mut aim_binder_host::parcel::Reader::new(request.data(), &[])).unwrap().unwrap();
+        let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
+        if let Some(expected) = error.binder_exception() {
+            assert_eq!(exception.code, expected.code); assert_eq!(exception.message, expected.message);
+        } else {assert_eq!(exception.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);}
+        assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
+    }
+}

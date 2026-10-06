@@ -14,11 +14,38 @@ pub struct Group {
     pub action: i32,
     pub filters: Option<Vec<Option<Filter>>>,
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MatchError {
-    NullPattern,
+    NullPattern(i32),
     InvalidPattern(String),
     IndexOutOfBounds { length: usize, index: usize },
+}
+impl MatchError {
+    pub fn java_class(&self) -> &'static str {
+        match self {
+            Self::NullPattern(_) => "java.lang.NullPointerException",
+            Self::InvalidPattern(_) => "java.lang.IllegalArgumentException",
+            Self::IndexOutOfBounds { .. } => "java.lang.StringIndexOutOfBoundsException",
+        }
+    }
+    pub fn message(&self) -> String {
+        match self {
+            Self::NullPattern(0) => "Attempt to invoke virtual method 'boolean java.lang.Object.equals(java.lang.Object)' on a null object reference".into(),
+            Self::NullPattern(_) => "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference".into(),
+            Self::InvalidPattern(message) => message.clone(),
+            Self::IndexOutOfBounds { length, index } => format!("length={length}; index={index}"),
+        }
+    }
+    /// Parcel only serializes the original NPE/IAE cases. Bounds errors escape.
+    pub fn binder_exception(&self) -> Option<aim_binder_host::parcel::Exception> {
+        use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_NULL_POINTER, Exception};
+        let code = match self {
+            Self::NullPattern(_) => EX_NULL_POINTER,
+            Self::InvalidPattern(_) => EX_ILLEGAL_ARGUMENT,
+            Self::IndexOutOfBounds { .. } => return None,
+        };
+        Some(Exception::new(code, self.message()))
+    }
 }
 impl Filter {
     /// Match DTO metadata without substituting null or suppressing constructor errors.
@@ -41,7 +68,7 @@ impl Filter {
                 }
             })?;
         if matcher.is_none() && self.pattern_type == PATTERN_ADVANCED_GLOB {
-            return Err(MatchError::NullPattern);
+            return Err(MatchError::NullPattern(self.pattern_type));
         }
         let matches = |value: Option<&str>| {
             if value.is_none() {
@@ -51,7 +78,7 @@ impl Filter {
                 return Ok(matcher.matches(value));
             }
             match self.pattern_type {
-                0..=4 => Err(MatchError::NullPattern),
+                0..=4 => Err(MatchError::NullPattern(self.pattern_type)),
                 _ => Ok(false),
             }
         };

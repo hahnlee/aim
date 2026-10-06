@@ -93,7 +93,7 @@ impl Resolution {
             .collect();
         Ok(Resolution {
             components: ComponentResolver::new(&state)?,
-            apps_filter: AppsFilter::new(&state, config).map_err(|_| MimeGroupError::UriMatching)?,
+            apps_filter: AppsFilter::new(&state, config).map_err(MimeGroupError::UriMatching)?,
             state,
             preferred,
             setup_wizard: OnceLock::new(),

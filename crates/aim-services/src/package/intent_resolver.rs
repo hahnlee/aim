@@ -321,7 +321,7 @@ mod tests {
         let mut resolver = IntentResolver::default(); resolver.add(F("nullable", filter));
         let mut build = Names {once: false, stopped: &[]};
         assert_eq!(resolver.query(&intent("VIEW", Some("https://x/path")), None, false, &mut build),
-            Err(super::super::domain_verification::uri_parcel::MatchError::NullPattern));
+            Err(super::super::domain_verification::uri_parcel::MatchError::NullPattern(0)));
     }
 
     #[test]

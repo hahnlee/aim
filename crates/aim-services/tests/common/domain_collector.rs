@@ -568,9 +568,20 @@ pub fn verify_uri_dto(directory: &Path) {
     for case in 0..cases {
         let filter = Filter {uri_part: reader.read_i32().unwrap(), pattern_type: reader.read_i32().unwrap(), filter: reader.read_string16().unwrap()};
         let uri = reader.read_string16().unwrap().unwrap(); let expected = reader.read_i32().unwrap();
-        let actual = match filter.match_data(&aim_services::package::uri::Uri::parse(&uri)) {
+        let error_class = reader.read_string16().unwrap(); let error_message = reader.read_string16().unwrap();
+        let result = filter.match_data(&aim_services::package::uri::Uri::parse(&uri));
+        if let Err(error) = &result {
+            assert_eq!(Some(error.java_class()), error_class.as_deref(), "URI exception class case={case}");
+            assert_eq!(Some(error.message()), error_message, "URI exception message case={case}");
+            let reply = aim_services::package::component_resolver::MimeGroupError::UriMatching(error.clone()).reply();
+            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
+            if let Some(expected) = error.binder_exception() {
+                assert_eq!(exception.code, expected.code); assert_eq!(exception.message, expected.message);
+            } else {assert_eq!(exception.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);}
+        } else {assert!(error_class.is_none() && error_message.is_none());}
+        let actual = match result {
             Ok(value) => i32::from(value),
-            Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern) => -1,
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern(_)) => -1,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::InvalidPattern(_)) => -2,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
         };
@@ -580,7 +591,7 @@ pub fn verify_uri_dto(directory: &Path) {
         let model_result = aim_services::package::intent_filter::UriRelativeFilterGroup::match_groups(&[model], &aim_services::package::uri::Uri::parse(&uri));
         let model_actual = match model_result {
             Ok(value) => i32::from(value),
-            Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern) => -1,
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern(_)) => -1,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::InvalidPattern(_)) => -2,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
         };

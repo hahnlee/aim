@@ -1665,7 +1665,19 @@ retains the previous capture and leaves file/Store/disk-base/cache unchanged
 (1.15s). Full original oracle passes (41.19s, no skips), actual ART sends the
 partial update and reads the same outcome (15.78s), and production build passes
 (42 fresh, 0.3s). These are conformance checks of the existing runtime-only
-publication. Other #966 generic type/error cases and full native
+publication. Matcher errors now retain the null pattern kind and expose the original Java
+exception class/message; null literal reports Object.equals, while the other
+null pattern paths report String.length. The original matching corpus expands
+to 1,680 cases, including six malformed advanced patterns, and compares exact
+classes/messages alongside results. Visibility construction retains the typed
+matcher failure rather than replacing every error with a generic NPE; its
+NPE/IAE replies use the original category/message, and failed construction
+retains the prior resolver. Bounds errors cannot be serialized by original
+Parcel and explicitly remain unsupported at this native boundary (#964).
+Ordinary query paths still need typed matcher-error propagation (#964).
+Full original oracle passes (29.49s, no skips), 498 units pass (0.50s; five
+excluded), and production build passes (3 rebuilt, 39 fresh, 1.7s).
+Other #966 generic type/error cases and full native
 PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.
 
