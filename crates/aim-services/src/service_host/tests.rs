@@ -2486,6 +2486,145 @@ fn verify_boot_scan(
                 >= 30
         )
     );
+    // A real disk store backs the registry's domain compare-and-swap.
+    let root = std::env::temp_dir().join(format!(
+        "aim-domain-commit-{}-{}",
+        std::process::id(),
+        published.version()
+    ));
+    struct DomainData(std::path::PathBuf);
+    impl Drop for DomainData {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    std::fs::create_dir(&root).unwrap();
+    let data = DomainData(root);
+    std::fs::create_dir(data.0.join("system")).unwrap();
+    use aim_android_xml::{Element, Node, Value};
+    let mut document = aim_android_xml::read(b"<packages/>").unwrap();
+    for setting in &published.owner().settings.packages {
+        let mut package = Element {
+            name: "package".into(),
+            attrs: vec![
+                ("name".into(), Value::String(setting.name.clone())),
+                ("codePath".into(), Value::String(setting.code_path.clone())),
+                ("userId".into(), Value::Int(setting.app_id)),
+                ("version".into(), Value::Long(setting.version_code)),
+                (
+                    "domainSetId".into(),
+                    Value::String(setting.domain_set_id.clone().unwrap()),
+                ),
+            ],
+            content: vec![],
+        };
+        let signatures = setting.signatures.as_ref().unwrap();
+        let mut sigs = Element {
+            name: "sigs".into(),
+            attrs: vec![
+                (
+                    "count".into(),
+                    Value::Int(signatures.signatures.len() as i32),
+                ),
+                (
+                    "schemeVersion".into(),
+                    Value::Int(signatures.scheme_version),
+                ),
+            ],
+            content: vec![],
+        };
+        for (index, bytes) in signatures.signatures.iter().enumerate() {
+            sigs.content.push(Node::Element(Element {
+                name: "cert".into(),
+                attrs: vec![
+                    ("index".into(), Value::Int(index as i32)),
+                    (
+                        "key".into(),
+                        Value::String(bytes.iter().map(|b| format!("{b:02x}")).collect()),
+                    ),
+                ],
+                content: vec![],
+            }));
+        }
+        package.content.push(Node::Element(sigs));
+        document.content.push(Node::Element(package));
+    }
+    let document = crate::package::owner::domains::replace(
+        &document,
+        &published.owner().settings.domain_verification,
+    )
+    .unwrap();
+    let path = data.0.join("system/packages.xml");
+    std::fs::write(&path, aim_android_xml::abx::write(&document).unwrap()).unwrap();
+    let mut persistence = crate::package::owner::Store::open(&data.0, &[])
+        .unwrap()
+        .unwrap();
+    let mut updated = retained_domains.owner().clone();
+    updated
+        .set_link_handling_internal(Some("android"), false, 0, &[0, 10])
+        .unwrap();
+    let first_update = query.prepare_domain_update(updated.clone()).unwrap();
+    let stale_update = query.prepare_domain_update(updated).unwrap();
+    let committed = system
+        .commit_package_domains(bridge, first_update, &mut persistence)
+        .unwrap();
+    assert_eq!(committed.scan().version(), published.version() + 1);
+    assert!(
+        !committed.state().packages["android"].users[&0]
+            .domain_selection
+            .as_ref()
+            .unwrap()
+            .0
+    );
+    assert!(Arc::ptr_eq(
+        &committed,
+        &system.capture_package_queries().unwrap()
+    ));
+    assert_eq!(
+        persistence.state().settings.domain_verification,
+        committed.domains().unwrap().owner().persisted()
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        !system
+            .commit_package_domains(bridge, stale_update, &mut persistence)
+            .err()
+            .unwrap()
+            .committed
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(Arc::ptr_eq(
+        &committed,
+        &system.capture_package_queries().unwrap()
+    ));
+    let mut updated = committed.domains().unwrap().owner().clone();
+    updated
+        .set_link_handling_internal(Some("android"), true, 0, &[0, 10])
+        .unwrap();
+    let conflict = committed.prepare_domain_update(updated).unwrap();
+    std::fs::write(&path, b"<packages external='writer'/>").unwrap();
+    assert!(
+        !system
+            .commit_package_domains(bridge, conflict, &mut persistence)
+            .err()
+            .unwrap()
+            .committed
+    );
+    assert!(Arc::ptr_eq(
+        &committed,
+        &system.capture_package_queries().unwrap()
+    ));
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"<packages external='writer'/>"
+    );
+    assert!(
+        query.state().packages["android"].users[&0]
+            .domain_selection
+            .as_ref()
+            .unwrap()
+            .0
+    );
     let android = &query.state().packages["android"];
     let loaded = &published.owner().loaded_packages()["android"];
     assert_eq!(android.pkg.as_deref(), Some(&loaded.package));
@@ -2503,7 +2642,7 @@ fn verify_boot_scan(
     assert_eq!(android.pkg.as_ref().unwrap().uid, 1000);
     assert_eq!(query_uid(client, "android", 0).unwrap(), 1000);
     let lease = capture_scan(client).unwrap();
-    assert_eq!(scan_version(&lease).unwrap(), published.version() as i64);
+    assert_eq!(scan_version(&lease).unwrap(), committed.scan().version() as i64);
     {
         use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
         let mut data = Parcel::new();

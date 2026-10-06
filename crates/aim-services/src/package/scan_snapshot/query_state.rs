@@ -137,11 +137,19 @@ impl Context {
     }
 }
 
+/// A fully validated replacement, retaining its exact publication base.
+pub struct DomainUpdate {
+    pub(crate) base: Arc<Capture>,
+    pub(crate) store: super::Store,
+    pub(crate) capture: Arc<Capture>,
+}
+
 /// Query code and the Java replica retain the same native package owner.
 pub struct Capture {
     scan: Arc<Snapshot>,
     state: Arc<model::State>,
     domains: Option<Arc<NativeDomains>>,
+    context: Arc<Context>,
 }
 impl Capture {
     pub fn scan(&self) -> &Arc<Snapshot> {
@@ -153,11 +161,48 @@ impl Capture {
     pub fn domains(&self) -> Option<&Arc<NativeDomains>> {
         self.domains.as_ref()
     }
+    pub fn prepare_domain_update(
+        self: &Arc<Self>,
+        owner: crate::package::domain_verification::owner::Owner,
+    ) -> Result<DomainUpdate, String> {
+        let current = self
+            .domains
+            .as_ref()
+            .ok_or("missing captured domain owner")?;
+        let version = self
+            .scan
+            .version()
+            .checked_add(1)
+            .ok_or("domain version exhausted")?;
+        let mut scan_owner = self.scan.owner().clone();
+        scan_owner.settings.domain_verification = owner.persisted();
+        let store =
+            super::Store::new_replica_at_version(scan_owner, self.scan.usage().clone(), version)
+                .map_err(|e| format!("domain scan validation: {e:?}"))?;
+        let mut context = (*self.context).clone();
+        context.scan_version = version;
+        let mut boot = current.boot.clone();
+        boot.owner = owner;
+        let context = context.attach_boot_domains(
+            store.capture().owner(),
+            boot,
+            &current.config,
+            &current.policies,
+        )?;
+        let capture = Self::new(store.capture(), context)?;
+        Ok(DomainUpdate {
+            base: self.clone(),
+            store,
+            capture,
+        })
+    }
+
     pub fn new(scan: Arc<Snapshot>, mut context: Context) -> Result<Arc<Self>, String> {
         if context.scan_version != scan.version() {
             return Err("query context scan version differs".into());
         }
         super::validate_replica(&scan).map_err(|error| format!("query replica: {error:?}"))?;
+        let source = Arc::new(context.clone());
         let domains = context.native_domains.take();
         if let Some(domains) = &domains {
             let expected = context.clone().resolve_domains(
@@ -316,6 +361,7 @@ impl Capture {
             scan,
             state: Arc::new(state),
             domains,
+            context: source,
         }))
     }
 }

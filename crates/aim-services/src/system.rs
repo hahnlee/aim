@@ -751,6 +751,98 @@ impl System {
                 )
             })
     }
+    /// Persist a prevalidated domain replacement under the same generation
+    /// lock as publication. A committed reserve failure still publishes it.
+    pub fn commit_package_domains(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        update: crate::package::scan_snapshot::query_state::DomainUpdate,
+        persistence: &mut crate::package::owner::Store,
+    ) -> std::result::Result<
+        Arc<crate::package::scan_snapshot::query_state::Capture>,
+        crate::package::owner::WriteError,
+    > {
+        use crate::package::owner::WriteError;
+        let before = |message: &str| WriteError {
+            committed: false,
+            message: message.into(),
+        };
+        let mut state = self.package_bootstrap.lock().unwrap();
+        if update.capture.scan().version()
+            != state
+                .version
+                .checked_add(1)
+                .ok_or_else(|| before("domain generation exhausted"))?
+        {
+            return Err(before("domain generation differs"));
+        }
+        let current = state
+            .current
+            .as_mut()
+            .filter(|c| Arc::ptr_eq(&c.bridge, bridge))
+            .ok_or_else(|| before("domain bootstrap owner changed"))?;
+        if !current
+            .queries
+            .as_ref()
+            .is_some_and(|q| Arc::ptr_eq(q, &update.base))
+        {
+            return Err(before("domain publication base changed"));
+        }
+        // Bind the disk writer to this exact package inventory, including signers.
+        let identities = |settings: &crate::package::settings::Settings| {
+            settings
+                .packages
+                .iter()
+                .map(|s| {
+                    (
+                        s.name.clone(),
+                        s.app_id,
+                        s.code_path.clone(),
+                        s.version_code,
+                        s.domain_set_id.clone(),
+                        s.signatures.as_ref().map(|v| v.signatures.clone()),
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if identities(&persistence.state().settings)
+            != identities(&update.base.scan().owner().settings)
+        {
+            return Err(before("domain persistence package owner differs"));
+        }
+        let canonical = |mut value: crate::package::domain_verification::State| {
+            value.active.sort_by(|a, b| a.name.cmp(&b.name));
+            value.restored.sort_by(|a, b| a.name.cmp(&b.name));
+            value
+        };
+        if canonical(persistence.state().settings.domain_verification.clone())
+            != canonical(
+                update
+                    .base
+                    .scan()
+                    .owner()
+                    .settings
+                    .domain_verification
+                    .clone(),
+            )
+        {
+            return Err(before("domain persistence base differs"));
+        }
+        let result = persistence.commit_domains(
+            &update
+                .capture
+                .domains()
+                .ok_or_else(|| before("missing replacement domain owner"))?
+                .owner()
+                .persisted(),
+        );
+        if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            current.snapshots = Some(update.store);
+            current.queries = Some(update.capture.clone());
+            state.version = update.capture.scan().version();
+        }
+        result.map(|_| update.capture)
+    }
     // Original policy calls run without holding the publication lock.
     fn complete_package_owner(
         &self,
