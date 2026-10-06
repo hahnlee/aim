@@ -11,14 +11,15 @@ pub use registration::{register, restore};
 
 /// Signing sets and defined aliases each hold a reference; upgrade sets do
 /// not. Public keys are referenced by key sets, not by packages. Validate the
-/// complete owner view before changing this stage; counters never rewind.
+/// pool structure before changing this stage; absent saved role handles are
+/// ignored as in the original decrementKeySetLPw. Counters never rewind.
 pub fn clear_package(settings: &mut Settings, name: &str) -> Result<(), String> {
     let at = settings
         .packages
         .iter()
         .position(|p| p.name == name)
         .ok_or_else(|| format!("unknown keyset package {name}"))?;
-    validated_sets(settings)?;
+    validated_pool(settings)?;
     let ids: Vec<_> = std::iter::once(settings.packages[at].key_set_data.proper_signing_key_set)
         .chain(
             settings.packages[at]
@@ -213,6 +214,7 @@ mod tests {
             },
             ..Default::default()
         };
+        settings.packages[0].key_set_data.add_defined_key_set(99, Some("absent".into()));
         clear_package(&mut settings, "a").unwrap();
         assert_eq!(settings.key_sets.key_sets, [(1, vec![1])]);
         assert_eq!(settings.key_sets.public_keys, [(1, vec![1])]);
@@ -230,21 +232,24 @@ mod tests {
         );
     }
     #[test]
-    fn malformed_references_leave_the_owner_unchanged() {
+    fn retirement_clears_absent_saved_roles_without_creating_handles() {
         let mut settings = Settings {
             packages: vec![Package {
                 name: "a".into(),
                 key_set_data: KeySetData {
                     proper_signing_key_set: 7,
-                    ..Default::default()
+                    defined_key_sets: vec![(Some("missing".into()), 8)],
+                    upgrade_key_sets: vec![9],
                 },
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let original = settings.clone();
-        assert!(clear_package(&mut settings, "a").is_err());
-        assert_eq!(settings, original);
+        clear_package(&mut settings, "a").unwrap();
+        assert_eq!(settings.packages[0].key_set_data, KeySetData::default());
+        assert!(settings.key_sets.key_sets.is_empty());
+        assert!(settings.key_sets.public_keys.is_empty());
+        assert!(clear_package(&mut settings, "unknown").is_err());
     }
 
     #[test]

@@ -128,3 +128,7 @@ pub fn trace(state: &Settings, status: &str) -> String {
         sets.join(";")
     )
 }
+
+pub fn retire(state: &mut Settings) {
+    key_sets::clear_package(state, "p").unwrap();
+}

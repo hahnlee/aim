@@ -960,10 +960,22 @@ These projections use empty public-key mappings with the actual native restore;
 full public-key factory/live reference/mutation/retirement integration remains
 #914/#916/#824/#823. A native fatal-input recovery test preserves the selected
 file; a missing-role restore regression creates no fake handles.
-17 XML tests and 522 service units pass (5 service tests excluded, 0.52s).
-Full original ART oracle passes without skips (56.64s), retaining 34 version,
+Keyset retirement now validates pool structure separately from saved package
+roles: decrementing an absent role handle does nothing, then proper/alias/upgrade
+roles are cleared, matching original removeAppKeySetDataLPw. No handles are
+synthesized and counters do not rewind. Native units cover absent roles mixed
+with live/shared sets, an absent-only owner and unknown package rejection.
+The boot error-retention test now injects a genuine pool/counter invariant error
+rather than treating an absent saved role as failure; earlier domain removal
+still survives, and restoring the pool permits later retirement. Each of the 158
+original keyset read-order fixtures now also invokes actual original retirement
+and compares the resulting pool, counters, package roles and handle references.
+These are empty-public-key mappings; full live public-key count/retirement and
+boot/uninstall integration remain #823/#824/#914/#798.
+17 XML tests and 522 service units pass (5 service tests excluded, 0.51s).
+Full original ART oracle passes without skips (57.01s), retaining 34 version,
 866 package-body/header, 238 shared UID and incremental permission projections.
-Production runtime build passes (3 rebuilt/39 fresh, 3.0s); previous image/template
+Production runtime build passes (3 rebuilt/39 fresh, 25.6s); previous image/template
 build passed (6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier

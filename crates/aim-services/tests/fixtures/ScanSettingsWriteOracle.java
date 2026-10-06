@@ -82,12 +82,15 @@ public final class ScanSettingsWriteOracle {
             String status = "ok";
             try { settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>()); }
             catch (NullPointerException failure) { status = "fatal"; }
-            var p = settings.getPackagesLocked().get("p"); long proper = p == null ? -1 : p.getKeySetData().getProperSigningKeySet();
-            var owner = settings.getKeySetManagerService(); var handle = p == null ? null : owner.getSigningKeySetByPackageNameLPr("p");
-            java.nio.file.Files.write(new java.io.File(directory, "keyset-event-output-" + index).toPath(), (status + "|" + proper + "|" + (handle == null ? "absent" : handle.getRefCountLPr())).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "keyset-event-pool-" + index))) {
-                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true); xml.startTag(null, "packages");
-                owner.writeKeySetManagerServiceLPr(xml); xml.endTag(null, "packages"); xml.endDocument();
+            for (String phase : new String[] { "read", "retired" }) {
+                if (phase.equals("retired")) settings.getKeySetManagerService().removeAppKeySetDataLPw("p");
+                var p = settings.getPackagesLocked().get("p"); long proper = p == null ? -1 : p.getKeySetData().getProperSigningKeySet();
+                var owner = settings.getKeySetManagerService(); var handle = p == null ? null : owner.getSigningKeySetByPackageNameLPr("p");
+                java.nio.file.Files.write(new java.io.File(directory, "keyset-event-" + phase + "-output-" + index).toPath(), (status + "|" + proper + "|" + (handle == null ? "absent" : handle.getRefCountLPr())).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                try (var output = new java.io.FileOutputStream(new java.io.File(directory, "keyset-event-" + phase + "-pool-" + index))) {
+                    var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true); xml.startTag(null, "packages");
+                    owner.writeKeySetManagerServiceLPr(xml); xml.endTag(null, "packages"); xml.endDocument();
+                }
             }
         }
     }

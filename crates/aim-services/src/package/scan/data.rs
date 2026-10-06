@@ -921,6 +921,9 @@ mod tests {
         .unwrap();
         let restored_key_sets = owner.settings.key_sets.clone();
         owner.settings.packages[0].key_set_data = package.key_set_data.clone();
+        // A native pool/counter invariant failure, not an absent saved role.
+        owner.settings.key_sets.reference_counts = Some(std::collections::BTreeMap::from([(7, 1)]));
+        let broken_key_sets = owner.settings.key_sets.clone();
         owner
             .update_ownership
             .add("a", &["shared".into(), "only-a".into()]);
@@ -930,10 +933,10 @@ mod tests {
         );
         assert!(owner.settings.domain_verification.active.is_empty());
         assert_eq!(owner.settings.packages, settings.packages);
-        assert_eq!(owner.settings.key_sets, restored_key_sets);
+        assert_eq!(owner.settings.key_sets, broken_key_sets);
         assert_eq!(owner.update_ownership.is_provider(Some("a")), Ok(true));
         assert_eq!(owner.update_ownership.is_denylisted("only-a"), Ok(true));
-        owner.settings.packages[0].key_set_data = Default::default();
+        owner.settings.key_sets = restored_key_sets;
         owner.clear_removed_boot_metadata(&package).unwrap();
         assert_eq!(owner.update_ownership.is_provider(Some("a")), Ok(false));
         assert_eq!(owner.update_ownership.is_denylisted("only-a"), Ok(false));

@@ -597,8 +597,10 @@ fn native_package_parcels_match_original_read_write() {
     let key_set_event_inputs = common::key_set_events::inputs();
     let key_set_event_expected: Vec<_> = key_set_event_inputs.iter().enumerate().map(|(index, bytes)| {
         fs::write(directory.join(format!("keyset-event-input-{index}")), bytes).unwrap();
-        let (state, status) = common::key_set_events::read(bytes);
-        common::key_set_events::trace(&state, status)
+        let (mut state, status) = common::key_set_events::read(bytes);
+        let before = common::key_set_events::trace(&state, status);
+        common::key_set_events::retire(&mut state);
+        (before, common::key_set_events::trace(&state, status))
     }).collect();
     eprintln!("original incremental keyset cases: {}", key_set_event_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
@@ -4293,13 +4295,15 @@ fn native_package_parcels_match_original_read_write() {
             "original shared UID read order {index}: {:?}", String::from_utf8_lossy(&shared_read_inputs[index]));
     }
     for (index, expected) in key_set_event_expected.iter().enumerate() {
-        let actual = fs::read_to_string(directory.join(format!("keyset-event-output-{index}"))).unwrap();
-        let fields = actual.split('|').collect::<Vec<_>>();
-        let root = aim_android_xml::read_next(&fs::read(directory.join(format!("keyset-event-pool-{index}"))).unwrap()).unwrap();
-        let keysets = aim_services::package::settings::Settings::parse(&root).unwrap().key_sets;
-        let mut sets = keysets.key_sets.iter().map(|(id, keys)| format!("{id}:{}", keys.iter().map(ToString::to_string).collect::<Vec<_>>().join(","))).collect::<Vec<_>>(); sets.sort();
-        let projected = format!("{}|{}|{}|{},{}|{}", fields[0], fields[1], fields[2], keysets.last_issued_key_id, keysets.last_issued_key_set_id, sets.join(";"));
-        assert_eq!(projected, *expected, "original incremental keyset {index}");
+        for (phase, expected) in [("read", &expected.0), ("retired", &expected.1)] {
+            let actual = fs::read_to_string(directory.join(format!("keyset-event-{phase}-output-{index}"))).unwrap();
+            let fields = actual.split('|').collect::<Vec<_>>();
+            let root = aim_android_xml::read_next(&fs::read(directory.join(format!("keyset-event-{phase}-pool-{index}"))).unwrap()).unwrap();
+            let keysets = aim_services::package::settings::Settings::parse(&root).unwrap().key_sets;
+            let mut sets = keysets.key_sets.iter().map(|(id, keys)| format!("{id}:{}", keys.iter().map(ToString::to_string).collect::<Vec<_>>().join(","))).collect::<Vec<_>>(); sets.sort();
+            let projected = format!("{}|{}|{}|{},{}|{}", fields[0], fields[1], fields[2], keysets.last_issued_key_id, keysets.last_issued_key_set_id, sets.join(";"));
+            assert_eq!(projected, *expected, "original incremental keyset {index} {phase}");
+        }
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {
