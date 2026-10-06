@@ -24,6 +24,7 @@ public final class DomainCollectorOracle {
         verifySignatures(directory);
         verifyAttachment(directory, context, compat);
         verifyPersistenceDefaults(directory, context, compat);
+        verifyNativeWrites(directory, context, compat);
         com.android.server.pm.ScanSettingsWriteOracle.verifyLegacyDomains(directory, context, compat);
         var config = new com.android.server.SystemConfig(false);
         var collector = new com.android.server.pm.verify.domain.DomainVerificationCollector(compat, config);
@@ -185,6 +186,21 @@ public final class DomainCollectorOracle {
                 var parser = android.util.Xml.resolvePullParser(stream); parser.next(); service.readLegacySettings(parser);
             }
             try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-default-" + i + ".original"))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true); xml.startTag(null, "packages");
+                service.writeSettings(null, xml, false, -1); xml.endTag(null, "packages"); xml.endDocument();
+            }
+        }
+    }
+    private static void verifyNativeWrites(java.io.File directory, android.content.Context context, Compat compat) throws Exception {
+        for (int i = 0; i < 5; i++) {
+            var service = new com.android.server.pm.verify.domain.DomainVerificationService(context, new com.android.server.SystemConfig(false), compat);
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-written-" + i + ".input"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next(); service.readSettings(null, parser);
+            }
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-written-" + i + ".legacy"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next(); service.readLegacySettings(parser);
+            }
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-written-" + i + ".original"))) {
                 var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true); xml.startTag(null, "packages");
                 service.writeSettings(null, xml, false, -1); xml.endTag(null, "packages"); xml.endDocument();
             }

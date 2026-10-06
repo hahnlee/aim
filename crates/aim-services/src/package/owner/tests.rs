@@ -2034,3 +2034,123 @@ fn derive_public_keys(settings: &mut crate::package::settings::Settings) {
         );
     }
 }
+
+#[test]
+fn domain_commits_preserve_foreign_data_and_reject_external_writers() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    let xml = b"<packages future='root'><package name='example.app' codePath='/data/app/example' userId='10100'/><domain-verifications future='global'><active><package-state packageName='example.app' id='00000000-0000-0000-0000-000000000001' future='package'><state><domain name='example.com' state='0' future='host'/><future-state/></state><user-states><user-state userId='0' allowLinkHandling='true'><enabled-hosts><host name='example.com'/></enabled-hosts><future-user/></user-state></user-states></package-state><future-active/></active><restored/></domain-verifications><domain-verifications-legacy><user-states packageName='example.app'><user-state userId='0' state='2'/></user-states></domain-verifications-legacy><future-owner/></packages>";
+    fs::write(&path, xml).unwrap();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let unchanged = store.state().settings.packages.clone();
+    let mut desired = store.state().settings.domain_verification.clone();
+    desired.active[0].domains[0].1 = 1;
+    desired.active[0].users[0].allow_link_handling = false;
+    store.commit_domains(&desired).unwrap();
+    assert_eq!(store.state().settings.packages, unchanged);
+    assert_eq!(store.state().settings.domain_verification, desired);
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.starts_with(abx::MAGIC));
+    assert_eq!(fs::read(sibling(&path, ".reservecopy")).unwrap(), bytes);
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state(),
+        store.state()
+    );
+    let root = aim_android_xml::read(&bytes).unwrap();
+    assert!(root.children().any(|e| e.name == "future-owner"));
+    let domains = root
+        .children()
+        .find(|e| e.name == "domain-verifications")
+        .unwrap();
+    assert_eq!(domains.string("future").as_deref(), Some("global"));
+    let package = domains
+        .children()
+        .find(|e| e.name == "active")
+        .unwrap()
+        .children()
+        .find(|e| e.name == "package-state")
+        .unwrap();
+    assert_eq!(package.string("future").as_deref(), Some("package"));
+    assert!(
+        package
+            .children()
+            .find(|e| e.name == "state")
+            .unwrap()
+            .children()
+            .any(|e| e.name == "future-state")
+    );
+    desired.active[0].domains.clear();
+    store.commit_domains(&desired).unwrap();
+    let root = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
+    let package = root
+        .children()
+        .find(|e| e.name == "domain-verifications")
+        .unwrap()
+        .children()
+        .find(|e| e.name == "active")
+        .unwrap()
+        .children()
+        .find(|e| e.name == "package-state")
+        .unwrap();
+    assert!(
+        package
+            .children()
+            .find(|e| e.name == "state")
+            .unwrap()
+            .children()
+            .any(|e| e.name == "future-state")
+    );
+    let before = fs::read(&path).unwrap();
+    let mut invalid = desired.clone();
+    invalid.active[0].id = "invalid".into();
+    assert!(!store.commit_domains(&invalid).unwrap_err().committed);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let mut invalid = desired.clone();
+    invalid.active.push(invalid.active[0].clone());
+    assert!(!store.commit_domains(&invalid).unwrap_err().committed);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let previous = store.state().clone();
+    fs::write(&path, b"<packages future='external'/>").unwrap();
+    let error = store.commit_domains(&desired).unwrap_err();
+    assert!(!error.committed);
+    assert_eq!(store.state(), &previous);
+    assert_eq!(fs::read(&path).unwrap(), b"<packages future='external'/>");
+}
+
+#[test]
+fn domain_write_failures_publish_only_committed_disk_state() {
+    let data = Data::new();
+    data.settings();
+    let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+    let path = data.0.join("system/packages.xml");
+    let desired_root = aim_android_xml::read(b"<domain-verifications><active><package-state packageName='example.app' id='00000000-0000-0000-0000-000000000001'><state><domain name='example.com' state='1'/></state></package-state></active><restored/></domain-verifications>").unwrap();
+    let mut desired = crate::package::domain_verification::State::default();
+    desired.read(&desired_root).unwrap();
+    let root = domains::replace(&store.settings_document, &desired).unwrap();
+    let before = store.state().clone();
+    let error = store
+        .commit_package_document_using(root.clone(), None, |file, bytes| {
+            file.write_all(&bytes[..bytes.len() / 2])?;
+            Err(io::Error::other("injected domain main-file failure"))
+        })
+        .unwrap_err();
+    assert!(!error.committed);
+    assert_eq!(store.state(), &before);
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state(),
+        &before
+    );
+    let error = store
+        .commit_package_document_using(root, None, |file, bytes| {
+            file.write_all(bytes)?;
+            fs::remove_file(sibling(&path, ".reservecopy"))
+        })
+        .unwrap_err();
+    assert!(error.committed);
+    assert_eq!(store.state().settings.domain_verification, desired);
+    assert_eq!(
+        Store::open(&data.0, &[0]).unwrap().unwrap().state(),
+        store.state()
+    );
+}

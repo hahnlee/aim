@@ -695,6 +695,39 @@ fn persistence_defaults(directory: &Path) {
             legacy,
         )
         .unwrap();
+        let mut state = aim_services::package::domain_verification::State::default();
+        state
+            .read(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-default-{case}.input"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        state
+            .read_legacy(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-default-{case}.legacy"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let root = aim_services::package::owner::domains::replace(
+            &aim_android_xml::read(b"<packages future='preserve'/>").unwrap(),
+            &state,
+        )
+        .unwrap();
+        for (tag, suffix) in [
+            ("domain-verifications", "input"),
+            ("domain-verifications-legacy", "legacy"),
+        ] {
+            let section = root.children().find(|e| e.name == tag).unwrap();
+            fs::write(
+                directory.join(format!("domain-written-{case}.{suffix}")),
+                aim_android_xml::abx::write(section).unwrap(),
+            )
+            .unwrap();
+        }
     }
 }
 
@@ -737,6 +770,49 @@ pub fn verify_persistence_defaults(directory: &Path) {
                     .unwrap(),
             )
             .unwrap();
+        let mut written = State::default();
+        written
+            .read(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-written-{case}.input"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        written
+            .read_legacy(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-written-{case}.legacy"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let native_root = aim_android_xml::read(
+            &fs::read(directory.join(format!("domain-written-{case}.original"))).unwrap(),
+        )
+        .unwrap();
+        let mut original_written = State::default();
+        original_written
+            .read(
+                native_root
+                    .children()
+                    .find(|e| e.name == "domain-verifications")
+                    .unwrap(),
+            )
+            .unwrap();
+        original_written
+            .read_legacy(
+                native_root
+                    .children()
+                    .find(|e| e.name == "domain-verifications-legacy")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            canonical(written),
+            canonical(original_written),
+            "native domain writer -> original reader case={case}"
+        );
         // SettingsXml omits a domain-state value of -1; its reader supplies 0.
         for p in &mut expected.active {
             for (_, state) in &mut p.domains {

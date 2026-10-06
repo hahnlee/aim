@@ -23,6 +23,7 @@ use super::write::Enabled;
 use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
+pub mod domains;
 pub mod install_sources;
 pub mod key_sets;
 pub mod keystore;
@@ -458,6 +459,16 @@ impl Store {
         let root =
             update_ownership::persistence::replace_clearings(&self.settings_document, settings)
                 .map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
+    /// Persist the domain owner's full projection; original PMS must not be a
+    /// writer of this data directory. Committed errors still require publication.
+    pub fn commit_domains(
+        &mut self,
+        state: &super::domain_verification::State,
+    ) -> Result<(), WriteError> {
+        let root = domains::replace(&self.settings_document, state).map_err(WriteError::before)?;
         self.commit_package_document(root)
     }
 

@@ -1365,7 +1365,17 @@ fields use false. URI-group action comes from the current group cursor, not
 its parent domain. Five original-service read/write cases compare omitted,
 malformed, -1/0/1 attributes with differing parent/group actions (#960 fixed).
 The writer's omission of a -1 domain state and the subsequent NO_RESPONSE
-read default are included in the comparison. The fixture runs the image's original collector with a controlled
+read default are included in the comparison. The native domain writer now writes
+active/restored verification, user selection, backup signatures, legacy user
+state and URI groups through Store.commit_domains and the existing resilient
+packages.xml backup/reserve protocol. It preserves unrelated settings and
+future XML on surviving records, including unknown container data after the
+last owned child is removed. Invalid/duplicate identities and external writer
+conflicts reject before commit. Native tests verify ABX main/reserve equality,
+restart state, precommit rollback and committed-state publication after reserve
+failure. Five native-written ABX cases are read and rewritten by the original
+DomainVerificationService and match the resulting logical state. Daemon mutation
+commit/nonce/notification integration remains unproved. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1376,9 +1386,9 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(40.59s, no skips); release units pass 482 cases (four excluded from the default
-run, 0.49s). The full build passes (three host nodes rebuilt, 39 fresh, 1.2s);
-the image/original-PMS template remains fresh; final host build is fresh (13 nodes, 0.2s).
+(30.85s, no skips); release units pass 484 cases (four excluded from the default
+run, 0.53s). The full build passes (three host nodes rebuilt, 39 fresh, 13.8s);
+the image/original-PMS template remains fresh; final host build is fresh (13 nodes, 0.3s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
@@ -1386,9 +1396,9 @@ Binder registration remain unproved. Native cache read/write and facade serializ
 now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
-independently null fields for both component kinds. Release units pass 482
-cases (four excluded from the default run, 0.49s). The full build passes
-(three host nodes rebuilt, 39 fresh, 1.2s); final host build is fresh (13 nodes, 0.2s).
+independently null fields for both component kinds. Release units pass 484
+cases (four excluded from the default run, 0.53s). The full build passes
+(three host nodes rebuilt, 39 fresh, 13.8s); final host build is fresh (13 nodes, 0.3s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
