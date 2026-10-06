@@ -1591,8 +1591,17 @@ lists and null elements, with exact reserialization. The full original oracle
 passes (29.78s, no skips), as do 493 units (0.55s; five excluded by default). This
 is lossless wire DTO evidence, not completed method 8. Original group conversion
 preserves null filter strings, whereas the current domain/intent filter model
-requires String (#964); model preservation and original matching/error behavior
-remain open. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
+requires String (#964); model preservation remains open. A checked nullable DTO matcher now retains bool,
+null-pattern and invalid-pattern outcomes instead of suppressing errors (2026-10-06).
+Original matchData agrees in 672 cases over null/empty/ordinary/malformed patterns,
+path/query/fragment and unknown URI parts, all pattern kinds and six URI forms.
+A trailing opening set in an advanced glob throws StringIndexOutOfBoundsException
+in the original, which the native parser previously categorized as an unterminated
+set. Native checked construction now retains the UTF-16 length/index bounds error
+(#965); the original oracle records that category distinctly. Full original oracle
+passes (30.85s, no skips); 493 units pass (0.53s; five excluded by default). This
+is matcher/DTO evidence: native domain/intent model integration and fallible resolver
+propagation remain open under #964. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
 and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup

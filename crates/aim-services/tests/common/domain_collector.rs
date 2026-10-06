@@ -523,6 +523,21 @@ pub fn verify_uri_dto(directory: &Path) {
         assert_eq!(output.data(), payload, "original URI DTO case={case}");
     }
     assert_eq!(reader.remaining(), 0);
+    let bytes = fs::read(directory.join("uri-null-match.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]); let cases = reader.read_i32().unwrap();
+    for case in 0..cases {
+        let filter = Filter {uri_part: reader.read_i32().unwrap(), pattern_type: reader.read_i32().unwrap(), filter: reader.read_string16().unwrap()};
+        let uri = reader.read_string16().unwrap().unwrap(); let expected = reader.read_i32().unwrap();
+        let actual = match filter.match_data(&aim_services::package::uri::Uri::parse(&uri)) {
+            Ok(value) => i32::from(value),
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern) => -1,
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::InvalidPattern(_)) => -2,
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
+        };
+        assert_eq!(actual, expected, "original nullable URI match case={case} filter={filter:?} uri={uri}");
+    }
+    assert_eq!(reader.remaining(), 0); eprintln!("Original nullable URI matching: {cases} cases");
+
 }
 
 pub fn verify_uuid(directory: &Path) {

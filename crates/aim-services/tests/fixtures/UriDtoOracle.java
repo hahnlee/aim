@@ -28,6 +28,21 @@ final class UriDtoOracle {
                 } finally { wire.recycle(); }
             }
             java.nio.file.Files.write(new java.io.File(directory, "uri-dto.original").toPath(), out.marshall());
+            out.recycle(); out = android.os.Parcel.obtain();
+            String[] uris = {"https://x/path?q=1#frag", "https://x", "mailto:x", "", "https://x?;", "#"};
+            out.writeInt(4 * 4 * 7 * uris.length);
+            for (String value : new String[] {null, "", "/path", "["}) for (int part : new int[] {-1, 0, 1, 2})
+                for (int pattern : new int[] {-1, 0, 1, 2, 3, 4, 99}) for (String uri : uris) {
+                    var parcel = new android.content.UriRelativeFilterParcel(); parcel.uriPart = part; parcel.patternType = pattern; parcel.filter = value;
+                    out.writeInt(part); out.writeInt(pattern); out.writeString(value); out.writeString(uri);
+                    int result;
+                    try { result = new android.content.UriRelativeFilter(parcel).matchData(android.net.Uri.parse(uri)) ? 1 : 0; }
+                    catch (NullPointerException error) { result = -1; }
+                    catch (IllegalArgumentException error) { result = -2; }
+                    catch (IndexOutOfBoundsException error) { result = -3; }
+                    out.writeInt(result);
+                }
+            java.nio.file.Files.write(new java.io.File(directory, "uri-null-match.original").toPath(), out.marshall());
         } finally { out.recycle(); }
     }
     private UriDtoOracle() {}

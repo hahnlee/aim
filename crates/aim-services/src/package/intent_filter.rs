@@ -86,10 +86,39 @@ pub struct PatternMatcher {
     parsed: Option<Vec<i32>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternError {
+    IllegalArgument(String),
+    IndexOutOfBounds { length: usize, index: usize },
+}
+impl From<String> for PatternError {
+    fn from(value: String) -> Self {
+        Self::IllegalArgument(value)
+    }
+}
+impl From<&str> for PatternError {
+    fn from(value: &str) -> Self {
+        Self::IllegalArgument(value.into())
+    }
+}
+impl std::fmt::Display for PatternError {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IllegalArgument(value) => out.write_str(value),
+            Self::IndexOutOfBounds { length, index } => {
+                write!(out, "length={length}; index={index}")
+            }
+        }
+    }
+}
+
 impl PatternMatcher {
     /// `new PatternMatcher(pattern, type)`; an error for an advanced glob
     /// the original refuses.
     pub fn new(pattern: &str, kind: i32) -> std::result::Result<PatternMatcher, String> {
+        Self::new_checked(pattern, kind).map_err(|error| error.to_string())
+    }
+    pub fn new_checked(pattern: &str, kind: i32) -> std::result::Result<PatternMatcher, PatternError> {
         let parsed = if kind == PATTERN_ADVANCED_GLOB {
             Some(parse_advanced(&utf16(pattern))?)
         } else {
@@ -249,7 +278,7 @@ fn match_glob(pattern: &[u16], m: &[u16]) -> bool {
 }
 
 /// `PatternMatcher.parseAndVerifyAdvancedPattern`.
-fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, String> {
+fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, PatternError> {
     let lp = pattern.len();
     let mut out: Vec<i32> = Vec::new();
     let (mut ip, mut in_set, mut in_range, mut in_char_class) = (0, false, false, false);
@@ -264,7 +293,7 @@ fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, String> {
     };
     let after_token = |out: &[i32]| match out.last() {
         Some(&t) if !is_modifier(t) => Ok(()),
-        _ => Err("Modifier must follow a token.".to_owned()),
+        _ => Err(PatternError::from("Modifier must follow a token.")),
     };
     while ip < lp {
         if out.len() > MAX_PATTERN_STORAGE - 3 {
@@ -277,7 +306,8 @@ fn parse_advanced(pattern: &[u16]) -> std::result::Result<Vec<i32>, String> {
                 if in_set {
                     add = true;
                 } else {
-                    if pattern.get(ip + 1) == Some(&0x5e) {
+                    let next = pattern.get(ip + 1).ok_or(PatternError::IndexOutOfBounds {length: lp, index: ip + 1})?;
+                    if *next == 0x5e {
                         out.push(PARSED_TOKEN_CHAR_SET_INVERSE_START);
                         ip += 1;
                     } else {

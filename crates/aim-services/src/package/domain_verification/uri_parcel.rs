@@ -14,6 +14,79 @@ pub struct Group {
     pub action: i32,
     pub filters: Option<Vec<Option<Filter>>>,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub enum MatchError {
+    NullPattern,
+    InvalidPattern(String),
+    IndexOutOfBounds { length: usize, index: usize },
+}
+impl Filter {
+    /// Match DTO metadata without substituting null or suppressing constructor errors.
+    pub fn match_data(
+        &self,
+        data: &crate::package::uri::Uri,
+    ) -> std::result::Result<bool, MatchError> {
+        use crate::package::intent_filter::{PATTERN_ADVANCED_GLOB, PatternMatcher};
+        let matcher = self
+            .filter
+            .as_deref()
+            .map(|pattern| PatternMatcher::new_checked(pattern, self.pattern_type))
+            .transpose()
+            .map_err(|error| match error {
+                crate::package::intent_filter::PatternError::IllegalArgument(message) => {
+                    MatchError::InvalidPattern(message)
+                }
+                crate::package::intent_filter::PatternError::IndexOutOfBounds { length, index } => {
+                    MatchError::IndexOutOfBounds { length, index }
+                }
+            })?;
+        if matcher.is_none() && self.pattern_type == PATTERN_ADVANCED_GLOB {
+            return Err(MatchError::NullPattern);
+        }
+        let matches = |value: Option<&str>| {
+            if value.is_none() {
+                return Ok(false);
+            }
+            if let Some(matcher) = &matcher {
+                return Ok(matcher.matches(value));
+            }
+            match self.pattern_type {
+                0..=4 => Err(MatchError::NullPattern),
+                _ => Ok(false),
+            }
+        };
+        match self.uri_part {
+            0 => matches(data.path().as_deref()),
+            1 => {
+                let Some(query) = data.query() else {
+                    return Ok(false);
+                };
+                let split = |by| {
+                    let mut values = query.split(by).collect::<Vec<_>>();
+                    while values.len() > 1 && values.last() == Some(&"") {
+                        values.pop();
+                    }
+                    if values.len() == 1 && values[0].is_empty() && !query.is_empty() {
+                        values.clear();
+                    }
+                    values
+                };
+                let mut values = split('&');
+                if values.len() == 1 {
+                    values = split(';');
+                }
+                for value in values {
+                    if matches(Some(value))? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            2 => matches(data.fragment().as_deref()),
+            _ => Ok(false),
+        }
+    }
+}
 fn body<'a>(reader: &mut Reader<'a>) -> Result<Reader<'a>> {
     let start = reader.position();
     let size = usize::try_from(reader.read_i32()?).map_err(|_| BAD_VALUE)?;
