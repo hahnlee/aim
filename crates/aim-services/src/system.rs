@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Weak};
 
-use aim_binder_host::local::{Call, LocalProcess, Reply, Service, Strong};
+use aim_binder_host::local::{Call, LocalProcess, LocalService, Received, Reply, Service, Strong};
 use aim_binder_host::parcel::{Binder, Exception, Parcel, Reader, Result as ParcelResult};
 use aim_service_aidl::{
     ReadParcelable, Returned, WriteParcelable, android_app_iactivitymanager as am,
@@ -87,6 +87,24 @@ enum Collection {
     Sync,
     /// Told to the app's async noted-op callback.
     Async,
+}
+
+enum ServiceOwner {
+    Remote(Arc<Strong>),
+    Local(LocalService),
+}
+impl ServiceOwner {
+    fn transact(
+        &self,
+        code: u32,
+        data: &Parcel,
+        oneway: bool,
+    ) -> std::result::Result<Received, aim_binder_host::parcel::StatusCode> {
+        match self {
+            Self::Remote(service) => service.transact(code, data, oneway),
+            Self::Local(service) => service.transact(code, data, oneway),
+        }
+    }
 }
 
 pub struct System {
@@ -235,9 +253,9 @@ impl System {
     }
 
     /// `name` from servicemanager, kept until it dies.
-    fn service(self: &Arc<Self>, name: &'static str) -> Result<Arc<Strong>> {
+    fn service(self: &Arc<Self>, name: &'static str) -> Result<ServiceOwner> {
         if let Some(s) = self.services.lock().unwrap().get(name) {
-            return Ok(s.clone());
+            return Ok(ServiceOwner::Remote(s.clone()));
         }
         let mut data = Parcel::new();
         sm::CheckService {
@@ -250,6 +268,18 @@ impl System {
             .map_err(|s| unreachable_service(name, s))?;
         let binder = sm::read_check_service_reply(&mut reply.reader())
             .map_err(|s| unreachable_service(name, s))??;
+        if let Some(Binder::Local(ptr)) = binder {
+            return self
+                .process
+                .local_service(ptr)
+                .map(ServiceOwner::Local)
+                .ok_or_else(|| {
+                    Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("unknown local {name} service"),
+                    )
+                });
+        }
         let Some(aim_binder_host::parcel::Binder::Handle(handle)) = binder else {
             return Err(Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -268,7 +298,7 @@ impl System {
             }),
         );
         self.services.lock().unwrap().insert(name, strong.clone());
-        Ok(strong)
+        Ok(ServiceOwner::Remote(strong))
     }
 
     /// Calls `code` of service `name` and reads its reply.
@@ -307,14 +337,16 @@ impl System {
         read(&mut reply.reader()).map_err(|s| unreachable_service(name, s))??;
         // The instance registered with; one already dead is reported at once.
         let this = Arc::downgrade(self);
-        self.process.link_to_death(
-            &service,
-            Box::new(move || {
-                if let Some(system) = this.upgrade() {
-                    unwatch(&system);
-                }
-            }),
-        );
+        if let ServiceOwner::Remote(service) = service {
+            self.process.link_to_death(
+                &service,
+                Box::new(move || {
+                    if let Some(system) = this.upgrade() {
+                        unwatch(&system);
+                    }
+                }),
+            );
+        }
         Ok(())
     }
 

@@ -178,6 +178,7 @@ impl GuestProcess for Local<'_> {
 pub struct LocalProcess {
     driver: Arc<Driver>,
     handle: ProcHandle,
+    credentials: Credentials,
     services: Mutex<HashMap<u64, Arc<dyn Service>>>,
     deaths: Mutex<HashMap<u64, Box<dyn FnOnce() + Send>>>,
     next_cookie: AtomicU64,
@@ -189,24 +190,81 @@ pub struct LocalProcess {
 pub struct Received {
     process: Arc<LocalProcess>,
     buffer: u64,
-    data: &'static [u8],
+    data: std::borrow::Cow<'static, [u8]>,
     objects: Vec<u64>,
+    owned_fds: Vec<u32>,
 }
 
 impl Received {
     pub fn reader(&self) -> Reader<'_> {
-        Reader::new(self.data, &self.objects)
+        Reader::new(&self.data, &self.objects)
     }
 }
 
 impl Drop for Received {
     fn drop(&mut self) {
+        self.process.close(std::mem::take(&mut self.owned_fds));
         if self.buffer != 0 {
             self.process
-                .close(self.process.received_fds(self.data, &self.objects));
+                .close(self.process.received_fds(&self.data, &self.objects));
             let mut out = Commands::default();
             out.u32(BC_FREE_BUFFER).u64(self.buffer);
             self.process.write(&out.0);
+        }
+    }
+}
+
+thread_local! {
+    static CALLER: std::cell::Cell<Option<(i32, u32)>> = const { std::cell::Cell::new(None) };
+}
+
+struct CallingIdentity(Option<(i32, u32)>);
+impl CallingIdentity {
+    fn enter(pid: i32, uid: u32) -> Self {
+        Self(CALLER.replace(Some((pid, uid))))
+    }
+}
+impl Drop for CallingIdentity {
+    fn drop(&mut self) {
+        CALLER.set(self.0);
+    }
+}
+
+/// A retained node of this process, dispatched like libbinder's BBinder.
+pub struct LocalService {
+    process: Arc<LocalProcess>,
+    service: Arc<dyn Service>,
+}
+impl LocalService {
+    pub fn transact(&self, code: u32, data: &Parcel, oneway: bool) -> Result<Received, StatusCode> {
+        let request = self.process.owned_reply(data);
+        if !request.owned_fds.is_empty() && !self.service.accepts_fds() {
+            return Err(FAILED_TRANSACTION);
+        }
+        let (pid, uid) = CALLER
+            .get()
+            .unwrap_or((self.process.credentials.pid, self.process.credentials.euid));
+        let _identity = CallingIdentity::enter(pid, uid);
+        let mut call = Call {
+            code,
+            flags: TF_ACCEPT_FDS | if oneway { TF_ONE_WAY } else { 0 },
+            sender_pid: pid,
+            sender_euid: uid,
+            data: request.reader(),
+        };
+        let reply = match code {
+            INTERFACE_TRANSACTION => {
+                let mut reply = Parcel::new();
+                reply.write_string16(Some(self.service.descriptor()));
+                Ok(reply)
+            }
+            PING_TRANSACTION => Ok(Parcel::new()),
+            _ => self.service.transact(&mut call),
+        }?;
+        if oneway {
+            Ok(self.process.owned_reply(&Parcel::new()))
+        } else {
+            Ok(self.process.owned_reply(&reply))
         }
     }
 }
@@ -268,11 +326,12 @@ enum Until {
 impl LocalProcess {
     /// Opens `device` as a process with `credentials` (`ProcessState`).
     pub fn open(driver: &Arc<Driver>, device: Device, credentials: Credentials) -> Arc<Self> {
-        let handle = driver.open(device, credentials);
+        let handle = driver.open(device, credentials.clone());
         let memory = HeapReceiveMemory::new(VM_SIZE);
         let process = Arc::new_cyclic(|this| Self {
             driver: driver.clone(),
             handle,
+            credentials,
             services: Mutex::new(HashMap::new()),
             deaths: Mutex::new(HashMap::new()),
             next_cookie: AtomicU64::new(1),
@@ -365,6 +424,26 @@ impl LocalProcess {
         let ptr = self.next_cookie.fetch_add(1, Ordering::Relaxed) << 4;
         self.services.lock().unwrap().insert(ptr, service);
         Binder::Local(ptr)
+    }
+
+    /// Retain a local object returned by the driver to its owning process.
+    pub fn local_service(&self, ptr: u64) -> Option<LocalService> {
+        let service = self.services.lock().unwrap().get(&ptr).cloned()?;
+        Some(LocalService {
+            process: self.arc(),
+            service,
+        })
+    }
+
+    fn owned_reply(&self, parcel: &Parcel) -> Received {
+        let (bytes, owned_fds) = self.install_files(parcel);
+        Received {
+            process: self.arc(),
+            buffer: 0,
+            data: bytes.into_owned().into(),
+            objects: parcel.objects().to_vec(),
+            owned_fds,
+        }
     }
 
     /// Starts the thread pool: one looper now, more as the driver asks.
@@ -461,8 +540,9 @@ impl LocalProcess {
             return Ok(Received {
                 process: self.arc(),
                 buffer: 0,
-                data: &[],
+                data: (&[][..]).into(),
                 objects: Vec::new(),
+                owned_fds: Vec::new(),
             });
         };
         // SAFETY: the driver wrote the reply into the receive buffer at
@@ -473,8 +553,9 @@ impl LocalProcess {
         let received = Received {
             process: self.arc(),
             buffer: tr.buffer,
-            data,
+            data: data.into(),
             objects,
+            owned_fds: Vec::new(),
         };
         if tr.flags & TF_STATUS_CODE != 0 {
             let status = data.get(..4).map_or(FAILED_TRANSACTION, |s| {
@@ -637,6 +718,7 @@ impl LocalProcess {
             data: Reader::new(data, &objects),
         };
         let fds = self.received_fds(data, &objects);
+        let _identity = CallingIdentity::enter(tr.sender_pid, tr.sender_euid);
         let reply = match (&service, tr.code) {
             (None, _) => Err(UNKNOWN_TRANSACTION),
             (Some(s), _) if !fds.is_empty() && !s.accepts_fds() => Err(FAILED_TRANSACTION),
@@ -833,6 +915,83 @@ mod tests {
             panic!("no {n} binder");
         };
         client.strong(h)
+    }
+
+    #[test]
+    fn local_objects_preserve_identity_and_file_lifetimes() {
+        struct Echo(Weak<LocalProcess>);
+        impl Service for Echo {
+            fn descriptor(&self) -> &str {
+                "local.echo"
+            }
+            fn accepts_fds(&self) -> bool {
+                true
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                call.data.enforce_interface(self.descriptor())?;
+                let mut reply = Parcel::new();
+                reply.write_i32(call.sender_pid);
+                reply.write_i32(call.sender_euid as i32);
+                if call.code == 1 {
+                    let fd = call.data.read_fd()?;
+                    reply.write_file(self.0.upgrade().unwrap().file(fd).unwrap());
+                    reply.write_i32(fd as i32);
+                } else if call.code != 0 {
+                    return Err(UNKNOWN_TRANSACTION);
+                }
+                Ok(reply)
+            }
+        }
+        let driver = Driver::new();
+        let process = open(&driver, 991, 1000);
+        let Binder::Local(ptr) = process.add_service(Arc::new(Echo(Arc::downgrade(&process))))
+        else {
+            unreachable!()
+        };
+        let service = process.local_service(ptr).unwrap();
+        assert!(process.local_service(ptr + 1).is_none());
+        let mut request = Parcel::new();
+        request.write_interface_token("local.echo");
+        let reply = service.transact(0, &request, false).unwrap();
+        let mut reader = reply.reader();
+        assert_eq!(reader.read_i32().unwrap(), 991);
+        assert_eq!(reader.read_i32().unwrap(), 1000);
+        {
+            let _identity = CallingIdentity::enter(992, 19001);
+            let reply = service.transact(0, &request, false).unwrap();
+            let mut reader = reply.reader();
+            assert_eq!(reader.read_i32().unwrap(), 992);
+            assert_eq!(reader.read_i32().unwrap(), 19001);
+        }
+        assert!(CALLER.get().is_none());
+        assert_eq!(
+            service.transact(999, &request, false).err(),
+            Some(UNKNOWN_TRANSACTION)
+        );
+        let wrong = Parcel::new();
+        assert!(service.transact(0, &wrong, false).is_err());
+        assert_eq!(
+            service
+                .transact(0, &request, true)
+                .unwrap()
+                .reader()
+                .remaining(),
+            0
+        );
+        let file: File = Arc::new(String::from("retained file"));
+        request.write_file(file.clone());
+        let reply = service.transact(1, &request, false).unwrap();
+        let mut reader = reply.reader();
+        reader.read_i32().unwrap();
+        reader.read_i32().unwrap();
+        let reply_fd = reader.read_fd().unwrap();
+        let call_fd = reader.read_i32().unwrap() as u32;
+        assert!(process.file(call_fd).is_none());
+        assert!(Arc::ptr_eq(&process.file(reply_fd).unwrap(), &file));
+        let retained = process.file(reply_fd).unwrap();
+        drop(reply);
+        assert!(process.file(reply_fd).is_none());
+        assert!(Arc::ptr_eq(&retained, &file));
     }
 
     /// Hands out a node of its own (as a `ParceledListSlice` hands out its
@@ -1120,9 +1279,10 @@ mod tests {
                 buffer: tr.buffer,
                 // SAFETY: the reply, in the receive buffer until dropped.
                 data: unsafe {
-                    std::slice::from_raw_parts(tr.buffer as *const u8, tr.data_size as usize)
+                    std::slice::from_raw_parts(tr.buffer as *const u8, tr.data_size as usize).into()
                 },
                 objects: Vec::new(),
+                owned_fds: Vec::new(),
             };
             received.data.to_vec()
         };

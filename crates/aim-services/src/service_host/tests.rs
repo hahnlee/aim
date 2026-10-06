@@ -2491,6 +2491,8 @@ fn verify_boot_scan(
                 let args = am::CheckPermission::read(&mut call.data)?;
                 assert_eq!(args.uid, 19001);
                 assert_eq!(args.pid, 94005);
+                assert_eq!(call.sender_euid, 19001);
+                assert_eq!(call.sender_pid, 94005);
                 assert!(matches!(
                     args.permission.as_deref(),
                     Some(
@@ -2505,11 +2507,56 @@ fn verify_boot_scan(
             }
         }
         register(
-            client,
+            native,
             "activity",
-            client.add_service(Arc::new(DeniedPermissions)),
+            native.add_service(Arc::new(DeniedPermissions)),
         );
         assert_eq!(domain_names(foreign_client).unwrap_err().code, -1);
+        struct Replacement(Option<i32>);
+        impl Service for Replacement {
+            fn descriptor(&self) -> &str {
+                am::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                assert_eq!(call.sender_pid, 94002);
+                let args = am::CheckPermission::read(&mut call.data)?;
+                assert_eq!(args.uid, 19001);
+                assert_eq!(args.pid, 94005);
+                let mut reply = Parcel::new();
+                if let Some(value) = self.0 {
+                    am::write_check_permission_reply(&mut reply, value);
+                }
+                Ok(reply)
+            }
+        }
+        let invoke = || {
+            system.call(
+                "activity",
+                am::CHECK_PERMISSION,
+                |p| {
+                    am::CheckPermission {
+                        permission: Some("android.permission.DOMAIN_VERIFICATION_AGENT".into()),
+                        pid: 94005,
+                        uid: 19001,
+                    }
+                    .write(p)
+                },
+                am::read_check_permission_reply,
+            )
+        };
+        register(
+            native,
+            "activity",
+            native.add_service(Arc::new(Replacement(Some(0)))),
+        );
+        assert_eq!(invoke().unwrap(), 0);
+        register(
+            native,
+            "activity",
+            native.add_service(Arc::new(Replacement(None))),
+        );
+        assert!(invoke().is_err());
     }
     use crate::package::domain_verification::enforcer::Operation;
     assert!(system.authorize_package_domain(bridge, &query, 1, 1000, Operation::Info).unwrap());

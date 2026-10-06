@@ -1419,12 +1419,24 @@ reply writer. It captures one published native domain/query generation, applies
 approved-verifier authorization, and returns only attached auto-verification
 packages in the original name-map order. It rejects wrong tokens/trailing data,
 unknown codes and unimplemented methods. The native publisher fixture registers
-it under a test alias and covers actual Binder replies, remote permission-owner
-denial and bootstrap replacement clearing current captures (0.80s). Original ART
+it under a test alias and covers actual Binder replies, same-process permission-owner
+denial and bootstrap replacement clearing current captures (0.81s). Original ART
 compares eight add/migrate package lists, including exclusion of pending/restored
 records. This endpoint is not registered by guest-init under the original name;
 remaining methods and migration gates are tracked in #957. Same-process service
-lookup still rejects valid local Binder owners (#961). The retained bootstrap bridge now delegates
+lookup now retains and dispatches the returned local object (#961), with the
+original BBinder calling identity rule: an incoming caller's UID/PID is retained
+through a nested local call, then restored; outside a call, the host service's
+own Android credentials apply. Local request FDs close after dispatch and reply
+FDs close with the received reply; retained files remain valid. Native tests
+exercise app identity through the actual domain-to-permission call, local service
+replacement and malformed replies; binder-host tests cover owned/inherited
+identity, file retention/close and transaction failures. The complete binder-host
+suite passes (14 unit cases, one backend integration, six transport cases).
+Remote handle references and death notifications retain their driver path;
+local objects have no remote process death registration. Local lookup is repeated
+so replacement does not keep a cached old node. The existing native node release
+gap remains #568. The retained bootstrap bridge now delegates
 UID-specific verifier checks to the current original domain owner's proxy,
 rejecting missing owner/proxy and negative UIDs instead of inventing identity.
 Native authorization combines this producer, original permission front-end checks
@@ -1446,8 +1458,8 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(30.66s, no skips); release units pass 485 cases (four excluded from the default
-run, 0.48s). The full build passes (nine nodes rebuilt, 33 fresh, 64.8s);
+(28.98s, no skips); release units pass 485 cases (four excluded from the default
+run, 0.53s). The full build passes (six nodes rebuilt, 36 fresh, 7.6s);
 the image/original-PMS template build passes; final host build is fresh (13 nodes, 0.2s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
@@ -1457,8 +1469,8 @@ now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 485
-cases (four excluded from the default run, 0.48s). The full build passes
-(nine nodes rebuilt, 33 fresh, 64.8s); final host build is fresh (13 nodes, 0.2s).
+cases (four excluded from the default run, 0.53s). The full build passes
+(six nodes rebuilt, 36 fresh, 7.6s); final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
