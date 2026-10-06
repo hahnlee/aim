@@ -647,9 +647,10 @@ impl DomainQueries {
                     let parcels = entry.groups_with_classes(self.classes.as_deref()).map_err(|error| {
                         use super::uri_bundle::GroupError;
                         match error {
-                            GroupError::BadParcelable(message) => Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, message),
-                            GroupError::Parcel(status) => Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {status}")),
-                            GroupError::Unavailable => Exception::new(EX_UNSUPPORTED_OPERATION, "Parcelable class metadata/creator is unavailable"),
+                            GroupError::Transport(status) => UriUpdateError::Transport(status),
+                            GroupError::BadParcelable(message) => UriUpdateError::Exception(Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, message)),
+                            GroupError::Parcel(status) => UriUpdateError::Exception(Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {status}"))),
+                            GroupError::Unavailable => UriUpdateError::Exception(Exception::new(EX_UNSUPPORTED_OPERATION, "Parcelable class metadata/creator is unavailable")),
                         }
                     })?;
                     let groups = super::uri_parcel::groups_to_model(parcels).map_err(|message| {

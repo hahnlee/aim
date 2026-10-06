@@ -8,6 +8,7 @@ pub enum GroupError {
     Parcel(i32),
     BadParcelable(String),
     Unavailable,
+    Transport(i32),
 }
 impl From<i32> for GroupError {
     fn from(status: i32) -> Self {
@@ -209,7 +210,16 @@ impl Entry {
             outer.skip(length)?;
             let mut value = Reader::new(&self.bytes[4..4 + length], &[]);
             if self.kind == 21 {
-                read_serializable(&mut value)?;
+                return match read_serializable(&mut value)? {
+                    SerialValue::List {
+                        count,
+                        other: false,
+                    } => Ok(Some((0..count).map(|_| None).collect())),
+                    SerialValue::List { other: true, .. } => Err(GroupError::Transport(
+                        aim_binder_host::parcel::UNKNOWN_TRANSACTION,
+                    )),
+                    _ => Ok(None),
+                };
             } else if let Some(name) = value.read_string16()? {
                 if class_matches(&name, "Ljava/util/ArrayList;", classes)? {
                     return Err(GroupError::Unavailable);
@@ -246,9 +256,10 @@ impl Entry {
                 reader.skip(length)?;
                 let bytes = reader.since(start).0;
                 let mut value = Reader::new(&bytes[..length], &[]);
-                read_serializable(&mut value)?;
-                groups.push(None);
-                continue;
+                match read_serializable(&mut value)? {
+                    SerialValue::NullName => {groups.push(None); continue;}
+                    _ => return Ok(None),
+                }
             }
             if kind != 4 {
                 return Ok(None);
@@ -306,16 +317,127 @@ fn class_matches(
     Ok(classes.assignable(&descriptor, required))
 }
 
-fn read_serializable(reader: &mut Reader<'_>) -> std::result::Result<(), GroupError> {
+enum SerialValue {
+    NullName,
+    Other,
+    List { count: usize, other: bool },
+}
+fn read_serializable(reader: &mut Reader<'_>) -> std::result::Result<SerialValue, GroupError> {
     let Some(name) = reader.read_string16()? else {
-        return Ok(());
+        return Ok(SerialValue::NullName);
     };
     let bytes = aim_service_aidl::read_byte_array(reader)?.ok_or(GroupError::Unavailable)?;
-    // ObjectInputStream reads the stream header before resolving any class.
-    if bytes.len() <= 4 || bytes[..4] != [0xac, 0xed, 0, 5] {
-        return Err(GroupError::BadParcelable(format!(
+    serial_stream(&bytes).map_err(|error| match error {
+        SerialError::Io => GroupError::BadParcelable(format!(
             "Parcelable encountered IOException reading a Serializable object (name = {name})"
-        )));
+        )),
+        SerialError::Unsupported => GroupError::Unavailable,
+    })
+}
+#[derive(Debug)]
+enum SerialError {
+    Io,
+    Unsupported,
+}
+struct SerialInput<'a> {
+    bytes: &'a [u8],
+}
+impl<'a> SerialInput<'a> {
+    fn take(&mut self, count: usize) -> std::result::Result<&'a [u8], SerialError> {
+        let data = self.bytes.get(..count).ok_or(SerialError::Io)?;
+        self.bytes = &self.bytes[count..];
+        Ok(data)
     }
-    Err(GroupError::Unavailable)
+    fn string(&mut self, long: bool) -> std::result::Result<(), SerialError> {
+        let count = if long {
+            usize::try_from(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
+                .map_err(|_| SerialError::Io)?
+        } else {
+            u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize
+        };
+        let data = self.take(count)?;
+        let mut at = 0;
+        while at < data.len() {
+            let first = data[at];
+            at += 1;
+            let following = match first {
+                0..=0x7f => 0,
+                0xc0..=0xdf => 1,
+                0xe0..=0xef => 2,
+                _ => return Err(SerialError::Io),
+            };
+            for _ in 0..following {
+                if data.get(at).is_none_or(|value| value & 0xc0 != 0x80) {
+                    return Err(SerialError::Io);
+                }
+                at += 1;
+            }
+        }
+        Ok(())
+    }
+}
+fn serial_stream(bytes: &[u8]) -> std::result::Result<SerialValue, SerialError> {
+    let mut input = SerialInput { bytes };
+    if input.take(4)? != [0xac, 0xed, 0, 5] {
+        return Err(SerialError::Io);
+    }
+    match input.take(1)?[0] {
+        0x74 => {
+            input.string(false)?;
+            Ok(SerialValue::Other)
+        }
+        0x7c => {
+            input.string(true)?;
+            Ok(SerialValue::Other)
+        }
+        0x73 => {
+            // Pinned libcore ArrayList descriptor: serialVersionUID, size, writeObject.
+            let schema = b"\x72\x00\x13java.util.ArrayList\x78\x81\xd2\x1d\x99\xc7\x61\x9d\x03\x00\x01I\x00\x04size\x78\x70";
+            if input.bytes.len() < schema.len() {
+                return Err(SerialError::Io);
+            }
+            if input.take(schema.len())? != schema {
+                return Err(SerialError::Unsupported);
+            }
+            let count = usize::try_from(i32::from_be_bytes(input.take(4)?.try_into().unwrap()))
+                .map_err(|_| SerialError::Io)?;
+            if input.take(2)? != [0x77, 4] {
+                return Err(SerialError::Unsupported);
+            }
+            input.take(4)?; // ArrayList's compatibility capacity, ignored by readObject.
+            if count > input.bytes.len() {
+                return Err(SerialError::Io);
+            }
+            let mut other = false;
+            let mut next_handle = 0x7e0002u32;
+            for _ in 0..count {
+                match input.take(1)?[0] {
+                    0x70 => (),
+                    0x74 => {
+                        input.string(false)?;
+                        other = true;
+                        next_handle += 1;
+                    }
+                    0x7c => {
+                        input.string(true)?;
+                        other = true;
+                        next_handle += 1;
+                    }
+                    0x71 => {
+                        let handle = u32::from_be_bytes(input.take(4)?.try_into().unwrap());
+                        if !(0x7e0001..next_handle).contains(&handle) {
+                            return Err(SerialError::Io);
+                        }
+                        other = true;
+                    }
+                    _ => return Err(SerialError::Unsupported),
+                }
+            }
+            if input.take(1)?[0] != 0x78 {
+                return Err(SerialError::Io);
+            }
+            Ok(SerialValue::List { count, other })
+        }
+        _ => Err(SerialError::Unsupported),
+    }
 }

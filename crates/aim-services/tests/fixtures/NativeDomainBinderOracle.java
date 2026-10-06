@@ -320,6 +320,29 @@ public final class NativeDomainBinderOracle {
                 if (reply.readTypedObject(android.os.Bundle.CREATOR).keySet().contains("serial.example") != errorExpected || reply.dataAvail() != 0) throw new AssertionError("Serializable error/null state differs");
             } finally {data.recycle(); reply.recycle();}
         }
+        Object[] validValues = {"wrong", new java.util.ArrayList<>(), new java.util.ArrayList<>(java.util.Arrays.asList((Object) null)), new java.util.ArrayList<>(java.util.List.of("wrong"))};
+        for (int mode = 0; mode < validValues.length; mode++) for (boolean root : new boolean[] {false, true}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                var seed = new android.os.Bundle(); var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 1; group.filters = new java.util.ArrayList<>(); var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); groups.add(group); seed.putParcelableArrayList("validserial.example", groups);
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(seed, 0); service.transact(Integer.parseInt(args[9]), data, reply, 0); reply.readException();
+            } finally {data.recycle(); reply.recycle();}
+            boolean errorExpected = root && mode >= 2;
+            var bytes = new java.io.ByteArrayOutputStream(); try (var stream = new java.io.ObjectOutputStream(bytes)) {stream.writeObject(validValues[mode]);}
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(serialPayloadBundle("validserial.example", validValues[mode].getClass().getName(), bytes.toByteArray(), root), 0);
+                boolean handled = service.transact(Integer.parseInt(args[9]), data, reply, 0);
+                if (root && mode == 3) {if (handled) throw new AssertionError("serialized ClassCast did not return UNKNOWN_TRANSACTION");}
+                else {if (!handled) throw new AssertionError("valid serialized value unhandled"); try {reply.readException(); if (errorExpected) throw new AssertionError("serialized null element accepted");} catch (NullPointerException error) {if (!errorExpected || !conversionErrors[0].equals(error.getMessage())) throw error;}}
+                if (reply.dataAvail() != 0) throw new AssertionError("valid Serializable framing differs");
+            } finally {data.recycle(); reply.recycle();}
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("validserial.example")); service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
+                if (reply.readTypedObject(android.os.Bundle.CREATOR).keySet().contains("validserial.example") != errorExpected || reply.dataAvail() != 0) throw new AssertionError("valid Serializable state differs");
+            } finally {data.recycle(); reply.recycle();}
+        }
         for (String alias : new String[] {"query_uri_bounds", "query_uri_invalid"}) {
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
@@ -356,10 +379,11 @@ public final class NativeDomainBinderOracle {
             return android.os.Bundle.CREATOR.createFromParcel(wire);
         } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}
     }
-    private static android.os.Bundle serialBundle(String key, String name, boolean root) {
+    private static android.os.Bundle serialBundle(String key, String name, boolean root) {return serialPayloadBundle(key, name, new byte[] {0}, root);}
+    private static android.os.Bundle serialPayloadBundle(String key, String name, byte[] payload, boolean root) {
         var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
         try {
-            value.writeString(name); if (name != null) value.writeByteArray(new byte[] {0});
+            value.writeString(name); if (name != null) value.writeByteArray(payload);
             int length = value.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(root ? 21 : 11);
             if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
             else {list.writeInt(1); list.writeInt(21); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}

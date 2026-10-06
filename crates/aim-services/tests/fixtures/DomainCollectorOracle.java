@@ -230,6 +230,16 @@ public final class DomainCollectorOracle {
                 if (service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("serial.example")).keySet().contains("serial.example") != errorExpected || connection.writes != 0) throw new AssertionError("Serializable error/null state differs");
             }
             var serialCleanup = new android.os.Bundle(); serialCleanup.putParcelableArrayList("serial.example", null); service.setUriRelativeFilterGroups("fixture.domains", serialCleanup);
+            Object[] validValues = {"wrong", new java.util.ArrayList<>(), new java.util.ArrayList<>(java.util.Arrays.asList((Object) null)), new java.util.ArrayList<>(java.util.List.of("wrong"))};
+            for (int mode = 0; mode < validValues.length; mode++) for (boolean root : new boolean[] {false, true}) {
+                var validSeed = new android.os.Bundle(); validSeed.putParcelableArrayList("validserial.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(1, "/validserial"))))); service.setUriRelativeFilterGroups("fixture.domains", validSeed);
+                var bytes = new java.io.ByteArrayOutputStream(); try (var stream = new java.io.ObjectOutputStream(bytes)) {stream.writeObject(validValues[mode]);}
+                boolean errorExpected = root && mode >= 2;
+                try {service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.serialPayloadBundle("validserial.example", validValues[mode].getClass().getName(), bytes.toByteArray(), root)); if (errorExpected) throw new AssertionError("serialized invalid element accepted");}
+                catch (RuntimeException error) {if (!errorExpected || (mode == 2 ? !(error instanceof NullPointerException) : !(error instanceof ClassCastException))) throw error;}
+                if (service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("validserial.example")).keySet().contains("validserial.example") != errorExpected || connection.writes != 0) throw new AssertionError("valid Serializable state differs");
+            }
+            var validCleanup = new android.os.Bundle(); validCleanup.putParcelableArrayList("validserial.example", null); service.setUriRelativeFilterGroups("fixture.domains", validCleanup);
             var seed = new android.os.Bundle();
             var oldGroups = new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/old"))));
             seed.putParcelableArrayList("runtime.example", oldGroups); seed.putParcelableArrayList("late.example", oldGroups);

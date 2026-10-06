@@ -88,6 +88,21 @@ final class UriDtoOracle {
                 }
                 java.nio.file.Files.write(new java.io.File(directory, "uri-serial-bundles.original").toPath(), serialCases.marshall());
             } finally {serialCases.recycle();}
+            var validSerial = android.os.Parcel.obtain();
+            try {
+                Object[] values = {"wrong", new java.util.ArrayList<>(), new java.util.ArrayList<>(java.util.Arrays.asList((Object) null)), new java.util.ArrayList<>(java.util.List.of("wrong"))};
+                validSerial.writeInt(values.length * 2);
+                for (int mode = 0; mode < values.length; mode++) for (boolean root : new boolean[] {false, true}) {
+                    var bytes = new java.io.ByteArrayOutputStream(); try (var stream = new java.io.ObjectOutputStream(bytes)) {stream.writeObject(values[mode]);}
+                    var bundle = serialPayloadBundle("x.example", values[mode].getClass().getName(), bytes.toByteArray(), root); var wire = android.os.Parcel.obtain();
+                    try {
+                        bundle.writeToParcel(wire, 0); validSerial.writeInt(mode); validSerial.writeBoolean(root); validSerial.writeByteArray(wire.marshall()); validSerial.writeByteArray(bytes.toByteArray());
+                        try {var groups = bundle.getParcelableArrayList("x.example", android.content.UriRelativeFilterGroupParcel.class); validSerial.writeInt(groups == null ? -2 : groups.size()); validSerial.writeString(null); validSerial.writeString(null);}
+                        catch (RuntimeException error) {validSerial.writeInt(-1); validSerial.writeString(error.getClass().getName()); validSerial.writeString(error.getMessage());}
+                    } finally {wire.recycle();}
+                }
+                java.nio.file.Files.write(new java.io.File(directory, "uri-valid-serial.original").toPath(), validSerial.marshall());
+            } finally {validSerial.recycle();}
             out.recycle(); out = android.os.Parcel.obtain();
             out.writeInt(3);
             for (int mode = 0; mode < 3; mode++) {
@@ -124,10 +139,11 @@ final class UriDtoOracle {
             java.nio.file.Files.write(new java.io.File(directory, "uri-null-match.original").toPath(), out.marshall());
         } finally { out.recycle(); }
     }
-    static android.os.Bundle serialBundle(String key, String name, boolean root) {
+    static android.os.Bundle serialBundle(String key, String name, boolean root) {return serialPayloadBundle(key, name, new byte[] {0}, root);}
+    static android.os.Bundle serialPayloadBundle(String key, String name, byte[] payload, boolean root) {
         var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
         try {
-            value.writeString(name); if (name != null) value.writeByteArray(new byte[] {0});
+            value.writeString(name); if (name != null) value.writeByteArray(payload);
             int length = value.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(root ? 21 : 11);
             if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
             else {list.writeInt(1); list.writeInt(21); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}

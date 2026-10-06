@@ -1754,9 +1754,20 @@ oracle and was replaced. Six original service/actual ART cases verify exact
 error messages, unchanged groups on I/O/NPE failure, and group removal for a
 null top-level Serializable; original service schedules no write (18.12s).
 Full original oracle passes (29.15s, no skips), 499 units pass (0.53s; five
-excluded), and production build passes (3 rebuilt, 39 fresh, 1.2s). Valid Java
-serialization stream decoding, other lazy value/creator/malformed Bundle cases
-remain #966 and fail explicitly where unsupported. Startup class-metadata
+excluded), and production build passes (3 rebuilt, 39 fresh, 1.2s). Valid serialization now reads short/long modified-UTF strings and the pinned
+libcore ArrayList descriptor, size field, compatibility capacity block, null/string
+items and known references. Eight original ObjectOutputStream cases verify string,
+empty ArrayList, null-item ArrayList and string-item ArrayList in both top-level
+and list-element forms. Original typed getter retains a serialized ArrayList's
+string item; service conversion then throws ClassCastException, whose native
+transport outcome is UNKNOWN_TRANSACTION. Null-item lists retain the original
+constructor NPE; wrong list-element object types remain typed-getter mismatches.
+Original service and actual ART verify all eight outcomes, error-state preservation
+and successful group removal (22.95s); no original settings write is scheduled.
+Full original oracle passes (30.88s, no skips), 499 units pass (0.50s; five excluded),
+and production build passes (3 rebuilt, 39 fresh, 1.3s). Other object schemas,
+noncanonical serialization forms, creators and malformed Bundle behavior remain
+#966 and fail explicitly where unsupported. Startup class-metadata
 binding and full domain/PMS conformance remain #957/#798; original services stay
 active.
 
