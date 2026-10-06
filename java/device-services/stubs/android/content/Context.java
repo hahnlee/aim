@@ -29,6 +29,7 @@ public abstract class Context {
     public abstract ContentResolver getContentResolver();
     public final <T> T getSystemService(Class<T> serviceClass) { throw new RuntimeException("stub"); }
     public abstract int checkPermission(String permission, int pid, int uid);
+    public abstract void enforcePermission(String permission, int pid, int uid, String message);
     public final int getColor(int id) { throw new RuntimeException("stub"); }
     public final String getString(int resId) { throw new RuntimeException("stub"); }
     public abstract String getBasePackageName();

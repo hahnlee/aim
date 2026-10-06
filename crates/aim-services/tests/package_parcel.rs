@@ -14,6 +14,7 @@ mod common {
     pub mod settings_owner_defaults;
     pub mod signature_events;
     pub mod domain_collector;
+    pub mod domain_enforcer;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -89,6 +90,7 @@ fn native_package_parcels_match_original_read_write() {
                 .join("tests/fixtures/PackageCacheValidationOracle.java"),
         )
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainCollectorOracle.java"))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainEnforcerOracle.java"))
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedSharedUserOracle.java"),
@@ -1639,6 +1641,7 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
     common::domain_collector::export(&directory);
+    common::domain_enforcer::export(&directory);
     let original = boot.command().args([
         "shell", "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",

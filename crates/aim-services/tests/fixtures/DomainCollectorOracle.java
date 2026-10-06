@@ -21,6 +21,7 @@ public final class DomainCollectorOracle {
         var context = android.app.ActivityThread.systemMain().getSystemUiContext();
         var compat = new Compat(context);
         verifyConfiguration(directory);
+        DomainEnforcerOracle.verify(directory);
         verifySignatures(directory);
         verifyAttachment(directory, context, compat);
         verifyPersistenceDefaults(directory, context, compat);

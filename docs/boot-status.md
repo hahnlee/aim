@@ -1393,7 +1393,18 @@ Original ART's PropertyInvalidatedCache probe retains an entry before the bridge
 call and recomputes it afterward, with actual foreign-UID denial. This uses the
 original mutable shared-memory owner in the disposable client process; a live
 system_server shared nonce mapping was not exercised end-to-end. Notification
-delivery, automatic startup and Binder mutation serving remain unproved. The fixture runs the image's original collector with a controlled
+delivery, automatic startup and Binder mutation serving remain unproved. Native domain authorization now ports the original
+Enforcer's internal/query/verifier/user-query/user-select/owner-query and legacy
+checks, with explicit permission, verifier identity, user-existence and visibility
+owners. Missing owners are not treated as grants or ordinary permission denials.
+The captured adapter uses the same query graph's user map/AppsFilter (including
+uninstalled/archived filtering) and an explicit permission callback/verifier UID.
+Original ART compares 6,912 controlled-owner cases over root/system/shell/app
+UIDs, verifier status, permission combinations, user existence, cross-user access,
+hidden packages and nullable selection targets. Allow/false/SecurityException
+outcomes match, including the legacy selector's silent cross-user denial.
+These are controlled owners, not a production verifier selection or registered
+native domain Binder endpoint; live authorization integration remains unproved. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1404,9 +1415,9 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(28.87s, no skips); release units pass 484 cases (four excluded from the default
-run, 0.53s). The full build passes (nine nodes rebuilt, 33 fresh, 74.1s);
-the image/original-PMS template build passes; final host build is fresh (13 nodes, 0.3s).
+(28.76s, no skips); release units pass 485 cases (four excluded from the default
+run, 0.50s). The full build passes (nine nodes rebuilt, 33 fresh, 54.8s);
+the image/original-PMS template build passes; final host build is fresh (13 nodes, 0.2s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
@@ -1414,9 +1425,9 @@ Binder registration remain unproved. Native cache read/write and facade serializ
 now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
-independently null fields for both component kinds. Release units pass 484
-cases (four excluded from the default run, 0.53s). The full build passes
-(nine nodes rebuilt, 33 fresh, 74.1s); final host build is fresh (13 nodes, 0.3s).
+independently null fields for both component kinds. Release units pass 485
+cases (four excluded from the default run, 0.50s). The full build passes
+(nine nodes rebuilt, 33 fresh, 54.8s); final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template
