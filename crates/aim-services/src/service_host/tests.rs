@@ -3332,6 +3332,29 @@ fn verify_boot_scan(
             assert_eq!(updated.scan().owner().settings.domain_verification, current.scan().owner().settings.domain_verification);
             assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
         }
+        {
+            let base = system.capture_package_queries().unwrap();
+            let mut live_owner = base.domains().unwrap().owner().clone();
+            let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(0);
+            group.add_nullable(0, 0, None); group.add(0, 0, "");
+            live_owner.set_uri_groups("android", &[("nullable.example".into(), Some(vec![group]))]).unwrap();
+            let expected_runtime = live_owner.persisted(); let expected_disk = live_owner.xml_projection();
+            let update = base.prepare_domain_update(live_owner).unwrap();
+            let updated = system.commit_package_domains(&bridge, update, &mut persistence.lock().unwrap()).unwrap();
+            assert_eq!(updated.domains().unwrap().owner().persisted(), expected_runtime);
+            assert_eq!(updated.scan().owner().settings.domain_verification, expected_disk);
+            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, expected_disk);
+            let disk = crate::package::settings::Settings::parse(&aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap()).unwrap().domain_verification;
+            assert_eq!(disk, expected_disk);
+            assert!(base.domains().unwrap().owner().uri_groups("android", &["nullable.example".into()]).is_empty());
+            let groups = updated.domains().unwrap().owner().uri_groups("android", &["nullable.example".into()]);
+            assert_eq!(groups[0].1[0].filters.len(), 2); assert_eq!(groups[0].1[0].filters[0].filter, None);
+            // A second write must compare with the read-back XML base, not live null metadata.
+            let mut next_owner = updated.domains().unwrap().owner().clone();
+            next_owner.set_link_handling_internal(Some("android"), false, 0, &[0]).unwrap();
+            let next = updated.prepare_domain_update(next_owner).unwrap();
+            system.commit_package_domains(&bridge, next, &mut persistence.lock().unwrap()).unwrap();
+        }
         let before_parallel = system.capture_package_queries().unwrap();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);
         let barrier = std::sync::Barrier::new(4);
@@ -3348,7 +3371,7 @@ fn verify_boot_scan(
         let after_parallel = system.capture_package_queries().unwrap();
         assert_eq!(after_parallel.scan().version(), before_parallel.scan().version() + 4);
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations + 4);
-        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, after_parallel.domains().unwrap().owner().persisted());
+        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, after_parallel.domains().unwrap().owner().xml_projection());
         let before_failure = system.capture_package_queries().unwrap();
         owner.query_reply.store(1, Ordering::SeqCst);
         let reply = invoke(client, Some("android"), false, 0, false).unwrap();
@@ -3358,7 +3381,7 @@ fn verify_boot_scan(
         let committed_failure = system.capture_package_queries().unwrap();
         assert_eq!(committed_failure.scan().version(), before_failure.scan().version() + 1);
         assert!(!committed_failure.domains().unwrap().owner().package("android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling);
-        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, committed_failure.domains().unwrap().owner().persisted());
+        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, committed_failure.domains().unwrap().owner().xml_projection());
         owner.query_reply.store(0, Ordering::SeqCst);
         bridge.invalidate_package_info_cache().unwrap();
         invoke(client, Some("android"), true, 0, false).unwrap().reader().read_exception().unwrap().unwrap();

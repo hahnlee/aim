@@ -1601,14 +1601,15 @@ set. Native checked construction now retains the UTF-16 length/index bounds erro
 (#965); the original oracle records that category distinctly. Full original oracle
 passes (30.85s, no skips); 493 units pass (0.53s; five excluded by default). This
 is matcher/DTO evidence: the domain/intent model now stores nullable filter strings (2026-10-06).
-Cache reads and XML reads preserve missing versus empty, ArraySet hashing uses zero
-for null, and cache/Bundle writers preserve null strings. Domain updates normalize
-without substitution. A nullable XML attribute is rejected before file I/O instead
-of silently omitting it; exact original serializer-failure reporting remains open.
-Matching now returns an explicit error through intent resolver, component queries,
-preferred candidates, visibility construction and domain filtering; an error cannot
-become an empty result. Existing native resolution replies classify it as an explicit
-unmodelled/constructor failure, so exact Java exception mapping still remains #964.
+Cache and intent-filter XML reads preserve missing versus empty, ArraySet hashing
+uses zero for null, and cache/Bundle writers preserve null strings. Domain updates
+normalize without substitution. Domain persistence has different XML semantics:
+SettingsXml omits a null filter attribute and DomainVerificationPersistence skips
+that filter on read. Native domain writing/reading follows that behavior while
+retaining null in the live runtime owner. Matching returns typed errors through
+intent resolver, component queries, preferred candidates, visibility construction
+and domain filtering; NPE/IAE replies preserve the original exception, and bounds
+failures preserve the original Binder transport status.
 The original 672-case matcher corpus now also goes through real model groups; full
 oracle passes (33.42s, no skips), 496 units pass (0.52s; five excluded by default),
 publisher passes (0.98s) and actual ART Binder passes (25.61s). New regression cases
@@ -1702,7 +1703,19 @@ matching and visibility construction; the comparator's status-reply comparison
 also passes. Current units pass (499, 0.53s; five excluded) and host build passes
 (3 rebuilt, 10 fresh, 15.0s). The original ART integration was not rerun for this
 shadow-only change; its preceding 16.55s result remains the native transport
-proof. Nullable XML persistence error parity remains under #964.
+proof. Original XML persistence is now verified for null, empty and ordinary
+filter strings across four owner cases: writing succeeds and retains three live
+filters; restoring/re-writing omits the null filter while preserving empty and
+ordinary strings. The added oracle reproduced the previous native reader's extra
+null filter (three instead of two). Native XML writer no longer rejects null;
+scan settings keep the read-back XML projection while the live owner retains
+nullable filters, preventing the next disk write from failing its base comparison.
+Native publication verifies both projections, old capture immutability, sequential
+writes, concurrent writes and committed-error publication. Full original oracle
+passes (30.90s, no skips), publisher passes (1.12s), 499 units pass (0.55s; five
+excluded), actual ART Binder regression passes (15.97s), and production build
+passes (3 rebuilt, 39 fresh, 23.4s). Nullable metadata/matching compatibility
+tracked by #964 is verified; full domain/PMS activation remains gated below.
 Other #966 generic type/error cases and full native
 PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.

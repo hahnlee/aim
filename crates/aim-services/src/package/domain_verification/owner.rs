@@ -810,6 +810,19 @@ impl Owner {
         saved.active.sort_by_key(|p| java_hash(&p.name));
         saved
     }
+    /// SettingsXml omits null filter attributes; persistence reads skip those rows.
+    /// Writing does not change the live owner's nullable URI filters.
+    pub fn xml_projection(&self) -> State {
+        let mut saved = self.persisted();
+        for package in saved.active.iter_mut().chain(&mut saved.restored) {
+            for (_, groups) in &mut package.uri_relative_filter_groups {
+                for group in groups {
+                    group.filters.retain(|filter| filter.filter.is_some());
+                }
+            }
+        }
+        saved
+    }
     pub fn add(&mut self, input: Input<'_>, config: &SystemConfig) -> Result<Change, String> {
         validate(&input)?;
         let name = input.name;

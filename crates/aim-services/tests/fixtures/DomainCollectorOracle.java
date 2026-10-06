@@ -166,6 +166,23 @@ public final class DomainCollectorOracle {
             var restoredGroup = new android.os.Bundle();
             restoredGroup.putParcelableArrayList("h0.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/second")))));
             service.setUriRelativeFilterGroups("fixture.domains", restoredGroup);
+            var nullableUpdate = new android.os.Bundle();
+            var nullableGroup = new android.content.UriRelativeFilterGroupParcel(); nullableGroup.action = 0; nullableGroup.filters = new java.util.ArrayList<>();
+            for (String value : new String[] {null, "", "ordinary"}) {
+                var filter = new android.content.UriRelativeFilterParcel(); filter.filter = value; nullableGroup.filters.add(filter);
+            }
+            var nullableGroups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); nullableGroups.add(nullableGroup);
+            nullableUpdate.putParcelableArrayList("h0.example", nullableGroups);
+            service.setUriRelativeFilterGroups("fixture.domains", nullableUpdate);
+            writeDomains(directory, i, "uri-null-write", service);
+            var liveGroups = service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("h0.example")).getParcelableArrayList("h0.example", android.content.UriRelativeFilterGroupParcel.class);
+            if (liveGroups.get(0).filters.size() != 3 || liveGroups.get(0).filters.get(0).filter != null) throw new AssertionError("XML write changed nullable runtime filters");
+            var restoredService = new com.android.server.pm.verify.domain.DomainVerificationService(context, config, compat);
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-owner-" + i + "-uri-null-write.original"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next(); restoredService.readSettings(null, parser);
+            }
+            writeDomains(directory, i, "uri-null-restore", restoredService);
+            service.setUriRelativeFilterGroups("fixture.domains", restoredGroup);
             for (boolean followingGroup : new boolean[] {false, true}) {
                 try {service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.nullNamedBundle("h0.example", followingGroup)); throw new AssertionError("null Parcelable name accepted as URI group");}
                 catch (NullPointerException expected) {}

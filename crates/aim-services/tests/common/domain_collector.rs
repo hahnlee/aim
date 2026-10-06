@@ -927,6 +927,23 @@ pub fn verify_attachment(directory: &Path) {
                 "URI group update case={case} stage={stage}"
             );
         }
+        let root = aim_android_xml::read(&fs::read(directory.join(format!("domain-owner-{case}-uri-null-write.original"))).unwrap()).unwrap();
+        let mut saved = State::default(); saved.read(root.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
+        let group = &saved.active.iter().find(|p| p.name == "fixture.domains").unwrap().uri_relative_filter_groups.iter().find(|(name, _)| name.as_deref() == Some("h0.example")).unwrap().1[0];
+        assert_eq!(group.filters.len(), 2, "original nullable URI persistence case={case}");
+        assert_eq!(group.filters[0].filter.as_deref(), Some("")); assert_eq!(group.filters[1].filter.as_deref(), Some("ordinary"));
+        let restored_root = aim_android_xml::read(&fs::read(directory.join(format!("domain-owner-{case}-uri-null-restore.original"))).unwrap()).unwrap();
+        let mut restored = State::default(); restored.read(restored_root.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
+        assert_eq!(canonical(saved.clone()), canonical(restored), "original nullable XML restore case={case}");
+        let mut desired = saved;
+        let mut nullable = UriRelativeFilterGroup::new(0); nullable.add_nullable(0, 0, None); nullable.add(0, 0, ""); nullable.add(0, 0, "ordinary");
+        desired.active.iter_mut().find(|p| p.name == "fixture.domains").unwrap().uri_relative_filter_groups.iter_mut().find(|(name, _)| name.as_deref() == Some("h0.example")).unwrap().1 = vec![nullable];
+        let written = aim_services::package::owner::domains::replace(&root, &desired).unwrap();
+        let parsed = aim_services::package::settings::Settings::parse(&written).unwrap().domain_verification;
+        let projection = aim_services::package::domain_verification::owner::Owner::new(desired.clone(), Default::default()).xml_projection();
+        assert_eq!(canonical(parsed), canonical(projection), "native nullable XML projection case={case}");
+        assert_eq!(desired.active.iter().find(|p| p.name == "fixture.domains").unwrap().uri_relative_filter_groups.iter().find(|(name, _)| name.as_deref() == Some("h0.example")).unwrap().1[0].filters.len(), 3);
+
         let previous = owner.persisted();
         owner.set_uri_groups("missing", &[]).unwrap();
         assert!(owner.set_uri_groups("missing", &updates).is_err());

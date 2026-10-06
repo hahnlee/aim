@@ -281,7 +281,7 @@ impl Capture {
             .ok_or("domain version exhausted")?;
         let mut scan_owner = self.scan.owner().clone();
         if persist {
-            scan_owner.settings.domain_verification = owner.persisted();
+            scan_owner.settings.domain_verification = owner.xml_projection();
         }
         let store =
             super::Store::new_replica_at_version(scan_owner, self.scan.usage().clone(), version)
