@@ -972,11 +972,22 @@ original keyset read-order fixtures now also invokes actual original retirement
 and compares the resulting pool, counters, package roles and handle references.
 These are empty-public-key mappings; full live public-key count/retirement and
 boot/uninstall integration remain #823/#824/#914/#798.
+System.recover_package_settings now places exclusive recovery under the retained
+early package bootstrap owner used by scan. It validates bridge identity before
+file selection, before/after each frontend attempt and before returning the
+unpublished Store. A replaced/dead/stale owner aborts; typed frontend errors retain
+partial state. The Binder bootstrap fixture exercises actual captured-document
+recovery, native owner failure, bridge replacement during the read (selected file
+preserved, no Store returned), and stale-owner rejection before backup selection
+(main/backup unchanged). Complete record owners are supplied by the caller;
+guest-init/SystemServer orchestration, full frontend and original-name activation
+remain #914/#912/#798. This entry does not run or replace original PMS.
 17 XML tests and 522 service units pass (5 service tests excluded, 0.51s).
-Full original ART oracle passes without skips (57.01s), retaining 34 version,
-866 package-body/header, 238 shared UID and incremental permission projections.
-Production runtime build passes (3 rebuilt/39 fresh, 25.6s); previous image/template
-build passed (6 rebuilt/36 fresh, 72.1s). An original
+The explicit retained-owner native scan against original framework-res passes
+(1.45s), including the new recovery-entry checks. The previous full original ART
+oracle passed without skips (57.01s); it was not rerun for this System-entry-only
+change. Production runtime build passes (3 rebuilt/39 fresh, 22.5s); previous
+image/template build passed (6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier
 checks it against the pinned original. Only worktree incremental cache was removed

@@ -1079,6 +1079,52 @@ impl System {
             })
     }
 
+    /// Recover settings under the same retained early owner used by native scan.
+    /// Missing/replaced bridges abort before selection or frontend publication.
+    /// The caller supplies complete record owners and keeps partial mutations.
+    pub fn recover_package_settings(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        data: &std::path::Path,
+        users: &[u32],
+        settings: &mut crate::package::settings::Settings,
+        mut read: impl FnMut(
+            &[u8],
+            &mut crate::package::settings::Settings,
+        ) -> std::result::Result<
+            Option<aim_android_xml::Element>,
+            crate::package::owner::recovery::ReadError,
+        >,
+    ) -> std::result::Result<
+        (
+            crate::package::owner::Store,
+            crate::package::owner::recovery::Report,
+        ),
+        crate::package::owner::recovery::Error,
+    > {
+        use crate::package::owner::recovery::{Error, Plan, ReadError};
+        let check = || {
+            self.check_package_bootstrap(bridge)
+                .map_err(|error| format!("settings bootstrap owner: {error:?}"))
+        };
+        check().map_err(|message| Error {
+            events: Vec::new(),
+            message,
+        })?;
+        let recovered =
+            Plan::inspect(data)?.recover_with_owner(users, settings, |bytes, settings| {
+                check().map_err(ReadError::Owner)?;
+                let document = read(bytes, settings)?;
+                check().map_err(ReadError::Owner)?;
+                Ok(document)
+            })?;
+        check().map_err(|message| Error {
+            events: recovered.1.events.clone(),
+            message,
+        })?;
+        Ok(recovered)
+    }
+
     /// Prepare native first-boot code using the caller's captured early owner.
     /// Carry that same bridge through saved phases and completion/publication.
     /// The result is unpublished until reconciliation and snapshot gates finish.

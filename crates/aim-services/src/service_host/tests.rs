@@ -890,6 +890,46 @@ fn signing_override_transport_reaches_live_apk_collection() {
     exercise_bootstrap(true, true);
 }
 type ScanOracle<'a> = dyn Fn(&Arc<System>, &Arc<crate::package::bootstrap::Bridge>, &SystemConfig, &Arc<Mutex<crate::package::owner::Store>>) + 'a;
+fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>, mut replace: Option<&mut dyn FnMut()>) {
+    use crate::package::{owner::recovery::{Event, ReadError}, settings::Settings};
+    let root = std::env::temp_dir().join(format!("aim-settings-entry-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    struct Data(std::path::PathBuf);
+    impl Drop for Data { fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); } }
+    std::fs::create_dir_all(root.join("system")).unwrap();
+    let _data = Data(root.clone());
+    let path = root.join("system/packages.xml");
+    let bytes = b"<packages><version sdkVersion='36' databaseVersion='3'/><extension value='keep'/></packages>";
+    std::fs::write(&path, bytes).unwrap();
+    let mut settings = Settings::default();
+    let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
+    assert!(!report.first_boot);
+    assert_eq!(store.state().settings.versions[0].sdk_version, 36);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {
+        state.find_or_create_version(None).database_version = 8;
+        Err(ReadError::Owner("native settings owner unavailable".into()))
+    }).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::OwnerFailed { .. })));
+    assert_eq!(settings.versions[0].database_version, 8);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    if let Some(replace) = &mut replace {
+        let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| {
+            let document = state.read_document(bytes, |_,_,_| Ok(false))?;
+            replace();
+            Ok(document)
+        }).err().unwrap();
+        assert!(matches!(error.events.last(), Some(Event::OwnerFailed { .. })));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let backup = root.join("system/packages-backup.xml");
+        std::fs::write(&backup, bytes).unwrap();
+        let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, |_,_| panic!("stale bridge read settings")).err().unwrap();
+        assert!(stale.events.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+    }
+
+}
+
 fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     exercise_bootstrap_on(Driver::new(), run_scan, debuggable, None);
 }
@@ -1058,6 +1098,7 @@ fn exercise_bootstrap_on(
             .is_err()
     );
     let old = system.package_bootstrap().unwrap();
+    verify_settings_boot_entry(&system, &old, None);
     let signing = verify_signing_transport(&system, &first, &foreign, debuggable);
     owner
         .signing_debuggable
@@ -1641,7 +1682,7 @@ fn exercise_bootstrap_on(
     let previous_version = system.capture_package_scan().unwrap().version();
     let prior_domains = system.capture_package_domains().ok();
     let prior_domain_state = prior_domains.as_ref().map(|d| d.owner().persisted());
-    attach(&second, Some(replacement)).unwrap();
+    verify_settings_boot_entry(&system, &old, Some(&mut || attach(&second, Some(replacement)).unwrap()));
     assert!(system.capture_package_domains().is_err());
     assert!(domain_names(&second).is_err_and(|e| e.code == -5));
     assert_eq!(
