@@ -147,7 +147,12 @@ impl Plan {
         Ok(())
     }
 
-    fn remove(&mut self, index: usize, events: &mut Vec<Event>) -> Result<(), Error> {
+    fn remove(
+        &mut self,
+        index: usize,
+        events: &mut Vec<Event>,
+        best_effort: bool,
+    ) -> Result<(), Error> {
         self.check().map_err(|message| Error {
             events: events.clone(),
             message,
@@ -159,7 +164,7 @@ impl Plan {
                 fs::remove_file(&input.path)
             };
             if let Err(error) = removed {
-                if input.directory.is_some() && error.raw_os_error() == Some(libc::ENOTEMPTY) {
+                if best_effort {
                     events.push(Event::RemoveFailed(input.source));
                     return Ok(());
                 }
@@ -235,8 +240,8 @@ impl Plan {
             if index == 1 {
                 // openRead discards main/reserve as soon as backup opens,
                 // before the settings frontend decides whether backup parses.
-                self.remove(0, &mut events)?;
-                self.remove(2, &mut events)?;
+                self.remove(0, &mut events, true)?;
+                self.remove(2, &mut events, true)?;
             }
             match parse(&self.inputs[index].as_ref().unwrap().file.payload, settings) {
                 Ok(Some(document)) => {
@@ -265,7 +270,7 @@ impl Plan {
                 Err(message) => {
                     failed = true;
                     events.push(Event::Failed { source, message });
-                    self.remove(index, &mut events)?;
+                    self.remove(index, &mut events, false)?;
                 }
             }
         }

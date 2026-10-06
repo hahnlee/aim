@@ -721,6 +721,8 @@ fn native_package_parcels_match_original_read_write() {
         ([None, Some(b"<packages/>".to_vec()), None], [1, 0, 1]),
         ([None, Some(b"<packages/>".to_vec()), None], [2, 0, 1]),
     ]);
+    let readonly_recovery = recovery_cases.len();
+    recovery_cases.push(([Some(b"<packages/>".to_vec()), Some(b"<packages/>".to_vec()), Some(b"<packages/>".to_vec())], [0, 0, 0]));
     let mut recovery_expected = Vec::new();
     for (index, (inputs, directories)) in recovery_cases.iter().enumerate() {
         let native = directory.join(format!("recovery-native-{index}"));
@@ -730,7 +732,7 @@ fn native_package_parcels_match_original_read_write() {
             "packages-backup.xml",
             "packages.xml.reservecopy",
         ];
-        let mut properties = String::new();
+        let mut properties = if index == readonly_recovery {"readonly=true\n".to_string()} else {String::new()};
         for (slot, input) in inputs.iter().enumerate() {
             if directories[slot] != 0 {
                 properties.push_str(&format!("{slot}={}\n", if directories[slot] == 1 {"directory"} else {"nonempty-directory"}));
@@ -754,9 +756,9 @@ fn native_package_parcels_match_original_read_write() {
             properties,
         )
         .unwrap();
-        let (_, report) = aim_services::package::owner::recovery::Plan::inspect(&native)
-            .unwrap()
-            .recover(&[0], &mut Default::default(), |bytes, state| {
+        let plan = aim_services::package::owner::recovery::Plan::inspect(&native).unwrap();
+        if index == readonly_recovery {use std::os::unix::fs::PermissionsExt; fs::set_permissions(native.join("system"), fs::Permissions::from_mode(0o555)).unwrap();}
+        let (_, report) = plan.recover(&[0], &mut Default::default(), |bytes, state| {
                 let root = aim_android_xml::read_next_optional(bytes)?;
                 if let Some(root) = &root {
                     *state = aim_services::package::settings::Settings::parse(root)?;
@@ -792,6 +794,7 @@ fn native_package_parcels_match_original_read_write() {
             .collect::<Vec<_>>()
             .join(";");
         recovery_expected.push(format!("{}|{events}|{remains}", report.first_boot));
+        if index == readonly_recovery {use std::os::unix::fs::PermissionsExt; fs::set_permissions(native.join("system"), fs::Permissions::from_mode(0o755)).unwrap();}
     }
     let reindexed_data = directory.join("reindexed-settings-writer");
     fs::create_dir_all(reindexed_data.join("system")).unwrap();

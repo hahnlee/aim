@@ -325,8 +325,12 @@ public final class ScanSettingsWriteOracle {
                     java.nio.file.Files.write(files[slot].toPath(), bytes);
                 }
             }
+            boolean readOnly = "true".equals(inputs.getProperty("readonly"));
+            if (readOnly && !root.setWritable(false, false)) throw new AssertionError("cannot set recovery directory readonly");
             var events = new java.util.ArrayList<String>(); boolean failed = false, first = false;
             var sources = new String[]{"Main", "Backup", "Reserve"};
+            int originalUid = android.system.Os.geteuid();
+            if (readOnly) {android.system.Os.seteuid(1000); if (android.system.Os.geteuid() != 1000) throw new AssertionError("recovery euid differs");}
             try (var atomic = new ResilientAtomicFile(files[0], files[1], files[2], 0660, "fixture", null)) {
                 while (true) {
                     int selected = files[1].isFile() ? 1 : files[0].exists() ? 0 : files[2].exists() ? 2 : -1;
@@ -351,6 +355,8 @@ public final class ScanSettingsWriteOracle {
                     }
                 }
             }
+            finally {if (readOnly) android.system.Os.seteuid(originalUid);}
+            if (readOnly && !root.setWritable(true, true)) throw new AssertionError("cannot restore recovery directory permissions");
             var remains = new java.util.ArrayList<String>();
             for (var file : files) remains.add(file.isDirectory() ? (file.list().length == 0 ? "directory" : "nonempty-directory") : file.exists() ? hex(java.nio.file.Files.readAllBytes(file.toPath())) : "missing");
             String output = first + "|" + String.join(",", events) + "|" + String.join(";", remains);

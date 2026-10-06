@@ -2179,3 +2179,25 @@ fn exclusive_recovery_matches_directory_open_selection_and_cleanup() {
     let plan = Plan::inspect(&data.0).unwrap(); fs::write(paths[1].join("foreign"), b"changed").unwrap();
     assert!(plan.recover(&[0], &mut Default::default(), parse).is_err()); assert!(paths[1].join("foreign").is_file());
 }
+
+#[test]
+fn backup_cleanup_permission_failure_is_reported_without_aborting_the_read() {
+    use recovery::{Event, Plan, Source};
+    let data = Data::new(); let parent = data.0.join("system"); fs::create_dir_all(&parent).unwrap();
+    let paths = settings_paths(&data.0);
+    for path in &paths {fs::write(path, b"<packages/>").unwrap();}
+    let plan = Plan::inspect(&data.0).unwrap();
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {fn drop(&mut self) {fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755)).unwrap();}}
+    let restore = RestorePermissions(parent.clone()); fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let (_, report) = plan.recover(&[0], &mut Default::default(), |bytes, state| {
+        let root = aim_android_xml::read(bytes)?; *state = crate::package::settings::Settings::parse(&root)?; Ok(Some(root))
+    }).unwrap();
+    assert_eq!(report.events, vec![Event::Selected(Source::Backup), Event::RemoveFailed(Source::Main), Event::RemoveFailed(Source::Reserve)]);
+    assert!(paths.iter().all(|path| path.is_file())); drop(restore);
+    // failRead still owns a required deletion; it must expose permission failure.
+    fs::write(&paths[1], b"broken").unwrap(); let plan = Plan::inspect(&data.0).unwrap();
+    let restore = RestorePermissions(parent.clone()); fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let error = plan.recover(&[0], &mut Default::default(), |_, _| Err("controlled parse failure".into())).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::Failed {source: Source::Backup, ..}))); assert!(paths.iter().all(|path| path.is_file())); drop(restore);
+}

@@ -102,12 +102,66 @@ fn mknod_host(r: &Resolved, mode: u32) -> i64 {
     }
 }
 
+fn directory_permits(st: &libc::stat, want: u32, id: &super::cred::Identity) -> bool {
+    let bits = if st.st_uid == id.uid[3] {
+        (st.st_mode as u32 >> 6) & 7
+    } else if st.st_gid == id.gid[3] || id.groups.contains(&st.st_gid) {
+        (st.st_mode as u32 >> 3) & 7
+    } else {
+        st.st_mode as u32 & 7
+    };
+    bits & want == want
+        || id.cap_eff & (1 << 1) != 0
+        || (want & 2 == 0 && id.cap_eff & (1 << 2) != 0)
+}
+fn sticky_permits(parent: &libc::stat, target: &libc::stat, id: &super::cred::Identity) -> bool {
+    parent.st_mode as u32 & libc::S_ISVTX as u32 == 0
+        || id.uid[3] == parent.st_uid
+        || id.uid[3] == target.st_uid
+        || id.cap_eff & (1 << 3) != 0
+}
+fn unlink_permissions(r: &Resolved, id: &super::cred::Identity) -> Result<(), i64> {
+    if !attrs::recording() {
+        return Ok(());
+    }
+    let parent = std::path::Path::new(&r.guest)
+        .parent()
+        .ok_or(-crate::errno::EBUSY as i64)?;
+    for directory in parent.ancestors() {
+        let st = super::fs::stat_at(
+            crate::vfs::LINUX_AT_FDCWD,
+            directory.as_os_str().as_encoded_bytes(),
+            0,
+        )?;
+        if !directory_permits(&st, if directory == parent { 3 } else { 1 }, id) {
+            return Err(-crate::errno::EACCES as i64);
+        }
+    }
+    let directory = super::fs::stat_at(
+        crate::vfs::LINUX_AT_FDCWD,
+        parent.as_os_str().as_encoded_bytes(),
+        0,
+    )?;
+    if directory.st_mode as u32 & libc::S_ISVTX as u32 != 0 {
+        let target = super::fs::stat_at(
+            crate::vfs::LINUX_AT_FDCWD,
+            r.guest.as_bytes(),
+            AT_SYMLINK_NOFOLLOW,
+        )?;
+        if !sticky_permits(&directory, &target, id) {
+            return Err(-EPERM);
+        }
+    }
+    Ok(())
+}
+
 pub fn unlinkat(a: [u64; 6]) -> i64 {
     if a[2] & !AT_REMOVEDIR != 0 {
         return -(EINVAL as i64);
     }
     match resolve_w(a[0], a[1], false) {
         Ok(r) => {
+            if let Err(error) = unlink_permissions(&r, &super::cred::current()) {return error;}
             // SAFETY: resolved host path.
             let result = unsafe {
                 if a[2] & AT_REMOVEDIR != 0 {
@@ -717,5 +771,29 @@ mod tests {
             table.len(),
             start.elapsed().as_micros()
         );
+    }
+}
+
+#[cfg(test)]
+mod unlink_permission_tests {
+    use super::*;
+    #[test]
+    fn sticky_directory_requires_owner_or_fowner_capability() {
+        let mut parent: libc::stat = unsafe {std::mem::zeroed()}; parent.st_mode = libc::S_IFDIR | 0o1777; parent.st_uid = 1000;
+        let mut target: libc::stat = unsafe {std::mem::zeroed()}; target.st_uid = 2000;
+        let mut id = super::super::cred::Identity::default(); id.cap_eff = 0; id.uid = [3000; 4];
+        assert!(!sticky_permits(&parent, &target, &id)); id.uid[3] = 1000; assert!(sticky_permits(&parent, &target, &id));
+        id.uid[3] = 2000; assert!(sticky_permits(&parent, &target, &id)); id.uid[3] = 3000;
+        id.cap_eff = 1 << 1; assert!(!sticky_permits(&parent, &target, &id)); id.cap_eff = 1 << 3; assert!(sticky_permits(&parent, &target, &id));
+    }
+    #[test]
+    fn directory_dac_uses_fs_ids_groups_and_capabilities() {
+        let mut st: libc::stat = unsafe {std::mem::zeroed()}; st.st_mode = libc::S_IFDIR | 0o750; st.st_uid = 1000; st.st_gid = 2000;
+        let mut id = super::super::cred::Identity::default(); id.uid = [1001; 4]; id.gid = [2001; 4]; id.cap_eff = 0;
+        assert!(!directory_permits(&st, 3, &id)); id.groups.push(2000); assert!(directory_permits(&st, 1, &id)); assert!(!directory_permits(&st, 3, &id));
+        id.uid[3] = 1000; assert!(directory_permits(&st, 3, &id));
+        id.uid[3] = 0; st.st_mode = libc::S_IFDIR; assert!(!directory_permits(&st, 3, &id));
+        id.cap_eff = 1 << 2; assert!(directory_permits(&st, 1, &id)); assert!(!directory_permits(&st, 3, &id));
+        id.cap_eff = 1 << 1; assert!(directory_permits(&st, 3, &id));
     }
 }
