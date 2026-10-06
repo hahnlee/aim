@@ -757,7 +757,11 @@ fn visibility_construction_retains_uri_matcher_errors_and_the_previous_resolver(
             let reply = reply.unwrap();
             let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
             assert_eq!(exception.code, expected.code); assert_eq!(exception.message, expected.message);
-        } else {assert!(matches!(reply, Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));}
+        } else {
+            assert!(matches!(reply, Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+            let mut call = ShadowCall {service: "package", descriptor: pm::DESCRIPTOR, code: pm::QUERY_INTENT_ACTIVITIES, flags: 0, sender_pid: 123, sender_euid: 1000, seq: 1, sent: std::time::Instant::now(), dropped: 0, data: aim_binder_host::parcel::Reader::new(request.data(), request.objects())};
+            assert!(matches!(resolver.answer(&invalid, &mut call), Some(Answer::Status(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+        }
         assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
     }
 }
@@ -792,7 +796,10 @@ fn intent_queries_return_uri_matcher_exceptions_instead_of_not_modelled() {
             request.write_string16(None); request.write_i64(MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE); request.write_i32(0);
             let reply = resolver.query(&state, code, if explicit {10002} else {1000}, &mut aim_binder_host::parcel::Reader::new(request.data(), request.objects())).unwrap();
             let Some(expected) = &expected else {
-                assert!(matches!(reply, Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION)))); continue;
+                assert!(matches!(reply, Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+                let mut call = ShadowCall {service: "package", descriptor: pm::DESCRIPTOR, code, flags: 0, sender_pid: 123, sender_euid: if explicit {10002} else {1000}, seq: 1, sent: std::time::Instant::now(), dropped: 0, data: aim_binder_host::parcel::Reader::new(request.data(), request.objects())};
+                assert!(matches!(resolver.answer(&state, &mut call), Some(Answer::Status(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+                continue;
             };
             let reply = reply.unwrap();
             let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();

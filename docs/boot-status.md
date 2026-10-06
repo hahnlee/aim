@@ -1679,8 +1679,10 @@ Ordinary intent query paths now retain typed matcher failures through component
 search, preferred activities, domain filtering and safer-intent enforcement.
 The shared shadow/native Binder query frontend serializes the original NPE/IAE
 instead of reporting these errors as NotModelled. Non-serializable bounds
-failures now return UNKNOWN_TRANSACTION from native PackageQueries; the shadow
-comparison still leaves transport status unmodelled (#964). A query test covers activity,
+failures now return UNKNOWN_TRANSACTION from native PackageQueries. Shadow
+answers now retain Answer::Status through intent queries and visibility
+construction, allowing the existing comparator to compare TF_STATUS_CODE
+replies instead of counting these paths as not modelled. A query test covers activity,
 service, receiver and provider queries, intent/service resolution, and a foreign
 app's explicit activity query through safer-intent checks, for null literal,
 prefix and advanced patterns and a malformed advanced pattern. Full original
@@ -1694,8 +1696,13 @@ advanced pattern returns the original IAE/message (16.55s). Resolver tests also
 cover transport status across all six query/resolve methods and explicit
 safer-intent matching, and visibility-construction bounds failures. Full original
 oracle passes (32.23s, no skips), 499 units pass (0.67s; five excluded), and
-production build passes (3 rebuilt, 39 fresh, 1.5s). Nullable XML persistence
-error parity and shadow transport-status comparison remain under #964.
+production build passes (3 rebuilt, 39 fresh, 1.5s). Shadow bounds tests now
+assert status answers from all six query/resolve methods, explicit safer-intent
+matching and visibility construction; the comparator's status-reply comparison
+also passes. Current units pass (499, 0.53s; five excluded) and host build passes
+(3 rebuilt, 10 fresh, 15.0s). The original ART integration was not rerun for this
+shadow-only change; its preceding 16.55s result remains the native transport
+proof. Nullable XML persistence error parity remains under #964.
 Other #966 generic type/error cases and full native
 PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.

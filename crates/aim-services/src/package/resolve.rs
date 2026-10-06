@@ -1276,7 +1276,7 @@ impl Resolver {
             .map(|answer| match answer {
                 Ok(reply) => Answer::Reply(reply),
                 Err(QueryError::NotModelled(NotModelled(reason))) => self.not_modelled(call.code, reason),
-                Err(QueryError::Transport(_)) => self.not_modelled(call.code, "non-serializable URI matching exception"),
+                Err(QueryError::Transport(status)) => Answer::Status(status),
             })
     }
 
