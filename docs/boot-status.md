@@ -1439,15 +1439,23 @@ only a disposable unlinked region is created. Five ashmem ABI tests pass,
 including native region size/device/protection and rejected writable mappings.
 The original ART creator reads 4,000 entries from a native FD-backed Info packet:
 the test passes its FD to a disposable client and installs the file object at its
-native Parcel offset. This proves original creator/ashmem compatibility; a large
-Info query through the registered native endpoint to an original app remains
-unrun. Native codec tests cover the exact 32 KiB boundary, UTF-16 surrogate pairs,
+native Parcel offset. A separate original ART client now resolves the actual
+native DomainQueries endpoint through ServiceManager, calls its generated Info
+transaction and reads all 4,000 domains through the original creator. It asserts
+the reply contains an FD (12.76s, no skips). This uses a test-only native code
+metadata copy with added auto-verification hosts; no APK/image/extracted tree is
+modified. seInfo/shared-process values are recomputed at their owning stages,
+then the normal runtime/domain completion and validated capture publication run.
+The test registry implements pinned checkService2's Service/ServiceWithMetadata
+framing. Failure-only AndroidRuntime logging identified the earlier SIGKILL as
+this registry's missing checkService2 response; that scaffold failure is fixed.
+This proves real Binder FD transport; it does not prove full native PMS startup
+or the named app/CTS migration gates. Native codec tests cover the exact 32 KiB boundary, UTF-16 surrogate pairs,
 small inline blobs with a large prefix and empty-map behavior. The full original
-parcel fixture passes (30.18s, no skips); service units pass 488 cases (four
-excluded from the default run, 0.49s); binder-host units pass 14 cases (0.02s).
-The image/original-PMS template build passes (12 rebuilt, 30 fresh, 68.6s). The
-last full build passes (17 rebuilt, 25 fresh, 0.7s); final host build is fresh
-(13 nodes, 0.2s). Same-process service
+parcel fixture passes (30.18s, no skips); service units pass 488 cases (five
+excluded from the default run, 0.52s); binder-host units pass 14 cases (0.02s).
+The image/original-PMS template build passes (nine rebuilt, 33 fresh, 57.0s);
+final host build is fresh (13 nodes, 0.2s). Same-process service
 lookup now retains and dispatches the returned local object (#961), with the
 original BBinder calling identity rule: an incoming caller's UID/PID is retained
 through a nested local call, then restored; outside a call, the host service's

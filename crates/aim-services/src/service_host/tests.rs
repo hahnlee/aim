@@ -50,14 +50,28 @@ impl Service for Registry {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         use aim_service_aidl::android_os_iservicemanager as sm;
         let position = call.data.position();
-        if call.code == sm::CHECK_SERVICE && call.data.enforce_interface(sm::DESCRIPTOR).is_ok() {
+        if matches!(call.code, sm::CHECK_SERVICE | sm::CHECK_SERVICE2)
+            && call.data.enforce_interface(sm::DESCRIPTOR).is_ok()
+        {
             let name = call.data.read_string16()?.unwrap();
             assert_eq!(call.data.remaining(), 0);
             let mut reply = Parcel::new();
-            sm::write_check_service_reply(
-                &mut reply,
-                Some(self.nodes.lock().unwrap()[&name].binder()),
-            );
+            let nodes = self.nodes.lock().unwrap();
+            let binder = nodes.get(&name).map(Strong::binder);
+            if call.code == sm::CHECK_SERVICE {
+                sm::write_check_service_reply(&mut reply, binder);
+            } else {
+                // Pinned Service union: tag 0, typed sized ServiceWithMetadata.
+                reply.write_no_exception();
+                reply.write_i32(1);
+                reply.write_i32(0);
+                reply.write_i32(1);
+                let start = reply.position();
+                reply.write_i32(0);
+                reply.write_binder(binder);
+                reply.write_bool(false);
+                reply.set_i32_at(start, (reply.position() - start) as i32);
+            }
             return Ok(reply);
         }
         call.data.set_position(position);
@@ -866,8 +880,16 @@ fn signing_override_transport_uses_captured_debug_policy() {
 fn signing_override_transport_reaches_live_apk_collection() {
     exercise_bootstrap(true, true);
 }
+type ScanOracle<'a> = dyn Fn(&Arc<System>, &Arc<crate::package::bootstrap::Bridge>, &SystemConfig) + 'a;
 fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
-    let driver = Driver::new();
+    exercise_bootstrap_on(Driver::new(), run_scan, debuggable, None);
+}
+fn exercise_bootstrap_on(
+    driver: Arc<Driver>,
+    run_scan: bool,
+    debuggable: bool,
+    oracle: Option<&ScanOracle<'_>>,
+) {
     let open = |pid, euid| {
         LocalProcess::open(
             &driver,
@@ -1357,7 +1379,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     assert!(old.resolve_boot(&config, &|_| None).is_err());
     owner.apex_reply.store(0, Ordering::SeqCst);
     if run_scan {
-        verify_boot_scan(&system, &native, &first, &foreign, &old, &owner, &config);
+        verify_boot_scan(&system, &native, &first, &foreign, &old, &owner, &config, oracle);
     }
     let mut parsed = crate::package::pkg::AndroidPackage {
         feature_flag_state: Some(Vec::new()),
@@ -1904,6 +1926,7 @@ fn verify_boot_scan(
     bridge: &Arc<crate::package::bootstrap::Bridge>,
     owner: &Owner,
     config: &SystemConfig,
+    oracle: Option<&ScanOracle<'_>>,
 ) {
     use crate::package::{
         bootstrap::ScanPolicy,
@@ -2911,6 +2934,9 @@ fn verify_boot_scan(
     ));
     owner.reject.store(false, Ordering::SeqCst);
     owner.apex_reply.store(0, Ordering::SeqCst);
+    if let Some(oracle) = oracle {
+        oracle(system, bridge, config);
+    }
     drop(data);
 }
 
@@ -2983,3 +3009,6 @@ fn sdk_data_host_rejects_foreign_callers_bad_tokens_tails_and_missing_owner() {
     );
     driver.release(process.proc_handle());
 }
+
+#[path = "domain_transport_test.rs"]
+mod domain_transport_test;

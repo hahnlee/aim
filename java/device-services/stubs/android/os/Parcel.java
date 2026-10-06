@@ -8,6 +8,7 @@ public final class Parcel {
     public static Parcel obtain(IBinder binder) { throw new RuntimeException("stub"); }
     public final void writeFileDescriptor(java.io.FileDescriptor fd) { throw new RuntimeException("stub"); }
     public final byte[] readBlob() { throw new RuntimeException("stub"); }
+    public boolean hasFileDescriptors() { throw new RuntimeException("stub"); }
     public final void recycle() { throw new RuntimeException("stub"); }
     public final void setDataPosition(int pos) { throw new RuntimeException("stub"); }
     public final void writeInterfaceToken(String interfaceName) { throw new RuntimeException("stub"); }

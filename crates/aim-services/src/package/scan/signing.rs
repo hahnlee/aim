@@ -272,6 +272,35 @@ impl SigningScan {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn add_fixture_domains(&mut self, name: &str, count: usize) {
+        use crate::package::intent_filter::{
+            ACTION_VIEW, CATEGORY_BROWSABLE, IntentFilter, ParsedIntentInfo,
+        };
+        let code = &mut Arc::make_mut(self.loaded.get_mut(name).unwrap()).package;
+        let mut filter = IntentFilter {
+            auto_verify: true,
+            ..Default::default()
+        };
+        filter.add_action(ACTION_VIEW);
+        filter.add_category(CATEGORY_BROWSABLE);
+        filter.add_category("android.intent.category.DEFAULT");
+        filter.add_data_scheme("https");
+        for index in 0..count {
+            filter.add_data_authority(&format!("h{index}.example"), None);
+        }
+        code.activities
+            .first_mut()
+            .unwrap()
+            .main
+            .component
+            .intents
+            .push(ParsedIntentInfo {
+                filter,
+                ..Default::default()
+            });
+    }
+
     /// Native-parsed active code, admitted only after every scan metadata gate.
     /// Settings and user state remain in their owners; this is not a query replica.
     pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {
