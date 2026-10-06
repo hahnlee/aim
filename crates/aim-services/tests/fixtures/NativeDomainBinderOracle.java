@@ -77,7 +77,33 @@ public final class NativeDomainBinderOracle {
             for (var filter : groups.get(0).getUriRelativeFilters()) values.add(filter.getUriPart() + ":" + filter.getPatternType() + ":" + filter.getFilter());
             if (!values.equals(java.util.Set.of("0:0:/path", "1:0:q=1", "2:1:fragment", "0:1:😀", "0:0:Aa", "0:0:BB"))) throw new AssertionError("native URI filter values differ");
         } finally { data.recycle(); reply.recycle(); }
+        var setService = android.os.ServiceManager.checkService("query_domain_set");
+        if (setService == null) throw new AssertionError("DomainSet receiver unavailable");
+        for (int count : new int[] {0, 1, 4000, -1, 1}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]);
+                // Large prefix forces a small inline blob on the final case.
+                boolean forceBlob = count == 1 && alreadyReadInlineSet;
+                data.writeString(forceBlob ? "x".repeat(20000) : "00000000-0000-0000-0000-000000000001");
+                if (count == -1) {
+                    data.writeInt(1); data.writeBoolean(false); data.writeInt(5);
+                    for (String host : new String[] {"BB", null, "Aa", "", "BB"}) data.writeString(host);
+                } else {
+                    var hosts = new android.util.ArraySet<String>();
+                    for (int i = 0; i < count; i++) hosts.add("h" + i + ".example");
+                    data.writeTypedObject(new android.content.pm.verify.domain.DomainSet(hosts), 0);
+                    if (count == 1) alreadyReadInlineSet = true;
+                }
+                data.writeInt(count);
+                if (data.hasFileDescriptors() != (count == 4000)) throw new AssertionError("DomainSet FD form differs");
+                if (!setService.transact(Integer.parseInt(args[7]), data, reply, 0)) throw new AssertionError("native DomainSet receiver unhandled");
+                reply.readException();
+                if (reply.readInt() != (count == -1 ? 4 : count) || reply.dataAvail() != 0) throw new AssertionError("native DomainSet values/framing differ");
+            } finally { data.recycle(); reply.recycle(); }
+        }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
+    private static boolean alreadyReadInlineSet;
     private NativeDomainBinderOracle() {}
 }

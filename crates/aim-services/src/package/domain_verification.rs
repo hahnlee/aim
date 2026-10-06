@@ -5,6 +5,7 @@
 //! id and user restriction state.
 
 pub mod collector;
+pub mod domain_set;
 pub mod enforcer;
 pub mod owner;
 pub mod names;

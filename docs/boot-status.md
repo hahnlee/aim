@@ -1504,8 +1504,18 @@ the full original oracle passes with those group states and exact Bundle replies
 as do 488 service units (0.50s; five excluded by default) and the native publisher
 (0.89s), including unrestricted foreign-UID reads and trailing-input rejection.
 Original ART reads the actual native Bundle and all six filter values through its
-own creators (14.80s). Three domain methods and full M4 C acceptance remain open
-(#957/#798).
+own creators (14.80s). Incoming DomainSet decoding is now available for the remaining verifier/user
+mutation frontends (2026-10-06): direct sets, inline blobs and immutable/mutable
+ashmem FD blobs. It preserves null/empty host distinction, deduplication and
+ArraySet hash/collision order; impossible counts, invalid blob frames and short
+FD backing fail explicitly. An original ART sender executes generated method 5
+against a test-only decoder endpoint, verifying empty/single-host sets, a forced
+small inline blob, a 4,000-host FD blob and a nullable duplicate/collision frame
+(13.85s). The endpoint explicitly accepts FDs; the first fixture attempt rejected
+the large transfer at the Binder node, before decoding. This establishes incoming
+codec/transport behavior, not verifier-state method implementation. Native units
+pass (490, 0.50s; five excluded by default). Three domain methods and full M4 C
+acceptance remain open (#957/#798).
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

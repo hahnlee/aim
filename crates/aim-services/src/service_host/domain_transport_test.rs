@@ -7,6 +7,53 @@ mod runtime;
 use runtime::{Boot, Data, run};
 use std::{fs, process::Command};
 
+struct DomainSetEcho(Weak<LocalProcess>);
+impl Service for DomainSetEcho {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::DESCRIPTOR
+    }
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+        if call.code != api::SET_DOMAIN_VERIFICATION_STATUS {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        let args = api::SetDomainVerificationStatus::<
+            crate::package::domain_verification::domain_set::DomainSet,
+        >::read(&mut call.data)?;
+        assert_eq!(call.data.remaining(), 0);
+        let process = self.0.upgrade().ok_or(aim_binder_host::parcel::BAD_VALUE)?;
+        let value = args.domains.unwrap();
+        let hosts = value.resolve(&process)?;
+        let count = hosts.len();
+        let expected = if args.state == 4000 {
+            (0..4000)
+                .map(|i| Some(format!("h{i}.example")))
+                .collect::<std::collections::BTreeSet<_>>()
+        } else if args.state == -1 {
+            std::collections::BTreeSet::from([
+                None,
+                Some("".into()),
+                Some("Aa".into()),
+                Some("BB".into()),
+            ])
+        } else {
+            (0..args.state)
+                .map(|i| Some(format!("h{i}.example")))
+                .collect()
+        };
+        assert_eq!(
+            hosts.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        let mut reply = Parcel::new();
+        api::write_set_domain_verification_status_reply(&mut reply, count as i32);
+        Ok(reply)
+    }
+}
+
 #[test]
 #[ignore = "requires pinned image, built host/image, JDK and d8; run explicitly"]
 fn original_art_reads_large_native_domain_query_over_binder() {
@@ -136,6 +183,8 @@ fn original_art_reads_large_native_domain_query_over_binder() {
         for (part, pattern, value) in [(0, 0, "/path"), (1, 0, "q=1"), (2, 1, "fragment"), (0, 1, "😀"), (0, 0, "Aa"), (0, 0, "BB")] { group.add(part, pattern, value); }
         domains.set_uri_groups("android", &[("h0.example".into(), Some(vec![group]))]).unwrap();
         system.commit_package_domains(bridge, capture.prepare_domain_update(domains).unwrap(), &mut persistence.lock().unwrap()).unwrap();
+        let process = system.process();
+        super::register(&process, "query_domain_set", process.add_service(Arc::new(DomainSetEcho(Arc::downgrade(&process)))));
         let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
             "-Djava.class.path=/data/local/tmp/domain-binder/oracle.dex", "/system/bin", "NativeDomainBinderOracle"])
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_INFO.to_string())
@@ -145,6 +194,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_OWNERS_FOR_DOMAIN.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_URI_RELATIVE_FILTER_GROUPS.to_string())
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_STATUS.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot
