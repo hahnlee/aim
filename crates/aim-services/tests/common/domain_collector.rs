@@ -534,6 +534,17 @@ pub fn verify_uri_dto(directory: &Path) {
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::InvalidPattern(_)) => -2,
             Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
         };
+        let mut model = aim_services::package::intent_filter::UriRelativeFilterGroup::new(0);
+        model.add_nullable(filter.uri_part, filter.pattern_type, filter.filter.as_deref());
+        assert_eq!(model.filters[0].filter, filter.filter);
+        let model_result = aim_services::package::intent_filter::UriRelativeFilterGroup::match_groups(&[model], &aim_services::package::uri::Uri::parse(&uri));
+        let model_actual = match model_result {
+            Ok(value) => i32::from(value),
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::NullPattern) => -1,
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::InvalidPattern(_)) => -2,
+            Err(aim_services::package::domain_verification::uri_parcel::MatchError::IndexOutOfBounds {..}) => -3,
+        };
+        assert_eq!(model_actual, expected, "original model URI match case={case}");
         assert_eq!(actual, expected, "original nullable URI match case={case} filter={filter:?} uri={uri}");
     }
     assert_eq!(reader.remaining(), 0); eprintln!("Original nullable URI matching: {cases} cases");
@@ -916,7 +927,7 @@ pub fn verify_attachment(directory: &Path) {
                 for f in g.filters {
                     expected.write_i32(f.uri_part);
                     expected.write_i32(f.pattern_type);
-                    expected.write_string16(Some(&f.filter));
+                    expected.write_string16(f.filter.as_deref());
                 }
             }
         }

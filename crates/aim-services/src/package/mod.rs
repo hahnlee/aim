@@ -500,7 +500,7 @@ mod tests {
         assert!(domains.active[0].users[0].allow_link_handling);
         let group = &domains.active[0].uri_relative_filter_groups[0].1[0];
         assert_eq!(group.action, 1);
-        assert_eq!(group.filters[0].filter, "/path");
+        assert_eq!(group.filters[0].filter.as_deref(), Some("/path"));
         assert_eq!(
             domains.legacy,
             [(Some("android".into()), vec![(0, 4), (10, 3)])]

@@ -131,7 +131,7 @@ fn call(
     code: u32,
     write: impl FnOnce(&mut Parcel),
 ) -> Parcel {
-    let filter = AppsFilter::new(state, &crate::package::apps_filter::Config::default());
+    let filter = AppsFilter::new(state, &crate::package::apps_filter::Config::default()).unwrap();
     let q = Query {
         state,
         filter: &filter,

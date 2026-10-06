@@ -475,7 +475,7 @@ impl Owner {
                         let mut normalized =
                             super::super::intent_filter::UriRelativeFilterGroup::new(g.action);
                         for f in &g.filters {
-                            normalized.add(f.uri_part, f.pattern_type, &f.filter);
+                            normalized.add_nullable(f.uri_part, f.pattern_type, f.filter.as_deref());
                         }
                         normalized
                     })

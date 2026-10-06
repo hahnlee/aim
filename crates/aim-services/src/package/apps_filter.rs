@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::model::{PackageState, SharedUser, State};
-use super::pkg::{AndroidPackage, MainComponent, booleans};
+use super::pkg::{AndroidPackage, booleans};
 use super::uri::Uri;
 
 mod implicit;
@@ -156,13 +156,24 @@ fn can_query_via_components(
     querying: &AndroidPackage,
     target: &AndroidPackage,
     protected: &HashSet<&str>,
-) -> bool {
-    querying.queries_intents.iter().any(|intent| {
-        let matches = |c: &MainComponent, protected: Option<&HashSet<&str>>| {
-            let ignored: Option<Vec<&str>> = protected.map(|p| p.iter().copied().collect());
-            c.exported
-                && c.component.intents.iter().rev().any(|info| {
-                    info.filter.matches(
+) -> std::result::Result<bool, super::domain_verification::uri_parcel::MatchError> {
+    for intent in &querying.queries_intents {
+        for (components, protected) in [
+            (
+                target.services.iter().map(|c| &c.main).collect::<Vec<_>>(),
+                None,
+            ),
+            (target.activities.iter().map(|c| &c.main).collect(), None),
+            (
+                target.receivers.iter().map(|c| &c.main).collect(),
+                Some(protected),
+            ),
+            (target.providers.iter().map(|c| &c.main).collect(), None),
+        ] {
+            let ignored = protected.map(|values| values.iter().copied().collect::<Vec<_>>());
+            for component in components.into_iter().rev().filter(|c| c.exported) {
+                for info in component.component.intents.iter().rev() {
+                    if info.filter.matches(
                         intent.action.as_deref(),
                         intent.ty.as_deref(),
                         intent.scheme(),
@@ -170,36 +181,30 @@ fn can_query_via_components(
                         intent.categories.as_deref(),
                         true,
                         ignored.as_deref(),
-                    ) > 0
-                })
-        };
-        target.services.iter().rev().any(|s| matches(&s.main, None))
-            || target
-                .activities
-                .iter()
-                .rev()
-                .any(|a| matches(&a.main, None))
-            || target
-                .receivers
-                .iter()
-                .rev()
-                .any(|r| matches(&r.main, Some(protected)))
-            || target
-                .providers
-                .iter()
-                .rev()
-                .any(|p| matches(&p.main, None))
-    }) || (!querying.queries_providers.is_empty()
+                    )? > 0
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(!querying.queries_providers.is_empty()
         && target.providers.iter().any(|p| {
             p.main.exported
-                && p.authority.as_deref().is_some_and(|a| {
-                    a.split(';')
+                && p.authority.as_deref().is_some_and(|authorities| {
+                    authorities
+                        .split(';')
                         .filter(|s| !s.is_empty())
-                        .any(|a| querying.queries_providers.iter().any(|q| q == a))
+                        .any(|authority| {
+                            querying
+                                .queries_providers
+                                .iter()
+                                .any(|query| query == authority)
+                        })
                 })
         }))
 }
-
 /// `canQueryViaPackage`, `canQueryAsInstaller`, `canQueryAsUpdateOwner`.
 fn can_query_via_package(
     querying: &PackageState,
@@ -305,7 +310,7 @@ fn signatures_match_exactly(a: &PackageState, b: &PackageState) -> bool {
 impl AppsFilter {
     /// The relations of every package in `state`, as `addPackage` of each
     /// and the recomputation at boot completion leave them.
-    pub fn new(state: &State, config: &Config) -> AppsFilter {
+    pub fn new(state: &State, config: &Config) -> std::result::Result<AppsFilter, super::domain_verification::uri_parcel::MatchError> {
         let mut f = AppsFilter::default();
         let packages: Vec<(&PackageState, &AndroidPackage)> = state
             .packages
@@ -350,7 +355,7 @@ impl AppsFilter {
                 }
                 let pair = (qs.app_id, ts.app_id);
                 if !f.force_queryable.contains(&ts.app_id) {
-                    if !requests_query_all_packages(q) && can_query_via_components(q, t, &protected)
+                    if !requests_query_all_packages(q) && can_query_via_components(q, t, &protected)?
                     {
                         f.queries_via_component.insert(pair);
                     }
@@ -373,7 +378,7 @@ impl AppsFilter {
                 }
             }
         }
-        f
+        Ok(f)
     }
 
     /// `AppsFilterBase.shouldFilterApplication`: whether the target is
@@ -701,7 +706,7 @@ mod tests {
             force_system_packages_queryable: false,
             force_queryable_packages: vec!["settings".into()],
         };
-        let f = AppsFilter::new(&s, &config);
+        let f = AppsFilter::new(&s, &config).unwrap();
         // <queries><package>, and not the other way.
         assert!(!filtered(&f, &s, 10001, "b"));
         assert!(filtered(&f, &s, 10002, "a"));
@@ -730,14 +735,14 @@ mod tests {
             force_system_packages_queryable: true,
             force_queryable_packages: Vec::new(),
         };
-        let f = AppsFilter::new(&s, &all);
+        let f = AppsFilter::new(&s, &all).unwrap();
         assert!(!filtered(&f, &s, 10002, "settings"));
     }
 
     #[test]
     fn interaction_grants_are_directional_user_scoped_and_snapshot_owned() {
         let mut s = state();
-        let f = AppsFilter::new(&s, &Config::default());
+        let f = AppsFilter::new(&s, &Config::default()).unwrap();
         assert!(filtered(&f, &s, 10002, "a"));
         assert!(!s.system.implicit_access.grant(10002, 10002, false));
         assert!(s.system.implicit_access.grant(10002, 10001, false));
@@ -843,7 +848,7 @@ mod tests {
                 .into(),
                 ..Default::default()
             };
-            let filter = AppsFilter::new(&state, &Config::default());
+            let filter = AppsFilter::new(&state, &Config::default()).unwrap();
             assert_eq!(
                 should_filter_application(
                     &state,
@@ -971,7 +976,7 @@ mod tests {
                 .remove_package(target.app_id, &[user]);
             target.is.force_queryable_override = true;
             state.packages.insert(target.name.clone(), target.clone());
-            let forced = AppsFilter::new(&state, &Config::default());
+            let forced = AppsFilter::new(&state, &Config::default()).unwrap();
             assert_eq!(
                 should_filter_application(
                     &state,
@@ -1003,7 +1008,7 @@ mod tests {
     #[test]
     fn sandbox_clients_are_visible_before_code_user_and_instant_checks() {
         let state = State::default();
-        let filter = AppsFilter::new(&state, &Config::default());
+        let filter = AppsFilter::new(&state, &Config::default()).unwrap();
         for user in [0, 10] {
             for client_id in [FIRST_APPLICATION_UID, FIRST_SDK_SANDBOX_UID - 1] {
                 let sandbox = uid(

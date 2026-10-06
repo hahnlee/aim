@@ -196,10 +196,10 @@ pub fn query<E: Entry + Clone>(
     intent: &Intent,
     resolved_type: Option<&str>,
     default_only: bool,
-) -> Vec<E> {
-    let mut list = r.query(intent, resolved_type, default_only, &mut Itself);
+) -> std::result::Result<Vec<E>, super::domain_verification::uri_parcel::MatchError> {
+    let mut list = r.query(intent, resolved_type, default_only, &mut Itself)?;
     list.sort_by(|a, b| b.filter().priority.cmp(&a.filter().priority));
-    list
+    Ok(list)
 }
 
 #[cfg(test)]
@@ -249,14 +249,14 @@ mod tests {
             data: Some(super::super::uri::Uri::parse("https://example.com/")),
             ..Intent::default()
         };
-        assert_eq!(query(&p.preferred, &view, None, true).len(), 1);
+        assert_eq!(query(&p.preferred, &view, None, true).unwrap().len(), 1);
         let ppa = &p.persistent.entries()[0];
         assert!(ppa.set_by_dpm);
         let capture = Intent {
             action: Some("android.media.action.IMAGE_CAPTURE".into()),
             ..Intent::default()
         };
-        assert_eq!(query(&p.persistent, &capture, None, true).len(), 1);
+        assert_eq!(query(&p.persistent, &capture, None, true).unwrap().len(), 1);
         assert!(
             Preferred::parse(None, Some(b"not xml"))
                 .persistent

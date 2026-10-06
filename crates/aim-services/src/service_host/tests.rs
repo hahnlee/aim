@@ -3152,7 +3152,7 @@ fn verify_boot_scan(
         assert_eq!(current.scan().owner().settings.domain_verification, before.scan().owner().settings.domain_verification);
         assert!(!current.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
         assert!(before.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
-        assert_eq!(current.domains().unwrap().owner().uri_groups("android", &["runtime.example".into()])[0].1[0].filters[0].filter, "/runtime-only");
+        assert_eq!(current.domains().unwrap().owner().uri_groups("android", &["runtime.example".into()])[0].1[0].filters[0].filter.as_deref(), Some("/runtime-only"));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(persistence.state().settings.domain_verification, disk_state);
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
@@ -3167,7 +3167,7 @@ fn verify_boot_scan(
         let disk = aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap();
         let mut saved = crate::package::domain_verification::State::default();
         saved.read(disk.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
-        assert_eq!(saved.active.iter().find(|p| p.name == "android").unwrap().uri_relative_filter_groups[0].1[0].filters[0].filter, "/runtime-only");
+        assert_eq!(saved.active.iter().find(|p| p.name == "android").unwrap().uri_relative_filter_groups[0].1[0].filters[0].filter.as_deref(), Some("/runtime-only"));
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations + 1);
     }
     let persistence = Arc::new(Mutex::new(persistence));

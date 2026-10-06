@@ -5,6 +5,10 @@ use crate::package::domain_verification::{Package, State};
 use aim_android_xml::{Element, Node, Value};
 
 pub fn replace(original: &Element, desired: &State) -> Result<Element, String> {
+    if desired.active.iter().chain(&desired.restored).flat_map(|package| &package.uri_relative_filter_groups)
+        .flat_map(|(_, groups)| groups).flat_map(|group| &group.filters).any(|filter| filter.filter.is_none()) {
+        return Err("null URI filter attribute cannot be serialized".into());
+    }
     let mut root = original.clone();
     let mut current = element("domain-verifications");
     for (tag, packages) in [("active", &desired.active), ("restored", &desired.restored)] {
@@ -104,7 +108,7 @@ fn package(p: &Package) -> Element {
                     let mut filter = element("uri-relative-filter");
                     number(&mut filter, "uri-part", f.uri_part);
                     number(&mut filter, "pattern-type", f.pattern_type);
-                    text(&mut filter, "filter", Some(&f.filter));
+                    text(&mut filter, "filter", f.filter.as_deref());
                     g.content.push(Node::Element(filter));
                 }
                 domain.content.push(Node::Element(g));

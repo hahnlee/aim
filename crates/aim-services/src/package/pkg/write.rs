@@ -915,7 +915,7 @@ fn write_filter(w: &mut Writer, value: &IntentFilter) {
         for filter in &group.filters {
             w.int(filter.uri_part);
             w.int(filter.pattern_type);
-            w.string(Some(&filter.filter));
+            w.string(filter.filter.as_deref());
         }
     }
 }

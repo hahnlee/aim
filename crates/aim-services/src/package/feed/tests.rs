@@ -340,7 +340,7 @@ fn reads_a_package_record() {
         (
             domain.as_str(),
             groups[0].action,
-            groups[0].filters[0].filter.as_str()
+            groups[0].filters[0].filter.as_deref().unwrap()
         ),
         ("example.com", 1, "/private")
     );

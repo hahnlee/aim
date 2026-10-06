@@ -253,6 +253,7 @@ fn main_of(pkg: &AndroidPackage, kind: Kind, index: usize) -> &MainComponent {
 pub enum MimeGroupError {
     MissingGroup,
     NullType,
+    UriMatching,
 }
 
 impl MimeGroupError {
@@ -263,6 +264,7 @@ impl MimeGroupError {
             match self {
                 Self::MissingGroup => "missing MIME group during component registration",
                 Self::NullType => "null MIME type during component registration",
+                Self::UriMatching => "URI filter matching exception during visibility construction",
             },
         ));
         reply
@@ -602,9 +604,9 @@ impl ComponentResolver {
         intent: &Intent,
         resolved_type: Option<&str>,
         package: Option<&str>,
-    ) -> Option<Vec<ResolveInfo>> {
+    ) -> std::result::Result<Option<Vec<ResolveInfo>>, super::domain_verification::uri_parcel::MatchError> {
         if !results.state.users.contains_key(&results.user) {
-            return None;
+            return Ok(None);
         }
         let default_only = results.flags & MATCH_DEFAULT_ONLY != 0;
         let resolver = self.resolver(kind);
@@ -622,8 +624,8 @@ impl ComponentResolver {
                 }
                 query_from_list(lists, intent, resolved_type, default_only, &mut results)
             }
-        };
+        }?;
         list.sort_by(resolve_priority_order);
-        Some(list)
+        Ok(Some(list))
     }
 }

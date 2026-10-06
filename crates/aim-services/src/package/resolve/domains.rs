@@ -238,7 +238,7 @@ impl Resolution {
                 .map_or(&[][..], |(_, g)| g.as_slice());
             let level = match ps {
                 Some(ps)
-                    if groups.is_empty() || UriRelativeFilterGroup::match_groups(groups, data) =>
+                    if groups.is_empty() || UriRelativeFilterGroup::match_groups(groups, data).map_err(|_| NotModelled("URI filter matching exception"))? =>
                 {
                     self.approval_level(ps, &host, user)?
                 }

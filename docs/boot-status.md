@@ -1600,8 +1600,20 @@ in the original, which the native parser previously categorized as an unterminat
 set. Native checked construction now retains the UTF-16 length/index bounds error
 (#965); the original oracle records that category distinctly. Full original oracle
 passes (30.85s, no skips); 493 units pass (0.53s; five excluded by default). This
-is matcher/DTO evidence: native domain/intent model integration and fallible resolver
-propagation remain open under #964. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
+is matcher/DTO evidence: the domain/intent model now stores nullable filter strings (2026-10-06).
+Cache reads and XML reads preserve missing versus empty, ArraySet hashing uses zero
+for null, and cache/Bundle writers preserve null strings. Domain updates normalize
+without substitution. A nullable XML attribute is rejected before file I/O instead
+of silently omitting it; exact original serializer-failure reporting remains open.
+Matching now returns an explicit error through intent resolver, component queries,
+preferred candidates, visibility construction and domain filtering; an error cannot
+become an empty result. Existing native resolution replies classify it as an explicit
+unmodelled/constructor failure, so exact Java exception mapping still remains #964.
+The original 672-case matcher corpus now also goes through real model groups; full
+oracle passes (33.42s, no skips), 496 units pass (0.52s; five excluded by default),
+publisher passes (0.98s) and actual ART Binder passes (25.61s). New regression cases
+retain null/empty Bundle/XML metadata and reject a nullable matcher resolver query.
+Method 8 input/application and full M4 gates remain open (#957/#798). Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
 and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup

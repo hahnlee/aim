@@ -1322,7 +1322,7 @@ fn manifest_keysets_match_original_parser() {
             },
         );
     }
-    let filter = AppsFilter::new(&state, &Config::default());
+    let filter = AppsFilter::new(&state, &Config::default()).unwrap();
     let mut expected = String::new();
     for (recipient, visible, retain) in [
         (10002, 10002, false),

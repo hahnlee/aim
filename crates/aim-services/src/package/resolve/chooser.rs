@@ -96,7 +96,7 @@ impl Resolution {
             return Ok(None);
         };
         let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-        for ppa in preferred::query(&p.persistent, intent, resolved_type, default_only) {
+        for ppa in preferred::query(&p.persistent, intent, resolved_type, default_only).map_err(|_| NotModelled("URI filter matching exception"))? {
             let c = &ppa.component;
             if !self.activity(c, flags | MATCH_DISABLED_COMPONENTS, calling_uid, user)? {
                 continue;
@@ -121,7 +121,7 @@ impl Resolution {
         user: i32,
         calling_uid: i32,
     ) -> Result<Option<ResolveInfo>> {
-        let capture = self.implicit_image_capture(intent, user, resolved_type, flags);
+        let capture = self.implicit_image_capture(intent, user, resolved_type, flags)?;
         let flags =
             self.update_flags_for_resolve(flags, user, calling_uid, false, false, capture)?;
         let intent = intent.selector.as_deref().unwrap_or(intent);
@@ -134,7 +134,7 @@ impl Resolution {
             return Ok(None);
         };
         let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-        let prefs = preferred::query(&p.preferred, intent, resolved_type, default_only);
+        let prefs = preferred::query(&p.preferred, intent, resolved_type, default_only).map_err(|_| NotModelled("URI filter matching exception"))?;
         if prefs.is_empty() {
             return Ok(None);
         }

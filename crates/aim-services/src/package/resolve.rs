@@ -93,7 +93,7 @@ impl Resolution {
             .collect();
         Ok(Resolution {
             components: ComponentResolver::new(&state)?,
-            apps_filter: AppsFilter::new(&state, config),
+            apps_filter: AppsFilter::new(&state, config).map_err(|_| MimeGroupError::UriMatching)?,
             state,
             preferred,
             setup_wizard: OnceLock::new(),
@@ -127,14 +127,14 @@ impl Resolution {
         flags: i64,
         user: i32,
         package: Option<&str>,
-    ) -> Option<Vec<ResolveInfo>> {
+    ) -> Result<Option<Vec<ResolveInfo>>> {
         let at = Results {
             state: &self.state,
             user,
             flags,
         };
         self.components
-            .query(kind, at, intent, resolved_type, package)
+            .query(kind, at, intent, resolved_type, package).map_err(|_| NotModelled("URI filter matching exception"))
     }
 
     fn user_exists(&self, user: i32) -> bool {
@@ -213,14 +213,21 @@ impl Resolution {
         user: i32,
         resolved_type: Option<&str>,
         flags: i64,
-    ) -> bool {
-        intent.is_implicit_image_capture_intent()
-            && !self.preferred(user).is_some_and(|p| {
-                let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-                preferred::query(&p.persistent, intent, resolved_type, default_only)
-                    .iter()
-                    .any(|ppa| ppa.set_by_dpm)
-            })
+    ) -> Result<bool> {
+        if !intent.is_implicit_image_capture_intent() {
+            return Ok(false);
+        }
+        let Some(preferred) = self.preferred(user) else {
+            return Ok(true);
+        };
+        let entries = preferred::query(
+            &preferred.persistent,
+            intent,
+            resolved_type,
+            flags & MATCH_DEFAULT_ONLY != 0,
+        )
+        .map_err(|_| NotModelled("URI filter matching exception"))?;
+        Ok(!entries.iter().any(|entry| entry.set_by_dpm))
     }
 
     /// The user's preferred activities.
@@ -265,7 +272,7 @@ impl Resolution {
             calling_uid,
             false,
             comp.is_some() || package.is_some(),
-            self.implicit_image_capture(intent, user, resolved_type, flags),
+            self.implicit_image_capture(intent, user, resolved_type, flags)?,
         )?;
         let mut list = match comp {
             Some(comp) => {
@@ -285,7 +292,7 @@ impl Resolution {
                         resolved_type,
                         calling_uid,
                         &mut list,
-                    );
+                    )?;
                 }
                 list
             }
@@ -307,7 +314,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
-            );
+            )?;
         }
         self.apply_post_resolution_filter(list, instant_pkg, true, calling_uid, user, intent)
     }
@@ -365,7 +372,7 @@ impl Resolution {
         let mut result = Vec::new();
         match package {
             None => {
-                let found = self.find(Kind::Activity, intent, resolved_type, flags, user, None);
+                let found = self.find(Kind::Activity, intent, resolved_type, flags, user, None)?;
                 result.extend(filter_if_not_system_user(found.unwrap_or_default(), user));
                 self.check_instant_resolution(intent, &result, false)?;
             }
@@ -391,7 +398,7 @@ impl Resolution {
                         flags,
                         user,
                         Some(package),
-                    );
+                    )?;
                     result.extend(filter_if_not_system_user(found.unwrap_or_default(), user));
                 }
                 if result.is_empty() {
@@ -504,14 +511,15 @@ impl Resolution {
         resolved_type: Option<&str>,
         calling_uid: i32,
         list: &mut Vec<ResolveInfo>,
-    ) {
+    ) -> Result<()> {
         /// `ParsedMainComponentImpl.INTENT_MATCHING_FLAGS_*`.
         const NONE: i32 = 1;
         const ENFORCE_INTENT_FILTER: i32 = 1 << 1;
         const ALLOW_NULL_ACTION: i32 = 1 << 2;
         if matches!(app_id(calling_uid), 0 | SYSTEM_UID) {
-            return;
+            return Ok(());
         }
+        let mut failure = None;
         list.retain(|ri| {
             let Info::Activity(ai) = &ri.info else {
                 return true;
@@ -543,10 +551,12 @@ impl Resolution {
                     intent.categories.as_deref(),
                     false,
                     None,
-                ) >= 0
+                ).map_or_else(|error| { failure = Some(error); false }, |matched| matched >= 0)
             });
             !((null_action && flags & ALLOW_NULL_ACTION == 0) || !matches)
         });
+        if failure.is_some() { return Err(NotModelled("URI filter matching exception")); }
+        Ok(())
     }
 
     /// A component by kind, package and class (`infoToComponent`).
@@ -599,7 +609,7 @@ impl Resolution {
             calling_uid,
             false,
             false,
-            self.implicit_image_capture(intent, user, resolved_type, flags),
+            self.implicit_image_capture(intent, user, resolved_type, flags)?,
         )?;
         self.enforce_cross_user(calling_uid, user)?;
         let mut query =
@@ -689,7 +699,7 @@ impl Resolution {
                             resolved_type,
                             calling_uid,
                             &mut list,
-                        );
+                        )?;
                     }
                 }
                 list
@@ -700,7 +710,7 @@ impl Resolution {
                     Vec::new()
                 } else {
                     let found =
-                        self.find(Kind::Service, intent, resolved_type, flags, user, package);
+                        self.find(Kind::Service, intent, resolved_type, flags, user, package)?;
                     self.post_filter_others(
                         found.unwrap_or_default(),
                         instant_pkg,
@@ -717,7 +727,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
-            );
+            )?;
         }
         Ok(list)
     }
@@ -811,7 +821,7 @@ impl Resolution {
             calling_uid,
             false,
             false,
-            self.implicit_image_capture(intent, user, resolved_type, flags),
+            self.implicit_image_capture(intent, user, resolved_type, flags)?,
         )?;
         let (intent, original) = match (&intent.component, &intent.selector) {
             (None, Some(selector)) => (&**selector, Some(intent)),
@@ -843,7 +853,7 @@ impl Resolution {
                             resolved_type,
                             calling_uid,
                             &mut list,
-                        );
+                        )?;
                     }
                 }
                 list
@@ -853,7 +863,7 @@ impl Resolution {
                 let mut list = Vec::new();
                 if package.is_none() {
                     list = self
-                        .find(Kind::Receiver, intent, resolved_type, flags, user, None)
+                        .find(Kind::Receiver, intent, resolved_type, flags, user, None)?
                         .unwrap_or_default();
                 }
                 if let Some(package) = package.filter(|p| {
@@ -870,7 +880,7 @@ impl Resolution {
                             flags,
                             user,
                             Some(package),
-                        )
+                        )?
                         .unwrap_or_default();
                 }
                 list
@@ -883,7 +893,7 @@ impl Resolution {
                 resolved_type,
                 calling_uid,
                 &mut list,
-            );
+            )?;
         }
         self.apply_post_resolution_filter(list, instant_pkg, false, calling_uid, user, intent)
     }
@@ -944,7 +954,7 @@ impl Resolution {
         if package.is_some_and(|p| !self.has_code(p)) {
             return Ok(Vec::new());
         }
-        let found = self.find(Kind::Provider, intent, resolved_type, flags, user, package);
+        let found = self.find(Kind::Provider, intent, resolved_type, flags, user, package)?;
         self.post_filter_others(found.unwrap_or_default(), instant_pkg, calling_uid, user)
     }
 

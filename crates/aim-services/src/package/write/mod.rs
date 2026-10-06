@@ -228,7 +228,7 @@ impl Writes {
         let Some((pre, dropped)) = inner.pre_state(call.sent) else {
             return Some(Answer::NotModelled);
         };
-        let filter = inner.filter(&pre);
+        let Ok(filter) = inner.filter(&pre) else { return Some(Answer::NotModelled) };
         let q = Query {
             state: &pre,
             filter: &filter,
@@ -444,17 +444,17 @@ impl Inner {
             .map(|(_, s, dropped)| (s.clone(), *dropped))
     }
 
-    fn filter(&mut self, state: &Arc<State>) -> Arc<AppsFilter> {
+    fn filter(&mut self, state: &Arc<State>) -> std::result::Result<Arc<AppsFilter>, super::domain_verification::uri_parcel::MatchError> {
         match &self.filter {
-            Some((s, f)) if Arc::ptr_eq(s, state) => f.clone(),
+            Some((s, f)) if Arc::ptr_eq(s, state) => Ok(f.clone()),
             _ => {
                 let config = Config {
                     force_system_packages_queryable: state.system.force_system_packages_queryable,
                     force_queryable_packages: state.system.force_queryable_packages.clone(),
                 };
-                let filter = Arc::new(AppsFilter::new(state, &config));
+                let filter = Arc::new(AppsFilter::new(state, &config)?);
                 self.filter = Some((state.clone(), filter.clone()));
-                filter
+                Ok(filter)
             }
         }
     }

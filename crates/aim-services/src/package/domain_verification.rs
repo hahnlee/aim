@@ -171,13 +171,8 @@ fn package(e: &Element) -> Result<Option<Package>, String> {
                         // on the group when the original reads its action.
                         let mut parsed = UriRelativeFilterGroup::new(number(group, "action", -1));
                         for filter in children(group, "uri-relative-filter") {
-                            if let Some(value) = string(filter, "filter") {
-                                parsed.add(
-                                    number(filter, "uri-part", -1),
-                                    number(filter, "pattern-type", -1),
-                                    &value,
-                                );
-                            }
+                            let value = string(filter, "filter");
+                            parsed.add_nullable(number(filter, "uri-part", -1), number(filter, "pattern-type", -1), value.as_deref());
                         }
                         groups.push(parsed);
                     }
@@ -210,4 +205,17 @@ fn number(e: &Element, key: &str, default: i32) -> i32 {
 }
 fn boolean(e: &Element, key: &str, default: bool) -> bool {
     e.bool(key).ok().flatten().unwrap_or(default)
+}
+
+#[cfg(test)]
+mod nullable_filter_tests {
+    #[test]
+    fn domain_xml_missing_and_empty_filter_remain_distinct() {
+        let xml = b"<domain-verifications><active><package-state packageName='x' id='00000000-0000-0000-0000-000000000001'><uri-relative-filter-groups><domain name='x.example'><uri-relative-filter-group action='0'><uri-relative-filter uri-part='0' pattern-type='0'/><uri-relative-filter uri-part='0' pattern-type='0' filter=''/></uri-relative-filter-group></domain></uri-relative-filter-groups></package-state></active></domain-verifications>";
+        let mut state = super::State::default(); state.read(&aim_android_xml::read(xml).unwrap()).unwrap();
+        let filters = &state.active[0].uri_relative_filter_groups[0].1[0].filters;
+        assert_eq!(filters.len(), 2); assert_eq!(filters[0].filter, None); assert_eq!(filters[1].filter.as_deref(), Some(""));
+        let document = aim_android_xml::read(b"<packages/>").unwrap();
+        assert!(crate::package::owner::domains::replace(&document, &state).is_err());
+    }
 }

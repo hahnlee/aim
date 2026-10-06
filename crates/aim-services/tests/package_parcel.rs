@@ -2108,7 +2108,7 @@ fn native_package_parcels_match_original_read_write() {
     let sandbox_filter = aim_services::package::apps_filter::AppsFilter::new(
         &sandbox_state,
         &aim_services::package::apps_filter::Config::default(),
-    );
+    ).unwrap();
     let selected_name = selected.unwrap();
     let selected_setting = state
         .settings
