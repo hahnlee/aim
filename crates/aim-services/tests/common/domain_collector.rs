@@ -543,6 +543,20 @@ pub fn verify_uri_dto(directory: &Path) {
         }
     }
     assert_eq!(reader.remaining(), 0);
+    let bytes = fs::read(directory.join("uri-conversion-errors.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    assert_eq!(reader.read_i32().unwrap(), 3);
+    for mode in 0..3 {
+        assert_eq!(reader.read_i32().unwrap(), mode);
+        let expected = reader.read_string16().unwrap().unwrap();
+        let parcel = match mode {
+            0 => None,
+            1 => Some(Group {action: 0, filters: None}),
+            _ => Some(Group {action: 0, filters: Some(vec![None])}),
+        };
+        assert_eq!(aim_services::package::domain_verification::uri_parcel::groups_to_model(Some(vec![parcel])).unwrap_err(), expected);
+    }
+    assert_eq!(reader.remaining(), 0);
     let bytes = fs::read(directory.join("uri-null-match.original")).unwrap();
     let mut reader = Reader::new(&bytes, &[]); let cases = reader.read_i32().unwrap();
     for case in 0..cases {

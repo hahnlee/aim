@@ -87,6 +87,27 @@ impl Filter {
         }
     }
 }
+/// Original `UriRelativeFilterGroup.parcelsToGroups`, including constructor NPEs.
+pub fn groups_to_model(
+    parcels: Option<Vec<Option<Group>>>,
+) -> std::result::Result<Vec<crate::package::intent_filter::UriRelativeFilterGroup>, &'static str> {
+    let mut groups = Vec::new();
+    for parcel in parcels.unwrap_or_default() {
+        let parcel = parcel.ok_or("Attempt to read from field 'int android.content.UriRelativeFilterGroupParcel.action' on a null object reference in method 'void android.content.UriRelativeFilterGroup.<init>(android.content.UriRelativeFilterGroupParcel)'")?;
+        let filters = parcel.filters.ok_or("Attempt to invoke interface method 'int java.util.List.size()' on a null object reference")?;
+        let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(parcel.action);
+        for filter in filters {
+            let filter = filter.ok_or("Attempt to read from field 'int android.content.UriRelativeFilterParcel.uriPart' on a null object reference in method 'void android.content.UriRelativeFilter.<init>(android.content.UriRelativeFilterParcel)'")?;
+            group.add_nullable(
+                filter.uri_part,
+                filter.pattern_type,
+                filter.filter.as_deref(),
+            );
+        }
+        groups.push(group);
+    }
+    Ok(groups)
+}
 fn body<'a>(reader: &mut Reader<'a>) -> Result<Reader<'a>> {
     let start = reader.position();
     let size = usize::try_from(reader.read_i32()?).map_err(|_| BAD_VALUE)?;

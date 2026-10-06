@@ -637,41 +637,9 @@ impl DomainQueries {
                     let parcels = entry.groups().map_err(|e| {
                         Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {e}"))
                     })?;
-                    let mut groups = Vec::new();
-                    if let Some(parcels) = parcels {
-                        for parcel in parcels {
-                            let parcel = parcel.ok_or_else(|| {
-                                Exception::new(
-                                    aim_binder_host::parcel::EX_NULL_POINTER,
-                                    "null URI group parcel",
-                                )
-                            })?;
-                            let filters = parcel.filters.ok_or_else(|| {
-                                Exception::new(
-                                    aim_binder_host::parcel::EX_NULL_POINTER,
-                                    "null URI filter list",
-                                )
-                            })?;
-                            let mut group =
-                                crate::package::intent_filter::UriRelativeFilterGroup::new(
-                                    parcel.action,
-                                );
-                            for filter in filters {
-                                let filter = filter.ok_or_else(|| {
-                                    Exception::new(
-                                        aim_binder_host::parcel::EX_NULL_POINTER,
-                                        "null URI filter parcel",
-                                    )
-                                })?;
-                                group.add_nullable(
-                                    filter.uri_part,
-                                    filter.pattern_type,
-                                    filter.filter.as_deref(),
-                                );
-                            }
-                            groups.push(group);
-                        }
-                    }
+                    let groups = super::uri_parcel::groups_to_model(parcels).map_err(|message| {
+                        Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, message)
+                    })?;
                     owner
                         .set_uri_groups(name, &[(domain.to_owned(), Some(groups))])
                         .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;

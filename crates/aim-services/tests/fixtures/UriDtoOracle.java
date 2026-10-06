@@ -54,6 +54,22 @@ final class UriDtoOracle {
                 java.nio.file.Files.write(new java.io.File(directory, "uri-input-bundles.original").toPath(), bundles.marshall());
             } finally {bundles.recycle();}
             out.recycle(); out = android.os.Parcel.obtain();
+            out.writeInt(3);
+            for (int mode = 0; mode < 3; mode++) {
+                var parcels = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>();
+                var group = new android.content.UriRelativeFilterGroupParcel();
+                if (mode == 0) parcels.add(null);
+                else {
+                    if (mode == 2) {group.filters = new java.util.ArrayList<>(); group.filters.add(null);}
+                    parcels.add(group);
+                }
+                try {android.content.UriRelativeFilterGroup.parcelsToGroups(parcels); throw new AssertionError("null URI conversion accepted");}
+                catch (NullPointerException error) {
+                    out.writeInt(mode); out.writeString(error.getMessage());
+                }
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "uri-conversion-errors.original").toPath(), out.marshall());
+            out.recycle(); out = android.os.Parcel.obtain();
             String[] uris = {"https://x/path?q=1#frag", "https://x", "mailto:x", "", "https://x?;", "#"};
             out.writeInt(4 * 4 * 7 * uris.length);
             for (String value : new String[] {null, "", "/path", "["}) for (int part : new int[] {-1, 0, 1, 2})

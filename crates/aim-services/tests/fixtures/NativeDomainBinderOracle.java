@@ -173,6 +173,26 @@ public final class NativeDomainBinderOracle {
             if (!service.transact(Integer.parseInt(args[9]), data, reply, 0)) throw new AssertionError("styled URI update unhandled");
             reply.readException(); if (reply.dataAvail() != 0) throw new AssertionError("styled URI update framing differs");
         } finally {styled.recycle(); styledWire.recycle(); data.recycle(); reply.recycle();}
+        String[] conversionErrors = {
+            "Attempt to read from field 'int android.content.UriRelativeFilterGroupParcel.action' on a null object reference in method 'void android.content.UriRelativeFilterGroup.<init>(android.content.UriRelativeFilterGroupParcel)'",
+            "Attempt to invoke interface method 'int java.util.List.size()' on a null object reference",
+            "Attempt to read from field 'int android.content.UriRelativeFilterParcel.uriPart' on a null object reference in method 'void android.content.UriRelativeFilter.<init>(android.content.UriRelativeFilterParcel)'"
+        };
+        for (int mode = 0; mode < 3; mode++) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                var bundle = new android.os.Bundle(); var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>();
+                var group = new android.content.UriRelativeFilterGroupParcel();
+                if (mode == 0) groups.add(null);
+                else {if (mode == 2) {group.filters = new java.util.ArrayList<>(); group.filters.add(null);} groups.add(group);}
+                bundle.putParcelableArrayList("runtime.example", groups);
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(bundle, 0);
+                if (!service.transact(Integer.parseInt(args[9]), data, reply, 0)) throw new AssertionError("URI conversion error unhandled");
+                try {reply.readException(); throw new AssertionError("null URI conversion accepted");}
+                catch (NullPointerException error) {if (!conversionErrors[mode].equals(error.getMessage())) throw new AssertionError("URI conversion message differs: " + error.getMessage());}
+                if (reply.dataAvail() != 0) throw new AssertionError("URI conversion error framing differs");
+            } finally {data.recycle(); reply.recycle();}
+        }
         data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
         try {
             data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("runtime.example"));

@@ -1643,8 +1643,14 @@ produce the original typed-getter mismatch; the original service removes the
 URI key without a persistence write. Full original oracle passes (29.85s, no
 skips), 497 units pass (0.52s; five excluded), and actual original ART sends a
 styled Bundle to the native setter while retaining another URI group (15.60s).
-The image/template build passes (9 rebuilt, 33 fresh, 54.7s). Other #966 generic
-type/error cases and full native PMS/facade/CTS/app gates remain open
+The image/template build passes (9 rebuilt, 33 fresh, 54.7s). URI-group DTO
+conversion now returns the original NPE messages for a null group, filter list
+and filter element. A three-case original constructor oracle compares exact
+messages; actual ART receives the matching Binder NPEs and rereads the unchanged
+URI group after all three failures (15.53s). Full original oracle passes (30.90s,
+no skips), 497 units pass (0.57s; five excluded), and the production build passes
+(3 rebuilt, 39 fresh, 1.3s). Other #966 generic type/error cases and full native
+PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.
 
 User-state lookup
