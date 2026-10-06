@@ -13,6 +13,7 @@ public class DomainVerificationService extends com.android.server.SystemService 
     public void setConnection(DomainVerificationManagerInternal.Connection connection) { throw new RuntimeException("stub"); }
     public android.content.pm.verify.domain.DomainVerificationInfo getDomainVerificationInfo(String name) { throw new RuntimeException("stub"); }
     public android.content.pm.verify.domain.DomainVerificationUserState getDomainVerificationUserState(String name, int user) { throw new RuntimeException("stub"); }
+    public int setDomainVerificationStatus(java.util.UUID id, java.util.Set<String> domains, int state) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
     public void setDomainVerificationLinkHandlingAllowedInternal(String name, boolean allowed, int user) throws android.content.pm.PackageManager.NameNotFoundException { throw new RuntimeException("stub"); }
     public void clearPackage(String name) { throw new RuntimeException("stub"); }
     public void clearPackageForUser(String name, int user) { throw new RuntimeException("stub"); }

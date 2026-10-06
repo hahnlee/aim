@@ -219,6 +219,72 @@ impl Owner {
         }
         Some(p)
     }
+    /// Verifier-state mutation after caller authorization. Error statuses do
+    /// not request persistence; success must be scheduled by the driver.
+    pub fn set_verifier_status(
+        &mut self,
+        id: &str,
+        code: Option<&AndroidPackage>,
+        policy: Policy,
+        hosts: &mut std::collections::BTreeSet<String>,
+        state: i32,
+    ) -> Result<i32, String> {
+        if state != 1 && state < 1024 {
+            return Err("invalid verifier state".into());
+        }
+        let Some(name) = self.ids.get(&id.to_ascii_lowercase()).cloned() else {
+            return Ok(1);
+        };
+        let code = code
+            .filter(|code| code.package_name == name)
+            .ok_or("verification package code is unavailable")?;
+        if hosts.is_empty() {
+            return Err("verification domain set is empty".into());
+        }
+        let declared = collector::collect(code, policy, Kind::ValidAutoVerify);
+        let size = hosts.len();
+        hosts.retain(|host| declared.contains(host));
+        if hosts.len() != size {
+            return Ok(2);
+        }
+        let package = self
+            .attached
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or("missing indexed domain owner")?;
+        let mut verified = Vec::new();
+        for host in hosts.iter() {
+            let old = package
+                .domains
+                .iter()
+                .find(|(h, _)| h.as_ref() == Some(host))
+                .map(|(_, state)| *state);
+            if old.is_some_and(|old| {
+                old == state || !(matches!(old, 0 | 1 | 4 | 5 | 6 | 8) || old >= 1024)
+            }) {
+                continue;
+            }
+            if state == 1 && old.is_none_or(|old| !matches!(old, 1 | 2 | 4 | 5 | 7 | 8)) {
+                verified.push(host.clone());
+            }
+            set(package, host, state);
+        }
+        let disabled: std::collections::BTreeSet<_> = package
+            .users
+            .iter()
+            .filter(|u| !u.allow_link_handling)
+            .map(|u| u.id)
+            .collect();
+        for p in &mut self.attached {
+            for user in &mut p.users {
+                if !disabled.contains(&user.id) {
+                    user.enabled_hosts.retain(|host| !verified.contains(host));
+                }
+            }
+        }
+        Ok(0)
+    }
+
     /// State part of the original internal setter; caller enforces identity and
     /// schedules persistence after success. Only attached packages are changed.
     pub fn set_link_handling_internal(

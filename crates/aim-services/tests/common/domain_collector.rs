@@ -289,6 +289,7 @@ fn attachment_inputs(directory: &Path) {
                 extra("restored.only", "00000000000f")
             ),
         );
+        let xml = xml.replace("</domain-verifications>", "<active><package-state packageName='competitor' id='00000000-0000-0000-0000-000000000011' hasAutoVerifyDomains='true'><user-states><user-state userId='0' allowLinkHandling='true'><enabled-hosts><host name='h0.example'/></enabled-hosts></user-state><user-state userId='10' allowLinkHandling='true'><enabled-hosts><host name='h0.example'/></enabled-hosts></user-state></user-states></package-state></active></domain-verifications>");
         fs::write(directory.join(format!("domain-owner-{case}.input")), xml).unwrap();
     }
 }
@@ -398,6 +399,101 @@ pub fn verify_attachment(directory: &Path) {
                 canonical(owner.persisted()),
                 canonical(original),
                 "attached domain state case={case} stage={stage}"
+            );
+        }
+        let mut competitor = code.clone();
+        competitor.package_name = "competitor".into();
+        owner
+            .add(
+                Input {
+                    id: "00000000-0000-0000-0000-000000000012",
+                    name: "competitor",
+                    code: Some(&competitor),
+                    signatures: &[],
+                    system: false,
+                    restrict_domains: true,
+                    pre_verified: None,
+                },
+                &config,
+            )
+            .unwrap();
+        use aim_services::package::domain_verification::collector::Policy;
+        let policy = Policy {
+            restrict_domains: true,
+            linked_app: case == 1,
+        };
+        let id = "00000000-0000-0000-0000-00000000000c";
+        let mut hosts = std::collections::BTreeSet::from(["h0.example".into()]);
+        let before = owner.persisted();
+        assert_eq!(
+            owner
+                .set_verifier_status(
+                    "00000000-0000-0000-0000-000000000000",
+                    Some(&code),
+                    policy,
+                    &mut hosts,
+                    1
+                )
+                .unwrap(),
+            1
+        );
+        hosts.insert("unknown.example".into());
+        assert_eq!(
+            owner
+                .set_verifier_status(id, Some(&code), policy, &mut hosts, 1)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            hosts,
+            std::collections::BTreeSet::from(["h0.example".into()])
+        );
+        assert!(
+            owner
+                .set_verifier_status(id, Some(&code), policy, &mut Default::default(), 1)
+                .is_err()
+        );
+        assert!(
+            owner
+                .set_verifier_status(id, Some(&code), policy, &mut hosts, 0)
+                .is_err()
+        );
+        assert_eq!(owner.persisted(), before);
+        hosts = (0..=8)
+            .map(|h| format!("h{h}.example"))
+            .chain(["h1024.example".into()])
+            .collect();
+        for state in [1, 1024] {
+            assert_eq!(
+                owner
+                    .set_verifier_status(id, Some(&code), policy, &mut hosts, state)
+                    .unwrap(),
+                0
+            );
+            let root = aim_android_xml::read(
+                &fs::read(directory.join(format!("domain-owner-{case}-verified-{state}.original")))
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut original = State::default();
+            original
+                .read(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications")
+                        .unwrap(),
+                )
+                .unwrap();
+            original
+                .read_legacy(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications-legacy")
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                canonical(owner.persisted()),
+                canonical(original),
+                "verifier state case={case} state={state}"
             );
         }
         for (stage, name, allowed, id) in [

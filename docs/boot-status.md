@@ -1350,7 +1350,15 @@ cover these changes across the attachment scenarios; missing package mutation
 rejects without a state change or write request. Each scenario records eleven
 successful link/cleanup persistence requests and none from queries. This is the
 state owner only: caller authorization, durable writes and nonce invalidation
-must be connected before serving this mutation through native Binder. The fixture runs the image's original collector with a controlled
+must be connected before serving this mutation through native Binder. The
+verifier update owner now matches public-state validation (SUCCESS or verifier
+errors), invalid UUID/domain result codes and original requested-set filtering.
+It preserves immutable approvals/denials/system approvals, updates modifiable
+states and removes newly verified hosts from attached user selections, except
+users where the verifying package has link handling disabled. Eight original
+SUCCESS/error state comparisons include an attached competing app; invalid UUID,
+unknown/empty domains and invalid state do not mutate the owner or request writes.
+Each scenario now schedules thirteen successful verifier/link/cleanup writes. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1361,9 +1369,9 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(28.56s, no skips); release units pass 482 cases (four excluded from the default
+(29.70s, no skips); release units pass 482 cases (four excluded from the default
 run, 0.50s). The full image/original-PMS template build passes (nine rebuilt,
-33 fresh, 60.4s); final host build is fresh (13 nodes, 0.2s).
+33 fresh, 58.2s); final host build is fresh (13 nodes, 0.2s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
@@ -1373,7 +1381,7 @@ the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 482
 cases (four excluded from the default run, 0.50s). The full build passes
-(nine rebuilt, 33 fresh, 60.4s); final host build is fresh (13 nodes, 0.2s).
+(nine rebuilt, 33 fresh, 58.2s); final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

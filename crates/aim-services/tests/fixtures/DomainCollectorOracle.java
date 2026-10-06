@@ -5,7 +5,7 @@ public final class DomainCollectorOracle {
         @Override public android.os.IBinder asBinder() { return this; }
         Compat(android.content.Context context) { super(context); }
         @Override public boolean isChangeEnabledInternalNoLogging(long id, android.content.pm.ApplicationInfo info) {
-            if (id != 175408749L || !"fixture.domains".equals(info.packageName))
+            if (id != 175408749L || !("fixture.domains".equals(info.packageName) || "competitor".equals(info.packageName)))
                 throw new AssertionError("domain compatibility identity differs");
             return restricted;
         }
@@ -122,7 +122,28 @@ public final class DomainCollectorOracle {
             service.migrateState((com.android.server.pm.pkg.PackageStateInternal) oldSetting, (com.android.server.pm.pkg.PackageStateInternal) newSetting, null);
             writeDomains(directory, i, "migrate", service);
             writeQueries(directory, i, "migrate", service, newSetting);
+            var competitor = (com.android.internal.pm.parsing.pkg.PackageImpl) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
+            competitor.setPackageName("competitor");
+            var competitorSetting = new com.android.server.pm.PackageSetting("competitor", null, new java.io.File("/data/app/competitor"), 0, 0, java.util.UUID.fromString("00000000-0000-0000-0000-000000000012"));
+            competitorSetting.setPkg((com.android.server.pm.pkg.AndroidPackage) competitor);
+            service.addPackage((com.android.server.pm.pkg.PackageStateInternal) competitorSetting, null);
             var connection = new DomainConnection(newSetting); service.setConnection(connection);
+            var hosts = new java.util.TreeSet<String>(); hosts.add("h0.example");
+            if (service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-000000000000"), hosts, 1) != 1) throw new AssertionError("invalid domain UUID status differs");
+            hosts.add("unknown.example");
+            if (service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-00000000000c"), hosts, 1) != 2 || !hosts.equals(java.util.Set.of("h0.example"))) throw new AssertionError("unknown domain filtering differs");
+            try { service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-00000000000c"), new java.util.TreeSet<>(), 1); throw new AssertionError("empty domains accepted"); }
+            catch (IllegalArgumentException expected) {}
+            try { service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-00000000000c"), hosts, 0); throw new AssertionError("invalid verifier state accepted"); }
+            catch (IllegalArgumentException expected) {}
+            if (connection.writes != 0) throw new AssertionError("failed verification scheduled persistence");
+            hosts.clear(); for (int h = 0; h <= 8; h++) hosts.add("h" + h + ".example"); hosts.add("h1024.example");
+            for (int state : new int[] {1, 1024}) {
+                if (service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-00000000000c"), hosts, state) != 0) throw new AssertionError("verifier update failed");
+                writeDomains(directory, i, "verified-" + state, service);
+            }
+
             service.setDomainVerificationLinkHandlingAllowedInternal("fixture.domains", false, 0); writeDomains(directory, i, "link-single", service);
             service.setDomainVerificationLinkHandlingAllowedInternal("fixture.domains", true, -1); writeDomains(directory, i, "link-all-users", service);
             service.setDomainVerificationLinkHandlingAllowedInternal(null, false, 11); writeDomains(directory, i, "link-all-packages", service);
@@ -135,7 +156,7 @@ public final class DomainCollectorOracle {
             service.clearPackage("pending.only"); service.clearPackage("restored.only");
             writeDomains(directory, i, "pending-restored", service);
             service.clearPackage("missing"); service.clearPackageForUser("missing", 10); service.clearUser(-1);
-            if (connection.writes != 11) throw new AssertionError("domain cleanup persistence requests differ: " + connection.writes);
+            if (connection.writes != 13) throw new AssertionError("domain cleanup persistence requests differ: " + connection.writes);
 
         }
     }
