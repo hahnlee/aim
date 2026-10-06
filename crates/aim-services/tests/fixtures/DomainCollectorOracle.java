@@ -287,7 +287,7 @@ public final class DomainCollectorOracle {
         public com.android.server.pm.Computer snapshot() { return computer; }
         public boolean doesUserExist(int id) { return id == 0 || id == 10; }
         public boolean filterAppAccess(String name, int uid, int id) {
-            if (!"fixture.domains".equals(name) || uid != 1000 || !doesUserExist(id)) throw new AssertionError("foreign domain visibility identity");
+            if (!computer.settings.containsKey(name) || uid != 1000 || !doesUserExist(id)) throw new AssertionError("foreign domain visibility identity");
             return false;
         }
         public void scheduleWriteSettings() { writes++; }
@@ -349,6 +349,28 @@ public final class DomainCollectorOracle {
                 }
             }
             java.nio.file.Files.write(new java.io.File(directory, "domain-owners-group.original").toPath(), out.marshall());
+            var statuses = android.os.Parcel.obtain();
+            try {
+                int index = 0;
+                for (int phase = 0; phase < 3; phase++) {
+                    compat.v2 = phase != 2;
+                    if (phase == 1) for (String suffix : new String[] {"Aa", "BB", "a", "A", "İ", "ı", "instant"})
+                        service.setDomainVerificationLinkHandlingAllowedInternal("fixture.owner." + suffix, false, 0);
+                    for (int user : new int[] {0, 10}) for (String suffix : new String[] {"disabled", "selected", "always", "Aa", "instant"})
+                        for (boolean enabled : new boolean[] {true, false}) for (boolean multiple : new boolean[] {false, true}) {
+                            String name = "fixture.owner." + suffix;
+                            String id = new String(java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-selection-" + suffix + ".id").toPath()), java.nio.charset.StandardCharsets.UTF_8);
+                            var hosts = new java.util.TreeSet<String>(); hosts.add("h0.example"); if (multiple) hosts.add("h1.example");
+                            statuses.writeInt(service.setDomainVerificationUserSelection(java.util.UUID.fromString(id), hosts, enabled, user));
+                            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-selection-" + index++ + ".original"))) {
+                                var serializer = android.util.Xml.resolveSerializer(output); serializer.startDocument(null, true); serializer.startTag(null, "packages");
+                                service.writeSettings(null, serializer, false, -1); serializer.endTag(null, "packages"); serializer.endDocument();
+                            }
+                        }
+                }
+                java.nio.file.Files.write(new java.io.File(directory, "domain-selection.status").toPath(), statuses.marshall());
+            } finally { statuses.recycle(); }
+
         } finally { compat.v2 = true; in.recycle(); out.recycle(); }
     }
     private static void writeStates(android.os.Parcel out, java.util.Map<String, Integer> states) {

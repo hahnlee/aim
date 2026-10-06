@@ -623,6 +623,114 @@ impl Owner {
         Ok(0)
     }
 
+    /// After ID/code/host validation: public user selection's two-pass revocation.
+    /// Even approval failure retains the newly allocated user state, as original.
+    pub fn set_user_selection<'a>(
+        &mut self,
+        name: &str,
+        user_id: i32,
+        hosts: &std::collections::BTreeSet<String>,
+        enabled: bool,
+        mut lookup: impl FnMut(&str) -> Result<Option<ApprovalInput<'a>>, String>,
+    ) -> Result<i32, String> {
+        let at = self
+            .attached
+            .iter()
+            .position(|p| p.name == name)
+            .ok_or("selection package is unavailable")?;
+        if !self.attached[at].users.iter().any(|u| u.id == user_id) {
+            self.attached[at].users.push(User {
+                id: user_id,
+                allow_link_handling: true,
+                enabled_hosts: vec![],
+            });
+            self.attached[at].users.sort_by_key(|u| u.id);
+        }
+        let selected = self.attached[at]
+            .users
+            .iter()
+            .find(|u| u.id == user_id)
+            .unwrap()
+            .enabled_hosts
+            .clone();
+        let mut revoke = Vec::new();
+        if enabled {
+            for host in hosts {
+                if selected.contains(host) {
+                    continue;
+                }
+                let mut highest = 1;
+                let mut approved = Vec::new();
+                for package in &self.attached {
+                    let Some(input) = lookup(&package.name)? else {
+                        continue;
+                    };
+                    let level = self.approval(
+                        &package.name,
+                        input.code,
+                        input.user,
+                        user_id,
+                        input.settings_v2,
+                        input.policy,
+                        host,
+                    )?;
+                    if level < 1 {
+                        continue;
+                    }
+                    if level > highest {
+                        approved.clear();
+                        highest = level;
+                    }
+                    if level == highest {
+                        approved.push((
+                            package.name.clone(),
+                            input.user.map_or(0, |u| u.first_install_time),
+                        ));
+                    }
+                }
+                if highest > 3 {
+                    return Ok(3);
+                }
+                if let Some(latest) = approved.iter().map(|(_, time)| *time).max() {
+                    revoke.push((
+                        host.clone(),
+                        approved
+                            .into_iter()
+                            .filter(|(_, time)| *time == latest)
+                            .map(|(name, _)| name)
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+            }
+            for (host, packages) in revoke {
+                for package in &mut self.attached {
+                    if packages.contains(&package.name)
+                        && let Some(user) = package.users.iter_mut().find(|u| u.id == user_id)
+                    {
+                        user.enabled_hosts.retain(|selected| selected != &host);
+                    }
+                }
+            }
+        }
+        let user = self.attached[at]
+            .users
+            .iter_mut()
+            .find(|u| u.id == user_id)
+            .unwrap();
+        if enabled {
+            for host in hosts {
+                if !user.enabled_hosts.contains(host) {
+                    user.enabled_hosts.push(host.clone());
+                }
+            }
+            user.enabled_hosts =
+                array_order(std::mem::take(&mut user.enabled_hosts), String::as_str);
+        } else {
+            user.enabled_hosts.retain(|host| !hosts.contains(host));
+        }
+        Ok(0)
+    }
+
     /// State part of the original internal setter; caller enforces identity and
     /// schedules persistence after success. Only attached packages are changed.
     pub fn set_link_handling_internal(

@@ -281,17 +281,21 @@ pub fn grouped_owners(directory: &Path, verify: bool) {
         users.write_string16(Some(&id));
         users.write_i32(*level);
         users.write_i64(*time);
+        if !verify { fs::write(directory.join(format!("domain-selection-{suffix}.id")), &id).unwrap(); }
+
         xml.push_str(&format!(
             "<package-state packageName='{name}' id='{id}' hasAutoVerifyDomains='true'><state>"
         ));
         if *level == 4 || *level == 6 {
             xml.push_str("<domain name='h0.example' state='1'/>");
         }
-        xml.push_str("</state><user-states><user-state userId='0' allowLinkHandling='true'>");
+        xml.push_str("</state><user-states>");
+        if *level != 0 { xml.push_str("<user-state userId='0' allowLinkHandling='true'>"); }
         if *level == 3 {
             xml.push_str("<enabled-hosts><host name='h0.example'/></enabled-hosts>");
         }
-        xml.push_str("</user-state></user-states></package-state>");
+        if *level != 0 { xml.push_str("</user-state>"); }
+        xml.push_str("</user-states></package-state>");
         if matches!(level, 1 | 2) {
             legacy.push_str(&format!("<user-states packageName='{name}'><user-state userId='0' state='{level}'/></user-states>"));
         }
@@ -376,6 +380,34 @@ pub fn grouped_owners(directory: &Path, verify: bool) {
         fs::read(directory.join("domain-owners-group.original")).unwrap(),
         "original grouped Owners replies"
     );
+    let bytes = fs::read(directory.join("domain-selection.status")).unwrap();
+    let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+    let mut index = 0;
+    for phase in 0..3 {
+        let v2 = phase != 2;
+        if phase == 1 { for suffix in ["Aa", "BB", "a", "A", "İ", "ı", "instant"] {
+            owner.set_link_handling_internal(Some(&format!("fixture.owner.{suffix}")), false, 0, &[]).unwrap();
+        }}
+        for user_id in [0, 10] { for suffix in ["disabled", "selected", "always", "Aa", "instant"] {
+            for enabled in [true, false] { for multiple in [false, true] {
+                let mut hosts = std::collections::BTreeSet::from(["h0.example".to_string()]); if multiple { hosts.insert("h1.example".into()); }
+                let status = owner.set_user_selection(&format!("fixture.owner.{suffix}"), user_id, &hosts, enabled, |name| {
+                    let (code, _, level, user) = codes.iter().find(|(code, ..)| code.package_name == name).unwrap();
+                    Ok((*level != 6).then_some(ApprovalInput {code, user: (user_id == 0).then_some(user), settings_v2: v2, policy: Policy {restrict_domains: true, linked_app: false}}))
+                }).unwrap();
+                assert_eq!(status, reader.read_i32().unwrap(), "original selection status case={index}");
+                let root = aim_android_xml::read(&fs::read(directory.join(format!("domain-selection-{index}.original"))).unwrap()).unwrap();
+                let mut original = State::default();
+                original.read(root.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
+                original.read_legacy(root.children().find(|e| e.name == "domain-verifications-legacy").unwrap()).unwrap();
+                assert_eq!(canonical(owner.persisted()), canonical(original), "original selection state case={index}");
+                index += 1;
+            }}
+        }}
+    }
+    assert_eq!(reader.remaining(), 0);
+    eprintln!("Original user selection: {index} status/state transitions");
+
 }
 
 fn attachment_inputs(directory: &Path) {
@@ -1059,6 +1091,7 @@ fn canonical(
 ) -> aim_services::package::domain_verification::State {
     state.active.sort_by(|a, b| a.name.cmp(&b.name));
     state.restored.sort_by(|a, b| a.name.cmp(&b.name));
+    state.legacy.sort_by(|a, b| a.0.cmp(&b.0));
     state
 }
 

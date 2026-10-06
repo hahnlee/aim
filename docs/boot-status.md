@@ -1546,8 +1546,21 @@ capture and invalidation count. Original ART sends 4,000 hosts by ashmem FD to t
 actual DomainQueries endpoint and reads every newly published SUCCESS value with
 its original Info creator (14.62s). Units pass (491, 0.51s; five excluded by default),
 as does the publisher (1.00s). Runtime shared-writer binding remains part of full
-native bootstrap. Two domain methods (7/8) and full M4 C acceptance remain open
-(#957/#798).
+native bootstrap. The native user-selection state model now mirrors the public service's two-pass
+revocation (2026-10-06): existing exact selections bypass owner conflict checks;
+otherwise verified/instant approval blocks enabling. Lower-priority approvals
+revoke only the latest-install packages at the highest approval level, retaining
+all latest-time ties. All requested domains must pass before any revocation; disable
+removes hosts without priority checks. A new attached user is allocated before a
+blocked approval, matching the original in-memory side effect. Original public
+API comparisons agree in 120 status/state transitions across five target packages,
+two users, single/multiple hosts, enable/disable, higher-owner link handling and
+legacy/V2 modes (full oracle 30.67s, no skips; 491 units 0.56s, five excluded by
+default). The comparison canonicalizes logical legacy maps independently of output
+iteration order. This is state-model evidence; method 7 requires a nonpersistent
+capture path for failed-approval allocation, before its Binder frontend can be
+connected. Method 8 also needs original no-write runtime publication. Both methods
+and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the
