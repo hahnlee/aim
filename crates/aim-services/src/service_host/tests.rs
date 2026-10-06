@@ -696,6 +696,7 @@ fn query_context_for(
     Context {
         scan_version: version,
         native_domains: None,
+        boot_classes: None,
         nonce: Some(version as i64),
         system: model::System {
             sdk_sandbox_package: Some(None),
@@ -2401,7 +2402,7 @@ fn verify_boot_scan(
     assert_eq!(complete, untouched);
     assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
-    let mut context = query_context_for(&complete, base.version() + 1);
+    let mut context = query_context_for(&complete, base.version() + 1).with_boot_classpath(&aim_paths::derived_image()).unwrap();
     use crate::package::domain_verification::owner::Owner as DomainOwner;
     let boot_domains = bridge.boot_domains(&complete, config).unwrap();
     assert_eq!(boot_domains.changes.len(), complete.settings.packages.len());
@@ -3166,9 +3167,7 @@ fn verify_boot_scan(
     }
     let persistence = Arc::new(Mutex::new(persistence));
     register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
-    let jars = aim_android_image::classpath::jars(&aim_paths::derived_image(), "bootclasspath.pb", aim_android_image::classpath::BOOTCLASSPATH).unwrap();
-    let classes = Arc::new(aim_android_image::linkage::ClassPath::read(&aim_paths::derived_image(), &jars).unwrap().hierarchy().unwrap());
-    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(system, persistence.clone(), classes);
+    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(system, persistence.clone());
     register(native, "query_domains", native.add_service(domains));
     {
         use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
@@ -3281,6 +3280,7 @@ fn verify_boot_scan(
             let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
             api::read_set_uri_relative_filter_groups_reply(&mut reply.reader()).unwrap().unwrap();
             let updated = system.capture_package_queries().unwrap(); assert_eq!(updated.scan().version(), current.scan().version() + 1);
+            assert!(std::ptr::eq(updated.domains().unwrap().classes().unwrap(), current.domains().unwrap().classes().unwrap()));
             assert_eq!(updated.domains().unwrap().owner().uri_groups("android", &["runtime.example".into()])[0].1[0].filters[0].filter, None);
             assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
             assert_eq!(updated.scan().owner().settings.domain_verification, current.scan().owner().settings.domain_verification);

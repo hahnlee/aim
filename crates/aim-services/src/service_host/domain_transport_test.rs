@@ -176,7 +176,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             })
             .collect();
         candidate.complete_shared_processes(orders).unwrap();
-        let context = super::query_context_for(&candidate, base.version() + 1);
+        let context = super::query_context_for(&candidate, base.version() + 1).with_boot_classpath(&aim_paths::derived_image()).unwrap();
         system
             .complete_package_scan_with_domains(
                 bridge,

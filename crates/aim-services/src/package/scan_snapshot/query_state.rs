@@ -33,6 +33,7 @@ pub struct UserInputs {
 pub struct Context {
     pub scan_version: u64,
     pub native_domains: Option<Arc<NativeDomains>>,
+    pub boot_classes: Option<Arc<aim_android_image::linkage::Hierarchy>>,
     pub nonce: Option<i64>,
     pub system: model::System,
     pub platform: model::Platform,
@@ -48,10 +49,13 @@ pub struct Context {
 #[derive(Clone, Debug)]
 pub struct NativeDomains {
     boot: crate::package::domain_verification::owner::Boot,
+    classes: Option<Arc<aim_android_image::linkage::Hierarchy>>,
     config: crate::package::system_config::SystemConfig,
     policies: BTreeMap<String, bool>,
 }
 impl NativeDomains {
+    pub fn classes(&self) -> Option<&aim_android_image::linkage::Hierarchy> {self.classes.as_deref()}
+
     pub fn collector_policy(
         &self,
         name: &str,
@@ -142,6 +146,14 @@ impl NativeDomains {
 }
 
 impl Context {
+    /// Load immutable class relations from the same image used by native scanning.
+    pub fn with_boot_classpath(mut self, image: &std::path::Path) -> Result<Self, String> {
+        use aim_android_image::{classpath, linkage::ClassPath};
+        let jars = classpath::jars(image, "bootclasspath.pb", classpath::BOOTCLASSPATH)?;
+        self.boot_classes = Some(Arc::new(ClassPath::read(image, &jars)?.hierarchy()?));
+        Ok(self)
+    }
+
     pub fn attach_boot_domains(
         self,
         scan: &crate::package::scan::SigningScan,
@@ -152,6 +164,7 @@ impl Context {
         let mut context = self.resolve_domains(scan, &boot.owner, config, policies)?;
         context.native_domains = Some(Arc::new(NativeDomains {
             boot,
+            classes: context.boot_classes.clone(),
             config: config.clone(),
             policies: policies.clone(),
         }));

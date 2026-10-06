@@ -1730,8 +1730,8 @@ no skips). This is not a fix for either intermittent environment issue. Actual
 ART Binder passes (15.85s), 499 units pass (0.51s; five excluded), and production
 build passes (3 rebuilt, 39 fresh, 1.6s). Other #966 generic type/error cases and
 full native PMS/facade/CTS/app gates remain open. URI list Parcelable class
-validation now uses immutable bootclasspath DEX type relations supplied to the
-native domain writer; no class initialization or guest reflection is added.
+validation uses immutable bootclasspath DEX type relations captured with the
+native scan/query context; no class initialization or guest reflection is added.
 Missing classes and non-Parcelable classes return the original BadParcelable
 category/message, while existing unrelated Parcelables produce the typed-getter
 mismatch. Twenty original lazy-Bundle cases cover the same ten class names as both list
@@ -1767,9 +1767,16 @@ and successful group removal (22.95s); no original settings write is scheduled.
 Full original oracle passes (30.88s, no skips), 499 units pass (0.50s; five excluded),
 and production build passes (3 rebuilt, 39 fresh, 1.3s). Other object schemas,
 noncanonical serialization forms, creators and malformed Bundle behavior remain
-#966 and fail explicitly where unsupported. Startup class-metadata
-binding and full domain/PMS conformance remain #957/#798; original services stay
-active.
+#966 and fail explicitly where unsupported. Class metadata now comes from the request's retained domain capture rather than
+an endpoint constructor argument. Context.with_boot_classpath loads the native
+scan image's boot class relations, and query/domain publications retain the same
+immutable metadata; a publication test asserts identity across an update. The
+ART fixture's separate capture path also supplies its image metadata. 499 units
+pass (0.55s; five excluded), publisher passes (1.11s), actual ART Binder passes
+(24.31s), and production build passes (3 rebuilt, 39 fresh, 21.5s). The initial
+ART run failed with SIGKILL (#902); no cause or environment fix is claimed.
+Production first-boot orchestration/service registration and full domain/PMS
+conformance remain #957/#798; original services stay active.
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the
