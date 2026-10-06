@@ -2238,6 +2238,10 @@ fn native_package_parcels_match_original_read_write() {
         let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
         aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_domain_verification_restricted_reply(&mut reader).unwrap().unwrap();
         assert_eq!(reader.remaining(), 0);
+        let bytes = fs::read(directory.join(format!("domain-settings-v2-{sdk}.original"))).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_domain_verification_settings_v2enabled_reply(&mut reader).unwrap().unwrap();
+        assert_eq!(reader.remaining(), 0);
     }
     let invalidation = fs::read(directory.join("package-cache-invalidation.original")).unwrap();
     let mut invalidation_reader = aim_binder_host::parcel::Reader::new(&invalidation, &[]);

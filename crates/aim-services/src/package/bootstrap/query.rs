@@ -114,6 +114,40 @@ impl Bridge {
         Ok(enabled)
     }
 
+    pub fn domain_verification_settings_v2(
+        &self,
+        name: &str,
+        target_sdk: i32,
+    ) -> Result<bool, OwnerError> {
+        if name.is_empty() || target_sdk < 0 {
+            return Err(OwnerError::Code(
+                "invalid domain compatibility identity".into(),
+            ));
+        }
+        let mut request = Parcel::new();
+        bridge::IsDomainVerificationSettingsV2Enabled {
+            package_name: Some(name.into()),
+            target_sdk,
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(
+                bridge::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED,
+                &request,
+                false,
+            )
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let enabled = bridge::read_is_domain_verification_settings_v2enabled_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(BAD_VALUE));
+        }
+        Ok(enabled)
+    }
+
     pub fn domain_policies(
         &self,
         owner: &SigningScan,

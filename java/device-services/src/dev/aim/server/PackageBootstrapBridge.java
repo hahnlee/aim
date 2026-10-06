@@ -159,6 +159,15 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
 
     @Override
     public boolean isDomainVerificationRestricted(String packageName, int targetSdk) throws RemoteException {
+        return domainCompatibility(175408749L, packageName, targetSdk);
+    }
+
+    @Override
+    public boolean isDomainVerificationSettingsV2Enabled(String packageName, int targetSdk) throws RemoteException {
+        return domainCompatibility(178111421L, packageName, targetSdk);
+    }
+
+    private static boolean domainCompatibility(long changeId, String packageName, int targetSdk) throws RemoteException {
         enforceSystemUid();
         if (packageName == null || packageName.isEmpty() || targetSdk < 0)
             throw new IllegalArgumentException("invalid domain compatibility identity");
@@ -169,7 +178,7 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
                 ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
         if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
-        return compat.getAppConfig(info).isChangeEnabled(175408749L);
+        return compat.getAppConfig(info).isChangeEnabled(changeId);
     }
 
     @Override

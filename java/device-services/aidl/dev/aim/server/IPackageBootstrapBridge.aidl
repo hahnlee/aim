@@ -35,4 +35,6 @@ interface IPackageBootstrapBridge {
     void invalidatePackageInfoCache();
     /** Current original domain proxy identity check; never a fixed native UID. */
     boolean isDomainVerifierUid(int uid);
+    /** Domain approval legacy/V2 decision from original PlatformCompat. */
+    boolean isDomainVerificationSettingsV2Enabled(String packageName, int targetSdk);
 }

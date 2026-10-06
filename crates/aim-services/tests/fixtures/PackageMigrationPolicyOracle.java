@@ -120,31 +120,35 @@ public final class PackageMigrationPolicyOracle {
         if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
         var original = new LocalCompat(android.app.ActivityThread.systemMain().getSystemUiContext());
         var bridge = new PackageBootstrapBridge().asBinder();
-        for (int sdk : new int[] {28, 30, 31, 36}) {
-            var info = new android.content.pm.ApplicationInfo();
-            info.packageName = "fixture.domains.compat"; info.targetSdkVersion = sdk;
-            var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
-            try {
-                request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeString(info.packageName); request.writeInt(sdk);
-                if (!bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted, request, reply, 0))
-                    throw new AssertionError("domain policy transaction unhandled");
-                byte[] bytes = reply.marshall(); reply.readException();
-                if (reply.readBoolean() != original.isChangeEnabledInternalNoLogging(175408749L, info) || reply.dataAvail() != 0)
-                    throw new AssertionError("original domain collector policy differs sdk=" + sdk);
-                java.nio.file.Files.write(new java.io.File(directory, "domain-compat-" + sdk + ".original").toPath(), bytes);
-            } finally { request.recycle(); reply.recycle(); }
+        int[] codes = {IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted,
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationSettingsV2Enabled};
+        long[] changes = {175408749L, 178111421L};
+        for (int kind = 0; kind < codes.length; kind++) {
+            for (int sdk : new int[] {28, 30, 31, 36}) {
+                var info = new android.content.pm.ApplicationInfo();
+                info.packageName = "fixture.domains.compat"; info.targetSdkVersion = sdk;
+                var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+                try {
+                    request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeString(info.packageName); request.writeInt(sdk);
+                    if (!bridge.transact(codes[kind], request, reply, 0)) throw new AssertionError("domain policy transaction unhandled");
+                    byte[] bytes = reply.marshall(); reply.readException();
+                    if (reply.readBoolean() != original.isChangeEnabledInternalNoLogging(changes[kind], info) || reply.dataAvail() != 0)
+                        throw new AssertionError("original domain policy differs change=" + changes[kind] + " sdk=" + sdk);
+                    String prefix = kind == 0 ? "domain-compat-" : "domain-settings-v2-";
+                    java.nio.file.Files.write(new java.io.File(directory, prefix + sdk + ".original").toPath(), bytes);
+                } finally { request.recycle(); reply.recycle(); }
+            }
+            invalidDomainPolicyInput(bridge, codes[kind], null, 31);
+            invalidDomainPolicyInput(bridge, codes[kind], "", 31);
+            invalidDomainPolicyInput(bridge, codes[kind], "fixture.domains.compat", -1);
         }
-        invalidDomainPolicyInput(bridge, null, 31);
-        invalidDomainPolicyInput(bridge, "", 31);
-        invalidDomainPolicyInput(bridge, "fixture.domains.compat", -1);
     }
-    private static void invalidDomainPolicyInput(android.os.IBinder bridge, String name, int sdk) throws Exception {
+    private static void invalidDomainPolicyInput(android.os.IBinder bridge, int code, String name, int sdk) throws Exception {
         var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
         try {
             request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeString(name); request.writeInt(sdk);
             try {
-                if (!bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted, request, reply, 0))
-                    throw new AssertionError("invalid domain input transaction unhandled");
+                if (!bridge.transact(code, request, reply, 0)) throw new AssertionError("invalid domain input transaction unhandled");
                 reply.readException();
             } catch (IllegalArgumentException expected) { return; }
             throw new AssertionError("invalid domain compatibility input accepted");
@@ -208,6 +212,7 @@ public final class PackageMigrationPolicyOracle {
         for (int code : new int[] {IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled,
                 IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid,
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted,
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationSettingsV2Enabled,
                 IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache,
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid}) {
             var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();

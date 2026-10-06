@@ -1425,7 +1425,16 @@ it under a test alias and covers actual Binder replies, same-process permission-
 denial and bootstrap replacement clearing current captures (0.84s). Original ART
 compares eight add/migrate package lists, including exclusion of pending/restored
 records. This endpoint is not registered by guest-init under the original name;
-remaining six methods and migration gates are tracked in #957. User-state lookup
+remaining six methods and migration gates are tracked in #957. Domain approval
+now has a separate retained-bridge producer for SETTINGS_API_V2 (178111421),
+using the original PlatformCompat config for package name/target SDK. It is not
+inferred from SDK or the collector's distinct RESTRICT_DOMAINS (175408749)
+decision. Both generated transactions enforce system UID and reject missing/empty
+names or negative SDK. Original ART compares each change with original
+isChangeEnabledInternalNoLogging at SDK 28/30/31/36, with invalid-input and actual
+foreign-UID denial. Native bridge tests prove the decisions can differ and reject
+empty/trailing replies (publisher 0.85s). This establishes the approval-policy
+producer; getOwnersForDomain ranking/serving remains unimplemented. User-state lookup
 applies the original user-existence/cross-user/visibility contract against the
 same capture, retaining nullable package names. Visibility denial returns the
 original name-not-found service-specific error; missing users/cross-user
@@ -1465,10 +1474,10 @@ this registry's missing checkService2 response; that scaffold failure is fixed.
 This proves real Binder FD transport; it does not prove full native PMS startup
 or the named app/CTS migration gates. Native codec tests cover the exact 32 KiB boundary, UTF-16 surrogate pairs,
 small inline blobs with a large prefix and empty-map behavior. The full original
-parcel fixture passes (31.26s, no skips); service units pass 488 cases (five
-excluded from the default run, 0.48s); binder-host units pass 14 cases (0.02s).
-The image/original-PMS template build passes (nine rebuilt, 33 fresh, 63.8s);
-final host build is fresh (13 nodes, 0.2s). Same-process service
+parcel fixture passes (30.14s, no skips); service units pass 488 cases (five
+excluded from the default run, 0.56s); binder-host units pass 14 cases (0.02s).
+The image/original-PMS template build passes (four rebuilt, 38 fresh, 35.9s);
+final host build is fresh (13 nodes, 0.3s). Same-process service
 lookup now retains and dispatches the returned local object (#961), with the
 original BBinder calling identity rule: an incoming caller's UID/PID is retained
 through a nested local call, then restored; outside a call, the host service's

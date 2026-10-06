@@ -202,7 +202,8 @@ impl Service for Owner {
                 }
             }
             bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED
-            | bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED => {
+            | bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED
+            | bootstrap::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED => {
                 let name = call.data.read_string16()?.unwrap();
                 let sdk = call.data.read_i32()?;
                 assert_eq!(call.data.remaining(), 0);
@@ -210,11 +211,12 @@ impl Service for Owner {
                 let mode = self.query_reply.load(Ordering::SeqCst);
                 if mode != 2 {
                     reply.write_bool(
-                        sdk >= if call.code == bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED {
-                            31
-                        } else {
-                            30
-                        },
+                        call.code == bootstrap::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED
+                            || sdk >= if call.code == bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED {
+                                31
+                            } else {
+                                30
+                            },
                     );
                 }
                 if mode == 1 {
@@ -1177,6 +1179,14 @@ fn exercise_bootstrap_on(
         old.domain_verification_restricted("fixture.domains", 31)
             .unwrap()
     );
+    assert!(old.domain_verification_settings_v2("fixture.domains", 28).unwrap());
+    for mode in [1, 2] {
+        owner.query_reply.store(mode, Ordering::SeqCst);
+        assert!(old.domain_verification_settings_v2("fixture.domains", 28).is_err());
+    }
+    owner.query_reply.store(0, Ordering::SeqCst);
+    assert!(old.domain_verification_settings_v2("", 28).is_err());
+    assert!(old.domain_verification_settings_v2("fixture.domains", -1).is_err());
     assert!(old.domain_verification_restricted("", 31).is_err());
     assert!(
         old.domain_verification_restricted("fixture.domains", -1)
