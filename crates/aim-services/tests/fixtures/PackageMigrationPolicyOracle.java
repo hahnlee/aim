@@ -43,6 +43,7 @@ public final class PackageMigrationPolicyOracle {
                 verifyTestBase(new java.io.File(args[0]));
                 verifyQueryOwners(new java.io.File(args[0]));
                 verifyDomainPolicy(new java.io.File(args[0]));
+                verifyCacheInvalidation(new java.io.File(args[0]));
                 System.out.println("MIGRATION_POLICY " + (bestEffort ? 1 : 0));
             }
         } finally { request.recycle(); reply.recycle(); }
@@ -148,14 +149,36 @@ public final class PackageMigrationPolicyOracle {
             throw new AssertionError("invalid domain compatibility input accepted");
         } finally { request.recycle(); reply.recycle(); }
     }
+    private static final class CacheProbe extends android.app.PropertyInvalidatedCache<String, Integer> {
+        int count;
+        CacheProbe() { super(4, "cache_key.system_server.package_info_cache"); }
+        @Override public Integer recompute(String query) { return ++count; }
+    }
+    private static void verifyCacheInvalidation(java.io.File directory) throws Exception {
+        var cache = new CacheProbe(); cache.invalidateCache();
+        int before = cache.query("probe");
+        if (cache.query("probe") != before) throw new AssertionError("original cache did not retain an entry");
+        var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+        try {
+            request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
+            if (!new PackageBootstrapBridge().asBinder().transact(IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache, request, reply, 0))
+                throw new AssertionError("cache invalidation transaction unhandled");
+            byte[] bytes = reply.marshall(); reply.readException();
+            if (reply.dataAvail() != 0 || cache.query("probe") == before) throw new AssertionError("package-info cache entry survived invalidation");
+            java.nio.file.Files.write(new java.io.File(directory, "package-cache-invalidation.original").toPath(), bytes);
+        } finally { request.recycle(); reply.recycle(); }
+    }
     private static void verifyDeniedQueryOwners() throws Exception {
         for (int code : new int[] {IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled,
                 IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid,
-                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted}) {
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted,
+                IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache}) {
             var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
             try {
                 request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
-                if (code != IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid) {
+                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache) {
+                    // No arguments.
+                } else if (code != IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid) {
                     request.writeString("fixture.query.compat"); request.writeInt(30);
                 } else { request.writeInt(1000); }
                 try {

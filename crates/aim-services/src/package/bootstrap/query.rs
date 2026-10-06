@@ -17,6 +17,23 @@ pub enum QueryContextError {
 }
 
 impl Bridge {
+    pub fn invalidate_package_info_cache(&self) -> Result<(), OwnerError> {
+        let mut request = Parcel::new();
+        bridge::InvalidatePackageInfoCache {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::INVALIDATE_PACKAGE_INFO_CACHE, &request, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        bridge::read_invalidate_package_info_cache_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(BAD_VALUE));
+        }
+        Ok(())
+    }
+
     pub fn application_query_filtering(
         &self,
         name: &str,

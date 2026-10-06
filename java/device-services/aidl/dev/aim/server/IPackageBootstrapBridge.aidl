@@ -31,4 +31,6 @@ interface IPackageBootstrapBridge {
     String[] getPackageGrantedPermissions(String packageName, int appId, int userId);
     /** Domain collector's RESTRICT_DOMAINS decision from original PlatformCompat. */
     boolean isDomainVerificationRestricted(String packageName, int targetSdk);
+    /** Original package-info cache invalidation after a committed native change. */
+    void invalidatePackageInfoCache();
 }

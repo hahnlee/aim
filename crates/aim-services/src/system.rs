@@ -841,6 +841,27 @@ impl System {
             current.queries = Some(update.capture.clone());
             state.version = update.capture.scan().version();
         }
+        let committed = result.is_ok() || result.as_ref().is_err_and(|e| e.committed);
+        drop(state);
+        if committed {
+            // Original callbacks cannot run under the publication lock.
+            if let Err(error) = self
+                .check_package_bootstrap(bridge)
+                .map_err(|e| format!("{e:?}"))
+                .and_then(|_| {
+                    bridge
+                        .invalidate_package_info_cache()
+                        .map_err(|e| format!("{e:?}"))
+                })
+            {
+                return Err(WriteError {
+                    committed: true,
+                    message: format!(
+                        "committed domain cache invalidation failed: {error}; persistence: {result:?}"
+                    ),
+                });
+            }
+        }
         result.map(|_| update.capture)
     }
     // Original policy calls run without holding the publication lock.

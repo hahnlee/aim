@@ -136,6 +136,7 @@ struct Owner {
     signing_debuggable: AtomicBool,
     test_base_reply: AtomicUsize,
     query_reply: AtomicUsize,
+    invalidations: AtomicUsize,
     permission_reply: AtomicUsize,
     permission_calls: Mutex<Vec<(String, Option<(i32, i32)>)>>,
     gid_reply: AtomicUsize,
@@ -205,6 +206,12 @@ impl Service for Owner {
                 if mode == 1 {
                     reply.write_i32(99);
                 }
+            }
+            bootstrap::INVALIDATE_PACKAGE_INFO_CACHE => {
+                assert_eq!(call.data.remaining(), 0);
+                self.invalidations.fetch_add(1, Ordering::SeqCst);
+                // This uses the reply fault owner already exercised for query policy.
+                if self.query_reply.load(Ordering::SeqCst) == 1 { reply.write_i32(99); }
             }
             bootstrap::ARE_NATIVE_LIBRARY_DEPENDENCIES_ENFORCED => {
                 assert!(
@@ -949,6 +956,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
+        invalidations: AtomicUsize::new(0),
         permission_reply: AtomicUsize::new(0),
         permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
@@ -971,6 +979,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
+        invalidations: AtomicUsize::new(0),
         permission_reply: AtomicUsize::new(0),
         permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
@@ -1548,6 +1557,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         signing_debuggable: AtomicBool::new(debuggable),
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
+        invalidations: AtomicUsize::new(0),
         permission_reply: AtomicUsize::new(0),
         permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
@@ -2565,6 +2575,7 @@ fn verify_boot_scan(
         .unwrap();
     let first_update = query.prepare_domain_update(updated.clone()).unwrap();
     let stale_update = query.prepare_domain_update(updated).unwrap();
+    let before_invalidations = owner.invalidations.load(Ordering::SeqCst);
     let committed = system
         .commit_package_domains(bridge, first_update, &mut persistence)
         .unwrap();
@@ -2583,6 +2594,10 @@ fn verify_boot_scan(
     assert_eq!(
         persistence.state().settings.domain_verification,
         committed.domains().unwrap().owner().persisted()
+    );
+    assert_eq!(
+        owner.invalidations.load(Ordering::SeqCst),
+        before_invalidations + 1
     );
     let bytes = std::fs::read(&path).unwrap();
     assert!(
@@ -2618,6 +2633,36 @@ fn verify_boot_scan(
         std::fs::read(&path).unwrap(),
         b"<packages external='writer'/>"
     );
+    assert_eq!(
+        owner.invalidations.load(Ordering::SeqCst),
+        before_invalidations + 1
+    );
+    std::fs::write(&path, &bytes).unwrap();
+    let mut updated = committed.domains().unwrap().owner().clone();
+    updated
+        .set_link_handling_internal(Some("android"), true, 0, &[0, 10])
+        .unwrap();
+    let update = committed.prepare_domain_update(updated).unwrap();
+    owner.query_reply.store(1, Ordering::SeqCst);
+    let error = system
+        .commit_package_domains(bridge, update, &mut persistence)
+        .err()
+        .unwrap();
+    assert!(error.committed);
+    let cache_failed = system.capture_package_queries().unwrap();
+    assert_eq!(
+        cache_failed.scan().version(),
+        committed.scan().version() + 1
+    );
+    assert!(
+        cache_failed.state().packages["android"].users[&0]
+            .domain_selection
+            .as_ref()
+            .unwrap()
+            .0
+    );
+    owner.query_reply.store(0, Ordering::SeqCst);
+    bridge.invalidate_package_info_cache().unwrap();
     assert!(
         query.state().packages["android"].users[&0]
             .domain_selection
@@ -2642,7 +2687,7 @@ fn verify_boot_scan(
     assert_eq!(android.pkg.as_ref().unwrap().uid, 1000);
     assert_eq!(query_uid(client, "android", 0).unwrap(), 1000);
     let lease = capture_scan(client).unwrap();
-    assert_eq!(scan_version(&lease).unwrap(), committed.scan().version() as i64);
+    assert_eq!(scan_version(&lease).unwrap(), cache_failed.scan().version() as i64);
     {
         use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
         let mut data = Parcel::new();

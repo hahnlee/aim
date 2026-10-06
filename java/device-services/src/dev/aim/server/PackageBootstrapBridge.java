@@ -142,6 +142,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public void invalidatePackageInfoCache() {
+        enforceSystemUid();
+        android.content.pm.PackageManager.invalidatePackageInfoCache();
+    }
+
+    @Override
     public boolean isDomainVerificationRestricted(String packageName, int targetSdk) throws RemoteException {
         enforceSystemUid();
         if (packageName == null || packageName.isEmpty() || targetSdk < 0)

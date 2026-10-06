@@ -2185,6 +2185,10 @@ fn native_package_parcels_match_original_read_write() {
         aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_domain_verification_restricted_reply(&mut reader).unwrap().unwrap();
         assert_eq!(reader.remaining(), 0);
     }
+    let invalidation = fs::read(directory.join("package-cache-invalidation.original")).unwrap();
+    let mut invalidation_reader = aim_binder_host::parcel::Reader::new(&invalidation, &[]);
+    aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_invalidate_package_info_cache_reply(&mut invalidation_reader).unwrap().unwrap();
+    assert_eq!(invalidation_reader.remaining(), 0);
     let migration_policy = if best_effort {
         aim_services::package::scan::SharedUidMigration::BestEffort
     } else {

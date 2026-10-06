@@ -1383,8 +1383,17 @@ Store-backed link change, query state and facade lease generation advancing,
 rejected stale candidates leaving the file intact, and outside-writer conflict
 leaving the current capture intact (0.76s). Old captures remain isolated. The
 reserve-error daemon branch has not been exercised directly; Store-level main
-and reserve failures are tested. Nonce/notification delivery and automatic
-startup/Binder mutation serving remain unproved. The fixture runs the image's original collector with a controlled
+and reserve failures are tested. After a successful or main-committed domain write, the daemon now releases its
+publication lock and calls the retained bridge's original
+PackageManager.invalidatePackageInfoCache. Precommit/stale failures do not call
+it. A malformed/failing invalidation reply reports committed=true while retaining
+new disk/query state; an explicit retry invokes only invalidation. Native tests
+count successful invalidation calls and exercise that failure/retry path (0.74s).
+Original ART's PropertyInvalidatedCache probe retains an entry before the bridge
+call and recomputes it afterward, with actual foreign-UID denial. This uses the
+original mutable shared-memory owner in the disposable client process; a live
+system_server shared nonce mapping was not exercised end-to-end. Notification
+delivery, automatic startup and Binder mutation serving remain unproved. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1395,9 +1404,9 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(30.85s, no skips, prior writer run); release units pass 484 cases (four excluded from the default
-run, 0.53s). The full build passes (three host nodes rebuilt, 39 fresh, 2.6s);
-the image/original-PMS template remains fresh; final host build is fresh (13 nodes, 0.2s).
+(28.87s, no skips); release units pass 484 cases (four excluded from the default
+run, 0.53s). The full build passes (nine nodes rebuilt, 33 fresh, 74.1s);
+the image/original-PMS template build passes; final host build is fresh (13 nodes, 0.3s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
@@ -1407,7 +1416,7 @@ the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 484
 cases (four excluded from the default run, 0.53s). The full build passes
-(three host nodes rebuilt, 39 fresh, 2.6s); final host build is fresh (13 nodes, 0.2s).
+(nine nodes rebuilt, 33 fresh, 74.1s); final host build is fresh (13 nodes, 0.3s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

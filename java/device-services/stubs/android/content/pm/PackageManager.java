@@ -22,6 +22,8 @@ public abstract class PackageManager {
     public static final String FEATURE_AUTOMOTIVE = "android.hardware.type.automotive";
     public static final String FEATURE_WATCH = "android.hardware.type.watch";
 
+    public static void invalidatePackageInfoCache() { throw new RuntimeException("stub"); }
+
     public static class NameNotFoundException extends android.util.AndroidException {}
 
     public abstract ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException;
