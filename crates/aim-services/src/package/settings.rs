@@ -189,6 +189,61 @@ impl Package {
             .sort_by_key(|(name, _)| name.as_deref().map_or(0, string_hash));
     }
 
+    /// Apply a package child at its start event. The caller owns registration,
+    /// legacy permission/domain state and unrecognized children (#914).
+    /// Keyset tags leave nested events visible; libraries/splits consume theirs.
+    pub fn read_child(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        child: &Element,
+        signatures: &mut SignatureReader,
+        key_set_refs: &mut std::collections::BTreeMap<i64, i32>,
+    ) -> Result<bool, String> {
+        if libraries(self, child)? {
+            signatures::skip(reader)?;
+            return Ok(true);
+        }
+        match child.name.as_str() {
+            "sigs" => {
+                signatures.read(reader, child, &mut self.signatures)?;
+            }
+            "install-initiator-sigs" => {
+                let mut target = None;
+                signatures.read(reader, child, &mut target)?;
+                self.install_source.initiating_package_signatures = target;
+            }
+            "proper-signing-keyset" | "defined-keyset" => {
+                let id = identifier(child)?;
+                let count = key_set_refs.entry(id).or_default();
+                *count = count.wrapping_add(1);
+                if child.name == "proper-signing-keyset" {
+                    self.key_set_data.proper_signing_key_set = id;
+                } else {
+                    self.key_set_data
+                        .add_defined_key_set(id, string(child, "alias"));
+                }
+            }
+            "upgrade-keyset" => self.key_set_data.add_upgrade_key_set(identifier(child)?),
+            "signing-keyset" => {}
+            "split-version" => {
+                self.read_split_version(child);
+                signatures::skip(reader)?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn read_split_version(&mut self, child: &Element) {
+        let revision = defaulted(child.int("version"), -1);
+        if let Some(name) = string(child, "name").filter(|_| revision >= 0) {
+            match self.split_versions.iter_mut().find(|(n, _)| *n == name) {
+                Some(split) => split.1 = revision,
+                None => self.split_versions.push((name, revision)),
+            }
+        }
+    }
+
     pub fn is_loading(&self) -> bool {
         (1.0f32 - self.loading_progress).abs() >= 0.00000001f32
     }
@@ -843,15 +898,7 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
                     p.add_mime_types(group, types);
                 }
             }
-            "split-version" => {
-                let revision = defaulted(child.int("version"), -1);
-                if let Some(name) = string(child, "name").filter(|_| revision >= 0) {
-                    match p.split_versions.iter_mut().find(|(n, _)| *n == name) {
-                        Some(split) => split.1 = revision,
-                        None => p.split_versions.push((name, revision)),
-                    }
-                }
-            }
+            "split-version" => p.read_split_version(child),
             _ => {}
         }
     }
@@ -1166,5 +1213,99 @@ mod version_event_tests {
         .unwrap();
         assert_eq!(settings.versions[3].database_version, 6);
         assert_eq!(settings.versions[4].database_version, 7);
+    }
+}
+
+#[cfg(test)]
+mod incremental_package_tests {
+    use super::*;
+    use aim_android_xml::pull::{Event, Reader};
+    use std::collections::BTreeMap;
+
+    fn read(
+        bytes: &[u8],
+        package: &mut Package,
+        refs: &mut BTreeMap<i64, i32>,
+    ) -> Result<(), String> {
+        let mut reader = Reader::new(bytes)?;
+        assert!(matches!(reader.next()?, Event::Start(_)));
+        let mut signatures = SignatureReader::default();
+        loop {
+            match reader.next()? {
+                Event::Start(child) => {
+                    if !package.read_child(&mut reader, &child, &mut signatures, refs)? {
+                        signatures::skip(&mut reader)?;
+                    }
+                }
+                Event::End(_) if reader.depth() == 1 => return Ok(()),
+                Event::EndDocument => return Ok(()),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn package_children_preserve_start_effects_when_subtree_read_fails() {
+        for (tag, attributes) in [
+            ("uses-static-lib", "name='lib' version='7'"),
+            ("uses-sdk-lib", "name='lib' version='7' optional='false'"),
+            ("split-version", "name='lib' version='7'"),
+            ("proper-signing-keyset", "identifier='7'"),
+            ("defined-keyset", "identifier='7' alias='lib'"),
+            ("upgrade-keyset", "identifier='7'"),
+        ] {
+            let bytes = format!("<package><{tag} {attributes}><");
+            let mut package = Package::default();
+            let mut refs = BTreeMap::new();
+            assert!(
+                read(bytes.as_bytes(), &mut package, &mut refs).is_err(),
+                "{tag}"
+            );
+            match tag {
+                "uses-static-lib" => assert_eq!(package.uses_static_libraries, [("lib".into(), 7)]),
+                "uses-sdk-lib" => {
+                    assert_eq!(package.uses_sdk_libraries[0].version_major, 7);
+                    assert!(!package.uses_sdk_libraries[0].optional);
+                }
+                "split-version" => assert_eq!(package.split_versions, [("lib".into(), 7)]),
+                "proper-signing-keyset" => {
+                    assert_eq!(package.key_set_data.proper_signing_key_set, 7);
+                    assert_eq!(refs[&7], 1);
+                }
+                "defined-keyset" => assert_eq!(refs[&7], 1),
+                "upgrade-keyset" => assert_eq!(package.key_set_data.upgrade_key_sets, [7]),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn package_child_skip_boundaries_and_reference_counts_match_tree_import() {
+        let bytes = b"<package name='p' codePath='/p' userId='10001'><uses-static-lib name='a' version='1'><uses-static-lib name='hidden' version='2'/></uses-static-lib><uses-static-lib name='a' version='3'/><uses-sdk-lib name='b' version='4' optional='false'/><split-version name='x' version='1'/><split-version name='x' version='5'/><proper-signing-keyset identifier='8'><defined-keyset identifier='8' alias='alias'/></proper-signing-keyset><upgrade-keyset identifier='9'/></package>";
+        for bytes in [
+            bytes.to_vec(),
+            aim_android_xml::abx::write(&aim_android_xml::read(bytes).unwrap()).unwrap(),
+        ] {
+            let root = aim_android_xml::read(&bytes).unwrap();
+            let expected = package(&root, &mut Vec::new()).unwrap().unwrap();
+            let mut actual = package(
+                &Element {
+                    content: Vec::new(),
+                    ..root
+                },
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .unwrap();
+            let mut refs = BTreeMap::from([(8, i32::MAX)]);
+            read(&bytes, &mut actual, &mut refs).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(refs[&8], i32::MIN + 1);
+        }
+        let mut actual = Package::default();
+        let mut refs = BTreeMap::new();
+        assert!(read(b"<package><proper-signing-keyset identifier='2'/><defined-keyset identifier='bad'/></package>", &mut actual, &mut refs).is_err());
+        assert_eq!(actual.key_set_data.proper_signing_key_set, 2);
+        assert_eq!(refs, BTreeMap::from([(2, 1)]));
     }
 }

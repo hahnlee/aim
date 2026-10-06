@@ -37,6 +37,7 @@ public final class ScanSettingsWriteOracle {
         verifySettingsDefaults(cache.getParentFile());
         verifyOwnerDefaults(cache.getParentFile());
         verifySignatureEvents(cache.getParentFile());
+        verifyPackageChildEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -67,6 +68,36 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyPackageChildEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "package-child-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "package-child-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var p = settings.getPackagesLocked().get("p");
+            if (p == null) throw new AssertionError("package child owner absent: " + index);
+            var fields = new java.util.ArrayList<String>(); var entries = new java.util.ArrayList<String>();
+            var names = p.getUsesStaticLibraries(); var versions = p.getUsesStaticLibrariesVersions();
+            for (int i = 0; i < names.length; i++) entries.add(names[i] + ":" + versions[i]);
+            fields.add(String.join(",", entries)); entries.clear();
+            names = p.getUsesSdkLibraries(); versions = p.getUsesSdkLibrariesVersionsMajor(); var optional = p.getUsesSdkLibrariesOptional();
+            for (int i = 0; i < names.length; i++) entries.add(names[i] + ":" + versions[i] + ":" + optional[i]);
+            fields.add(String.join(",", entries)); entries.clear();
+            names = p.getSplitNames(); var revisions = p.getSplitRevisionCodes();
+            for (int i = 0; i < names.length; i++) entries.add(names[i] + ":" + revisions[i]);
+            fields.add(String.join(",", entries)); entries.clear();
+            var keys = p.getKeySetData(); fields.add(Long.toString(keys.getProperSigningKeySet()));
+            for (var entry : keys.getAliases().entrySet()) entries.add(entry.getKey() + ":" + entry.getValue());
+            fields.add(String.join(",", entries)); entries.clear();
+            if (keys.getUpgradeKeySets() != null) for (long id : keys.getUpgradeKeySets()) entries.add(Long.toString(id));
+            fields.add(String.join(",", entries));
+            java.nio.file.Files.write(new java.io.File(directory, "package-child-output-" + index).toPath(), String.join("|", fields).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
     private static void verifyOwnerDefaults(java.io.File directory) throws Exception {

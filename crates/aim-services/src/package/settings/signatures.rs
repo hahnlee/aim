@@ -99,7 +99,7 @@ impl SignatureReader {
     }
 }
 
-fn skip(reader: &mut Reader<'_>) -> Result<(), String> {
+pub(super) fn skip(reader: &mut Reader<'_>) -> Result<(), String> {
     let outer = reader.depth();
     loop {
         match reader.next()? {

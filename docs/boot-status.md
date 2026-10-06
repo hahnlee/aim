@@ -876,8 +876,23 @@ append/clone flags, repeated/nested histories, invalid DER and a following signa
 read sharing the same table. This is a within-attempt signature-owner comparison,
 not Settings failRead file retry (each new file attempt needs a fresh table).
 The normal AST importer now shares the signing builder with SignatureReader;
-full package/shared UID/keyset event owners, incremental frontend integration
-and default boot integration remain #914. Native Signatures now stores current capability flags (an empty vector represents
+Native Package.read_child now connects the shared SignatureReader to active and
+initiator signing targets, applies library/split changes before subtree skips,
+and retains keyset changes/reference counts at completed starts. Keyset tags
+leave nested entries visible; library/split helpers skip them, matching the
+original Settings control flow. Actual original Settings.readSettingsLPw agrees
+on 615 text/ABX package-child cases, including every ABX truncation after the
+package header, duplicate updates, nested skip boundaries, invalid identifiers
+and partial effects retained across empty-reserve retry. Native units also check
+reference-count wrapping and retention before a later required-attribute error.
+503 service units pass (5 excluded, 0.53s); the full original ART oracle passes
+without skips (55.10s), and the production image/runtime build passes (3 rebuilt,
+39 fresh, 14.3s). The initial oracle attempt failed in its input generator on a
+short ABX header and was corrected; the next run stopped at existing SDK sandbox
+ENOSPC (#903). Removing only this worktree's regenerable release incremental
+cache allowed the successful rerun. Package registration/header effects, shared
+UID/global/keyset owners, remaining package children, complete incremental
+frontend and default boot integration remain #914. Original PMS still runs. Native Signatures now stores current capability flags (an empty vector represents
 all zero); the feed retains them instead of discarding them, and the AST reader
 inherits flags from its certificate table. Verified APK/shared-owner constructors
 use the original zero current flags. SignatureReader retains generated Java

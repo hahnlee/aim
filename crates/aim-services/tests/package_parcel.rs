@@ -13,6 +13,7 @@ mod common {
     pub mod settings_defaults;
     pub mod settings_owner_defaults;
     pub mod signature_events;
+    pub mod package_child_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -576,6 +577,12 @@ fn native_package_parcels_match_original_read_write() {
         output.push(format!("{},{}", main.exists(), reserve.exists()));
         version_expected.push(output.join("|"));
     }
+    let package_child_inputs = common::package_child_events::inputs();
+    let package_child_expected: Vec<_> = package_child_inputs.iter().enumerate().map(|(index, bytes)| {
+        fs::write(directory.join(format!("package-child-input-{index}")), bytes).unwrap();
+        common::package_child_events::trace(&common::package_child_events::read(bytes))
+    }).collect();
+    eprintln!("original incremental package child cases: {}", package_child_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -4256,6 +4263,10 @@ fn native_package_parcels_match_original_read_write() {
             *expected,
             "original Settings version recovery {index}"
         );
+    }
+    for (index, expected) in package_child_expected.iter().enumerate() {
+        assert_eq!(fs::read_to_string(directory.join(format!("package-child-output-{index}"))).unwrap(), *expected,
+            "original incremental package child {index}: {:?}", String::from_utf8_lossy(&package_child_inputs[index]));
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {
