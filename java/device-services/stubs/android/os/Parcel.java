@@ -21,6 +21,8 @@ public final class Parcel {
     public final void writeLong(long val) { throw new RuntimeException("stub"); }
     public final long readLong() { throw new RuntimeException("stub"); }
     public final int dataPosition() { throw new RuntimeException("stub"); }
+    public final void writeString8(String val) { throw new RuntimeException("stub"); }
+    public final void appendFrom(Parcel parcel, int offset, int length) { throw new RuntimeException("stub"); }
     public final String readString8() { throw new RuntimeException("stub"); }
     public final String[] createString8Array() { throw new RuntimeException("stub"); }
     public final void writeStringList(java.util.List<String> value) { throw new RuntimeException("stub"); }

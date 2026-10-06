@@ -152,11 +152,7 @@ fn skip_value(reader: &mut Reader<'_>, kind: i32) -> Result<()> {
             }
         }
         10 => {
-            let kind = reader.read_i32()?;
-            reader.read_string8()?;
-            if kind != 1 {
-                return Err(BAD_VALUE);
-            }
+            crate::clip::char_sequence(reader)?;
         }
         24 => {
             let count = reader.read_i32()?;

@@ -1621,8 +1621,8 @@ and filter DTOs convert without nullable-string substitution. Changes use runtim
 only publication, with no Store write or cache callback; an error after earlier
 keys retains those runtime changes. Native Binder tests confirm null group metadata,
 removal, denied callers, framing rejection, empty/missing-name behavior and unchanged
-file/Store/disk base/invalidation count. Original Bundle inputs cover six empty,
-wrong-type, null/empty list and nullable DTO forms. Full original oracle passes
+file/Store/disk base/invalidation count. Original Bundle inputs cover ten empty,
+wrong-type, null/empty list, nullable DTO and CharSequence forms. Full original oracle passes
 (30.21s, no skips), units pass (496, 0.67s; five excluded by default), publisher passes
 (0.96s), and actual original ART invokes the setter then reads action/numeric/null
 filter fields with its own creators (15.45s). A stub putString declaration initially
@@ -1636,9 +1636,16 @@ key and call trailer. Original service oracle removes the URI key for Binder inp
 without scheduling a write; actual ART sends the Binder plus a nullable URI group
 and confirms removal and the later group's survival (17.15s). Full original oracle
 passes (31.24s, no skips), 497 units pass (0.50s; five excluded by default), and
-production/final host builds pass. Other #966 generic type/error cases remain open. Full native PMS/facade/CTS/app gates remain open
-(#798); original services stay active. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
-and full M4 C acceptance remain open (#957/#798).
+production/final host builds pass. URI Bundle CharSequence values now use the
+existing TextUtils span reader, including arrays and null text. Four original
+Parcel inputs (ForegroundColorSpan, an array, null text and a non-plain kind)
+produce the original typed-getter mismatch; the original service removes the
+URI key without a persistence write. Full original oracle passes (29.85s, no
+skips), 497 units pass (0.52s; five excluded), and actual original ART sends a
+styled Bundle to the native setter while retaining another URI group (15.60s).
+The image/template build passes (9 rebuilt, 33 fresh, 54.7s). Other #966 generic
+type/error cases and full native PMS/facade/CTS/app gates remain open
+(#957/#798); original services stay active.
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

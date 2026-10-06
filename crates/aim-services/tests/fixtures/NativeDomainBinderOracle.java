@@ -159,6 +159,21 @@ public final class NativeDomainBinderOracle {
             reply.readException(); if (reply.dataAvail() != 0) throw new AssertionError("URI update framing differs");
         } finally { data.recycle(); reply.recycle(); }
         data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        var styled = android.os.Parcel.obtain(); var styledWire = android.os.Parcel.obtain();
+        try {
+            styled.writeInt(1); styled.writeString("h0.example"); styled.writeInt(10);
+            styled.writeInt(0); styled.writeString8("styled");
+            styled.writeInt(2); styled.writeInt(0xff123456); // ForegroundColorSpan
+            styled.writeInt(0); styled.writeInt(6); styled.writeInt(33); styled.writeInt(0);
+            int length = styled.marshall().length;
+            styledWire.writeInt(length); styledWire.writeInt(0x4c444e42);
+            styledWire.appendFrom(styled, 0, length); styledWire.writeBoolean(false); styledWire.setDataPosition(0);
+            var bundle = android.os.Bundle.CREATOR.createFromParcel(styledWire);
+            data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(bundle, 0);
+            if (!service.transact(Integer.parseInt(args[9]), data, reply, 0)) throw new AssertionError("styled URI update unhandled");
+            reply.readException(); if (reply.dataAvail() != 0) throw new AssertionError("styled URI update framing differs");
+        } finally {styled.recycle(); styledWire.recycle(); data.recycle(); reply.recycle();}
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
         try {
             data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("runtime.example"));
             service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();

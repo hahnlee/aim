@@ -159,6 +159,10 @@ public final class DomainCollectorOracle {
             service.setUriRelativeFilterGroups("fixture.domains", binderMismatch);
             if (!service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("h0.example")).keySet().isEmpty()) throw new AssertionError("original Binder mismatch did not remove URI key");
             if (connection.writes != 0) throw new AssertionError("Binder URI mismatch scheduled persistence");
+            for (int mode = 6; mode < 10; mode++) {
+                service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.styledBundle("h0.example", mode));
+                if (!service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("h0.example")).keySet().isEmpty() || connection.writes != 0) throw new AssertionError("styled URI mismatch/removal or persistence differs");
+            }
             var restoredGroup = new android.os.Bundle();
             restoredGroup.putParcelableArrayList("h0.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/second")))));
             service.setUriRelativeFilterGroups("fixture.domains", restoredGroup);
