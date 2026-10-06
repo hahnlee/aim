@@ -127,27 +127,14 @@ fn unlink_permissions(r: &Resolved, id: &super::cred::Identity) -> Result<(), i6
     let parent = std::path::Path::new(&r.guest)
         .parent()
         .ok_or(-crate::errno::EBUSY as i64)?;
-    for directory in parent.ancestors() {
-        let st = super::fs::stat_at(
-            crate::vfs::LINUX_AT_FDCWD,
-            directory.as_os_str().as_encoded_bytes(),
-            0,
-        )?;
-        if !directory_permits(&st, if directory == parent { 3 } else { 1 }, id) {
-            return Err(-crate::errno::EACCES as i64);
-        }
-    }
     let directory = super::fs::stat_at(
         crate::vfs::LINUX_AT_FDCWD,
         parent.as_os_str().as_encoded_bytes(),
         0,
     )?;
+    let target = super::fs::stat_at(crate::vfs::LINUX_AT_FDCWD, r.guest.as_bytes(), AT_SYMLINK_NOFOLLOW)?;
+    if !directory_permits(&directory, 3, id) {return Err(-crate::errno::EACCES as i64);}
     if directory.st_mode as u32 & libc::S_ISVTX as u32 != 0 {
-        let target = super::fs::stat_at(
-            crate::vfs::LINUX_AT_FDCWD,
-            r.guest.as_bytes(),
-            AT_SYMLINK_NOFOLLOW,
-        )?;
         if !sticky_permits(&directory, &target, id) {
             return Err(-EPERM);
         }
@@ -156,12 +143,39 @@ fn unlink_permissions(r: &Resolved, id: &super::cred::Identity) -> Result<(), i6
 }
 
 pub fn unlinkat(a: [u64; 6]) -> i64 {
+    unlinkat_as(a, &super::cred::current())
+}
+fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if a[2] & !AT_REMOVEDIR != 0 {
         return -(EINVAL as i64);
     }
-    match resolve_w(a[0], a[1], false) {
+    // SAFETY: guest path pointer.
+    let path = unsafe { guest_cstr(a[1]) };
+    let resolved = vfs::resolve_checked(a[0] as i32, path, false, |directory| {
+        if !attrs::recording() {
+            return Ok(());
+        }
+        let st = super::fs::stat_at(crate::vfs::LINUX_AT_FDCWD, directory.as_bytes(), 0)
+            .map_err(|error| -error as i32)?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(crate::errno::ENOTDIR);
+        }
+        if directory_permits(&st, 1, id) {
+            Ok(())
+        } else {
+            Err(crate::errno::EACCES)
+        }
+    })
+    .map_err(|error| -i64::from(error))
+    .and_then(|r| {
+        check_writable(&r)?;
+        Ok(r)
+    });
+    match resolved {
         Ok(r) => {
-            if let Err(error) = unlink_permissions(&r, &super::cred::current()) {return error;}
+            if let Err(error) = unlink_permissions(&r, id) {
+                return error;
+            }
             // SAFETY: resolved host path.
             let result = unsafe {
                 if a[2] & AT_REMOVEDIR != 0 {
@@ -190,6 +204,7 @@ pub fn unlinkat(a: [u64; 6]) -> i64 {
         Err(e) => e,
     }
 }
+
 
 pub fn symlinkat(a: [u64; 6]) -> i64 {
     // SAFETY: guest string; the target is stored verbatim (guest-relative).
@@ -777,6 +792,44 @@ mod tests {
 #[cfg(test)]
 mod unlink_permission_tests {
     use super::*;
+    #[test]
+    fn unlink_walk_checks_symlink_prefixes_dotdot_and_relative_fd_base() {
+        use std::{ffi::CString, os::fd::AsRawFd};
+        let (_guard, view) = crate::vfs::test_view();
+        let base = format!("/data/unlink-walk-{}", std::process::id()); let host = view.join("data").join(base.trim_start_matches("/data/"));
+        std::fs::create_dir_all(host.join("denied")).unwrap(); std::fs::create_dir_all(host.join("allowed")).unwrap();
+        let record = |suffix: &str, uid, mode| {
+            let path = CString::new(host.join(suffix).as_os_str().as_encoded_bytes()).unwrap();
+            super::super::attrs::record(super::super::attrs::Host::Path(&path), || format!("{base}/{suffix}"), super::super::attrs::Attr {uid: Some(uid), gid: Some(2000), mode: Some(mode)});
+        };
+        record("denied", 1000, 0o700); record("allowed", 3000, 0o777);
+        std::os::unix::fs::symlink(format!("{base}/allowed"), host.join("denied/link")).unwrap(); std::fs::write(host.join("allowed/victim"), b"owned").unwrap();
+        let mut id = super::super::cred::Identity::default(); id.uid = [3000; 4]; id.gid = [3000; 4]; id.cap_eff = 0;
+        let invoke = |fd, path: &str, flags| {let path = CString::new(path).unwrap(); unlinkat_as([fd as u64, path.as_ptr() as u64, flags, 0, 0, 0], &id)};
+        assert_eq!(invoke(crate::vfs::LINUX_AT_FDCWD, &format!("{base}/denied/link/victim"), 0), -crate::errno::EACCES as i64);
+        assert_eq!(invoke(crate::vfs::LINUX_AT_FDCWD, &format!("{base}/denied/../allowed/victim"), 0), -crate::errno::EACCES as i64);
+        assert!(host.join("allowed/victim").is_file());
+        std::fs::create_dir(host.join("denied/nested")).unwrap(); record("denied/nested", 3000, 0o777); std::fs::write(host.join("denied/nested/victim"), b"owned").unwrap();
+        let fd = std::fs::File::open(host.join("denied/nested")).unwrap();
+        assert_eq!(invoke(fd.as_raw_fd(), "victim", 0), 0, "dirfd access does not search ancestors above its base");
+        record("allowed", 3000, 0o555);
+        assert_eq!(invoke(crate::vfs::LINUX_AT_FDCWD, &format!("{base}/allowed/victim"), 0), -crate::errno::EACCES as i64);
+        assert_eq!(invoke(crate::vfs::LINUX_AT_FDCWD, &format!("{base}/allowed/missing"), 0), -crate::errno::ENOENT as i64);
+        std::fs::remove_dir_all(&host).unwrap();
+    }
+    #[test]
+    fn unlink_sticky_checks_symlink_owner_and_rmdir() {
+        use std::ffi::CString;
+        let (_guard, view) = crate::vfs::test_view(); let base = format!("/data/unlink-sticky-{}", std::process::id()); let host = view.join("data").join(base.trim_start_matches("/data/")); std::fs::create_dir_all(&host).unwrap();
+        let record = |suffix: &str, uid, mode| {let path = CString::new(host.join(suffix).as_os_str().as_encoded_bytes()).unwrap(); super::super::attrs::record(super::super::attrs::Host::Path(&path), || if suffix.is_empty() {base.clone()} else {format!("{base}/{suffix}")}, super::super::attrs::Attr {uid: Some(uid), gid: Some(2000), mode: Some(mode)});};
+        record("", 1000, 0o1777); std::fs::write(host.join("target"), b"owned").unwrap(); record("target", 3000, 0o600); std::os::unix::fs::symlink("target", host.join("link")).unwrap(); record("link", 2000, 0o777);
+        let mut id = super::super::cred::Identity::default(); id.uid = [3000; 4]; id.gid = [3000; 4]; id.cap_eff = 0;
+        let link = CString::new(format!("{base}/link")).unwrap(); let args = [crate::vfs::LINUX_AT_FDCWD as u64, link.as_ptr() as u64, 0, 0, 0, 0];
+        assert_eq!(unlinkat_as(args, &id), -EPERM); assert!(host.join("link").symlink_metadata().is_ok()); id.uid[3] = 2000; assert_eq!(unlinkat_as(args, &id), 0); assert!(host.join("target").is_file());
+        std::fs::create_dir(host.join("dir")).unwrap(); record("dir", 4000, 0o700); let dir = CString::new(format!("{base}/dir")).unwrap(); let args = [crate::vfs::LINUX_AT_FDCWD as u64, dir.as_ptr() as u64, AT_REMOVEDIR, 0, 0, 0];
+        assert_eq!(unlinkat_as(args, &id), -EPERM); id.cap_eff = 1 << 3; assert_eq!(unlinkat_as(args, &id), 0);
+        std::fs::remove_dir_all(&host).unwrap();
+    }
     #[test]
     fn sticky_directory_requires_owner_or_fowner_capability() {
         let mut parent: libc::stat = unsafe {std::mem::zeroed()}; parent.st_mode = libc::S_IFDIR | 0o1777; parent.st_uid = 1000;

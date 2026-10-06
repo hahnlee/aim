@@ -787,16 +787,28 @@ RemoveFailed while continuing the selected backup read; failRead's required
 selected-file deletion still fails visibly. A readonly-parent test exposed a
 lower-layer gap: guest chmod retains physical host owner access, and unlinkat
 had no guest parent DAC/sticky checks (#967). unlinkat now checks recorded guest
-directory write/search and canonical ancestor search using fs IDs, supplementary
-groups and capabilities, plus sticky file/directory ownership or CAP_FOWNER.
+directory write/search and path-walk search using fs IDs, supplementary groups
+and capabilities, plus sticky file/directory ownership or CAP_FOWNER. Search
+checks include directories traversed before symlinks or dot-dot alter the final
+path; fd-relative paths start from their actual base without checking ancestors
+above it.
 The original ART fixture temporarily changes effective UID to 1000 and restores
 it; root-only comparisons initially removed the files, and nonroot comparisons
 also removed them before the syscall correction. The corrected original recovery
 matrix agrees on readonly cleanup failure (full oracle 31.43s, no skips).
 501 service units pass (0.50s; five excluded), 124 Linux ABI units pass (0.03s;
 two excluded), image/template build passes (6 rebuilt, 36 fresh, 56.3s), and
-runtime/translation build passes (3 rebuilt, 39 fresh, 6.7s). Broader namespace/
-symlink/search validation remains #967; other recovery/open-I/O gates stay open.
+runtime/translation build passes (3 rebuilt, 39 fresh, 6.7s). Mapped syscall tests
+now cover denied symlink prefixes/dot-dot traversal, relative dirfd access below
+an inaccessible ancestor, sticky symlink ownership/rmdir/CAP_FOWNER, and ENOENT
+versus EACCES. A dirfd test exposed canonical host aliases in inverse mount
+lookup (#968); lookup now recognizes canonical roots while preserving deepest,
+shortest-name and hidden-mount selection. 127 Linux ABI units pass (0.04s; two
+excluded), full original ART oracle passes (52.76s, no skips), and runtime/
+translation build passes (3 rebuilt, 39 fresh, 6.8s). Host build passes (2 rebuilt,
+11 fresh, 4.0s). Canonical host alias mapping is verified; broader namespace
+mutation/root/error validation remains #967, and recovery/open-I/O gates remain
+open.
 No-start-tag documents remain, whereas malformed reads remove
 the selected file and retry. Changed or replaced claimed files reject before
 cleanup. Optional XML root parsing distinguishes empty/whitespace and complete

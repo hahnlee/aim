@@ -507,10 +507,20 @@ pub fn guest_path_of_host(host: &Path) -> Option<String> {
             best = Some((len, m.guest.len(), g));
         }
     }
-    if let Some((_, _, g)) = best {
-        return Some(g);
+    for m in mounts.iter() {
+        if hidden(&mounts, m) {continue;}
+        let Ok(canonical) = m.host.canonicalize() else {continue;};
+        let Ok(rest) = host.strip_prefix(&canonical) else {continue;};
+        let len = canonical.as_os_str().len();
+        if best.as_ref().is_none_or(|b| len > b.0 || (len == b.0 && m.guest.len() < b.1)) {
+            let guest = if rest.as_os_str().is_empty() {m.guest.clone()} else {format!("{}/{}", m.guest, rest.display())};
+            best = Some((len, m.guest.len(), guest));
+        }
     }
-    let rel = host.strip_prefix(&v.root).ok()?;
+    if let Some((_, _, guest)) = best {return Some(guest);}
+    let canonical_root = v.root.canonicalize().ok();
+    let root = canonical_root.as_deref().unwrap_or(&v.root);
+    let rel = host.strip_prefix(root).ok()?;
     Some(format!("/{}", rel.display()))
 }
 
@@ -586,6 +596,25 @@ fn link_target(host: PathBuf, area: Area) -> Option<PathBuf> {
 
 /// Resolve a guest path relative to a Linux dirfd into a host path.
 pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, Errno> {
+    resolve_inner(dirfd, path, follow_last, false, |_| Ok(()))
+}
+/// Resolve from the actual cwd/dirfd and check each searched directory, including
+/// directories visited before a symlink or dot-dot changes the resolved path.
+pub fn resolve_checked(
+    dirfd: i32,
+    path: &[u8],
+    follow_last: bool,
+    check: impl FnMut(&str) -> Result<(), Errno>,
+) -> Result<Resolved, Errno> {
+    resolve_inner(dirfd, path, follow_last, true, check)
+}
+fn resolve_inner(
+    dirfd: i32,
+    path: &[u8],
+    follow_last: bool,
+    relative_base: bool,
+    mut check: impl FnMut(&str) -> Result<(), Errno>,
+) -> Result<Resolved, Errno> {
     if path.is_empty() {
         return Err(errno::ENOENT);
     }
@@ -597,7 +626,7 @@ pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, E
         guest_path_of_fd(dirfd)?
     };
     let mut pending: Vec<Vec<u8>> = Vec::new();
-    let mut joined = base.into_bytes();
+    let mut joined = base.as_bytes().to_vec();
     joined.push(b'/');
     joined.extend_from_slice(path);
     for c in joined.split(|&b| b == b'/').rev() {
@@ -606,8 +635,13 @@ pub fn resolve(dirfd: i32, path: &[u8], follow_last: bool) -> Result<Resolved, E
         }
     }
     let mut done: Vec<Vec<u8>> = Vec::new();
+    if relative_base && path[0] != b'/' {
+        done = base.split('/').filter(|part| !part.is_empty()).map(|part| part.as_bytes().to_vec()).collect();
+        pending = path.split(|&byte| byte == b'/').filter(|part| !part.is_empty()).rev().map(<[u8]>::to_vec).collect();
+    }
     let mut links = 0;
     while let Some(c) = pending.pop() {
+        check(&join_guest(&done))?;
         match c.as_slice() {
             b"." => continue,
             b".." => {
@@ -692,6 +726,21 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
 mod tests {
     use super::*;
 
+    #[test]
+    fn canonical_host_aliases_preserve_deepest_shortest_and_hidden_mounts() {
+        let (_view, dir) = test_view(); let data = dir.join("data"); let nested = data.join("inverse-alias"); std::fs::create_dir_all(&nested).unwrap();
+        let alias = dir.join("inverse-host-alias"); std::os::unix::fs::symlink(&data, &alias).unwrap();
+        let canonical = nested.canonicalize().unwrap();
+        add_mount("/inverse-parent", data.canonicalize().unwrap(), Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/inverse-short", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/inverse-long-name", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs");
+        assert_eq!(guest_path_of_host(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
+        let hidden_host = dir.join("inverse-hidden"); std::fs::create_dir_all(&hidden_host).unwrap();
+        add_mount("/inverse-short", hidden_host, Area::Writable, "tmpfs", "tmpfs");
+        assert_eq!(guest_path_of_host(&canonical.join("file")).as_deref(), Some("/inverse-long-name/file"));
+        assert!(remove_mount("/inverse-short")); assert!(remove_mount("/inverse-short")); assert!(remove_mount("/inverse-long-name")); assert!(remove_mount("/inverse-parent"));
+        std::fs::remove_file(alias).unwrap(); std::fs::remove_dir_all(nested).unwrap();
+    }
     #[test]
     fn map_parses_and_orders_longest_first() {
         let (root, m) = parse_map(
