@@ -3298,6 +3298,40 @@ fn verify_boot_scan(
                 find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap().reader().read_exception().unwrap().unwrap();
             }
         }
+        {
+            use aim_service_aidl::{WriteParcelable, android_content_pm_verify_domain_idomainverificationmanager as api};
+            let current = system.capture_package_queries().unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let saved = persistence.lock().unwrap().state().settings.domain_verification.clone();
+            let invalidations = owner.invalidations.load(Ordering::SeqCst);
+            let mut body = Parcel::new(); body.write_i32(3);
+            // Reverse insertion order; ArrayMap visits the signed Java hashes.
+            for (key, good) in [("late.example", true), ("runtime.example", false), ("partial.example", true)] {
+                body.write_string16(Some(key)); body.write_i32(11);
+                let mut list = Parcel::new(); list.write_i32(1);
+                if good {
+                    list.write_i32(4);
+                    let mut value = Parcel::new(); value.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
+                    crate::package::domain_verification::uri_parcel::Group {action: 1, filters: Some(vec![])}.write_to(&mut value);
+                    list.write_i32(value.data().len() as i32); list.write_raw(value.data(), &[]);
+                } else {list.write_i32(-1);}
+                body.write_i32(list.data().len() as i32); body.write_raw(list.data(), &[]);
+            }
+            let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(Some("android")); request.write_i32(1);
+            request.write_i32(body.data().len() as i32); request.write_i32(crate::bundle::MAGIC); request.write_raw(body.data(), &[]); request.write_bool(false);
+            let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
+            assert_eq!(reply.reader().read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_NULL_POINTER);
+            let updated = system.capture_package_queries().unwrap();
+            assert_eq!(updated.scan().version(), current.scan().version() + 1);
+            let hosts = ["partial.example".into(), "runtime.example".into(), "late.example".into()];
+            assert!(current.domains().unwrap().owner().uri_groups("android", &hosts).is_empty());
+            let groups = updated.domains().unwrap().owner().uri_groups("android", &hosts);
+            assert_eq!(groups.len(), 1); assert_eq!(groups[0].0, "partial.example"); assert_eq!(groups[0].1[0].action, 1);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
+            assert_eq!(updated.scan().owner().settings.domain_verification, current.scan().owner().settings.domain_verification);
+            assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        }
         let before_parallel = system.capture_package_queries().unwrap();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);
         let barrier = std::sync::Barrier::new(4);

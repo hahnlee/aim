@@ -1657,7 +1657,16 @@ reproduced a native typed-getter mismatch before the fix; full original oracle
 now passes (32.12s, no skips), 497 units pass (0.57s; five excluded), and actual
 ART sends the null-named Parcelable and receives the original NPE while retaining
 the group (15.29s). Production build passes (3 rebuilt, 39 fresh, 1.3s).
-Other #966 generic type/error cases and full native PMS/facade/CTS/app gates remain open
+A three-domain Bundle inserted in reverse order now verifies partial updates on
+a null-group failure: the earlier signed-Java-hash key changes, the failing key
+retains its prior group, and the later key is untouched. Original service
+oracle confirms no persistence request; native publication advances one version,
+retains the previous capture and leaves file/Store/disk-base/cache unchanged
+(1.15s). Full original oracle passes (41.19s, no skips), actual ART sends the
+partial update and reads the same outcome (15.78s), and production build passes
+(42 fresh, 0.3s). These are conformance checks of the existing runtime-only
+publication. Other #966 generic type/error cases and full native
+PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.
 
 User-state lookup

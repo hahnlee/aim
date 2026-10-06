@@ -196,6 +196,28 @@ public final class NativeDomainBinderOracle {
         }
         data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
         try {
+            var bundle = new android.os.Bundle();
+            var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 1; group.filters = new java.util.ArrayList<>();
+            var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); groups.add(group);
+            var bad = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); bad.add(null);
+            bundle.putParcelableArrayList("late.example", groups); bundle.putParcelableArrayList("runtime.example", bad); bundle.putParcelableArrayList("partial.example", groups);
+            data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(bundle, 0);
+            service.transact(Integer.parseInt(args[9]), data, reply, 0);
+            try {reply.readException(); throw new AssertionError("partial URI conversion accepted");}
+            catch (NullPointerException error) {if (!conversionErrors[0].equals(error.getMessage())) throw new AssertionError("partial URI failure message differs");}
+            if (reply.dataAvail() != 0) throw new AssertionError("partial URI error framing differs");
+        } finally {data.recycle(); reply.recycle();}
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("partial.example", "runtime.example", "late.example"));
+            service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
+            var bundle = reply.readTypedObject(android.os.Bundle.CREATOR);
+            var groups = bundle.getParcelableArrayList("partial.example", android.content.UriRelativeFilterGroupParcel.class);
+            var existing = bundle.getParcelableArrayList("runtime.example", android.content.UriRelativeFilterGroupParcel.class);
+            if (groups == null || groups.size() != 1 || groups.get(0).action != 1 || !groups.get(0).filters.isEmpty() || existing == null || existing.get(0).action != 99 || bundle.keySet().contains("late.example") || reply.dataAvail() != 0) throw new AssertionError("partial URI mutation order differs");
+        } finally {data.recycle(); reply.recycle();}
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
             data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("runtime.example"));
             service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
             var bundle = reply.readTypedObject(android.os.Bundle.CREATOR);

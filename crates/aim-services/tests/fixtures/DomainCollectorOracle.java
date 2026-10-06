@@ -174,6 +174,27 @@ public final class DomainCollectorOracle {
 
 
 
+            var seed = new android.os.Bundle();
+            var oldGroups = new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/old"))));
+            seed.putParcelableArrayList("runtime.example", oldGroups); seed.putParcelableArrayList("late.example", oldGroups);
+            service.setUriRelativeFilterGroups("fixture.domains", seed);
+            var partial = new android.os.Bundle();
+            var newGroups = new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(1, "/new"))));
+            partial.putParcelableArrayList("late.example", newGroups);
+            var badGroups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); badGroups.add(null);
+            partial.putParcelableArrayList("runtime.example", badGroups); partial.putParcelableArrayList("partial.example", newGroups);
+            try {service.setUriRelativeFilterGroups("fixture.domains", partial); throw new AssertionError("partial URI conversion accepted");}
+            catch (NullPointerException expected) {}
+            var after = service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("partial.example", "runtime.example", "late.example"));
+            for (String host : java.util.List.of("partial.example", "runtime.example", "late.example")) {
+                var groups = after.getParcelableArrayList(host, android.content.UriRelativeFilterGroupParcel.class);
+                if (groups == null || groups.size() != 1 || groups.get(0).action != (host.equals("partial.example") ? 1 : 0)) throw new AssertionError("partial URI mutation order differs");
+            }
+            if (connection.writes != 0) throw new AssertionError("partial URI failure scheduled persistence");
+            var cleanup = new android.os.Bundle();
+            for (String host : java.util.List.of("partial.example", "runtime.example", "late.example")) cleanup.putParcelableArrayList(host, null);
+            service.setUriRelativeFilterGroups("fixture.domains", cleanup);
+
             var hosts = new java.util.TreeSet<String>(); hosts.add("h0.example");
             if (service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-000000000000"), hosts, 1) != 1) throw new AssertionError("invalid domain UUID status differs");
             hosts.add("unknown.example");
