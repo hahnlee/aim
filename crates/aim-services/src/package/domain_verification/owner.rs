@@ -122,6 +122,14 @@ impl Owner {
         }
         Ok(Boot { owner, changes })
     }
+    /// Attached auto-verification packages in the original ArrayMap order.
+    pub fn valid_verification_package_names(&self) -> Vec<String> {
+        self.attached
+            .iter()
+            .filter(|p| p.has_auto_verify_domains)
+            .map(|p| p.name.clone())
+            .collect()
+    }
     pub fn package(&self, name: &str) -> Option<&Package> {
         self.attached.iter().find(|p| p.name == name)
     }

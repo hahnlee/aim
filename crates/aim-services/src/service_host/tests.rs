@@ -715,6 +715,18 @@ fn query_context_for(
         retained_packages,
     }
 }
+fn domain_names(process: &Arc<LocalProcess>) -> Result<Option<Vec<Option<String>>>, Exception> {
+    use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+    let mut request = Parcel::new();
+    api::QueryValidVerificationPackageNames {}.write(&mut request);
+    let reply = find(process, "query_domains")
+        .transact(api::QUERY_VALID_VERIFICATION_PACKAGE_NAMES, &request, false)
+        .unwrap();
+    let mut reader = reply.reader();
+    let names = api::read_query_valid_verification_package_names_reply(&mut reader).unwrap();
+    assert_eq!(reader.remaining(), 0);
+    names
+}
 fn query_names(process: &Arc<LocalProcess>) -> Result<Option<String>, Exception> {
     use aim_service_aidl::android_content_pm_ipackagemanagernative as api;
     let mut p = Parcel::new();
@@ -947,6 +959,9 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     }
     let (_, queries) = crate::package::service::PackageQueries::from_system(&system);
     register(&native, "query_native", native.add_service(queries));
+    let domains = crate::package::domain_verification::service::DomainQueries::from_system(&system);
+    register(&native, "query_domains", native.add_service(domains));
+    assert!(domain_names(&first).is_err_and(|e| e.code == -5));
     assert!(query_names(&first).is_err_and(|error| error.code == -5));
     assert!(system.package_bootstrap().is_err());
     assert!(capture_scan(&first).is_err_and(|error| error.code == -5));
@@ -1342,7 +1357,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     assert!(old.resolve_boot(&config, &|_| None).is_err());
     owner.apex_reply.store(0, Ordering::SeqCst);
     if run_scan {
-        verify_boot_scan(&system, &native, &first, &old, &owner, &config);
+        verify_boot_scan(&system, &native, &first, &foreign, &old, &owner, &config);
     }
     let mut parsed = crate::package::pkg::AndroidPackage {
         feature_flag_state: Some(Vec::new()),
@@ -1583,6 +1598,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     let prior_domain_state = prior_domains.as_ref().map(|d| d.owner().persisted());
     attach(&second, Some(replacement)).unwrap();
     assert!(system.capture_package_domains().is_err());
+    assert!(domain_names(&second).is_err_and(|e| e.code == -5));
     assert_eq!(
         prior_domains.as_ref().map(|d| d.owner().persisted()),
         prior_domain_state
@@ -1884,6 +1900,7 @@ fn verify_boot_scan(
     system: &Arc<System>,
     native: &Arc<LocalProcess>,
     client: &Arc<LocalProcess>,
+    foreign_client: &Arc<LocalProcess>,
     bridge: &Arc<crate::package::bootstrap::Bridge>,
     owner: &Owner,
     config: &SystemConfig,
@@ -2420,6 +2437,80 @@ fn verify_boot_scan(
         query.scan().owner().settings.packages.len()
     );
     assert!(retained_domains.owner().package("android").is_some());
+    assert_eq!(
+        domain_names(client).unwrap(),
+        Some(
+            retained_domains
+                .owner()
+                .valid_verification_package_names()
+                .into_iter()
+                .map(Some)
+                .collect()
+        )
+    );
+    {
+        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+        let endpoint = find(client, "query_domains");
+        let mut request = Parcel::new();
+        api::QueryValidVerificationPackageNames {}.write(&mut request);
+        request.write_i32(99);
+        assert!(
+            endpoint
+                .transact(api::QUERY_VALID_VERIFICATION_PACKAGE_NAMES, &request, false)
+                .is_err()
+        );
+        let mut wrong = Parcel::new();
+        wrong.write_interface_token("wrong.interface");
+        assert!(
+            endpoint
+                .transact(api::QUERY_VALID_VERIFICATION_PACKAGE_NAMES, &wrong, false)
+                .is_err()
+        );
+        assert!(endpoint.transact(999, &request, false).is_err());
+        let mut unsupported = Parcel::new();
+        unsupported.write_interface_token(api::DESCRIPTOR);
+        let reply = endpoint
+            .transact(api::GET_DOMAIN_VERIFICATION_INFO, &unsupported, false)
+            .unwrap();
+        assert_eq!(
+            reply.reader().read_exception().unwrap().unwrap_err().code,
+            -7
+        );
+    }
+    {
+        use aim_service_aidl::android_app_iactivitymanager as am;
+        struct DeniedPermissions;
+        impl Service for DeniedPermissions {
+            fn descriptor(&self) -> &str {
+                am::DESCRIPTOR
+            }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                if call.code != am::CHECK_PERMISSION {
+                    return Err(UNKNOWN_TRANSACTION);
+                }
+                let args = am::CheckPermission::read(&mut call.data)?;
+                assert_eq!(args.uid, 19001);
+                assert_eq!(args.pid, 94005);
+                assert!(matches!(
+                    args.permission.as_deref(),
+                    Some(
+                        "android.permission.DOMAIN_VERIFICATION_AGENT"
+                            | "android.permission.INTENT_FILTER_VERIFICATION_AGENT"
+                    )
+                ));
+                assert_eq!(call.data.remaining(), 0);
+                let mut reply = Parcel::new();
+                am::write_check_permission_reply(&mut reply, -1);
+                Ok(reply)
+            }
+        }
+        register(
+            client,
+            "activity",
+            client.add_service(Arc::new(DeniedPermissions)),
+        );
+        assert_eq!(domain_names(foreign_client).unwrap_err().code, -1);
+    }
     use crate::package::domain_verification::enforcer::Operation;
     assert!(system.authorize_package_domain(bridge, &query, 1, 1000, Operation::Info).unwrap());
     assert!(system.authorize_package_domain(bridge, &query, 1, 0, Operation::UserQuery("android", 0)).unwrap());

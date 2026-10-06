@@ -391,6 +391,11 @@ pub fn verify_attachment(directory: &Path) {
                 expected.write_i32(i32::from(allowed));
                 write_states(&mut expected, &states);
             }
+            let names = owner.valid_verification_package_names();
+            expected.write_i32(names.len() as i32);
+            for name in names {
+                expected.write_string16(Some(&name));
+            }
             assert_eq!(
                 expected.data(),
                 fs::read(directory.join(format!("domain-owner-{case}-{stage}.queries"))).unwrap(),

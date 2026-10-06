@@ -11,6 +11,7 @@ public class DomainVerificationService extends com.android.server.SystemService 
     public void readSettings(com.android.server.pm.Computer snapshot, com.android.modules.utils.TypedXmlPullParser parser) throws java.io.IOException { throw new RuntimeException("stub"); }
     public void writeSettings(com.android.server.pm.Computer snapshot, com.android.modules.utils.TypedXmlSerializer serializer, boolean signatures, int user) throws java.io.IOException { throw new RuntimeException("stub"); }
     public void setConnection(DomainVerificationManagerInternal.Connection connection) { throw new RuntimeException("stub"); }
+    public java.util.List<String> queryValidVerificationPackageNames() { throw new RuntimeException("stub"); }
     public android.content.pm.verify.domain.DomainVerificationInfo getDomainVerificationInfo(String name) { throw new RuntimeException("stub"); }
     public android.content.pm.verify.domain.DomainVerificationUserState getDomainVerificationUserState(String name, int user) { throw new RuntimeException("stub"); }
     public android.os.Bundle getUriRelativeFilterGroups(String name, java.util.List<String> domains) { throw new RuntimeException("stub"); }

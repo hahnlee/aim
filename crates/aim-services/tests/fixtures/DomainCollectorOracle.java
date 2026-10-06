@@ -290,6 +290,9 @@ public final class DomainCollectorOracle {
                 out.writeInt(selection.isLinkHandlingAllowed() ? 1 : 0);
                 writeStates(out, selection.getHostToStateMap());
             }
+            var names = service.queryValidVerificationPackageNames();
+            out.writeInt(names.size());
+            for (String name : names) out.writeString(name);
             if (connection.writes != 0) throw new AssertionError("query scheduled a settings write");
             java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".queries").toPath(), out.marshall());
         } finally { out.recycle(); }
