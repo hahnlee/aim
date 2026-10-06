@@ -159,6 +159,7 @@ pub fn export(directory: &Path) {
     signatures(directory);
     attachment_inputs(directory);
     legacy_inputs(directory);
+    persistence_defaults(directory);
     let mut cases = vec![
         package(vec![
             filter(true, false, &["https"], &["seed.example"]),
@@ -665,4 +666,89 @@ fn canonical(
     state.active.sort_by(|a, b| a.name.cmp(&b.name));
     state.restored.sort_by(|a, b| a.name.cmp(&b.name));
     state
+}
+
+fn persistence_defaults(directory: &Path) {
+    for (case, value) in [None, Some("bad"), Some("-1"), Some("0"), Some("1")]
+        .into_iter()
+        .enumerate()
+    {
+        let attr = |key| value.map(|v| format!(" {key}='{v}'")).unwrap_or_default();
+        let xml = format!(
+            "<domain-verifications><active><package-state packageName='defaults' id='00000000-0000-0000-0000-000000000020'{}><state><domain name='default.example'{} /></state><user-states><user-state{}{} /></user-states><uri-relative-filter-groups><domain name='default.example' action='0'><uri-relative-filter-group{}><uri-relative-filter{}{} filter='/path'/></uri-relative-filter-group></domain></uri-relative-filter-groups></package-state></active></domain-verifications>",
+            attr("hasAutoVerifyDomains"),
+            attr("state"),
+            attr("userId"),
+            attr("allowLinkHandling"),
+            attr("action"),
+            attr("uri-part"),
+            attr("pattern-type")
+        );
+        fs::write(directory.join(format!("domain-default-{case}.input")), xml).unwrap();
+        let legacy = format!(
+            "<domain-verifications-legacy><user-states packageName='defaults'><user-state{}{} /></user-states></domain-verifications-legacy>",
+            attr("userId"),
+            attr("state")
+        );
+        fs::write(
+            directory.join(format!("domain-default-{case}.legacy")),
+            legacy,
+        )
+        .unwrap();
+    }
+}
+
+pub fn verify_persistence_defaults(directory: &Path) {
+    use aim_services::package::domain_verification::State;
+    for case in 0..5 {
+        let mut expected = State::default();
+        expected
+            .read(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-default-{case}.input"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        expected
+            .read_legacy(
+                &aim_android_xml::read(
+                    &fs::read(directory.join(format!("domain-default-{case}.legacy"))).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let root = aim_android_xml::read(
+            &fs::read(directory.join(format!("domain-default-{case}.original"))).unwrap(),
+        )
+        .unwrap();
+        let mut original = State::default();
+        original
+            .read(
+                root.children()
+                    .find(|e| e.name == "domain-verifications")
+                    .unwrap(),
+            )
+            .unwrap();
+        original
+            .read_legacy(
+                root.children()
+                    .find(|e| e.name == "domain-verifications-legacy")
+                    .unwrap(),
+            )
+            .unwrap();
+        // SettingsXml omits a domain-state value of -1; its reader supplies 0.
+        for p in &mut expected.active {
+            for (_, state) in &mut p.domains {
+                if *state == -1 {
+                    *state = 0;
+                }
+            }
+        }
+        assert_eq!(
+            canonical(expected),
+            canonical(original),
+            "original domain defaults case={case}"
+        );
+    }
 }

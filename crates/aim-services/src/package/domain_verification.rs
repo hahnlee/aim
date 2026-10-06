@@ -76,8 +76,8 @@ impl State {
             };
             let users = &mut self.legacy[index].1;
             for child in children(section, "user-state") {
-                let id = child.int("userId")?.unwrap_or(0);
-                let status = child.int("state")?.unwrap_or(0);
+                let id = number(child, "userId", -1);
+                let status = number(child, "state", -1);
                 put(users, id, (id, status), |(id, _)| id);
             }
         }
@@ -106,7 +106,7 @@ fn package(e: &Element) -> Result<Option<Package>, String> {
     let mut package = Package {
         name,
         id: id.to_ascii_lowercase(),
-        has_auto_verify_domains: e.bool("hasAutoVerifyDomains")?.unwrap_or(false),
+        has_auto_verify_domains: boolean(e, "hasAutoVerifyDomains", false),
         signature: string(e, "signature"),
         domains: Vec::new(),
         users: Vec::new(),
@@ -117,7 +117,7 @@ fn package(e: &Element) -> Result<Option<Package>, String> {
             "state" => {
                 for domain in children(section, "domain") {
                     let name = string(domain, "name");
-                    let state = domain.int("state")?.unwrap_or(0);
+                    let state = number(domain, "state", 0);
                     put(
                         &mut package.domains,
                         name.clone(),
@@ -128,7 +128,7 @@ fn package(e: &Element) -> Result<Option<Package>, String> {
             }
             "user-states" => {
                 for user in children(section, "user-state") {
-                    let id = user.int("userId")?.unwrap_or(-1);
+                    let id = number(user, "userId", -1);
                     if id == -1 {
                         continue;
                     }
@@ -147,7 +147,7 @@ fn package(e: &Element) -> Result<Option<Package>, String> {
                         id,
                         User {
                             id,
-                            allow_link_handling: user.bool("allowLinkHandling")?.unwrap_or(false),
+                            allow_link_handling: boolean(user, "allowLinkHandling", false),
                             enabled_hosts,
                         },
                         |u| &u.id,
@@ -159,15 +159,14 @@ fn package(e: &Element) -> Result<Option<Package>, String> {
                     let name = string(domain, "name");
                     let mut groups = Vec::new();
                     for group in children(domain, "uri-relative-filter-group") {
-                        // `createUriRelativeFilterGroupsFromXml` reads the
-                        // action from the parent domain section.
-                        let mut parsed =
-                            UriRelativeFilterGroup::new(domain.int("action")?.unwrap_or(0));
+                        // SettingsXml sections share the parser cursor, which is
+                        // on the group when the original reads its action.
+                        let mut parsed = UriRelativeFilterGroup::new(number(group, "action", -1));
                         for filter in children(group, "uri-relative-filter") {
                             if let Some(value) = string(filter, "filter") {
                                 parsed.add(
-                                    filter.int("uri-part")?.unwrap_or(0),
-                                    filter.int("pattern-type")?.unwrap_or(0),
+                                    number(filter, "uri-part", -1),
+                                    number(filter, "pattern-type", -1),
                                     &value,
                                 );
                             }
@@ -195,4 +194,12 @@ fn put<K: PartialEq, V>(items: &mut Vec<V>, key: K, value: V, get: impl Fn(&V) -
         Some(i) => items[i] = value,
         None => items.push(value),
     }
+}
+
+// TypedXmlPullParser's defaulted accessors use the supplied default on bad types.
+fn number(e: &Element, key: &str, default: i32) -> i32 {
+    e.int(key).ok().flatten().unwrap_or(default)
+}
+fn boolean(e: &Element, key: &str, default: bool) -> bool {
+    e.bool(key).ok().flatten().unwrap_or(default)
 }
