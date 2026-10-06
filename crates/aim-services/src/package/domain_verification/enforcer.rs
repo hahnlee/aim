@@ -25,6 +25,7 @@ pub enum Operation<'a> {
     Internal,
     Info,
     Verifier,
+    UriAgent,
     UserQuery(Option<&'a str>, i32),
     UserSelect(Option<&'a str>, i32),
     UserSelectionVisibility(&'a str, i32),
@@ -79,6 +80,7 @@ pub fn authorize(
             }
             Ok(true)
         }
+        Operation::UriAgent => { require(AGENT)?; Ok(true) }
         Operation::Verifier => {
             if !matches!(uid, 0 | 1000 | 2000) {
                 if check(AGENT)? {

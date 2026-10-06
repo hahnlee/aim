@@ -461,7 +461,7 @@ impl DomainQueries {
                         return Ok(false);
                     }
                     if let Some(package) = domains.owner().package_by_id(&identifier) {
-                    authorize(Operation::UserSelectionVisibility(&package.name, user_id))
+                        authorize(Operation::UserSelectionVisibility(&package.name, user_id))
                     } else {
                         Ok(true)
                     }
@@ -586,6 +586,112 @@ impl DomainQueries {
             }
         }
     }
+    fn set_uri_groups(
+        &self,
+        pid: i32,
+        uid: i32,
+        name: Option<&str>,
+        bundle: Option<super::uri_bundle::Bundle>,
+    ) -> Result<(), Exception> {
+        let system = self.system.upgrade().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
+        })?;
+        let bridge = system.package_bootstrap()?;
+        loop {
+            let capture = system.capture_package_queries()?;
+            let domains = capture.domains().ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
+            })?;
+            if let Err(error) =
+                system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::UriAgent)
+            {
+                system.check_package_bootstrap(&bridge)?;
+                if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                    continue;
+                }
+                return Err(error);
+            }
+            let bundle = bundle.as_ref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "Attempt to invoke virtual method 'boolean android.os.Bundle.isEmpty()' on a null object reference"))?;
+            let entries = bundle
+                .entries()
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("URI Bundle: {e}")))?;
+            if entries.is_empty() {
+                return Ok(());
+            }
+            let name = name
+                .filter(|name| domains.owner().package(name).is_some())
+                .ok_or_else(|| Exception {
+                    code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
+                    message: String::new(),
+                    service_specific: 1,
+                })?;
+            let mut owner = domains.owner().clone();
+            let result = (|| {
+                for entry in entries {
+                    let domain = entry.key.as_deref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference"))?;
+                    if !super::uri_groups::valid_domain(domain).map_err(|e| {
+                        Exception::new(aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT, e)
+                    })? {
+                        continue;
+                    }
+                    let parcels = entry.groups().map_err(|e| {
+                        Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {e}"))
+                    })?;
+                    let mut groups = Vec::new();
+                    if let Some(parcels) = parcels {
+                        for parcel in parcels {
+                            let parcel = parcel.ok_or_else(|| {
+                                Exception::new(
+                                    aim_binder_host::parcel::EX_NULL_POINTER,
+                                    "null URI group parcel",
+                                )
+                            })?;
+                            let filters = parcel.filters.ok_or_else(|| {
+                                Exception::new(
+                                    aim_binder_host::parcel::EX_NULL_POINTER,
+                                    "null URI filter list",
+                                )
+                            })?;
+                            let mut group =
+                                crate::package::intent_filter::UriRelativeFilterGroup::new(
+                                    parcel.action,
+                                );
+                            for filter in filters {
+                                let filter = filter.ok_or_else(|| {
+                                    Exception::new(
+                                        aim_binder_host::parcel::EX_NULL_POINTER,
+                                        "null URI filter parcel",
+                                    )
+                                })?;
+                                group.add_nullable(
+                                    filter.uri_part,
+                                    filter.pattern_type,
+                                    filter.filter.as_deref(),
+                                );
+                            }
+                            groups.push(group);
+                        }
+                    }
+                    owner
+                        .set_uri_groups(name, &[(domain.to_owned(), Some(groups))])
+                        .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                }
+                Ok(())
+            })();
+            if owner.persisted() == domains.owner().persisted() {
+                return result;
+            }
+            let update = capture
+                .prepare_runtime_domain_update(owner)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            if system
+                .publish_runtime_package_domains(&bridge, update)?
+                .is_some()
+            {
+                return result;
+            }
+        }
+    }
 }
 
 impl Service for DomainQueries {
@@ -601,6 +707,26 @@ impl Service for DomainQueries {
             return Err(UNKNOWN_TRANSACTION);
         }
         let mut reply = Parcel::new();
+        if call.code == api::SET_URI_RELATIVE_FILTER_GROUPS {
+            let args =
+                api::SetUriRelativeFilterGroups::<super::uri_bundle::Bundle>::read(&mut call.data)?;
+            if call.data.remaining() != 0 {
+                return Err(BAD_VALUE);
+            }
+            match self.set_uri_groups(
+                call.sender_pid,
+                call.sender_euid as i32,
+                args.package_name.as_deref(),
+                args.domain_to_groups_bundle,
+            ) {
+                Ok(()) => api::write_set_uri_relative_filter_groups_reply(&mut reply),
+                Err(error) if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC => {
+                    reply.write_exception_message(&error, None)
+                }
+                Err(error) => reply.write_exception(&error),
+            }
+            return Ok(reply);
+        }
         if call.code == api::SET_DOMAIN_VERIFICATION_USER_SELECTION {
             let args =
                 api::SetDomainVerificationUserSelection::<super::domain_set::DomainSet>::read(

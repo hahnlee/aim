@@ -28,6 +28,25 @@ final class UriDtoOracle {
                 } finally { wire.recycle(); }
             }
             java.nio.file.Files.write(new java.io.File(directory, "uri-dto.original").toPath(), out.marshall());
+            var bundles = android.os.Parcel.obtain();
+            try {
+                bundles.writeInt(6);
+                for (int mode = 0; mode < 6; mode++) {
+                    var bundle = new android.os.Bundle();
+                    if (mode == 1) bundle.putString("x.example", "wrong type");
+                    if (mode == 2) bundle.putParcelableArrayList("x.example", null);
+                    if (mode >= 3) {
+                        var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>();
+                        if (mode == 4) groups.add(null);
+                        if (mode == 5) {var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 99; group.filters = new java.util.ArrayList<>(); var filter = new android.content.UriRelativeFilterParcel(); filter.filter = null; group.filters.add(filter); groups.add(group);}
+                        bundle.putParcelableArrayList("x.example", groups);
+                    }
+                    var wire = android.os.Parcel.obtain();
+                    try {bundle.writeToParcel(wire, 0); bundles.writeInt(mode); bundles.writeByteArray(wire.marshall());}
+                    finally {wire.recycle();}
+                }
+                java.nio.file.Files.write(new java.io.File(directory, "uri-input-bundles.original").toPath(), bundles.marshall());
+            } finally {bundles.recycle();}
             out.recycle(); out = android.os.Parcel.obtain();
             String[] uris = {"https://x/path?q=1#frag", "https://x", "mailto:x", "", "https://x?;", "#"};
             out.writeInt(4 * 4 * 7 * uris.length);

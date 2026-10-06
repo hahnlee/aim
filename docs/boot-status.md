@@ -1613,7 +1613,24 @@ The original 672-case matcher corpus now also goes through real model groups; fu
 oracle passes (33.42s, no skips), 496 units pass (0.52s; five excluded by default),
 publisher passes (0.98s) and actual ART Binder passes (25.61s). New regression cases
 retain null/empty Bundle/XML metadata and reject a nullable matcher resolver query.
-Method 8 input/application and full M4 gates remain open (#957/#798). Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
+Generated method 8 now decodes a retained lazy Bundle after URI-agent permission
+checks (2026-10-07), returns early for an empty bundle even with no package, and
+looks up the exact attached name before applying keys in ArrayMap order. Invalid
+domain keys are ignored; null/wrong-typed/empty lists remove that key. Sized group
+and filter DTOs convert without nullable-string substitution. Changes use runtime-
+only publication, with no Store write or cache callback; an error after earlier
+keys retains those runtime changes. Native Binder tests confirm null group metadata,
+removal, denied callers, framing rejection, empty/missing-name behavior and unchanged
+file/Store/disk base/invalidation count. Original Bundle inputs cover six empty,
+wrong-type, null/empty list and nullable DTO forms. Full original oracle passes
+(30.21s, no skips), units pass (496, 0.67s; five excluded by default), publisher passes
+(0.96s), and actual original ART invokes the setter then reads action/numeric/null
+filter fields with its own creators (15.45s). A stub putString declaration initially
+failed pinned-image linkage; it now belongs to BaseBundle, as original does.
+All nine domain transaction paths are present, but broad Bundle type handling,
+exact conversion/domain-error replies (#964/#957), service CTS and native startup
+writer binding remain unproven. Full native PMS/facade/CTS/app gates remain open
+(#798); original services stay active. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
 and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup

@@ -523,6 +523,26 @@ pub fn verify_uri_dto(directory: &Path) {
         assert_eq!(output.data(), payload, "original URI DTO case={case}");
     }
     assert_eq!(reader.remaining(), 0);
+    let bytes = fs::read(directory.join("uri-input-bundles.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]); let cases = reader.read_i32().unwrap();
+    for _ in 0..cases {
+        let mode = reader.read_i32().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
+        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
+        let entries = bundle.entries().unwrap();
+        assert_eq!(entries.len(), if mode == 0 {0} else {1});
+        if mode != 0 {
+            assert_eq!(entries[0].key.as_deref(), Some("x.example"));
+            let groups = entries[0].groups().unwrap();
+            match mode {
+                1 | 2 => assert!(groups.is_none()),
+                3 => assert!(groups.unwrap().is_empty()),
+                4 => assert!(groups.unwrap()[0].is_none()),
+                5 => {let groups = groups.unwrap(); assert_eq!(groups[0].as_ref().unwrap().action, 99); assert_eq!(groups[0].as_ref().unwrap().filters.as_ref().unwrap()[0].as_ref().unwrap().filter, None);}
+                _ => unreachable!(),
+            }
+        }
+    }
+    assert_eq!(reader.remaining(), 0);
     let bytes = fs::read(directory.join("uri-null-match.original")).unwrap();
     let mut reader = Reader::new(&bytes, &[]); let cases = reader.read_i32().unwrap();
     for case in 0..cases {

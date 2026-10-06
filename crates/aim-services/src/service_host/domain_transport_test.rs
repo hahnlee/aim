@@ -212,6 +212,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_URI_RELATIVE_FILTER_GROUPS.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_STATUS.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_USER_SELECTION.to_string())
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_URI_RELATIVE_FILTER_GROUPS.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot

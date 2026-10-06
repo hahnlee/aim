@@ -2700,13 +2700,7 @@ fn verify_boot_scan(
         assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
-        let reply = endpoint
-            .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &unsupported, false)
-            .unwrap();
-        assert_eq!(
-            reply.reader().read_exception().unwrap().unwrap_err().code,
-            -7
-        );
+        assert!(endpoint.transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &unsupported, false).is_err());
     }
     {
         use aim_service_aidl::android_app_iactivitymanager as am;
@@ -3274,6 +3268,35 @@ fn verify_boot_scan(
             assert!(Arc::ptr_eq(&current, &system.capture_package_queries().unwrap()));
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        }
+        {
+            use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+            let current = system.capture_package_queries().unwrap(); let bytes = std::fs::read(&path).unwrap();
+            let saved = persistence.lock().unwrap().state().settings.domain_verification.clone(); let invalidations = owner.invalidations.load(Ordering::SeqCst);
+            let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(99); group.add_nullable(0, 0, None);
+            let bundle = crate::package::domain_verification::parcels::UriGroups::prepare(&[(Some("runtime.example".into()), vec![group])]).unwrap();
+            let mut request = Parcel::new(); api::SetUriRelativeFilterGroups {package_name: Some("android".into()), domain_to_groups_bundle: Some(bundle)}.write(&mut request);
+            let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
+            api::read_set_uri_relative_filter_groups_reply(&mut reply.reader()).unwrap().unwrap();
+            let updated = system.capture_package_queries().unwrap(); assert_eq!(updated.scan().version(), current.scan().version() + 1);
+            assert_eq!(updated.domains().unwrap().owner().uri_groups("android", &["runtime.example".into()])[0].1[0].filters[0].filter, None);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
+            assert_eq!(updated.scan().owner().settings.domain_verification, current.scan().owner().settings.domain_verification);
+            assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+            let denied = find(foreign_client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
+            assert_eq!(denied.reader().read_exception().unwrap().unwrap_err().code, -1);
+            request.write_i32(99); assert!(find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).is_err());
+            // Null list removes the runtime key without asking the disk writer.
+            let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(Some("android")); request.write_i32(1);
+            let mut value = Parcel::new(); value.write_i32(1); value.write_string16(Some("runtime.example")); value.write_i32(-1);
+            request.write_i32(value.data().len() as i32); request.write_i32(crate::bundle::MAGIC); request.write_raw(value.data(), &[]); request.write_bool(false);
+            let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap(); reply.reader().read_exception().unwrap().unwrap();
+            assert!(system.capture_package_queries().unwrap().domains().unwrap().owner().uri_groups("android", &["runtime.example".into()]).is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+            for name in [None, Some("missing")] {
+                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(name); request.write_i32(1); request.write_i32(0);
+                find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap().reader().read_exception().unwrap().unwrap();
+            }
         }
         let before_parallel = system.capture_package_queries().unwrap();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);

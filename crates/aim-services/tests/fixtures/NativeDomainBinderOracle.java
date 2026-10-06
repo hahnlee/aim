@@ -146,6 +146,24 @@ public final class NativeDomainBinderOracle {
             if (info.getHostToStateMap().size() != 4000 || reply.dataAvail() != 0) throw new AssertionError("post-verifier framing differs");
             for (int i = 0; i < 4000; i++) if (!Integer.valueOf(1).equals(info.getHostToStateMap().get("h" + i + ".example"))) throw new AssertionError("verifier state not published");
         } finally { data.recycle(); reply.recycle(); }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            var bundle = new android.os.Bundle(); var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>();
+            var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 99; group.filters = new java.util.ArrayList<>();
+            var filter = new android.content.UriRelativeFilterParcel(); filter.uriPart = 2; filter.patternType = 1; filter.filter = null; group.filters.add(filter); groups.add(group);
+            bundle.putParcelableArrayList("runtime.example", groups);
+            data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(bundle, 0);
+            if (!service.transact(Integer.parseInt(args[9]), data, reply, 0)) throw new AssertionError("URI update unhandled");
+            reply.readException(); if (reply.dataAvail() != 0) throw new AssertionError("URI update framing differs");
+        } finally { data.recycle(); reply.recycle(); }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("runtime.example"));
+            service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
+            var bundle = reply.readTypedObject(android.os.Bundle.CREATOR);
+            var groups = bundle.getParcelableArrayList("runtime.example", android.content.UriRelativeFilterGroupParcel.class);
+            if (groups.size() != 1 || groups.get(0).action != 99 || groups.get(0).filters.size() != 1 || groups.get(0).filters.get(0).filter != null || reply.dataAvail() != 0) throw new AssertionError("nullable URI update not preserved");
+        } finally { data.recycle(); reply.recycle(); }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private static boolean alreadyReadInlineSet;
