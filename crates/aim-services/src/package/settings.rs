@@ -189,6 +189,37 @@ impl Package {
             .sort_by_key(|(name, _)| name.as_deref().map_or(0, string_hash));
     }
 
+    /// Consume an already registered package's body without rolling back earlier
+    /// mutations. The caller supplies the legacy permission/domain owners (#914).
+    pub fn read_children(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        signatures: &mut SignatureReader,
+        key_set_refs: &mut std::collections::BTreeMap<i64, i32>,
+        mut read_owner: impl FnMut(
+            &mut Self,
+            &mut aim_android_xml::pull::Reader<'_>,
+            &Element,
+        ) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        use aim_android_xml::pull::Event;
+        let outer = reader.depth();
+        loop {
+            match reader.next()? {
+                Event::Start(child) => {
+                    if !self.read_child(reader, &child, signatures, key_set_refs)?
+                        && !read_owner(self, reader, &child)?
+                    {
+                        signatures::skip(reader)?;
+                    }
+                }
+                Event::End(_) if reader.depth() <= outer => return Ok(()),
+                Event::EndDocument => return Ok(()),
+                _ => {}
+            }
+        }
+    }
+
     /// Apply a package child at its start event. The caller owns registration,
     /// legacy permission/domain state and unrecognized children (#914).
     /// Keyset tags leave nested events visible; libraries/splits consume theirs.
@@ -225,6 +256,14 @@ impl Package {
             }
             "upgrade-keyset" => self.key_set_data.add_upgrade_key_set(identifier(child)?),
             "signing-keyset" => {}
+            "mime-group" => {
+                if let Some(group) = string(child, "name") {
+                    let types = read_mime_group(reader)?;
+                    self.add_mime_types(group, types);
+                } else {
+                    signatures::skip(reader)?;
+                }
+            }
             "split-version" => {
                 self.read_split_version(child);
                 signatures::skip(reader)?;
@@ -938,6 +977,27 @@ fn string_hash(value: &str) -> i32 {
     })
 }
 
+// The group publishes after the container completes; mime-type starts do not
+// skip their own subtree, so nested type events remain visible.
+fn read_mime_group(reader: &mut aim_android_xml::pull::Reader<'_>) -> Result<Vec<String>, String> {
+    use aim_android_xml::pull::Event;
+    let outer = reader.depth();
+    let mut types = Vec::new();
+    loop {
+        match reader.next()? {
+            Event::Start(child) if child.name == "mime-type" => {
+                if let Some(value) = string(&child, "value") {
+                    types.push(value);
+                }
+            }
+            Event::Start(_) => signatures::skip(reader)?,
+            Event::End(_) if reader.depth() <= outer => return Ok(types),
+            Event::EndDocument => return Ok(types),
+            _ => {}
+        }
+    }
+}
+
 fn read_mime_types(e: &Element, types: &mut Vec<String>) {
     for child in e.children().filter(|child| child.name == "mime-type") {
         if let Some(value) = string(child, "value") {
@@ -1242,6 +1302,36 @@ mod incremental_package_tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn package_body_retains_earlier_effects_and_propagates_external_owner_failure() {
+        let mut reader =
+            Reader::new(b"<package><uses-static-lib name='l' version='3'/><perms/></package>")
+                .unwrap();
+        reader.next().unwrap();
+        let mut package = Package::default();
+        let mut signatures = SignatureReader::default();
+        let mut refs = BTreeMap::new();
+        let error = package
+            .read_children(&mut reader, &mut signatures, &mut refs, |p, _, child| {
+                assert_eq!(child.name, "perms");
+                assert_eq!(p.uses_static_libraries, [("l".into(), 3)]);
+                Err("legacy permission owner failed".into())
+            })
+            .unwrap_err();
+        assert_eq!(error, "legacy permission owner failed");
+        assert_eq!(package.uses_static_libraries, [("l".into(), 3)]);
+    }
+
+    #[test]
+    fn mime_group_failure_retains_previous_completed_groups() {
+        let mut package = Package::default();
+        assert!(read(b"<package><mime-group name='g'><mime-type value='a'/></mime-group><mime-group name='g'><mime-type value='b'/><", &mut package, &mut BTreeMap::new()).is_err());
+        assert_eq!(
+            package.mime_groups,
+            [(Some("g".into()), vec![Some("a".into())])]
+        );
     }
 
     #[test]

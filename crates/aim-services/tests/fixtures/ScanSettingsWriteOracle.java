@@ -96,7 +96,11 @@ public final class ScanSettingsWriteOracle {
             for (var entry : keys.getAliases().entrySet()) entries.add(entry.getKey() + ":" + entry.getValue());
             fields.add(String.join(",", entries)); entries.clear();
             if (keys.getUpgradeKeySets() != null) for (long id : keys.getUpgradeKeySets()) entries.add(Long.toString(id));
-            fields.add(String.join(",", entries));
+            fields.add(String.join(",", entries)); entries.clear();
+            if (p.getMimeGroups() != null) for (var group : p.getMimeGroups().entrySet()) {
+                entries.add(group.getKey() + ":" + String.join(",", group.getValue()));
+            }
+            fields.add(String.join(";", entries));
             java.nio.file.Files.write(new java.io.File(directory, "package-child-output-" + index).toPath(), String.join("|", fields).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }

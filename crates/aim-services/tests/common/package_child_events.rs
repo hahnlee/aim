@@ -25,6 +25,8 @@ pub fn inputs() -> Vec<Vec<u8>> {
         "<proper-signing-keyset identifier='2'/><defined-keyset identifier='bad'/>",
         "<defined-keyset identifier='2' alias='a'/><defined-keyset identifier='3' alias='a'/><defined-keyset identifier='4'/>",
         "<signing-keyset><upgrade-keyset identifier='3'/></signing-keyset><unknown><upgrade-keyset identifier='5'/></unknown>",
+        "<mime-group name='g'><mime-type value='b'/><mime-type value='a'><mime-type value='c'/></mime-type><unknown><mime-type value='hidden'/></unknown></mime-group><mime-group name='g'><mime-type value='a'/><mime-type value='d'/></mime-group>",
+        "<mime-group><mime-type value='hidden'/></mime-group><mime-group name=''><mime-type value=''/><mime-type/></mime-group>",
     ] {
         let bytes = format!("{header}{children}</package></packages>").into_bytes();
         out.push(bytes.clone());
@@ -59,27 +61,8 @@ pub fn read(bytes: &[u8]) -> Package {
     let mut package = Settings::parse(&root).unwrap().packages.remove(0);
     let mut signatures = SignatureReader::default();
     let mut refs = BTreeMap::new();
-    let result = (|| -> Result<(), String> {
-        loop {
-            match reader.next()? {
-                Event::Start(child) => {
-                    if !package.read_child(&mut reader, &child, &mut signatures, &mut refs)? {
-                        let outer = reader.depth();
-                        loop {
-                            match reader.next()? {
-                                Event::End(_) if reader.depth() <= outer => break,
-                                Event::EndDocument => break,
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                Event::End(_) if reader.depth() <= 2 => return Ok(()),
-                Event::EndDocument => return Ok(()),
-                _ => {}
-            }
-        }
-    })();
+    let result =
+        package.read_children(&mut reader, &mut signatures, &mut refs, |_, _, _| Ok(false));
     // Original failRead retries an empty reserve without clearing active settings.
     let _ = result;
     package
@@ -118,8 +101,24 @@ pub fn trace(p: &Package) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let mime = p
+        .mime_groups
+        .iter()
+        .map(|(name, types)| {
+            format!(
+                "{}:{}",
+                name.as_deref().unwrap_or("null"),
+                types
+                    .iter()
+                    .map(|value| value.as_deref().unwrap_or("null"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
     format!(
-        "{static_libs}|{sdk}|{splits}|{}|{aliases}|{upgrades}",
+        "{static_libs}|{sdk}|{splits}|{}|{aliases}|{upgrades}|{mime}",
         p.key_set_data.proper_signing_key_set
     )
 }
