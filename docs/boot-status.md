@@ -807,8 +807,15 @@ shortest-name and hidden-mount selection. 127 Linux ABI units pass (0.04s; two
 excluded), full original ART oracle passes (52.76s, no skips), and runtime/
 translation build passes (3 rebuilt, 39 fresh, 6.8s). Host build passes (2 rebuilt,
 11 fresh, 4.0s). Canonical host alias mapping is verified; broader namespace
-mutation/root/error validation remains #967, and recovery/open-I/O gates remain
-open.
+mutation/mountpoint/error validation remains #967, and recovery/open-I/O gates
+remain open. unlink/rmdir now retain the original final-name kind before mount
+write/DAC checks: root, dot and dot-dot return their distinct Linux errors; a
+trailing slash on unlink uses no-follow target kind and never removes a file or
+symlink. Mapped tests verify file/directory/symlink/missing slash paths, root and
+dot/dot-dot errors, and unchanged targets on failures. Results follow Linux
+v6.12 namei do_unlinkat/do_rmdir control flow. 128 Linux ABI units pass (0.05s;
+two excluded), full original ART oracle passes (52.77s, no skips), and runtime/
+translation build passes (3 rebuilt, 39 fresh, 17.9s).
 No-start-tag documents remain, whereas malformed reads remove
 the selected file and retry. Changed or replaced claimed files reject before
 cleanup. Optional XML root parsing distinguishes empty/whitespace and complete

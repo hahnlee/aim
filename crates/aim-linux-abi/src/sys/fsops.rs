@@ -16,6 +16,7 @@ const AT_SYMLINK_FOLLOW: u64 = 0x400;
 const EPERM: i64 = 1;
 const EXDEV: i64 = 18;
 const EISDIR: i64 = 21;
+const ENOTEMPTY: i64 = 39;
 const EOPNOTSUPP: i64 = 95;
 
 fn resolve_w(dirfd: u64, path: u64, follow: bool) -> Result<Resolved, i64> {
@@ -166,13 +167,50 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             Err(crate::errno::EACCES)
         }
     })
-    .map_err(|error| -i64::from(error))
-    .and_then(|r| {
-        check_writable(&r)?;
-        Ok(r)
-    });
+    .map_err(|error| -i64::from(error));
     match resolved {
         Ok(r) => {
+            let last = path
+                .split(|&byte| byte == b'/')
+                .rfind(|component| !component.is_empty());
+            match last {
+                None => {
+                    return if a[2] & AT_REMOVEDIR != 0 {
+                        -crate::errno::EBUSY as i64
+                    } else {
+                        -EISDIR
+                    };
+                }
+                Some(b".") => {
+                    return if a[2] & AT_REMOVEDIR != 0 {
+                        -EINVAL as i64
+                    } else {
+                        -EISDIR
+                    };
+                }
+                Some(b"..") => {
+                    return if a[2] & AT_REMOVEDIR != 0 {
+                        -39
+                    } else {
+                        -EISDIR
+                    };
+                }
+                _ => (),
+            }
+            if let Err(error) = check_writable(&r) {
+                return error;
+            }
+            if a[2] & AT_REMOVEDIR == 0 && path.last() == Some(&b'/') {
+                return match super::fs::stat_at(
+                    crate::vfs::LINUX_AT_FDCWD,
+                    r.guest.as_bytes(),
+                    AT_SYMLINK_NOFOLLOW,
+                ) {
+                    Ok(st) if st.st_mode & libc::S_IFMT == libc::S_IFDIR => -EISDIR,
+                    Ok(_) => -crate::errno::ENOTDIR as i64,
+                    Err(error) => error,
+                };
+            }
             if let Err(error) = unlink_permissions(&r, id) {
                 return error;
             }
@@ -792,6 +830,21 @@ mod tests {
 #[cfg(test)]
 mod unlink_permission_tests {
     use super::*;
+    #[test]
+    fn removal_last_components_and_trailing_slashes_keep_linux_errors() {
+        use std::ffi::CString;
+        let (_guard, view) = crate::vfs::test_view(); let base = format!("/data/unlink-last-{}", std::process::id()); let host = view.join("data").join(base.trim_start_matches("/data/")); std::fs::create_dir_all(host.join("dir")).unwrap(); std::fs::write(host.join("file"), b"owned").unwrap();
+        std::os::unix::fs::symlink("dir", host.join("dirlink")).unwrap(); std::os::unix::fs::symlink("file", host.join("filelink")).unwrap();
+        let id = super::super::cred::Identity::default(); let invoke = |path: &str, flags| {let path = CString::new(path).unwrap(); unlinkat_as([crate::vfs::LINUX_AT_FDCWD as u64, path.as_ptr() as u64, flags, 0, 0, 0], &id)};
+        for root in ["/", "///"] {assert_eq!(invoke(root, 0), -EISDIR); assert_eq!(invoke(root, AT_REMOVEDIR), -crate::errno::EBUSY as i64);}
+        for suffix in [".", "../"] {assert_eq!(invoke(&format!("{base}/{suffix}"), 0), -EISDIR); assert_eq!(invoke(&format!("{base}/{suffix}"), AT_REMOVEDIR), if suffix == "." {-EINVAL as i64} else {-ENOTEMPTY});}
+        assert_eq!(invoke(&format!("{base}/file/"), 0), -crate::errno::ENOTDIR as i64);
+        assert_eq!(invoke(&format!("{base}/dir/"), 0), -EISDIR);
+        for link in ["dirlink", "filelink"] {assert_eq!(invoke(&format!("{base}/{link}/"), 0), -crate::errno::ENOTDIR as i64); assert_eq!(invoke(&format!("{base}/{link}/"), AT_REMOVEDIR), -crate::errno::ENOTDIR as i64);}
+        assert_eq!(invoke(&format!("{base}/missing/"), 0), -crate::errno::ENOENT as i64);
+        assert!(host.join("file").is_file() && host.join("dir").is_dir() && host.join("dirlink").symlink_metadata().is_ok());
+        assert_eq!(invoke(&format!("{base}/dir/"), AT_REMOVEDIR), 0); std::fs::remove_dir_all(host).unwrap();
+    }
     #[test]
     fn unlink_walk_checks_symlink_prefixes_dotdot_and_relative_fd_base() {
         use std::{ffi::CString, os::fd::AsRawFd};
