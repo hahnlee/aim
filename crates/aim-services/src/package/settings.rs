@@ -511,7 +511,111 @@ pub fn fix_protection_level(mut level: i32) -> i32 {
 /// `<cert>` in the document carries its key, later ones only its index.
 type Certificates = Vec<Option<(Vec<u8>, i32)>>;
 
+/// Per-attempt transient state. Retry clears pending packages, certificate and
+/// keyset tables and first-install timestamps while retaining registered owners.
+#[derive(Default)]
+pub struct PackageReadAttempt {
+    pub signatures: SignatureReader,
+    pub key_set_refs: std::collections::BTreeMap<i64, i32>,
+    pub pending: Vec<Package>,
+    pub first_install_times: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PackageReadOutcome {
+    Active(usize),
+    Pending(usize),
+    InvalidHeader,
+    DuplicateId,
+    RejectedId(super::owner::app_ids::Error),
+}
+
 impl Settings {
+    /// Read one package from its completed start. The caller resolves domain IDs
+    /// and owns legacy permission/domain side effects before using this entry.
+    /// Registered settings remain visible if a later body event fails (#914).
+    pub fn read_package(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        start: &Element,
+        ids: &mut super::owner::app_ids::AppIds,
+        attempt: &mut PackageReadAttempt,
+        read_owner: impl FnMut(
+            &mut Package,
+            &mut aim_android_xml::pull::Reader<'_>,
+            &Element,
+        ) -> Result<bool, String>,
+    ) -> Result<PackageReadOutcome, String> {
+        let Some(mut incoming) = package_header(start)? else {
+            signatures::skip(reader)?;
+            return Ok(PackageReadOutcome::InvalidHeader);
+        };
+        let first_install_time = incoming.legacy_first_install_time;
+        incoming.legacy_first_install_time = 0;
+        let (target, outcome) = if incoming.shared_user {
+            attempt.pending.push(incoming);
+            let index = attempt.pending.len() - 1;
+            (
+                &mut attempt.pending[index],
+                PackageReadOutcome::Pending(index),
+            )
+        } else if let Some(index) = self.packages.iter().position(|p| p.name == incoming.name) {
+            let existing = &mut self.packages[index];
+            if existing.app_id != incoming.app_id {
+                signatures::skip(reader)?;
+                return Ok(PackageReadOutcome::DuplicateId);
+            }
+            // addPackageLPw returns the existing object. Its construction fields
+            // and accumulated child state survive; the reader updates metadata.
+            incoming.real_name = existing.real_name.clone();
+            incoming.code_path = existing.code_path.clone();
+            incoming.flags = existing.flags;
+            incoming.private_flags = existing.private_flags;
+            incoming.domain_set_id = existing.domain_set_id.clone();
+            incoming.signatures = existing.signatures.clone();
+            incoming.key_set_data = existing.key_set_data.clone();
+            incoming.mime_groups = existing.mime_groups.clone();
+            incoming.split_versions = existing.split_versions.clone();
+            incoming.uses_static_libraries = existing.uses_static_libraries.clone();
+            incoming.uses_sdk_libraries = existing.uses_sdk_libraries.clone();
+            incoming.is_sdk_library = existing.is_sdk_library;
+            incoming.old_paths = existing.old_paths.clone();
+            incoming.leaving_shared_user = existing.leaving_shared_user;
+            incoming.shared_user_app_id = existing.shared_user_app_id;
+            incoming.transient = existing.transient.clone();
+            let progress = incoming.loading_progress;
+            incoming.loading_progress = existing.loading_progress;
+            incoming.set_loading_progress(progress);
+            incoming.page_size_compat = existing.page_size_compat;
+            *existing = incoming;
+            (existing, PackageReadOutcome::Active(index))
+        } else {
+            if let Err(error) = ids.register_existing(
+                incoming.app_id,
+                super::owner::app_ids::Owner::Package(incoming.name.clone()),
+            ) {
+                signatures::skip(reader)?;
+                return Ok(PackageReadOutcome::RejectedId(error));
+            }
+            self.packages.push(incoming);
+            let index = self.packages.len() - 1;
+            (&mut self.packages[index], PackageReadOutcome::Active(index))
+        };
+        target.set_page_size_compat(defaulted(start.int("pageSizeCompat"), 0))?;
+        target.read_children(
+            reader,
+            &mut attempt.signatures,
+            &mut attempt.key_set_refs,
+            read_owner,
+        )?;
+        if first_install_time != 0 {
+            attempt
+                .first_install_times
+                .insert(target.name.clone(), first_install_time);
+        }
+        Ok(outcome)
+    }
+
     /// The settings in the document whose root is `root`.
     pub fn parse(root: &Element) -> Result<Settings, String> {
         Self::parse_with_config(root, &Default::default())
@@ -858,7 +962,7 @@ fn updated_package(e: &Element) -> Result<Package, String> {
 
 /// `readPackageLPw`: `None` for an entry the original drops (no name, code
 /// path or app id).
-fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Package>, String> {
+fn package_header(e: &Element) -> Result<Option<Package>, String> {
     // The pinned Settings DEX compiles out disallowSdkLibsToBeApps:
     // SDK libraries still need a positive app/shared-user ID (#802).
     let Some(mut p) = package_attributes(e)?.filter(|p| p.app_id > 0) else {
@@ -915,8 +1019,15 @@ fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Packag
     p.debuggable = defaulted(e.bool("debuggable"), false);
 
     p.base_revision_code = defaulted(e.int("baseRevisionCode"), 0);
-    p.set_page_size_compat(defaulted(e.int("pageSizeCompat"), 0))?;
     p.domain_set_id = string(e, "domainSetId").filter(|id| !id.is_empty());
+    Ok(Some(p))
+}
+
+fn package(e: &Element, certificates: &mut Certificates) -> Result<Option<Package>, String> {
+    let Some(mut p) = package_header(e)? else {
+        return Ok(None);
+    };
+    p.set_page_size_compat(defaulted(e.int("pageSizeCompat"), 0))?;
     for child in e.children() {
         if libraries(&mut p, child)? {
             continue;
@@ -1302,6 +1413,84 @@ mod incremental_package_tests {
                 _ => {}
             }
         }
+    }
+
+    fn registered(
+        bytes: &[u8],
+        settings: &mut Settings,
+        ids: &mut super::super::owner::app_ids::AppIds,
+        attempt: &mut PackageReadAttempt,
+    ) -> Result<PackageReadOutcome, String> {
+        let mut reader = Reader::new(bytes)?;
+        let Event::Start(start) = reader.next()? else {
+            panic!()
+        };
+        settings.read_package(&mut reader, &start, ids, attempt, |_, _, _| Ok(false))
+    }
+
+    #[test]
+    fn registration_precedes_body_failure_and_retry_keeps_uid_slots() {
+        use super::super::owner::app_ids::{AppIds, Owner};
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        assert!(registered(b"<package name='p' codePath='/p' userId='10001' it='7'><uses-static-lib name='l' version='3'/><", &mut settings, &mut ids, &mut attempt).is_err());
+        assert_eq!(ids.get(10001), Some(&Owner::Package("p".into())));
+        assert_eq!(
+            settings.packages[0].uses_static_libraries,
+            [("l".into(), 3)]
+        );
+        assert!(attempt.first_install_times.is_empty());
+        attempt = PackageReadAttempt::default();
+        let outcome = registered(
+            b"<package name='q' codePath='/q' userId='10001'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        assert!(matches!(outcome, PackageReadOutcome::RejectedId(_)));
+        assert_eq!(settings.packages.len(), 1);
+        registered(
+            b"<package name='p' codePath='/other' userId='10001' it='9' version='6'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        assert_eq!(settings.packages[0].code_path, "/p");
+        assert_eq!(settings.packages[0].version_code, 6);
+        assert_eq!(
+            settings.packages[0].uses_static_libraries,
+            [("l".into(), 3)]
+        );
+        assert_eq!(attempt.first_install_times["p"], 9);
+    }
+
+    #[test]
+    fn invalid_page_mode_retains_registered_header_effects() {
+        use super::super::owner::app_ids::{AppIds, Owner};
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        assert_eq!(registered(b"<package name='p' codePath='/p' userId='10001' pageSizeCompat='128' version='5'/>", &mut settings, &mut ids, &mut attempt).unwrap_err(), "Invalid page size compat mode specified");
+        assert_eq!(settings.packages[0].version_code, 5);
+        assert_eq!(settings.packages[0].page_size_compat, 0);
+        assert_eq!(ids.get(10001), Some(&Owner::Package("p".into())));
+    }
+
+    #[test]
+    fn shared_package_is_pending_before_failure_and_not_registered() {
+        use super::super::owner::app_ids::AppIds;
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        assert!(registered(b"<package name='p' codePath='/p' sharedUserId='10001'><split-version name='x' version='2'/><", &mut settings, &mut ids, &mut attempt).is_err());
+        assert!(settings.packages.is_empty());
+        assert!(ids.get(10001).is_none());
+        assert_eq!(attempt.pending[0].split_versions, [("x".into(), 2)]);
+        attempt = PackageReadAttempt::default();
+        assert!(attempt.pending.is_empty());
     }
 
     #[test]

@@ -34,6 +34,7 @@ public class PackageSetting extends SettingBase {
     void setDisabledComponentsCopy(com.android.server.utils.WatchedArraySet<String> components, int user) { throw new RuntimeException("stub"); }
     public boolean isInstallPermissionsFixed() { throw new RuntimeException("stub"); }
     public PackageSetting setInstallPermissionsFixed(boolean fixed) { throw new RuntimeException("stub"); }
+    public String getPathString() { throw new RuntimeException("stub"); }
     public String getPackageName() { throw new RuntimeException("stub"); }
     public com.android.server.pm.pkg.PackageStateUnserialized getPkgState() { throw new RuntimeException("stub"); }
     public PackageSetting setPrimaryCpuAbi(String abi) { throw new RuntimeException("stub"); }

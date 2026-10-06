@@ -876,26 +876,34 @@ append/clone flags, repeated/nested histories, invalid DER and a following signa
 read sharing the same table. This is a within-attempt signature-owner comparison,
 not Settings failRead file retry (each new file attempt needs a fresh table).
 The normal AST importer now shares the signing builder with SignatureReader;
-Native Package.read_children now consumes an already registered package body,
-connecting the shared SignatureReader and keyset reference table and delegating
-legacy permission/domain children to their owners. External owner errors propagate
-without rolling back previous effects. Library/split changes precede subtree skips;
-keyset changes/reference counts apply at completed starts and leave nested entries
-visible. MIME groups publish after their container finishes, retain earlier groups
-if a later group fails, merge repeats, expose nested mime-type events and skip
-unknown/missing-name subtrees as the original does. Actual original
-Settings.readSettingsLPw agrees on 858 text/ABX package-child cases, including
-every ABX truncation after the package header, duplicate updates, nested skip
-boundaries, invalid identifiers, MIME groups and partial effects retained across
-empty-reserve retry. Native units check reference-count wrapping, external owner
-failure and completed MIME-group retention. 505 service units pass (5 excluded);
-the full original ART oracle passes without skips (58.70s), and production
-image/runtime build passes (3 rebuilt, 39 fresh, 34.9s). The previous input-generator
-short-header failure was fixed; previous SDK sandbox ENOSPC remains #903. Only
-this worktree's regenerable incremental cache was cleared before this run to
-recover space. Package registration/header effects, shared UID/global/keyset
-owners, legacy permission/domain callback integration, complete incremental
-frontend and default boot integration remain #914. Original PMS still runs. Native Signatures now stores current capability flags (an empty vector represents
+Native Settings.read_package now registers active package headers before consuming
+their body with Package.read_children. One PackageReadAttempt owns certificates,
+keyset references, pending shared-UID packages and deferred first-install times;
+retry creates a fresh attempt without erasing registered package/UID owners.
+Same-name/same-UID reads retain construction fields and accumulated children while
+updating metadata; different-ID duplicates and occupied UID slots are explicit
+rejection outcomes. Shared-UID packages enter pending before their body, without
+registering a separate slot. Loading progress remains monotonic; page-size flags
+merge on the registered target, so an invalid mode retains preceding header/UID
+effects. First-install timestamps publish only after the body completes.
+The body connects the shared SignatureReader/keyset table and delegates legacy
+permission/domain children to their owners; external errors propagate without
+rollback. Library/split changes precede subtree skips, keyset changes leave nested
+entries visible, and MIME groups publish only after their container completes.
+Actual original Settings.readSettingsLPw agrees on 866 text/ABX package cases,
+including post-header truncations, accumulated children, retained path/flags/domain
+ID, updated version, monotonic loading, merged/invalid page modes and partial
+effects across empty-reserve retry. Native units additionally check UID rejection,
+pending-before-failure and deferred first-install timestamps. 508 service units
+pass (5 excluded, 0.51s); full original ART oracle passes without skips (54.24s).
+The image/template build passes (6 rebuilt/36 fresh, 72.1s). An original
+PackageSetting.getPathString compile-only API declaration was added after the
+oracle's compilation failed on the missing declaration; the image API verifier
+checks it against the pinned original. Only worktree incremental cache was removed
+to recover test space (#903). This is a registered-package owner comparison:
+domain-ID policy delivery, shared UID resolution, global/keyset owners and legacy
+permission/domain callbacks, complete incremental frontend and default boot
+integration remain #914/#798. Original PMS still runs. Native Signatures now stores current capability flags (an empty vector represents
 all zero); the feed retains them instead of discarding them, and the AST reader
 inherits flags from its certificate table. Verified APK/shared-owner constructors
 use the original zero current flags. SignatureReader retains generated Java

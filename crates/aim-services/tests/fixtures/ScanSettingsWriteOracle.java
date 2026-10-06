@@ -101,6 +101,7 @@ public final class ScanSettingsWriteOracle {
                 entries.add(group.getKey() + ":" + String.join(",", group.getValue()));
             }
             fields.add(String.join(";", entries));
+            fields.add(p.getPathString() + ":" + p.getFlags() + ":" + p.getPrivateFlags() + ":" + p.getVersionCode() + ":" + p.getDomainSetId() + ":" + String.format("%08x", Float.floatToRawIntBits(p.getLoadingProgress())) + ":" + p.getPageSizeAppCompatFlags());
             java.nio.file.Files.write(new java.io.File(directory, "package-child-output-" + index).toPath(), String.join("|", fields).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }

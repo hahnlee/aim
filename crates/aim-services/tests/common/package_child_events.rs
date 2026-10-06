@@ -1,13 +1,12 @@
 //! Incremental package-child effects against original Settings.readSettingsLPw.
-use aim_android_xml::{
-    Element, Node,
-    pull::{Event, Reader},
+use aim_android_xml::pull::{Event, Reader};
+use aim_services::package::{
+    owner::app_ids::AppIds,
+    settings::{Package, PackageReadAttempt, Settings},
 };
-use aim_services::package::settings::{Package, Settings, SignatureReader};
-use std::collections::BTreeMap;
 
 pub fn inputs() -> Vec<Vec<u8>> {
-    let header = "<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'>";
+    let header = "<packages><package name='p' codePath='/p' userId='10001' loadingProgress='0.75' pageSizeCompat='16' domainSetId='00000000-0000-0000-0000-000000000001'>";
     let mut out = Vec::new();
     for child in [
         "<uses-static-lib name='a' version='7'>",
@@ -44,28 +43,54 @@ pub fn inputs() -> Vec<Vec<u8>> {
             }
         }
     }
+    for suffix in [
+        "<package name='p' codePath='/other' userId='10001' pageSizeCompat='128' version='6' domainSetId='00000000-0000-0000-0000-000000000002'/>",
+        "<package name='p' codePath='/other' realName='other' userId='10001' publicFlags='0' privateFlags='8' version='9' loadingProgress='0.5' pageSizeCompat='8' domainSetId='00000000-0000-0000-0000-000000000002'><uses-static-lib name='second' version='4'/></package>",
+        "<package name='p' codePath='/other' userId='10002' domainSetId='00000000-0000-0000-0000-000000000002'><uses-static-lib name='hidden' version='4'/></package>",
+        "<package name='q' codePath='/q' userId='10001' domainSetId='00000000-0000-0000-0000-000000000002'><uses-static-lib name='hidden' version='4'/></package>",
+    ] {
+        let bytes = format!(
+            "{header}<uses-static-lib name='first' version='3'/></package>{suffix}</packages>"
+        )
+        .into_bytes();
+        out.push(bytes.clone());
+        out.push(aim_android_xml::abx::write(&aim_android_xml::read(&bytes).unwrap()).unwrap());
+    }
     out
 }
 
 pub fn read(bytes: &[u8]) -> Package {
     let mut reader = Reader::new(bytes).unwrap();
     reader.next().unwrap();
-    let Event::Start(start) = reader.next().unwrap() else {
-        panic!()
-    };
-    let root = Element {
-        name: "packages".into(),
-        attrs: vec![],
-        content: vec![Node::Element(start)],
-    };
-    let mut package = Settings::parse(&root).unwrap().packages.remove(0);
-    let mut signatures = SignatureReader::default();
-    let mut refs = BTreeMap::new();
-    let result =
-        package.read_children(&mut reader, &mut signatures, &mut refs, |_, _, _| Ok(false));
+    let mut settings = Settings::default();
+    let mut ids = AppIds::default();
+    let mut attempt = PackageReadAttempt::default();
+    let result = (|| -> Result<(), String> {
+        loop {
+            match reader.next()? {
+                Event::Start(start) if start.name == "package" => {
+                    settings.read_package(
+                        &mut reader,
+                        &start,
+                        &mut ids,
+                        &mut attempt,
+                        |_, _, _| Ok(false),
+                    )?;
+                }
+                Event::Start(_) => panic!("unexpected top-level fixture owner"),
+                Event::End(_) if reader.depth() == 1 => return Ok(()),
+                Event::EndDocument => return Ok(()),
+                _ => {}
+            }
+        }
+    })();
     // Original failRead retries an empty reserve without clearing active settings.
     let _ = result;
-    package
+    settings
+        .packages
+        .into_iter()
+        .find(|p| p.name == "p")
+        .unwrap()
 }
 
 pub fn trace(p: &Package) -> String {
@@ -118,7 +143,14 @@ pub fn trace(p: &Package) -> String {
         .collect::<Vec<_>>()
         .join(";");
     format!(
-        "{static_libs}|{sdk}|{splits}|{}|{aliases}|{upgrades}|{mime}",
-        p.key_set_data.proper_signing_key_set
+        "{static_libs}|{sdk}|{splits}|{}|{aliases}|{upgrades}|{mime}|{}:{}:{}:{}:{}:{:08x}:{}",
+        p.key_set_data.proper_signing_key_set,
+        p.code_path,
+        p.flags,
+        p.private_flags,
+        p.version_code,
+        p.domain_set_id.as_deref().unwrap_or("null"),
+        p.loading_progress.to_bits(),
+        p.page_size_compat
     )
 }
