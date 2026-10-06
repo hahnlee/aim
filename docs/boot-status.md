@@ -815,7 +815,15 @@ symlink. Mapped tests verify file/directory/symlink/missing slash paths, root an
 dot/dot-dot errors, and unchanged targets on failures. Results follow Linux
 v6.12 namei do_unlinkat/do_rmdir control flow. 128 Linux ABI units pass (0.05s;
 two excluded), full original ART oracle passes (52.77s, no skips), and runtime/
-translation build passes (3 rebuilt, 39 fresh, 17.9s).
+translation build passes (3 rebuilt, 39 fresh, 17.9s). Active own file/directory
+mounts and visible mapped directory roots now reject removal without touching
+backing nodes: type/DAC checks precede EBUSY, and writeability is checked on the
+parent mount, as namespace removal changes its directory. Tests verify readonly
+target mounts under writable parents, readonly parent precedence (EROFS), final
+symlink removal, stacked mounts/unmount visibility, and preservation of backing
+files/children. 129 Linux ABI units pass (0.06s; two excluded), full original ART
+oracle passes (52.33s, no skips), and runtime/translation build passes (3 rebuilt,
+39 fresh, 17.4s). Other namespace mutation/error cases remain #967.
 No-start-tag documents remain, whereas malformed reads remove
 the selected file and retry. Changed or replaced claimed files reject before
 cleanup. Optional XML root parsing distinguishes empty/whitespace and complete

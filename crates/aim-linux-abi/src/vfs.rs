@@ -245,6 +245,12 @@ pub fn mount_points() -> Vec<MountPoint> {
         .collect()
 }
 
+/// Active guest mount roots, including file binds and mapped directory roots.
+pub fn is_mountpoint(guest: &str) -> bool {
+    let mounts = vfs().mounts.read().unwrap();
+    mounts.iter().any(|mount| mount.guest == guest && !hidden(&mounts, mount) && (mount.own || mount.host.is_dir()))
+}
+
 /// The host paths the guest writes to: the path map's writable entries,
 /// or the root without a path map. None before [`init`].
 pub fn writable_hosts() -> Option<Vec<PathBuf>> {

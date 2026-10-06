@@ -190,14 +190,23 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
                 }
                 Some(b"..") => {
                     return if a[2] & AT_REMOVEDIR != 0 {
-                        -39
+                        -ENOTEMPTY
                     } else {
                         -EISDIR
                     };
                 }
                 _ => (),
             }
-            if let Err(error) = check_writable(&r) {
+            let parent = std::path::Path::new(&r.guest).parent().unwrap();
+            let parent = match vfs::resolve(
+                crate::vfs::LINUX_AT_FDCWD,
+                parent.as_os_str().as_encoded_bytes(),
+                true,
+            ) {
+                Ok(parent) => parent,
+                Err(error) => return -i64::from(error),
+            };
+            if let Err(error) = check_writable(&parent) {
                 return error;
             }
             if a[2] & AT_REMOVEDIR == 0 && path.last() == Some(&b'/') {
@@ -213,6 +222,24 @@ fn unlinkat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
             }
             if let Err(error) = unlink_permissions(&r, id) {
                 return error;
+            }
+            let target = match super::fs::stat_at(
+                crate::vfs::LINUX_AT_FDCWD,
+                r.guest.as_bytes(),
+                AT_SYMLINK_NOFOLLOW,
+            ) {
+                Ok(target) => target,
+                Err(error) => return error,
+            };
+            let directory = target.st_mode & libc::S_IFMT == libc::S_IFDIR;
+            if a[2] & AT_REMOVEDIR != 0 && !directory {
+                return -crate::errno::ENOTDIR as i64;
+            }
+            if a[2] & AT_REMOVEDIR == 0 && directory {
+                return -EISDIR;
+            }
+            if vfs::is_mountpoint(&r.guest) {
+                return -crate::errno::EBUSY as i64;
             }
             // SAFETY: resolved host path.
             let result = unsafe {
@@ -830,6 +857,25 @@ mod tests {
 #[cfg(test)]
 mod unlink_permission_tests {
     use super::*;
+    #[test]
+    fn unlink_and_rmdir_preserve_active_mount_backing_nodes() {
+        use std::ffi::CString;
+        let (_guard, view) = crate::vfs::test_view(); let base = format!("/data/remove-mount-{}", std::process::id()); let host = view.join("data").join(base.trim_start_matches("/data/")); std::fs::create_dir_all(&host).unwrap();
+        let backing = view.join("remove-mount-backing"); std::fs::create_dir_all(&backing).unwrap(); std::fs::write(backing.join("keep"), b"owned").unwrap();
+        let file = view.join("remove-mount-file"); std::fs::write(&file, b"owned").unwrap();
+        let directory_guest = format!("{base}/directory"); let file_guest = format!("{base}/file");
+        crate::vfs::add_mount(&directory_guest, backing.clone(), crate::vfs::Area::Writable, "bind", "bind"); crate::vfs::add_mount(&file_guest, file.clone(), crate::vfs::Area::Writable, "bind", "bind");
+        let id = super::super::cred::Identity::default(); let invoke = |path: &str, flags| {let path = CString::new(path).unwrap(); unlinkat_as([crate::vfs::LINUX_AT_FDCWD as u64, path.as_ptr() as u64, flags, 0, 0, 0], &id)};
+        assert_eq!(invoke(&directory_guest, AT_REMOVEDIR), -crate::errno::EBUSY as i64); assert_eq!(invoke(&directory_guest, 0), -EISDIR);
+        assert_eq!(invoke(&file_guest, 0), -crate::errno::EBUSY as i64); assert_eq!(invoke(&file_guest, AT_REMOVEDIR), -crate::errno::ENOTDIR as i64);
+        assert_eq!(invoke("/data", AT_REMOVEDIR), -30, "readonly parent mount precedes busy target");
+        std::os::unix::fs::symlink(&directory_guest, host.join("link")).unwrap(); assert_eq!(invoke(&format!("{base}/link"), 0), 0);
+        assert!(backing.join("keep").is_file() && file.is_file());
+        crate::vfs::add_mount(&file_guest, file.clone(), crate::vfs::Area::Image, "bind", "bind"); assert_eq!(invoke(&file_guest, 0), -crate::errno::EBUSY as i64); assert!(crate::vfs::remove_mount(&file_guest));
+        crate::vfs::add_mount(&directory_guest, file.clone(), crate::vfs::Area::Writable, "bind", "bind"); assert_eq!(invoke(&directory_guest, 0), -crate::errno::EBUSY as i64);
+        assert!(crate::vfs::remove_mount(&directory_guest)); assert!(crate::vfs::is_mountpoint(&directory_guest)); assert!(crate::vfs::remove_mount(&directory_guest)); assert!(!crate::vfs::is_mountpoint(&directory_guest)); assert!(crate::vfs::remove_mount(&file_guest));
+        std::fs::remove_dir_all(backing).unwrap(); std::fs::remove_file(file).unwrap(); std::fs::remove_dir_all(host).unwrap();
+    }
     #[test]
     fn removal_last_components_and_trailing_slashes_keep_linux_errors() {
         use std::ffi::CString;
