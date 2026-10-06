@@ -219,6 +219,88 @@ impl Owner {
         }
         Some(p)
     }
+    /// Bundle update after DOMAIN_VERIFICATION_AGENT authorization. The
+    /// original merges keys, removes null/empty lists and schedules no write.
+    pub fn set_uri_groups(
+        &mut self,
+        name: &str,
+        updates: &[(
+            String,
+            Option<Vec<super::super::intent_filter::UriRelativeFilterGroup>>,
+        )],
+    ) -> Result<(), String> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let package = self
+            .attached
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or("URI-group package is unavailable")?;
+        for (host, groups) in updates {
+            if !super::uri_groups::valid_domain(host)? {
+                continue;
+            }
+            if let Some(groups) = groups.as_ref().filter(|g| !g.is_empty()) {
+                let groups: Vec<_> = groups
+                    .iter()
+                    .map(|g| {
+                        let mut normalized =
+                            super::super::intent_filter::UriRelativeFilterGroup::new(g.action);
+                        for f in &g.filters {
+                            normalized.add(f.uri_part, f.pattern_type, &f.filter);
+                        }
+                        normalized
+                    })
+                    .collect();
+                if let Some((_, target)) = package
+                    .uri_relative_filter_groups
+                    .iter_mut()
+                    .find(|(name, _)| name.as_ref() == Some(host))
+                {
+                    *target = groups.clone();
+                } else {
+                    package
+                        .uri_relative_filter_groups
+                        .push((Some(host.clone()), groups.clone()));
+                }
+            } else {
+                package
+                    .uri_relative_filter_groups
+                    .retain(|(name, _)| name.as_ref() != Some(host));
+            }
+        }
+        package.uri_relative_filter_groups = array_order(
+            std::mem::take(&mut package.uri_relative_filter_groups),
+            |(name, _)| name.as_deref().unwrap_or(""),
+        );
+        Ok(())
+    }
+    pub fn uri_groups(
+        &self,
+        name: &str,
+        domains: &[String],
+    ) -> Vec<(
+        String,
+        Vec<super::super::intent_filter::UriRelativeFilterGroup>,
+    )> {
+        let Some(package) = self.package(name) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        for name in domains {
+            if !out.iter().any(|(host, _)| host == name)
+                && let Some((_, groups)) = package
+                    .uri_relative_filter_groups
+                    .iter()
+                    .find(|(host, _)| host.as_ref() == Some(name))
+            {
+                out.push((name.clone(), groups.clone()));
+            }
+        }
+        array_order(out, |(name, _)| name.as_str())
+    }
+
     /// Verifier-state mutation after caller authorization. Error statuses do
     /// not request persistence; success must be scheduled by the driver.
     pub fn set_verifier_status(

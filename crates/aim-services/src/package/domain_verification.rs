@@ -7,6 +7,7 @@
 pub mod collector;
 pub mod enforcer;
 pub mod owner;
+pub mod uri_groups;
 
 use aim_android_xml::Element;
 

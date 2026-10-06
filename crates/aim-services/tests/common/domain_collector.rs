@@ -418,6 +418,93 @@ pub fn verify_attachment(directory: &Path) {
                 &config,
             )
             .unwrap();
+        use aim_services::package::intent_filter::UriRelativeFilterGroup;
+        let group = |action, path: &str| {
+            let mut g = UriRelativeFilterGroup::new(action);
+            g.add(0, 0, path);
+            g
+        };
+        let hosts = [
+            "h0.example".to_string(),
+            "h1.example".into(),
+            "*.wild.example".into(),
+            "undeclared.example".into(),
+            "-edge.example".into(),
+            "numeric.1".into(),
+            "bad_name.example".into(),
+            "δοκιμή.example".into(),
+            "x".into(),
+            format!("*.{}.example", "a".repeat(64)),
+        ];
+        let updates: Vec<_> = hosts
+            .iter()
+            .map(|h| (h.clone(), Some(vec![group(1, "/first")])))
+            .collect();
+        owner.set_uri_groups("fixture.domains", &updates).unwrap();
+        for stage in ["uri-add", "uri-update"] {
+            if stage == "uri-update" {
+                owner
+                    .set_uri_groups(
+                        "fixture.domains",
+                        &[
+                            ("h0.example".into(), Some(vec![group(0, "/second")])),
+                            ("h1.example".into(), Some(vec![])),
+                            ("*.wild.example".into(), None),
+                        ],
+                    )
+                    .unwrap();
+            }
+            let root = aim_android_xml::read(
+                &fs::read(directory.join(format!("domain-owner-{case}-{stage}.original"))).unwrap(),
+            )
+            .unwrap();
+            let mut original = State::default();
+            original
+                .read(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications")
+                        .unwrap(),
+                )
+                .unwrap();
+            original
+                .read_legacy(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications-legacy")
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                canonical(owner.persisted()),
+                canonical(original),
+                "URI group update case={case} stage={stage}"
+            );
+        }
+        let previous = owner.persisted();
+        owner.set_uri_groups("missing", &[]).unwrap();
+        assert!(owner.set_uri_groups("missing", &updates).is_err());
+        assert_eq!(owner.persisted(), previous);
+        let mut values = owner.uri_groups("fixture.domains", &hosts);
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut expected = Parcel::new();
+        expected.write_i32(values.len() as i32);
+        for (host, groups) in values {
+            expected.write_string16(Some(&host));
+            expected.write_i32(groups.len() as i32);
+            for g in groups {
+                expected.write_i32(g.action);
+                expected.write_i32(g.filters.len() as i32);
+                for f in g.filters {
+                    expected.write_i32(f.uri_part);
+                    expected.write_i32(f.pattern_type);
+                    expected.write_string16(Some(&f.filter));
+                }
+            }
+        }
+        assert_eq!(
+            expected.data(),
+            fs::read(directory.join(format!("domain-uri-{case}.original"))).unwrap()
+        );
+        assert!(owner.uri_groups("missing", &hosts).is_empty());
         use aim_services::package::domain_verification::collector::Policy;
         let policy = Policy {
             restrict_domains: true,

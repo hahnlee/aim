@@ -132,6 +132,21 @@ public final class DomainCollectorOracle {
             competitorSetting.setPkg((com.android.server.pm.pkg.AndroidPackage) competitor);
             service.addPackage((com.android.server.pm.pkg.PackageStateInternal) competitorSetting, null);
             var connection = new DomainConnection(newSetting); service.setConnection(connection);
+            String[] groupHosts = {"h0.example", "h1.example", "*.wild.example", "undeclared.example", "-edge.example", "numeric.1", "bad_name.example", "δοκιμή.example", "x", "*." + "a".repeat(64) + ".example"};
+            var update = new android.os.Bundle();
+            for (String host : groupHosts) update.putParcelableArrayList(host, new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(1, "/first")))));
+            service.setUriRelativeFilterGroups("fixture.domains", update); writeDomains(directory, i, "uri-add", service);
+            update = new android.os.Bundle();
+            update.putParcelableArrayList("h0.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/second")))));
+            update.putParcelableArrayList("h1.example", new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>());
+            update.putParcelableArrayList("*.wild.example", null);
+            service.setUriRelativeFilterGroups("fixture.domains", update); writeDomains(directory, i, "uri-update", service);
+            service.setUriRelativeFilterGroups("missing", new android.os.Bundle());
+            try { service.setUriRelativeFilterGroups("missing", update); throw new AssertionError("missing URI owner accepted"); }
+            catch (android.content.pm.PackageManager.NameNotFoundException expected) {}
+            if (connection.writes != 0) throw new AssertionError("URI group update scheduled an unexpected settings write");
+            writeUriGroups(directory, i, service, java.util.Arrays.asList(groupHosts));
+
             var hosts = new java.util.TreeSet<String>(); hosts.add("h0.example");
             if (service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-000000000000"), hosts, 1) != 1) throw new AssertionError("invalid domain UUID status differs");
             hosts.add("unknown.example");
@@ -162,6 +177,31 @@ public final class DomainCollectorOracle {
             if (connection.writes != 13) throw new AssertionError("domain cleanup persistence requests differ: " + connection.writes);
 
         }
+    }
+    private static android.content.UriRelativeFilterGroup uriGroup(int action, String path) {
+        var group = new android.content.UriRelativeFilterGroup(action);
+        group.addUriRelativeFilter(new android.content.UriRelativeFilter(0, 0, path));
+        return group;
+    }
+    private static void writeUriGroups(java.io.File directory, int caseId, com.android.server.pm.verify.domain.DomainVerificationService service, java.util.List<String> hosts) throws Exception {
+        var out = android.os.Parcel.obtain();
+        try {
+            var result = service.getUriRelativeFilterGroups("fixture.domains", hosts);
+            var values = new java.util.TreeMap<String, java.util.List<android.content.UriRelativeFilterGroup>>();
+            for (String host : hosts) {
+                var parcels = result.getParcelableArrayList(host, android.content.UriRelativeFilterGroupParcel.class);
+                if (parcels != null) values.put(host, android.content.UriRelativeFilterGroup.parcelsToGroups(parcels));
+            }
+            out.writeInt(values.size());
+            for (var entry : values.entrySet()) {
+                out.writeString(entry.getKey()); out.writeInt(entry.getValue().size());
+                for (var group : entry.getValue()) {
+                    out.writeInt(group.getAction()); out.writeInt(group.getUriRelativeFilters().size());
+                    for (var filter : group.getUriRelativeFilters()) { out.writeInt(filter.getUriPart()); out.writeInt(filter.getPatternType()); out.writeString(filter.getFilter()); }
+                }
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "domain-uri-" + caseId + ".original").toPath(), out.marshall());
+        } finally { out.recycle(); }
     }
     private static com.android.server.pm.PackageSetting domainSetting(com.android.server.pm.pkg.AndroidPackage code, boolean system, String id) {
         var setting = new com.android.server.pm.PackageSetting("fixture.domains", null, new java.io.File("/data/app/fixture.domains"), system ? 1 : 0, 0, java.util.UUID.fromString(id));
