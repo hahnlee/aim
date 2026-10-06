@@ -91,6 +91,7 @@ fn native_package_parcels_match_original_read_write() {
         )
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainCollectorOracle.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainEnforcerOracle.java"))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/NativeAshmemOracle.java"))
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedSharedUserOracle.java"),
@@ -1657,6 +1658,56 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
     );
+    {
+        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as domains;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let states: Vec<_> = (0..4000)
+            .map(|i| (format!("h{i}.example"), i % 5))
+            .collect();
+        let info = aim_services::package::domain_verification::parcels::Info::prepare(
+            8,
+            "00000000-0000-0000-0000-000000000abc",
+            "fixture.large",
+            &states,
+        )
+        .unwrap();
+        let mut reply = aim_binder_host::parcel::Parcel::new();
+        domains::write_get_domain_verification_info_reply(&mut reply, Some(&info));
+        assert_eq!(reply.files().len(), 1);
+        assert!(reply.data().len() < 1024);
+        fs::write(directory.join("native-large-domain.info"), reply.data()).unwrap();
+        let region = aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
+        let fd = region.as_raw_fd();
+        let mut command = boot.client(1000);
+        // SAFETY: both calls are async-signal-safe; fd lives until output completes.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(fd, 91) < 0 || libc::fcntl(91, libc::F_SETFD, 0) < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let output = command
+            .args([
+                "/system/bin/app_process",
+                "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex",
+                "/system/bin",
+                "NativeAshmemOracle",
+                "91",
+                "/data/local/tmp/package-parcels/native-large-domain.info",
+            ])
+            .arg(reply.files()[0].0.to_string())
+            .output()
+            .unwrap();
+        assert_guest_success(&boot, &output, "original domain info native ashmem reader");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "NATIVE_DOMAIN_INFO 4000\n"
+        );
+    }
     common::domain_collector::verify_attachment(&directory);
     common::domain_collector::verify_legacy(&directory);
     common::domain_collector::verify_persistence_defaults(&directory);

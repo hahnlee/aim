@@ -239,9 +239,14 @@ impl Parcel {
     /// `writeException`: the code, the message and an empty remote stack
     /// trace.
     pub fn write_exception(&mut self, exception: &Exception) {
+        self.write_exception_message(exception, Some(&exception.message));
+    }
+
+    /// Exception framing when the original Java exception has a null message.
+    pub fn write_exception_message(&mut self, exception: &Exception, message: Option<&str>) {
         crate::appops::prefix_reply(self);
         self.write_i32(exception.code);
-        self.write_string16(Some(&exception.message));
+        self.write_string16(message);
         self.write_i32(0);
         if exception.code == EX_SERVICE_SPECIFIC {
             self.write_i32(exception.service_specific);

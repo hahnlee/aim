@@ -50,6 +50,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aim-ashmem"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "aim-binder-driver"
 version = "0.1.0"
 
@@ -208,6 +215,7 @@ name = "aim-linux-abi"
 version = "0.1.0"
 dependencies = [
  "aim-android-init",
+ "aim-ashmem",
  "aim-binder-driver",
  "aim-binder-host",
  "aim-guest-init",
@@ -247,6 +255,7 @@ dependencies = [
  "aim-android-image",
  "aim-android-xml",
  "aim-apps",
+ "aim-ashmem",
  "aim-binder-driver",
  "aim-binder-host",
  "aim-host-audio",

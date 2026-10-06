@@ -7,6 +7,7 @@ publish = false
 description = "Android's system services as native macOS implementations, served on the host's binder (ADR 0013)"
 
 [dependencies]
+aim-ashmem = { path = "../aim-ashmem" }
 aim-android-xml = { path = "../aim-android-xml" }
 aim-apps = { path = "../aim-apps" }
 aim-binder-driver = { path = "../aim-binder-driver" }

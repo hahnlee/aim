@@ -4,9 +4,12 @@ package android.os;
 
 import java.io.FileDescriptor;
 
-public class ParcelFileDescriptor implements Parcelable {
+public class ParcelFileDescriptor implements Parcelable, java.io.Closeable {
     public static final Parcelable.Creator<ParcelFileDescriptor> CREATOR = null;
 
+    public static ParcelFileDescriptor fromFd(int fd) throws java.io.IOException { throw new RuntimeException("stub"); }
+    public FileDescriptor getFileDescriptor() { throw new RuntimeException("stub"); }
+    @Override public void close() throws java.io.IOException { throw new RuntimeException("stub"); }
     public ParcelFileDescriptor(FileDescriptor fd) { throw new RuntimeException("stub"); }
     @Override
     public void writeToParcel(Parcel out, int flags) { throw new RuntimeException("stub"); }

@@ -1414,16 +1414,40 @@ hidden packages and nullable selection targets. Allow/false/SecurityException
 outcomes match, including the legacy selector's silent cross-user denial.
 These are controlled owners; production verifier selection remains unproved.
 A native IDomainVerificationManager endpoint now serves
-queryValidVerificationPackageNames using the generated pinned AIDL code and
-reply writer. It captures one published native domain/query generation, applies
-approved-verifier authorization, and returns only attached auto-verification
-packages in the original name-map order. It rejects wrong tokens/trailing data,
+queryValidVerificationPackageNames and getDomainVerificationInfo using generated
+pinned AIDL codes/reply writers. Each request captures one published native
+domain/query generation. The package-list method applies approved-verifier
+authorization and returns attached auto-verification packages in original
+name-map order; Info applies approved-querent authorization. It rejects wrong tokens/trailing data,
 unknown codes and unimplemented methods. The native publisher fixture registers
 it under a test alias and covers actual Binder replies, same-process permission-owner
-denial and bootstrap replacement clearing current captures (0.81s). Original ART
+denial and bootstrap replacement clearing current captures (0.84s). Original ART
 compares eight add/migrate package lists, including exclusion of pending/restored
 records. This endpoint is not registered by guest-init under the original name;
-remaining methods and migration gates are tracked in #957. Same-process service
+remaining methods and migration gates are tracked in #957. Info uses the same
+captured package-name resolution (Settings renames and visible static libraries)
+and native attached owner/policy, with requested-name lookup kept distinct from
+resolved code. It returns null without auto-verification domains and the original
+service-specific name-not-found code with a null message for unavailable code.
+The publisher fixture covers null info, missing/null package names, malformed
+requests and app DUMP denial. Native info keeps signed Java name-hash order and
+hash-collision insertion order. Eight original add/migrate Info reply parcels
+match exact native bytes. Host maps use the original UTF-16 size estimate including
+reply headers, inline maps/short blobs and FD-backed blobs. The new aim-ashmem
+crate shares backing-file flags/state encoding with the existing syscall owner;
+only a disposable unlinked region is created. Five ashmem ABI tests pass,
+including native region size/device/protection and rejected writable mappings.
+The original ART creator reads 4,000 entries from a native FD-backed Info packet:
+the test passes its FD to a disposable client and installs the file object at its
+native Parcel offset. This proves original creator/ashmem compatibility; a large
+Info query through the registered native endpoint to an original app remains
+unrun. Native codec tests cover the exact 32 KiB boundary, UTF-16 surrogate pairs,
+small inline blobs with a large prefix and empty-map behavior. The full original
+parcel fixture passes (30.18s, no skips); service units pass 488 cases (four
+excluded from the default run, 0.49s); binder-host units pass 14 cases (0.02s).
+The image/original-PMS template build passes (12 rebuilt, 30 fresh, 68.6s). The
+last full build passes (17 rebuilt, 25 fresh, 0.7s); final host build is fresh
+(13 nodes, 0.2s). Same-process service
 lookup now retains and dispatches the returned local object (#961), with the
 original BBinder calling identity rule: an incoming caller's UID/PID is retained
 through a nested local call, then restored; outside a call, the host service's
@@ -1458,8 +1482,8 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(28.98s, no skips); release units pass 485 cases (four excluded from the default
-run, 0.53s). The full build passes (six nodes rebuilt, 36 fresh, 7.6s);
+(30.18s, no skips); release units pass 488 cases (four excluded from the default
+run, 0.49s). The full build passes (17 nodes rebuilt, 25 fresh, 0.7s);
 the image/original-PMS template build passes; final host build is fresh (13 nodes, 0.2s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
@@ -1468,9 +1492,9 @@ Binder registration remain unproved. Native cache read/write and facade serializ
 now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
-independently null fields for both component kinds. Release units pass 485
-cases (four excluded from the default run, 0.53s). The full build passes
-(six nodes rebuilt, 36 fresh, 7.6s); final host build is fresh (13 nodes, 0.2s).
+independently null fields for both component kinds. Release units pass 488
+cases (four excluded from the default run, 0.49s). The full build passes
+(17 nodes rebuilt, 25 fresh, 0.7s); final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

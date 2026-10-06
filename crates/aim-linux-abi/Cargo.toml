@@ -18,6 +18,7 @@ name = "linux-translate"
 path = "src/bin/linux-translate.rs"
 
 [dependencies]
+aim-ashmem = { path = "../aim-ashmem" }
 aim-binder-driver = { path = "../aim-binder-driver" }
 aim-binder-host = { path = "../aim-binder-host" }
 aim-host-audio = { path = "../aim-host-audio" }

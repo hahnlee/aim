@@ -281,6 +281,11 @@ public final class DomainCollectorOracle {
         var out = android.os.Parcel.obtain();
         try {
             var info = service.getDomainVerificationInfo("fixture.domains");
+            var reply = android.os.Parcel.obtain();
+            try {
+                reply.writeNoException(); reply.writeTypedObject(info, 0);
+                java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".info").toPath(), reply.marshall());
+            } finally { reply.recycle(); }
             out.writeInt(info == null ? 0 : 1);
             if (info != null) { out.writeString(info.getIdentifier().toString()); writeStates(out, info.getHostToStateMap()); }
             for (int user : new int[] {0, 10}) {

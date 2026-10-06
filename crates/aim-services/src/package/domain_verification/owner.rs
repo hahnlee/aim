@@ -154,21 +154,8 @@ impl Owner {
             restrict_domains,
             linked_app: config.linked_apps.contains(&code.package_name),
         };
-        let auto = collector::collect(code, policy, Kind::ValidAutoVerify);
         let web = collector::collect(code, policy, Kind::Web);
-        let verification = if auto.is_empty() {
-            None
-        } else {
-            let mut states = BTreeMap::new();
-            for (host, state) in &p.domains {
-                let host = host.as_ref().ok_or("null attached domain host")?;
-                states.insert(host.clone(), info_state(*state));
-            }
-            for host in auto {
-                states.entry(host).or_insert(0);
-            }
-            Some((p.id.clone(), states.into_iter().collect()))
-        };
+        let verification = self.verification(&code.package_name, code, restrict_domains, config)?;
         let mut selections = BTreeMap::new();
         for id in users {
             if id < 0 || selections.contains_key(&id) {
@@ -218,6 +205,55 @@ impl Owner {
             users: selections,
             uri_relative_filter_groups: groups,
         }))
+    }
+    /// Info looks up its attached state by the requested name, while Computer
+    /// resolves renamed/static-library package names for the parsed code.
+    pub fn verification(
+        &self,
+        name: &str,
+        code: &AndroidPackage,
+        restrict_domains: bool,
+        config: &SystemConfig,
+    ) -> Result<Option<(String, Vec<(String, i32)>)>, String> {
+        let Some(package) = self.package(name) else {
+            return Ok(None);
+        };
+        let auto = collector::collect(
+            code,
+            Policy {
+                restrict_domains,
+                linked_app: config.linked_apps.contains(&code.package_name),
+            },
+            Kind::ValidAutoVerify,
+        );
+        if auto.is_empty() {
+            return Ok(None);
+        }
+        let mut states = BTreeMap::<String, (usize, i32)>::new();
+        for (index, (host, state)) in package.domains.iter().enumerate() {
+            let host = host.as_ref().ok_or("null attached domain host")?;
+            states
+                .entry(host.clone())
+                .and_modify(|value| value.1 = info_state(*state))
+                .or_insert((index, info_state(*state)));
+        }
+        for (index, host) in auto.into_iter().enumerate() {
+            states
+                .entry(host)
+                .or_insert((package.domains.len() + index, 0));
+        }
+        let mut states: Vec<_> = states
+            .into_iter()
+            .map(|(host, (index, state))| (host, index, state))
+            .collect();
+        states.sort_by_key(|(host, index, _)| (java_hash(host), *index));
+        Ok(Some((
+            package.id.clone(),
+            states
+                .into_iter()
+                .map(|(host, _, state)| (host, state))
+                .collect(),
+        )))
     }
     pub fn remove(&mut self, name: &str) -> Option<Package> {
         let i = self.attached.iter().position(|p| p.name == name)?;
@@ -710,6 +746,32 @@ mod tests {
             restrict_domains: true,
             pre_verified: None,
         }
+    }
+    #[test]
+    fn info_keeps_hash_collision_insertion_order_and_requested_name() {
+        let code = code(&["BB.example", "Aa.example"]);
+        let config = SystemConfig::default();
+        let mut owner = Owner::new(State::default(), BTreeMap::new());
+        owner.add(input(&code), &config).unwrap();
+        owner.attached[0].domains = vec![
+            (Some("BB.example".into()), 1),
+            (Some("Aa.example".into()), 2),
+        ];
+        assert_eq!(java_hash("BB.example"), java_hash("Aa.example"));
+        let (_, states) = owner
+            .verification("fixture", &code, true, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            states,
+            vec![("BB.example".into(), 1), ("Aa.example".into(), 2)]
+        );
+        assert!(
+            owner
+                .verification("alias", &code, true, &config)
+                .unwrap()
+                .is_none()
+        );
     }
     fn saved() -> Package {
         Package {

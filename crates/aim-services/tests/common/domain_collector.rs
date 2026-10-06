@@ -374,11 +374,21 @@ pub fn verify_attachment(directory: &Path) {
                 .queries(&code, true, &config, [0, 10])
                 .unwrap()
                 .unwrap();
+            let info = values.verification.as_ref().map(|(id, states)| {
+                aim_services::package::domain_verification::parcels::Info::prepare(
+                    8, id, "fixture.domains", states,
+                ).unwrap()
+            });
+            let mut reply = Parcel::new();
+            aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_domain_verification_info_reply(&mut reply, info.as_ref());
+            assert_eq!(reply.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.info"))).unwrap(), "original domain info parcel case={case} stage={stage}");
             let mut expected = Parcel::new();
             expected.write_i32(i32::from(values.verification.is_some()));
             let write_states = |out: &mut Parcel, states: &[(String, i32)]| {
                 out.write_i32(states.len() as i32);
-                for (host, state) in states {
+                let mut sorted = states.to_vec();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                for (host, state) in &sorted {
                     out.write_string16(Some(host));
                     out.write_i32(*state);
                 }

@@ -855,7 +855,7 @@ impl Query<'_> {
 
     /// `resolveInternalPackageName`: a static shared library's package
     /// for its library name, as the caller may see it.
-    fn resolve_internal_package_name(&self, name: &str, version_code: i64) -> String {
+    pub(crate) fn resolve_internal_package_name(&self, name: &str, version_code: i64) -> String {
         let libs: Vec<(&PackageState, &AndroidPackage)> = self
             .state
             .packages

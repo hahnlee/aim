@@ -1,0 +1,116 @@
+//! Pinned DomainVerificationInfo and DomainVerificationUtils host-map parcels.
+use std::io;
+use std::os::fd::AsFd;
+
+use aim_binder_host::parcel::Parcel;
+use aim_service_aidl::WriteParcelable;
+
+pub struct Info(Parcel);
+impl Info {
+    /// Prepare before replying: creating a large-map region can fail.
+    /// `prefix` includes the enclosing reply/typed-object headers.
+    pub fn prepare(
+        prefix: usize,
+        id: &str,
+        name: &str,
+        states: &[(String, i32)],
+    ) -> io::Result<Self> {
+        let mut parcel = Parcel::new();
+        parcel.write_string16(Some(&id.to_ascii_lowercase()));
+        parcel.write_string16(Some(name));
+        let mut estimated = prefix + parcel.data().len();
+        let mut blob = false;
+        for (host, _) in states {
+            estimated = estimated
+                .checked_add(host.encode_utf16().count() * 2 + 12)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "host-map size overflow")
+                })?;
+            if estimated > 32768 {
+                blob = true;
+                break;
+            }
+        }
+        let mut map = Parcel::new();
+        map.write_i32(
+            i32::try_from(states.len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "host-map count overflow")
+            })?,
+        );
+        for (host, state) in states {
+            map.write_i32(0); // Parcel.VAL_STRING
+            map.write_string16(Some(host));
+            map.write_i32(1); // Parcel.VAL_INTEGER
+            map.write_i32(*state);
+        }
+        parcel.write_bool(blob);
+        if !blob {
+            parcel.write_raw(map.data(), &[]);
+        } else {
+            parcel.write_i32(i32::try_from(map.data().len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "blob length overflow")
+            })?);
+            if map.data().len() <= 16384 {
+                parcel.write_i32(0); // BLOB_INPLACE
+                parcel.write_raw(map.data(), &[]);
+            } else {
+                let region = aim_ashmem::immutable_blob(map.data())?;
+                let file = aim_binder_host::server::file_from_fd(region.as_fd())
+                    .ok_or_else(|| io::Error::other("cannot retain native blob fileport"))?;
+                parcel.write_i32(1); // BLOB_ASHMEM_IMMUTABLE
+                parcel.write_file(file);
+            }
+        }
+        Ok(Self(parcel))
+    }
+}
+impl WriteParcelable for Info {
+    fn write_to(&self, out: &mut Parcel) {
+        out.write_raw_files(self.0.data(), self.0.objects(), self.0.files());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const ID: &str = "00000000-0000-0000-0000-000000000abc";
+
+    fn map_start(info: &Info) -> aim_binder_host::parcel::Reader<'_> {
+        let mut reader = aim_binder_host::parcel::Reader::new(info.0.data(), info.0.objects());
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some(ID));
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("fixture"));
+        reader
+    }
+
+    #[test]
+    fn host_map_threshold_includes_headers_and_utf16_units() {
+        let base = 8 + 80 + 20; // reply headers, UUID String16, package String16
+        let units = (32768 - base - 12) / 2;
+        let host = "😀".repeat(units / 2) + &"a".repeat(units % 2);
+        let inline = Info::prepare(8, ID, "fixture", &[(host.clone(), 1024)]).unwrap();
+        assert_eq!(map_start(&inline).read_i32().unwrap(), 0);
+        assert!(inline.0.files().is_empty());
+        let large = Info::prepare(8, ID, "fixture", &[(host + "a", 1024)]).unwrap();
+        let mut reader = map_start(&large);
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        assert!(reader.read_i32().unwrap() > 16384);
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        assert_eq!(large.0.files().len(), 1);
+        let file = aim_binder_host::server::file_fd(&large.0.files()[0].1).unwrap();
+        let bytes = std::fs::File::from(file).metadata().unwrap().len();
+        assert!(bytes > 16384);
+    }
+
+    #[test]
+    fn oversized_prefix_uses_inline_blob_for_a_small_map_and_empty_stays_inline() {
+        let small = Info::prepare(40000, ID, "fixture", &[("a.example".into(), 1)]).unwrap();
+        let mut reader = map_start(&small);
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        let length = reader.read_i32().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 0);
+        assert_eq!(reader.remaining(), length as usize);
+        assert!(small.0.files().is_empty());
+        let empty = Info::prepare(40000, ID, "fixture", &[]).unwrap();
+        assert_eq!(map_start(&empty).read_i32().unwrap(), 0);
+    }
+}

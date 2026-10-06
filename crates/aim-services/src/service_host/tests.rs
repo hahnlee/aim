@@ -2467,10 +2467,44 @@ fn verify_boot_scan(
                 .is_err()
         );
         assert!(endpoint.transact(999, &request, false).is_err());
+        let mut info = Parcel::new();
+        api::GetDomainVerificationInfo {
+            package_name: Some("android".into()),
+        }
+        .write(&mut info);
+        let reply = endpoint
+            .transact(api::GET_DOMAIN_VERIFICATION_INFO, &info, false)
+            .unwrap();
+        let mut reader = reply.reader();
+        reader.read_exception().unwrap().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 0);
+        assert_eq!(reader.remaining(), 0);
+        info.write_i32(99);
+        assert!(
+            endpoint
+                .transact(api::GET_DOMAIN_VERIFICATION_INFO, &info, false)
+                .is_err()
+        );
+        for name in [None, Some("missing.package")] {
+            let mut request = Parcel::new();
+            api::GetDomainVerificationInfo {
+                package_name: name.map(String::from),
+            }
+            .write(&mut request);
+            let reply = endpoint
+                .transact(api::GET_DOMAIN_VERIFICATION_INFO, &request, false)
+                .unwrap();
+            let mut reader = reply.reader();
+            assert_eq!(reader.read_i32().unwrap(), -8);
+            assert_eq!(reader.read_string16().unwrap(), None);
+            assert_eq!(reader.read_i32().unwrap(), 0);
+            assert_eq!(reader.read_i32().unwrap(), 1);
+            assert_eq!(reader.remaining(), 0);
+        }
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
         let reply = endpoint
-            .transact(api::GET_DOMAIN_VERIFICATION_INFO, &unsupported, false)
+            .transact(api::GET_OWNERS_FOR_DOMAIN, &unsupported, false)
             .unwrap();
         assert_eq!(
             reply.reader().read_exception().unwrap().unwrap_err().code,
@@ -2498,6 +2532,7 @@ fn verify_boot_scan(
                     Some(
                         "android.permission.DOMAIN_VERIFICATION_AGENT"
                             | "android.permission.INTENT_FILTER_VERIFICATION_AGENT"
+                            | "android.permission.DUMP"
                     )
                 ));
                 assert_eq!(call.data.remaining(), 0);
@@ -2512,6 +2547,21 @@ fn verify_boot_scan(
             native.add_service(Arc::new(DeniedPermissions)),
         );
         assert_eq!(domain_names(foreign_client).unwrap_err().code, -1);
+        {
+            use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+            let mut request = Parcel::new();
+            api::GetDomainVerificationInfo {
+                package_name: Some("android".into()),
+            }
+            .write(&mut request);
+            let reply = find(foreign_client, "query_domains")
+                .transact(api::GET_DOMAIN_VERIFICATION_INFO, &request, false)
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -1
+            );
+        }
         struct Replacement(Option<i32>);
         impl Service for Replacement {
             fn descriptor(&self) -> &str {
