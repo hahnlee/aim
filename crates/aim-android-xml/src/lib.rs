@@ -10,8 +10,8 @@
 pub mod abx;
 mod base64;
 mod double;
-pub mod text;
 pub mod pull;
+pub mod text;
 
 use std::borrow::Cow;
 
@@ -114,63 +114,64 @@ pub fn read_next(bytes: &[u8]) -> Result<Element, String> {
 /// Pull-parser END_DOCUMENT without START_TAG is distinct from malformed XML.
 /// Required-root readers continue to reject this through read/read_next.
 pub fn read_next_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
-    fn normalize(e: &mut Element, binary: bool) -> Result<(), String> {
-        let mut pending_text = false;
-        let mut content = Vec::new();
-        for mut node in e.content.drain(..) {
-            match &mut node {
-                Node::Element(child) => {
-                    normalize(child, binary)?;
-                    pending_text = false;
-                }
-                Node::Token(TEXT, _) => pending_text = true,
-                Node::Token(CDSECT, _) if !binary || pending_text => {
-                    let Node::Token(kind, _) = &mut node else {
-                        unreachable!()
-                    };
-                    *kind = TEXT;
-                    pending_text = true;
-                }
-                Node::Token(CDSECT, _) => continue,
-                Node::Token(6, Some(name)) if binary => {
-                    let value = match name.as_str() {
-                        "lt" => "<".into(),
-                        "gt" => ">".into(),
-                        "amp" => "&".into(),
-                        "apos" => "'".into(),
-                        "quot" => "\"".into(),
-                        name if name.starts_with('#') => {
-                            let value: i32 = name[1..]
-                                .parse()
-                                .map_err(|_| format!("invalid entity {name}"))?;
-                            char::from_u32(value as u16 as u32)
-                                .ok_or_else(|| format!("invalid UTF-16 entity {name}"))?
-                                .to_string()
-                        }
-                        _ => return Err(format!("unknown entity {name}")),
-                    };
-                    if !pending_text {
-                        continue;
-                    }
-                    node = Node::Token(TEXT, Some(value));
-                }
-                Node::Token(COMMENT | 8, _) => {}
-                _ => pending_text = false,
-            }
-            content.push(node);
-        }
-        e.content = content;
-        Ok(())
-    }
     let mut root = if bytes.starts_with(abx::MAGIC) {
         abx::read_optional(bytes)?
     } else {
         text::read_optional(bytes)?
     };
     if let Some(root) = &mut root {
-        normalize(root, bytes.starts_with(abx::MAGIC))?;
+        normalize_next(root, bytes.starts_with(abx::MAGIC))?;
     }
     Ok(root)
+}
+
+pub(crate) fn normalize_next(e: &mut Element, binary: bool) -> Result<(), String> {
+    let mut pending_text = false;
+    let mut content = Vec::new();
+    for mut node in e.content.drain(..) {
+        match &mut node {
+            Node::Element(child) => {
+                normalize_next(child, binary)?;
+                pending_text = false;
+            }
+            Node::Token(TEXT, _) => pending_text = true,
+            Node::Token(CDSECT, _) if !binary || pending_text => {
+                let Node::Token(kind, _) = &mut node else {
+                    unreachable!()
+                };
+                *kind = TEXT;
+                pending_text = true;
+            }
+            Node::Token(CDSECT, _) => continue,
+            Node::Token(6, Some(name)) if binary => {
+                let value = match name.as_str() {
+                    "lt" => "<".into(),
+                    "gt" => ">".into(),
+                    "amp" => "&".into(),
+                    "apos" => "'".into(),
+                    "quot" => "\"".into(),
+                    name if name.starts_with('#') => {
+                        let value: i32 = name[1..]
+                            .parse()
+                            .map_err(|_| format!("invalid entity {name}"))?;
+                        char::from_u32(value as u16 as u32)
+                            .ok_or_else(|| format!("invalid UTF-16 entity {name}"))?
+                            .to_string()
+                    }
+                    _ => return Err(format!("unknown entity {name}")),
+                };
+                if !pending_text {
+                    continue;
+                }
+                node = Node::Token(TEXT, Some(value));
+            }
+            Node::Token(COMMENT | 8, _) => {}
+            _ => pending_text = false,
+        }
+        content.push(node);
+    }
+    e.content = content;
+    Ok(())
 }
 
 impl Value {

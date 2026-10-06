@@ -602,6 +602,22 @@ impl PackageReadAttempt {
 }
 
 impl Settings {
+    /// Preserve the complete consumed persistence document while applying its
+    /// incremental owners. Owner/input failures return before any document export.
+    pub fn read_document(
+        &mut self,
+        bytes: &[u8],
+        read_record: impl FnMut(
+            &mut Self,
+            &mut aim_android_xml::pull::Reader<'_>,
+            &Element,
+        ) -> Result<bool, ReadError>,
+    ) -> Result<Option<Element>, ReadError> {
+        let mut reader = aim_android_xml::pull::Reader::with_document(bytes)?;
+        self.read_events(&mut reader, read_record)?;
+        Ok(reader.take_document()?)
+    }
+
     /// Dispatch one original readSettingsLPw event stream. The callback supplies
     /// package/shared/global owners; recognized owners cannot silently be skipped.
     /// Returns false only when there is no start tag. Boot/retry tables belong to
@@ -1923,6 +1939,27 @@ mod incremental_package_tests {
                 .read_events(&mut Reader::new(b" ").unwrap(), |_, _, _| Ok(false))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn document_capture_preserves_helper_subtrees_unknown_extensions_and_types() {
+        let bytes = b"<packages custom='keep'><!--note--><permissions><item name='p' package='owner' protection='2'/></permissions><extension value='keep'><nested/></extension><version sdkVersion='36' databaseVersion='3'/></packages>";
+        let root = aim_android_xml::read_next(bytes).unwrap();
+        for bytes in [bytes.to_vec(), aim_android_xml::abx::write(&root).unwrap()] {
+            let mut settings = Settings::default();
+            assert_eq!(
+                settings
+                    .read_document(&bytes, |_, _, _| Ok(false))
+                    .unwrap()
+                    .unwrap(),
+                aim_android_xml::read_next(&bytes).unwrap()
+            );
+            assert_eq!(settings.permissions.len(), 1);
+            assert_eq!(settings.versions[0].sdk_version, 36);
+        }
+        let mut settings = Settings::default();
+        assert!(matches!(settings.read_document(b"<packages><version sdkVersion='36' databaseVersion='3'/><keyset-settings/></packages>", |_,_,_| Ok(false)), Err(ReadError::Owner(_))));
+        assert_eq!(settings.versions[0].sdk_version, 36);
     }
 
     #[test]

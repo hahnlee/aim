@@ -2,7 +2,7 @@
 //! remain observable when a later read fails; callers choose where to stop.
 //! Binary event/EOF behavior follows android-16.0.0_r1 BinaryXmlPullParser
 //! (The Android Open Source Project, Apache License 2.0).
-use crate::{CDSECT, COMMENT, ENTITY_REF, Element, PROCESSING_INSTRUCTION, TEXT};
+use crate::{CDSECT, COMMENT, ENTITY_REF, Element, Node, PROCESSING_INSTRUCTION, TEXT};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -29,6 +29,49 @@ pub struct Reader<'a> {
     depth: i32,
     end_tag: bool,
     ended: bool,
+    document: Option<Document>,
+}
+
+#[derive(Default)]
+struct Document {
+    stack: Vec<Element>,
+    root: Option<Element>,
+    complete: bool,
+    failed: bool,
+}
+
+impl Document {
+    fn close(&mut self) {
+        if let Some(element) = self.stack.pop() {
+            if let Some(parent) = self.stack.last_mut() {
+                parent.content.push(Node::Element(element));
+            } else {
+                self.root = Some(element);
+                self.complete = true;
+            }
+        }
+    }
+
+    fn token(&mut self, token: &Token) {
+        if self.complete {
+            return;
+        }
+        match token {
+            Token::Start(element) => self.stack.push(element.clone()),
+            Token::End(_) => self.close(),
+            Token::Content(kind, text) => {
+                if let Some(element) = self.stack.last_mut() {
+                    element.content.push(Node::Token(*kind, text.clone()));
+                }
+            }
+            Token::EndDocument => {
+                while !self.stack.is_empty() {
+                    self.close();
+                }
+                self.complete = true;
+            }
+        }
+    }
 }
 
 impl<'a> Reader<'a> {
@@ -42,7 +85,33 @@ impl<'a> Reader<'a> {
             depth: 0,
             end_tag: false,
             ended: false,
+            document: None,
         })
+    }
+
+    /// Capture the tokens consumed by this reader, including helper-owned and
+    /// skipped subtrees. No second parse or read past the owner's stop boundary.
+    pub fn with_document(bytes: &'a [u8]) -> Result<Self, String> {
+        let mut reader = Self::new(bytes)?;
+        reader.document = Some(Document::default());
+        Ok(reader)
+    }
+
+    pub fn take_document(&mut self) -> Result<Option<Element>, String> {
+        let mut document = self
+            .document
+            .take()
+            .ok_or("document capture is not enabled")?;
+        if document.failed {
+            return Err("document capture failed during XML reading".into());
+        }
+        if !document.complete {
+            return Err("document capture has not reached root end or EOF".into());
+        }
+        if let Some(root) = &mut document.root {
+            crate::normalize_next(root, matches!(self.input, Input::Binary(_)))?;
+        }
+        Ok(document.root)
     }
 
     /// END_TAG retains its element's depth until the next event, as Android does.
@@ -51,10 +120,14 @@ impl<'a> Reader<'a> {
     }
 
     fn token(&mut self) -> Result<Token, String> {
-        match &mut self.input {
+        let token = match &mut self.input {
             Input::Binary(reader) => reader.token(),
             Input::Text(reader) => reader.token(),
+        }?;
+        if let Some(document) = &mut self.document {
+            document.token(&token);
         }
+        Ok(token)
     }
 
     fn peek(&self) -> Result<u8, String> {
@@ -65,6 +138,16 @@ impl<'a> Reader<'a> {
     }
 
     pub fn next(&mut self) -> Result<Event, String> {
+        let result = self.next_event();
+        if result.is_err()
+            && let Some(document) = &mut self.document
+        {
+            document.failed = true;
+        }
+        result
+    }
+
+    fn next_event(&mut self) -> Result<Event, String> {
         if self.ended {
             return Ok(Event::EndDocument);
         }
@@ -134,6 +217,53 @@ pub(crate) fn entity(name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_preserves_text_comments_cdata_entities_and_binary_attribute_types() {
+        let bytes =
+            b"<r kind='value'>a<!--comment--><![CDATA[b]]><?probe value?>&amp;<child/>tail</r>";
+        let mut root = crate::read(bytes).unwrap();
+        root.attrs.push(("number".into(), crate::Value::IntHex(42)));
+        for bytes in [bytes.to_vec(), crate::abx::write(&root).unwrap()] {
+            let mut reader = Reader::with_document(&bytes).unwrap();
+            loop {
+                match reader.next().unwrap() {
+                    Event::End(_) if reader.depth() == 1 => break,
+                    Event::EndDocument => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                reader.take_document().unwrap().unwrap(),
+                crate::read_next(&bytes).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn captured_document_obeys_root_stop_eof_and_failed_read_boundaries() {
+        for bytes in [b"<r><child/></r>broken".as_slice(), b"<r><child/>"] {
+            let mut reader = Reader::with_document(bytes).unwrap();
+            loop {
+                match reader.next().unwrap() {
+                    Event::End(_) if reader.depth() == 1 => break,
+                    Event::EndDocument => break,
+                    _ => {}
+                }
+            }
+            let root = reader.take_document().unwrap().unwrap();
+            assert_eq!(root.name, "r");
+            assert_eq!(root.children().next().unwrap().name, "child");
+            assert!(reader.take_document().is_err());
+        }
+        let mut reader = Reader::with_document(b"<r><").unwrap();
+        reader.next().unwrap();
+        assert!(reader.next().is_err());
+        assert!(reader.take_document().is_err());
+        let mut reader = Reader::with_document(b" ").unwrap();
+        assert_eq!(reader.next().unwrap(), Event::EndDocument);
+        assert!(reader.take_document().unwrap().is_none());
+    }
 
     #[test]
     fn completed_events_survive_a_later_failure_and_root_end_is_a_stop_boundary() {

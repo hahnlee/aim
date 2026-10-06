@@ -2,7 +2,8 @@
 //! and `Xml.newSerializer` write: elements, attributes (all strings),
 //! character data, CDATA sections and comments, with the predefined
 //! entities and character references. The declaration, processing
-//! instructions and a document type declaration are skipped.
+//! instructions outside the root and document type declarations are skipped;
+//! in-element processing instructions are retained.
 
 use crate::{CDSECT, COMMENT, Element, Node, TEXT, Value};
 
@@ -126,8 +127,10 @@ impl<'a> Reader<'a> {
             } else if self.eat("<![CDATA[") {
                 Node::Token(CDSECT, Some(self.until("]]>")?.to_owned()))
             } else if self.eat("<?") {
-                self.until("?>")?;
-                continue;
+                Node::Token(
+                    crate::PROCESSING_INSTRUCTION,
+                    Some(self.until("?>")?.to_owned()),
+                )
             } else if self.eat("<") {
                 Node::Element(self.element()?)
             } else {

@@ -5609,20 +5609,7 @@ fn read_version_events(
     bytes: &[u8],
     settings: &mut aim_services::package::settings::Settings,
 ) -> Result<Option<aim_android_xml::Element>, String> {
-    use aim_android_xml::pull::{Event, Reader};
-    let mut reader = Reader::new(bytes)?;
-    let root = loop {
-        match reader.next()? {
-            Event::Start(element) => break element,
-            Event::EndDocument => return Ok(None),
-            _ => {}
-        }
-    };
-    // This projection returns only the root marker; full persistence document
-    // capture belongs to the complete frontend (#914).
-    let mut reader = Reader::new(bytes)?;
-    settings.read_events(&mut reader, |_,_,_| Ok(false)).map_err(|error| error.to_string())?;
-    Ok(Some(root))
+    settings.read_document(bytes, |_,_,_| Ok(false)).map_err(|error| error.to_string())
 }
 
 fn export_retained_snapshot(

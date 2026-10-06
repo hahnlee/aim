@@ -2264,3 +2264,21 @@ fn classified_file_failure_still_removes_corrupt_input_and_retries_reserve() {
     assert!(report.events.iter().any(|event| matches!(event, Event::Failed { source: Source::Main, .. })));
     assert_eq!(report.events.last(), Some(&Event::Selected(Source::Reserve)));
 }
+
+#[test]
+fn captured_settings_document_reopens_after_owned_commit_with_extensions() {
+    let data = Data::new();
+    fs::create_dir_all(data.0.join("system")).unwrap();
+    let path = data.0.join("system/packages.xml");
+    let bytes = b"<packages custom='keep'><!--note--><version sdkVersion='36' databaseVersion='3'/><permissions><item name='perm' package='p' protection='2'/></permissions><?native capture?><extension value='keep'><nested/></extension></packages>";
+    fs::write(&path, bytes).unwrap();
+    let mut settings = crate::package::settings::Settings::default();
+    let (mut store, report) = recovery::Plan::inspect(&data.0).unwrap()
+        .recover_with_owner(&[0], &mut settings, |bytes, state| state.read_document(bytes, |_, _, _| Ok(false))).unwrap();
+    assert!(!report.first_boot);
+    let document = aim_android_xml::read_next(bytes).unwrap();
+    assert_eq!(store.settings_document, document);
+    store.commit_package_document_using(document.clone(), None, |file, bytes| file.write_all(bytes)).unwrap();
+    assert_eq!(Store::open(&data.0, &[0]).unwrap().unwrap().settings_document, document);
+    assert_eq!(aim_android_xml::read_next(&fs::read(path).unwrap()).unwrap(), document);
+}

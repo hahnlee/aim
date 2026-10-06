@@ -928,14 +928,26 @@ now runs through this dispatcher. Package/shared-UID and version/permission ART
 projections now use the production dispatcher, with 34 original version cases
 including nested preferred-packages, renamed-package and read-external-storage
 records. Unit checks cover rename replacement, unknown subtree skip, trailing
-malformed input, no start tag and missing-owner classification. Full persistence
-document capture, remaining global/keyset/domain/verifier/migration owners and
-boot/retry orchestration are still required (#914/#912/#798); fixture projections
-return only the root marker and do not prove a complete writable Store frontend.
-515 service units pass (5 excluded, 0.51s); full original ART oracle passes without
-skips (68.24s), retaining 866 package-body/header, 238 shared UID and incremental
-permission projections. Production runtime build passes (3 rebuilt/39 fresh,
-1.2s); previous image/template build passed (6 rebuilt/36 fresh, 72.1s). An original
+malformed input, no start tag and missing-owner classification. The pull reader now optionally captures every consumed token, including
+helper/skipped subtrees, typed attributes, comments and processing instructions,
+without a second parse or reading past root end. EOF closes the consumed event
+snapshot as the original reader permits; XML failures prevent document export.
+Settings.read_document runs the dispatcher and returns the full captured document
+only after a successful attempt. Version/permission recovery projections now use
+this actual document rather than a synthetic root marker. A native owned
+read/commit/reopen test retains unknown attributes/extensions, comments and an
+in-element processing instruction in packages.xml. Text AST reads previously
+lost in-element processing instructions (#969); they now retain the token,
+matching pull/ABX capture. Mixed text/comment/CDATA/entity and typed ABX capture
+comparisons pass. Remaining global/keyset/domain/verifier/migration owners,
+group/user/permission binding and complete boot/retry/write orchestration remain
+#914/#912/#798; full native Store frontend and default boot are still unproved.
+17 XML tests and 517 service units pass (5 service tests excluded, 0.49s); the
+updated processing-instruction owned reopen test also passes explicitly (0.03s).
+Full original ART oracle passes without skips (58.20s), retaining 34 version,
+866 package-body/header, 238 shared UID and incremental permission projections.
+Production runtime build passes (5 rebuilt/37 fresh, 1.1s); previous image/template
+build passed (6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier
 checks it against the pinned original. Only worktree incremental cache was removed
