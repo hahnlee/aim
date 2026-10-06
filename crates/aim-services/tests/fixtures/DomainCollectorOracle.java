@@ -23,6 +23,7 @@ public final class DomainCollectorOracle {
         verifyConfiguration(directory);
         verifySignatures(directory);
         verifyAttachment(directory, context, compat);
+        com.android.server.pm.ScanSettingsWriteOracle.verifyLegacyDomains(directory, context, compat);
         var config = new com.android.server.SystemConfig(false);
         var collector = new com.android.server.pm.verify.domain.DomainVerificationCollector(compat, config);
         byte[] expected = java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-collector.input").toPath());

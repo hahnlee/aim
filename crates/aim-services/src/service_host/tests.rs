@@ -2242,26 +2242,23 @@ fn verify_boot_scan(
     assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
     let mut context = query_context_for(&complete, base.version() + 1);
-    use crate::package::domain_verification::owner::{Input as DomainInput, Owner as DomainOwner};
-    let mut domains = DomainOwner::new(Default::default(), Default::default());
+    use crate::package::domain_verification::owner::Owner as DomainOwner;
+    let boot_domains = bridge.boot_domains(&complete, config).unwrap();
+    assert_eq!(boot_domains.changes.len(), complete.settings.packages.len());
+    let domains = boot_domains.owner;
     let policies = bridge.domain_policies(&complete).unwrap();
-    for setting in &complete.settings.packages {
-        let code = &complete.loaded_packages()[&setting.name].package;
-        domains
-            .add(
-                DomainInput {
-                    id: setting.domain_set_id.as_deref().unwrap(),
-                    name: &setting.name,
-                    code: Some(code),
-                    signatures: &[],
-                    system: setting.flags & 1 != 0,
-                    restrict_domains: policies[&setting.name],
-                    pre_verified: None,
-                },
-                config,
-            )
-            .unwrap();
-    }
+    let before_domains = complete.clone();
+    let mut missing_signing = complete.clone();
+    missing_signing.settings.packages[0].signatures = None;
+    assert!(bridge.boot_domains(&missing_signing, config).is_err());
+    let mut changed_signing = complete.clone();
+    changed_signing.settings.packages[0]
+        .signatures
+        .as_mut()
+        .unwrap()
+        .signatures = vec![vec![0]];
+    assert!(bridge.boot_domains(&changed_signing, config).is_err());
+    assert_eq!(complete, before_domains);
     // Supplied values must be overwritten by the native attached owner.
     context
         .packages

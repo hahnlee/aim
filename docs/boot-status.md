@@ -1303,7 +1303,12 @@ failed domains, disabled link handling and absent-user defaults. The native boot
 scan publisher fixture now derives domains through this resolver instead of
 supplying host states, rejects UUID mismatch/missing owner/missing policies, and
 preserves previous scan/query captures on later publication failures (one explicit
-ignored test executed, 0.70s). Its policy inventory now comes from the retained
+ignored test executed, 0.66s). This fixture now constructs the attached owner
+through the bootstrap builder from the actual native scan: current code,
+Settings UUIDs and verified signer arrays. Missing/UNKNOWN signing, mismatched
+code/signing owners and incomplete policies reject before attachment; candidate
+failures leave the scan unchanged. The builder retains pending/restored state
+and returns verifier requests separately from delivery. Its policy inventory now comes from the retained
 bootstrap bridge's original PlatformCompat owner. The bridge supplies the same
 mock ApplicationInfo name/target-SDK fields as DomainVerificationUtils and reads
 RESTRICT_DOMAINS (175408749), preserving original configuration decisions. The
@@ -1311,7 +1316,14 @@ original-ART fixture at system UID compares this producer with original
 isChangeEnabledInternalNoLogging at SDK 28/30/31/36; null/empty names, negative
 SDK and an actual foreign UID are rejected. Native tests reject empty/trailing
 replies and invalid identities. Runtime override changes/invalidation have not
-been exercised. Production domain-owner creation and native domain Binder
+been exercised. Native Settings now imports old per-package
+`<domain-verification>` global statuses separately from legacy per-user state,
+using the Settings package name rather than the child's packageName. Original
+Settings.readSettingsLPw followed by DomainVerificationService.addPackage
+matches eight native imports: foreign/missing child names, last duplicate wins,
+missing/malformed/negative status and verifier-defined status. The boot builder
+uses these actual Settings inputs, not an assumed empty legacy map. Daemon
+startup/lifetime storage of the constructed owner and native domain Binder
 registration are still unwired. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
@@ -1323,10 +1335,10 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(31.23s, no skips); release units pass 482 cases (four excluded from the default
-run, 0.49s). The full image/original-PMS template build passes (nine rebuilt,
-33 fresh, 60.4s).
-URI-group migration, legacy/pre-verified transitions and missing-owner recovery
+(41.33s, no skips); release units pass 482 cases (four excluded from the default
+run, 0.47s). The full build passes (three host nodes rebuilt, 39 fresh, 14.8s);
+the image/original-PMS template remains fresh.
+URI-group migration, legacy per-user/pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
 Binder registration remain unproved. Native cache read/write and facade serialization
@@ -1334,8 +1346,8 @@ now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 482
-cases (four excluded from the default run, 0.49s). The current full build passes
-(nine nodes rebuilt, 33 fresh, 60.4s); the final host build is fresh (13 nodes, 0.2s).
+cases (four excluded from the default run, 0.47s). The current full build passes
+(three host nodes rebuilt, 39 fresh, 14.8s); the final host build is fresh (13 nodes, 0.3s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

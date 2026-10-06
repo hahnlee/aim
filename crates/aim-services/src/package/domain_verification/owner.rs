@@ -46,6 +46,11 @@ pub struct Owner {
     ids: BTreeMap<String, String>,
     legacy_info: BTreeMap<String, i32>,
 }
+pub struct Boot {
+    pub owner: Owner,
+    /// Requests only; the verifier driver must apply its boot-readiness policy.
+    pub changes: Vec<(String, Change)>,
+}
 impl Owner {
     /// Legacy global approvals are a separate owner, not inferred from user state.
     pub fn new(saved: State, legacy_info: BTreeMap<String, i32>) -> Self {
@@ -55,6 +60,66 @@ impl Owner {
             ids: BTreeMap::new(),
             legacy_info,
         }
+    }
+    /// Attach the actual current scan's code, Settings IDs and signer arrays.
+    pub fn from_boot(
+        scan: &crate::package::scan::SigningScan,
+        config: &SystemConfig,
+        policies: &BTreeMap<String, bool>,
+    ) -> Result<Boot, String> {
+        use std::collections::BTreeSet;
+        let names: BTreeSet<_> = scan
+            .settings
+            .packages
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        if names.len() != scan.settings.packages.len()
+            || policies.keys().cloned().collect::<BTreeSet<_>>() != names
+        {
+            return Err("boot domain policy inventory differs".into());
+        }
+        let mut inputs = Vec::new();
+        for setting in &scan.settings.packages {
+            let code = scan
+                .loaded_packages()
+                .get(&setting.name)
+                .ok_or("missing boot domain code")?;
+            let signing = setting
+                .signatures
+                .as_ref()
+                .ok_or("missing boot domain signing owner")?;
+            if code.collected_signing.unknown
+                || code.collected_signing.package_details()? != code.package.signing_details
+                || signing.signatures != code.collected_signing.signatures
+            {
+                return Err("boot domain signing owners differ".into());
+            }
+            let input = Input {
+                id: setting
+                    .domain_set_id
+                    .as_deref()
+                    .ok_or("missing boot domain UUID")?,
+                name: &setting.name,
+                code: Some(&code.package),
+                signatures: &signing.signatures,
+                system: setting.flags & crate::package::settings::FLAG_SYSTEM != 0,
+                restrict_domains: policies[&setting.name],
+                pre_verified: None,
+            };
+            validate(&input)?;
+            inputs.push(input);
+        }
+        let mut owner = Self::new(
+            scan.settings.domain_verification.clone(),
+            scan.settings.legacy_domain_info.clone(),
+        );
+        let mut changes = Vec::new();
+        for input in inputs {
+            let name = input.name.to_owned();
+            changes.push((name, owner.add(input, config)?));
+        }
+        Ok(Boot { owner, changes })
     }
     pub fn package(&self, name: &str) -> Option<&Package> {
         self.attached.iter().find(|p| p.name == name)

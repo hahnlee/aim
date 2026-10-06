@@ -2,6 +2,30 @@ package com.android.server.pm;
 
 /** Actual pinned Settings writer on detached, native-captured setting owners. */
 public final class ScanSettingsWriteOracle {
+    public static void verifyLegacyDomains(java.io.File directory, android.content.Context context,
+            com.android.server.compat.PlatformCompat compat) throws Exception {
+        var code = (com.android.server.pm.pkg.AndroidPackage) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+            java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
+        for (int i = 0; i < 8; i++) {
+            var domain = new com.android.server.pm.verify.domain.DomainVerificationService(context, new com.android.server.SystemConfig(false), compat);
+            var data = new java.io.File(directory, "domain-legacy-original-" + i);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-legacy-" + i + ".input").toPath()));
+            var settings = new Settings(data, null, null, domain, null, new PackageManagerTracedLock());
+            if (!settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>())) throw new AssertionError("legacy settings import failed");
+            var setting = settings.getPackagesLocked().get("fixture.domains");
+            if (setting == null) throw new AssertionError("legacy package owner missing");
+            setting.setPkg(code);
+            setting.setSigningDetails(new android.content.pm.SigningDetails(new android.content.pm.Signature[0], 0, new android.util.ArraySet<>(), null));
+            domain.addPackage((com.android.server.pm.pkg.PackageStateInternal) setting, null);
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-legacy-" + i + ".original"))) {
+                var xml = android.util.Xml.resolveSerializer(output);
+                xml.startDocument(null, true); xml.startTag(null, "packages");
+                domain.writeSettings(null, xml, false, -1);
+                xml.endTag(null, "packages"); xml.endDocument();
+            }
+        }
+    }
     public static void write(java.io.File cache, dev.aim.server.PackageScanLease lease,
             PackageSetting assembled) throws Exception {
         verifyArrayMapOrder();

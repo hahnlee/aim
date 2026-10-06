@@ -7,8 +7,7 @@
 //! Legacy `<perms>` restore lives in owner::legacy_permissions.
 //! Not modelled yet: what only older platforms write (per-package
 //! `<enabled-components>`, `<disabled-components>`,
-//! `<domain-verification>`, the single-user
-//! preferred activities), which
+//! the single-user preferred activities), which
 //! the original reads only to migrate.
 
 use aim_android_xml::Element;
@@ -46,6 +45,9 @@ pub struct Settings {
     pub renamed_packages: Vec<(String, String)>,
     pub key_sets: KeySets,
     pub domain_verification: domain_verification::State,
+    /// Imported IntentFilterVerificationInfo statuses, keyed by the Settings owner
+    /// name (not the child XML packageName). Only used for legacy migration.
+    pub legacy_domain_info: std::collections::BTreeMap<String, i32>,
 }
 
 /// `Settings.VersionInfo`.
@@ -535,6 +537,10 @@ impl Settings {
                         }) {
                             let count = key_set_refs.entry(identifier(child)?).or_default();
                             *count = count.wrapping_add(1);
+                        }
+                        for child in children(e, "domain-verification") {
+                            s.legacy_domain_info
+                                .insert(p.name.clone(), defaulted(child.int("status"), -1));
                         }
                         s.packages.push(p);
                     }

@@ -104,6 +104,16 @@ impl Bridge {
             .collect()
     }
 
+    pub fn boot_domains(
+        &self,
+        owner: &SigningScan,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<crate::package::domain_verification::owner::Boot, QueryContextError> {
+        let policies = self.domain_policies(owner)?;
+        crate::package::domain_verification::owner::Owner::from_boot(owner, config, &policies)
+            .map_err(QueryContextError::Input)
+    }
+
     pub fn resolve_domain_query_context(
         &self,
         owner: &SigningScan,

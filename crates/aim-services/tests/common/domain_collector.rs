@@ -158,6 +158,7 @@ pub fn export(directory: &Path) {
     configuration(directory);
     signatures(directory);
     attachment_inputs(directory);
+    legacy_inputs(directory);
     let mut cases = vec![
         package(vec![
             filter(true, false, &["https"], &["seed.example"]),
@@ -371,5 +372,84 @@ pub fn verify_attachment(directory: &Path) {
                 "attached domain state case={case} stage={stage}"
             );
         }
+    }
+}
+
+fn legacy_inputs(directory: &Path) {
+    let tags = [
+        "<domain-verification packageName='foreign.child' status='2'/>",
+        "<domain-verification status='2'/>",
+        "<domain-verification status='1'/><domain-verification status='2'/>",
+        "<domain-verification status='2'/><domain-verification status='1'/>",
+        "<domain-verification/>",
+        "<domain-verification status='bad'/>",
+        "<domain-verification status='-1'/>",
+        "<domain-verification status='1024'/>",
+    ];
+    for (index, tag) in tags.into_iter().enumerate() {
+        let xml = format!(
+            "<packages><package name='fixture.domains' codePath='/data/app/fixture.domains' userId='10001' domainSetId='00000000-0000-0000-0000-00000000000d'>{tag}</package></packages>"
+        );
+        fs::write(directory.join(format!("domain-legacy-{index}.input")), xml).unwrap();
+    }
+}
+
+pub fn verify_legacy(directory: &Path) {
+    use aim_services::package::{
+        domain_verification::{
+            State,
+            owner::{Input, Owner},
+        },
+        settings::Settings,
+        system_config::SystemConfig,
+    };
+    let code =
+        AndroidPackage::read_cache_entry(&fs::read(directory.join("domain-owner.cache")).unwrap())
+            .unwrap();
+    for index in 0..8 {
+        let settings = Settings::parse(
+            &aim_android_xml::read(
+                &fs::read(directory.join(format!("domain-legacy-{index}.input"))).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.legacy_domain_info.keys().collect::<Vec<_>>(),
+            [&"fixture.domains".to_string()]
+        );
+        let mut owner = Owner::new(settings.domain_verification, settings.legacy_domain_info);
+        let setting = &settings.packages[0];
+        owner
+            .add(
+                Input {
+                    id: setting.domain_set_id.as_deref().unwrap(),
+                    name: &setting.name,
+                    code: Some(&code),
+                    signatures: &[],
+                    system: false,
+                    restrict_domains: true,
+                    pre_verified: None,
+                },
+                &SystemConfig::default(),
+            )
+            .unwrap();
+        let root = aim_android_xml::read(
+            &fs::read(directory.join(format!("domain-legacy-{index}.original"))).unwrap(),
+        )
+        .unwrap();
+        let mut original = State::default();
+        original
+            .read(
+                root.children()
+                    .find(|e| e.name == "domain-verifications")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            owner.persisted(),
+            original,
+            "legacy domain import case={index}"
+        );
     }
 }
