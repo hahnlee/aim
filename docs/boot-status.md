@@ -982,12 +982,27 @@ preserved, no Store returned), and stale-owner rejection before backup selection
 (main/backup unchanged). Complete record owners are supplied by the caller;
 guest-init/SystemServer orchestration, full frontend and original-name activation
 remain #914/#912/#798. This entry does not run or replace original PMS.
-17 XML tests and 522 service units pass (5 service tests excluded, 0.51s).
-The explicit retained-owner native scan against original framework-res passes
-(1.45s), including the new recovery-entry checks. The previous full original ART
-oracle passed without skips (57.01s); it was not rerun for this System-entry-only
-change. Production runtime build passes (3 rebuilt/39 fresh, 22.5s); previous
-image/template build passed (6 rebuilt/36 fresh, 72.1s). An original
+The verifier tag now has a native VerifierDeviceIdentity.parse owner in both
+incremental dispatch and AST import. It validates the 64-bit Base32 value,
+normalizes arbitrary separators/case and ambiguous 0/1 letters to the canonical
+form, and publishes only after successful decoding. Invalid characters/start
+bit overflow/length errors enter file recovery; a null attribute is FatalInput
+as the original uncaught NPE, retaining earlier identity. Actual original Settings
+agrees on 392 ABX read/retry cases with synthetic fixture values, including all
+ASCII characters in first/middle/last positions, aliases, Unicode, null and
+length/overflow failures. The previous raw-string AST import is superseded.
+Compile-only VerifierDeviceIdentity/Settings API declarations were checked against
+the pinned image; an initial implicit no-arg constructor mismatch was corrected
+to the original long constructor. No identities are generated/spoofed and no
+original guest code is modified. Domain SettingsXml cursor/error/merge semantics
+and full remaining owner/bootstrap integration remain #914/#957/#798.
+17 XML tests and 524 service units pass (5 service tests excluded, 0.52s).
+Full original ART oracle passes without skips (58.87s), retaining package/shared
+UID/keyset/read-and-retirement/permission projections. Image/template build passes
+(6 rebuilt/36 fresh, 72.9s). The prior explicit retained-owner native framework-res
+scan passed (1.45s); it was not rerun for this verifier-owner change.
+Source: pinned frameworks/base core/java/android/content/pm/VerifierDeviceIdentity.java.
+ An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier
 checks it against the pinned original. Only worktree incremental cache was removed

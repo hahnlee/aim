@@ -40,6 +40,7 @@ public final class ScanSettingsWriteOracle {
         verifyPackageChildEvents(cache.getParentFile());
         verifySharedReadEvents(cache.getParentFile());
         verifyKeySetEvents(cache.getParentFile());
+        verifyVerifierEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -70,6 +71,18 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyVerifierEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "verifier-event-input-" + index); if (!input.exists()) break;
+            var data = new java.io.File(directory, "verifier-event-original-" + index); var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock()); String status = "ok";
+            try { settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>()); }
+            catch (NullPointerException failure) { status = "fatal"; }
+            java.nio.file.Files.write(new java.io.File(directory, "verifier-event-output-" + index).toPath(), (status + "|" + settings.getVerifierDeviceIdentityLPw(null).toString()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
     private static void verifyKeySetEvents(java.io.File directory) throws Exception {

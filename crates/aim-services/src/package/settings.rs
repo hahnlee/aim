@@ -17,6 +17,7 @@ use super::{children, string};
 
 mod signatures;
 mod key_sets;
+mod verifier;
 pub use super::owner::recovery::ReadError;
 pub use signatures::SignatureReader;
 
@@ -664,6 +665,7 @@ impl Settings {
                             }
                         }
                     }
+                    "verifier" => self.read_verifier(&start)?,
                     "preferred-packages" | "read-external-storage" => {}
                     _ => {
                         if !read_record(self, reader, &start)? {
@@ -672,7 +674,6 @@ impl Settings {
                                 "package"
                                     | "shared-user"
                                     | "updated-package"
-                                    | "verifier"
                                     | "keyset-settings"
                                     | "domain-verifications"
                                     | "domain-verifications-legacy"
@@ -1005,7 +1006,7 @@ impl Settings {
                         s.renamed_packages.push((new, old));
                     }
                 }
-                "verifier" => s.verifier = string(e, "device"),
+                "verifier" => s.read_verifier(e).map_err(|error| error.to_string())?,
                 "keyset-settings" => {
                     s.key_sets = key_sets(e)?;
                     if s.key_sets.versioned {

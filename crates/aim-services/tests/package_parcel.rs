@@ -16,6 +16,7 @@ mod common {
     pub mod package_child_events;
     pub mod shared_read_events;
     pub mod key_set_events;
+    pub mod verifier_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -603,6 +604,12 @@ fn native_package_parcels_match_original_read_write() {
         (before, common::key_set_events::trace(&state, status))
     }).collect();
     eprintln!("original incremental keyset cases: {}", key_set_event_inputs.len());
+    let verifier_event_inputs = common::verifier_events::inputs();
+    let verifier_event_expected: Vec<_> = verifier_event_inputs.iter().enumerate().map(|(index, bytes)| {
+        fs::write(directory.join(format!("verifier-event-input-{index}")), bytes).unwrap();
+        common::verifier_events::read(bytes)
+    }).collect();
+    eprintln!("original verifier recovery cases: {}", verifier_event_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -4304,6 +4311,9 @@ fn native_package_parcels_match_original_read_write() {
             let projected = format!("{}|{}|{}|{},{}|{}", fields[0], fields[1], fields[2], keysets.last_issued_key_id, keysets.last_issued_key_set_id, sets.join(";"));
             assert_eq!(projected, *expected, "original incremental keyset {index} {phase}");
         }
+    }
+    for (index, expected) in verifier_event_expected.iter().enumerate() {
+        assert_eq!(fs::read_to_string(directory.join(format!("verifier-event-output-{index}"))).unwrap(), *expected, "original verifier read/retry {index}");
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {

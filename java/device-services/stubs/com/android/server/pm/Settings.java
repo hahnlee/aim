@@ -21,6 +21,7 @@ public final class Settings {
     boolean readLPw(Computer computer, java.util.List<android.content.pm.UserInfo> users) { throw new RuntimeException("stub"); }
     boolean readSettingsLPw(Computer computer, java.util.List<android.content.pm.UserInfo> users,
         android.util.ArrayMap<String, Long> firstInstallTimes) { throw new RuntimeException("stub"); }
+    public android.content.pm.VerifierDeviceIdentity getVerifierDeviceIdentityLPw(Computer computer) { throw new RuntimeException("stub"); }
     public VersionInfo findOrCreateVersion(String uuid) { throw new RuntimeException("stub"); }
     final com.android.server.pm.permission.LegacyPermissionSettings mPermissions = null;
     KeySetManagerService getKeySetManagerService() { throw new RuntimeException("stub"); }
