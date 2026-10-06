@@ -427,6 +427,38 @@ fn attachment_inputs(directory: &Path) {
     }
 }
 
+pub fn verify_uuid(directory: &Path) {
+    use aim_binder_host::parcel::Reader;
+    use aim_services::package::domain_verification::uuid;
+    let bytes = fs::read(directory.join("domain-uuid-digits.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    for c in 0..=65535 {
+        assert_eq!(
+            uuid::digit(c).map_or(-1, i32::from),
+            reader.read_i32().unwrap(),
+            "original hex digit U+{c:04X}"
+        );
+    }
+    assert_eq!(reader.remaining(), 0);
+    let bytes = fs::read(directory.join("domain-uuid.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    let cases = reader.read_i32().unwrap();
+    for case in 0..cases {
+        let strict = reader.read_bool().unwrap();
+        let value = reader.read_string16().unwrap().unwrap();
+        let failed = reader.read_i32().unwrap();
+        let result = reader.read_string16().unwrap().unwrap();
+        let expected = if failed == 0 { Ok(result) } else { Err(result) };
+        assert_eq!(
+            uuid::parse(&value, strict),
+            expected,
+            "original UUID case={case} strict={strict} input={value:?}"
+        );
+    }
+    assert_eq!(reader.remaining(), 0);
+    eprintln!("Original UUID modes: {cases} cases and 65,536 hex digits");
+}
+
 pub fn verify_owner_sort(directory: &Path) {
     use aim_binder_host::parcel::Reader;
     let fold_bytes = fs::read(directory.join("domain-name-fold.original")).unwrap();

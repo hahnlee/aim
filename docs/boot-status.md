@@ -1522,7 +1522,16 @@ reuse the domain-settings V2 policy. Only system UID may ask. Native tests rejec
 empty/trailing replies, and the original runtime policy oracle confirms the same
 boolean and real foreign-UID denial. The full original oracle passes (30.56s,
 no skips), and 490 units pass (0.68s; five excluded by default). This establishes
-mode ownership; native UUID parsing and method 5 integration remain open. Three
+mode ownership. Native UUID parsing now implements current/Java8 normalization,
+field truncation/overflow, plus and trailing-dash rules, UTF-16 hexadecimal digits
+and the original numeric error messages (2026-10-06). An original-runtime fixture
+selects each mode through Compatibility's public behavior delegate, calls original
+UUID.fromString and restores that delegate on exit; no reflection or patched JDK
+classes are used. All 1,648 cases agree in values and errors, and all 65,536 UTF-16
+Character.digit results agree. The full oracle passes (29.83s, no skips); 491 units
+pass (0.51s; five excluded by default). The port retains OpenJDK notices/Classpath
+exception, with pinned ICU digit data under its own license. Method 5 integration
+remains open. Three
 domain methods and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup

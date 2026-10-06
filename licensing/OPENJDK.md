@@ -18,6 +18,12 @@ its containing Cargo package records both that exception and the Apache-2.0
 terms of the package's independent files. The root Apache license does not
 relicense the port.
 
+The native UUID parser in
+[`domain_verification/uuid.rs`](../crates/aim-services/src/package/domain_verification/uuid.rs)
+ports the same pinned libcore UUID/Long algorithms, preserving both Android UUID
+modes and hexadecimal error rules. Its Unicode digit table follows the separately
+licensed pinned ICU data described in THIRD_PARTY_NOTICES.
+
 The ART exception build
 (the `art` node of `cargo aim`, ADR 0012 decision 4) compiles, unmodified:
 

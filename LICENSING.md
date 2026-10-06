@@ -18,6 +18,7 @@ upstream file is modified, translated, embedded in a script, or renamed.
 | Downloaded sources, tools, images, libraries and generated derivatives | Their upstream terms; their presence in a build directory does not make them Apache-2.0 |
 | `crates/aim-services/src/package/timsort.rs` (libcore TimSort port) | GPL-2.0-only WITH Classpath-exception-2.0; upstream notices retained, see [licensing/OPENJDK.md](licensing/OPENJDK.md) |
 | `crates/aim-services/src/package/domain_verification/names.rs` casing table | Unicode-3.0; see [ICU license](licensing/third-party/icu-LICENSE) |
+| `crates/aim-services/src/package/domain_verification/uuid.rs` UUID/Long port | GPL-2.0-only WITH Classpath-exception-2.0; Unicode table under Unicode-3.0 |
 | License and notice documents | Reproduced under their original terms, not relicensed by the root license |
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution,

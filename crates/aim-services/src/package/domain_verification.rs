@@ -12,6 +12,7 @@ pub mod names;
 pub mod parcels;
 pub mod service;
 pub mod uri_groups;
+pub mod uuid;
 
 use aim_android_xml::Element;
 

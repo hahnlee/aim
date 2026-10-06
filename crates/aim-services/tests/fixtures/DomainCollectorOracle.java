@@ -26,6 +26,7 @@ public final class DomainCollectorOracle {
         DomainEnforcerOracle.verify(directory);
         verifySignatures(directory);
         DomainOwnerSortOracle.write(directory);
+        DomainUuidOracle.verify(directory);
         verifyAttachment(directory, context, compat);
         verifyGroupedOwners(directory, context, compat);
         verifyPersistenceDefaults(directory, context, compat);

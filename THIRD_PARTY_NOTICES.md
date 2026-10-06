@@ -48,6 +48,10 @@ travel with any redistributed covered sources or binaries.
   Copyright © 2016-2023 Unicode, Inc.; Unicode License V3, reproduced in
   [icu-LICENSE](licensing/third-party/icu-LICENSE).
   [Pinned data](https://android.googlesource.com/platform/external/icu/+/android-16.0.0_r1/icu4c/source/data/unidata/UnicodeData.txt).
+- **libcore/OpenJDK UUID and Long.** `package/domain_verification/uuid.rs` ports
+  the pinned `java.util.UUID` and `java.lang.Long` algorithms at `android-16.0.0_r1`
+  under GPL-2.0-only WITH Classpath-exception-2.0; upstream notices and the
+  [license/exception](licensing/third-party/libcore-ojluni-LICENSE) are retained.
 - **libcore/OpenJDK TimSort.** The native SELinuxMMAC policy ordering
   (`crates/aim-services/src/package/timsort.rs`) ports
   `ojluni/src/main/java/java/util/TimSort.java` from `platform/libcore` at
