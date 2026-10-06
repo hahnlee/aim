@@ -77,7 +77,8 @@ fn original_art_reads_large_native_domain_query_over_binder() {
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
     let oracle = |system: &Arc<System>,
                   bridge: &Arc<crate::package::bootstrap::Bridge>,
-                  config: &SystemConfig| {
+                  config: &SystemConfig,
+                  persistence: &Arc<Mutex<crate::package::owner::Store>>| {
         let base = system.capture_package_scan().unwrap();
         let mut candidate = base.owner().clone();
         // Only fixture metadata changes; its original APK and extracted tree stay read-only.
@@ -128,6 +129,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
                 config,
             )
             .unwrap();
+        persistence.lock().unwrap().commit_domains(&system.capture_package_queries().unwrap().domains().unwrap().owner().persisted()).unwrap();
         let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
             "-Djava.class.path=/data/local/tmp/domain-binder/oracle.dex", "/system/bin", "NativeDomainBinderOracle"])
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_INFO.to_string())
@@ -135,6 +137,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_USER_STATE.to_string())
             .arg(system.capture_package_queries().unwrap().state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_OWNERS_FOR_DOMAIN.to_string())
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot

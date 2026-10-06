@@ -48,6 +48,22 @@ public final class NativeDomainBinderOracle {
                 if (reply.dataAvail() != 0) throw new AssertionError("native Owners framing differs");
             } finally { data.recycle(); reply.recycle(); }
         }
+        for (boolean allowed : new boolean[] {false, true}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeBoolean(allowed); data.writeInt(0);
+                if (!service.transact(Integer.parseInt(args[5]), data, reply, 0)) throw new AssertionError("native link mutation unhandled");
+                reply.readException(); if (reply.dataAvail() != 0) throw new AssertionError("native link reply framing differs");
+            } finally { data.recycle(); reply.recycle(); }
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeInt(0);
+                if (!service.transact(Integer.parseInt(args[2]), data, reply, 0)) throw new AssertionError("native post-write user state unhandled");
+                reply.readException();
+                var state = reply.readTypedObject(android.content.pm.verify.domain.DomainVerificationUserState.CREATOR);
+                if (state.isLinkHandlingAllowed() != allowed || reply.dataAvail() != 0) throw new AssertionError("native mutation not published");
+            } finally { data.recycle(); reply.recycle(); }
+        }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private NativeDomainBinderOracle() {}

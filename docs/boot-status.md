@@ -1462,7 +1462,23 @@ null-domain exception, alongside the existing 4,000-host FD-backed Info/UserStat
 checks (12.50s). The publisher also checks permission denial and trailing input
 rejection. The full original oracle passed (30.84s, no skips), with 488 units
 passed (0.48s; five excluded by default). The original PMS remains enabled;
-five domain methods and full M4 C acceptance remain open (#957/#798).
+Method 6 now serves public link-handling changes when supplied the shared native
+PackageManager Store (2026-10-06). User-selector authorization and exact attached
+name lookup precede the write; null/missing names return the original name-not-found
+status. It uses the same prevalidated update, inventory/generation/disk checks,
+atomic persistence, capture publication and original cache invalidation as the
+native daemon write path. The pending query-only factory has no writer and rejects
+writes explicitly; binding the shared writer during full native PMS startup remains
+open (#798). Real Binder tests cover disable/repeated-disable/enable, persisted
+flags and generation/cache changes, denied callers, absent users/packages, trailing
+input and outside-writer conflict with no write/publication. A malformed postcommit
+cache reply returns committed=true while retaining new disk/capture state; an explicit
+cache-only retry precedes further mutations. Original ART invokes disable/enable
+over actual Binder and reads each published value through its original UserState
+creator (13.51s). A stale publication base triggers fresh capture and authorization
+before retrying; four concurrent Binder changes each publish their own generation
+and invalidate the cache. Units pass (488, 0.49s; five excluded by default), as does
+the publisher (0.89s). Four domain methods and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

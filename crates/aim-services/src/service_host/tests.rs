@@ -882,7 +882,7 @@ fn signing_override_transport_uses_captured_debug_policy() {
 fn signing_override_transport_reaches_live_apk_collection() {
     exercise_bootstrap(true, true);
 }
-type ScanOracle<'a> = dyn Fn(&Arc<System>, &Arc<crate::package::bootstrap::Bridge>, &SystemConfig) + 'a;
+type ScanOracle<'a> = dyn Fn(&Arc<System>, &Arc<crate::package::bootstrap::Bridge>, &SystemConfig, &Arc<Mutex<crate::package::owner::Store>>) + 'a;
 fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
     exercise_bootstrap_on(Driver::new(), run_scan, debuggable, None);
 }
@@ -2620,6 +2620,14 @@ fn verify_boot_scan(
             data.write_i32(99);
             assert!(endpoint.transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).is_err());
         }
+        let before = system.capture_package_queries().unwrap();
+        let mut data = Parcel::new();
+        api::SetDomainVerificationLinkHandlingAllowed {package_name: Some("android".into()), allowed: false, user_id: 0}.write(&mut data);
+        let reply = endpoint.transact(api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED, &data, false).unwrap();
+        let error = reply.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(error.code, -5);
+        assert!(error.message.contains("persistence owner is unavailable"));
+        assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
         let reply = endpoint
@@ -3057,9 +3065,94 @@ fn verify_boot_scan(
     ));
     owner.reject.store(false, Ordering::SeqCst);
     owner.apex_reply.store(0, Ordering::SeqCst);
+    let persistence = Arc::new(Mutex::new(persistence));
+    register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
+    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(system, persistence.clone());
+    register(native, "query_domains", native.add_service(domains));
+    {
+        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+        let invoke = |client: &Arc<LocalProcess>, name: Option<&str>, allowed, user, trailing| {
+            let mut request = Parcel::new();
+            api::SetDomainVerificationLinkHandlingAllowed {package_name: name.map(String::from), allowed, user_id: user}.write(&mut request);
+            if trailing { request.write_i32(99); }
+            find(client, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED, &request, false)
+        };
+        for allowed in [false, false, true] {
+            let before = system.capture_package_queries().unwrap();
+            let invalidations = owner.invalidations.load(Ordering::SeqCst);
+            let reply = invoke(client, Some("android"), allowed, 0, false).unwrap();
+            let mut reader = reply.reader();
+            api::read_set_domain_verification_link_handling_allowed_reply(&mut reader).unwrap().unwrap();
+            assert_eq!(reader.remaining(), 0);
+            let current = system.capture_package_queries().unwrap();
+            assert_eq!(current.scan().version(), before.scan().version() + 1);
+            assert_eq!(current.domains().unwrap().owner().package("android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, allowed);
+            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, current.domains().unwrap().owner().persisted());
+            assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations + 1);
+            let disk = aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap();
+            let mut state = crate::package::domain_verification::State::default();
+            state.read(disk.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
+            assert_eq!(state.active.iter().find(|p| p.name == "android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, allowed);
+        }
+        let before_parallel = system.capture_package_queries().unwrap();
+        let invalidations = owner.invalidations.load(Ordering::SeqCst);
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for allowed in [true, false, true, false] {
+                let barrier = &barrier;
+                let invoke = &invoke;
+                scope.spawn(move || {
+                    barrier.wait();
+                    invoke(client, Some("android"), allowed, 0, false).unwrap().reader().read_exception().unwrap().unwrap();
+                });
+            }
+        });
+        let after_parallel = system.capture_package_queries().unwrap();
+        assert_eq!(after_parallel.scan().version(), before_parallel.scan().version() + 4);
+        assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations + 4);
+        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, after_parallel.domains().unwrap().owner().persisted());
+        let before_failure = system.capture_package_queries().unwrap();
+        owner.query_reply.store(1, Ordering::SeqCst);
+        let reply = invoke(client, Some("android"), false, 0, false).unwrap();
+        let error = reply.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(error.code, -5);
+        assert!(error.message.contains("committed=true"));
+        let committed_failure = system.capture_package_queries().unwrap();
+        assert_eq!(committed_failure.scan().version(), before_failure.scan().version() + 1);
+        assert!(!committed_failure.domains().unwrap().owner().package("android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling);
+        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, committed_failure.domains().unwrap().owner().persisted());
+        owner.query_reply.store(0, Ordering::SeqCst);
+        bridge.invalidate_package_info_cache().unwrap();
+        invoke(client, Some("android"), true, 0, false).unwrap().reader().read_exception().unwrap().unwrap();
+        let before = system.capture_package_queries().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let invalidations = owner.invalidations.load(Ordering::SeqCst);
+        for (who, name, user, expected) in [
+            (client, None, 0, -8), (client, Some("missing"), 0, -8),
+            (client, Some("android"), 99, -1), (foreign_client, Some("android"), 0, -1),
+        ] {
+            let reply = invoke(who, name, false, user, false).unwrap();
+            let error = reply.reader().read_exception().unwrap().unwrap_err();
+            assert_eq!(error.code, expected);
+            if expected == -8 { assert_eq!(error.service_specific, 1); }
+        }
+        assert!(invoke(client, Some("android"), false, 0, true).is_err());
+        assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        std::fs::write(&path, b"<packages external='writer'/>").unwrap();
+        let reply = invoke(client, Some("android"), false, 0, false).unwrap();
+        let error = reply.reader().read_exception().unwrap().unwrap_err();
+        assert_eq!(error.code, -5);
+        assert!(error.message.contains("committed=false"));
+        assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"<packages external='writer'/>");
+        assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        std::fs::write(&path, bytes).unwrap();
+    }
     if let Some(oracle) = oracle {
         register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
-        oracle(system, bridge, config);
+        oracle(system, bridge, config, &persistence);
     }
     drop(data);
 }

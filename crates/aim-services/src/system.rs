@@ -868,20 +868,28 @@ impl System {
         Arc<crate::package::scan_snapshot::query_state::Capture>,
         crate::package::owner::WriteError,
     > {
+        self.commit_package_domains_if_current(bridge, update, persistence)?
+            .ok_or_else(|| crate::package::owner::WriteError {
+                committed: false,
+                message: "domain publication base changed".into(),
+            })
+    }
+    pub(crate) fn commit_package_domains_if_current(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        update: crate::package::scan_snapshot::query_state::DomainUpdate,
+        persistence: &mut crate::package::owner::Store,
+    ) -> std::result::Result<
+        Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
+        crate::package::owner::WriteError,
+    > {
         use crate::package::owner::WriteError;
         let before = |message: &str| WriteError {
             committed: false,
             message: message.into(),
         };
         let mut state = self.package_bootstrap.lock().unwrap();
-        if update.capture.scan().version()
-            != state
-                .version
-                .checked_add(1)
-                .ok_or_else(|| before("domain generation exhausted"))?
-        {
-            return Err(before("domain generation differs"));
-        }
+        let version = state.version;
         let current = state
             .current
             .as_mut()
@@ -892,7 +900,14 @@ impl System {
             .as_ref()
             .is_some_and(|q| Arc::ptr_eq(q, &update.base))
         {
-            return Err(before("domain publication base changed"));
+            return Ok(None);
+        }
+        if update.capture.scan().version()
+            != version
+                .checked_add(1)
+                .ok_or_else(|| before("domain generation exhausted"))?
+        {
+            return Err(before("domain generation differs"));
         }
         // Bind the disk writer to this exact package inventory, including signers.
         let identities = |settings: &crate::package::settings::Settings| {
@@ -968,7 +983,7 @@ impl System {
                 });
             }
         }
-        result.map(|_| update.capture)
+        result.map(|_| Some(update.capture))
     }
     // Original policy calls run without holding the publication lock.
     fn complete_package_owner(
