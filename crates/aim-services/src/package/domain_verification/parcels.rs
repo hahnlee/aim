@@ -6,6 +6,16 @@ use aim_binder_host::parcel::Parcel;
 use aim_service_aidl::WriteParcelable;
 
 pub struct Info(Parcel);
+pub struct Owner {
+    pub name: String,
+    pub overrideable: bool,
+}
+impl WriteParcelable for Owner {
+    fn write_to(&self, out: &mut Parcel) {
+        out.write_i32(if self.overrideable { 2 } else { 0 });
+        out.write_string16(Some(&self.name));
+    }
+}
 impl Info {
     /// Prepare before replying: creating a large-map region can fail.
     /// `prefix` includes the enclosing reply/typed-object headers.

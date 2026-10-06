@@ -19,5 +19,11 @@ public final class DomainApprovalFixture {
         intent.addCategory("android.intent.category.BROWSABLE");
         return service.approvalLevelForDomain((com.android.server.pm.pkg.PackageStateInternal) setting, intent, 0x10000L, 0);
     }
+    public static void ownersUser(PackageSetting setting, int level, long time) {
+        var user = setting.modifyUserState(0);
+        user.setInstalled(level != 0); user.setEnabledState(1);
+        user.setInstantApp(level == 5); user.setFirstInstallTimeMillis(time);
+        setting.getUserStates().remove(10);
+    }
     private DomainApprovalFixture() {}
 }

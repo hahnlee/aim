@@ -1711,6 +1711,7 @@ fn native_package_parcels_match_original_read_write() {
         );
     }
     common::domain_collector::verify_owner_sort(&directory);
+    common::domain_collector::grouped_owners(&directory, true);
     common::domain_collector::verify_attachment(&directory);
     common::domain_collector::verify_legacy(&directory);
     common::domain_collector::verify_persistence_defaults(&directory);

@@ -3,6 +3,7 @@
 package com.android.server.pm.pkg;
 
 public interface AndroidPackage {
+    String getPackageName();
     String getPath();
     long getLongVersionCode();
     int getTargetSdkVersion();

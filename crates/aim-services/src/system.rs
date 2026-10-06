@@ -783,6 +783,22 @@ impl System {
                 )
             })
     }
+    pub(crate) fn check_package_domain_capture(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+    ) -> Result<()> {
+        self.check_package_bootstrap(bridge)?;
+        if Arc::ptr_eq(capture, &self.capture_package_queries()?) {
+            Ok(())
+        } else {
+            Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "domain authorization capture changed",
+            ))
+        }
+    }
+
     /// Original permission/proxy calls run outside the publication lock.
     pub fn authorize_package_domain(
         self: &Arc<Self>,
@@ -793,17 +809,7 @@ impl System {
         operation: crate::package::domain_verification::enforcer::Operation<'_>,
     ) -> Result<bool> {
         use crate::package::domain_verification::enforcer::{self, Captured, Error};
-        let check = || {
-            self.check_package_bootstrap(bridge)?;
-            if Arc::ptr_eq(capture, &self.capture_package_queries()?) {
-                Ok(())
-            } else {
-                Err(Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                    "domain authorization capture changed",
-                ))
-            }
-        };
+        let check = || self.check_package_domain_capture(bridge, capture);
         check()?;
         if uid < 0 {
             return Err(Exception::new(

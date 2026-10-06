@@ -1928,6 +1928,32 @@ fn late_bridge_death_preserves_replacement_nonce_mapping() {
     until(|| system.package_info_nonce().is_none());
 }
 
+struct DomainPermissions;
+impl Service for DomainPermissions {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::android_app_iactivitymanager::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_app_iactivitymanager as am;
+        if call.code != am::CHECK_PERMISSION {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        let args = am::CheckPermission::read(&mut call.data)?;
+        assert_eq!(call.data.remaining(), 0);
+        assert!(matches!(
+            args.permission.as_deref(),
+            Some(
+                "android.permission.QUERY_ALL_PACKAGES"
+                    | "android.permission.UPDATE_DOMAIN_VERIFICATION_USER_SELECTION"
+                    | "android.permission.INTERACT_ACROSS_USERS"
+            )
+        ));
+        let mut reply = Parcel::new();
+        am::write_check_permission_reply(&mut reply, if args.uid == 1000 { 0 } else { -1 });
+        Ok(reply)
+    }
+}
+
 fn verify_boot_scan(
     system: &Arc<System>,
     native: &Arc<LocalProcess>,
@@ -2578,10 +2604,26 @@ fn verify_boot_scan(
                     .is_err()
             );
         }
+        register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
+        for host in [Some("missing.example"), None] {
+            let mut data = Parcel::new();
+            api::GetOwnersForDomain { domain: host.map(String::from), user_id: 0 }.write(&mut data);
+            let reply = endpoint.transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).unwrap();
+            let mut reader = reply.reader();
+            if host.is_none() {
+                assert_eq!(reader.read_exception().unwrap().unwrap_err().code, -4);
+            } else {
+                reader.read_exception().unwrap().unwrap();
+                assert_eq!(reader.read_i32().unwrap(), 0);
+            }
+            assert_eq!(reader.remaining(), 0);
+            data.write_i32(99);
+            assert!(endpoint.transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).is_err());
+        }
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
         let reply = endpoint
-            .transact(api::GET_OWNERS_FOR_DOMAIN, &unsupported, false)
+            .transact(api::SET_DOMAIN_VERIFICATION_STATUS, &unsupported, false)
             .unwrap();
         assert_eq!(
             reply.reader().read_exception().unwrap().unwrap_err().code,
@@ -2611,6 +2653,7 @@ fn verify_boot_scan(
                             | "android.permission.INTENT_FILTER_VERIFICATION_AGENT"
                             | "android.permission.DUMP"
                             | "android.permission.INTERACT_ACROSS_USERS"
+                            | "android.permission.QUERY_ALL_PACKAGES"
                     )
                 ));
                 assert_eq!(call.data.remaining(), 0);
@@ -2655,6 +2698,15 @@ fn verify_boot_scan(
                 reply.reader().read_exception().unwrap().unwrap_err().code,
                 -1
             );
+        }
+        {
+            use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+            for host in [Some("h0.example"), None] {
+                let mut data = Parcel::new();
+                api::GetOwnersForDomain { domain: host.map(String::from), user_id: 0 }.write(&mut data);
+                let reply = find(foreign_client, "query_domains").transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).unwrap();
+                assert_eq!(reply.reader().read_exception().unwrap().unwrap_err().code, if host.is_none() { -4 } else { -1 });
+            }
         }
         struct Replacement(Option<i32>);
         impl Service for Replacement {
@@ -3006,6 +3058,7 @@ fn verify_boot_scan(
     owner.reject.store(false, Ordering::SeqCst);
     owner.apex_reply.store(0, Ordering::SeqCst);
     if let Some(oracle) = oracle {
+        register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
         oracle(system, bridge, config);
     }
     drop(data);

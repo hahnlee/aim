@@ -7,6 +7,7 @@
 pub mod collector;
 pub mod enforcer;
 pub mod owner;
+pub mod names;
 pub mod parcels;
 pub mod service;
 pub mod uri_groups;

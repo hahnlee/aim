@@ -158,6 +158,7 @@ pub fn export(directory: &Path) {
     configuration(directory);
     signatures(directory);
     attachment_inputs(directory);
+    grouped_owners(directory, false);
     legacy_inputs(directory);
     persistence_defaults(directory);
     let mut cases = vec![
@@ -246,6 +247,137 @@ pub fn export(directory: &Path) {
     fs::write(directory.join("domain-collector.input"), expected.data()).unwrap();
 }
 
+pub fn grouped_owners(directory: &Path, verify: bool) {
+    use aim_services::package::domain_verification::{
+        State,
+        owner::{ApprovalInput, Input, Owner},
+    };
+    let entries = [
+        ("disabled", 0, 0),
+        ("ask", 1, 20),
+        ("always", 2, 10),
+        ("selected", 3, 30),
+        ("Aa", 4, 40),
+        ("BB", 4, 40),
+        ("a", 4, 0),
+        ("A", 4, 0),
+        ("İ", 4, 0),
+        ("ı", 4, 0),
+        ("instant", 5, 50),
+        ("missing", 6, 0),
+    ];
+    let mut xml = String::from("<domain-verifications><active>");
+    let mut legacy = String::from("<domain-verifications-legacy>");
+    let mut users = Parcel::new();
+    users.write_i32(entries.len() as i32);
+    let mut codes = Vec::new();
+    let code =
+        AndroidPackage::read_cache_entry(&fs::read(directory.join("domain-owner.cache")).unwrap())
+            .unwrap();
+    for (i, (suffix, level, time)) in entries.iter().enumerate() {
+        let name = format!("fixture.owner.{suffix}");
+        let id = format!("00000000-0000-0000-0000-{:012x}", i + 1);
+        users.write_string16(Some(&name));
+        users.write_string16(Some(&id));
+        users.write_i32(*level);
+        users.write_i64(*time);
+        xml.push_str(&format!(
+            "<package-state packageName='{name}' id='{id}' hasAutoVerifyDomains='true'><state>"
+        ));
+        if *level == 4 || *level == 6 {
+            xml.push_str("<domain name='h0.example' state='1'/>");
+        }
+        xml.push_str("</state><user-states><user-state userId='0' allowLinkHandling='true'>");
+        if *level == 3 {
+            xml.push_str("<enabled-hosts><host name='h0.example'/></enabled-hosts>");
+        }
+        xml.push_str("</user-state></user-states></package-state>");
+        if matches!(level, 1 | 2) {
+            legacy.push_str(&format!("<user-states packageName='{name}'><user-state userId='0' state='{level}'/></user-states>"));
+        }
+        let mut code = code.clone();
+        code.package_name = name;
+        let user = aim_services::package::restrictions::UserState {
+            installed: *level != 0,
+            enabled: 1,
+            instant_app: *level == 5,
+            first_install_time: *time,
+            ..Default::default()
+        };
+        codes.push((code, id, *level, user));
+    }
+    xml.push_str("</active></domain-verifications>");
+    legacy.push_str("</domain-verifications-legacy>");
+    if !verify {
+        fs::write(directory.join("domain-owners-group.input"), xml).unwrap();
+        fs::write(directory.join("domain-owners-group.legacy"), legacy).unwrap();
+        fs::write(directory.join("domain-owners-group.users"), users.data()).unwrap();
+        return;
+    }
+    let mut state = State::default();
+    state
+        .read(&aim_android_xml::read(xml.as_bytes()).unwrap())
+        .unwrap();
+    state
+        .read_legacy(&aim_android_xml::read(legacy.as_bytes()).unwrap())
+        .unwrap();
+    let mut owner = Owner::new(state, Default::default());
+    for (code, id, _, _) in &codes {
+        owner
+            .add(
+                Input {
+                    id,
+                    name: &code.package_name,
+                    code: Some(code),
+                    signatures: &[],
+                    system: false,
+                    restrict_domains: true,
+                    pre_verified: None,
+                },
+                &Default::default(),
+            )
+            .unwrap();
+    }
+    let mut expected = Parcel::new();
+    for v2 in [false, true] {
+        for user_id in [0, 10] {
+            for host in ["h0.example", "unknown.invalid"] {
+                let owners = owner
+                    .owners(host, user_id, |name| {
+                        let (code, _, level, user) = codes
+                            .iter()
+                            .find(|(code, ..)| code.package_name == name)
+                            .unwrap();
+                        Ok((*level != 6).then_some(ApprovalInput {
+                            code,
+                            user: (user_id == 0).then_some(user),
+                            settings_v2: v2,
+                            policy: Policy {
+                                restrict_domains: true,
+                                linked_app: false,
+                            },
+                        }))
+                    })
+                    .unwrap()
+                    .into_iter()
+                    .map(|(name, overrideable)| {
+                        Some(aim_services::package::domain_verification::parcels::Owner {
+                            name,
+                            overrideable,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_owners_for_domain_reply(&mut expected, Some(&owners));
+            }
+        }
+    }
+    assert_eq!(
+        expected.data(),
+        fs::read(directory.join("domain-owners-group.original")).unwrap(),
+        "original grouped Owners replies"
+    );
+}
+
 fn attachment_inputs(directory: &Path) {
     fs::write(directory.join("domain-cleanup-legacy.input"), "<domain-verifications-legacy><user-states packageName='fixture.domains'><user-state userId='10' state='2'/></user-states></domain-verifications-legacy>").unwrap();
     let hosts: Vec<_> = (0..=8)
@@ -297,6 +429,13 @@ fn attachment_inputs(directory: &Path) {
 
 pub fn verify_owner_sort(directory: &Path) {
     use aim_binder_host::parcel::Reader;
+    let fold_bytes = fs::read(directory.join("domain-name-fold.original")).unwrap();
+    let mut fold_reader = Reader::new(&fold_bytes, &[]);
+    for unit in 0..=u16::MAX {
+        assert_eq!(aim_services::package::domain_verification::names::fold(unit) as i32,
+            fold_reader.read_i32().unwrap(), "original char fold U+{unit:04X}");
+    }
+    assert_eq!(fold_reader.remaining(), 0);
     let bytes = fs::read(directory.join("domain-owner-sort.original")).unwrap();
     let mut reader = Reader::new(&bytes, &[]);
     let cases = reader.read_i32().unwrap();
@@ -327,7 +466,7 @@ pub fn verify_owner_sort(directory: &Path) {
             Ok(if a.2 != b.2 {
                 (a.2.wrapping_sub(b.2) as i32).cmp(&0)
             } else {
-                a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase())
+                aim_services::package::domain_verification::names::compare(&a.1, &b.1)
             })
         };
         let actual = aim_services::package::timsort::sort(size, compare);
@@ -473,6 +612,7 @@ pub fn verify_attachment(directory: &Path) {
             {
                 use aim_services::package::restrictions::{UserState, Suspension, SuspendingUser};
                 let mut expected = Parcel::new();
+                let mut owners_reply = Parcel::new();
                 for v2 in [false, true] {
                     for mode in -1..=8 {
                         let mut user = UserState::default();
@@ -483,9 +623,15 @@ pub fn verify_attachment(directory: &Path) {
                         for host in ["h0.example", "h1.example", "h4.example", "h7.example", "h8.example", "h1024.example", "example", "sub.example", "notexample", "unknown.invalid"] {
                             expected.write_i32(owner.approval("fixture.domains", &code, (mode != -1).then_some(&user), 0, v2,
                                 Policy { restrict_domains: true, linked_app: case == 1 }, host).unwrap());
+                            let owners = owner.owners(host, 0, |_| Ok(Some(aim_services::package::domain_verification::owner::ApprovalInput {
+                                code: &code, user: (mode != -1).then_some(&user), settings_v2: v2,
+                                policy: Policy { restrict_domains: true, linked_app: case == 1 },
+                            }))).unwrap().into_iter().map(|(name, overrideable)| Some(aim_services::package::domain_verification::parcels::Owner { name, overrideable })).collect::<Vec<_>>();
+                            aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_owners_for_domain_reply(&mut owners_reply, Some(&owners));
                         }
                     }
                 }
+                assert_eq!(owners_reply.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.owners"))).unwrap(), "original Owners replies case={case} stage={stage}");
                 assert_eq!(expected.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.approvals"))).unwrap(), "original approval levels case={case} stage={stage}");
             }
             assert_eq!(

@@ -1442,20 +1442,29 @@ Wildcard matching retains the original suffix comparison. Original ART's public
 approval API matches 1,600 native cases across eight add/migrate states, both
 V2 modes, missing users, enabled overrides, install/suspend/instant state and
 ten hosts. The same-package test helper accesses original user state directly,
-without reflection or changing APKs. This establishes approval policy and levels;
-getOwnersForDomain list ranking/serving remains unimplemented. Its sorting
-algorithm is now shared with SELinuxMMAC: the pinned libcore TimSort port,
-retaining comparator calls and ordering-contract failures. An original ART
-sort corpus covers 960 ASCII-name lists (0–128 entries), equal times/names,
-32-bit truncation, 64-bit overflow and non-transitive comparisons. Rust
-standard sorting differed in 298 cases; original libcore rejected two.
-The shared native sort matches all 960 results and both rejections; the full
-original oracle passed (35.02s, no skips), and 488 unit tests passed (0.56s;
-five excluded by default). This checks the sort algorithm, not the full
-Owners Binder endpoint. The first full
-oracle attempt reached a later migration-policy ENOSPC crash (#903); removing only
-this worktree's reproducible release incremental cache restored free space. The
-same full oracle then passed (30.55s, no skips). User-state lookup
+without reflection or changing APKs. The native query endpoint now also serves
+getOwnersForDomain (2026-10-06) from the captured attached state and explicit scan user state.
+Its V2 decisions come from the original compatibility bridge; capture identity
+is rechecked after those calls. Positive approvals group in ascending level,
+then use the shared pinned libcore TimSort with the original truncated int32
+installation-time subtraction and stable case-insensitive UTF-16 name order.
+The name mapping derives from pinned ICU data, with its license retained;
+original ART matches all 65,536 UTF-16 unit mappings and 960 Unicode-name sort
+cases (0–128 entries), including four comparator-contract rejections. Those
+failures become IllegalArgumentException, as original sorting does. Original
+service results match 1,600 native Owners reply byte sequences across the
+add/migrate and approval cases, plus eight mixed-package/group/user/V2 queries
+covering levels 1–5, case ties, hash collisions and missing settings/users.
+The reply uses original DomainOwner's 0x2 overrideable flag and String16 name.
+Null domains fail before authorization; empty results are non-null typed lists.
+Original ART reads actual native Binder nonempty/empty Owners replies and the
+null-domain exception, alongside the existing 4,000-host FD-backed Info/UserState
+checks (12.50s). The publisher also checks permission denial and trailing input
+rejection. The full original oracle passed (30.84s, no skips), with 488 units
+passed (0.48s; five excluded by default). The original PMS remains enabled;
+five domain methods and full M4 C acceptance remain open (#957/#798).
+
+User-state lookup
 applies the original user-existence/cross-user/visibility contract against the
 same capture, retaining nullable package names. Visibility denial returns the
 original name-not-found service-specific error; missing users/cross-user

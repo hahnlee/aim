@@ -4,6 +4,9 @@ final class DomainOwnerSortOracle {
     static void write(java.io.File directory) throws Exception {
         var out = android.os.Parcel.obtain();
         try {
+            for (int c = 0; c <= 65535; c++) out.writeInt(Character.toLowerCase(Character.toUpperCase((char)c)));
+            java.nio.file.Files.write(new java.io.File(directory, "domain-name-fold.original").toPath(), out.marshall());
+            out.recycle(); out = android.os.Parcel.obtain();
             int[] sizes = {0, 1, 2, 3, 15, 31, 32, 33, 64, 128};
             long[] edge = {0, 1, -1, Integer.MAX_VALUE, Integer.MIN_VALUE,
                 1L << 32, -(1L << 32), Long.MIN_VALUE, Long.MAX_VALUE};
@@ -20,7 +23,8 @@ final class DomainOwnerSortOracle {
                         case 4 -> (long) i << 32;
                         default -> (long) (i % 3) * 0x60000000L;
                     };
-                    String name = (i % 2 == 0 ? "fixture.A" : "fixture.a") + (i / 2);
+                    String[] letters = {"A", "a", "İ", "ı", "Σ", "ς", "µ", "Μ", "K", "k", "ß", "ẞ", "😀", "𐐀", "𐐨", "Z"};
+                    String name = "fixture." + letters[(i + seed) % letters.length] + (i / 2);
                     entries.add(new Entry(i, name, time));
                 }
                 java.util.Collections.shuffle(entries, random);

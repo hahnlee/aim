@@ -82,6 +82,15 @@ fn original_art_reads_large_native_domain_query_over_binder() {
         let mut candidate = base.owner().clone();
         // Only fixture metadata changes; its original APK and extracted tree stay read-only.
         candidate.add_fixture_domains("android", 4000);
+        let mut user = candidate.scanned_user_states("android").unwrap()[&0].clone();
+        user.installed = true; user.enabled = 1;
+        candidate.set_user_state("android", 0, user).unwrap();
+        let id = candidate.settings.packages.iter().find(|p| p.name == "android").unwrap().domain_set_id.clone().unwrap();
+        candidate.settings.domain_verification.active.retain(|p| p.name != "android");
+        candidate.settings.domain_verification.active.push(crate::package::domain_verification::Package {
+            name: "android".into(), id, has_auto_verify_domains: true, signature: None,
+            domains: vec![(Some("h0.example".into()), 1)], users: vec![], uri_relative_filter_groups: vec![],
+        });
         let seinfo =
             crate::package::owner::seinfo::Policy::load(&aim_paths::original_image()).unwrap();
         candidate
@@ -125,6 +134,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::DESCRIPTOR)
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_USER_STATE.to_string())
             .arg(system.capture_package_queries().unwrap().state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0.to_string())
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_OWNERS_FOR_DOMAIN.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot

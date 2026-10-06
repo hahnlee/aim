@@ -7,7 +7,7 @@ public final class DomainCollectorOracle {
         Compat(android.content.Context context) { super(context); }
         @Override public boolean isChangeEnabledInternalNoLogging(long id, android.content.pm.ApplicationInfo info) {
             if (id == 178111421L) return v2;
-            if (id != 175408749L || !("fixture.domains".equals(info.packageName) || "competitor".equals(info.packageName)))
+            if (id != 175408749L || !("fixture.domains".equals(info.packageName) || "competitor".equals(info.packageName) || info.packageName.startsWith("fixture.owner.")))
                 throw new AssertionError("domain compatibility identity differs");
             return restricted;
         }
@@ -27,6 +27,7 @@ public final class DomainCollectorOracle {
         verifySignatures(directory);
         DomainOwnerSortOracle.write(directory);
         verifyAttachment(directory, context, compat);
+        verifyGroupedOwners(directory, context, compat);
         verifyPersistenceDefaults(directory, context, compat);
         verifyNativeWrites(directory, context, compat);
         com.android.server.pm.ScanSettingsWriteOracle.verifyLegacyDomains(directory, context, compat);
@@ -209,7 +210,7 @@ public final class DomainCollectorOracle {
         } finally { out.recycle(); }
     }
     private static com.android.server.pm.PackageSetting domainSetting(com.android.server.pm.pkg.AndroidPackage code, boolean system, String id) {
-        var setting = new com.android.server.pm.PackageSetting("fixture.domains", null, new java.io.File("/data/app/fixture.domains"), system ? 1 : 0, 0, java.util.UUID.fromString(id));
+        var setting = new com.android.server.pm.PackageSetting(code.getPackageName(), null, new java.io.File("/data/app/" + code.getPackageName()), system ? 1 : 0, 0, java.util.UUID.fromString(id));
         setting.setPkg(code);
         setting.setSigningDetails(new android.content.pm.SigningDetails(new android.content.pm.Signature[0], 0, new android.util.ArraySet<>(), null));
         return setting;
@@ -253,18 +254,17 @@ public final class DomainCollectorOracle {
         }
     }
     private static final class DomainComputer implements com.android.server.pm.Computer {
-        final com.android.server.pm.pkg.PackageStateInternal setting;
-        DomainComputer(com.android.server.pm.PackageSetting setting) { this.setting = (com.android.server.pm.pkg.PackageStateInternal) setting; }
-        public com.android.server.pm.pkg.PackageStateInternal getPackageStateInternal(String name) {
-            if (!"fixture.domains".equals(name)) throw new AssertionError("foreign domain query package");
-            return setting;
-        }
+        final java.util.Map<String, com.android.server.pm.pkg.PackageStateInternal> settings;
+        DomainComputer(com.android.server.pm.PackageSetting setting) { this(java.util.Map.of("fixture.domains", (com.android.server.pm.pkg.PackageStateInternal) setting)); }
+        DomainComputer(java.util.Map<String, com.android.server.pm.pkg.PackageStateInternal> settings) { this.settings = settings; }
+        public com.android.server.pm.pkg.PackageStateInternal getPackageStateInternal(String name) { return settings.get(name); }
     }
     private static final class DomainConnection implements com.android.server.pm.verify.domain.DomainVerificationManagerInternal.Connection {
         final DomainComputer computer;
         int user;
         int writes;
         DomainConnection(com.android.server.pm.PackageSetting setting) { computer = new DomainComputer(setting); }
+        DomainConnection(java.util.Map<String, com.android.server.pm.pkg.PackageStateInternal> settings) { computer = new DomainComputer(settings); }
         public int getCallingUid() { return 1000; }
         public int getCallingUserId() { return user; }
         public int[] getAllUserIds() { return new int[] {0, 10}; }
@@ -279,17 +279,61 @@ public final class DomainCollectorOracle {
     private static void writeApprovals(java.io.File directory, int caseId, String stage,
             com.android.server.pm.verify.domain.DomainVerificationService service,
             com.android.server.pm.PackageSetting setting, Compat compat) throws Exception {
+        service.setConnection(new DomainConnection(setting));
         var out = android.os.Parcel.obtain();
+        var ownersOut = android.os.Parcel.obtain();
         try {
             for (boolean v2 : new boolean[] {false, true}) {
                 compat.v2 = v2;
                 for (int mode = -1; mode <= 8; mode++) {
-                    for (String host : new String[] {"h0.example", "h1.example", "h4.example", "h7.example", "h8.example", "h1024.example", "example", "sub.example", "notexample", "unknown.invalid"})
+                    for (String host : new String[] {"h0.example", "h1.example", "h4.example", "h7.example", "h8.example", "h1024.example", "example", "sub.example", "notexample", "unknown.invalid"}) {
                         out.writeInt(com.android.server.pm.DomainApprovalFixture.approval(service, setting, mode, host));
+                        var owners = service.getOwnersForDomain(host, 0);
+                        ownersOut.writeNoException(); ownersOut.writeInt(owners.size());
+                        for (var owner : owners) ownersOut.writeTypedObject(owner, 0);
+                    }
                 }
             }
             java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".approvals").toPath(), out.marshall());
-        } finally { compat.v2 = true; out.recycle(); }
+            java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".owners").toPath(), ownersOut.marshall());
+        } finally { compat.v2 = true; out.recycle(); ownersOut.recycle(); }
+    }
+    private static void verifyGroupedOwners(java.io.File directory, android.content.Context context, Compat compat) throws Exception {
+        var service = new com.android.server.pm.verify.domain.DomainVerificationService(context, new com.android.server.SystemConfig(false), compat);
+        for (String file : new String[] {"domain-owners-group.input", "domain-owners-group.legacy"}) {
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, file))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next();
+                if (file.endsWith(".legacy")) service.readLegacySettings(parser); else service.readSettings(null, parser);
+            }
+        }
+        byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owners-group.users").toPath());
+        var in = android.os.Parcel.obtain(); var out = android.os.Parcel.obtain();
+        var settings = new java.util.HashMap<String, com.android.server.pm.pkg.PackageStateInternal>();
+        try {
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            int count = in.readInt();
+            for (int i = 0; i < count; i++) {
+                String name = in.readString(); String id = in.readString(); int level = in.readInt(); long time = in.readLong();
+                var code = (com.android.internal.pm.parsing.pkg.PackageImpl) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+                    java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
+                code.setPackageName(name);
+                var setting = domainSetting((com.android.server.pm.pkg.AndroidPackage)code, false, id);
+                com.android.server.pm.DomainApprovalFixture.ownersUser(setting, level, time);
+                service.addPackage((com.android.server.pm.pkg.PackageStateInternal)setting, null);
+                if (level != 6) settings.put(name, (com.android.server.pm.pkg.PackageStateInternal)setting);
+            }
+            if (in.dataAvail() != 0) throw new AssertionError("trailing grouped Owners users");
+            var connection = new DomainConnection(settings); service.setConnection(connection);
+            for (boolean v2 : new boolean[] {false, true}) {
+                compat.v2 = v2;
+                for (int user : new int[] {0, 10}) for (String host : new String[] {"h0.example", "unknown.invalid"}) {
+                    var owners = service.getOwnersForDomain(host, user);
+                    out.writeNoException(); out.writeInt(owners.size());
+                    for (var owner : owners) out.writeTypedObject(owner, 0);
+                }
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "domain-owners-group.original").toPath(), out.marshall());
+        } finally { compat.v2 = true; in.recycle(); out.recycle(); }
     }
     private static void writeStates(android.os.Parcel out, java.util.Map<String, Integer> states) {
         var sorted = new java.util.TreeMap<>(states);

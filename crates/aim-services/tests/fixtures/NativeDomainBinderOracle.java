@@ -15,7 +15,7 @@ public final class NativeDomainBinderOracle {
             var states = info.getHostToStateMap();
             if (states.size() != 4000) throw new AssertionError("native domain count differs: " + states.size());
             for (int i = 0; i < 4000; i++) {
-                if (!Integer.valueOf(0).equals(states.get("h" + i + ".example"))) throw new AssertionError("native domain value differs at " + i);
+                if (!Integer.valueOf(i == 0 ? 1 : 0).equals(states.get("h" + i + ".example"))) throw new AssertionError("native domain value differs at " + i);
             }
         } finally { data.recycle(); reply.recycle(); }
         data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
@@ -28,8 +28,26 @@ public final class NativeDomainBinderOracle {
             if (reply.dataAvail() != 0 || state.getUser().getIdentifier() != 0 || !state.getPackageName().equals("android")
                 || state.isLinkHandlingAllowed() != Boolean.parseBoolean(args[3])) throw new AssertionError("native user-state framing differs");
             if (state.getHostToStateMap().size() != 4000) throw new AssertionError("user-state domain count differs");
-            for (int i = 0; i < 4000; i++) if (!Integer.valueOf(0).equals(state.getHostToStateMap().get("h" + i + ".example"))) throw new AssertionError("user-state value differs");
+            for (int i = 0; i < 4000; i++) if (!Integer.valueOf(i == 0 ? 2 : 0).equals(state.getHostToStateMap().get("h" + i + ".example"))) throw new AssertionError("user-state value differs");
         } finally { data.recycle(); reply.recycle(); }
+        for (String host : new String[] {"h0.example", "h1.example", null}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString(host); data.writeInt(0);
+                if (!service.transact(Integer.parseInt(args[4]), data, reply, 0)) throw new AssertionError("native Owners transaction unhandled");
+                if (host == null) {
+                    try { reply.readException(); throw new AssertionError("null host accepted"); }
+                    catch (NullPointerException expected) {}
+                } else {
+                    reply.readException();
+                    var owners = reply.createTypedArrayList(android.content.pm.verify.domain.DomainOwner.CREATOR);
+                    int count = host.equals("h0.example") ? 1 : 0;
+                    if (owners == null || owners.size() != count) throw new AssertionError("native Owners count differs");
+                    if (count != 0 && (!owners.get(0).getPackageName().equals("android") || owners.get(0).isOverrideable())) throw new AssertionError("native DomainOwner values differ");
+                }
+                if (reply.dataAvail() != 0) throw new AssertionError("native Owners framing differs");
+            } finally { data.recycle(); reply.recycle(); }
+        }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private NativeDomainBinderOracle() {}

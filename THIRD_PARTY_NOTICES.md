@@ -42,6 +42,12 @@ travel with any redistributed covered sources or binaries.
   generated from the framework AIDL files pinned in
   [`crates/aim-services/sources.lock`](crates/aim-services/sources.lock).
   [Upstream](https://android.googlesource.com/platform/frameworks/base/).
+- **Unicode simple casing data.** `package/domain_verification/names.rs` derives
+  its UTF-16 mapping from `platform/external/icu` at `android-16.0.0_r1`,
+  `icu4c/source/data/unidata/UnicodeData.txt` (SHA-256 recorded in the file).
+  Copyright © 2016-2023 Unicode, Inc.; Unicode License V3, reproduced in
+  [icu-LICENSE](licensing/third-party/icu-LICENSE).
+  [Pinned data](https://android.googlesource.com/platform/external/icu/+/android-16.0.0_r1/icu4c/source/data/unidata/UnicodeData.txt).
 - **libcore/OpenJDK TimSort.** The native SELinuxMMAC policy ordering
   (`crates/aim-services/src/package/timsort.rs`) ports
   `ojluni/src/main/java/java/util/TimSort.java` from `platform/libcore` at

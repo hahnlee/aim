@@ -12,6 +12,23 @@ use crate::package::{
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+pub(crate) fn approval_eligible(
+    code: &AndroidPackage,
+    user: Option<&crate::package::restrictions::UserState>,
+) -> bool {
+    let Some(user) = user else { return false };
+    user.installed
+        && match user.enabled {
+            1 => true,
+            2 | 3 | 4 => false,
+            _ => code.is(crate::package::pkg::booleans::ENABLED),
+        }
+        && !user
+            .suspensions
+            .as_ref()
+            .is_some_and(|owners| !owners.is_empty())
+}
+
 pub struct Input<'a> {
     pub id: &'a str,
     pub name: &'a str,
@@ -21,6 +38,19 @@ pub struct Input<'a> {
     /// The original compatibility owner's decision, including overrides.
     pub restrict_domains: bool,
     pub pre_verified: Option<&'a [String]>,
+}
+
+#[derive(Debug)]
+pub enum OwnersError {
+    Input(String),
+    Ordering(String),
+}
+
+pub struct ApprovalInput<'a> {
+    pub code: &'a AndroidPackage,
+    pub user: Option<&'a crate::package::restrictions::UserState>,
+    pub settings_v2: bool,
+    pub policy: Policy,
 }
 
 /// A request for the verifier driver; this does not claim broadcast delivery.
@@ -133,6 +163,58 @@ impl Owner {
     pub fn package(&self, name: &str) -> Option<&Package> {
         self.attached.iter().find(|p| p.name == name)
     }
+    pub fn attached_names(&self) -> impl Iterator<Item = &str> {
+        self.attached.iter().map(|package| package.name.as_str())
+    }
+    pub fn owners<'a>(
+        &self,
+        host: &str,
+        user_id: i32,
+        mut lookup: impl FnMut(&str) -> Result<Option<ApprovalInput<'a>>, String>,
+    ) -> Result<Vec<(String, bool)>, OwnersError> {
+        let mut levels: BTreeMap<i32, Vec<(String, i64)>> = BTreeMap::new();
+        for name in self.attached_names() {
+            let Some(input) = lookup(name).map_err(OwnersError::Input)? else {
+                continue;
+            };
+            let level = self
+                .approval(
+                    name,
+                    input.code,
+                    input.user,
+                    user_id,
+                    input.settings_v2,
+                    input.policy,
+                    host,
+                )
+                .map_err(OwnersError::Input)?;
+            if level > 0 {
+                levels.entry(level).or_default().push((
+                    name.to_owned(),
+                    input.user.map_or(0, |user| user.first_install_time),
+                ));
+            }
+        }
+        let mut owners = Vec::new();
+        for (level, packages) in levels {
+            let order = crate::package::timsort::sort(packages.len(), |a, b| {
+                let (first, second) = (&packages[a], &packages[b]);
+                Ok(if first.1 != second.1 {
+                    (first.1.wrapping_sub(second.1) as i32).cmp(&0)
+                } else {
+                    super::names::compare(&first.0, &second.0)
+                })
+            })
+            .map_err(OwnersError::Ordering)?;
+            owners.extend(
+                order
+                    .into_iter()
+                    .map(|i| (packages[i].0.clone(), level <= 3)),
+            );
+        }
+        Ok(owners)
+    }
+
     pub fn package_by_id(&self, id: &str) -> Option<&Package> {
         self.ids
             .get(&id.to_ascii_lowercase())
@@ -291,22 +373,10 @@ impl Owner {
         policy: Policy,
         host: &str,
     ) -> Result<i32, String> {
-        let Some(user) = user else {
-            return Ok(0);
-        };
-        if !user.installed
-            || match user.enabled {
-                1 => false,
-                2 | 3 | 4 => true,
-                _ => !code.is(crate::package::pkg::booleans::ENABLED),
-            }
-            || user
-                .suspensions
-                .as_ref()
-                .is_some_and(|owners| !owners.is_empty())
-        {
+        if !approval_eligible(code, user) {
             return Ok(0);
         }
+        let user = user.unwrap();
         if !settings_v2 {
             let legacy = self
                 .saved
@@ -367,6 +437,7 @@ impl Owner {
         }
         Ok(0)
     }
+
     pub fn remove(&mut self, name: &str) -> Option<Package> {
         let i = self.attached.iter().position(|p| p.name == name)?;
         let p = self.attached.remove(i);

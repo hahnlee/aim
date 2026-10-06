@@ -160,6 +160,46 @@ impl DomainQueries {
             prefix.data().len(),
         )
     }
+    fn owners(
+        &self,
+        pid: i32,
+        uid: i32,
+        host: Option<&str>,
+        user: i32,
+    ) -> Result<Vec<Option<super::parcels::Owner>>, Exception> {
+        let host =
+            host.ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, ""))?;
+        let system = self.system.upgrade().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
+        })?;
+        let capture = system.capture_package_queries()?;
+        let domains = capture.domains().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
+        })?;
+        let bridge = system.package_bootstrap()?;
+        system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::Owners(user))?;
+        let result = domains.owners(capture.scan().owner(), host, user, |name, sdk| {
+            bridge
+                .domain_verification_settings_v2(name, sdk)
+                .map_err(|e| format!("{e:?}"))
+        });
+        system.check_package_domain_capture(&bridge, &capture)?;
+        result
+            .map(|owners| {
+                owners
+                    .into_iter()
+                    .map(|(name, overrideable)| Some(super::parcels::Owner { name, overrideable }))
+                    .collect()
+            })
+            .map_err(|e| match e {
+                super::owner::OwnersError::Input(message) => {
+                    Exception::new(EX_ILLEGAL_STATE, message)
+                }
+                super::owner::OwnersError::Ordering(message) => {
+                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT, message)
+                }
+            })
+    }
 }
 
 impl Service for DomainQueries {
@@ -172,6 +212,25 @@ impl Service for DomainQueries {
             return Err(UNKNOWN_TRANSACTION);
         }
         let mut reply = Parcel::new();
+        if call.code == api::GET_OWNERS_FOR_DOMAIN {
+            let args = api::GetOwnersForDomain::read(&mut call.data)?;
+            if call.data.remaining() != 0 {
+                return Err(BAD_VALUE);
+            }
+            match self.owners(
+                call.sender_pid,
+                call.sender_euid as i32,
+                args.domain.as_deref(),
+                args.user_id,
+            ) {
+                Ok(owners) => api::write_get_owners_for_domain_reply(&mut reply, Some(&owners)),
+                Err(error) if error.code == aim_binder_host::parcel::EX_NULL_POINTER => {
+                    reply.write_exception_message(&error, None)
+                }
+                Err(error) => reply.write_exception(&error),
+            }
+            return Ok(reply);
+        }
         if call.code == api::GET_DOMAIN_VERIFICATION_USER_STATE {
             let args = api::GetDomainVerificationUserState::read(&mut call.data)?;
             if call.data.remaining() != 0 {

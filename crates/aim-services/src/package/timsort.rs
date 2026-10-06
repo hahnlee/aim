@@ -258,7 +258,7 @@ impl<C: FnMut(usize, usize) -> Result<Ordering>> Sort<C> {
             self.a.copy_within(c2..c2 + len2, dest);
             self.a[dest + len2] = tmp[c1];
         } else if len1 == 0 {
-            return Err("comparison violates ordering".into());
+            return Err("Comparison method violates its general contract!".into());
         } else {
             self.a[dest..dest + len1].copy_from_slice(&tmp[c1..c1 + len1]);
         }
@@ -367,7 +367,7 @@ impl<C: FnMut(usize, usize) -> Result<Ordering>> Sort<C> {
             self.a.copy_within(c1 - len1..c1, dest);
             self.a[dest - 1] = tmp[c2 - 1];
         } else if len2 == 0 {
-            return Err("comparison violates ordering".into());
+            return Err("Comparison method violates its general contract!".into());
         } else {
             self.a[dest - len2..dest].copy_from_slice(&tmp[..len2]);
         }

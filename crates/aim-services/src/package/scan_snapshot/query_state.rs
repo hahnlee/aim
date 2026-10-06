@@ -83,6 +83,49 @@ impl NativeDomains {
     pub fn changes(&self) -> &[(String, crate::package::domain_verification::owner::Change)] {
         &self.boot.changes
     }
+    pub fn owners(
+        &self,
+        scan: &crate::package::scan::SigningScan,
+        host: &str,
+        user: i32,
+        mut settings_v2: impl FnMut(&str, i32) -> Result<bool, String>,
+    ) -> Result<Vec<(String, bool)>, crate::package::domain_verification::owner::OwnersError> {
+        self.owner().owners(host, user, |name| {
+            if !scan
+                .settings
+                .packages
+                .iter()
+                .any(|setting| setting.name == name)
+            {
+                return Ok(None);
+            }
+            let code = &scan
+                .loaded_packages()
+                .get(name)
+                .ok_or("missing current domain approval code")?
+                .package;
+            let user = scan
+                .scanned_user_states(name)
+                .and_then(|users| users.get(&user));
+            if !crate::package::domain_verification::owner::approval_eligible(code, user) {
+                return Ok(None);
+            }
+            Ok(Some(
+                crate::package::domain_verification::owner::ApprovalInput {
+                    code,
+                    user,
+                    settings_v2: settings_v2(name, code.target_sdk_version)?,
+                    policy: crate::package::domain_verification::collector::Policy {
+                        restrict_domains: *self
+                            .policies
+                            .get(name)
+                            .ok_or("missing current domain policy")?,
+                        linked_app: self.config.linked_apps.iter().any(|linked| linked == name),
+                    },
+                },
+            ))
+        })
+    }
 }
 
 impl Context {

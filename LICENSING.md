@@ -17,6 +17,7 @@ upstream file is modified, translated, embedded in a script, or renamed.
 | Code generated from the Khronos registry and ANGLE's extension registry (`hal/gles/src/thunks.rs`, `crates/aim-host-gpu/src/table.rs`) | The registries' terms (Khronos: Apache-2.0; ANGLE: BSD-3-Clause) in addition to ours |
 | Downloaded sources, tools, images, libraries and generated derivatives | Their upstream terms; their presence in a build directory does not make them Apache-2.0 |
 | `crates/aim-services/src/package/timsort.rs` (libcore TimSort port) | GPL-2.0-only WITH Classpath-exception-2.0; upstream notices retained, see [licensing/OPENJDK.md](licensing/OPENJDK.md) |
+| `crates/aim-services/src/package/domain_verification/names.rs` casing table | Unicode-3.0; see [ICU license](licensing/third-party/icu-LICENSE) |
 | License and notice documents | Reproduced under their original terms, not relicensed by the root license |
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution,
