@@ -26,17 +26,14 @@
  */
 //! Rust port of libcore java.util.TimSort, platform/libcore
 //! fff4fcc0cf7f080cf2511cbb57561482b13b218f (android-16.0.0_r1),
-//! ojluni/src/main/java/java/util/TimSort.java. Uses policy indices, Rust vectors
+//! ojluni/src/main/java/java/util/TimSort.java. Uses indices, Rust vectors
 //! and Result diagnostics, preserving the original comparator sequence.
 //! License/exception text: licensing/third-party/libcore-ojluni-LICENSE.
-//! Index sorting keeps policy ownership separate from comparator diagnostics.
+//! Index sorting keeps value ownership separate from comparator diagnostics.
 use std::cmp::Ordering::{self, Greater, Less};
 type Result<T> = std::result::Result<T, String>;
 
-pub(super) fn sort(
-    n: usize,
-    cmp: impl FnMut(usize, usize) -> Result<Ordering>,
-) -> Result<Vec<usize>> {
+pub fn sort(n: usize, cmp: impl FnMut(usize, usize) -> Result<Ordering>) -> Result<Vec<usize>> {
     let mut sort = Sort {
         a: (0..n).collect(),
         runs: vec![],
@@ -261,7 +258,7 @@ impl<C: FnMut(usize, usize) -> Result<Ordering>> Sort<C> {
             self.a.copy_within(c2..c2 + len2, dest);
             self.a[dest + len2] = tmp[c1];
         } else if len1 == 0 {
-            return Err("policy comparison violates ordering".into());
+            return Err("comparison violates ordering".into());
         } else {
             self.a[dest..dest + len1].copy_from_slice(&tmp[c1..c1 + len1]);
         }
@@ -370,7 +367,7 @@ impl<C: FnMut(usize, usize) -> Result<Ordering>> Sort<C> {
             self.a.copy_within(c1 - len1..c1, dest);
             self.a[dest - 1] = tmp[c2 - 1];
         } else if len2 == 0 {
-            return Err("policy comparison violates ordering".into());
+            return Err("comparison violates ordering".into());
         } else {
             self.a[dest - len2..dest].copy_from_slice(&tmp[..len2]);
         }
@@ -426,10 +423,10 @@ fn gallop(
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/common/java.rs"]
+#[path = "../../tests/common/java.rs"]
 mod java;
 #[cfg(test)]
-#[path = "../../../../tests/common/runtime.rs"]
+#[path = "../../tests/common/runtime.rs"]
 mod runtime;
 
 #[cfg(test)]

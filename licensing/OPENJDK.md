@@ -6,12 +6,13 @@ code is distributed under **GPL-2.0-only WITH Classpath-exception-2.0**.
 ## What the repository holds
 
 The repository holds a Rust port of libcore's TimSort at
-[`crates/aim-services/src/package/owner/seinfo/sort.rs`](../crates/aim-services/src/package/owner/seinfo/sort.rs).
+[`crates/aim-services/src/package/timsort.rs`](../crates/aim-services/src/package/timsort.rs).
 It follows `platform/libcore` revision
 `fff4fcc0cf7f080cf2511cbb57561482b13b218f` (`android-16.0.0_r1`),
 [`ojluni/src/main/java/java/util/TimSort.java`](https://android.googlesource.com/platform/libcore/+/fff4fcc0cf7f080cf2511cbb57561482b13b218f/ojluni/src/main/java/java/util/TimSort.java).
-The local changes use policy indices, Rust vectors and Result diagnostics while
-preserving the comparator sequence needed by SELinuxMMAC's duplicate detection.
+The local changes use indices, Rust vectors and Result diagnostics while
+preserving the comparator sequence needed by SELinuxMMAC's duplicate detection
+and domain-owner ranking.
 The port retains upstream copyright/license notices and the Classpath exception;
 its containing Cargo package records both that exception and the Apache-2.0
 terms of the package's independent files. The root Apache license does not

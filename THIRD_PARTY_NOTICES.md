@@ -43,7 +43,7 @@ travel with any redistributed covered sources or binaries.
   [`crates/aim-services/sources.lock`](crates/aim-services/sources.lock).
   [Upstream](https://android.googlesource.com/platform/frameworks/base/).
 - **libcore/OpenJDK TimSort.** The native SELinuxMMAC policy ordering
-  (`crates/aim-services/src/package/owner/seinfo/sort.rs`) ports
+  (`crates/aim-services/src/package/timsort.rs`) ports
   `ojluni/src/main/java/java/util/TimSort.java` from `platform/libcore` at
   `fff4fcc0cf7f080cf2511cbb57561482b13b218f` (`android-16.0.0_r1`).
   Copyright (c) 2009, 2013 Oracle and/or its affiliates; Copyright 2009 Google Inc.

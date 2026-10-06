@@ -1443,7 +1443,16 @@ approval API matches 1,600 native cases across eight add/migrate states, both
 V2 modes, missing users, enabled overrides, install/suspend/instant state and
 ten hosts. The same-package test helper accesses original user state directly,
 without reflection or changing APKs. This establishes approval policy and levels;
-getOwnersForDomain list ranking/serving remains unimplemented. The first full
+getOwnersForDomain list ranking/serving remains unimplemented. Its sorting
+algorithm is now shared with SELinuxMMAC: the pinned libcore TimSort port,
+retaining comparator calls and ordering-contract failures. An original ART
+sort corpus covers 960 ASCII-name lists (0–128 entries), equal times/names,
+32-bit truncation, 64-bit overflow and non-transitive comparisons. Rust
+standard sorting differed in 298 cases; original libcore rejected two.
+The shared native sort matches all 960 results and both rejections; the full
+original oracle passed (35.02s, no skips), and 488 unit tests passed (0.56s;
+five excluded by default). This checks the sort algorithm, not the full
+Owners Binder endpoint. The first full
 oracle attempt reached a later migration-policy ENOSPC crash (#903); removing only
 this worktree's reproducible release incremental cache restored free space. The
 same full oracle then passed (30.55s, no skips). User-state lookup

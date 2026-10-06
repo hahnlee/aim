@@ -36,6 +36,7 @@ pub mod scan;
 pub mod scan_snapshot;
 pub mod sign;
 pub mod system_config;
+pub mod timsort;
 pub mod uri;
 pub mod write;
 

@@ -1,6 +1,6 @@
 //! SELinuxMMAC policy and label composition, android-16.0.0_r1 (#838).
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
-mod sort;
+use crate::package::timsort;
 use crate::package::sign::SigningDetails;
 use aim_android_xml::Element;
 use std::{
@@ -231,7 +231,7 @@ pub fn target_sdk(
 
 fn sort_rules(rules: &mut Vec<Rule>) -> Result<(), String> {
     use std::cmp::Ordering;
-    let order = sort::sort(rules.len(), |a, b| {
+    let order = timsort::sort(rules.len(), |a, b| {
         let (a, b) = (&rules[a], &rules[b]);
         let order = a.packages.is_empty().cmp(&b.packages.is_empty());
         if order == Ordering::Equal

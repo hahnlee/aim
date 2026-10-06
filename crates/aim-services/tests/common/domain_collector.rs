@@ -295,6 +295,60 @@ fn attachment_inputs(directory: &Path) {
     }
 }
 
+pub fn verify_owner_sort(directory: &Path) {
+    use aim_binder_host::parcel::Reader;
+    let bytes = fs::read(directory.join("domain-owner-sort.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    let cases = reader.read_i32().unwrap();
+    assert_eq!(cases, 960);
+    let mut rejected = 0;
+    for case in 0..cases {
+        let mode = reader.read_i32().unwrap();
+        let size = reader.read_i32().unwrap() as usize;
+        let entries = (0..size)
+            .map(|_| {
+                (
+                    reader.read_i32().unwrap(),
+                    reader.read_string16().unwrap().unwrap(),
+                    reader.read_i64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let failed = reader.read_i32().unwrap();
+        let original = (0..size)
+            .map(|_| reader.read_i32().unwrap())
+            .collect::<Vec<_>>();
+        let mut indices = original.clone();
+        indices.sort_unstable();
+        assert_eq!(indices, (0..size as i32).collect::<Vec<_>>(), "case={case}");
+        assert!(matches!(failed, 0 | 1));
+        let compare = |a: usize, b: usize| {
+            let (a, b) = (&entries[a], &entries[b]);
+            Ok(if a.2 != b.2 {
+                (a.2.wrapping_sub(b.2) as i32).cmp(&0)
+            } else {
+                a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase())
+            })
+        };
+        let actual = aim_services::package::timsort::sort(size, compare);
+        if failed != 0 {
+            assert!(actual.is_err(), "original rejected owner sort case={case}");
+            rejected += 1;
+            continue;
+        }
+        let actual = actual
+            .unwrap()
+            .into_iter()
+            .map(|i| entries[i].0)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, original, "owner TimSort case={case} mode={mode}");
+    }
+    assert_eq!(reader.remaining(), 0);
+    eprintln!(
+        "Original Owners sort: {cases} cases, {rejected} comparator rejections, native TimSort matches"
+    );
+}
+
 pub fn verify_attachment(directory: &Path) {
     use aim_services::package::{
         domain_verification::{
