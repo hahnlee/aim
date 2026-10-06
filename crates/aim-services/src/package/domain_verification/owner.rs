@@ -161,29 +161,8 @@ impl Owner {
             if id < 0 || selections.contains_key(&id) {
                 return Err("invalid domain query users".into());
             }
-            let user = p.users.iter().find(|u| u.id == id);
-            let states = web
-                .iter()
-                .map(|host| {
-                    let state = p
-                        .domains
-                        .iter()
-                        .find(|(h, _)| h.as_ref() == Some(host))
-                        .map(|(_, state)| *state);
-                    let state = if state.is_some_and(|state| matches!(state, 1 | 2 | 4 | 5 | 7 | 8))
-                    {
-                        2
-                    } else if user.is_some_and(|u| u.enabled_hosts.contains(host)) {
-                        1
-                    } else {
-                        0
-                    };
-                    (host.clone(), state)
-                })
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect();
-            selections.insert(id, (user.is_none_or(|u| u.allow_link_handling), states));
+            let (_, allowed, states) = self.user_state(&code.package_name, code, restrict_domains, config, id)?.ok_or("missing attached user owner")?;
+            selections.insert(id, (allowed, states));
         }
         // The package feed asks for groups of the queried users' web hosts.
         let groups = if selections.is_empty() {
@@ -253,6 +232,50 @@ impl Owner {
                 .into_iter()
                 .map(|(host, _, state)| (host, state))
                 .collect(),
+        )))
+    }
+    pub fn user_state(
+        &self,
+        name: &str,
+        code: &AndroidPackage,
+        restrict_domains: bool,
+        config: &SystemConfig,
+        user: i32,
+    ) -> Result<Option<(String, bool, Vec<(String, i32)>)>, String> {
+        let Some(package) = self.package(name) else {
+            return Ok(None);
+        };
+        let domains = collector::collect(
+            code,
+            Policy {
+                restrict_domains,
+                linked_app: config.linked_apps.contains(&code.package_name),
+            },
+            Kind::Web,
+        );
+        let selected = package.users.iter().find(|u| u.id == user);
+        let states = domains
+            .into_iter()
+            .map(|host| {
+                let state = package
+                    .domains
+                    .iter()
+                    .find(|(h, _)| h.as_ref() == Some(&host))
+                    .map(|(_, state)| *state);
+                let value = if state.is_some_and(|state| matches!(state, 1 | 2 | 4 | 5 | 7 | 8)) {
+                    2
+                } else if selected.is_some_and(|user| user.enabled_hosts.contains(&host)) {
+                    1
+                } else {
+                    0
+                };
+                (host, value)
+            })
+            .collect();
+        Ok(Some((
+            package.id.clone(),
+            selected.is_none_or(|user| user.allow_link_handling),
+            states,
         )))
     }
     pub fn remove(&mut self, name: &str) -> Option<Package> {

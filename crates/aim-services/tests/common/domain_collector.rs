@@ -397,7 +397,12 @@ pub fn verify_attachment(directory: &Path) {
                 expected.write_string16(Some(&id));
                 write_states(&mut expected, &states);
             }
-            for (_, (allowed, states)) in values.users {
+            for (user, (allowed, states)) in values.users {
+                let id = &owner.package("fixture.domains").unwrap().id;
+                let prepared = aim_services::package::domain_verification::parcels::UserState::prepare(8, id, "fixture.domains", user, allowed, &states).unwrap();
+                let mut reply = Parcel::new();
+                aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_domain_verification_user_state_reply(&mut reply, Some(&prepared));
+                assert_eq!(reply.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.user-{user}"))).unwrap(), "original user-state parcel case={case} stage={stage} user={user}");
                 expected.write_i32(i32::from(allowed));
                 write_states(&mut expected, &states);
             }

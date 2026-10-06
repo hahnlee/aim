@@ -14,7 +14,7 @@ public final class DomainEnforcerOracle {
         int missing; boolean hidden, verifier;
         public boolean isCallerVerifier(int uid) { return verifier; }
         public boolean doesUserExist(int user) { return (user == 0 || user == 10) && user != missing; }
-        public boolean filterAppAccess(String name, int uid, int user) { if (!"fixture.domains".equals(name)) throw new AssertionError("foreign domain visibility package"); return hidden; }
+        public boolean filterAppAccess(String name, int uid, int user) { if (name != null && !"fixture.domains".equals(name)) throw new AssertionError("foreign domain visibility package"); return hidden; }
         public void sendBroadcastForPackages(java.util.Set<String> names) { throw new AssertionError("authorization broadcast"); }
         public boolean runMessage(int code, Object object) { throw new AssertionError("authorization message"); }
     }
@@ -41,6 +41,7 @@ public final class DomainEnforcerOracle {
                         case 6 -> actual = enforcer.callerIsLegacyUserSelector(uid, 0, "fixture.domains", target) ? 1 : 0;
                         case 7 -> actual = enforcer.callerIsLegacyUserQuerent(uid, 0, "fixture.domains", target) ? 1 : 0;
                         case 8 -> actual = enforcer.assertApprovedUserSelector(uid, 0, null, target) ? 1 : 0;
+                        case 9 -> actual = enforcer.assertApprovedUserStateQuerent(uid, 0, null, target) ? 1 : 0;
                         default -> throw new AssertionError("unknown authorization case");
                     }
                 } catch (SecurityException denied) { actual = -1; }

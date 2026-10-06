@@ -123,6 +123,8 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             "-Djava.class.path=/data/local/tmp/domain-binder/oracle.dex", "/system/bin", "NativeDomainBinderOracle"])
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_INFO.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::DESCRIPTOR)
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_USER_STATE.to_string())
+            .arg(system.capture_package_queries().unwrap().state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot

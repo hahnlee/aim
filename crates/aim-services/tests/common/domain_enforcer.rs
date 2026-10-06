@@ -31,8 +31,8 @@ impl Owners for Fixture {
     fn user_exists(&self, user: i32) -> Result<bool, String> {
         Ok([0, 10].contains(&user) && user != self.missing)
     }
-    fn filtered(&self, package: &str, _: i32, _: i32) -> Result<bool, String> {
-        assert_eq!(package, "fixture.domains");
+    fn filtered(&self, package: Option<&str>, _: i32, _: i32) -> Result<bool, String> {
+        assert!(matches!(package, None | Some("fixture.domains")));
         Ok(self.hidden)
     }
 }
@@ -47,12 +47,12 @@ pub fn export(directory: &Path) {
         (0, -1, true),
         (10, -1, true),
     ];
-    cases.write_i32((4 * 2 * masks.len() * scenarios.len() * 9) as i32);
+    cases.write_i32((4 * 2 * masks.len() * scenarios.len() * 10) as i32);
     for uid in [0, 1000, 2000, 10001] {
         for verifier in [false, true] {
             for mask in masks {
                 for (target, missing, hidden) in scenarios {
-                    for kind in 0..9 {
+                    for kind in 0..10 {
                         let fixture = Fixture {
                             mask,
                             verifier,
@@ -63,12 +63,13 @@ pub fn export(directory: &Path) {
                             0 => Operation::Internal,
                             1 => Operation::Info,
                             2 => Operation::Verifier,
-                            3 => Operation::UserQuery("fixture.domains", target),
+                            3 => Operation::UserQuery(Some("fixture.domains"), target),
                             4 => Operation::UserSelect(Some("fixture.domains"), target),
                             5 => Operation::Owners(target),
                             6 => Operation::LegacySelect("fixture.domains", target),
                             7 => Operation::LegacyQuery("fixture.domains", target),
-                            _ => Operation::UserSelect(None, target),
+                            8 => Operation::UserSelect(None, target),
+                            _ => Operation::UserQuery(None, target),
                         };
                         let expected = match authorize(&fixture, uid, 0, op) {
                             Ok(true) => 1,

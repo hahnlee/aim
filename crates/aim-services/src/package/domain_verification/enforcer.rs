@@ -18,14 +18,14 @@ pub trait Owners {
     fn permission(&self, uid: i32, permission: &str) -> Result<bool, String>;
     fn verifier(&self, uid: i32) -> Result<bool, String>;
     fn user_exists(&self, user: i32) -> Result<bool, String>;
-    fn filtered(&self, package: &str, uid: i32, user: i32) -> Result<bool, String>;
+    fn filtered(&self, package: Option<&str>, uid: i32, user: i32) -> Result<bool, String>;
 }
 #[derive(Clone, Copy, Debug)]
 pub enum Operation<'a> {
     Internal,
     Info,
     Verifier,
-    UserQuery(&'a str, i32),
+    UserQuery(Option<&'a str>, i32),
     UserSelect(Option<&'a str>, i32),
     Owners(i32),
     LegacySelect(&'a str, i32),
@@ -104,7 +104,7 @@ pub fn authorize(
             }
             require(UPDATE)?;
             users(target)?;
-            package.map_or(Ok(true), |package| visible(package, target))
+            package.map_or(Ok(true), |package| visible(Some(package), target))
         }
         Operation::Owners(target) => {
             if caller_user != target {
@@ -121,14 +121,14 @@ pub fn authorize(
                 return Ok(false);
             }
             users(target)?;
-            visible(package, target)
+            visible(Some(package), target)
         }
         Operation::LegacyQuery(package, target) => {
             if caller_user != target {
                 require(CROSS_USER_FULL)?;
             }
             users(target)?;
-            visible(package, target)
+            visible(Some(package), target)
         }
     }
 }
@@ -150,11 +150,11 @@ impl Owners for Captured<'_> {
     fn user_exists(&self, user: i32) -> Result<bool, String> {
         Ok(self.query.state.users.contains_key(&user))
     }
-    fn filtered(&self, package: &str, uid: i32, user: i32) -> Result<bool, String> {
+    fn filtered(&self, package: Option<&str>, uid: i32, user: i32) -> Result<bool, String> {
         crate::package::apps_filter::should_filter_application(
             self.query.state,
             self.query.filter,
-            self.query.state.packages.get(package),
+            package.and_then(|name| self.query.state.packages.get(name)),
             uid,
             user,
             true,
@@ -178,7 +178,7 @@ mod tests {
         fn user_exists(&self, _: i32) -> Result<bool, String> {
             Err("user owner".into())
         }
-        fn filtered(&self, _: &str, _: i32, _: i32) -> Result<bool, String> {
+        fn filtered(&self, _: Option<&str>, _: i32, _: i32) -> Result<bool, String> {
             Err("visibility owner".into())
         }
     }
@@ -187,7 +187,7 @@ mod tests {
         for op in [
             Operation::Info,
             Operation::Verifier,
-            Operation::UserQuery("p", 0),
+            Operation::UserQuery(Some("p"), 0),
             Operation::UserSelect(Some("p"), 10),
             Operation::Owners(0),
         ] {

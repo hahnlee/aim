@@ -2524,6 +2524,50 @@ fn verify_boot_scan(
             assert_eq!(reader.read_i32().unwrap(), 1);
             assert_eq!(reader.remaining(), 0);
         }
+        for name in [Some("android"), None, Some("missing.package")] {
+            let mut data = Parcel::new();
+            api::GetDomainVerificationUserState {
+                package_name: name.map(String::from),
+                user_id: 0,
+            }
+            .write(&mut data);
+            let reply = endpoint
+                .transact(api::GET_DOMAIN_VERIFICATION_USER_STATE, &data, false)
+                .unwrap();
+            let mut reader = reply.reader();
+            if name == Some("android") {
+                reader.read_exception().unwrap().unwrap();
+                assert_eq!(reader.read_i32().unwrap(), 1);
+                assert_eq!(reader.read_i32().unwrap(), 8); // default link handling allowed
+                assert_eq!(
+                    reader.read_string16().unwrap().as_deref(),
+                    Some(
+                        retained_domains
+                            .owner()
+                            .package("android")
+                            .unwrap()
+                            .id
+                            .as_str()
+                    )
+                );
+                assert_eq!(reader.read_string16().unwrap().as_deref(), Some("android"));
+                assert_eq!(reader.read_i32().unwrap(), 1);
+                assert_eq!(reader.read_i32().unwrap(), 0);
+                assert_eq!(reader.read_i32().unwrap(), 0);
+                assert_eq!(reader.read_i32().unwrap(), 0);
+            } else {
+                let error = reader.read_exception().unwrap().unwrap_err();
+                assert_eq!(error.code, -8);
+                assert_eq!(error.service_specific, 1);
+            }
+            assert_eq!(reader.remaining(), 0);
+            data.write_i32(9);
+            assert!(
+                endpoint
+                    .transact(api::GET_DOMAIN_VERIFICATION_USER_STATE, &data, false)
+                    .is_err()
+            );
+        }
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
         let reply = endpoint
@@ -2556,6 +2600,7 @@ fn verify_boot_scan(
                         "android.permission.DOMAIN_VERIFICATION_AGENT"
                             | "android.permission.INTENT_FILTER_VERIFICATION_AGENT"
                             | "android.permission.DUMP"
+                            | "android.permission.INTERACT_ACROSS_USERS"
                     )
                 ));
                 assert_eq!(call.data.remaining(), 0);
@@ -2579,6 +2624,22 @@ fn verify_boot_scan(
             .write(&mut request);
             let reply = find(foreign_client, "query_domains")
                 .transact(api::GET_DOMAIN_VERIFICATION_INFO, &request, false)
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                -1
+            );
+        }
+        {
+            use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+            let mut data = Parcel::new();
+            api::GetDomainVerificationUserState {
+                package_name: Some("android".into()),
+                user_id: 10,
+            }
+            .write(&mut data);
+            let reply = find(foreign_client, "query_domains")
+                .transact(api::GET_DOMAIN_VERIFICATION_USER_STATE, &data, false)
                 .unwrap();
             assert_eq!(
                 reply.reader().read_exception().unwrap().unwrap_err().code,
@@ -2633,7 +2694,7 @@ fn verify_boot_scan(
     }
     use crate::package::domain_verification::enforcer::Operation;
     assert!(system.authorize_package_domain(bridge, &query, 1, 1000, Operation::Info).unwrap());
-    assert!(system.authorize_package_domain(bridge, &query, 1, 0, Operation::UserQuery("android", 0)).unwrap());
+    assert!(system.authorize_package_domain(bridge, &query, 1, 0, Operation::UserQuery(Some("android"), 0)).unwrap());
     assert!(system.authorize_package_domain(bridge, &query, 1, 10001, Operation::Internal).is_err_and(|e| e.code == -1));
     assert!(system.authorize_package_domain(bridge, &old_query, 1, 1000, Operation::Info).is_err());
     let published = query.scan().clone();

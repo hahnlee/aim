@@ -39,6 +39,68 @@ impl DomainQueries {
         uid: i32,
         name: Option<&str>,
     ) -> Result<Option<super::parcels::Info>, Exception> {
+        self.query(
+            pid,
+            uid,
+            name,
+            Operation::Info,
+            |domains, name, code, prefix| {
+                domains
+                    .verification(name, code)
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+                    .as_ref()
+                    .map(|(id, states)| {
+                        super::parcels::Info::prepare(prefix, id, name, states).map_err(|e| {
+                            Exception::new(EX_ILLEGAL_STATE, format!("domain info parcel: {e}"))
+                        })
+                    })
+                    .transpose()
+            },
+        )
+    }
+    fn user_state(
+        &self,
+        pid: i32,
+        uid: i32,
+        name: Option<&str>,
+        user: i32,
+    ) -> Result<Option<super::parcels::UserState>, Exception> {
+        self.query(
+            pid,
+            uid,
+            name,
+            Operation::UserQuery(name, user),
+            |domains, name, code, prefix| {
+                domains
+                    .user_state(name, code, user)
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?
+                    .as_ref()
+                    .map(|(id, allowed, states)| {
+                        super::parcels::UserState::prepare(prefix, id, name, user, *allowed, states)
+                            .map_err(|e| {
+                                Exception::new(
+                                    EX_ILLEGAL_STATE,
+                                    format!("domain user-state parcel: {e}"),
+                                )
+                            })
+                    })
+                    .transpose()
+            },
+        )
+    }
+    fn query<T>(
+        &self,
+        pid: i32,
+        uid: i32,
+        name: Option<&str>,
+        operation: Operation<'_>,
+        build: impl FnOnce(
+            &crate::package::scan_snapshot::query_state::NativeDomains,
+            &str,
+            &crate::package::pkg::AndroidPackage,
+            usize,
+        ) -> Result<Option<T>, Exception>,
+    ) -> Result<Option<T>, Exception> {
         let system = self.system.upgrade().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
         })?;
@@ -50,12 +112,15 @@ impl DomainQueries {
             ));
         }
         let bridge = system.package_bootstrap()?;
-        system.authorize_package_domain(&bridge, &capture, pid, uid, Operation::Info)?;
+        let allowed = system.authorize_package_domain(&bridge, &capture, pid, uid, operation)?;
         let missing = || Exception {
             code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
             message: String::new(),
             service_specific: 1,
         };
+        if !allowed {
+            return Err(missing());
+        }
         let name = name.ok_or_else(missing)?;
         let normalized = capture
             .scan()
@@ -85,22 +150,15 @@ impl DomainQueries {
             .loaded_packages()
             .get(&resolved)
             .ok_or_else(missing)?;
-        let verification = capture
-            .domains()
-            .unwrap()
-            .verification(name, &code.package)
-            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
-        verification
-            .as_ref()
-            .map(|(id, states)| {
-                let mut prefix = Parcel::new();
-                prefix.write_no_exception();
-                prefix.write_i32(1);
-                super::parcels::Info::prepare(prefix.data().len(), id, name, states).map_err(|e| {
-                    Exception::new(EX_ILLEGAL_STATE, format!("domain info parcel: {e}"))
-                })
-            })
-            .transpose()
+        let mut prefix = Parcel::new();
+        prefix.write_no_exception();
+        prefix.write_i32(1);
+        build(
+            capture.domains().unwrap(),
+            name,
+            &code.package,
+            prefix.data().len(),
+        )
     }
 }
 
@@ -114,6 +172,27 @@ impl Service for DomainQueries {
             return Err(UNKNOWN_TRANSACTION);
         }
         let mut reply = Parcel::new();
+        if call.code == api::GET_DOMAIN_VERIFICATION_USER_STATE {
+            let args = api::GetDomainVerificationUserState::read(&mut call.data)?;
+            if call.data.remaining() != 0 {
+                return Err(BAD_VALUE);
+            }
+            match self.user_state(
+                call.sender_pid,
+                call.sender_euid as i32,
+                args.package_name.as_deref(),
+                args.user_id,
+            ) {
+                Ok(state) => {
+                    api::write_get_domain_verification_user_state_reply(&mut reply, state.as_ref())
+                }
+                Err(error) if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC => {
+                    reply.write_exception_message(&error, None)
+                }
+                Err(error) => reply.write_exception(&error),
+            }
+            return Ok(reply);
+        }
         if call.code == api::GET_DOMAIN_VERIFICATION_INFO {
             let args = api::GetDomainVerificationInfo::read(&mut call.data)?;
             if call.data.remaining() != 0 {

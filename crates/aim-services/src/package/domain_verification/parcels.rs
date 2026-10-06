@@ -18,49 +18,7 @@ impl Info {
         let mut parcel = Parcel::new();
         parcel.write_string16(Some(&id.to_ascii_lowercase()));
         parcel.write_string16(Some(name));
-        let mut estimated = prefix + parcel.data().len();
-        let mut blob = false;
-        for (host, _) in states {
-            estimated = estimated
-                .checked_add(host.encode_utf16().count() * 2 + 12)
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "host-map size overflow")
-                })?;
-            if estimated > 32768 {
-                blob = true;
-                break;
-            }
-        }
-        let mut map = Parcel::new();
-        map.write_i32(
-            i32::try_from(states.len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "host-map count overflow")
-            })?,
-        );
-        for (host, state) in states {
-            map.write_i32(0); // Parcel.VAL_STRING
-            map.write_string16(Some(host));
-            map.write_i32(1); // Parcel.VAL_INTEGER
-            map.write_i32(*state);
-        }
-        parcel.write_bool(blob);
-        if !blob {
-            parcel.write_raw(map.data(), &[]);
-        } else {
-            parcel.write_i32(i32::try_from(map.data().len()).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "blob length overflow")
-            })?);
-            if map.data().len() <= 16384 {
-                parcel.write_i32(0); // BLOB_INPLACE
-                parcel.write_raw(map.data(), &[]);
-            } else {
-                let region = aim_ashmem::immutable_blob(map.data())?;
-                let file = aim_binder_host::server::file_from_fd(region.as_fd())
-                    .ok_or_else(|| io::Error::other("cannot retain native blob fileport"))?;
-                parcel.write_i32(1); // BLOB_ASHMEM_IMMUTABLE
-                parcel.write_file(file);
-            }
-        }
+        host_map(&mut parcel, prefix, states)?;
         Ok(Self(parcel))
     }
 }
@@ -68,6 +26,77 @@ impl WriteParcelable for Info {
     fn write_to(&self, out: &mut Parcel) {
         out.write_raw_files(self.0.data(), self.0.objects(), self.0.files());
     }
+}
+
+pub struct UserState(Parcel);
+impl UserState {
+    pub fn prepare(
+        prefix: usize,
+        id: &str,
+        name: &str,
+        user: i32,
+        allowed: bool,
+        states: &[(String, i32)],
+    ) -> io::Result<Self> {
+        let mut parcel = Parcel::new();
+        parcel.write_i32(if allowed { 8 } else { 0 }); // writeByte(flg), padded to int32
+        parcel.write_string16(Some(&id.to_ascii_lowercase()));
+        parcel.write_string16(Some(name));
+        parcel.write_i32(1); // typed UserHandle
+        parcel.write_i32(user);
+        host_map(&mut parcel, prefix, states)?;
+        Ok(Self(parcel))
+    }
+}
+impl WriteParcelable for UserState {
+    fn write_to(&self, out: &mut Parcel) {
+        out.write_raw_files(self.0.data(), self.0.objects(), self.0.files());
+    }
+}
+
+fn host_map(parcel: &mut Parcel, prefix: usize, states: &[(String, i32)]) -> io::Result<()> {
+    let mut estimated = prefix + parcel.data().len();
+    let mut blob = false;
+    for (host, _) in states {
+        estimated = estimated
+            .checked_add(host.encode_utf16().count() * 2 + 12)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "host-map size overflow"))?;
+        if estimated > 32768 {
+            blob = true;
+            break;
+        }
+    }
+    let mut map = Parcel::new();
+    map.write_i32(
+        i32::try_from(states.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "host-map count overflow"))?,
+    );
+    for (host, state) in states {
+        map.write_i32(0); // Parcel.VAL_STRING
+        map.write_string16(Some(host));
+        map.write_i32(1); // Parcel.VAL_INTEGER
+        map.write_i32(*state);
+    }
+    parcel.write_bool(blob);
+    if !blob {
+        parcel.write_raw(map.data(), &[]);
+    } else {
+        parcel
+            .write_i32(i32::try_from(map.data().len()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "blob length overflow")
+            })?);
+        if map.data().len() <= 16384 {
+            parcel.write_i32(0); // BLOB_INPLACE
+            parcel.write_raw(map.data(), &[]);
+        } else {
+            let region = aim_ashmem::immutable_blob(map.data())?;
+            let file = aim_binder_host::server::file_from_fd(region.as_fd())
+                .ok_or_else(|| io::Error::other("cannot retain native blob fileport"))?;
+            parcel.write_i32(1); // BLOB_ASHMEM_IMMUTABLE
+            parcel.write_file(file);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

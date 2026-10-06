@@ -1408,13 +1408,14 @@ checks, with explicit permission, verifier identity, user-existence and visibili
 owners. Missing owners are not treated as grants or ordinary permission denials.
 The captured adapter uses the same query graph's user map/AppsFilter (including
 uninstalled/archived filtering) and explicit current permission and UID-specific verifier callbacks.
-Original ART compares 6,912 controlled-owner cases over root/system/shell/app
+Original ART compares 7,680 controlled-owner cases over root/system/shell/app
 UIDs, verifier status, permission combinations, user existence, cross-user access,
-hidden packages and nullable selection targets. Allow/false/SecurityException
+hidden packages and nullable query/selection targets. Allow/false/SecurityException
 outcomes match, including the legacy selector's silent cross-user denial.
 These are controlled owners; production verifier selection remains unproved.
 A native IDomainVerificationManager endpoint now serves
-queryValidVerificationPackageNames and getDomainVerificationInfo using generated
+queryValidVerificationPackageNames, getDomainVerificationInfo and
+getDomainVerificationUserState using generated
 pinned AIDL codes/reply writers. Each request captures one published native
 domain/query generation. The package-list method applies approved-verifier
 authorization and returns attached auto-verification packages in original
@@ -1424,7 +1425,19 @@ it under a test alias and covers actual Binder replies, same-process permission-
 denial and bootstrap replacement clearing current captures (0.84s). Original ART
 compares eight add/migrate package lists, including exclusion of pending/restored
 records. This endpoint is not registered by guest-init under the original name;
-remaining methods and migration gates are tracked in #957. Info uses the same
+remaining six methods and migration gates are tracked in #957. User-state lookup
+applies the original user-existence/cross-user/visibility contract against the
+same capture, retaining nullable package names. Visibility denial returns the
+original name-not-found service-specific error; missing users/cross-user
+permission deny with SecurityException. Native projections preserve all-web-host
+hash order, verified-over-selected priority and per-user link handling (default
+allowed), including an attached package with an empty web-host map. The UserState
+parcel uses the original 0x8 flag byte, UUID/name, typed UserHandle and shared
+map/blob codec. Sixteen original add/migrate user-state replies for users 0/10
+match exact native bytes. Native Binder tests cover empty-map/default-allowed
+replies, null/missing names, tails and app cross-user denial (0.91s). The original
+ART Binder client now reads both large Info and UserState replies with an FD,
+checking all 4,000 user domains, user ID and link handling (14.08s, no skips). Info uses the same
 captured package-name resolution (Settings renames and visible static libraries)
 and native attached owner/policy, with requested-name lookup kept distinct from
 resolved code. It returns null without auto-verification domains and the original
@@ -1452,9 +1465,9 @@ this registry's missing checkService2 response; that scaffold failure is fixed.
 This proves real Binder FD transport; it does not prove full native PMS startup
 or the named app/CTS migration gates. Native codec tests cover the exact 32 KiB boundary, UTF-16 surrogate pairs,
 small inline blobs with a large prefix and empty-map behavior. The full original
-parcel fixture passes (30.18s, no skips); service units pass 488 cases (five
-excluded from the default run, 0.52s); binder-host units pass 14 cases (0.02s).
-The image/original-PMS template build passes (nine rebuilt, 33 fresh, 57.0s);
+parcel fixture passes (31.26s, no skips); service units pass 488 cases (five
+excluded from the default run, 0.48s); binder-host units pass 14 cases (0.02s).
+The image/original-PMS template build passes (nine rebuilt, 33 fresh, 63.8s);
 final host build is fresh (13 nodes, 0.2s). Same-process service
 lookup now retains and dispatches the returned local object (#961), with the
 original BBinder calling identity rule: an incoming caller's UID/PID is retained

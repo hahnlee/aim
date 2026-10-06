@@ -18,6 +18,18 @@ public final class NativeDomainBinderOracle {
                 if (!Integer.valueOf(0).equals(states.get("h" + i + ".example"))) throw new AssertionError("native domain value differs at " + i);
             }
         } finally { data.recycle(); reply.recycle(); }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeInt(0);
+            if (!service.transact(Integer.parseInt(args[2]), data, reply, 0)) throw new AssertionError("native user-state transaction unhandled");
+            if (!reply.hasFileDescriptors()) throw new AssertionError("large user-state reply did not carry an FD");
+            reply.readException();
+            var state = reply.readTypedObject(android.content.pm.verify.domain.DomainVerificationUserState.CREATOR);
+            if (reply.dataAvail() != 0 || state.getUser().getIdentifier() != 0 || !state.getPackageName().equals("android")
+                || state.isLinkHandlingAllowed() != Boolean.parseBoolean(args[3])) throw new AssertionError("native user-state framing differs");
+            if (state.getHostToStateMap().size() != 4000) throw new AssertionError("user-state domain count differs");
+            for (int i = 0; i < 4000; i++) if (!Integer.valueOf(0).equals(state.getHostToStateMap().get("h" + i + ".example"))) throw new AssertionError("user-state value differs");
+        } finally { data.recycle(); reply.recycle(); }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private NativeDomainBinderOracle() {}

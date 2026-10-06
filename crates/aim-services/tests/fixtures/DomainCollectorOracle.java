@@ -292,6 +292,11 @@ public final class DomainCollectorOracle {
                 connection.user = user;
                 var selection = service.getDomainVerificationUserState("fixture.domains", user);
                 if (selection == null) throw new AssertionError("missing attached user state");
+                var userReply = android.os.Parcel.obtain();
+                try {
+                    userReply.writeNoException(); userReply.writeTypedObject(selection, 0);
+                    java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".user-" + user).toPath(), userReply.marshall());
+                } finally { userReply.recycle(); }
                 out.writeInt(selection.isLinkHandlingAllowed() ? 1 : 0);
                 writeStates(out, selection.getHostToStateMap());
             }

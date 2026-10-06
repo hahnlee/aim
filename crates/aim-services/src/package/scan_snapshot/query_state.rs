@@ -67,6 +67,19 @@ impl NativeDomains {
         self.owner()
             .verification(name, code, *restrict, &self.config)
     }
+    pub fn user_state(
+        &self,
+        name: &str,
+        code: &super::super::pkg::AndroidPackage,
+        user: i32,
+    ) -> Result<Option<(String, bool, Vec<(String, i32)>)>, String> {
+        let restrict = self
+            .policies
+            .get(&code.package_name)
+            .ok_or("missing current domain policy")?;
+        self.owner()
+            .user_state(name, code, *restrict, &self.config, user)
+    }
     pub fn changes(&self) -> &[(String, crate::package::domain_verification::owner::Change)] {
         &self.boot.changes
     }
