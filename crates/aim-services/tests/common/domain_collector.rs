@@ -416,6 +416,24 @@ pub fn verify_attachment(directory: &Path) {
                 fs::read(directory.join(format!("domain-owner-{case}-{stage}.queries"))).unwrap(),
                 "public domain queries case={case} stage={stage}"
             );
+            {
+                use aim_services::package::restrictions::{UserState, Suspension, SuspendingUser};
+                let mut expected = Parcel::new();
+                for v2 in [false, true] {
+                    for mode in -1..=8 {
+                        let mut user = UserState::default();
+                        user.installed = mode != 6;
+                        user.enabled = if (0..=5).contains(&mode) { mode } else { 1 };
+                        user.instant_app = mode == 7;
+                        if mode == 8 { user.suspensions = Some(vec![Suspension { package: "suspender".into(), user: SuspendingUser::Resolved(0), params: None }]); }
+                        for host in ["h0.example", "h1.example", "h4.example", "h7.example", "h8.example", "h1024.example", "example", "sub.example", "notexample", "unknown.invalid"] {
+                            expected.write_i32(owner.approval("fixture.domains", &code, (mode != -1).then_some(&user), 0, v2,
+                                Policy { restrict_domains: true, linked_app: case == 1 }, host).unwrap());
+                        }
+                    }
+                }
+                assert_eq!(expected.data(), fs::read(directory.join(format!("domain-owner-{case}-{stage}.approvals"))).unwrap(), "original approval levels case={case} stage={stage}");
+            }
             assert_eq!(
                 canonical(owner.persisted()),
                 canonical(original),

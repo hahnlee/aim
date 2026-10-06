@@ -278,6 +278,95 @@ impl Owner {
             states,
         )))
     }
+    /// Positive approval levels used by getOwnersForDomain and user selection.
+    /// User state is explicit (not PackageUserStateDefault); v2 is an original
+    /// compatibility-owner decision independent of collector restrictions.
+    pub fn approval(
+        &self,
+        name: &str,
+        code: &AndroidPackage,
+        user: Option<&crate::package::restrictions::UserState>,
+        user_id: i32,
+        settings_v2: bool,
+        policy: Policy,
+        host: &str,
+    ) -> Result<i32, String> {
+        let Some(user) = user else {
+            return Ok(0);
+        };
+        if !user.installed
+            || match user.enabled {
+                1 => false,
+                2 | 3 | 4 => true,
+                _ => !code.is(crate::package::pkg::booleans::ENABLED),
+            }
+            || user
+                .suspensions
+                .as_ref()
+                .is_some_and(|owners| !owners.is_empty())
+        {
+            return Ok(0);
+        }
+        if !settings_v2 {
+            let legacy = self
+                .saved
+                .legacy
+                .iter()
+                .find(|(pkg, _)| pkg.as_deref() == Some(name))
+                .and_then(|(_, users)| users.iter().find(|(id, _)| *id == user_id))
+                .map_or(0, |(_, state)| *state);
+            match legacy {
+                3 => return Ok(0),
+                1 | 4 => return Ok(1),
+                2 => return Ok(2),
+                _ => {}
+            }
+        }
+        let Some(package) = self.package(name) else {
+            return Ok(0);
+        };
+        let selected = package.users.iter().find(|u| u.id == user_id);
+        if selected.is_some_and(|u| !u.allow_link_handling) {
+            return Ok(0);
+        }
+        if user.instant_app
+            && collector::collect(code, policy, Kind::ValidAutoVerify)
+                .iter()
+                .any(|domain| domain == host)
+        {
+            return Ok(5);
+        }
+        let verified = |state: i32| matches!(state, 1 | 2 | 4 | 5 | 7 | 8);
+        if package
+            .domains
+            .iter()
+            .any(|(domain, state)| domain.as_deref() == Some(host) && verified(*state))
+        {
+            return Ok(4);
+        }
+        for (domain, state) in &package.domains {
+            if verified(*state) {
+                let domain = domain.as_deref().ok_or("null attached approval host")?;
+                if domain
+                    .strip_prefix("*.")
+                    .is_some_and(|suffix| host.ends_with(suffix))
+                {
+                    return Ok(4);
+                }
+            }
+        }
+        if selected.is_some_and(|user| {
+            user.enabled_hosts.iter().any(|domain| {
+                domain == host
+                    || domain
+                        .strip_prefix("*.")
+                        .is_some_and(|suffix| host.ends_with(suffix))
+            })
+        }) {
+            return Ok(3);
+        }
+        Ok(0)
+    }
     pub fn remove(&mut self, name: &str) -> Option<Package> {
         let i = self.attached.iter().position(|p| p.name == name)?;
         let p = self.attached.remove(i);

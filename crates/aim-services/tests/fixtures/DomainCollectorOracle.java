@@ -2,9 +2,11 @@
 public final class DomainCollectorOracle {
     private static final class Compat extends com.android.server.compat.PlatformCompat {
         boolean restricted;
+        boolean v2 = true;
         @Override public android.os.IBinder asBinder() { return this; }
         Compat(android.content.Context context) { super(context); }
         @Override public boolean isChangeEnabledInternalNoLogging(long id, android.content.pm.ApplicationInfo info) {
+            if (id == 178111421L) return v2;
             if (id != 175408749L || !("fixture.domains".equals(info.packageName) || "competitor".equals(info.packageName)))
                 throw new AssertionError("domain compatibility identity differs");
             return restricted;
@@ -121,10 +123,12 @@ public final class DomainCollectorOracle {
             service.addPackage((com.android.server.pm.pkg.PackageStateInternal) oldSetting, null);
             writeDomains(directory, i, "add", service);
             writeQueries(directory, i, "add", service, oldSetting);
+            writeApprovals(directory, i, "add", service, oldSetting, compat);
             var newSetting = domainSetting(code, i == 1, "00000000-0000-0000-0000-00000000000c");
             service.migrateState((com.android.server.pm.pkg.PackageStateInternal) oldSetting, (com.android.server.pm.pkg.PackageStateInternal) newSetting, null);
             writeDomains(directory, i, "migrate", service);
             writeQueries(directory, i, "migrate", service, newSetting);
+            writeApprovals(directory, i, "migrate", service, newSetting, compat);
             var competitor = (com.android.internal.pm.parsing.pkg.PackageImpl) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
                 java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
             competitor.setPackageName("competitor");
@@ -270,6 +274,21 @@ public final class DomainCollectorOracle {
             return false;
         }
         public void scheduleWriteSettings() { writes++; }
+    }
+    private static void writeApprovals(java.io.File directory, int caseId, String stage,
+            com.android.server.pm.verify.domain.DomainVerificationService service,
+            com.android.server.pm.PackageSetting setting, Compat compat) throws Exception {
+        var out = android.os.Parcel.obtain();
+        try {
+            for (boolean v2 : new boolean[] {false, true}) {
+                compat.v2 = v2;
+                for (int mode = -1; mode <= 8; mode++) {
+                    for (String host : new String[] {"h0.example", "h1.example", "h4.example", "h7.example", "h8.example", "h1024.example", "example", "sub.example", "notexample", "unknown.invalid"})
+                        out.writeInt(com.android.server.pm.DomainApprovalFixture.approval(service, setting, mode, host));
+                }
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".approvals").toPath(), out.marshall());
+        } finally { compat.v2 = true; out.recycle(); }
     }
     private static void writeStates(android.os.Parcel out, java.util.Map<String, Integer> states) {
         var sorted = new java.util.TreeMap<>(states);

@@ -90,6 +90,7 @@ fn native_package_parcels_match_original_read_write() {
                 .join("tests/fixtures/PackageCacheValidationOracle.java"),
         )
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainCollectorOracle.java"))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainApprovalFixture.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainEnforcerOracle.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/NativeAshmemOracle.java"))
         .arg(

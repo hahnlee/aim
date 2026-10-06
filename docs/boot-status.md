@@ -1433,8 +1433,20 @@ decision. Both generated transactions enforce system UID and reject missing/empt
 names or negative SDK. Original ART compares each change with original
 isChangeEnabledInternalNoLogging at SDK 28/30/31/36, with invalid-input and actual
 foreign-UID denial. Native bridge tests prove the decisions can differ and reject
-empty/trailing replies (publisher 0.85s). This establishes the approval-policy
-producer; getOwnersForDomain ranking/serving remains unimplemented. User-state lookup
+empty/trailing replies (publisher 0.85s). The native attached owner now computes positive approval levels from explicit
+package-user state: absent/not installed/disabled/suspended exclude approval;
+legacy ASK/ALWAYS/NEVER apply before V2 link handling; instant-app exact auto
+hosts outrank verified states; verified exact/wildcard hosts outrank user
+selection. Disabled link handling excludes instant/verified/selected paths.
+Wildcard matching retains the original suffix comparison. Original ART's public
+approval API matches 1,600 native cases across eight add/migrate states, both
+V2 modes, missing users, enabled overrides, install/suspend/instant state and
+ten hosts. The same-package test helper accesses original user state directly,
+without reflection or changing APKs. This establishes approval policy and levels;
+getOwnersForDomain list ranking/serving remains unimplemented. The first full
+oracle attempt reached a later migration-policy ENOSPC crash (#903); removing only
+this worktree's reproducible release incremental cache restored free space. The
+same full oracle then passed (30.55s, no skips). User-state lookup
 applies the original user-existence/cross-user/visibility contract against the
 same capture, retaining nullable package names. Visibility denial returns the
 original name-not-found service-specific error; missing users/cross-user
@@ -1474,9 +1486,9 @@ this registry's missing checkService2 response; that scaffold failure is fixed.
 This proves real Binder FD transport; it does not prove full native PMS startup
 or the named app/CTS migration gates. Native codec tests cover the exact 32 KiB boundary, UTF-16 surrogate pairs,
 small inline blobs with a large prefix and empty-map behavior. The full original
-parcel fixture passes (30.14s, no skips); service units pass 488 cases (five
-excluded from the default run, 0.56s); binder-host units pass 14 cases (0.02s).
-The image/original-PMS template build passes (four rebuilt, 38 fresh, 35.9s);
+parcel fixture passes (30.55s, no skips); service units pass 488 cases (five
+excluded from the default run, 0.49s); binder-host units pass 14 cases (0.02s).
+The image/original-PMS template build passes (six rebuilt, 36 fresh, 53.5s);
 final host build is fresh (13 nodes, 0.3s). Same-process service
 lookup now retains and dispatches the returned local object (#961), with the
 original BBinder calling identity rule: an incoming caller's UID/PID is retained

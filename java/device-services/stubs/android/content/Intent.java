@@ -37,6 +37,7 @@ public class Intent {
     public Intent putExtra(String name, String value) { throw new RuntimeException("stub"); }
     public Intent addFlags(int flags) { throw new RuntimeException("stub"); }
     public Intent setFlags(int flags) { throw new RuntimeException("stub"); }
+    public Intent setData(android.net.Uri data) { throw new RuntimeException("stub"); }
     public Intent addCategory(String category) { throw new RuntimeException("stub"); }
     public Intent setClassName(String packageName, String className) { throw new RuntimeException("stub"); }
     public String getAction() { throw new RuntimeException("stub"); }
