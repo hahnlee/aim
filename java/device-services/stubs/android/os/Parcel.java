@@ -36,6 +36,7 @@ public final class Parcel {
     public final void unmarshall(byte[] data, int offset, int length) { throw new RuntimeException("stub"); }
     public final void writeBoolean(boolean val) { throw new RuntimeException("stub"); }
     public final boolean readBoolean() { throw new RuntimeException("stub"); }
+    public final void writeException(Exception exception) { throw new RuntimeException("stub"); }
     public final void writeNoException() { throw new RuntimeException("stub"); }
     public void enforceNoDataAvail() { throw new RuntimeException("stub"); }
     public final void readException() { throw new RuntimeException("stub"); }

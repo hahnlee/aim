@@ -2620,6 +2620,17 @@ fn verify_boot_scan(
             data.write_i32(99);
             assert!(endpoint.transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).is_err());
         }
+        for who in [client, foreign_client] { for name in [Some("android"), Some("missing"), None] {
+            let mut data = Parcel::new();
+            api::GetUriRelativeFilterGroups {package_name: name.map(String::from), domains: None}.write(&mut data);
+            let reply = find(who, "query_domains").transact(api::GET_URI_RELATIVE_FILTER_GROUPS, &data, false).unwrap();
+            let mut reader = reply.reader();
+            if name == Some("android") { assert_eq!(reader.read_exception().unwrap().unwrap_err().code, -4); }
+            else { reader.read_exception().unwrap().unwrap(); assert_eq!(reader.read_i32().unwrap(), 1); assert_eq!(reader.read_i32().unwrap(), 0); }
+            assert_eq!(reader.remaining(), 0);
+            data.write_i32(99);
+            assert!(find(who, "query_domains").transact(api::GET_URI_RELATIVE_FILTER_GROUPS, &data, false).is_err());
+        }}
         let before = system.capture_package_queries().unwrap();
         let mut data = Parcel::new();
         api::SetDomainVerificationLinkHandlingAllowed {package_name: Some("android".into()), allowed: false, user_id: 0}.write(&mut data);

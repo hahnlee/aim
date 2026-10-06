@@ -645,6 +645,11 @@ impl UriRelativeFilterGroup {
         };
         if !self.filters.contains(&f) {
             self.filters.push(f);
+            self.filters.sort_by_key(|f| {
+                31i32.wrapping_add(f.uri_part).wrapping_mul(31)
+                    .wrapping_add(f.pattern_type).wrapping_mul(31)
+                    .wrapping_add(crate::package::info::java_hash(&f.filter))
+            });
         }
     }
 

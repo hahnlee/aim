@@ -660,6 +660,8 @@ pub fn verify_attachment(directory: &Path) {
         let group = |action, path: &str| {
             let mut g = UriRelativeFilterGroup::new(action);
             g.add(0, 0, path);
+            g.add(1, 0, "q=1"); g.add(2, 1, "fragment"); g.add(0, 1, "😀");
+            g.add(0, 0, "Aa"); g.add(0, 0, "BB");
             g
         };
         let hosts = [
@@ -721,6 +723,41 @@ pub fn verify_attachment(directory: &Path) {
         owner.set_uri_groups("missing", &[]).unwrap();
         assert!(owner.set_uri_groups("missing", &updates).is_err());
         assert_eq!(owner.persisted(), previous);
+    let mut requests = hosts.iter().cloned().map(Some).collect::<Vec<_>>();
+    requests.push(None);
+    requests.push(Some(hosts[0].clone()));
+    let bytes = fs::read(directory.join(format!("domain-uri-{case}.reply"))).unwrap();
+    let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+    for name in [Some("fixture.domains"), Some("missing"), None] {
+        for list in [Some(requests.as_slice()), Some(&[][..]), None] {
+            match owner.uri_groups_query(name, list) {
+                Ok(groups) => {
+                    let value =
+                        aim_services::package::domain_verification::parcels::UriGroups::prepare(
+                            &groups,
+                        )
+                        .unwrap();
+                    let mut reply = Parcel::new();
+                    aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::write_get_uri_relative_filter_groups_reply(&mut reply, Some(&value));
+                    let start = reader.position();
+                    reader.set_position(start + reply.data().len());
+                    assert_eq!(
+                        &bytes[start..reader.position()],
+                        reply.data(),
+                        "original URI Bundle case={case} name={name:?} null-list={}",
+                        list.is_none()
+                    );
+                }
+                Err(expected) => {
+                    let error = reader.read_exception().unwrap().unwrap_err();
+                    assert_eq!(error.code, -4);
+                    assert_eq!(error.message, expected);
+                }
+            }
+        }
+    }
+    assert_eq!(reader.remaining(), 0);
+
         let mut values = owner.uri_groups("fixture.domains", &hosts);
         values.sort_by(|a, b| a.0.cmp(&b.0));
         let mut expected = Parcel::new();

@@ -3,8 +3,9 @@
 //! type in the high nibble) and the token's data, big-endian. Element and
 //! attribute names, and values written with `attributeInterned`, are
 //! interned: a string's first use carries it and gets the next index,
-//! later uses carry the index. Strings are Java's modified UTF-8 with a
-//! 16-bit length.
+//! later uses carry the index. Strings have a 16-bit byte length and use
+//! ArtFastDataOutput's modified UTF-8, including four-byte supplementary
+//! characters; the reader also accepts legacy six-byte surrogate pairs.
 
 use std::collections::HashMap;
 
@@ -176,7 +177,7 @@ pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
 
 /// `root` as one binary XML document, written as `BinaryXmlSerializer`
 /// writes it: a document whose values keep their types is written back
-/// byte for byte.
+/// in the pinned ArtFastDataOutput string encoding.
 pub fn write(root: &Element) -> Result<Vec<u8>, String> {
     let mut w = Writer {
         out: MAGIC.to_vec(),
@@ -278,7 +279,8 @@ impl Writer {
 
 /// Java's modified UTF-8 (`ModifiedUtf8`): UTF-16 units, NUL in two
 /// bytes, a supplementary character as its two surrogates in three bytes
-/// each.
+/// each. ArtFastDataInput/Output also accept/emit ART's non-standard four-byte
+/// supplementary form (CharsetUtils, android-16.0.0_r1).
 fn decode_utf(b: &[u8]) -> Option<String> {
     let mut units = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -288,6 +290,17 @@ fn decode_utf(b: &[u8]) -> Option<String> {
                 .filter(|c| *c & 0xc0 == 0x80)
                 .map(|c| (c & 0x3f) as u16)
         };
+        if matches!(b[i], 0xf0..=0xf4) {
+            let scalar = ((b[i] & 7) as u32) << 18
+                | (cont(i + 1)? as u32) << 12
+                | (cont(i + 2)? as u32) << 6
+                | cont(i + 3)? as u32;
+            let c = char::from_u32(scalar).filter(|c| *c as u32 >= 0x10000)?;
+            let mut pair = [0; 2];
+            units.extend_from_slice(c.encode_utf16(&mut pair));
+            i += 4;
+            continue;
+        }
         let (unit, n) = match b[i] {
             c @ 0x01..=0x7f => (c as u16, 1),
             c @ 0xc0..=0xdf => (((c & 0x1f) as u16) << 6 | cont(i + 1)?, 2),
@@ -305,15 +318,14 @@ fn decode_utf(b: &[u8]) -> Option<String> {
 
 fn encode_utf(s: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(s.len());
-    for u in s.encode_utf16() {
-        match u {
-            0x01..=0x7f => out.push(u as u8),
-            0x00..=0x7ff => out.extend([0xc0 | (u >> 6) as u8, 0x80 | (u & 0x3f) as u8]),
-            _ => out.extend([
-                0xe0 | (u >> 12) as u8,
-                0x80 | (u >> 6 & 0x3f) as u8,
-                0x80 | (u & 0x3f) as u8,
-            ]),
+    // ArtFastDataOutput/CharsetUtils use ART's four-byte supplementary form.
+    // NUL remains modified UTF-8; the reader also accepts surrogate pairs.
+    for c in s.chars() {
+        if c == '\0' {
+            out.extend([0xc0, 0x80]);
+        } else {
+            let mut bytes = [0; 4];
+            out.extend_from_slice(c.encode_utf8(&mut bytes).as_bytes());
         }
     }
     out
@@ -419,9 +431,20 @@ mod tests {
             assert_eq!(decode_utf(&b).as_deref(), Some(s));
         }
         assert_eq!(encode_utf("\u{0}"), [0xc0, 0x80]);
-        assert_eq!(encode_utf("😀"), [0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]);
+        assert_eq!(encode_utf("😀"), [0xf0, 0x9f, 0x98, 0x80]);
+        assert_eq!(
+            decode_utf(&[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]).as_deref(),
+            Some("😀")
+        );
         assert_eq!(decode_utf(&[0x00]), None);
-        assert_eq!(decode_utf(&[0xf0, 0x9f, 0x98, 0x80]), None);
+        assert_eq!(decode_utf(&[0xf0, 0x9f, 0x98, 0x80]).as_deref(), Some("😀"));
+        for bad in [
+            &[0xf0, 0x80, 0x80, 0x80][..],
+            &[0xf4, 0x90, 0x80, 0x80],
+            &[0xf0, 0x9f, 0x98],
+        ] {
+            assert_eq!(decode_utf(bad), None);
+        }
     }
 }
 

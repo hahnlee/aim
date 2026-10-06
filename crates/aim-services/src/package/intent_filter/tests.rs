@@ -612,12 +612,13 @@ fn reads_a_parcel() {
     p.write_i32(1); // groups
     p.write_i32(ACTION_ALLOW);
     p.write_i32(2);
-    p.write_i32(URI_PART_PATH);
-    p.write_i32(PATTERN_LITERAL);
-    p.write_string16(Some("/path"));
+    // Original ArraySet writes the query filter before the path by signed hash.
     p.write_i32(URI_PART_QUERY);
     p.write_i32(PATTERN_SIMPLE_GLOB);
     p.write_string16(Some("q*"));
+    p.write_i32(URI_PART_PATH);
+    p.write_i32(PATTERN_LITERAL);
+    p.write_string16(Some("/path"));
     let mut r = Reader::new(p.data(), &[]);
     let f = IntentFilter::read(&mut r, &mut Plain).unwrap();
     assert_eq!(r.remaining(), 0);

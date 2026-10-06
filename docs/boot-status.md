@@ -1478,7 +1478,27 @@ over actual Binder and reads each published value through its original UserState
 creator (13.51s). A stale publication base triggers fresh capture and authorization
 before retrying; four concurrent Binder changes each publish their own generation
 and invalidate the cache. Units pass (488, 0.49s; five excluded by default), as does
-the publisher (0.89s). Four domain methods and full M4 C acceptance remain open (#957/#798).
+the publisher (0.89s). Method 9 now returns URI relative filter groups from the captured attached owner
+(2026-10-06), without adding permissions or package visibility filtering. Missing/null
+packages return a non-null empty Bundle; a null domain list throws only for an
+attached package, with the original NullPointerException message. Requested keys
+retain original ArrayMap hash/collision order and duplicate replacement. The Bundle
+writer includes length-prefixed List/Parcelable values and sized stable AIDL group
+and filter records. Original ART matches 36 request outcomes across four attached
+states, including 32 exact success replies and four null-list errors. Six-filter
+groups cover path/query/fragment, mixed patterns, Unicode and hash collisions.
+Native UriRelativeFilterGroup insertion now preserves the original signed-hash
+ArraySet order (#962); the hand-built parcel unit uses the original canonical order.
+The first expanded oracle exposed ART's four-byte supplementary ABX strings.
+Native ABX now reads both those and legacy six-byte surrogate pairs, and writes the
+pinned ArtFastDataOutput form. Original ABX contains f0 9f 98 80 for the emoji;
+the full original oracle passes with those group states and exact Bundle replies
+(40.76s, no skips). Unpaired UTF-16 remains unsupported (#843). XML tests pass (15),
+as do 488 service units (0.50s; five excluded by default) and the native publisher
+(0.89s), including unrestricted foreign-UID reads and trailing-input rejection.
+Original ART reads the actual native Bundle and all six filter values through its
+own creators (14.80s). Three domain methods and full M4 C acceptance remain open
+(#957/#798).
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

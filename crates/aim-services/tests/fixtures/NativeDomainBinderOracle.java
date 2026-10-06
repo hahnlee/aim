@@ -64,6 +64,19 @@ public final class NativeDomainBinderOracle {
                 if (state.isLinkHandlingAllowed() != allowed || reply.dataAvail() != 0) throw new AssertionError("native mutation not published");
             } finally { data.recycle(); reply.recycle(); }
         }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            data.writeInterfaceToken(args[1]); data.writeString("android");
+            data.writeStringList(java.util.Arrays.asList("h0.example", null, "h1.example", "h0.example"));
+            if (!service.transact(Integer.parseInt(args[6]), data, reply, 0)) throw new AssertionError("native URI query unhandled");
+            reply.readException();
+            var bundle = reply.readTypedObject(android.os.Bundle.CREATOR);
+            var groups = android.content.UriRelativeFilterGroup.parcelsToGroups(bundle.getParcelableArrayList("h0.example", android.content.UriRelativeFilterGroupParcel.class));
+            if (bundle.keySet().size() != 1 || groups.size() != 1 || groups.get(0).getAction() != 1 || groups.get(0).getUriRelativeFilters().size() != 6 || reply.dataAvail() != 0) throw new AssertionError("native URI group framing/values differ");
+            var values = new java.util.HashSet<String>();
+            for (var filter : groups.get(0).getUriRelativeFilters()) values.add(filter.getUriPart() + ":" + filter.getPatternType() + ":" + filter.getFilter());
+            if (!values.equals(java.util.Set.of("0:0:/path", "1:0:q=1", "2:1:fragment", "0:1:😀", "0:0:Aa", "0:0:BB"))) throw new AssertionError("native URI filter values differ");
+        } finally { data.recycle(); reply.recycle(); }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private NativeDomainBinderOracle() {}

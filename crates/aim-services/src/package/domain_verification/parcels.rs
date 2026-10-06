@@ -39,6 +39,73 @@ impl WriteParcelable for Info {
 }
 
 pub struct UserState(Parcel);
+pub struct UriGroups(Parcel);
+impl UriGroups {
+    pub fn prepare(
+        entries: &[(
+            Option<String>,
+            Vec<crate::package::intent_filter::UriRelativeFilterGroup>,
+        )],
+    ) -> io::Result<Self> {
+        let mut out = Parcel::new();
+        if entries.is_empty() {
+            out.write_i32(0);
+            return Ok(Self(out));
+        }
+        let length = out.position();
+        out.write_i32(-1);
+        out.write_i32(crate::bundle::MAGIC);
+        let start = out.position();
+        out.write_i32(count(entries.len())?);
+        for (host, groups) in entries {
+            out.write_string16(host.as_deref());
+            out.write_i32(11); // VAL_LIST, lazy value length
+            let length = out.position();
+            out.write_i32(-1);
+            let start = out.position();
+            out.write_i32(count(groups.len())?);
+            for group in groups {
+                out.write_i32(4); // VAL_PARCELABLE, lazy value length
+                let length = out.position();
+                out.write_i32(-1);
+                let start = out.position();
+                out.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
+                let size = out.position();
+                out.write_i32(-1);
+                out.write_i32(group.action);
+                out.write_i32(count(group.filters.len())?);
+                for filter in &group.filters {
+                    out.write_i32(1); // typed UriRelativeFilterParcel
+                    let size = out.position();
+                    out.write_i32(-1);
+                    out.write_i32(filter.uri_part);
+                    out.write_i32(filter.pattern_type);
+                    out.write_string16(Some(&filter.filter));
+                    out.set_i32_at(size, count(out.position() - size)?);
+                }
+                out.set_i32_at(size, count(out.position() - size)?);
+                out.set_i32_at(length, count(out.position() - start)?);
+            }
+            out.set_i32_at(length, count(out.position() - start)?);
+        }
+        out.set_i32_at(length, count(out.position() - start)?);
+        out.write_bool(false); // BaseBundle.mHasIntent
+        Ok(Self(out))
+    }
+}
+fn count(value: usize) -> io::Result<i32> {
+    i32::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "URI-group parcel size overflow",
+        )
+    })
+}
+impl WriteParcelable for UriGroups {
+    fn write_to(&self, out: &mut Parcel) {
+        out.write_raw(self.0.data(), &[]);
+    }
+}
 impl UserState {
     pub fn prepare(
         prefix: usize,

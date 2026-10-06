@@ -187,11 +187,26 @@ public final class DomainCollectorOracle {
     private static android.content.UriRelativeFilterGroup uriGroup(int action, String path) {
         var group = new android.content.UriRelativeFilterGroup(action);
         group.addUriRelativeFilter(new android.content.UriRelativeFilter(0, 0, path));
+        group.addUriRelativeFilter(new android.content.UriRelativeFilter(1, 0, "q=1"));
+        group.addUriRelativeFilter(new android.content.UriRelativeFilter(2, 1, "fragment"));
+        group.addUriRelativeFilter(new android.content.UriRelativeFilter(0, 1, "😀"));
+        group.addUriRelativeFilter(new android.content.UriRelativeFilter(0, 0, "Aa"));
+        group.addUriRelativeFilter(new android.content.UriRelativeFilter(0, 0, "BB"));
         return group;
     }
     private static void writeUriGroups(java.io.File directory, int caseId, com.android.server.pm.verify.domain.DomainVerificationService service, java.util.List<String> hosts) throws Exception {
         var out = android.os.Parcel.obtain();
         try {
+            var wire = android.os.Parcel.obtain();
+            try {
+                var requests = new java.util.ArrayList<>(hosts); requests.add(null); requests.add(hosts.get(0));
+                java.util.List<java.util.List<String>> lists = java.util.Arrays.asList(requests, java.util.Collections.emptyList(), null);
+                for (String name : new String[] {"fixture.domains", "missing", null}) for (var list : lists) {
+                    try { var bundle = service.getUriRelativeFilterGroups(name, list); wire.writeNoException(); wire.writeTypedObject(bundle, 0); }
+                    catch (NullPointerException error) { wire.writeException(error); }
+                }
+                java.nio.file.Files.write(new java.io.File(directory, "domain-uri-" + caseId + ".reply").toPath(), wire.marshall());
+            } finally { wire.recycle(); }
             var result = service.getUriRelativeFilterGroups("fixture.domains", hosts);
             var values = new java.util.TreeMap<String, java.util.List<android.content.UriRelativeFilterGroup>>();
             for (String host : hosts) {

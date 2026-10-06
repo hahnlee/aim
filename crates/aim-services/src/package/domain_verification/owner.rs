@@ -527,6 +527,35 @@ impl Owner {
         }
         array_order(out, |(name, _)| name.as_str())
     }
+    pub fn uri_groups_query(
+        &self,
+        name: Option<&str>,
+        domains: Option<&[Option<String>]>,
+    ) -> Result<
+        Vec<(
+            Option<String>,
+            Vec<super::super::intent_filter::UriRelativeFilterGroup>,
+        )>,
+        String,
+    > {
+        let Some(package) = name.and_then(|name| self.package(name)) else {
+            return Ok(vec![]);
+        };
+        let domains = domains.ok_or("Attempt to invoke interface method 'int java.util.List.size()' on a null object reference")?;
+        let mut out = Vec::new();
+        for name in domains {
+            if !out.iter().any(|(host, _)| host == name)
+                && let Some((_, groups)) = package
+                    .uri_relative_filter_groups
+                    .iter()
+                    .find(|(host, _)| host == name)
+            {
+                out.push((name.clone(), groups.clone()));
+            }
+        }
+        out.sort_by_key(|(name, _)| java_hash(name.as_deref().unwrap_or("")));
+        Ok(out)
+    }
 
     /// Verifier-state mutation after caller authorization. Error statuses do
     /// not request persistence; success must be scheduled by the driver.

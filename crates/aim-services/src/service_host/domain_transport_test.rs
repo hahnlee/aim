@@ -130,6 +130,12 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             )
             .unwrap();
         persistence.lock().unwrap().commit_domains(&system.capture_package_queries().unwrap().domains().unwrap().owner().persisted()).unwrap();
+        let capture = system.capture_package_queries().unwrap();
+        let mut domains = capture.domains().unwrap().owner().clone();
+        let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(1);
+        for (part, pattern, value) in [(0, 0, "/path"), (1, 0, "q=1"), (2, 1, "fragment"), (0, 1, "😀"), (0, 0, "Aa"), (0, 0, "BB")] { group.add(part, pattern, value); }
+        domains.set_uri_groups("android", &[("h0.example".into(), Some(vec![group]))]).unwrap();
+        system.commit_package_domains(bridge, capture.prepare_domain_update(domains).unwrap(), &mut persistence.lock().unwrap()).unwrap();
         let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
             "-Djava.class.path=/data/local/tmp/domain-binder/oracle.dex", "/system/bin", "NativeDomainBinderOracle"])
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_INFO.to_string())
@@ -138,6 +144,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(system.capture_package_queries().unwrap().state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_OWNERS_FOR_DOMAIN.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED.to_string())
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_URI_RELATIVE_FILTER_GROUPS.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot

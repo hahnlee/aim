@@ -279,6 +279,25 @@ impl DomainQueries {
                 }
             })
     }
+    fn uri_groups(
+        &self,
+        name: Option<&str>,
+        hosts: Option<&[Option<String>]>,
+    ) -> Result<super::parcels::UriGroups, Exception> {
+        let system = self.system.upgrade().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
+        })?;
+        let capture = system.capture_package_queries()?;
+        let domains = capture.domains().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
+        })?;
+        let groups = domains
+            .owner()
+            .uri_groups_query(name, hosts)
+            .map_err(|e| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, e))?;
+        super::parcels::UriGroups::prepare(&groups)
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("URI-group parcel: {e}")))
+    }
 }
 
 impl Service for DomainQueries {
@@ -291,6 +310,19 @@ impl Service for DomainQueries {
             return Err(UNKNOWN_TRANSACTION);
         }
         let mut reply = Parcel::new();
+        if call.code == api::GET_URI_RELATIVE_FILTER_GROUPS {
+            let args = api::GetUriRelativeFilterGroups::read(&mut call.data)?;
+            if call.data.remaining() != 0 {
+                return Err(BAD_VALUE);
+            }
+            match self.uri_groups(args.package_name.as_deref(), args.domains.as_deref()) {
+                Ok(groups) => {
+                    api::write_get_uri_relative_filter_groups_reply(&mut reply, Some(&groups))
+                }
+                Err(error) => reply.write_exception(&error),
+            }
+            return Ok(reply);
+        }
         if call.code == api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED {
             let args = api::SetDomainVerificationLinkHandlingAllowed::read(&mut call.data)?;
             if call.data.remaining() != 0 {
