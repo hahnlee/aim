@@ -485,6 +485,9 @@ fn native_package_parcels_match_original_read_write() {
         "<packages><last-platform-version internal='34' external='33' buildFingerprint='legacy' fingerprint='partitions'/><database-version internal='5' external='4'/></packages>",
         "<packages><last-platform-version internal='34' external='bad'/></packages>",
         "<packages><database-version internal='5' external='bad'/></packages>",
+        "<packages><preferred-packages><version volumeUuid='v' sdkVersion='36' databaseVersion='8'/></preferred-packages></packages>",
+        "<packages><renamed-package new='n' old='a'><version volumeUuid='v' sdkVersion='36' databaseVersion='8'/></renamed-package></packages>",
+        "<packages><read-external-storage><version volumeUuid='v' sdkVersion='36' databaseVersion='8'/></read-external-storage></packages>",
     ];
     let mut version_inputs: Vec<Vec<u8>> = version_text
         .iter()
@@ -5615,28 +5618,10 @@ fn read_version_events(
             _ => {}
         }
     };
-    let outer = reader.depth();
-    let mut skipped = None;
-    loop {
-        match reader.next()? {
-            Event::Start(element) if skipped.is_none() => {
-                if matches!(
-                    element.name.as_str(),
-                    "version" | "last-platform-version" | "database-version"
-                ) {
-                    settings.read_version(&element)?;
-                } else if matches!(element.name.as_str(), "permissions" | "permission-trees") {
-                    settings.read_permissions(&mut reader, element.name == "permission-trees")?;
-                } else {
-                    skipped = Some(reader.depth());
-                }
-            }
-            Event::End(_) if reader.depth() <= outer => break,
-            Event::End(_) if skipped == Some(reader.depth()) => skipped = None,
-            Event::EndDocument => break,
-            _ => {}
-        }
-    }
+    // This projection returns only the root marker; full persistence document
+    // capture belongs to the complete frontend (#914).
+    let mut reader = Reader::new(bytes)?;
+    settings.read_events(&mut reader, |_,_,_| Ok(false)).map_err(|error| error.to_string())?;
     Ok(Some(root))
 }
 

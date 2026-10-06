@@ -1,5 +1,5 @@
 //! Package/shared UID read-order projections against original Settings.readLPw.
-use aim_android_xml::pull::{Event, Reader};
+use aim_android_xml::pull::Reader;
 use aim_services::package::{
     owner::app_ids::AppIds,
     settings::{PackageReadAttempt, Settings},
@@ -52,35 +52,28 @@ pub fn read(bytes: &[u8]) -> Settings {
     let mut settings = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<(), aim_services::package::settings::ReadError> {
         let mut reader = Reader::new(bytes)?;
-        match reader.next()? {
-            Event::Start(_) => {}
-            Event::EndDocument => return Ok(()),
-            _ => panic!(),
-        }
-        loop {
-            match reader.next()? {
-                Event::Start(start) if start.name == "package" => {
+        settings.read_events(&mut reader, |settings, reader, start| {
+            match start.name.as_str() {
+                "package" => {
                     settings
-                        .read_package(&mut reader, &start, &mut ids, &mut attempt, |_, _, _| {
-                            Ok(false)
-                        })
-                        .map_err(|error| error.to_string())?;
+                        .read_package(reader, start, &mut ids, &mut attempt, |_, _, _| Ok(false))?;
                 }
-                Event::Start(start) if start.name == "shared-user" => {
-                    settings
-                        .read_shared_user(&mut reader, &start, &mut ids, &mut attempt, |_, _, _| {
-                            Ok(false)
-                        })
-                        .map_err(|error| error.to_string())?;
+                "shared-user" => {
+                    settings.read_shared_user(
+                        reader,
+                        start,
+                        &mut ids,
+                        &mut attempt,
+                        |_, _, _| Ok(false),
+                    )?;
                 }
-                Event::Start(_) => panic!("unexpected fixture owner"),
-                Event::End(_) if reader.depth() == 1 => return Ok(()),
-                Event::EndDocument => return Ok(()),
-                _ => {}
+                _ => return Ok(false),
             }
-        }
+            Ok(true)
+        })?;
+        Ok(())
     })();
     if result.is_err() {
         // failRead re-enters with an empty reserve and clears attempt tables.

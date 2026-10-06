@@ -602,6 +602,84 @@ impl PackageReadAttempt {
 }
 
 impl Settings {
+    /// Dispatch one original readSettingsLPw event stream. The callback supplies
+    /// package/shared/global owners; recognized owners cannot silently be skipped.
+    /// Returns false only when there is no start tag. Boot/retry tables belong to
+    /// the caller and are reset before each attempt (#914).
+    pub fn read_events(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        mut read_record: impl FnMut(
+            &mut Self,
+            &mut aim_android_xml::pull::Reader<'_>,
+            &Element,
+        ) -> Result<bool, ReadError>,
+    ) -> Result<bool, ReadError> {
+        use aim_android_xml::pull::Event;
+        loop {
+            match reader.next()? {
+                Event::Start(_) => break,
+                Event::EndDocument => return Ok(false),
+                _ => {}
+            }
+        }
+        let outer = reader.depth();
+        loop {
+            match reader.next()? {
+                Event::Start(start) => match start.name.as_str() {
+                    "version" | "last-platform-version" | "database-version" => {
+                        self.read_version(&start)?
+                    }
+                    "permissions" | "permission-trees" => {
+                        self.read_permissions(reader, start.name == "permission-trees")?
+                    }
+                    "renamed-package" => {
+                        if let (Some(new), Some(old)) =
+                            (string(&start, "new"), string(&start, "old"))
+                        {
+                            match self
+                                .renamed_packages
+                                .iter_mut()
+                                .find(|(name, _)| name == &new)
+                            {
+                                Some((_, value)) => *value = old,
+                                None => self.renamed_packages.push((new, old)),
+                            }
+                        }
+                    }
+                    "preferred-packages" | "read-external-storage" => {}
+                    _ => {
+                        if !read_record(self, reader, &start)? {
+                            if matches!(
+                                start.name.as_str(),
+                                "package"
+                                    | "shared-user"
+                                    | "updated-package"
+                                    | "verifier"
+                                    | "keyset-settings"
+                                    | "domain-verifications"
+                                    | "domain-verifications-legacy"
+                                    | "preferred-activities"
+                                    | "persistent-preferred-activities"
+                                    | "crossProfile-intent-filters"
+                                    | "default-browser"
+                            ) {
+                                return Err(ReadError::Owner(format!(
+                                    "settings owner unavailable: {}",
+                                    start.name
+                                )));
+                            }
+                            signatures::skip(reader)?;
+                        }
+                    }
+                },
+                Event::End(_) if reader.depth() <= outer => return Ok(true),
+                Event::EndDocument => return Ok(true),
+                _ => {}
+            }
+        }
+    }
+
     /// Read one package from its completed start. The caller resolves domain IDs
     /// and owns legacy permission/domain side effects before using this entry.
     /// Registered settings remain visible if a later body event fails (#914).
@@ -1811,6 +1889,39 @@ mod incremental_package_tests {
         assert_eq!(
             ids.detached_setting(10000).unwrap().package.code_path,
             "/old"
+        );
+    }
+
+    #[test]
+    fn dispatcher_retains_attribute_events_and_skips_unknown_subtrees() {
+        let mut settings = Settings::default();
+        let mut reader = Reader::new(b"<packages><renamed-package new='n' old='a'/><renamed-package new='n' old='b'/><preferred-packages><version sdkVersion='36' databaseVersion='3'/></preferred-packages><unknown><version volumeUuid='hidden' sdkVersion='1' databaseVersion='1'/></unknown><permissions><item name='perm' package='p' protection='2'/></permissions></packages>broken").unwrap();
+        assert!(
+            settings
+                .read_events(&mut reader, |_, _, _| Ok(false))
+                .unwrap()
+        );
+        assert_eq!(settings.renamed_packages, [("n".into(), "b".into())]);
+        assert_eq!(settings.versions.len(), 1);
+        assert_eq!(settings.versions[0].sdk_version, 36);
+        assert_eq!(settings.permissions[0].protection_level, 2);
+    }
+
+    #[test]
+    fn dispatcher_missing_owner_keeps_prior_records_and_is_not_a_file_error() {
+        let mut settings = Settings::default();
+        let mut reader = Reader::new(b"<packages><version sdkVersion='36' databaseVersion='3'/><keyset-settings version='1'/></packages>").unwrap();
+        assert_eq!(
+            settings
+                .read_events(&mut reader, |_, _, _| Ok(false))
+                .unwrap_err(),
+            ReadError::Owner("settings owner unavailable: keyset-settings".into())
+        );
+        assert_eq!(settings.versions[0].sdk_version, 36);
+        assert!(
+            !Settings::default()
+                .read_events(&mut Reader::new(b" ").unwrap(), |_, _, _| Ok(false))
+                .unwrap()
         );
     }
 

@@ -917,10 +917,25 @@ execution, as in the original. A separate File-error test removes corrupted main
 and selects reserve. The string-error recover entry remains for file-only parsers;
 native callbacks use the typed entry. Full error-source classification in the
 remaining native frontend owners is still required (#914/#912).
-513 service units pass (5 excluded, 0.51s); full original ART oracle passes without
-skips (57.20s), retaining 866 package-body/header and 238 shared UID cases.
-Production runtime build passes (3 rebuilt/39 fresh, 23.9s); previous image/template
-build passed (6 rebuilt/36 fresh, 72.1s). An original
+Native Settings.read_events now supplies the top-level readSettingsLPw dispatcher.
+It applies version, permission and rename records in event order, leaves
+attribute-only/deprecated subtrees visible, skips unknown subtrees and stops at
+the outer root end without consuming trailing input. Package/shared/global
+records use explicit owner callbacks; an unhandled recognized owner returns a
+typed Owner error, preserving earlier mutations rather than skipping valid data
+or entering file cleanup. The actual package-reader owner-failure recovery test
+now runs through this dispatcher. Package/shared-UID and version/permission ART
+projections now use the production dispatcher, with 34 original version cases
+including nested preferred-packages, renamed-package and read-external-storage
+records. Unit checks cover rename replacement, unknown subtree skip, trailing
+malformed input, no start tag and missing-owner classification. Full persistence
+document capture, remaining global/keyset/domain/verifier/migration owners and
+boot/retry orchestration are still required (#914/#912/#798); fixture projections
+return only the root marker and do not prove a complete writable Store frontend.
+515 service units pass (5 excluded, 0.51s); full original ART oracle passes without
+skips (68.24s), retaining 866 package-body/header, 238 shared UID and incremental
+permission projections. Production runtime build passes (3 rebuilt/39 fresh,
+1.2s); previous image/template build passed (6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier
 checks it against the pinned original. Only worktree incremental cache was removed

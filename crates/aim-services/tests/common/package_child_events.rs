@@ -61,27 +61,16 @@ pub fn inputs() -> Vec<Vec<u8>> {
 
 pub fn read(bytes: &[u8]) -> Package {
     let mut reader = Reader::new(bytes).unwrap();
-    reader.next().unwrap();
     let mut settings = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = (|| -> Result<(), String> {
-        loop {
-            match reader.next()? {
-                Event::Start(start) if start.name == "package" => {
-                    settings
-                        .read_package(&mut reader, &start, &mut ids, &mut attempt, |_, _, _| {
-                            Ok(false)
-                        })
-                        .map_err(|error| error.to_string())?;
-                }
-                Event::Start(_) => panic!("unexpected top-level fixture owner"),
-                Event::End(_) if reader.depth() == 1 => return Ok(()),
-                Event::EndDocument => return Ok(()),
-                _ => {}
-            }
+    let result = settings.read_events(&mut reader, |settings, reader, start| {
+        if start.name != "package" {
+            return Ok(false);
         }
-    })();
+        settings.read_package(reader, start, &mut ids, &mut attempt, |_, _, _| Ok(false))?;
+        Ok(true)
+    });
     // Original failRead retries an empty reserve without clearing active settings.
     let _ = result;
     settings

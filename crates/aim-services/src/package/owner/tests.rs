@@ -2219,14 +2219,15 @@ fn native_frontend_owner_failure_preserves_selected_input_and_prior_effects() {
         let mut ids = crate::package::owner::app_ids::AppIds::default();
         let mut attempt = crate::package::settings::PackageReadAttempt::default();
         let error = plan.recover_with_owner(&[0], &mut settings, |bytes, state| {
-            use aim_android_xml::pull::{Event, Reader};
+            use aim_android_xml::pull::Reader;
             calls += 1;
             state.find_or_create_version(None).sdk_version = 36;
             let mut reader = Reader::new(bytes).map_err(ReadError::File)?;
-            reader.next().map_err(ReadError::File)?;
-            let Event::Start(start) = reader.next().map_err(ReadError::File)? else { panic!() };
-            state.read_package(&mut reader, &start, &mut ids, &mut attempt, |_, _, _| {
-                Err(ReadError::Owner("package policy bridge unavailable".into()))
+            state.read_events(&mut reader, |state, reader, start| {
+                state.read_package(reader, start, &mut ids, &mut attempt, |_, _, _| {
+                    Err(ReadError::Owner("package policy bridge unavailable".into()))
+                })?;
+                Ok(true)
             })?;
             Ok(Some(element("packages")))
         }).err().unwrap();
