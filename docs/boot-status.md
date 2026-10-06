@@ -1477,7 +1477,14 @@ cache-only retry precedes further mutations. Original ART invokes disable/enable
 over actual Binder and reads each published value through its original UserState
 creator (13.51s). A stale publication base triggers fresh capture and authorization
 before retrying; four concurrent Binder changes each publish their own generation
-and invalidate the cache. Units pass (488, 0.49s; five excluded by default), as does
+and invalidate the cache. Authorization-time capture changes now also retry from
+fresh capture and permissions, provided the bootstrap bridge is unchanged (#963,
+2026-10-06). A real Binder permission fixture publishes a competing change during
+its first answer: a fresh grant commits the request, while fresh denial preserves
+only the competing change. Both make exactly two permission calls and retain
+matching Store/capture state. An unchanged-capture error or changed bridge still
+fails explicitly. The deterministic old-code reproduction returned IllegalState
+instead of retrying (0.99s); the fixed publisher passes (0.98s). Units pass (488, 0.49s; five excluded by default), as does
 the publisher (0.89s). Method 9 now returns URI relative filter groups from the captured attached owner
 (2026-10-06), without adding permissions or package visibility filtering. Missing/null
 packages return a non-null empty Bundle; a null domain list throws only for an

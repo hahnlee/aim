@@ -49,13 +49,22 @@ impl DomainQueries {
                 Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
             })?;
             let bridge = system.package_bootstrap()?;
-            let visible = system.authorize_package_domain(
+            let visible = match system.authorize_package_domain(
                 &bridge,
                 &capture,
                 pid,
                 uid,
                 Operation::UserSelect(name, user),
-            )?;
+            ) {
+                Ok(visible) => visible,
+                Err(error) => {
+                    system.check_package_bootstrap(&bridge)?;
+                    if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             let missing = || Exception {
                 code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
                 message: String::new(),

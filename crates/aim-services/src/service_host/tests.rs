@@ -1954,6 +1954,51 @@ impl Service for DomainPermissions {
     }
 }
 
+struct ReauthorizingDomainPermissions {
+    system: Weak<System>,
+    bridge: Arc<crate::package::bootstrap::Bridge>,
+    persistence: Arc<Mutex<crate::package::owner::Store>>,
+    calls: AtomicUsize,
+    granted: bool,
+}
+impl Service for ReauthorizingDomainPermissions {
+    fn descriptor(&self) -> &str {
+        aim_service_aidl::android_app_iactivitymanager::DESCRIPTOR
+    }
+    fn transact(&self, call: &mut Call<'_>) -> Reply {
+        use aim_service_aidl::android_app_iactivitymanager as am;
+        if call.code != am::CHECK_PERMISSION {
+            return Err(UNKNOWN_TRANSACTION);
+        }
+        let args = am::CheckPermission::read(&mut call.data)?;
+        assert_eq!(args.uid, 1000);
+        assert_eq!(
+            args.permission.as_deref(),
+            Some(crate::package::domain_verification::enforcer::UPDATE)
+        );
+        assert_eq!(call.data.remaining(), 0);
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        if first {
+            let system = self.system.upgrade().unwrap();
+            let capture = system.capture_package_queries().unwrap();
+            let mut owner = capture.domains().unwrap().owner().clone();
+            owner
+                .set_link_handling_internal(Some("android"), true, 0, &[])
+                .unwrap();
+            system
+                .commit_package_domains(
+                    &self.bridge,
+                    capture.prepare_domain_update(owner).unwrap(),
+                    &mut self.persistence.lock().unwrap(),
+                )
+                .unwrap();
+        }
+        let mut reply = Parcel::new();
+        am::write_check_permission_reply(&mut reply, if first || self.granted { 0 } else { -1 });
+        Ok(reply)
+    }
+}
+
 fn verify_boot_scan(
     system: &Arc<System>,
     native: &Arc<LocalProcess>,
@@ -3105,6 +3150,23 @@ fn verify_boot_scan(
             state.read(disk.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
             assert_eq!(state.active.iter().find(|p| p.name == "android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, allowed);
         }
+        for granted in [true, false] {
+            let before = system.capture_package_queries().unwrap();
+            let racing = Arc::new(ReauthorizingDomainPermissions {
+                system: Arc::downgrade(system), bridge: bridge.clone(), persistence: persistence.clone(),
+                calls: AtomicUsize::new(0), granted,
+            });
+            register(native, "activity", native.add_service(racing.clone()));
+            let reply = invoke(client, Some("android"), false, 0, false).unwrap();
+            let result = reply.reader().read_exception().unwrap();
+            if granted { result.unwrap(); } else { assert_eq!(result.unwrap_err().code, -1); }
+            assert_eq!(racing.calls.load(Ordering::SeqCst), 2);
+            let current = system.capture_package_queries().unwrap();
+            assert_eq!(current.scan().version(), before.scan().version() + if granted { 2 } else { 1 });
+            assert_eq!(current.domains().unwrap().owner().package("android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, !granted);
+            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, current.domains().unwrap().owner().persisted());
+        }
+        register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
         let before_parallel = system.capture_package_queries().unwrap();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);
         let barrier = std::sync::Barrier::new(4);
