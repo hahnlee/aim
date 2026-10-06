@@ -47,6 +47,76 @@ impl Bridge {
         Ok(enabled)
     }
 
+    pub fn domain_verification_restricted(
+        &self,
+        name: &str,
+        target_sdk: i32,
+    ) -> Result<bool, OwnerError> {
+        if name.is_empty() || target_sdk < 0 {
+            return Err(OwnerError::Code(
+                "invalid domain compatibility identity".into(),
+            ));
+        }
+        let mut request = Parcel::new();
+        bridge::IsDomainVerificationRestricted {
+            package_name: Some(name.into()),
+            target_sdk,
+        }
+        .write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::IS_DOMAIN_VERIFICATION_RESTRICTED, &request, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let enabled = bridge::read_is_domain_verification_restricted_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(BAD_VALUE));
+        }
+        Ok(enabled)
+    }
+
+    pub fn domain_policies(
+        &self,
+        owner: &SigningScan,
+    ) -> Result<BTreeMap<String, bool>, QueryContextError> {
+        let mut inputs = Vec::new();
+        for setting in &owner.settings.packages {
+            let code = owner
+                .loaded_packages()
+                .get(&setting.name)
+                .ok_or_else(|| QueryContextError::Input("missing domain policy code".into()))?;
+            if code.package.package_name != setting.name || code.package.target_sdk_version < 0 {
+                return Err(QueryContextError::Input(
+                    "invalid domain policy code identity".into(),
+                ));
+            }
+            inputs.push((&setting.name, code.package.target_sdk_version));
+        }
+        inputs
+            .into_iter()
+            .map(|(name, sdk)| {
+                self.domain_verification_restricted(name, sdk)
+                    .map(|value| (name.clone(), value))
+                    .map_err(QueryContextError::Compatibility)
+            })
+            .collect()
+    }
+
+    pub fn resolve_domain_query_context(
+        &self,
+        owner: &SigningScan,
+        context: Context,
+        domains: &crate::package::domain_verification::owner::Owner,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<Context, QueryContextError> {
+        let policies = self.domain_policies(owner)?;
+        context
+            .resolve_domains(owner, domains, config, &policies)
+            .map_err(QueryContextError::Input)
+    }
+
     pub fn installed_permissions(&self, name: &str) -> Result<Vec<String>, OwnerError> {
         if name.is_empty() {
             return Err(OwnerError::Code("missing permission package".into()));

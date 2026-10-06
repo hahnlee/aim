@@ -142,6 +142,21 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public boolean isDomainVerificationRestricted(String packageName, int targetSdk) throws RemoteException {
+        enforceSystemUid();
+        if (packageName == null || packageName.isEmpty() || targetSdk < 0)
+            throw new IllegalArgumentException("invalid domain compatibility identity");
+        // DomainVerificationUtils.buildMockAppInfo supplies precisely these fields.
+        var info = new android.content.pm.ApplicationInfo();
+        info.packageName = packageName;
+        info.targetSdkVersion = targetSdk;
+        var compat = com.android.internal.compat.IPlatformCompat.Stub.asInterface(
+                ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
+        if (compat == null) throw new IllegalStateException("platform_compat is unavailable");
+        return compat.getAppConfig(info).isChangeEnabled(175408749L);
+    }
+
+    @Override
     public boolean isTestBaseLibraryChangeEnabled(byte[] packageCache) throws RemoteException {
         enforceSystemUid();
         if (packageCache == null) throw new IllegalArgumentException("missing parsed package");

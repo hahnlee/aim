@@ -186,14 +186,21 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
-            bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED => {
+            bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED
+            | bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED => {
                 let name = call.data.read_string16()?.unwrap();
                 let sdk = call.data.read_i32()?;
                 assert_eq!(call.data.remaining(), 0);
                 self.query_calls.lock().unwrap().push((name, sdk));
                 let mode = self.query_reply.load(Ordering::SeqCst);
                 if mode != 2 {
-                    reply.write_bool(sdk >= 30);
+                    reply.write_bool(
+                        sdk >= if call.code == bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED {
+                            31
+                        } else {
+                            30
+                        },
+                    );
                 }
                 if mode == 1 {
                     reply.write_i32(99);
@@ -1101,7 +1108,27 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
                 .is_err()
         );
     }
+    for mode in [1, 2] {
+        owner.query_reply.store(mode, Ordering::SeqCst);
+        assert!(
+            old.domain_verification_restricted("fixture.domains", 31)
+                .is_err()
+        );
+    }
     owner.query_reply.store(0, Ordering::SeqCst);
+    assert!(
+        !old.domain_verification_restricted("fixture.domains", 30)
+            .unwrap()
+    );
+    assert!(
+        old.domain_verification_restricted("fixture.domains", 31)
+            .unwrap()
+    );
+    assert!(old.domain_verification_restricted("", 31).is_err());
+    assert!(
+        old.domain_verification_restricted("fixture.domains", -1)
+            .is_err()
+    );
     owner.gid_reply.store(1, Ordering::SeqCst);
     assert!(matches!(
         old.permission_gids(10100, &[0]),
@@ -2217,12 +2244,7 @@ fn verify_boot_scan(
     let mut context = query_context_for(&complete, base.version() + 1);
     use crate::package::domain_verification::owner::{Input as DomainInput, Owner as DomainOwner};
     let mut domains = DomainOwner::new(Default::default(), Default::default());
-    let policies: BTreeMap<_, _> = complete
-        .settings
-        .packages
-        .iter()
-        .map(|s| (s.name.clone(), true))
-        .collect();
+    let policies = bridge.domain_policies(&complete).unwrap();
     for setting in &complete.settings.packages {
         let code = &complete.loaded_packages()[&setting.name].package;
         domains
@@ -2233,7 +2255,7 @@ fn verify_boot_scan(
                     code: Some(code),
                     signatures: &[],
                     system: setting.flags & 1 != 0,
-                    restrict_domains: true,
+                    restrict_domains: policies[&setting.name],
                     pre_verified: None,
                 },
                 config,
@@ -2275,8 +2297,8 @@ fn verify_boot_scan(
             .resolve_domains(&complete, &domains, config, &BTreeMap::new())
             .is_err()
     );
-    context = context
-        .resolve_domains(&complete, &domains, config, &policies)
+    context = bridge
+        .resolve_domain_query_context(&complete, context, &domains, config)
         .unwrap();
     assert_eq!(
         context.packages[&("android".into(), false)].users[&0]

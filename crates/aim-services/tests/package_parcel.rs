@@ -2177,6 +2177,12 @@ fn native_package_parcels_match_original_read_write() {
         aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_application_query_filtering_enabled_reply(&mut reader).unwrap().unwrap();
         assert_eq!(reader.remaining(), 0);
     }
+    for sdk in [28, 30, 31, 36] {
+        let bytes = fs::read(directory.join(format!("domain-compat-{sdk}.original"))).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::read_is_domain_verification_restricted_reply(&mut reader).unwrap().unwrap();
+        assert_eq!(reader.remaining(), 0);
+    }
     let migration_policy = if best_effort {
         aim_services::package::scan::SharedUidMigration::BestEffort
     } else {

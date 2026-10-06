@@ -29,4 +29,6 @@ interface IPackageBootstrapBridge {
     String[] getPackageInstalledPermissions(String packageName);
     /** Grants from the exact expected current PackageManagerLocal UID owner. */
     String[] getPackageGrantedPermissions(String packageName, int appId, int userId);
+    /** Domain collector's RESTRICT_DOMAINS decision from original PlatformCompat. */
+    boolean isDomainVerificationRestricted(String packageName, int targetSdk);
 }

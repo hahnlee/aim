@@ -42,6 +42,7 @@ public final class PackageMigrationPolicyOracle {
                 java.nio.file.Files.write(new java.io.File(args[0], "migration-policy.original").toPath(), bytes);
                 verifyTestBase(new java.io.File(args[0]));
                 verifyQueryOwners(new java.io.File(args[0]));
+                verifyDomainPolicy(new java.io.File(args[0]));
                 System.out.println("MIGRATION_POLICY " + (bestEffort ? 1 : 0));
             }
         } finally { request.recycle(); reply.recycle(); }
@@ -106,13 +107,55 @@ public final class PackageMigrationPolicyOracle {
             if (!denied) throw new AssertionError("missing local permission owner accepted");
         } finally { request.recycle(); reply.recycle(); }
     }
+    private static final class LocalCompat extends com.android.server.compat.PlatformCompat {
+        LocalCompat(android.content.Context context) { super(context); }
+        @Override public android.os.IBinder asBinder() { return this; }
+        @Override public boolean isChangeEnabled(long id, android.content.pm.ApplicationInfo info) { throw new AssertionError("unexpected logging compatibility query"); }
+        @Override public com.android.internal.compat.CompatibilityChangeConfig getAppConfig(android.content.pm.ApplicationInfo info) { throw new AssertionError("unexpected local config query"); }
+    }
+    private static void verifyDomainPolicy(java.io.File directory) throws Exception {
+        com.android.internal.os.ApplicationSharedMemory.setInstance(com.android.internal.os.ApplicationSharedMemory.create());
+        if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
+        var original = new LocalCompat(android.app.ActivityThread.systemMain().getSystemUiContext());
+        var bridge = new PackageBootstrapBridge().asBinder();
+        for (int sdk : new int[] {28, 30, 31, 36}) {
+            var info = new android.content.pm.ApplicationInfo();
+            info.packageName = "fixture.domains.compat"; info.targetSdkVersion = sdk;
+            var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+            try {
+                request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeString(info.packageName); request.writeInt(sdk);
+                if (!bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted, request, reply, 0))
+                    throw new AssertionError("domain policy transaction unhandled");
+                byte[] bytes = reply.marshall(); reply.readException();
+                if (reply.readBoolean() != original.isChangeEnabledInternalNoLogging(175408749L, info) || reply.dataAvail() != 0)
+                    throw new AssertionError("original domain collector policy differs sdk=" + sdk);
+                java.nio.file.Files.write(new java.io.File(directory, "domain-compat-" + sdk + ".original").toPath(), bytes);
+            } finally { request.recycle(); reply.recycle(); }
+        }
+        invalidDomainPolicyInput(bridge, null, 31);
+        invalidDomainPolicyInput(bridge, "", 31);
+        invalidDomainPolicyInput(bridge, "fixture.domains.compat", -1);
+    }
+    private static void invalidDomainPolicyInput(android.os.IBinder bridge, String name, int sdk) throws Exception {
+        var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+        try {
+            request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeString(name); request.writeInt(sdk);
+            try {
+                if (!bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted, request, reply, 0))
+                    throw new AssertionError("invalid domain input transaction unhandled");
+                reply.readException();
+            } catch (IllegalArgumentException expected) { return; }
+            throw new AssertionError("invalid domain compatibility input accepted");
+        } finally { request.recycle(); reply.recycle(); }
+    }
     private static void verifyDeniedQueryOwners() throws Exception {
         for (int code : new int[] {IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled,
-                IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid}) {
+                IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid,
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted}) {
             var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
             try {
                 request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
-                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled) {
+                if (code != IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid) {
                     request.writeString("fixture.query.compat"); request.writeInt(30);
                 } else { request.writeInt(1000); }
                 try {
