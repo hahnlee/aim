@@ -116,6 +116,14 @@ public final class PackageMigrationPolicyOracle {
         @Override public com.android.internal.compat.CompatibilityChangeConfig getAppConfig(android.content.pm.ApplicationInfo info) { throw new AssertionError("unexpected local config query"); }
     }
     private static void verifyDomainPolicy(java.io.File directory) throws Exception {
+        var uuidRequest = android.os.Parcel.obtain(); var uuidReply = android.os.Parcel.obtain();
+        try {
+            uuidRequest.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
+            if (!new PackageBootstrapBridge().asBinder().transact(IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled, uuidRequest, uuidReply, 0)) throw new AssertionError("UUID mode transaction unhandled");
+            uuidReply.readException();
+            boolean expected = dalvik.system.VMRuntime.getSdkVersion() >= 34 && android.compat.Compatibility.isChangeEnabled(263076149L);
+            if (uuidReply.readBoolean() != expected || uuidReply.dataAvail() != 0) throw new AssertionError("original UUID mode differs");
+        } finally { uuidRequest.recycle(); uuidReply.recycle(); }
         com.android.internal.os.ApplicationSharedMemory.setInstance(com.android.internal.os.ApplicationSharedMemory.create());
         if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
         var original = new LocalCompat(android.app.ActivityThread.systemMain().getSystemUiContext());
@@ -214,11 +222,12 @@ public final class PackageMigrationPolicyOracle {
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted,
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationSettingsV2Enabled,
                 IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache,
-                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid}) {
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid,
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled}) {
             var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
             try {
                 request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
-                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache) {
+                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache || code == IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled) {
                     // No arguments.
                 } else if (code == IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid) {
                     request.writeInt(10073);

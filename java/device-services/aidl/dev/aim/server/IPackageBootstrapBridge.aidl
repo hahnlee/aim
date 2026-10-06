@@ -37,4 +37,6 @@ interface IPackageBootstrapBridge {
     boolean isDomainVerifierUid(int uid);
     /** Domain approval legacy/V2 decision from original PlatformCompat. */
     boolean isDomainVerificationSettingsV2Enabled(String packageName, int targetSdk);
+    /** UUID.fromString mode of the original service process. */
+    boolean isDomainSetUuidStrictValidationEnabled();
 }

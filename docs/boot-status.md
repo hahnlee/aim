@@ -1514,8 +1514,16 @@ small inline blob, a 4,000-host FD blob and a nullable duplicate/collision frame
 (13.85s). The endpoint explicitly accepts FDs; the first fixture attempt rejected
 the large transfer at the Binder node, before decoding. This establishes incoming
 codec/transport behavior, not verifier-state method implementation. Native units
-pass (490, 0.50s; five excluded by default). Three domain methods and full M4 C
-acceptance remain open (#957/#798).
+pass (490, 0.50s; five excluded by default). The UUID mode needed by the verifier/user mutation frontend is now an explicit
+original bridge policy (generated bootstrap method 20, 2026-10-06). It asks the
+original process's VMRuntime SDK and Compatibility change 263076149, the same
+selection UUID.fromString makes; native code does not infer it from an APK SDK or
+reuse the domain-settings V2 policy. Only system UID may ask. Native tests reject
+empty/trailing replies, and the original runtime policy oracle confirms the same
+boolean and real foreign-UID denial. The full original oracle passes (30.56s,
+no skips), and 490 units pass (0.68s; five excluded by default). This establishes
+mode ownership; native UUID parsing and method 5 integration remain open. Three
+domain methods and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

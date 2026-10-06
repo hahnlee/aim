@@ -201,6 +201,12 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::IS_DOMAIN_SET_UUID_STRICT_VALIDATION_ENABLED => {
+                assert_eq!(call.data.remaining(), 0);
+                let mode = self.query_reply.load(Ordering::SeqCst);
+                if mode != 2 { reply.write_bool(true); }
+                if mode == 1 { reply.write_i32(99); }
+            }
             bootstrap::IS_APPLICATION_QUERY_FILTERING_ENABLED
             | bootstrap::IS_DOMAIN_VERIFICATION_RESTRICTED
             | bootstrap::IS_DOMAIN_VERIFICATION_SETTINGS_V2ENABLED => {
@@ -1179,6 +1185,12 @@ fn exercise_bootstrap_on(
         old.domain_verification_restricted("fixture.domains", 31)
             .unwrap()
     );
+    assert!(old.domain_uuid_strict_validation().unwrap());
+    for mode in [1, 2] {
+        owner.query_reply.store(mode, Ordering::SeqCst);
+        assert!(old.domain_uuid_strict_validation().is_err());
+    }
+    owner.query_reply.store(0, Ordering::SeqCst);
     assert!(old.domain_verification_settings_v2("fixture.domains", 28).unwrap());
     for mode in [1, 2] {
         owner.query_reply.store(mode, Ordering::SeqCst);

@@ -148,6 +148,27 @@ impl Bridge {
         Ok(enabled)
     }
 
+    pub fn domain_uuid_strict_validation(&self) -> Result<bool, OwnerError> {
+        let mut request = Parcel::new();
+        bridge::IsDomainSetUuidStrictValidationEnabled {}.write(&mut request);
+        let reply = self
+            .owner
+            .transact(
+                bridge::IS_DOMAIN_SET_UUID_STRICT_VALIDATION_ENABLED,
+                &request,
+                false,
+            )
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let value = bridge::read_is_domain_set_uuid_strict_validation_enabled_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(BAD_VALUE));
+        }
+        Ok(value)
+    }
+
     pub fn domain_policies(
         &self,
         owner: &SigningScan,

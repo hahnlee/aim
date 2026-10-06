@@ -167,6 +167,14 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         return domainCompatibility(178111421L, packageName, targetSdk);
     }
 
+    @Override
+    public boolean isDomainSetUuidStrictValidationEnabled() {
+        enforceSystemUid();
+        // UUID.ENABLE_STRICT_VALIDATION, android-16.0.0_r1.
+        return dalvik.system.VMRuntime.getSdkVersion() >= 34
+                && android.compat.Compatibility.isChangeEnabled(263076149L);
+    }
+
     private static boolean domainCompatibility(long changeId, String packageName, int targetSdk) throws RemoteException {
         enforceSystemUid();
         if (packageName == null || packageName.isEmpty() || targetSdk < 0)
