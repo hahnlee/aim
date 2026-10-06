@@ -400,6 +400,46 @@ pub fn verify_attachment(directory: &Path) {
                 "attached domain state case={case} stage={stage}"
             );
         }
+        for (stage, name, allowed, id) in [
+            ("link-single", Some("fixture.domains"), false, 0),
+            ("link-all-users", Some("fixture.domains"), true, -1),
+            ("link-all-packages", None, false, 11),
+        ] {
+            owner
+                .set_link_handling_internal(name, allowed, id, &[0, 10])
+                .unwrap();
+            let root = aim_android_xml::read(
+                &fs::read(directory.join(format!("domain-owner-{case}-{stage}.original"))).unwrap(),
+            )
+            .unwrap();
+            let mut original = State::default();
+            original
+                .read(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications")
+                        .unwrap(),
+                )
+                .unwrap();
+            original
+                .read_legacy(
+                    root.children()
+                        .find(|e| e.name == "domain-verifications-legacy")
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                canonical(owner.persisted()),
+                canonical(original),
+                "link handling case={case} stage={stage}"
+            );
+        }
+        let previous = owner.persisted();
+        assert!(
+            owner
+                .set_link_handling_internal(Some("missing"), false, 0, &[0, 10])
+                .is_err()
+        );
+        assert_eq!(owner.persisted(), previous);
         for stage in ["package-user", "user", "package", "pending-restored"] {
             match stage {
                 "package-user" => owner.clear_package_for_user("fixture.domains", 10),

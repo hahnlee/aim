@@ -219,6 +219,45 @@ impl Owner {
         }
         Some(p)
     }
+    /// State part of the original internal setter; caller enforces identity and
+    /// schedules persistence after success. Only attached packages are changed.
+    pub fn set_link_handling_internal(
+        &mut self,
+        name: Option<&str>,
+        allowed: bool,
+        user_id: i32,
+        all_user_ids: &[i32],
+    ) -> Result<(), String> {
+        if name.is_some_and(|name| self.package(name).is_none()) {
+            return Err("link-handling package is unavailable".into());
+        }
+        let ids = if user_id == -1 {
+            all_user_ids
+        } else {
+            std::slice::from_ref(&user_id)
+        };
+        for package in self
+            .attached
+            .iter_mut()
+            .filter(|p| name.is_none_or(|name| p.name == name))
+        {
+            for id in ids {
+                let index = if let Some(index) = package.users.iter().position(|u| u.id == *id) {
+                    index
+                } else {
+                    package.users.push(User {
+                        id: *id,
+                        allow_link_handling: true,
+                        enabled_hosts: vec![],
+                    });
+                    package.users.len() - 1
+                };
+                package.users[index].allow_link_handling = allowed;
+            }
+            package.users.sort_by_key(|u| u.id);
+        }
+        Ok(())
+    }
     /// Caller schedules a settings write after each clear, even for a missing row.
     pub fn clear_package(&mut self, name: &str) {
         self.remove(name);

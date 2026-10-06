@@ -123,13 +123,19 @@ public final class DomainCollectorOracle {
             writeDomains(directory, i, "migrate", service);
             writeQueries(directory, i, "migrate", service, newSetting);
             var connection = new DomainConnection(newSetting); service.setConnection(connection);
+            service.setDomainVerificationLinkHandlingAllowedInternal("fixture.domains", false, 0); writeDomains(directory, i, "link-single", service);
+            service.setDomainVerificationLinkHandlingAllowedInternal("fixture.domains", true, -1); writeDomains(directory, i, "link-all-users", service);
+            service.setDomainVerificationLinkHandlingAllowedInternal(null, false, 11); writeDomains(directory, i, "link-all-packages", service);
+            try { service.setDomainVerificationLinkHandlingAllowedInternal("missing", false, 0); throw new AssertionError("missing link owner accepted"); }
+            catch (android.content.pm.PackageManager.NameNotFoundException expected) {}
+
             service.clearPackageForUser("fixture.domains", 10); writeDomains(directory, i, "package-user", service);
             service.clearUser(10); writeDomains(directory, i, "user", service);
             service.clearPackage("fixture.domains"); writeDomains(directory, i, "package", service);
             service.clearPackage("pending.only"); service.clearPackage("restored.only");
             writeDomains(directory, i, "pending-restored", service);
             service.clearPackage("missing"); service.clearPackageForUser("missing", 10); service.clearUser(-1);
-            if (connection.writes != 8) throw new AssertionError("domain cleanup persistence requests differ: " + connection.writes);
+            if (connection.writes != 11) throw new AssertionError("domain cleanup persistence requests differ: " + connection.writes);
 
         }
     }
