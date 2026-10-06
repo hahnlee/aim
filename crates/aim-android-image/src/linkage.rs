@@ -16,6 +16,49 @@ pub struct ClassPath {
     jars: Vec<Vec<u8>>,
 }
 
+/// Immutable type relations from a class path; no class initialization occurs.
+#[derive(Debug)]
+pub struct Hierarchy {
+    parents: HashMap<String, Vec<String>>,
+}
+impl Hierarchy {
+    pub fn contains(&self, descriptor: &str) -> bool {
+        let component = descriptor.trim_start_matches('[');
+        if component != descriptor {
+            return matches!(component, "B" | "C" | "D" | "F" | "I" | "J" | "S" | "Z")
+                || self.parents.contains_key(component);
+        }
+        self.parents.contains_key(descriptor)
+    }
+    pub fn assignable(&self, actual: &str, required: &str) -> bool {
+        if actual.starts_with('[') && self.contains(actual) {
+            if matches!(
+                required,
+                "Ljava/lang/Object;" | "Ljava/lang/Cloneable;" | "Ljava/io/Serializable;"
+            ) {
+                return self.contains(required);
+            }
+            if let Some(component) = required.strip_prefix('[') {
+                return actual == required || self.assignable(&actual[1..], component);
+            }
+        }
+        let mut pending = vec![actual];
+        let mut seen = HashSet::new();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            if next == required && self.contains(next) {
+                return true;
+            }
+            if let Some(parents) = self.parents.get(next) {
+                pending.extend(parents.iter().map(String::as_str));
+            }
+        }
+        false
+    }
+}
+
 /// A class's supertypes and declared members.
 struct Class {
     superclass: Option<String>,
@@ -146,6 +189,19 @@ impl ClassPath {
             }
         }
         Ok(Classes::new(dexes))
+    }
+
+    pub fn hierarchy(&self) -> Result<Hierarchy, String> {
+        let classes = self.classes(None)?;
+        let mut parents = HashMap::new();
+        for (name, (d, c)) in &classes.index {
+            let dex = &classes.dexes[*d];
+            let class = &dex.classes[*c];
+            let mut types = dex.interfaces(class)?;
+            types.extend(class.superclass.iter().cloned());
+            parents.insert(name.clone(), types);
+        }
+        Ok(Hierarchy { parents })
     }
 
     /// What `dex` refers to that neither it nor the class path has, one

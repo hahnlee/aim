@@ -1729,8 +1729,22 @@ caches increased available space to 5.7GiB; the next full oracle passed (29.24s,
 no skips). This is not a fix for either intermittent environment issue. Actual
 ART Binder passes (15.85s), 499 units pass (0.51s; five excluded), and production
 build passes (3 rebuilt, 39 fresh, 1.6s). Other #966 generic type/error cases and
-full native PMS/facade/CTS/app gates remain open
-(#957/#798); original services stay active.
+full native PMS/facade/CTS/app gates remain open. URI list Parcelable class
+validation now uses immutable bootclasspath DEX type relations supplied to the
+native domain writer; no class initialization or guest reflection is added.
+Missing classes and non-Parcelable classes return the original BadParcelable
+category/message, while existing unrelated Parcelables produce the typed-getter
+mismatch. Ten original lazy-Bundle cases cover missing classes, String, filter
+DTO, Bundle, normal group DTO, slash names, primitive/object arrays, absent array
+components and invalid array descriptors. Original service and actual ART native
+Binder tests verify five class cases, including unchanged state on error and
+removal on mismatch (17.08s); original service schedules no settings write.
+Full original oracle passes (30.37s, no skips), 499 units pass (0.50s; five
+excluded), publisher passes (1.14s), and host build passes (4 rebuilt, 9 fresh,
+3.4s). Unconfigured class metadata/unsupported creators fail explicitly; other
+lazy value/creator/malformed Bundle cases remain #966. Startup class-metadata
+binding and full domain/PMS conformance remain #957/#798; original services stay
+active.
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

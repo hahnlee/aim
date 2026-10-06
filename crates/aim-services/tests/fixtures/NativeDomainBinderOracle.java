@@ -268,6 +268,33 @@ public final class NativeDomainBinderOracle {
                 if (bundle.getParcelableArrayList("a.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 1 || bundle.getParcelableArrayList("runtime.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 99 || reply.dataAvail() != 0) throw new AssertionError("key error partial mutation differs");
             } finally {data.recycle(); reply.recycle();}
         }
+        for (String name : new String[] {"dev.aim.fixture.NoSuch", "java.lang.String", "android.content.UriRelativeFilterParcel", "android.os.Bundle", "[I"}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                var seed = new android.os.Bundle(); var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 1; group.filters = new java.util.ArrayList<>();
+                var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); groups.add(group); seed.putParcelableArrayList("class.example", groups);
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(seed, 0);
+                service.transact(Integer.parseInt(args[9]), data, reply, 0); reply.readException();
+            } finally {data.recycle(); reply.recycle();}
+            boolean mismatch = name.equals("android.content.UriRelativeFilterParcel") || name.equals("android.os.Bundle");
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(namedBundle("class.example", name), 0);
+                service.transact(Integer.parseInt(args[9]), data, reply, 0);
+                try {reply.readException(); if (!mismatch) throw new AssertionError("bad Parcelable class accepted");}
+                catch (RuntimeException error) {
+                    String expected = name.equals("dev.aim.fixture.NoSuch") ? "ClassNotFoundException when unmarshalling: " + name : "Parcelable protocol requires subclassing from Parcelable on class " + name;
+                    if (mismatch || !"android.os.BadParcelableException".equals(error.getClass().getName()) || !expected.equals(error.getMessage())) throw error;
+                }
+                if (reply.dataAvail() != 0) throw new AssertionError("Parcelable error framing differs");
+            } finally {data.recycle(); reply.recycle();}
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("class.example"));
+                service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
+                if (reply.readTypedObject(android.os.Bundle.CREATOR).keySet().contains("class.example") == mismatch || reply.dataAvail() != 0) throw new AssertionError("Parcelable mismatch/removal/error state differs");
+            } finally {data.recycle(); reply.recycle();}
+        }
         for (String alias : new String[] {"query_uri_bounds", "query_uri_invalid"}) {
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
@@ -291,15 +318,16 @@ public final class NativeDomainBinderOracle {
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private static boolean alreadyReadInlineSet;
-    private static android.os.Bundle nullNamedBundle(String key) {
-        var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
+    private static android.os.Bundle nullNamedBundle(String key) {return namedBundle(key, null);}
+    private static android.os.Bundle namedBundle(String key, String name) {
+        var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
         try {
-            body.writeInt(1); body.writeString(key); body.writeInt(11); body.writeInt(16);
-            body.writeInt(1); body.writeInt(4); body.writeInt(4); body.writeString(null);
-            int length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42);
-            wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
+            value.writeString(name); int length = value.marshall().length;
+            list.writeInt(1); list.writeInt(4); list.writeInt(length); list.appendFrom(value, 0, length);
+            length = list.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(11); body.writeInt(length); body.appendFrom(list, 0, length);
+            length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
             return android.os.Bundle.CREATOR.createFromParcel(wire);
-        } finally {body.recycle(); wire.recycle();}
+        } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}
     }
     private NativeDomainBinderOracle() {}
 }

@@ -3166,7 +3166,9 @@ fn verify_boot_scan(
     }
     let persistence = Arc::new(Mutex::new(persistence));
     register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
-    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(system, persistence.clone());
+    let jars = aim_android_image::classpath::jars(&aim_paths::derived_image(), "bootclasspath.pb", aim_android_image::classpath::BOOTCLASSPATH).unwrap();
+    let classes = Arc::new(aim_android_image::linkage::ClassPath::read(&aim_paths::derived_image(), &jars).unwrap().hierarchy().unwrap());
+    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(system, persistence.clone(), classes);
     register(native, "query_domains", native.add_service(domains));
     {
         use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;

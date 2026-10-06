@@ -13,6 +13,7 @@ use crate::system::System;
 pub struct DomainQueries {
     system: Weak<System>,
     persistence: Option<Arc<Mutex<crate::package::owner::Store>>>,
+    classes: Option<Arc<aim_android_image::linkage::Hierarchy>>,
 }
 
 enum UriUpdateError {
@@ -28,15 +29,18 @@ impl DomainQueries {
         Arc::new(Self {
             system: Arc::downgrade(system),
             persistence: None,
+            classes: None,
         })
     }
     pub fn with_persistence(
         system: &Arc<System>,
         persistence: Arc<Mutex<crate::package::owner::Store>>,
+        classes: Arc<aim_android_image::linkage::Hierarchy>,
     ) -> Arc<Self> {
         Arc::new(Self {
             system: Arc::downgrade(system),
             persistence: Some(persistence),
+            classes: Some(classes),
         })
     }
 
@@ -640,8 +644,13 @@ impl DomainQueries {
                     if !super::uri_groups::valid_domain(domain).map_err(|_| UriUpdateError::Transport(UNKNOWN_TRANSACTION))? {
                         continue;
                     }
-                    let parcels = entry.groups().map_err(|e| {
-                        Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {e}"))
+                    let parcels = entry.groups_with_classes(self.classes.as_deref()).map_err(|error| {
+                        use super::uri_bundle::GroupError;
+                        match error {
+                            GroupError::BadParcelable(message) => Exception::new(aim_binder_host::parcel::EX_BAD_PARCELABLE, message),
+                            GroupError::Parcel(status) => Exception::new(EX_ILLEGAL_STATE, format!("URI group list: {status}")),
+                            GroupError::Unavailable => Exception::new(EX_UNSUPPORTED_OPERATION, "Parcelable class metadata/creator is unavailable"),
+                        }
                     })?;
                     let groups = super::uri_parcel::groups_to_model(parcels).map_err(|message| {
                         Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, message)

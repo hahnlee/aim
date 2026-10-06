@@ -42,6 +42,7 @@ const DEFAULT_SCHED_BITS: u32 = 19 & FLAT_BINDER_FLAG_PRIORITY_MASK;
 
 /// `binder::Status` / `android.os.Parcel` exception codes.
 pub const EX_SECURITY: i32 = -1;
+pub const EX_BAD_PARCELABLE: i32 = -2;
 pub const EX_ILLEGAL_ARGUMENT: i32 = -3;
 pub const EX_NULL_POINTER: i32 = -4;
 pub const EX_ILLEGAL_STATE: i32 = -5;
