@@ -942,11 +942,28 @@ matching pull/ABX capture. Mixed text/comment/CDATA/entity and typed ABX capture
 comparisons pass. Remaining global/keyset/domain/verifier/migration owners,
 group/user/permission binding and complete boot/retry/write orchestration remain
 #914/#912/#798; full native Store frontend and default boot are still unproved.
-17 XML tests and 517 service units pass (5 service tests excluded, 0.49s); the
-updated processing-instruction owned reopen test also passes explicitly (0.03s).
-Full original ART oracle passes without skips (58.20s), retaining 34 version,
+Incremental Settings.read_key_sets now updates pool records/counters as each start
+completes, retains partial mutations on later read errors, exposes nested records
+under unknown tags, replaces duplicate keyset slots and deduplicates key IDs in
+ArraySet order. Unversioned containers clear active package roles only after
+successful subtree consumption and retain an existing pool. Public-key decoding
+and runtime reference finalization are explicit owner callbacks; finalization runs
+only after successful container completion. The missing-current-mapping case
+follows the original uncaught NPE path through typed FatalInput, preserving the
+selected file and preceding counter effects rather than entering failRead.
+Native restore now tolerates absent saved package-role references as the original
+warn/continue path does (#970), while mutation validation remains separate.
+Actual original Settings agrees on 158 additional keyset pool/counter/package-role
+and handle-reference projections, including post-package ABX truncation, nesting,
+duplicates, malformed counters, unversioned/repeated containers and fatal input.
+These projections use empty public-key mappings with the actual native restore;
+full public-key factory/live reference/mutation/retirement integration remains
+#914/#916/#824/#823. A native fatal-input recovery test preserves the selected
+file; a missing-role restore regression creates no fake handles.
+17 XML tests and 522 service units pass (5 service tests excluded, 0.52s).
+Full original ART oracle passes without skips (56.64s), retaining 34 version,
 866 package-body/header, 238 shared UID and incremental permission projections.
-Production runtime build passes (5 rebuilt/37 fresh, 1.1s); previous image/template
+Production runtime build passes (3 rebuilt/39 fresh, 3.0s); previous image/template
 build passed (6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier

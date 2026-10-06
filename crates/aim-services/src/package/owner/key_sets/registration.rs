@@ -1,7 +1,7 @@
 //! KeySetManagerService addScannedPackageLPw/addRefCountsFromSavedPackagesLPw
 //! at android-16.0.0_r1 (#824). Copyright (C) The Android Open Source Project,
 //! Apache License 2.0. Public keys are canonical PublicKey.getEncoded bytes.
-use super::{Settings, validated_sets};
+use super::{Settings, validated_pool, validated_sets};
 use crate::package::sign::canonical_public_keys;
 use std::collections::BTreeSet;
 
@@ -75,7 +75,9 @@ pub(super) fn release(settings: &mut Settings, id: i64) {
 /// Public keys not referenced by any removed set are retained. Invalid owner
 /// input leaves settings unchanged; disabled factories hold no separate refs.
 pub fn restore(settings: &mut Settings) -> Result<(), String> {
-    validated_sets(settings)?;
+    // The original warns and continues for absent saved package references.
+    // Installs/removals validate those references at their own mutation boundary.
+    validated_pool(settings)?;
     initialize_references(settings);
     let orphans: Vec<_> = settings
         .key_sets
@@ -315,6 +317,24 @@ mod tests {
             ..Default::default()
         }
     }
+    #[test]
+    fn restoration_preserves_absent_saved_roles_without_creating_handles() {
+        let mut state = settings();
+        state.packages[0].key_set_data.proper_signing_key_set = 2;
+        state.packages[0]
+            .key_set_data
+            .add_defined_key_set(3, Some("missing".into()));
+        restore(&mut state).unwrap();
+        assert_eq!(state.packages[0].key_set_data.proper_signing_key_set, 2);
+        assert_eq!(
+            state.packages[0].key_set_data.defined_key_sets,
+            [(Some("missing".into()), 3)]
+        );
+        assert!(state.key_sets.key_sets.is_empty());
+        assert!(state.key_sets.public_keys.is_empty());
+        assert!(state.key_sets.reference_counts.as_ref().unwrap().is_empty());
+    }
+
     #[test]
     fn replacement_reuses_shared_keys_and_acquires_aliases_before_retirement() {
         let (first, second) = (key(1), key(2));

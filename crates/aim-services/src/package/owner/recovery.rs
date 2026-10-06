@@ -23,18 +23,20 @@ pub enum Event {
     Removed(Source),
     Failed { source: Source, message: String },
     OwnerFailed { source: Source, message: String },
+    FatalInput { source: Source, message: String },
     NoStartTag(Source),
     OpenFailed(Source),
     RemoveFailed(Source),
     Absent,
 }
 
-/// Only errors in the guest settings input enter ResilientAtomicFile.failRead.
-/// Native owner/transport failures abort without deleting the selected input.
+/// Errors caught by original Settings recovery enter ResilientAtomicFile.failRead.
+/// Native owner failures and uncaught input exceptions preserve the selected input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadError {
     File(String),
     Owner(String),
+    FatalInput(String),
 }
 
 impl From<String> for ReadError {
@@ -45,7 +47,9 @@ impl From<String> for ReadError {
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::File(message) | Self::Owner(message) => message.fmt(f),
+            Self::File(message) | Self::Owner(message) | Self::FatalInput(message) => {
+                message.fmt(f)
+            }
         }
     }
 }
@@ -305,6 +309,13 @@ impl Plan {
                 }
                 Err(ReadError::Owner(message)) => {
                     events.push(Event::OwnerFailed {
+                        source,
+                        message: message.clone(),
+                    });
+                    return Err(Error { events, message });
+                }
+                Err(ReadError::FatalInput(message)) => {
+                    events.push(Event::FatalInput {
                         source,
                         message: message.clone(),
                     });

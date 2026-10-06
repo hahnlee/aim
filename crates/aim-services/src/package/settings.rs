@@ -16,6 +16,7 @@ use super::domain_verification;
 use super::{children, string};
 
 mod signatures;
+mod key_sets;
 pub use super::owner::recovery::ReadError;
 pub use signatures::SignatureReader;
 

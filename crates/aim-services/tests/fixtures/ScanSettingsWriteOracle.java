@@ -39,6 +39,7 @@ public final class ScanSettingsWriteOracle {
         verifySignatureEvents(cache.getParentFile());
         verifyPackageChildEvents(cache.getParentFile());
         verifySharedReadEvents(cache.getParentFile());
+        verifyKeySetEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -69,6 +70,25 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyKeySetEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "keyset-event-input-" + index); if (!input.exists()) break;
+            var data = new java.io.File(directory, "keyset-event-original-" + index); var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            String status = "ok";
+            try { settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>()); }
+            catch (NullPointerException failure) { status = "fatal"; }
+            var p = settings.getPackagesLocked().get("p"); long proper = p == null ? -1 : p.getKeySetData().getProperSigningKeySet();
+            var owner = settings.getKeySetManagerService(); var handle = p == null ? null : owner.getSigningKeySetByPackageNameLPr("p");
+            java.nio.file.Files.write(new java.io.File(directory, "keyset-event-output-" + index).toPath(), (status + "|" + proper + "|" + (handle == null ? "absent" : handle.getRefCountLPr())).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "keyset-event-pool-" + index))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true); xml.startTag(null, "packages");
+                owner.writeKeySetManagerServiceLPr(xml); xml.endTag(null, "packages"); xml.endDocument();
+            }
         }
     }
     private static void verifySharedReadEvents(java.io.File directory) throws Exception {

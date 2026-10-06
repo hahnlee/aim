@@ -2282,3 +2282,23 @@ fn captured_settings_document_reopens_after_owned_commit_with_extensions() {
     assert_eq!(Store::open(&data.0, &[0]).unwrap().unwrap().settings_document, document);
     assert_eq!(aim_android_xml::read_next(&fs::read(path).unwrap()).unwrap(), document);
 }
+
+#[test]
+fn uncaught_keyset_input_failure_preserves_the_selected_file() {
+    use recovery::{Event, Plan, Source};
+    let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap();
+    let path = data.0.join("system/packages.xml");
+    let bytes = b"<packages><keyset-settings version='1'><lastIssuedKeyId value='9'/><keysets><key-id identifier='1'/></keysets></keyset-settings></packages>";
+    fs::write(&path, bytes).unwrap();
+    let mut settings = crate::package::settings::Settings::default();
+    let error = Plan::inspect(&data.0).unwrap().recover_with_owner(&[0], &mut settings, |bytes, state| {
+        state.read_document(bytes, |state, reader, start| {
+            state.read_key_sets(reader, start, &Default::default(), |_| panic!("unexpected key"), |_,_| panic!("invalid mapping finalized"))?;
+            Ok(true)
+        })
+    }).err().unwrap();
+    assert_eq!(settings.key_sets.last_issued_key_id, 9);
+    assert!(matches!(error.events.last(), Some(Event::FatalInput { source: Source::Main, .. })));
+    assert!(!error.events.iter().any(|event| matches!(event, Event::Removed(_))));
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}

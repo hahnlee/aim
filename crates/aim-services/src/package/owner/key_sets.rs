@@ -38,7 +38,7 @@ pub fn clear_package(settings: &mut Settings, name: &str) -> Result<(), String> 
     Ok(())
 }
 
-fn validated_sets(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, String> {
+fn validated_pool(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, String> {
     let mut sets = BTreeMap::new();
     for (id, keys) in &settings.key_sets.key_sets {
         if *id <= 0 || sets.insert(*id, keys).is_some() {
@@ -62,6 +62,11 @@ fn validated_sets(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, Strin
     {
         return Err("keyset refers to a missing public key".into());
     }
+    Ok(sets)
+}
+
+fn validated_sets(settings: &Settings) -> Result<BTreeMap<i64, &Vec<i64>>, String> {
+    let sets = validated_pool(settings)?;
     for package in &settings.packages {
         let data = &package.key_set_data;
         let mut aliases = BTreeSet::new();

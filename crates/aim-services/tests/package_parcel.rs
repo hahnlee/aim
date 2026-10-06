@@ -15,6 +15,7 @@ mod common {
     pub mod signature_events;
     pub mod package_child_events;
     pub mod shared_read_events;
+    pub mod key_set_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -593,6 +594,13 @@ fn native_package_parcels_match_original_read_write() {
         common::shared_read_events::trace(&common::shared_read_events::read(bytes))
     }).collect();
     eprintln!("original shared UID read-order cases: {}", shared_read_inputs.len());
+    let key_set_event_inputs = common::key_set_events::inputs();
+    let key_set_event_expected: Vec<_> = key_set_event_inputs.iter().enumerate().map(|(index, bytes)| {
+        fs::write(directory.join(format!("keyset-event-input-{index}")), bytes).unwrap();
+        let (state, status) = common::key_set_events::read(bytes);
+        common::key_set_events::trace(&state, status)
+    }).collect();
+    eprintln!("original incremental keyset cases: {}", key_set_event_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -792,6 +800,7 @@ fn native_package_parcels_match_original_read_write() {
                 Event::Removed(source) => format!("removed.{source:?}"),
                 Event::Failed { source, .. } => format!("failed.{source:?}"),
                 Event::OwnerFailed { source, .. } => format!("owner-failed.{source:?}"),
+                Event::FatalInput { source, .. } => format!("fatal-input.{source:?}"),
                 Event::NoStartTag(source) => format!("no-root.{source:?}"),
                 Event::OpenFailed(source) => format!("open-failed.{source:?}"),
                 Event::RemoveFailed(source) => format!("remove-failed.{source:?}"),
@@ -4282,6 +4291,15 @@ fn native_package_parcels_match_original_read_write() {
     for (index, expected) in shared_read_expected.iter().enumerate() {
         assert_eq!(fs::read_to_string(directory.join(format!("shared-read-output-{index}"))).unwrap(), *expected,
             "original shared UID read order {index}: {:?}", String::from_utf8_lossy(&shared_read_inputs[index]));
+    }
+    for (index, expected) in key_set_event_expected.iter().enumerate() {
+        let actual = fs::read_to_string(directory.join(format!("keyset-event-output-{index}"))).unwrap();
+        let fields = actual.split('|').collect::<Vec<_>>();
+        let root = aim_android_xml::read_next(&fs::read(directory.join(format!("keyset-event-pool-{index}"))).unwrap()).unwrap();
+        let keysets = aim_services::package::settings::Settings::parse(&root).unwrap().key_sets;
+        let mut sets = keysets.key_sets.iter().map(|(id, keys)| format!("{id}:{}", keys.iter().map(ToString::to_string).collect::<Vec<_>>().join(","))).collect::<Vec<_>>(); sets.sort();
+        let projected = format!("{}|{}|{}|{},{}|{}", fields[0], fields[1], fields[2], keysets.last_issued_key_id, keysets.last_issued_key_set_id, sets.join(";"));
+        assert_eq!(projected, *expected, "original incremental keyset {index}");
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {
