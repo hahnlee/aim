@@ -1043,11 +1043,23 @@ shared publication, original-name registration and bootstrap execution remain
 #957/#914/#798. Initial fixture failures were an unavailable Files.readString
 API (replaced with image-supported readAllBytes) and an incorrect 64-case loop
 bound (corrected to the generated 32 cases), then the same oracle was rerun.
-17 XML tests and 529 service units pass (5 service tests excluded, 0.51s).
-Full original ART oracle passes without skips (62.27s), retaining prior modern/
-legacy/verifier/package/shared/keyset/read-and-retirement/permission comparisons.
-Image/template previously passed (6 rebuilt/36 fresh, 72.5s); final runtime
-rebuild passed (3 rebuilt/39 fresh, 1.1s). Compile-only persistence/state-map API declarations
+Capture.prepare_domain_settings_read now merges a completed domain read against
+that exact scan's loaded code and captured collector policy, then prepares a new
+runtime-only version. It carries section diagnostics and clones the prior owner;
+preparation does not publish or write disk. Existing System runtime publication
+compares bridge/base/version before swapping scan/query owners. The explicit
+retained-owner framework-res scan test now publishes a changed-ID read result:
+user query state changes in the new capture, the old capture remains unchanged,
+live UUID is retained, settings bytes/persistence owner/nonce invalidations stay
+unchanged, and a stale prepared read is rejected. A later actual domain commit
+still uses the current generation. Parser-to-bootstrap orchestration, full
+identity/order/state-matrix coverage, all owners and original-name activation
+remain #957/#914/#798; this API does not activate original-name native services.
+17 XML tests and 529 service units pass (5 service tests excluded, 0.49s).
+Explicit retained-owner native scan with original framework-res passes (1.14s).
+The prior full original ART oracle passed without skips (62.27s) and was not rerun
+for this capture/publication-only change. Image/template previously passed
+(6 rebuilt/36 fresh, 72.5s); runtime rebuild passes (3 rebuilt/39 fresh, 16.5s). Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
 The prior retained-owner framework-res scan passed (1.45s) and was not rerun.

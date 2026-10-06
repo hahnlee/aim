@@ -54,7 +54,9 @@ pub struct NativeDomains {
     policies: BTreeMap<String, bool>,
 }
 impl NativeDomains {
-    pub fn classes(&self) -> Option<&aim_android_image::linkage::Hierarchy> {self.classes.as_deref()}
+    pub fn classes(&self) -> Option<&aim_android_image::linkage::Hierarchy> {
+        self.classes.as_deref()
+    }
 
     pub fn collector_policy(
         &self,
@@ -278,6 +280,37 @@ impl Capture {
             capture: update.capture,
         })
     }
+    /// Merge a completed persistence read against this exact scan/code/policy
+    /// capture. Preparation is unpublished and does not claim a settings write.
+    pub fn prepare_domain_settings_read(
+        self: &Arc<Self>,
+        result: crate::package::domain_verification::ReadResult,
+    ) -> Result<
+        (
+            RuntimeDomainUpdate,
+            Vec<crate::package::domain_verification::SectionError>,
+        ),
+        String,
+    > {
+        use crate::package::domain_verification::collector::{self, Kind};
+        let current = self
+            .domains
+            .as_ref()
+            .ok_or("missing captured domain owner")?;
+        let mut owner = current.owner().clone();
+        let diagnostics = owner.read_settings(result, |name| {
+            let Some(code) = self.scan.owner().loaded_packages().get(name) else {
+                return Ok(Vec::new());
+            };
+            Ok(collector::collect(
+                &code.package,
+                current.collector_policy(name)?,
+                Kind::ValidAutoVerify,
+            ))
+        })?;
+        Ok((self.prepare_runtime_domain_update(owner)?, diagnostics))
+    }
+
     fn prepare_domains(
         self: &Arc<Self>,
         owner: crate::package::domain_verification::owner::Owner,

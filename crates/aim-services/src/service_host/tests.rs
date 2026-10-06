@@ -3196,6 +3196,26 @@ fn verify_boot_scan(
         assert!(Arc::ptr_eq(&current, &system.capture_package_queries().unwrap()));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        let mut incoming = current.domains().unwrap().owner().package("android").unwrap().clone();
+        incoming.id = "00000000-0000-0000-0000-000000000099".into();
+        incoming.users = vec![crate::package::domain_verification::User { id:0, allow_link_handling:true, enabled_hosts:vec!["read.example".into()] }];
+        let make_read = || crate::package::domain_verification::ReadResult {
+            state: crate::package::domain_verification::State {active:vec![incoming.clone()],..Default::default()}, diagnostics:vec![],
+        };
+        let (read_update, diagnostics) = current.prepare_domain_settings_read(make_read()).unwrap();
+        let (stale_read, _) = current.prepare_domain_settings_read(make_read()).unwrap();
+        assert!(diagnostics.is_empty());
+        let read_capture = system.publish_runtime_package_domains(bridge, read_update).unwrap().unwrap();
+        assert_eq!(read_capture.scan().version(), current.scan().version() + 1);
+        assert!(!current.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
+        assert!(read_capture.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
+        assert_eq!(read_capture.domains().unwrap().owner().package("android").unwrap().id, current.domains().unwrap().owner().package("android").unwrap().id);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(persistence.state().settings.domain_verification, disk_state);
+        assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        assert!(system.publish_runtime_package_domains(bridge, stale_read).unwrap().is_none());
+        let current = read_capture;
+        runtime = current.domains().unwrap().owner().clone();
         runtime.set_link_handling_internal(Some("android"), true, 0, &[]).unwrap();
         let committed = system.commit_package_domains(bridge, current.prepare_domain_update(runtime).unwrap(), &mut persistence).unwrap();
         assert_eq!(committed.scan().version(), current.scan().version() + 1);
