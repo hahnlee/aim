@@ -1583,8 +1583,16 @@ conflict returns ERROR_UNABLE_TO_APPROVE while allocating an empty attached user
 memory: old capture, Store state and scan disk base remain unchanged. Original ART
 then selects two hosts, reads selected values, and sends a 4,000-host FD set to disable;
 original UserState confirms each new state (15.53s). Units pass (491, 0.50s; five
-excluded by default), as does publisher (0.96s). Method 8 frontend and full M4 C
-acceptance remain open (#957/#798). Both methods
+excluded by default), as does publisher (0.96s). Sized AIDL URI group/filter DTO codecs now retain nullable strings, nullable
+filter elements and a nullable filter list, with default fields for short records
+and skipping future fields (2026-10-06). Original creators confirm 68 read/write
+roundtrips across null/empty/ordinary/Unicode filters, numeric fields, empty/null
+lists and null elements, with exact reserialization. The full original oracle
+passes (29.78s, no skips), as do 493 units (0.55s; five excluded by default). This
+is lossless wire DTO evidence, not completed method 8. Original group conversion
+preserves null filter strings, whereas the current domain/intent filter model
+requires String (#964); model preservation and original matching/error behavior
+remain open. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
 and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup

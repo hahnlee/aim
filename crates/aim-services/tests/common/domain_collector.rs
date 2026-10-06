@@ -459,6 +459,72 @@ fn attachment_inputs(directory: &Path) {
     }
 }
 
+pub fn verify_uri_dto(directory: &Path) {
+    use aim_binder_host::parcel::Reader;
+    use aim_service_aidl::{ReadParcelable, WriteParcelable};
+    use aim_services::package::domain_verification::uri_parcel::{Filter, Group};
+    let bytes = fs::read(directory.join("uri-dto.original")).unwrap();
+    let mut reader = Reader::new(&bytes, &[]);
+    let count = reader.read_i32().unwrap();
+    assert_eq!(count, 68);
+    for case in 0..count {
+        let group = reader.read_i32().unwrap() != 0;
+        let expected_filter = if !group {
+            Some(Filter {
+                uri_part: reader.read_i32().unwrap(),
+                pattern_type: reader.read_i32().unwrap(),
+                filter: reader.read_string16().unwrap(),
+            })
+        } else {
+            None
+        };
+        let mode = if group {
+            reader.read_i32().unwrap()
+        } else {
+            -1
+        };
+        let payload = aim_service_aidl::read_byte_array(&mut reader)
+            .unwrap()
+            .unwrap();
+        let mut input = Reader::new(&payload, &[]);
+        let mut output = Parcel::new();
+        if group {
+            let value = Group::read_from(&mut input).unwrap();
+            assert_eq!(value.action, mode - 1);
+            assert_eq!(
+                value.filters.as_ref().map(Vec::len),
+                match mode {
+                    0 => None,
+                    1 => Some(0),
+                    2 => Some(1),
+                    _ => Some(2),
+                }
+            );
+            if mode >= 2 {
+                assert!(value.filters.as_ref().unwrap()[0].is_none());
+            }
+            if mode == 3 {
+                assert_eq!(
+                    value.filters.as_ref().unwrap()[1],
+                    Some(Filter {
+                        uri_part: 2,
+                        pattern_type: 99,
+                        filter: None
+                    })
+                );
+            }
+            value.write_to(&mut output);
+        } else {
+            let value = Filter::read_from(&mut input).unwrap();
+            assert_eq!(Some(&value), expected_filter.as_ref());
+            value.write_to(&mut output);
+        }
+        assert_eq!(input.remaining(), 0);
+        assert_eq!(output.data(), payload, "original URI DTO case={case}");
+    }
+    assert_eq!(reader.remaining(), 0);
+}
+
 pub fn verify_uuid(directory: &Path) {
     use aim_binder_host::parcel::Reader;
     use aim_services::package::domain_verification::uuid;

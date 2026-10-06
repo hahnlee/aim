@@ -93,6 +93,7 @@ fn native_package_parcels_match_original_read_write() {
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainApprovalFixture.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainOwnerSortOracle.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainUuidOracle.java"))
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/UriDtoOracle.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainEnforcerOracle.java"))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/NativeAshmemOracle.java"))
         .arg(
@@ -1711,6 +1712,7 @@ fn native_package_parcels_match_original_read_write() {
             "NATIVE_DOMAIN_INFO 4000\n"
         );
     }
+    common::domain_collector::verify_uri_dto(&directory);
     common::domain_collector::verify_uuid(&directory);
     common::domain_collector::verify_owner_sort(&directory);
     common::domain_collector::grouped_owners(&directory, true);
