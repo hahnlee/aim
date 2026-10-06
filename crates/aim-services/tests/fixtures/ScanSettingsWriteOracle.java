@@ -38,6 +38,7 @@ public final class ScanSettingsWriteOracle {
         verifyOwnerDefaults(cache.getParentFile());
         verifySignatureEvents(cache.getParentFile());
         verifyPackageChildEvents(cache.getParentFile());
+        verifySharedReadEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -68,6 +69,23 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifySharedReadEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "shared-read-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "shared-read-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            settings.readLPw(null, java.util.List.of());
+            var packages = new java.util.ArrayList<String>(); var groups = new java.util.ArrayList<String>();
+            for (var p : settings.getPackagesLocked().values()) packages.add(p.getPackageName() + ":" + p.getAppId() + ":" + p.hasSharedUser() + ":" + p.getPathString());
+            for (var g : settings.getAllSharedUsersLPw()) groups.add(g.getName() + ":" + g.mAppId + ":" + g.getFlags());
+            java.util.Collections.sort(packages); java.util.Collections.sort(groups);
+            java.nio.file.Files.write(new java.io.File(directory, "shared-read-output-" + index).toPath(), (String.join(";", packages) + "|" + String.join(";", groups)).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
     private static void verifyPackageChildEvents(java.io.File directory) throws Exception {

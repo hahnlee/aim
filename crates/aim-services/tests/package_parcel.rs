@@ -14,6 +14,7 @@ mod common {
     pub mod settings_owner_defaults;
     pub mod signature_events;
     pub mod package_child_events;
+    pub mod shared_read_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -583,6 +584,12 @@ fn native_package_parcels_match_original_read_write() {
         common::package_child_events::trace(&common::package_child_events::read(bytes))
     }).collect();
     eprintln!("original incremental package child cases: {}", package_child_inputs.len());
+    let shared_read_inputs = common::shared_read_events::inputs();
+    let shared_read_expected: Vec<_> = shared_read_inputs.iter().enumerate().map(|(index, bytes)| {
+        fs::write(directory.join(format!("shared-read-input-{index}")), bytes).unwrap();
+        common::shared_read_events::trace(&common::shared_read_events::read(bytes))
+    }).collect();
+    eprintln!("original shared UID read-order cases: {}", shared_read_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -4267,6 +4274,10 @@ fn native_package_parcels_match_original_read_write() {
     for (index, expected) in package_child_expected.iter().enumerate() {
         assert_eq!(fs::read_to_string(directory.join(format!("package-child-output-{index}"))).unwrap(), *expected,
             "original incremental package child {index}: {:?}", String::from_utf8_lossy(&package_child_inputs[index]));
+    }
+    for (index, expected) in shared_read_expected.iter().enumerate() {
+        assert_eq!(fs::read_to_string(directory.join(format!("shared-read-output-{index}"))).unwrap(), *expected,
+            "original shared UID read order {index}: {:?}", String::from_utf8_lossy(&shared_read_inputs[index]));
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {

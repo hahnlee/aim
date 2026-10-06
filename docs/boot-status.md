@@ -882,8 +882,8 @@ keyset references, pending shared-UID packages and deferred first-install times;
 retry creates a fresh attempt without erasing registered package/UID owners.
 Same-name/same-UID reads retain construction fields and accumulated children while
 updating metadata; different-ID duplicates and occupied UID slots are explicit
-rejection outcomes. Shared-UID packages enter pending before their body, without
-registering a separate slot. Loading progress remains monotonic; page-size flags
+rejection outcomes. Shared-UID packages enter pending before their body with appId zero and a
+separate sharedUserAppId, without registering a separate slot. Loading progress remains monotonic; page-size flags
 merge on the registered target, so an invalid mode retains preceding header/UID
 effects. First-install timestamps publish only after the body completes.
 The body connects the shared SignatureReader/keyset table and delegates legacy
@@ -894,14 +894,29 @@ Actual original Settings.readSettingsLPw agrees on 866 text/ABX package cases,
 including post-header truncations, accumulated children, retained path/flags/domain
 ID, updated version, monotonic loading, merged/invalid page modes and partial
 effects across empty-reserve retry. Native units additionally check UID rejection,
-pending-before-failure and deferred first-install timestamps. 508 service units
-pass (5 excluded, 0.51s); full original ART oracle passes without skips (54.24s).
-The image/template build passes (6 rebuilt/36 fresh, 72.1s). An original
+pending-before-failure and deferred first-install timestamps. Native
+Settings.read_shared_user reserves its group slot before signatures/legacy
+permission events, retains existing same-ID group flags and reports conflicting
+name/UID records. PackageReadAttempt.resolve_pending processes the surviving
+attempt in order: missing/non-group slots reject, valid groups publish a package
+with the group's appId/sharedUserAppId. The binding callback receives the UID owner
+and displaced package so it can preserve prior objects and update group/user
+state; errors propagate with pending records retained. A native unit retains the
+previous non-shared UID object before replacing its package-map entry. Actual
+original Settings.readLPw agrees on package/group inventory projections for 238
+additional text/ABX cases (registration order, collisions, same-ID flag retention,
+truncation and empty-reserve retry). These use no users and exclude group
+membership/aggregate flags, legacy permission and user-binding side effects.
+511 service units pass (5 excluded, 0.50s); full original ART oracle passes without
+skips (57.26s), retaining the 866 package-body/header cases. Production runtime
+build passes (3 rebuilt/39 fresh, 1.1s); previous image/template build passed
+(6 rebuilt/36 fresh, 72.1s). An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier
 checks it against the pinned original. Only worktree incremental cache was removed
 to recover test space (#903). This is a registered-package owner comparison:
-domain-ID policy delivery, shared UID resolution, global/keyset owners and legacy
+domain-ID policy delivery, shared UID membership/aggregate flags and retained
+object/user/legacy binding callbacks, global/keyset owners and legacy
 permission/domain callbacks, complete incremental frontend and default boot
 integration remain #914/#798. Original PMS still runs. Native Signatures now stores current capability flags (an empty vector represents
 all zero); the feed retains them instead of discarding them, and the AST reader

@@ -530,6 +530,76 @@ pub enum PackageReadOutcome {
     RejectedId(super::owner::app_ids::Error),
 }
 
+#[derive(Debug, PartialEq)]
+pub enum SharedReadOutcome {
+    Active(usize),
+    InvalidHeader,
+    DuplicateId,
+    RejectedId(super::owner::app_ids::Error),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PendingOutcome {
+    Attached(String),
+    MissingOwner(String),
+    WrongOwner(String),
+}
+
+impl PackageReadAttempt {
+    /// Settings.readLPw resolves the last read attempt's pending records in order.
+    /// The binding owner retains displaced objects and applies group/user effects
+    /// before publication; missing or non-group UID owners reject that record.
+    pub fn resolve_pending(
+        &mut self,
+        settings: &mut Settings,
+        ids: &mut super::owner::app_ids::AppIds,
+        mut attach: impl FnMut(
+            &mut Package,
+            &SharedUser,
+            Option<&Package>,
+            &mut super::owner::app_ids::AppIds,
+        ) -> Result<(), String>,
+    ) -> Result<Vec<PendingOutcome>, String> {
+        use super::owner::app_ids::Owner;
+        let mut outcomes = Vec::new();
+        while let Some(package) = self.pending.first_mut() {
+            let outcome = match ids.get(package.uid_owner_id()).cloned() {
+                None => PendingOutcome::MissingOwner(package.name.clone()),
+                Some(Owner::SharedUser(name)) => {
+                    let group = settings
+                        .shared_users
+                        .iter()
+                        .find(|g| g.name == name && g.app_id == package.uid_owner_id())
+                        .ok_or("shared UID slot has no matching settings owner")?;
+                    let previous = settings
+                        .packages
+                        .iter()
+                        .position(|p| p.name == package.name);
+                    package.app_id = group.app_id;
+                    package.shared_user_app_id = Some(group.app_id);
+                    attach(
+                        package,
+                        group,
+                        previous.map(|index| &settings.packages[index]),
+                        ids,
+                    )?;
+                    let name = package.name.clone();
+                    if let Some(index) = previous {
+                        settings.packages[index] = package.clone();
+                    } else {
+                        settings.packages.push(package.clone());
+                    }
+                    PendingOutcome::Attached(name)
+                }
+                Some(_) => PendingOutcome::WrongOwner(package.name.clone()),
+            };
+            self.pending.remove(0);
+            outcomes.push(outcome);
+        }
+        Ok(outcomes)
+    }
+}
+
 impl Settings {
     /// Read one package from its completed start. The caller resolves domain IDs
     /// and owns legacy permission/domain side effects before using this entry.
@@ -553,6 +623,8 @@ impl Settings {
         let first_install_time = incoming.legacy_first_install_time;
         incoming.legacy_first_install_time = 0;
         let (target, outcome) = if incoming.shared_user {
+            incoming.shared_user_app_id = Some(incoming.app_id);
+            incoming.app_id = 0;
             attempt.pending.push(incoming);
             let index = attempt.pending.len() - 1;
             (
@@ -614,6 +686,79 @@ impl Settings {
                 .insert(target.name.clone(), first_install_time);
         }
         Ok(outcome)
+    }
+
+    /// Read a shared UID from its start event. Registration precedes signatures
+    /// and legacy permission mutations; prior registered groups survive retry.
+    pub fn read_shared_user(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        start: &Element,
+        ids: &mut super::owner::app_ids::AppIds,
+        attempt: &mut PackageReadAttempt,
+        mut read_owner: impl FnMut(
+            &mut SharedUser,
+            &mut aim_android_xml::pull::Reader<'_>,
+            &Element,
+        ) -> Result<bool, String>,
+    ) -> Result<SharedReadOutcome, String> {
+        use aim_android_xml::pull::Event;
+        let (Some(name), app_id) = (string(start, "name"), defaulted(start.int("userId"), 0))
+        else {
+            signatures::skip(reader)?;
+            return Ok(SharedReadOutcome::InvalidHeader);
+        };
+        if app_id == 0 {
+            signatures::skip(reader)?;
+            return Ok(SharedReadOutcome::InvalidHeader);
+        }
+        let index = if let Some(index) = self.shared_users.iter().position(|g| g.name == name) {
+            if self.shared_users[index].app_id != app_id {
+                signatures::skip(reader)?;
+                return Ok(SharedReadOutcome::DuplicateId);
+            }
+            index
+        } else {
+            if let Err(error) = ids.register_existing(
+                app_id,
+                super::owner::app_ids::Owner::SharedUser(name.clone()),
+            ) {
+                signatures::skip(reader)?;
+                return Ok(SharedReadOutcome::RejectedId(error));
+            }
+            self.shared_users.push(SharedUser {
+                name,
+                app_id,
+                flags: if defaulted(start.bool("system"), false) {
+                    FLAG_SYSTEM
+                } else {
+                    0
+                },
+                signatures: None,
+            });
+            self.shared_users.len() - 1
+        };
+        let group = &mut self.shared_users[index];
+        let outer = reader.depth();
+        loop {
+            match reader.next()? {
+                Event::Start(child) if child.name == "sigs" => {
+                    attempt
+                        .signatures
+                        .read(reader, &child, &mut group.signatures)?;
+                }
+                Event::Start(child) => {
+                    if !read_owner(group, reader, &child)? {
+                        signatures::skip(reader)?;
+                    }
+                }
+                Event::End(_) if reader.depth() <= outer => {
+                    return Ok(SharedReadOutcome::Active(index));
+                }
+                Event::EndDocument => return Ok(SharedReadOutcome::Active(index)),
+                _ => {}
+            }
+        }
     }
 
     /// The settings in the document whose root is `root`.
@@ -1491,6 +1636,177 @@ mod incremental_package_tests {
         assert_eq!(attempt.pending[0].split_versions, [("x".into(), 2)]);
         attempt = PackageReadAttempt::default();
         assert!(attempt.pending.is_empty());
+    }
+
+    fn shared(
+        bytes: &[u8],
+        settings: &mut Settings,
+        ids: &mut super::super::owner::app_ids::AppIds,
+        attempt: &mut PackageReadAttempt,
+    ) -> Result<SharedReadOutcome, String> {
+        let mut reader = Reader::new(bytes)?;
+        let Event::Start(start) = reader.next()? else {
+            panic!()
+        };
+        settings.read_shared_user(&mut reader, &start, ids, attempt, |_, _, _| Ok(false))
+    }
+
+    #[test]
+    fn shared_registration_survives_failure_and_pending_resolves_after_group_read() {
+        use super::super::owner::app_ids::{AppIds, Owner};
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        registered(
+            b"<package name='p' codePath='/p' sharedUserId='10001'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        assert_eq!(attempt.pending[0].app_id, 0);
+        assert_eq!(attempt.pending[0].shared_app_id(), Some(10001));
+        assert!(
+            shared(
+                b"<shared-user name='g' userId='10001' system='true'><",
+                &mut settings,
+                &mut ids,
+                &mut attempt
+            )
+            .is_err()
+        );
+        assert_eq!(ids.get(10001), Some(&Owner::SharedUser("g".into())));
+        // A new read attempt drops pending p but preserves the registered group.
+        attempt = PackageReadAttempt::default();
+        shared(
+            b"<shared-user name='g' userId='10001' system='false'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        assert_eq!(settings.shared_users[0].flags, FLAG_SYSTEM);
+        registered(
+            b"<package name='p' codePath='/p' sharedUserId='10001'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        let outcome = attempt
+            .resolve_pending(&mut settings, &mut ids, |p, g, old, _| {
+                assert_eq!(p.app_id, g.app_id);
+                assert!(old.is_none());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outcome, [PendingOutcome::Attached("p".into())]);
+        assert_eq!(settings.packages[0].shared_app_id(), Some(10001));
+        assert!(attempt.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_rejects_missing_or_package_slots_and_binding_error_retains_records() {
+        use super::super::owner::app_ids::AppIds;
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        registered(
+            b"<package name='active' codePath='/a' userId='10002'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        for bytes in [
+            b"<package name='missing' codePath='/p' sharedUserId='10001'/>".as_slice(),
+            b"<package name='wrong' codePath='/p' sharedUserId='10002'/>",
+        ] {
+            registered(bytes, &mut settings, &mut ids, &mut attempt).unwrap();
+        }
+        assert_eq!(
+            attempt
+                .resolve_pending(&mut settings, &mut ids, |_, _, _, _| panic!(
+                    "invalid group attached"
+                ))
+                .unwrap(),
+            [
+                PendingOutcome::MissingOwner("missing".into()),
+                PendingOutcome::WrongOwner("wrong".into())
+            ]
+        );
+        shared(
+            b"<shared-user name='g' userId='10003'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        registered(
+            b"<package name='pending' codePath='/p' sharedUserId='10003'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        assert_eq!(
+            attempt
+                .resolve_pending(&mut settings, &mut ids, |_, _, _, _| Err(
+                    "binding owner unavailable".into()
+                ))
+                .unwrap_err(),
+            "binding owner unavailable"
+        );
+        assert_eq!(attempt.pending.len(), 1);
+        assert_eq!(settings.packages.len(), 1);
+    }
+
+    #[test]
+    fn binding_owner_can_retain_displaced_uid_object_before_publication() {
+        use super::super::owner::app_ids::{AppIds, DetachedSetting, Owner};
+        let mut settings = Settings::default();
+        let mut ids = AppIds::default();
+        let mut attempt = PackageReadAttempt::default();
+        registered(
+            b"<package name='p' codePath='/old' userId='10000'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        shared(
+            b"<shared-user name='g' userId='10001'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        registered(
+            b"<package name='p' codePath='/new' sharedUserId='10001'/>",
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+        )
+        .unwrap();
+        attempt
+            .resolve_pending(&mut settings, &mut ids, |_, _, old, ids| {
+                ids.detach(DetachedSetting {
+                    package: old.unwrap().clone(),
+                    users: Default::default(),
+                    user_aliases: Default::default(),
+                    legacy: None,
+                    install_fixed: None,
+                    runtime: None,
+                })
+            })
+            .unwrap();
+        assert_eq!(settings.packages[0].app_id, 10001);
+        assert_eq!(settings.packages[0].code_path, "/new");
+        assert_eq!(ids.get(10000), Some(&Owner::DetachedPackage("p".into())));
+        assert_eq!(
+            ids.detached_setting(10000).unwrap().package.code_path,
+            "/old"
+        );
     }
 
     #[test]
