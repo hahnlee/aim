@@ -49,7 +49,7 @@ const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
 const ALLOW_ALL: u32 = !0;
 
 /// SystemConfig's features, libraries and hidden-API allowlist.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemConfig {
     /// `mSharedLibraries`, including public native libraries.
     pub libraries: BTreeMap<String, Library>,
@@ -75,7 +75,7 @@ pub struct SystemConfig {
     unavailable: Vec<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RejectedOemUid {
     /// The file relative to the image root.
     pub path: String,

@@ -114,6 +114,21 @@ impl Bridge {
             .map_err(QueryContextError::Input)
     }
 
+    pub fn resolve_boot_domain_query_context(
+        &self,
+        owner: &SigningScan,
+        context: Context,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<Context, QueryContextError> {
+        let policies = self.domain_policies(owner)?;
+        let boot =
+            crate::package::domain_verification::owner::Owner::from_boot(owner, config, &policies)
+                .map_err(QueryContextError::Input)?;
+        context
+            .attach_boot_domains(owner, boot, config, &policies)
+            .map_err(QueryContextError::Input)
+    }
+
     pub fn resolve_domain_query_context(
         &self,
         owner: &SigningScan,

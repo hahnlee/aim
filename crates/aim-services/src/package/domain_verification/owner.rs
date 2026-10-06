@@ -24,7 +24,7 @@ pub struct Input<'a> {
 }
 
 /// A request for the verifier driver; this does not claim broadcast delivery.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub broadcast_requested: bool,
     pub recovered_missing_owner: bool,
@@ -46,6 +46,7 @@ pub struct Owner {
     ids: BTreeMap<String, String>,
     legacy_info: BTreeMap<String, i32>,
 }
+#[derive(Clone, Debug)]
 pub struct Boot {
     pub owner: Owner,
     /// Requests only; the verifier driver must apply its boot-readiness policy.

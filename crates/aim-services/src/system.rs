@@ -710,6 +710,47 @@ impl System {
         self.publish_package_scan_with_queries(bridge, base, owner, usage, context)
     }
 
+    /// Complete and retain boot domains in the same atomic scan/query capture.
+    pub fn complete_package_scan_with_domains(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: Option<&Arc<crate::package::scan_snapshot::Snapshot>>,
+        owner: crate::package::scan::SigningScan,
+        usage: crate::package::owner::usage::Usage,
+        retained: std::collections::BTreeMap<(String, bool), crate::package::scan::OriginalRuntime>,
+        context: crate::package::scan_snapshot::query_state::Context,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        let owner = self.complete_package_owner(bridge, owner, &usage, retained)?;
+        let fail = |error| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("package domain/query owners failed: {error:?}"),
+            )
+        };
+        let context = bridge
+            .resolve_boot_domain_query_context(&owner, context, config)
+            .map_err(fail)?;
+        let context = bridge
+            .resolve_query_context(&owner, context)
+            .map_err(fail)?;
+        self.check_package_bootstrap(bridge)?;
+        self.publish_package_scan_with_queries(bridge, base, owner, usage, context)
+    }
+
+    pub fn capture_package_domains(
+        &self,
+    ) -> Result<Arc<crate::package::scan_snapshot::query_state::NativeDomains>> {
+        self.capture_package_queries()?
+            .domains()
+            .cloned()
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native package domain owner is unavailable",
+                )
+            })
+    }
     // Original policy calls run without holding the publication lock.
     fn complete_package_owner(
         &self,

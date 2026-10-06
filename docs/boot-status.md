@@ -1303,7 +1303,7 @@ failed domains, disabled link handling and absent-user defaults. The native boot
 scan publisher fixture now derives domains through this resolver instead of
 supplying host states, rejects UUID mismatch/missing owner/missing policies, and
 preserves previous scan/query captures on later publication failures (one explicit
-ignored test executed, 0.66s). This fixture now constructs the attached owner
+ignored test executed, 0.71s). This fixture now constructs the attached owner
 through the bootstrap builder from the actual native scan: current code,
 Settings UUIDs and verified signer arrays. Missing/UNKNOWN signing, mismatched
 code/signing owners and incomplete policies reject before attachment; candidate
@@ -1323,8 +1323,16 @@ Settings.readSettingsLPw followed by DomainVerificationService.addPackage
 matches eight native imports: foreign/missing child names, last duplicate wins,
 missing/malformed/negative status and verifier-defined status. The boot builder
 uses these actual Settings inputs, not an assumed empty legacy map. Daemon
-startup/lifetime storage of the constructed owner and native domain Binder
-registration are still unwired. The fixture runs the image's original collector with a controlled
+publisher now retains the immutable boot owner, configuration, policies and
+verifier request plans in the same query capture as its scan. A composite daemon
+entry completes native runtime, creates domains and resolves query owners before
+one atomic publication. Capture validation recomputes domain projections and
+rejects input changes after binding. The native publisher fixture confirms
+unchanged scan/query/domain capture pointers after a rejected publication,
+bootstrap replacement clearing the current domain owner and retained old-domain
+capture isolation. first_system_scan and package_parcel compile; compilation is
+not execution. Automatic startup through this composite entry and native domain
+Binder registration remain unwired. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1336,8 +1344,9 @@ state codes, filtered user hosts and link-handling booleans. Six signature-diges
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
 (41.33s, no skips); release units pass 482 cases (four excluded from the default
-run, 0.47s). The full build passes (three host nodes rebuilt, 39 fresh, 14.8s);
-the image/original-PMS template remains fresh.
+run, 0.50s). The final full build is fresh (42 nodes, 0.2s);
+the image/original-PMS template remains fresh. The original-ART result above is
+from the prior domain-import run; this retention change was verified natively.
 URI-group migration, legacy per-user/pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
 Verifier delivery, production boot domain-state publication and native domain
@@ -1346,8 +1355,8 @@ now reject null max/min aspect ratios for activities and receivers, matching
 the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 482
-cases (four excluded from the default run, 0.47s). The current full build passes
-(three host nodes rebuilt, 39 fresh, 14.8s); the final host build is fresh (13 nodes, 0.3s).
+cases (four excluded from the default run, 0.50s). The final full build is fresh
+(42 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

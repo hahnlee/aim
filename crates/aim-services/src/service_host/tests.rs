@@ -660,6 +660,7 @@ fn query_context_for(
     }
     Context {
         scan_version: version,
+        native_domains: None,
         nonce: Some(version as i64),
         system: model::System {
             sdk_sandbox_package: Some(None),
@@ -1562,7 +1563,14 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         gid: 3004,
     }));
     let previous_version = system.capture_package_scan().unwrap().version();
+    let prior_domains = system.capture_package_domains().ok();
+    let prior_domain_state = prior_domains.as_ref().map(|d| d.owner().persisted());
     attach(&second, Some(replacement)).unwrap();
+    assert!(system.capture_package_domains().is_err());
+    assert_eq!(
+        prior_domains.as_ref().map(|d| d.owner().persisted()),
+        prior_domain_state
+    );
     let current = system.package_bootstrap().unwrap();
     assert!(Arc::ptr_eq(
         &signing,
@@ -1606,6 +1614,7 @@ fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
         Some(true)
     );
     assert_eq!(current.new_domain_id().unwrap(), [3004i32 as u8; 16]);
+    assert!(system.capture_package_domains().is_err());
     driver.release(first.proc_handle());
     // Wait for the actual old endpoint death, then ensure it did not erase the new one.
     until(|| {
@@ -2295,7 +2304,7 @@ fn verify_boot_scan(
             .is_err()
     );
     context = bridge
-        .resolve_domain_query_context(&complete, context, &domains, config)
+        .resolve_boot_domain_query_context(&complete, context, config)
         .unwrap();
     assert_eq!(
         context.packages[&("android".into(), false)].users[&0]
@@ -2305,6 +2314,33 @@ fn verify_boot_scan(
             .0,
         true
     );
+    let mut forged = context.clone();
+    forged
+        .packages
+        .get_mut(&("android".into(), false))
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .domain_selection = Some((false, vec![]));
+    let old_capture = system.capture_package_queries().unwrap();
+    assert!(
+        system
+            .complete_package_scan_with_queries(
+                bridge,
+                Some(&base),
+                complete.clone(),
+                usage.clone(),
+                BTreeMap::new(),
+                forged
+            )
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(
+        &old_capture,
+        &system.capture_package_queries().unwrap()
+    ));
+    assert!(system.capture_package_domains().is_err());
     let mut bad = context.clone();
     bad.packages.remove(&("android".into(), false));
     let old_query = system.capture_package_queries().unwrap();
@@ -2351,17 +2387,65 @@ fn verify_boot_scan(
         malformed.store(0, Ordering::SeqCst);
     }
     let query = system
-        .complete_package_scan_with_queries(
+        .complete_package_scan_with_domains(
             bridge,
             Some(&base),
             complete,
             usage,
             BTreeMap::new(),
             context,
+            config,
         )
         .unwrap();
+    let retained_domains = system.capture_package_domains().unwrap();
+    assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
+    assert_eq!(
+        retained_domains.changes().len(),
+        query.scan().owner().settings.packages.len()
+    );
+    assert!(retained_domains.owner().package("android").is_some());
     let published = query.scan().clone();
     assert_eq!(published.version(), base.version() + 1);
+    let mut forged = query_context_for(published.owner(), published.version() + 1)
+        .resolve_domains(
+            published.owner(),
+            retained_domains.owner(),
+            config,
+            &policies,
+        )
+        .unwrap();
+    forged.native_domains = Some(retained_domains.clone());
+    forged
+        .packages
+        .get_mut(&("android".into(), false))
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .domain_selection = Some((false, vec![]));
+    assert!(
+        system
+            .publish_package_scan_with_queries(
+                bridge,
+                Some(&published),
+                published.owner().clone(),
+                published.usage().clone(),
+                forged
+            )
+            .is_err()
+    );
+    assert!(Arc::ptr_eq(
+        &published,
+        &system.capture_package_scan().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &query,
+        &system.capture_package_queries().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &retained_domains,
+        &system.capture_package_domains().unwrap()
+    ));
     assert!(published.owner().loaded_packages().contains_key("android"));
     let bytes =
         crate::package::scan_snapshot::runtime_record::captured(&published, "android", false)

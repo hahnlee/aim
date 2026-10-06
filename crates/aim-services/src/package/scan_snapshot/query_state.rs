@@ -32,6 +32,7 @@ pub struct UserInputs {
 #[derive(Clone, Debug)]
 pub struct Context {
     pub scan_version: u64,
+    pub native_domains: Option<Arc<NativeDomains>>,
     pub nonce: Option<i64>,
     pub system: model::System,
     pub platform: model::Platform,
@@ -43,7 +44,39 @@ pub struct Context {
     pub retained_packages: BTreeMap<(i32, String), PackageInputs>,
 }
 
+/// Immutable domain owner retained with the scan/query generation.
+#[derive(Clone, Debug)]
+pub struct NativeDomains {
+    boot: crate::package::domain_verification::owner::Boot,
+    config: crate::package::system_config::SystemConfig,
+    policies: BTreeMap<String, bool>,
+}
+impl NativeDomains {
+    pub fn owner(&self) -> &crate::package::domain_verification::owner::Owner {
+        &self.boot.owner
+    }
+    pub fn changes(&self) -> &[(String, crate::package::domain_verification::owner::Change)] {
+        &self.boot.changes
+    }
+}
+
 impl Context {
+    pub fn attach_boot_domains(
+        self,
+        scan: &crate::package::scan::SigningScan,
+        boot: crate::package::domain_verification::owner::Boot,
+        config: &crate::package::system_config::SystemConfig,
+        policies: &BTreeMap<String, bool>,
+    ) -> Result<Self, String> {
+        let mut context = self.resolve_domains(scan, &boot.owner, config, policies)?;
+        context.native_domains = Some(Arc::new(NativeDomains {
+            boot,
+            config: config.clone(),
+            policies: policies.clone(),
+        }));
+        Ok(context)
+    }
+
     /// Replace current-package domain inputs from the native attached owner.
     /// Factory/retained domains remain separate until their owner is implemented.
     pub fn resolve_domains(
@@ -53,6 +86,7 @@ impl Context {
         config: &crate::package::system_config::SystemConfig,
         policies: &BTreeMap<String, bool>,
     ) -> Result<Self, String> {
+        self.native_domains = None;
         let expected: BTreeSet<_> = owner
             .settings
             .packages
@@ -107,6 +141,7 @@ impl Context {
 pub struct Capture {
     scan: Arc<Snapshot>,
     state: Arc<model::State>,
+    domains: Option<Arc<NativeDomains>>,
 }
 impl Capture {
     pub fn scan(&self) -> &Arc<Snapshot> {
@@ -115,11 +150,41 @@ impl Capture {
     pub fn state(&self) -> &Arc<model::State> {
         &self.state
     }
+    pub fn domains(&self) -> Option<&Arc<NativeDomains>> {
+        self.domains.as_ref()
+    }
     pub fn new(scan: Arc<Snapshot>, mut context: Context) -> Result<Arc<Self>, String> {
         if context.scan_version != scan.version() {
             return Err("query context scan version differs".into());
         }
         super::validate_replica(&scan).map_err(|error| format!("query replica: {error:?}"))?;
+        let domains = context.native_domains.take();
+        if let Some(domains) = &domains {
+            let expected = context.clone().resolve_domains(
+                scan.owner(),
+                domains.owner(),
+                &domains.config,
+                &domains.policies,
+            )?;
+            for ((name, factory), value) in &context.packages {
+                if *factory {
+                    continue;
+                }
+                let target = expected
+                    .packages
+                    .get(&(name.clone(), false))
+                    .ok_or("foreign bound domain query package")?;
+                if value.domain_verification != target.domain_verification
+                    || value.uri_relative_filter_groups != target.uri_relative_filter_groups
+                    || value.users.iter().any(|(id, user)| {
+                        user.domain_selection != target.users[id].domain_selection
+                    })
+                {
+                    return Err("bound native domain query projection differs".into());
+                }
+            }
+        }
+
         if context
             .users
             .iter()
@@ -250,6 +315,7 @@ impl Capture {
         Ok(Arc::new(Self {
             scan,
             state: Arc::new(state),
+            domains,
         }))
     }
 }
