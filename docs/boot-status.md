@@ -1398,13 +1398,24 @@ Enforcer's internal/query/verifier/user-query/user-select/owner-query and legacy
 checks, with explicit permission, verifier identity, user-existence and visibility
 owners. Missing owners are not treated as grants or ordinary permission denials.
 The captured adapter uses the same query graph's user map/AppsFilter (including
-uninstalled/archived filtering) and an explicit permission callback/verifier UID.
+uninstalled/archived filtering) and explicit current permission and UID-specific verifier callbacks.
 Original ART compares 6,912 controlled-owner cases over root/system/shell/app
 UIDs, verifier status, permission combinations, user existence, cross-user access,
 hidden packages and nullable selection targets. Allow/false/SecurityException
 outcomes match, including the legacy selector's silent cross-user denial.
 These are controlled owners, not a production verifier selection or registered
-native domain Binder endpoint; live authorization integration remains unproved. The fixture runs the image's original collector with a controlled
+native domain Binder endpoint. The retained bootstrap bridge now delegates
+UID-specific verifier checks to the current original domain owner's proxy,
+rejecting missing owner/proxy and negative UIDs instead of inventing identity.
+Native authorization combines this producer, original permission front-end checks
+and captured users/AppsFilter, checking bootstrap/query identity before and after
+callbacks outside the publication lock. Native tests cover current root/system
+queries, denied app internal calls, stale-capture rejection, per-user verifier
+UID replies and malformed responses; publisher fixture passes (0.74s). Original
+ART verifies seven controlled-proxy UID delegations, the actual original unavailable
+proxy, missing owner/proxy failures, negative UID and actual foreign-UID denial.
+Active installed verifier component selection and app permission-front-end
+integration against live system_server remain unproved. The fixture runs the image's original collector with a controlled
 compatibility override and original mutable ApplicationSharedMemory owned by
 the disposable oracle process.
 The original ART fixture now invokes DomainVerificationService.addPackage and
@@ -1415,8 +1426,8 @@ All eight persisted attached states match the native owner, including migrated
 state codes, filtered user hosts and link-handling booleans. Six signature-digest
 cases match original PackageUtils (zero/one/multiple signers, reversed order,
 duplicate signer and empty certificate bytes). The complete parcel fixture passes
-(28.76s, no skips); release units pass 485 cases (four excluded from the default
-run, 0.50s). The full build passes (nine nodes rebuilt, 33 fresh, 54.8s);
+(29.47s, no skips); release units pass 485 cases (four excluded from the default
+run, 0.50s). The full build passes (nine nodes rebuilt, 33 fresh, 57.2s);
 the image/original-PMS template build passes; final host build is fresh (13 nodes, 0.2s).
 URI-group migration, pre-verified transitions and missing-owner recovery
 are unit-tested/source-compared but have not run against the original service.
@@ -1427,7 +1438,7 @@ the original ParsedActivityImpl Float-unboxing failure (#958). The original
 parcel fixture checks zero/nonzero values with exact roundtrip bytes and both
 independently null fields for both component kinds. Release units pass 485
 cases (four excluded from the default run, 0.50s). The full build passes
-(nine nodes rebuilt, 33 fresh, 54.8s); final host build is fresh (13 nodes, 0.2s).
+(nine nodes rebuilt, 33 fresh, 57.2s); final host build is fresh (13 nodes, 0.2s).
 The earlier original policy fixture
 compares actual PlatformCompat at SDK 28/29/30/36. All test targets compile;
 compilation does not count them as executed. The image/original-PMS template

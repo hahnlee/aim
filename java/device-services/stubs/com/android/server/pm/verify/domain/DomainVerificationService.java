@@ -19,5 +19,6 @@ public class DomainVerificationService extends com.android.server.SystemService 
     public void clearPackageForUser(String name, int user) { throw new RuntimeException("stub"); }
     public void clearUser(int user) { throw new RuntimeException("stub"); }
     public void readLegacySettings(com.android.modules.utils.TypedXmlPullParser parser) throws java.io.IOException { throw new RuntimeException("stub"); }
+    public com.android.server.pm.verify.domain.proxy.DomainVerificationProxy getProxy() { throw new RuntimeException("stub"); }
     public java.util.UUID generateNewId() { throw new RuntimeException("stub"); }
 }

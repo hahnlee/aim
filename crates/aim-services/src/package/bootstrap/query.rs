@@ -17,6 +17,26 @@ pub enum QueryContextError {
 }
 
 impl Bridge {
+    pub fn is_domain_verifier_uid(&self, uid: i32) -> Result<bool, OwnerError> {
+        if uid < 0 {
+            return Err(OwnerError::Code("invalid domain verifier UID".into()));
+        }
+        let mut request = Parcel::new();
+        bridge::IsDomainVerifierUid { uid }.write(&mut request);
+        let reply = self
+            .owner
+            .transact(bridge::IS_DOMAIN_VERIFIER_UID, &request, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let verified = bridge::read_is_domain_verifier_uid_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(BAD_VALUE));
+        }
+        Ok(verified)
+    }
+
     pub fn invalidate_package_info_cache(&self) -> Result<(), OwnerError> {
         let mut request = Parcel::new();
         bridge::InvalidatePackageInfoCache {}.write(&mut request);

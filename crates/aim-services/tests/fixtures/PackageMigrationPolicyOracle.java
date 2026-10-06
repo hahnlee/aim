@@ -44,6 +44,7 @@ public final class PackageMigrationPolicyOracle {
                 verifyQueryOwners(new java.io.File(args[0]));
                 verifyDomainPolicy(new java.io.File(args[0]));
                 verifyCacheInvalidation(new java.io.File(args[0]));
+                verifyVerifierIdentity(new java.io.File(args[0]));
                 System.out.println("MIGRATION_POLICY " + (bestEffort ? 1 : 0));
             }
         } finally { request.recycle(); reply.recycle(); }
@@ -168,16 +169,54 @@ public final class PackageMigrationPolicyOracle {
             java.nio.file.Files.write(new java.io.File(directory, "package-cache-invalidation.original").toPath(), bytes);
         } finally { request.recycle(); reply.recycle(); }
     }
+    private static final class VerifierProxy implements com.android.server.pm.verify.domain.proxy.DomainVerificationProxy {
+        public boolean isCallerVerifier(int uid) { return uid == 10073 || uid == 1010073; }
+        public void sendBroadcastForPackages(java.util.Set<String> names) { throw new AssertionError("identity broadcast"); }
+        public boolean runMessage(int code, Object object) { throw new AssertionError("identity message"); }
+    }
+    private static final class DomainIdentityOwner implements com.android.server.pm.verify.domain.DomainVerificationManagerInternal {
+        final com.android.server.pm.verify.domain.proxy.DomainVerificationProxy proxy;
+        DomainIdentityOwner(com.android.server.pm.verify.domain.proxy.DomainVerificationProxy proxy) { this.proxy = proxy; }
+        public java.util.UUID generateNewId() { throw new AssertionError("identity UUID generation"); }
+        public com.android.server.pm.verify.domain.proxy.DomainVerificationProxy getProxy() { return proxy; }
+    }
+    private static boolean verifierReply(android.os.IBinder bridge, int uid) throws Exception {
+        var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
+        try {
+            request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge"); request.writeInt(uid);
+            if (!bridge.transact(IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid, request, reply, 0)) throw new AssertionError("identity transaction unhandled");
+            reply.readException(); boolean selected = reply.readBoolean();
+            if (reply.dataAvail() != 0) throw new AssertionError("trailing identity reply"); return selected;
+        } finally { request.recycle(); reply.recycle(); }
+    }
+    private static void verifyVerifierIdentity(java.io.File directory) throws Exception {
+        var proxy = new VerifierProxy();
+        var bridge = new PackageBootstrapBridge(new DomainIdentityOwner(proxy)).asBinder();
+        for (int uid : new int[] {0, 1000, 2000, 10001, 10073, 1010073, 1010074})
+            if (verifierReply(bridge, uid) != proxy.isCallerVerifier(uid)) throw new AssertionError("proxy UID delegation differs");
+        var original = new com.android.server.pm.verify.domain.DomainVerificationService(null, new com.android.server.SystemConfig(false), null);
+        bridge = new PackageBootstrapBridge(original).asBinder();
+        if (verifierReply(bridge, 10073) != original.getProxy().isCallerVerifier(10073)) throw new AssertionError("original unavailable proxy differs");
+        try { verifierReply(new PackageBootstrapBridge().asBinder(), 10073); throw new AssertionError("missing identity owner accepted"); }
+        catch (IllegalStateException expected) {}
+        try { verifierReply(new PackageBootstrapBridge(new DomainIdentityOwner(null)).asBinder(), 10073); throw new AssertionError("missing proxy accepted"); }
+        catch (IllegalStateException expected) {}
+        try { verifierReply(bridge, -1); throw new AssertionError("negative identity UID accepted"); }
+        catch (IllegalArgumentException expected) {}
+    }
     private static void verifyDeniedQueryOwners() throws Exception {
         for (int code : new int[] {IPackageBootstrapBridge.Stub.TRANSACTION_isApplicationQueryFilteringEnabled,
                 IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid,
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationRestricted,
-                IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache}) {
+                IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache,
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid}) {
             var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
             try {
                 request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
                 if (code == IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache) {
                     // No arguments.
+                } else if (code == IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid) {
+                    request.writeInt(10073);
                 } else if (code != IPackageBootstrapBridge.Stub.TRANSACTION_getPermissionGidsForUid) {
                     request.writeString("fixture.query.compat"); request.writeInt(30);
                 } else { request.writeInt(1000); }

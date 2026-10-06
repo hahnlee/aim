@@ -751,6 +751,74 @@ impl System {
                 )
             })
     }
+    /// Original permission/proxy calls run outside the publication lock.
+    pub fn authorize_package_domain(
+        self: &Arc<Self>,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        pid: i32,
+        uid: i32,
+        operation: crate::package::domain_verification::enforcer::Operation<'_>,
+    ) -> Result<bool> {
+        use crate::package::domain_verification::enforcer::{self, Captured, Error};
+        let check = || {
+            self.check_package_bootstrap(bridge)?;
+            if Arc::ptr_eq(capture, &self.capture_package_queries()?) {
+                Ok(())
+            } else {
+                Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "domain authorization capture changed",
+                ))
+            }
+        };
+        check()?;
+        if uid < 0 {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT,
+                "invalid domain caller UID",
+            ));
+        }
+        let resolver = crate::package::resolve::Resolver::default();
+        let resolution = resolver.resolution(capture.state()).map_err(|e| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("domain visibility owner: {e:?}"),
+            )
+        })?;
+        let query = crate::package::query::Query {
+            state: capture.state(),
+            filter: &resolution.apps_filter,
+            calling_uid: uid,
+        };
+        let permission = |uid, permission: &str| {
+            self.check_permission(permission, pid, uid)
+                .map_err(|e| format!("{e:?}"))
+        };
+        let verifier = |uid| {
+            bridge
+                .is_domain_verifier_uid(uid)
+                .map_err(|e| format!("{e:?}"))
+        };
+        let owners = Captured {
+            query: &query,
+            permissions: &permission,
+            verifier: &verifier,
+        };
+        let result = enforcer::authorize(
+            &owners,
+            uid,
+            crate::package::apps_filter::user_id(uid),
+            operation,
+        );
+        check()?;
+        result.map_err(|error| match error {
+            Error::Security => Exception::security("domain caller is not authorized"),
+            Error::Owner(message) => {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message)
+            }
+        })
+    }
     /// Persist a prevalidated domain replacement under the same generation
     /// lock as publication. A committed reserve failure still publishes it.
     pub fn commit_package_domains(

@@ -142,6 +142,16 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public boolean isDomainVerifierUid(int uid) {
+        enforceSystemUid();
+        if (uid < 0) throw new IllegalArgumentException("invalid domain verifier UID");
+        if (domains == null) throw new IllegalStateException("domain owner is unavailable");
+        var proxy = domains.getProxy();
+        if (proxy == null) throw new IllegalStateException("domain proxy is unavailable");
+        return proxy.isCallerVerifier(uid);
+    }
+
+    @Override
     public void invalidatePackageInfoCache() {
         enforceSystemUid();
         android.content.pm.PackageManager.invalidatePackageInfoCache();

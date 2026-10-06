@@ -2,6 +2,7 @@
 package com.android.server.pm.verify.domain;
 public interface DomainVerificationManagerInternal {
     java.util.UUID generateNewId();
+    com.android.server.pm.verify.domain.proxy.DomainVerificationProxy getProxy();
     interface Connection extends DomainVerificationEnforcer.Callback {
         void scheduleWriteSettings();
         int getCallingUid();

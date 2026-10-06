@@ -138,16 +138,14 @@ pub fn authorize(
 pub struct Captured<'a> {
     pub query: &'a crate::package::query::Query<'a>,
     pub permissions: &'a dyn Fn(i32, &str) -> Result<bool, String>,
-    pub selected_verifier_uid: Option<Option<i32>>,
+    pub verifier: &'a dyn Fn(i32) -> Result<bool, String>,
 }
 impl Owners for Captured<'_> {
     fn permission(&self, uid: i32, permission: &str) -> Result<bool, String> {
         (self.permissions)(uid, permission)
     }
     fn verifier(&self, uid: i32) -> Result<bool, String> {
-        self.selected_verifier_uid
-            .map(|selected| selected == Some(uid))
-            .ok_or_else(|| "domain verifier owner is unavailable".into())
+        (self.verifier)(uid)
     }
     fn user_exists(&self, user: i32) -> Result<bool, String> {
         Ok(self.query.state.users.contains_key(&user))

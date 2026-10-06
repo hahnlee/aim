@@ -33,4 +33,6 @@ interface IPackageBootstrapBridge {
     boolean isDomainVerificationRestricted(String packageName, int targetSdk);
     /** Original package-info cache invalidation after a committed native change. */
     void invalidatePackageInfoCache();
+    /** Current original domain proxy identity check; never a fixed native UID. */
+    boolean isDomainVerifierUid(int uid);
 }

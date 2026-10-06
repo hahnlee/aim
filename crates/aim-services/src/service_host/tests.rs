@@ -207,6 +207,12 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::IS_DOMAIN_VERIFIER_UID => {
+                let uid = call.data.read_i32()?; assert_eq!(call.data.remaining(), 0);
+                let mode = self.query_reply.load(Ordering::SeqCst);
+                if mode != 2 { reply.write_bool(uid == 10073 || uid == 1010073); }
+                if mode == 1 { reply.write_i32(99); }
+            }
             bootstrap::INVALIDATE_PACKAGE_INFO_CACHE => {
                 assert_eq!(call.data.remaining(), 0);
                 self.invalidations.fetch_add(1, Ordering::SeqCst);
@@ -2414,6 +2420,11 @@ fn verify_boot_scan(
         query.scan().owner().settings.packages.len()
     );
     assert!(retained_domains.owner().package("android").is_some());
+    use crate::package::domain_verification::enforcer::Operation;
+    assert!(system.authorize_package_domain(bridge, &query, 1, 1000, Operation::Info).unwrap());
+    assert!(system.authorize_package_domain(bridge, &query, 1, 0, Operation::UserQuery("android", 0)).unwrap());
+    assert!(system.authorize_package_domain(bridge, &query, 1, 10001, Operation::Internal).is_err_and(|e| e.code == -1));
+    assert!(system.authorize_package_domain(bridge, &old_query, 1, 1000, Operation::Info).is_err());
     let published = query.scan().clone();
     assert_eq!(published.version(), base.version() + 1);
     let mut forged = query_context_for(published.owner(), published.version() + 1)
