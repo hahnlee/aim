@@ -1570,7 +1570,21 @@ normal update including the runtime URI-group change. The subsequent disk base
 check and file reread pass; only that persisted update invalidates the cache.
 Publisher passes (0.98s), 491 units pass (0.50s; five excluded by default), and
 actual original ART Binder queries/mutations still pass (15.46s). Runtime publication
-is implemented; connecting methods 7/8 to this path remains open. Both methods
+is implemented. Generated method 7 now serves public user selection (2026-10-06):
+UUID/DomainSet parsing precedes selector authorization; ID lookup and captured app
+visibility precede current code/host validation. The visibility step adds no duplicate
+permission request. The existing original-compared model applies highest-level/latest-
+install revocation. Success commits via shared Store; blocked approval publishes only
+new user allocation, and an unchanged blocked state publishes nothing. Original-policy
+callbacks and publication races recapture/retry. Native Binder tests cover bad UUID,
+null/empty set, unknown/null hosts, missing user, denied caller, invalid ID and trailing
+input, leaving file/capture/cache count unchanged. The actual endpoint's verified-host
+conflict returns ERROR_UNABLE_TO_APPROVE while allocating an empty attached user in
+memory: old capture, Store state and scan disk base remain unchanged. Original ART
+then selects two hosts, reads selected values, and sends a 4,000-host FD set to disable;
+original UserState confirms each new state (15.53s). Units pass (491, 0.50s; five
+excluded by default), as does publisher (0.96s). Method 8 frontend and full M4 C
+acceptance remain open (#957/#798). Both methods
 and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup

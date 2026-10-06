@@ -27,6 +27,7 @@ pub enum Operation<'a> {
     Verifier,
     UserQuery(Option<&'a str>, i32),
     UserSelect(Option<&'a str>, i32),
+    UserSelectionVisibility(&'a str, i32),
     Owners(i32),
     LegacySelect(&'a str, i32),
     LegacyQuery(&'a str, i32),
@@ -106,6 +107,7 @@ pub fn authorize(
             users(target)?;
             package.map_or(Ok(true), |package| visible(Some(package), target))
         }
+        Operation::UserSelectionVisibility(package, target) => visible(Some(package), target),
         Operation::Owners(target) => {
             if caller_user != target {
                 require(CROSS_USER)?;

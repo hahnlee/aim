@@ -109,6 +109,26 @@ public final class NativeDomainBinderOracle {
             if (!service.transact(Integer.parseInt(args[0]), data, reply, 0)) throw new AssertionError("pre-verifier Info unhandled");
             reply.readException(); identifier = reply.readTypedObject(android.content.pm.verify.domain.DomainVerificationInfo.CREATOR).getIdentifier().toString();
         } finally { data.recycle(); reply.recycle(); }
+        for (boolean enabled : new boolean[] {true, false}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                var hosts = new android.util.ArraySet<String>();
+                if (enabled) { hosts.add("h1.example"); hosts.add("h2.example"); }
+                else for (int i = 0; i < 4000; i++) hosts.add("h" + i + ".example");
+                data.writeInterfaceToken(args[1]); data.writeString(identifier); data.writeTypedObject(new android.content.pm.verify.domain.DomainSet(hosts), 0);
+                data.writeBoolean(enabled); data.writeInt(0);
+                if (data.hasFileDescriptors() != !enabled) throw new AssertionError("selection FD form differs");
+                if (!service.transact(Integer.parseInt(args[8]), data, reply, 0)) throw new AssertionError("native selection unhandled");
+                reply.readException(); if (reply.readInt() != 0 || reply.dataAvail() != 0) throw new AssertionError("selection status differs");
+            } finally { data.recycle(); reply.recycle(); }
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeInt(0);
+                service.transact(Integer.parseInt(args[2]), data, reply, 0); reply.readException();
+                var selection = reply.readTypedObject(android.content.pm.verify.domain.DomainVerificationUserState.CREATOR);
+                if (!Integer.valueOf(enabled ? 1 : 0).equals(selection.getHostToStateMap().get("h1.example")) || !Integer.valueOf(enabled ? 1 : 0).equals(selection.getHostToStateMap().get("h2.example")) || reply.dataAvail() != 0) throw new AssertionError("selection not published");
+            } finally { data.recycle(); reply.recycle(); }
+        }
         data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
         try {
             var hosts = new android.util.ArraySet<String>(); for (int i = 0; i < 4000; i++) hosts.add("h" + i + ".example");

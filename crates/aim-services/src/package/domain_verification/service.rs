@@ -423,6 +423,169 @@ impl DomainQueries {
         super::parcels::UriGroups::prepare(&groups)
             .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("URI-group parcel: {e}")))
     }
+    fn set_user_selection(
+        &self,
+        pid: i32,
+        uid: i32,
+        identifier: Option<&str>,
+        set: Option<super::domain_set::DomainSet>,
+        enabled: bool,
+        user_id: i32,
+    ) -> Result<i32, Exception> {
+        use aim_binder_host::parcel::{EX_ILLEGAL_ARGUMENT, EX_NULL_POINTER};
+        let system = self.system.upgrade().ok_or_else(|| {
+            Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
+        })?;
+        let bridge = system.package_bootstrap()?;
+        let strict = bridge
+            .domain_uuid_strict_validation()
+            .map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("UUID policy: {e:?}")))?;
+        system.check_package_bootstrap(&bridge)?;
+        let identifier = identifier.ok_or_else(|| Exception::new(EX_NULL_POINTER, if strict {
+            "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference"
+        } else { "Attempt to invoke virtual method 'java.lang.String[] java.lang.String.split(java.lang.String)' on a null object reference" }))?;
+        let identifier = super::uuid::parse(identifier, strict)
+            .map_err(|e| Exception::new(EX_ILLEGAL_ARGUMENT, e))?;
+        let hosts = set.ok_or_else(|| Exception::new(EX_NULL_POINTER, "Attempt to invoke virtual method 'java.util.Set android.content.pm.verify.domain.DomainSet.getDomains()' on a null object reference"))?
+            .resolve(&system.process()).map_err(|e| Exception::new(EX_ILLEGAL_STATE, format!("DomainSet blob: {e}")))?;
+        loop {
+            let capture = system.capture_package_queries()?;
+            let domains = capture.domains().ok_or_else(|| {
+                Exception::new(EX_ILLEGAL_STATE, "native domain owner is unavailable")
+            })?;
+            let authorize =
+                |operation| system.authorize_package_domain(&bridge, &capture, pid, uid, operation);
+            let authorization =
+                authorize(Operation::UserSelect(None, user_id)).and_then(|allowed| {
+                    if !allowed {
+                        return Ok(false);
+                    }
+                    if let Some(package) = domains.owner().package_by_id(&identifier) {
+                    authorize(Operation::UserSelectionVisibility(&package.name, user_id))
+                    } else {
+                        Ok(true)
+                    }
+                });
+            match authorization {
+                Ok(false) => return Ok(1),
+                Ok(true) => (),
+                Err(error) => {
+                    system.check_package_bootstrap(&bridge)?;
+                    if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+            let Some(package) = domains.owner().package_by_id(&identifier) else {
+                return Ok(1);
+            };
+            let scan = capture.scan().owner();
+            let code = scan
+                .loaded_packages()
+                .get(&package.name)
+                .ok_or_else(|| Exception {
+                    code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
+                    message: String::new(),
+                    service_specific: 1,
+                })?;
+            if hosts.is_empty() {
+                return Err(Exception::new(
+                    EX_ILLEGAL_ARGUMENT,
+                    "Provided domain set cannot be empty",
+                ));
+            }
+            let policy = domains
+                .collector_policy(&code.package.package_name)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            let declared =
+                super::collector::collect(&code.package, policy, super::collector::Kind::Web);
+            if hosts
+                .iter()
+                .any(|host| host.as_ref().is_none_or(|host| !declared.contains(host)))
+            {
+                return Ok(2);
+            }
+            let names = hosts.iter().flatten().cloned().collect();
+            let mut owner = domains.owner().clone();
+            let result =
+                owner.set_user_selection(&package.name, user_id, &names, enabled, |name| {
+                    if !scan
+                        .settings
+                        .packages
+                        .iter()
+                        .any(|setting| setting.name == name)
+                    {
+                        return Ok(None);
+                    }
+                    let code = &scan
+                        .loaded_packages()
+                        .get(name)
+                        .ok_or("missing selection approval code")?
+                        .package;
+                    let user = scan
+                        .scanned_user_states(name)
+                        .and_then(|users| users.get(&user_id));
+                    if !super::owner::approval_eligible(code, user) {
+                        return Ok(None);
+                    }
+                    Ok(Some(super::owner::ApprovalInput {
+                        code,
+                        user,
+                        settings_v2: bridge
+                            .domain_verification_settings_v2(name, code.target_sdk_version)
+                            .map_err(|e| format!("{e:?}"))?,
+                        policy: domains.collector_policy(name)?,
+                    }))
+                });
+            system.check_package_bootstrap(&bridge)?;
+            if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
+                continue;
+            }
+            let status = result.map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            if status != 0 {
+                if owner.persisted() == domains.owner().persisted() {
+                    return Ok(status);
+                }
+                let update = capture
+                    .prepare_runtime_domain_update(owner)
+                    .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+                if system
+                    .publish_runtime_package_domains(&bridge, update)?
+                    .is_some()
+                {
+                    return Ok(status);
+                }
+                continue;
+            }
+            let persistence = self.persistence.as_ref().ok_or_else(|| {
+                Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "native domain persistence owner is unavailable",
+                )
+            })?;
+            let update = capture
+                .prepare_domain_update(owner)
+                .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
+            match system.commit_package_domains_if_current(
+                &bridge,
+                update,
+                &mut persistence.lock().unwrap(),
+            ) {
+                Ok(Some(_)) => return Ok(0),
+                Ok(None) => continue,
+                Err(error) => {
+                    return Err(Exception::new(
+                        EX_ILLEGAL_STATE,
+                        format!(
+                            "domain write failed (committed={}): {}",
+                            error.committed, error.message
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 impl Service for DomainQueries {
@@ -438,6 +601,32 @@ impl Service for DomainQueries {
             return Err(UNKNOWN_TRANSACTION);
         }
         let mut reply = Parcel::new();
+        if call.code == api::SET_DOMAIN_VERIFICATION_USER_SELECTION {
+            let args =
+                api::SetDomainVerificationUserSelection::<super::domain_set::DomainSet>::read(
+                    &mut call.data,
+                )?;
+            if call.data.remaining() != 0 {
+                return Err(BAD_VALUE);
+            }
+            match self.set_user_selection(
+                call.sender_pid,
+                call.sender_euid as i32,
+                args.domain_set_id.as_deref(),
+                args.domains,
+                args.enabled,
+                args.user_id,
+            ) {
+                Ok(status) => {
+                    api::write_set_domain_verification_user_selection_reply(&mut reply, status)
+                }
+                Err(error) if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC => {
+                    reply.write_exception_message(&error, None)
+                }
+                Err(error) => reply.write_exception(&error),
+            }
+            return Ok(reply);
+        }
         if call.code == api::SET_DOMAIN_VERIFICATION_STATUS {
             let args = api::SetDomainVerificationStatus::<super::domain_set::DomainSet>::read(
                 &mut call.data,

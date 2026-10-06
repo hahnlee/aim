@@ -183,6 +183,22 @@ fn original_art_reads_large_native_domain_query_over_binder() {
         for (part, pattern, value) in [(0, 0, "/path"), (1, 0, "q=1"), (2, 1, "fragment"), (0, 1, "😀"), (0, 0, "Aa"), (0, 0, "BB")] { group.add(part, pattern, value); }
         domains.set_uri_groups("android", &[("h0.example".into(), Some(vec![group]))]).unwrap();
         system.commit_package_domains(bridge, capture.prepare_domain_update(domains).unwrap(), &mut persistence.lock().unwrap()).unwrap();
+        let before_selection = system.capture_package_queries().unwrap();
+        let saved_domains = persistence.lock().unwrap().state().settings.domain_verification.clone();
+        let mut request = Parcel::new();
+        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as domain_api;
+        request.write_interface_token(domain_api::DESCRIPTOR);
+        request.write_string16(Some(&before_selection.domains().unwrap().owner().package("android").unwrap().id));
+        request.write_i32(1); request.write_bool(false); request.write_i32(1); request.write_string16(Some("h0.example")); request.write_bool(true); request.write_i32(0);
+        let status = system.call("query_domains", domain_api::SET_DOMAIN_VERIFICATION_USER_SELECTION,
+            |out| out.write_raw(request.data(), request.objects()), domain_api::read_set_domain_verification_user_selection_reply).unwrap();
+        assert_eq!(status, 3);
+        let allocated = system.capture_package_queries().unwrap();
+        assert_eq!(allocated.scan().version(), before_selection.scan().version() + 1);
+        assert!(before_selection.domains().unwrap().owner().package("android").unwrap().users.is_empty());
+        assert!(allocated.domains().unwrap().owner().package("android").unwrap().users[0].enabled_hosts.is_empty());
+        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved_domains);
+        assert_eq!(allocated.scan().owner().settings.domain_verification, before_selection.scan().owner().settings.domain_verification);
         let process = system.process();
         super::register(&process, "query_domain_set", process.add_service(Arc::new(DomainSetEcho(Arc::downgrade(&process)))));
         let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
@@ -195,6 +211,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_URI_RELATIVE_FILTER_GROUPS.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_STATUS.to_string())
+            .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_USER_SELECTION.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot
