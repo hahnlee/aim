@@ -874,6 +874,42 @@ impl System {
                 message: "domain publication base changed".into(),
             })
     }
+    pub fn publish_runtime_package_domains(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        update: crate::package::scan_snapshot::query_state::RuntimeDomainUpdate,
+    ) -> Result<Option<Arc<crate::package::scan_snapshot::query_state::Capture>>> {
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let version = state.version;
+        let current = state
+            .current
+            .as_mut()
+            .filter(|current| Arc::ptr_eq(&current.bridge, bridge))
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "runtime domain bootstrap owner changed",
+                )
+            })?;
+        if !current
+            .queries
+            .as_ref()
+            .is_some_and(|capture| Arc::ptr_eq(capture, &update.base))
+        {
+            return Ok(None);
+        }
+        if Some(update.capture.scan().version()) != version.checked_add(1) {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "runtime domain generation differs",
+            ));
+        }
+        current.snapshots = Some(update.store);
+        current.queries = Some(update.capture.clone());
+        state.version = update.capture.scan().version();
+        Ok(Some(update.capture))
+    }
+
     pub(crate) fn commit_package_domains_if_current(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,

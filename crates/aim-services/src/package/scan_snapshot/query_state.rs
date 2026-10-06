@@ -224,6 +224,12 @@ pub struct DomainUpdate {
     pub(crate) store: super::Store,
     pub(crate) capture: Arc<Capture>,
 }
+/// A runtime-only replacement: cannot be passed to the disk commit API.
+pub struct RuntimeDomainUpdate {
+    pub(crate) base: Arc<Capture>,
+    pub(crate) store: super::Store,
+    pub(crate) capture: Arc<Capture>,
+}
 
 /// Query code and the Java replica retain the same native package owner.
 pub struct Capture {
@@ -246,6 +252,24 @@ impl Capture {
         self: &Arc<Self>,
         owner: crate::package::domain_verification::owner::Owner,
     ) -> Result<DomainUpdate, String> {
+        self.prepare_domains(owner, true)
+    }
+    pub fn prepare_runtime_domain_update(
+        self: &Arc<Self>,
+        owner: crate::package::domain_verification::owner::Owner,
+    ) -> Result<RuntimeDomainUpdate, String> {
+        let update = self.prepare_domains(owner, false)?;
+        Ok(RuntimeDomainUpdate {
+            base: update.base,
+            store: update.store,
+            capture: update.capture,
+        })
+    }
+    fn prepare_domains(
+        self: &Arc<Self>,
+        owner: crate::package::domain_verification::owner::Owner,
+        persist: bool,
+    ) -> Result<DomainUpdate, String> {
         let current = self
             .domains
             .as_ref()
@@ -256,7 +280,9 @@ impl Capture {
             .checked_add(1)
             .ok_or("domain version exhausted")?;
         let mut scan_owner = self.scan.owner().clone();
-        scan_owner.settings.domain_verification = owner.persisted();
+        if persist {
+            scan_owner.settings.domain_verification = owner.persisted();
+        }
         let store =
             super::Store::new_replica_at_version(scan_owner, self.scan.usage().clone(), version)
                 .map_err(|e| format!("domain scan validation: {e:?}"))?;

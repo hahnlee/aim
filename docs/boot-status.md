@@ -1559,7 +1559,18 @@ legacy/V2 modes (full oracle 30.67s, no skips; 491 units 0.56s, five excluded by
 default). The comparison canonicalizes logical legacy maps independently of output
 iteration order. This is state-model evidence; method 7 requires a nonpersistent
 capture path for failed-approval allocation, before its Binder frontend can be
-connected. Method 8 also needs original no-write runtime publication. Both methods
+connected. A separate RuntimeDomainUpdate now provides that no-write publication
+path (2026-10-06): the attached domain owner/query projections change while scan
+settings retain the last disk domain base. The disk commit API takes a different
+update type. Publication validates bridge, captured base and next generation;
+stale updates return without publishing. It performs no file write or original
+cache callback. Native tests retain the old capture, verify disk/Store/settings
+base and invalidation count unchanged, reject a stale candidate, then commit a
+normal update including the runtime URI-group change. The subsequent disk base
+check and file reread pass; only that persisted update invalidates the cache.
+Publisher passes (0.98s), 491 units pass (0.50s; five excluded by default), and
+actual original ART Binder queries/mutations still pass (15.46s). Runtime publication
+is implemented; connecting methods 7/8 to this path remains open. Both methods
 and full M4 C acceptance remain open (#957/#798).
 
 User-state lookup
