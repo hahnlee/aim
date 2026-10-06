@@ -268,7 +268,7 @@ public final class NativeDomainBinderOracle {
                 if (bundle.getParcelableArrayList("a.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 1 || bundle.getParcelableArrayList("runtime.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 99 || reply.dataAvail() != 0) throw new AssertionError("key error partial mutation differs");
             } finally {data.recycle(); reply.recycle();}
         }
-        for (String name : new String[] {"dev.aim.fixture.NoSuch", "java.lang.String", "android.content.UriRelativeFilterParcel", "android.os.Bundle", "[I"}) {
+        for (String name : new String[] {"dev.aim.fixture.NoSuch", "java.lang.String", "android.content.UriRelativeFilterParcel", "android.os.Bundle", "[I"}) for (boolean root : new boolean[] {false, true}) {
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
                 var seed = new android.os.Bundle(); var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 1; group.filters = new java.util.ArrayList<>();
@@ -279,7 +279,7 @@ public final class NativeDomainBinderOracle {
             boolean mismatch = name.equals("android.content.UriRelativeFilterParcel") || name.equals("android.os.Bundle");
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
-                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(namedBundle("class.example", name), 0);
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(namedBundle("class.example", name, root), 0);
                 service.transact(Integer.parseInt(args[9]), data, reply, 0);
                 try {reply.readException(); if (!mismatch) throw new AssertionError("bad Parcelable class accepted");}
                 catch (RuntimeException error) {
@@ -319,12 +319,14 @@ public final class NativeDomainBinderOracle {
     }
     private static boolean alreadyReadInlineSet;
     private static android.os.Bundle nullNamedBundle(String key) {return namedBundle(key, null);}
-    private static android.os.Bundle namedBundle(String key, String name) {
+    private static android.os.Bundle namedBundle(String key, String name) {return namedBundle(key, name, false);}
+    private static android.os.Bundle namedBundle(String key, String name, boolean root) {
         var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
         try {
             value.writeString(name); int length = value.marshall().length;
-            list.writeInt(1); list.writeInt(4); list.writeInt(length); list.appendFrom(value, 0, length);
-            length = list.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(11); body.writeInt(length); body.appendFrom(list, 0, length);
+            body.writeInt(1); body.writeString(key); body.writeInt(root ? 4 : 11);
+            if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
+            else {list.writeInt(1); list.writeInt(4); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}
             length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
             return android.os.Bundle.CREATOR.createFromParcel(wire);
         } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}

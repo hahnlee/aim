@@ -61,11 +61,11 @@ final class UriDtoOracle {
             var classCases = android.os.Parcel.obtain();
             try {
                 String[] names = {"dev.aim.fixture.NoSuch", "java.lang.String", "android.content.UriRelativeFilterParcel", "android.os.Bundle", "android.content.UriRelativeFilterGroupParcel", "android/content/UriRelativeFilterParcel", "[I", "[Ljava.lang.String;", "[Ldev.aim.fixture.NoSuch;", "[V"};
-                classCases.writeInt(names.length);
-                for (String name : names) {
-                    var bundle = namedBundle("x.example", name); var wire = android.os.Parcel.obtain();
+                classCases.writeInt(names.length * 2);
+                for (String name : names) for (boolean root : new boolean[] {false, true}) {
+                    var bundle = namedBundle("x.example", name, root); var wire = android.os.Parcel.obtain();
                     try {
-                        bundle.writeToParcel(wire, 0); classCases.writeString(name); classCases.writeByteArray(wire.marshall());
+                        bundle.writeToParcel(wire, 0); classCases.writeString(name); classCases.writeBoolean(root); classCases.writeByteArray(wire.marshall());
                         try {
                             var groups = bundle.getParcelableArrayList("x.example", android.content.UriRelativeFilterGroupParcel.class);
                             classCases.writeInt(groups == null ? 0 : 1); classCases.writeString(null); classCases.writeString(null);
@@ -110,15 +110,18 @@ final class UriDtoOracle {
             java.nio.file.Files.write(new java.io.File(directory, "uri-null-match.original").toPath(), out.marshall());
         } finally { out.recycle(); }
     }
-    static android.os.Bundle namedBundle(String key, String name) {
+    static android.os.Bundle namedBundle(String key, String name) {return namedBundle(key, name, false);}
+    static android.os.Bundle namedBundle(String key, String name, boolean root) {
         var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
         try {
             value.writeString(name);
             if ("android.content.UriRelativeFilterGroupParcel".equals(name)) {
                 var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 99; group.filters = new java.util.ArrayList<>(); group.writeToParcel(value, 0);
             }
-            int length = value.marshall().length; list.writeInt(1); list.writeInt(4); list.writeInt(length); list.appendFrom(value, 0, length);
-            length = list.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(11); body.writeInt(length); body.appendFrom(list, 0, length);
+            int length = value.marshall().length;
+            body.writeInt(1); body.writeString(key); body.writeInt(root ? 4 : 11);
+            if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
+            else {list.writeInt(1); list.writeInt(4); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}
             length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
             return android.os.Bundle.CREATOR.createFromParcel(wire);
         } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}

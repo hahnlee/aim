@@ -209,11 +209,11 @@ public final class DomainCollectorOracle {
                 }
                 java.nio.file.Files.write(new java.io.File(directory, "domain-uri-key-errors.original").toPath(), keyErrors.marshall());
             } finally {keyErrors.recycle();}
-            for (String name : new String[] {"dev.aim.fixture.NoSuch", "java.lang.String", "android.content.UriRelativeFilterParcel", "android.os.Bundle", "[I"}) {
+            for (String name : new String[] {"dev.aim.fixture.NoSuch", "java.lang.String", "android.content.UriRelativeFilterParcel", "android.os.Bundle", "[I"}) for (boolean root : new boolean[] {false, true}) {
                 var classSeed = new android.os.Bundle(); classSeed.putParcelableArrayList("class.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(1, "/class")))));
                 service.setUriRelativeFilterGroups("fixture.domains", classSeed);
                 boolean mismatch = name.equals("android.content.UriRelativeFilterParcel") || name.equals("android.os.Bundle");
-                try {service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.namedBundle("class.example", name)); if (!mismatch) throw new AssertionError("bad Parcelable class accepted");}
+                try {service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.namedBundle("class.example", name, root)); if (!mismatch) throw new AssertionError("bad Parcelable class accepted");}
                 catch (RuntimeException error) {if (mismatch || !"android.os.BadParcelableException".equals(error.getClass().getName())) throw error;}
                 if (service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("class.example")).keySet().contains("class.example") == mismatch || connection.writes != 0) throw new AssertionError("Parcelable mismatch/removal/error persistence differs");
             }

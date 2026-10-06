@@ -554,14 +554,14 @@ pub fn verify_uri_dto(directory: &Path) {
     let bytes = fs::read(directory.join("uri-class-bundles.original")).unwrap(); let mut reader = Reader::new(&bytes, &[]);
     let count = reader.read_i32().unwrap();
     for _ in 0..count {
-        let name = reader.read_string16().unwrap().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
+        let name = reader.read_string16().unwrap().unwrap(); let root = reader.read_bool().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
         let expected = reader.read_i32().unwrap(); let class = reader.read_string16().unwrap(); let message = reader.read_string16().unwrap();
         let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
         let result = bundle.entries().unwrap()[0].groups_with_classes(Some(&classes));
         match result {
-            Ok(groups) => assert_eq!(i32::from(groups.is_some()), expected, "URI class {name}"),
+            Ok(groups) => assert_eq!(i32::from(groups.is_some()), expected, "URI class {name} root={root}"),
             Err(aim_services::package::domain_verification::uri_bundle::GroupError::BadParcelable(actual)) => {
-                assert_eq!(expected, -1, "URI class {name}"); assert_eq!(class.as_deref(), Some("android.os.BadParcelableException")); assert_eq!(message.as_deref(), Some(actual.as_str()), "URI class {name}");
+                assert_eq!(expected, -1, "URI class {name} root={root}"); assert_eq!(class.as_deref(), Some("android.os.BadParcelableException")); assert_eq!(message.as_deref(), Some(actual.as_str()), "URI class {name} root={root}");
             }
             Err(error) => panic!("URI class {name}: {error:?}"),
         }

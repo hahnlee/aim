@@ -202,6 +202,19 @@ impl Entry {
         &self,
         classes: Option<&aim_android_image::linkage::Hierarchy>,
     ) -> std::result::Result<Option<Vec<Option<Group>>>, GroupError> {
+        if self.kind == 4 {
+            let mut outer = Reader::new(&self.bytes, &[]);
+            let length =
+                usize::try_from(outer.read_i32()?).map_err(|_| GroupError::Parcel(BAD_VALUE))?;
+            outer.skip(length)?;
+            let mut value = Reader::new(&self.bytes[4..4 + length], &[]);
+            if let Some(name) = value.read_string16()? {
+                if class_matches(&name, "Ljava/util/ArrayList;", classes)? {
+                    return Err(GroupError::Unavailable);
+                }
+            }
+            return Ok(None);
+        }
         if self.kind != 11 {
             return Ok(None);
         }
@@ -240,26 +253,11 @@ impl Entry {
                 }
                 Some("android.content.UriRelativeFilterGroupParcel") => (),
                 Some(name) => {
-                    let classes = classes.ok_or(GroupError::Unavailable)?;
-                    let descriptor = if name.starts_with('[') {
-                        name.replace('.', "/")
-                    } else {
-                        format!("L{};", name.replace('.', "/"))
-                    };
-                    if name.contains('/') || !classes.contains(&descriptor) {
-                        return Err(GroupError::BadParcelable(format!(
-                            "ClassNotFoundException when unmarshalling: {name}"
-                        )));
-                    }
-                    if !classes.assignable(&descriptor, "Landroid/os/Parcelable;") {
-                        return Err(GroupError::BadParcelable(format!(
-                            "Parcelable protocol requires subclassing from Parcelable on class {name}"
-                        )));
-                    }
-                    if classes.assignable(
-                        &descriptor,
+                    if class_matches(
+                        name,
                         "Landroid/content/UriRelativeFilterGroupParcel;",
-                    ) {
+                        classes,
+                    )? {
                         return Err(GroupError::Unavailable);
                     }
                     return Ok(None);
@@ -269,4 +267,28 @@ impl Entry {
         }
         Ok(Some(groups))
     }
+}
+
+fn class_matches(
+    name: &str,
+    required: &str,
+    classes: Option<&aim_android_image::linkage::Hierarchy>,
+) -> std::result::Result<bool, GroupError> {
+    let classes = classes.ok_or(GroupError::Unavailable)?;
+    let descriptor = if name.starts_with('[') {
+        name.replace('.', "/")
+    } else {
+        format!("L{};", name.replace('.', "/"))
+    };
+    if name.contains('/') || !classes.contains(&descriptor) {
+        return Err(GroupError::BadParcelable(format!(
+            "ClassNotFoundException when unmarshalling: {name}"
+        )));
+    }
+    if !classes.assignable(&descriptor, "Landroid/os/Parcelable;") {
+        return Err(GroupError::BadParcelable(format!(
+            "Parcelable protocol requires subclassing from Parcelable on class {name}"
+        )));
+    }
+    Ok(classes.assignable(&descriptor, required))
 }

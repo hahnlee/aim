@@ -1734,15 +1734,18 @@ validation now uses immutable bootclasspath DEX type relations supplied to the
 native domain writer; no class initialization or guest reflection is added.
 Missing classes and non-Parcelable classes return the original BadParcelable
 category/message, while existing unrelated Parcelables produce the typed-getter
-mismatch. Ten original lazy-Bundle cases cover missing classes, String, filter
-DTO, Bundle, normal group DTO, slash names, primitive/object arrays, absent array
-components and invalid array descriptors. Original service and actual ART native
-Binder tests verify five class cases, including unchanged state on error and
-removal on mismatch (17.08s); original service schedules no settings write.
-Full original oracle passes (30.37s, no skips), 499 units pass (0.50s; five
-excluded), publisher passes (1.14s), and host build passes (4 rebuilt, 9 fresh,
-3.4s). Unconfigured class metadata/unsupported creators fail explicitly; other
-lazy value/creator/malformed Bundle cases remain #966. Startup class-metadata
+mismatch. Twenty original lazy-Bundle cases cover the same ten class names as both list
+elements and top-level Parcelable values: missing classes, String, filter DTO,
+Bundle, normal group DTO, slash names, primitive/object arrays, absent array
+components and invalid array descriptors. The top-level path now checks class
+availability/Parcelable implementation before rejecting the ArrayList type,
+instead of treating every Parcelable value as a mismatch. Original service and
+actual ART native Binder tests verify ten class cases, including unchanged state
+on error and removal on mismatch (17.40s); original service schedules no settings
+write. Full original oracle passes (30.89s, no skips), 499 units pass (0.49s; five
+excluded), and production build passes (3 rebuilt, 39 fresh, 1.1s).
+Unconfigured class metadata/unsupported creators fail explicitly; Serializable,
+other lazy value/creator/malformed Bundle cases remain #966. Startup class-metadata
 binding and full domain/PMS conformance remain #957/#798; original services stay
 active.
 
