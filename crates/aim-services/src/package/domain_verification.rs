@@ -6,6 +6,8 @@
 
 pub mod collector;
 mod legacy_read;
+mod read;
+pub use read::ReadResult;
 pub use legacy_read::SectionError;
 pub mod domain_set;
 pub mod enforcer;
@@ -21,7 +23,6 @@ pub mod uuid;
 use aim_android_xml::Element;
 
 use super::intent_filter::UriRelativeFilterGroup;
-use super::{children, string};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
@@ -59,18 +60,14 @@ impl State {
     }
     /// `DomainVerificationPersistence.readFromXml`.
     pub fn read(&mut self, root: &Element) -> Result<(), String> {
-        for section in root.children() {
-            let target = match section.name.as_str() {
-                "active" => &mut self.active,
-                "restored" => &mut self.restored,
-                _ => continue,
-            };
-            for element in children(section, "package-state") {
-                if let Some(package) = package(element)? {
-                    put(target, package.name.clone(), package, |p| &p.name);
-                }
-            }
-        }
+        let bytes = aim_android_xml::abx::write(root)?;
+        let mut reader = aim_android_xml::pull::Reader::new(&bytes)?;
+        reader.next()?;
+        let result = Self::read_events(&mut reader, |id| uuid::parse(id, true).map_err(crate::package::settings::ReadError::File))
+            .map_err(|error| error.to_string())?;
+        if let Some(error) = result.diagnostics.first() { return Err(error.message.clone()); }
+        for package in result.state.active { put(&mut self.active, package.name.clone(), package, |p| &p.name); }
+        for package in result.state.restored { put(&mut self.restored, package.name.clone(), package, |p| &p.name); }
         Ok(())
     }
 
@@ -83,104 +80,6 @@ impl State {
         if let Some(error) = errors.first() { return Err(error.message.clone()); }
         Ok(())
     }
-}
-
-fn package(e: &Element) -> Result<Option<Package>, String> {
-    let (Some(name), Some(id)) = (string(e, "packageName"), string(e, "id")) else {
-        return Ok(None);
-    };
-    if name.is_empty() || id.is_empty() {
-        return Ok(None);
-    }
-    // `UUID.fromString`: the writer emits the canonical form, and a bad
-    // id makes the original reject this settings file.
-    let groups: Vec<_> = id.split('-').collect();
-    if groups.len() != 5
-        || groups
-            .iter()
-            .zip([8, 4, 4, 4, 12])
-            .any(|(g, n)| g.len() != n || !g.bytes().all(|b| b.is_ascii_hexdigit()))
-    {
-        return Err(format!("<package-state> invalid id {id}"));
-    }
-    let mut package = Package {
-        name,
-        id: id.to_ascii_lowercase(),
-        has_auto_verify_domains: boolean(e, "hasAutoVerifyDomains", false),
-        signature: string(e, "signature"),
-        domains: Vec::new(),
-        users: Vec::new(),
-        uri_relative_filter_groups: Vec::new(),
-    };
-    for section in e.children() {
-        match section.name.as_str() {
-            "state" => {
-                for domain in children(section, "domain") {
-                    let name = string(domain, "name");
-                    let state = number(domain, "state", 0);
-                    put(
-                        &mut package.domains,
-                        name.clone(),
-                        (name, state),
-                        |(name, _)| name,
-                    );
-                }
-            }
-            "user-states" => {
-                for user in children(section, "user-state") {
-                    let id = number(user, "userId", -1);
-                    if id == -1 {
-                        continue;
-                    }
-                    let mut enabled_hosts = Vec::new();
-                    for hosts in children(user, "enabled-hosts") {
-                        for host in children(hosts, "host") {
-                            if let Some(name) = string(host, "name").filter(|n| !n.is_empty())
-                                && !enabled_hosts.contains(&name)
-                            {
-                                enabled_hosts.push(name);
-                            }
-                        }
-                    }
-                    put(
-                        &mut package.users,
-                        id,
-                        User {
-                            id,
-                            allow_link_handling: boolean(user, "allowLinkHandling", false),
-                            enabled_hosts,
-                        },
-                        |u| &u.id,
-                    );
-                }
-            }
-            "uri-relative-filter-groups" => {
-                for domain in children(section, "domain") {
-                    let name = string(domain, "name");
-                    let mut groups = Vec::new();
-                    for group in children(domain, "uri-relative-filter-group") {
-                        // SettingsXml sections share the parser cursor, which is
-                        // on the group when the original reads its action.
-                        let mut parsed = UriRelativeFilterGroup::new(number(group, "action", -1));
-                        for filter in children(group, "uri-relative-filter") {
-                            if let Some(value) = string(filter, "filter") {
-                                parsed.add(number(filter, "uri-part", -1), number(filter, "pattern-type", -1), &value);
-                            }
-                        }
-                        groups.push(parsed);
-                    }
-                    put(
-                        &mut package.uri_relative_filter_groups,
-                        name.clone(),
-                        (name, groups),
-                        |(name, _)| name,
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(Some(package))
 }
 
 /// `ArrayMap.put`/`SparseArray.put`: replace a value without changing the

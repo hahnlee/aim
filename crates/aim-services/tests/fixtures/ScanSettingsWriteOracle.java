@@ -42,6 +42,7 @@ public final class ScanSettingsWriteOracle {
         verifyKeySetEvents(cache.getParentFile());
         verifyVerifierEvents(cache.getParentFile());
         verifyLegacyDomainEvents(cache.getParentFile());
+        verifyModernDomainEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -72,6 +73,24 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyModernDomainEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "modern-domain-event-input-" + index); if (!input.exists()) break;
+            com.android.server.pm.verify.domain.DomainVerificationPersistence.ReadResult result;
+            String status = "ok";
+            try (var stream = new java.io.FileInputStream(input)) {
+                var xml = android.util.Xml.resolvePullParser(stream); while (xml.next() != 2) {}
+                try { result = com.android.server.pm.verify.domain.DomainVerificationPersistence.readFromXml(xml); }
+                catch (IllegalArgumentException failure) { status = "invalid"; result = new com.android.server.pm.verify.domain.DomainVerificationPersistence.ReadResult(new android.util.ArrayMap<>(), new android.util.ArrayMap<>()); }
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "modern-domain-event-status-" + index).toPath(), status.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "modern-domain-event-output-" + index))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true);
+                com.android.server.pm.verify.domain.DomainVerificationPersistence.writeToXml(xml, new com.android.server.pm.verify.domain.models.DomainVerificationStateMap<>(), result.active, result.restored, -1, null);
+                xml.endDocument();
+            }
         }
     }
     private static void verifyLegacyDomainEvents(java.io.File directory) throws Exception {

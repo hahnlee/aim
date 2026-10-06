@@ -18,6 +18,7 @@ mod common {
     pub mod key_set_events;
     pub mod verifier_events;
     pub mod legacy_domain_events;
+    pub mod modern_domain_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -617,6 +618,13 @@ fn native_package_parcels_match_original_read_write() {
         common::legacy_domain_events::projection(&common::legacy_domain_events::read(bytes))
     }).collect();
     eprintln!("original legacy domain event cases: {}", legacy_domain_inputs.len());
+    let modern_domain_inputs = common::modern_domain_events::inputs();
+    let modern_domain_expected: Vec<_> = modern_domain_inputs.iter().enumerate().map(|(index, bytes)| {
+        fs::write(directory.join(format!("modern-domain-event-input-{index}")), bytes).unwrap();
+        let (mut state, status) = common::modern_domain_events::read(bytes); common::modern_domain_events::normalize(&mut state);
+        (state, status)
+    }).collect();
+    eprintln!("original modern domain event cases: {}", modern_domain_inputs.len());
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -4326,6 +4334,12 @@ fn native_package_parcels_match_original_read_write() {
         let root = aim_android_xml::read_next(&fs::read(directory.join(format!("legacy-domain-event-output-{index}"))).unwrap()).unwrap();
         let mut state = aim_services::package::domain_verification::State::default(); state.read_legacy(&root).unwrap();
         assert_eq!(common::legacy_domain_events::projection(&state), *expected, "original legacy domain event {index}");
+    }
+    for (index, expected) in modern_domain_expected.iter().enumerate() {
+        let root = aim_android_xml::read_next(&fs::read(directory.join(format!("modern-domain-event-output-{index}"))).unwrap()).unwrap();
+        let mut state = aim_services::package::domain_verification::State::default(); state.read(&root).unwrap(); common::modern_domain_events::normalize(&mut state);
+        assert_eq!(fs::read_to_string(directory.join(format!("modern-domain-event-status-{index}"))).unwrap(), expected.1, "original modern domain status {index}");
+        assert_eq!(state, expected.0, "original modern domain event {index}");
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {

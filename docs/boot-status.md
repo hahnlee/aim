@@ -1010,16 +1010,32 @@ null/empty package names, defaults, malformed text, trailing input and ABX
 truncation. The projection excludes empty/null SparseIntArray distinctions and
 legacy attached/info lifecycle; full modern domain cursor/merge and native
 bootstrap integration remain #957/#914/#798.
-17 XML tests and 526 service units pass (5 service tests excluded, 0.58s).
-Full original ART oracle passes without skips (62.29s), retaining prior verifier,
-package/shared/keyset/read-and-retirement/permission comparisons. The first run
-failed in the existing package oracle with ENOSPC (#903); removal of only this
-worktree's regenerable debug object files increased physical free space from
-2.2 to 7.3GiB before the successful retry. Image/template build passed
-(11 rebuilt/31 fresh, 78.1s), final runtime rebuild passed (3 rebuilt/39 fresh,
-1.5s). The prior retained-owner framework-res scan passed (1.45s) and was not
-rerun for this legacy-owner change. Source: pinned DomainVerificationLegacySettings.java
-and SettingsXml.java; verifier semantics use pinned VerifierDeviceIdentity.java.
+Modern DomainVerificationPersistence.readFromXml now has a native event parser
+using the same shared section cursor, including expected-name filtering that
+exposes matching nested records. It builds detached active/restored ReadResult
+maps, domain/user state and URI-relative groups, replaces duplicate package/user
+keys, skips empty package identities and retains section error diagnostics.
+UUID parsing is an explicit owner callback; invalid UUID aborts before result
+publication. AST import delegates to the same parser and stages its destination
+updates, superseding the previous direct-child/in-place mutation path. A regression
+keeps the existing destination unchanged if a later package UUID fails. Actual
+original persistence read/write agrees on 333 text/ABX projections, including
+unknown nesting, duplicate maps, null/default domain/user data, URI groups,
+partial input, invalid UUID and ABX byte truncation. Map iteration order is
+normalized in the projection; live attached/pending/restored merge, full order,
+process UUID policy delivery and runtime publication/default activation remain
+#957/#914/#798. The dispatcher still requires the modern domain owner callback;
+it does not silently publish detached persistence as live state.
+17 XML tests and 528 service units pass (5 service tests excluded, 0.49s).
+Full original ART oracle passes without skips (65.07s), retaining prior legacy,
+verifier/package/shared/keyset/read-and-retirement/permission comparisons.
+Image/template build passed (6 rebuilt/36 fresh, 72.5s); final runtime rebuild
+passed (3 rebuilt/39 fresh, 16.3s). Compile-only persistence/state-map API declarations
+were checked against the pinned image after making the unused constructor private,
+as supported by the existing image-link verifier for shrunk static-only classes.
+The prior retained-owner framework-res scan passed (1.45s) and was not rerun.
+Source: pinned DomainVerificationPersistence.java, DomainVerificationSettings.java,
+DomainVerificationLegacySettings.java and SettingsXml.java.
  An original
 PackageSetting.getPathString compile-only API declaration was added after the
 oracle's compilation failed on the missing declaration; the image API verifier

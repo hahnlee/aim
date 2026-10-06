@@ -13,23 +13,32 @@ pub struct SectionError {
     pub message: String,
 }
 
-struct Sections<'r, 'a> {
+pub(super) struct Sections<'r, 'a> {
     reader: &'r mut Reader<'a>,
     depths: Vec<i32>,
-    errors: Vec<SectionError>,
+    pub(super) errors: Vec<SectionError>,
 }
 
-impl Sections<'_, '_> {
-    fn children(&mut self) {
+impl<'r, 'a> Sections<'r, 'a> {
+    pub(super) fn new(reader: &'r mut Reader<'a>) -> Self {
+        Sections {
+            reader,
+            depths: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+    pub(super) fn children(&mut self) {
         self.depths.push(self.reader.depth());
     }
-    fn next(&mut self) -> Option<Element> {
+    pub(super) fn next_named(&mut self, expected: Option<&str>) -> Option<Element> {
         let Some(&depth) = self.depths.last() else {
             return None;
         };
         loop {
             match self.reader.next() {
-                Ok(Event::Start(element)) => return Some(element),
+                Ok(Event::Start(element)) if expected.is_none_or(|name| name == element.name) => {
+                    return Some(element);
+                }
                 Ok(Event::End(_)) if self.reader.depth() <= depth => {
                     self.depths.pop();
                     return None;
@@ -59,13 +68,9 @@ impl State {
     /// one cursor/stack and do not skip unknown subtrees. Diagnostics report the
     /// original section's caught errors; outer parsing still decides file recovery.
     pub fn read_legacy_events(&mut self, reader: &mut Reader<'_>) -> Vec<SectionError> {
-        let mut section = Sections {
-            reader,
-            depths: Vec::new(),
-            errors: Vec::new(),
-        };
+        let mut section = Sections::new(reader);
         section.children();
-        while let Some(start) = section.next() {
+        while let Some(start) = section.next_named(None) {
             if start.name != "user-states" {
                 continue;
             }
@@ -78,7 +83,7 @@ impl State {
                 }
             };
             section.children();
-            while let Some(start) = section.next() {
+            while let Some(start) = section.next_named(None) {
                 if start.name == "user-state" {
                     let id = number(&start, "userId", -1);
                     let state = number(&start, "state", -1);
