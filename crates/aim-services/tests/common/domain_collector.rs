@@ -567,6 +567,19 @@ pub fn verify_uri_dto(directory: &Path) {
         }
     }
     assert_eq!(reader.remaining(), 0);
+    let bytes = fs::read(directory.join("uri-serial-bundles.original")).unwrap(); let mut reader = Reader::new(&bytes, &[]);
+    let count = reader.read_i32().unwrap();
+    for _ in 0..count {
+        let name = reader.read_string16().unwrap(); let root = reader.read_bool().unwrap(); let data = aim_service_aidl::read_byte_array(&mut reader).unwrap().unwrap();
+        let expected = reader.read_i32().unwrap(); let class = reader.read_string16().unwrap(); let message = reader.read_string16().unwrap();
+        let bundle = aim_services::package::domain_verification::uri_bundle::Bundle::read_from(&mut Reader::new(&data, &[])).unwrap();
+        match bundle.entries().unwrap()[0].groups_with_classes(Some(&classes)) {
+            Ok(groups) => {assert_eq!(i32::from(groups.is_some()), expected, "Serializable {name:?} root={root}"); if name.is_none() && !root {assert!(groups.unwrap()[0].is_none());}}
+            Err(aim_services::package::domain_verification::uri_bundle::GroupError::BadParcelable(actual)) => {assert_eq!(expected, -1); assert_eq!(class.as_deref(), Some("android.os.BadParcelableException")); assert_eq!(message.as_deref(), Some(actual.as_str()), "Serializable {name:?} root={root}");}
+            Err(error) => panic!("Serializable {name:?} root={root}: {error:?}"),
+        }
+    }
+    assert_eq!(reader.remaining(), 0);
     let bytes = fs::read(directory.join("uri-conversion-errors.original")).unwrap();
     let mut reader = Reader::new(&bytes, &[]);
     assert_eq!(reader.read_i32().unwrap(), 3);

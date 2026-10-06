@@ -202,13 +202,15 @@ impl Entry {
         &self,
         classes: Option<&aim_android_image::linkage::Hierarchy>,
     ) -> std::result::Result<Option<Vec<Option<Group>>>, GroupError> {
-        if self.kind == 4 {
+        if matches!(self.kind, 4 | 21) {
             let mut outer = Reader::new(&self.bytes, &[]);
             let length =
                 usize::try_from(outer.read_i32()?).map_err(|_| GroupError::Parcel(BAD_VALUE))?;
             outer.skip(length)?;
             let mut value = Reader::new(&self.bytes[4..4 + length], &[]);
-            if let Some(name) = value.read_string16()? {
+            if self.kind == 21 {
+                read_serializable(&mut value)?;
+            } else if let Some(name) = value.read_string16()? {
                 if class_matches(&name, "Ljava/util/ArrayList;", classes)? {
                     return Err(GroupError::Unavailable);
                 }
@@ -234,6 +236,17 @@ impl Entry {
         for _ in 0..count {
             let kind = reader.read_i32()?;
             if kind == -1 {
+                groups.push(None);
+                continue;
+            }
+            if kind == 21 {
+                let length = usize::try_from(reader.read_i32()?)
+                    .map_err(|_| GroupError::Parcel(BAD_VALUE))?;
+                let start = reader.position();
+                reader.skip(length)?;
+                let bytes = reader.since(start).0;
+                let mut value = Reader::new(&bytes[..length], &[]);
+                read_serializable(&mut value)?;
                 groups.push(None);
                 continue;
             }
@@ -291,4 +304,18 @@ fn class_matches(
         )));
     }
     Ok(classes.assignable(&descriptor, required))
+}
+
+fn read_serializable(reader: &mut Reader<'_>) -> std::result::Result<(), GroupError> {
+    let Some(name) = reader.read_string16()? else {
+        return Ok(());
+    };
+    let bytes = aim_service_aidl::read_byte_array(reader)?.ok_or(GroupError::Unavailable)?;
+    // ObjectInputStream reads the stream header before resolving any class.
+    if bytes.len() <= 4 || bytes[..4] != [0xac, 0xed, 0, 5] {
+        return Err(GroupError::BadParcelable(format!(
+            "Parcelable encountered IOException reading a Serializable object (name = {name})"
+        )));
+    }
+    Err(GroupError::Unavailable)
 }

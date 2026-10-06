@@ -1744,8 +1744,19 @@ actual ART native Binder tests verify ten class cases, including unchanged state
 on error and removal on mismatch (17.40s); original service schedules no settings
 write. Full original oracle passes (30.89s, no skips), 499 units pass (0.49s; five
 excluded), and production build passes (3 rebuilt, 39 fresh, 1.1s).
-Unconfigured class metadata/unsupported creators fail explicitly; Serializable,
-other lazy value/creator/malformed Bundle cases remain #966. Startup class-metadata
+Unconfigured class metadata/unsupported creators fail explicitly. Serializable
+values now preserve null-name behavior and malformed ObjectInputStream header
+errors in both top-level and list-element forms. Twelve original cases show
+that this Bundle path reads the stream before resolving/checking classes: even
+an unknown name with a malformed stream yields the original IOException-based
+BadParcelable message. An initial class-before-stream implementation failed that
+oracle and was replaced. Six original service/actual ART cases verify exact
+error messages, unchanged groups on I/O/NPE failure, and group removal for a
+null top-level Serializable; original service schedules no write (18.12s).
+Full original oracle passes (29.15s, no skips), 499 units pass (0.53s; five
+excluded), and production build passes (3 rebuilt, 39 fresh, 1.2s). Valid Java
+serialization stream decoding, other lazy value/creator/malformed Bundle cases
+remain #966 and fail explicitly where unsupported. Startup class-metadata
 binding and full domain/PMS conformance remain #957/#798; original services stay
 active.
 

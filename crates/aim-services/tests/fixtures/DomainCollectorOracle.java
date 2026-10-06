@@ -218,6 +218,18 @@ public final class DomainCollectorOracle {
                 if (service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("class.example")).keySet().contains("class.example") == mismatch || connection.writes != 0) throw new AssertionError("Parcelable mismatch/removal/error persistence differs");
             }
             var classCleanup = new android.os.Bundle(); classCleanup.putParcelableArrayList("class.example", null); service.setUriRelativeFilterGroups("fixture.domains", classCleanup);
+            for (String name : new String[] {null, "dev.aim.fixture.NoSuch", "java.lang.String"}) for (boolean root : new boolean[] {false, true}) {
+                var serialSeed = new android.os.Bundle(); serialSeed.putParcelableArrayList("serial.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(1, "/serial")))));
+                service.setUriRelativeFilterGroups("fixture.domains", serialSeed);
+                boolean errorExpected = name != null || !root;
+                try {service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.serialBundle("serial.example", name, root)); if (errorExpected) throw new AssertionError("malformed Serializable accepted");}
+                catch (RuntimeException error) {
+                    String expectedClass = name == null ? "java.lang.NullPointerException" : "android.os.BadParcelableException";
+                    if (!errorExpected || !expectedClass.equals(error.getClass().getName())) throw error;
+                }
+                if (service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("serial.example")).keySet().contains("serial.example") != errorExpected || connection.writes != 0) throw new AssertionError("Serializable error/null state differs");
+            }
+            var serialCleanup = new android.os.Bundle(); serialCleanup.putParcelableArrayList("serial.example", null); service.setUriRelativeFilterGroups("fixture.domains", serialCleanup);
             var seed = new android.os.Bundle();
             var oldGroups = new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/old"))));
             seed.putParcelableArrayList("runtime.example", oldGroups); seed.putParcelableArrayList("late.example", oldGroups);

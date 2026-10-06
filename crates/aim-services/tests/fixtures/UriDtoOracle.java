@@ -74,6 +74,20 @@ final class UriDtoOracle {
                 }
                 java.nio.file.Files.write(new java.io.File(directory, "uri-class-bundles.original").toPath(), classCases.marshall());
             } finally {classCases.recycle();}
+            var serialCases = android.os.Parcel.obtain();
+            try {
+                String[] names = {null, "dev.aim.fixture.NoSuch", "java.lang.String", "android.os.Bundle", "[I", "android/content/UriRelativeFilterParcel"};
+                serialCases.writeInt(names.length * 2);
+                for (String name : names) for (boolean root : new boolean[] {false, true}) {
+                    var bundle = serialBundle("x.example", name, root); var wire = android.os.Parcel.obtain();
+                    try {
+                        bundle.writeToParcel(wire, 0); serialCases.writeString(name); serialCases.writeBoolean(root); serialCases.writeByteArray(wire.marshall());
+                        try {var groups = bundle.getParcelableArrayList("x.example", android.content.UriRelativeFilterGroupParcel.class); serialCases.writeInt(groups == null ? 0 : 1); serialCases.writeString(null); serialCases.writeString(null);}
+                        catch (RuntimeException error) {serialCases.writeInt(-1); serialCases.writeString(error.getClass().getName()); serialCases.writeString(error.getMessage());}
+                    } finally {wire.recycle();}
+                }
+                java.nio.file.Files.write(new java.io.File(directory, "uri-serial-bundles.original").toPath(), serialCases.marshall());
+            } finally {serialCases.recycle();}
             out.recycle(); out = android.os.Parcel.obtain();
             out.writeInt(3);
             for (int mode = 0; mode < 3; mode++) {
@@ -109,6 +123,17 @@ final class UriDtoOracle {
                 }
             java.nio.file.Files.write(new java.io.File(directory, "uri-null-match.original").toPath(), out.marshall());
         } finally { out.recycle(); }
+    }
+    static android.os.Bundle serialBundle(String key, String name, boolean root) {
+        var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
+        try {
+            value.writeString(name); if (name != null) value.writeByteArray(new byte[] {0});
+            int length = value.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(root ? 21 : 11);
+            if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
+            else {list.writeInt(1); list.writeInt(21); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}
+            length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
+            return android.os.Bundle.CREATOR.createFromParcel(wire);
+        } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}
     }
     static android.os.Bundle namedBundle(String key, String name) {return namedBundle(key, name, false);}
     static android.os.Bundle namedBundle(String key, String name, boolean root) {

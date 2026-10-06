@@ -295,6 +295,31 @@ public final class NativeDomainBinderOracle {
                 if (reply.readTypedObject(android.os.Bundle.CREATOR).keySet().contains("class.example") == mismatch || reply.dataAvail() != 0) throw new AssertionError("Parcelable mismatch/removal/error state differs");
             } finally {data.recycle(); reply.recycle();}
         }
+        for (String name : new String[] {null, "dev.aim.fixture.NoSuch", "java.lang.String"}) for (boolean root : new boolean[] {false, true}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                var seed = new android.os.Bundle(); var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 1; group.filters = new java.util.ArrayList<>();
+                var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); groups.add(group); seed.putParcelableArrayList("serial.example", groups);
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(seed, 0); service.transact(Integer.parseInt(args[9]), data, reply, 0); reply.readException();
+            } finally {data.recycle(); reply.recycle();}
+            boolean errorExpected = name != null || !root;
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(serialBundle("serial.example", name, root), 0); service.transact(Integer.parseInt(args[9]), data, reply, 0);
+                try {reply.readException(); if (errorExpected) throw new AssertionError("malformed Serializable accepted");}
+                catch (RuntimeException error) {
+                    String expectedClass = name == null ? "java.lang.NullPointerException" : "android.os.BadParcelableException";
+                    String expectedMessage = name == null ? conversionErrors[0] : "Parcelable encountered IOException reading a Serializable object (name = " + name + ")";
+                    if (!errorExpected || !expectedClass.equals(error.getClass().getName()) || !expectedMessage.equals(error.getMessage())) throw error;
+                }
+                if (reply.dataAvail() != 0) throw new AssertionError("Serializable error framing differs");
+            } finally {data.recycle(); reply.recycle();}
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("serial.example")); service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
+                if (reply.readTypedObject(android.os.Bundle.CREATOR).keySet().contains("serial.example") != errorExpected || reply.dataAvail() != 0) throw new AssertionError("Serializable error/null state differs");
+            } finally {data.recycle(); reply.recycle();}
+        }
         for (String alias : new String[] {"query_uri_bounds", "query_uri_invalid"}) {
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
@@ -327,6 +352,17 @@ public final class NativeDomainBinderOracle {
             body.writeInt(1); body.writeString(key); body.writeInt(root ? 4 : 11);
             if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
             else {list.writeInt(1); list.writeInt(4); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}
+            length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
+            return android.os.Bundle.CREATOR.createFromParcel(wire);
+        } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}
+    }
+    private static android.os.Bundle serialBundle(String key, String name, boolean root) {
+        var value = android.os.Parcel.obtain(); var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
+        try {
+            value.writeString(name); if (name != null) value.writeByteArray(new byte[] {0});
+            int length = value.marshall().length; body.writeInt(1); body.writeString(key); body.writeInt(root ? 21 : 11);
+            if (root) {body.writeInt(length); body.appendFrom(value, 0, length);}
+            else {list.writeInt(1); list.writeInt(21); list.writeInt(length); list.appendFrom(value, 0, length); length = list.marshall().length; body.writeInt(length); body.appendFrom(list, 0, length);}
             length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
             return android.os.Bundle.CREATOR.createFromParcel(wire);
         } finally {value.recycle(); list.recycle(); body.recycle(); wire.recycle();}
