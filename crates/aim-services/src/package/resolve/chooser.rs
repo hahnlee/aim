@@ -96,7 +96,7 @@ impl Resolution {
             return Ok(None);
         };
         let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-        for ppa in preferred::query(&p.persistent, intent, resolved_type, default_only).map_err(|_| NotModelled("URI filter matching exception"))? {
+        for ppa in preferred::query(&p.persistent, intent, resolved_type, default_only).map_err(ResolutionError::UriMatching)? {
             let c = &ppa.component;
             if !self.activity(c, flags | MATCH_DISABLED_COMPONENTS, calling_uid, user)? {
                 continue;
@@ -134,7 +134,7 @@ impl Resolution {
             return Ok(None);
         };
         let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-        let prefs = preferred::query(&p.preferred, intent, resolved_type, default_only).map_err(|_| NotModelled("URI filter matching exception"))?;
+        let prefs = preferred::query(&p.preferred, intent, resolved_type, default_only).map_err(ResolutionError::UriMatching)?;
         if prefs.is_empty() {
             return Ok(None);
         }
@@ -250,7 +250,7 @@ impl Resolution {
             if let Info::Activity(ai) = &ri.info
                 && ai.info.application_info.private_flags & PRIVATE_FLAG_INSTANT != 0
             {
-                return Err(NotModelled("an instant app's domain approval"));
+                return Err(NotModelled("an instant app's domain approval").into());
             }
         }
         let mut ai = self.resolver_activity()?;
@@ -293,7 +293,7 @@ impl Resolution {
     /// application of the system user, with its overlays.
     fn resolver_activity(&self) -> Result<ActivityInfo> {
         if self.state.platform.custom_resolver.is_some() {
-            return Err(NotModelled("a custom resolver activity"));
+            return Err(NotModelled("a custom resolver activity").into());
         }
         let ps = self
             .state

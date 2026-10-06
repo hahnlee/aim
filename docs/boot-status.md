@@ -1674,9 +1674,16 @@ matcher failure rather than replacing every error with a generic NPE; its
 NPE/IAE replies use the original category/message, and failed construction
 retains the prior resolver. Bounds errors cannot be serialized by original
 Parcel and explicitly remain unsupported at this native boundary (#964).
-Ordinary query paths still need typed matcher-error propagation (#964).
-Full original oracle passes (29.49s, no skips), 498 units pass (0.50s; five
-excluded), and production build passes (3 rebuilt, 39 fresh, 1.7s).
+Ordinary intent query paths now retain typed matcher failures through component
+search, preferred activities, domain filtering and safer-intent enforcement.
+The shared shadow/native Binder query frontend serializes the original NPE/IAE
+instead of reporting these errors as NotModelled; non-serializable bounds
+failures remain explicitly unmodelled (#964). A query test covers activity,
+service, receiver and provider queries, intent/service resolution, and a foreign
+app's explicit activity query through safer-intent checks, for null literal,
+prefix and advanced patterns and a malformed advanced pattern. Full original
+oracle passes (31.96s, no skips), 499 units pass (0.64s; five excluded), and
+production build passes (3 rebuilt, 39 fresh, 1.5s).
 Other #966 generic type/error cases and full native
 PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.

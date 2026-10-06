@@ -19,7 +19,7 @@ use aim_service_aidl::ReadParcelable;
 use aim_service_aidl::android_content_pm_ipackagemanager as pm;
 
 use super::apps_filter::{
-    self, AppsFilter, NotModelled, Result, SYSTEM_UID, app_id, instant_app_package_name,
+    self, AppsFilter, NotModelled, SYSTEM_UID, app_id, instant_app_package_name,
     should_filter_application, user_id,
 };
 use super::component_resolver::{
@@ -43,6 +43,16 @@ use super::reply;
 use super::uri;
 use crate::clip::char_sequence;
 use crate::shadow::{Answer, IntoValue, ListSlice, ShadowCall, Value, decode};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResolutionError {
+    NotModelled(NotModelled),
+    UriMatching(super::domain_verification::uri_parcel::MatchError),
+}
+impl From<NotModelled> for ResolutionError {
+    fn from(error: NotModelled) -> Self {Self::NotModelled(error)}
+}
+type Result<T> = std::result::Result<T, ResolutionError>;
 
 /// `PackageManager` flags.
 pub const MATCH_DIRECT_BOOT_UNAWARE: i64 = 0x0004_0000;
@@ -134,7 +144,7 @@ impl Resolution {
             flags,
         };
         self.components
-            .query(kind, at, intent, resolved_type, package).map_err(|_| NotModelled("URI filter matching exception"))
+            .query(kind, at, intent, resolved_type, package).map_err(ResolutionError::UriMatching)
     }
 
     fn user_exists(&self, user: i32) -> bool {
@@ -148,7 +158,7 @@ impl Resolution {
         if user_id(calling_uid) == user || matches!(app_id(calling_uid), 0 | SYSTEM_UID) {
             Ok(())
         } else {
-            Err(NotModelled("a query of another user's packages"))
+            Err(NotModelled("a query of another user's packages").into())
         }
     }
 
@@ -194,7 +204,7 @@ impl Resolution {
                 && want_match_instant
                 && calling_uid >= apps_filter::FIRST_APPLICATION_UID
             {
-                return Err(NotModelled("whether the caller may see instant apps"));
+                return Err(NotModelled("whether the caller may see instant apps").into());
             }
             let allow_match_instant = want_instant_apps || want_match_instant;
             flags &= !(MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY);
@@ -226,7 +236,7 @@ impl Resolution {
             resolved_type,
             flags & MATCH_DEFAULT_ONLY != 0,
         )
-        .map_err(|_| NotModelled("URI filter matching exception"))?;
+        .map_err(ResolutionError::UriMatching)?;
         Ok(!entries.iter().any(|entry| entry.set_by_dpm))
     }
 
@@ -238,7 +248,7 @@ impl Resolution {
     /// The model's limits: other profiles' results.
     fn single_profile(&self, user: i32) -> Result<()> {
         if self.state.users.len() > 1 {
-            return Err(NotModelled("cross-profile resolution"));
+            return Err(NotModelled("cross-profile resolution").into());
         }
         debug_assert!(self.user_exists(user));
         Ok(())
@@ -446,7 +456,7 @@ impl Resolution {
             resolved.is_empty() && intent.has_flag(FLAG_ACTIVITY_MATCH_EXTERNAL)
         };
         if possible {
-            Err(NotModelled("instant app resolution"))
+            Err(NotModelled("instant app resolution").into())
         } else {
             Ok(())
         }
@@ -464,12 +474,12 @@ impl Resolution {
         intent: &Intent,
     ) -> Result<Vec<ResolveInfo>> {
         if instant_pkg.is_some() {
-            return Err(NotModelled("an instant app's results"));
+            return Err(NotModelled("an instant app's results").into());
         }
         let mut kept = Vec::with_capacity(list.len());
         for info in list.drain(..).rev() {
             if info.is_instant_app_available && intent.is_web_intent() {
-                return Err(NotModelled("web instant apps' setting"));
+                return Err(NotModelled("web instant apps' setting").into());
             }
             if let Info::Activity(ai) = &info.info
                 && allow_dynamic_splits
@@ -483,7 +493,7 @@ impl Resolution {
                     .flatten()
                     .any(|s| s == split)
             {
-                return Err(NotModelled("an activity in a split not installed"));
+                return Err(NotModelled("an activity in a split not installed").into());
             }
             let (package, _) = info.component();
             let target = self.state.packages.get(package);
@@ -491,7 +501,7 @@ impl Resolution {
                 Some(t) => self
                     .apps_filter
                     .should_filter(&self.state, calling_uid, t, user),
-                None => return Err(NotModelled("a result without its package")),
+                None => return Err(NotModelled("a result without its package").into()),
             };
             if !hidden {
                 kept.push(info);
@@ -521,6 +531,7 @@ impl Resolution {
         }
         let mut failure = None;
         list.retain(|ri| {
+            if failure.is_some() {return false;}
             let Info::Activity(ai) = &ri.info else {
                 return true;
             };
@@ -543,6 +554,7 @@ impl Resolution {
             }
             let null_action = intent.action.is_none();
             let matches = main.component.intents.iter().any(|i| {
+                if failure.is_some() {return false;}
                 i.filter.matches(
                     intent.action.as_deref(),
                     resolved_type,
@@ -555,7 +567,7 @@ impl Resolution {
             });
             !((null_action && flags & ALLOW_NULL_ACTION == 0) || !matches)
         });
-        if failure.is_some() { return Err(NotModelled("URI filter matching exception")); }
+        if let Some(error) = failure {return Err(ResolutionError::UriMatching(error));}
         Ok(())
     }
 
@@ -744,11 +756,11 @@ impl Resolution {
         let mut kept = Vec::with_capacity(list.len());
         for info in list.into_iter().rev() {
             if instant_pkg.is_some() {
-                return Err(NotModelled("an instant app's results"));
+                return Err(NotModelled("an instant app's results").into());
             }
             let (package, _) = info.component();
             let Some(target) = self.state.packages.get(package) else {
-                return Err(NotModelled("a result without its package"));
+                return Err(NotModelled("a result without its package").into());
             };
             if !self
                 .apps_filter
@@ -772,7 +784,7 @@ impl Resolution {
                 Info::Activity(_) => unreachable!("services and providers only"),
             };
             if instant {
-                return Err(NotModelled("an instant app's results"));
+                return Err(NotModelled("an instant app's results").into());
             }
             if flags & FLAG_VISIBLE_TO_INSTANT_APP != 0 {
                 kept.push(info);
@@ -979,7 +991,7 @@ impl Resolution {
         };
         let provider = self.components.provider_by_authority(authority);
         if provider.is_some() && user != user_id(calling_uid) {
-            return Err(NotModelled("another user's provider (URI grants)"));
+            return Err(NotModelled("another user's provider (URI grants)").into());
         }
         self.enforce_cross_user(calling_uid, user)?;
         let Some(registered) = provider else {
@@ -1202,7 +1214,7 @@ fn filter_value(f: &IntentFilter) -> Value {
 /// A component lookup's answer; the exception it may throw (a cross-user
 /// check) is not modelled here.
 fn thrown<T>(r: std::result::Result<std::result::Result<T, Exception>, NotModelled>) -> Result<T> {
-    r?.map_err(|_| NotModelled("an exception from a component lookup"))
+    r?.map_err(|_| NotModelled("an exception from a component lookup").into())
 }
 
 /// `filterIfNotSystemUser`: an activity for the system user only is not
@@ -1267,7 +1279,7 @@ impl Resolver {
         code: u32,
         uid: i32,
         data: &mut Reader<'_>,
-    ) -> Option<Result<Parcel>> {
+    ) -> Option<apps_filter::Result<Parcel>> {
         if !matches!(
             code,
             pm::QUERY_INTENT_ACTIVITIES
@@ -1343,7 +1355,16 @@ impl Resolver {
             }
             _ => return None,
         };
-        Some(done.map(|()| p))
+        Some(match done {
+            Ok(()) => Ok(p),
+            Err(ResolutionError::NotModelled(error)) => Err(error),
+            Err(ResolutionError::UriMatching(error)) => {
+                let Some(exception) = error.binder_exception() else {
+                    return Some(Err(NotModelled("non-serializable URI matching exception")));
+                };
+                let mut reply = Parcel::new(); reply.write_exception(&exception); Ok(reply)
+            }
+        })
     }
 
     /// Reports a reason the first time a method meets it.

@@ -760,3 +760,40 @@ fn visibility_construction_retains_uri_matcher_errors_and_the_previous_resolver(
         assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
     }
 }
+
+#[test]
+fn intent_queries_return_uri_matcher_exceptions_instead_of_not_modelled() {
+    use super::super::domain_verification::uri_parcel::{Filter, MatchError};
+    for (pattern, kind) in [(None, 0), (None, 1), (None, 3), (Some("*"), 3)] {
+        let target = package("target", 10001, false, |pkg| {
+            let mut intent = filter(VIEW, None, Some("https"), 0); intent.filter.add_data_authority("x", None);
+            let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0); group.add_nullable(0, kind, pattern);
+            intent.filter.add_uri_relative_filter_group(group);
+            let mut component = main("target", "target.View", vec![intent]); component.intent_matching_flags = 2;
+            pkg.activities = vec![Activity {main: component.clone(), ..Activity::default()}];
+            pkg.services = vec![Service {main: component.clone(), ..Service::default()}];
+            pkg.receivers = vec![Activity {main: component.clone(), ..Activity::default()}];
+            pkg.providers = vec![Provider {main: component, ..Provider::default()}];
+        });
+        let caller = package("caller", 10002, false, |pkg| {pkg.queries_packages = vec!["target".into()];});
+        let state = Arc::new(State {packages: [("target".into(), target), ("caller".into(), caller)].into(), users: [(0, User {unlocking_or_unlocked: true, ..User::default()})].into(), ..State::default()});
+        let resolver = Resolver::default();
+        let error = Filter {uri_part: 0, pattern_type: kind, filter: pattern.map(str::to_owned)}.match_data(&Uri::parse("https://x/path")).unwrap_err();
+        assert!(!matches!(error, MatchError::IndexOutOfBounds {..}));
+        let expected = error.binder_exception().unwrap();
+        for (code, explicit) in [(pm::QUERY_INTENT_ACTIVITIES, false), (pm::QUERY_INTENT_SERVICES, false), (pm::QUERY_INTENT_RECEIVERS, false), (pm::QUERY_INTENT_CONTENT_PROVIDERS, false), (pm::RESOLVE_INTENT, false), (pm::RESOLVE_SERVICE, false), (pm::QUERY_INTENT_ACTIVITIES, true)] {
+            let mut request = Parcel::new(); request.write_interface_token(pm::DESCRIPTOR); request.write_i32(1);
+            request.write_string8(Some(VIEW)); request.write_i32(1); request.write_string8(Some("https://x/path"));
+            request.write_string8(None); request.write_string8(None); request.write_i32(0); request.write_i32(0);
+            request.write_string8(None);
+            if explicit {request.write_string16(Some("target")); request.write_string16(Some("target.View"));}
+            else {request.write_string16(None);}
+            for value in [0, 0, 0, 0, -2, -1, 0, 0] {request.write_i32(value);}
+            request.write_string16(None); request.write_i64(MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE); request.write_i32(0);
+            let reply = resolver.query(&state, code, if explicit {10002} else {1000}, &mut aim_binder_host::parcel::Reader::new(request.data(), request.objects())).unwrap().unwrap();
+            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
+            assert_eq!(exception.code, expected.code, "method={code} pattern={pattern:?} kind={kind}");
+            assert_eq!(exception.message, expected.message);
+        }
+    }
+}
