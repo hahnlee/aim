@@ -1026,11 +1026,28 @@ normalized in the projection; live attached/pending/restored merge, full order,
 process UUID policy delivery and runtime publication/default activation remain
 #957/#914/#798. The dispatcher still requires the modern domain owner callback;
 it does not silently publish detached persistence as live state.
-17 XML tests and 528 service units pass (5 service tests excluded, 0.49s).
-Full original ART oracle passes without skips (65.07s), retaining prior legacy,
-verifier/package/shared/keyset/read-and-retirement/permission comparisons.
-Image/template build passed (6 rebuilt/36 fresh, 72.5s); final runtime rebuild
-passed (3 rebuilt/39 fresh, 16.3s). Compile-only persistence/state-map API declarations
+Native domain Owner.read_settings now applies completed read results in original
+ArrayMap package order. Same-ID attached state is retained without querying the
+code owner; changed IDs consult current valid auto-verify domains and promote
+only absent/no-response domains whose incoming status is success/restored to
+STATE_RESTORED. Fresher statuses, attached UUID/signature/URI groups remain owned
+by the live object. User hosts are unioned in ArraySet order, new users attach in
+SparseArray order, and incoming link handling replaces the previous value.
+Unattached active entries update pending state; restored entries update their
+separate map after active processing. Collector-owner errors propagate and retain
+earlier processed effects. Actual original DomainVerificationService.readSettings
+agrees on 32 two-stage live read cases across same/changed IDs, domain responses,
+code absence/presence and link-handling values, with pending/restored records.
+The projection normalizes map order; full identity/alias, all state combinations,
+shared publication, original-name registration and bootstrap execution remain
+#957/#914/#798. Initial fixture failures were an unavailable Files.readString
+API (replaced with image-supported readAllBytes) and an incorrect 64-case loop
+bound (corrected to the generated 32 cases), then the same oracle was rerun.
+17 XML tests and 529 service units pass (5 service tests excluded, 0.51s).
+Full original ART oracle passes without skips (62.27s), retaining prior modern/
+legacy/verifier/package/shared/keyset/read-and-retirement/permission comparisons.
+Image/template previously passed (6 rebuilt/36 fresh, 72.5s); final runtime
+rebuild passed (3 rebuilt/39 fresh, 1.1s). Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
 The prior retained-owner framework-res scan passed (1.45s) and was not rerun.

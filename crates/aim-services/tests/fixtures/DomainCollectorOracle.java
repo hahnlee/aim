@@ -29,6 +29,7 @@ public final class DomainCollectorOracle {
         DomainUuidOracle.verify(directory);
         UriDtoOracle.verify(directory);
         verifyAttachment(directory, context, compat);
+        verifySettingsReadMerge(directory, context, compat);
         verifyGroupedOwners(directory, context, compat);
         verifyPersistenceDefaults(directory, context, compat);
         verifyNativeWrites(directory, context, compat);
@@ -107,6 +108,24 @@ public final class DomainCollectorOracle {
             }
             if (in.dataAvail() != 0) throw new AssertionError("trailing domain signature expectations");
         } finally { in.recycle(); }
+    }
+    private static void verifySettingsReadMerge(java.io.File directory, android.content.Context context, Compat compat) throws Exception {
+        compat.restricted = true;
+        var code = (com.android.server.pm.pkg.AndroidPackage) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
+        for (int i = 0; i < 32; i++) {
+            var service = new com.android.server.pm.verify.domain.DomainVerificationService(context, new com.android.server.SystemConfig(false), compat);
+            var setting = domainSetting(code, false, "00000000-0000-0000-0000-000000000001"); service.addPackage((com.android.server.pm.pkg.PackageStateInternal)setting, null);
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-read-merge-seed"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next(); service.readSettings(new DomainComputer(setting), parser);
+            }
+            boolean present = new String(java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-read-merge-" + i + ".code").toPath()), java.nio.charset.StandardCharsets.UTF_8).equals("true");
+            try (var stream = new java.io.FileInputStream(new java.io.File(directory, "domain-read-merge-" + i + ".input"))) {
+                var parser = android.util.Xml.resolvePullParser(stream); parser.next(); service.readSettings(new DomainComputer(present ? java.util.Map.of("fixture.domains", (com.android.server.pm.pkg.PackageStateInternal)setting) : java.util.Map.of()), parser);
+            }
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-read-merge-" + i + ".original"))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null,true); xml.startTag(null,"packages"); service.writeSettings(null,xml,false,-1); xml.endTag(null,"packages"); xml.endDocument();
+            }
+        }
     }
     private static void verifyAttachment(java.io.File directory, android.content.Context context, Compat compat) throws Exception {
         compat.restricted = true;

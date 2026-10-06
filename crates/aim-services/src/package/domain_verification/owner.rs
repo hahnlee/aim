@@ -92,6 +92,47 @@ impl Owner {
             legacy_info,
         }
     }
+    /// DomainVerificationSettings.readSettings merges only after persistence
+    /// decoding has completed. Current code/collector ownership supplies domains
+    /// for changed-ID attached packages; same-ID state is left untouched.
+    pub fn read_settings(
+        &mut self,
+        result: super::ReadResult,
+        mut valid_domains: impl FnMut(&str) -> Result<Vec<String>, String>,
+    ) -> Result<Vec<super::SectionError>, String> {
+        let mut active = result.state.active;
+        active.sort_by_key(|p| java_hash(&p.name));
+        for package in active {
+            if let Some(existing) = self
+                .attached
+                .iter_mut()
+                .find(|old| old.name == package.name)
+            {
+                if existing.id != package.id {
+                    let valid = valid_domains(&existing.name)?;
+                    merge_read_state(existing, &package, &valid);
+                }
+            } else {
+                super::put(&mut self.saved.active, package.name.clone(), package, |p| {
+                    &p.name
+                });
+                self.saved.active.sort_by_key(|p| java_hash(&p.name));
+            }
+        }
+        let mut restored = result.state.restored;
+        restored.sort_by_key(|p| java_hash(&p.name));
+        for package in restored {
+            super::put(
+                &mut self.saved.restored,
+                package.name.clone(),
+                package,
+                |p| &p.name,
+            );
+            self.saved.restored.sort_by_key(|p| java_hash(&p.name));
+        }
+        Ok(result.diagnostics)
+    }
+
     /// Attach the actual current scan's code, Settings IDs and signer arrays.
     pub fn from_boot(
         scan: &crate::package::scan::SigningScan,
@@ -243,7 +284,9 @@ impl Owner {
             if id < 0 || selections.contains_key(&id) {
                 return Err("invalid domain query users".into());
             }
-            let (_, allowed, states) = self.user_state(&code.package_name, code, restrict_domains, config, id)?.ok_or("missing attached user owner")?;
+            let (_, allowed, states) = self
+                .user_state(&code.package_name, code, restrict_domains, config, id)?
+                .ok_or("missing attached user owner")?;
             selections.insert(id, (allowed, states));
         }
         // The package feed asks for groups of the queried users' web hosts.
@@ -475,7 +518,11 @@ impl Owner {
                         let mut normalized =
                             super::super::intent_filter::UriRelativeFilterGroup::new(g.action);
                         for f in &g.filters {
-                            normalized.add_nullable(f.uri_part, f.pattern_type, f.filter.as_deref());
+                            normalized.add_nullable(
+                                f.uri_part,
+                                f.pattern_type,
+                                f.filter.as_deref(),
+                            );
                         }
                         normalized
                     })
@@ -931,6 +978,40 @@ impl Owner {
         })
     }
 }
+fn merge_read_state(old: &mut Package, new: &Package, valid: &[String]) {
+    for (domain, state) in &new.domains {
+        let Some(domain) = domain else { continue };
+        if !valid.contains(domain) {
+            continue;
+        }
+        let previous = old
+            .domains
+            .iter()
+            .find(|(name, _)| name.as_ref() == Some(domain))
+            .map(|(_, state)| *state);
+        if previous.is_none_or(|state| state == 0) && matches!(state, 1 | 5) {
+            set(old, domain, 5);
+        }
+    }
+    for user in &new.users {
+        if let Some(existing) = old.users.iter_mut().find(|old| old.id == user.id) {
+            for host in &user.enabled_hosts {
+                if !existing.enabled_hosts.contains(host) {
+                    existing.enabled_hosts.push(host.clone());
+                }
+            }
+            existing.enabled_hosts =
+                array_order(std::mem::take(&mut existing.enabled_hosts), |host| host);
+            existing.allow_link_handling = user.allow_link_handling;
+        } else {
+            let mut user = user.clone();
+            user.enabled_hosts = array_order(user.enabled_hosts, |host| host);
+            old.users.push(user);
+        }
+    }
+    old.users.sort_by_key(|user| user.id);
+}
+
 fn info_state(state: i32) -> i32 {
     match state {
         0 | 1 => state,
@@ -1044,6 +1125,73 @@ mod tests {
         },
         pkg::Activity,
     };
+    #[test]
+    fn settings_read_merges_changed_ids_and_retains_same_id_live_identity() {
+        let live = Package {
+            name: "live".into(),
+            id: "old".into(),
+            has_auto_verify_domains: true,
+            signature: Some("old-signature".into()),
+            domains: vec![(Some("x".into()), 0), (Some("fresh".into()), 1024)],
+            users: vec![User {
+                id: 1,
+                allow_link_handling: true,
+                enabled_hosts: vec!["old-host".into()],
+            }],
+            uri_relative_filter_groups: vec![],
+        };
+        let mut owner = Owner::new(State::default(), BTreeMap::new());
+        owner.put(live.clone());
+        let mut incoming = live.clone();
+        incoming.id = "new".into();
+        incoming.signature = Some("new-signature".into());
+        incoming.domains = vec![
+            (Some("x".into()), 1),
+            (Some("fresh".into()), 1),
+            (Some("invalid".into()), 1),
+        ];
+        incoming.users = vec![User {
+            id: 1,
+            allow_link_handling: false,
+            enabled_hosts: vec!["new-host".into()],
+        }];
+        owner
+            .read_settings(
+                super::super::ReadResult {
+                    state: State {
+                        active: vec![incoming],
+                        ..Default::default()
+                    },
+                    diagnostics: vec![],
+                },
+                |_| Ok(vec!["x".into(), "fresh".into()]),
+            )
+            .unwrap();
+        let merged = owner.package("live").unwrap();
+        assert_eq!(merged.id, "old");
+        assert_eq!(merged.signature, live.signature);
+        assert_eq!(
+            merged.domains,
+            [(Some("x".into()), 5), (Some("fresh".into()), 1024)]
+        );
+        assert!(!merged.users[0].allow_link_handling);
+        assert_eq!(merged.users[0].enabled_hosts.len(), 2);
+        let before = owner.persisted();
+        owner
+            .read_settings(
+                super::super::ReadResult {
+                    state: State {
+                        active: vec![live],
+                        ..Default::default()
+                    },
+                    diagnostics: vec![],
+                },
+                |_| panic!("same ID queried code owner"),
+            )
+            .unwrap();
+        assert_eq!(owner.persisted(), before);
+    }
+
     const OLD: &str = "00000000-0000-0000-0000-00000000000a";
     const NEW: &str = "00000000-0000-0000-0000-00000000000b";
     fn code(hosts: &[&str]) -> AndroidPackage {

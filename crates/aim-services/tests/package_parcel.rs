@@ -19,6 +19,7 @@ mod common {
     pub mod verifier_events;
     pub mod legacy_domain_events;
     pub mod modern_domain_events;
+    pub mod domain_read_merge;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -1718,6 +1719,7 @@ fn native_package_parcels_match_original_read_write() {
     )
     .unwrap();
     common::domain_collector::export(&directory);
+    common::domain_read_merge::export(&directory);
     common::domain_enforcer::export(&directory);
     let original = boot.command().args([
         "shell", "/system/bin/app_process",
@@ -1789,6 +1791,7 @@ fn native_package_parcels_match_original_read_write() {
     common::domain_collector::verify_owner_sort(&directory);
     common::domain_collector::grouped_owners(&directory, true);
     common::domain_collector::verify_attachment(&directory);
+    common::domain_read_merge::verify(&directory);
     common::domain_collector::verify_legacy(&directory);
     common::domain_collector::verify_persistence_defaults(&directory);
     for active in [false, true] {
