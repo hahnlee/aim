@@ -2215,27 +2215,77 @@ fn verify_boot_scan(
     assert!(Arc::ptr_eq(&base, &system.capture_package_scan().unwrap()));
     owner.reject.store(false, Ordering::SeqCst);
     let mut context = query_context_for(&complete, base.version() + 1);
-    use crate::package::domain_verification::collector::{self, Kind, Policy};
-    let web_hosts = collector::collect(
-        &complete.loaded_packages()["android"].package,
-        Policy {
-            restrict_domains: true,
-            linked_app: false,
-        },
-        Kind::Web,
-    );
-    for user in context
+    use crate::package::domain_verification::owner::{Input as DomainInput, Owner as DomainOwner};
+    let mut domains = DomainOwner::new(Default::default(), Default::default());
+    let policies: BTreeMap<_, _> = complete
+        .settings
+        .packages
+        .iter()
+        .map(|s| (s.name.clone(), true))
+        .collect();
+    for setting in &complete.settings.packages {
+        let code = &complete.loaded_packages()[&setting.name].package;
+        domains
+            .add(
+                DomainInput {
+                    id: setting.domain_set_id.as_deref().unwrap(),
+                    name: &setting.name,
+                    code: Some(code),
+                    signatures: &[],
+                    system: setting.flags & 1 != 0,
+                    restrict_domains: true,
+                    pre_verified: None,
+                },
+                config,
+            )
+            .unwrap();
+    }
+    // Supplied values must be overwritten by the native attached owner.
+    context
         .packages
         .get_mut(&("android".into(), false))
         .unwrap()
         .users
-        .values_mut()
-    {
-        user.domain_selection = Some((
-            true,
-            web_hosts.iter().map(|host| (host.clone(), 0)).collect(),
-        ));
-    }
+        .get_mut(&0)
+        .unwrap()
+        .domain_selection = Some((false, vec![("foreign.example".into(), 2)]));
+    let mut changed = complete.clone();
+    changed.settings.packages[0].domain_set_id =
+        Some("00000000-0000-0000-0000-000000000000".into());
+    assert!(
+        context
+            .clone()
+            .resolve_domains(&changed, &domains, config, &policies)
+            .is_err()
+    );
+    assert!(
+        context
+            .clone()
+            .resolve_domains(
+                &complete,
+                &DomainOwner::new(Default::default(), Default::default()),
+                config,
+                &policies
+            )
+            .is_err()
+    );
+    assert!(
+        context
+            .clone()
+            .resolve_domains(&complete, &domains, config, &BTreeMap::new())
+            .is_err()
+    );
+    context = context
+        .resolve_domains(&complete, &domains, config, &policies)
+        .unwrap();
+    assert_eq!(
+        context.packages[&("android".into(), false)].users[&0]
+            .domain_selection
+            .as_ref()
+            .unwrap()
+            .0,
+        true
+    );
     let mut bad = context.clone();
     bad.packages.remove(&("android".into(), false));
     let old_query = system.capture_package_queries().unwrap();

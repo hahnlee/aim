@@ -29,6 +29,16 @@ pub struct Change {
     pub broadcast_requested: bool,
     pub recovered_missing_owner: bool,
 }
+/// Public query values at the retained package/domain owner boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Queries {
+    pub verification: Option<(String, Vec<(String, i32)>)>,
+    pub users: BTreeMap<i32, (bool, Vec<(String, i32)>)>,
+    pub uri_relative_filter_groups: Vec<(
+        String,
+        Vec<super::super::intent_filter::UriRelativeFilterGroup>,
+    )>,
+}
 #[derive(Clone, Debug)]
 pub struct Owner {
     saved: State,
@@ -53,6 +63,87 @@ impl Owner {
         self.ids
             .get(&id.to_ascii_lowercase())
             .and_then(|name| self.package(name))
+    }
+    /// DomainVerificationService's public info/user projections. Compatibility
+    /// is a current owner decision, not inferred from the package's SDK.
+    pub fn queries(
+        &self,
+        code: &AndroidPackage,
+        restrict_domains: bool,
+        config: &SystemConfig,
+        users: impl IntoIterator<Item = i32>,
+    ) -> Result<Option<Queries>, String> {
+        let Some(p) = self.package(&code.package_name) else {
+            return Ok(None);
+        };
+        let policy = Policy {
+            restrict_domains,
+            linked_app: config.linked_apps.contains(&code.package_name),
+        };
+        let auto = collector::collect(code, policy, Kind::ValidAutoVerify);
+        let web = collector::collect(code, policy, Kind::Web);
+        let verification = if auto.is_empty() {
+            None
+        } else {
+            let mut states = BTreeMap::new();
+            for (host, state) in &p.domains {
+                let host = host.as_ref().ok_or("null attached domain host")?;
+                states.insert(host.clone(), info_state(*state));
+            }
+            for host in auto {
+                states.entry(host).or_insert(0);
+            }
+            Some((p.id.clone(), states.into_iter().collect()))
+        };
+        let mut selections = BTreeMap::new();
+        for id in users {
+            if id < 0 || selections.contains_key(&id) {
+                return Err("invalid domain query users".into());
+            }
+            let user = p.users.iter().find(|u| u.id == id);
+            let states = web
+                .iter()
+                .map(|host| {
+                    let state = p
+                        .domains
+                        .iter()
+                        .find(|(h, _)| h.as_ref() == Some(host))
+                        .map(|(_, state)| *state);
+                    let state = if state.is_some_and(|state| matches!(state, 1 | 2 | 4 | 5 | 7 | 8))
+                    {
+                        2
+                    } else if user.is_some_and(|u| u.enabled_hosts.contains(host)) {
+                        1
+                    } else {
+                        0
+                    };
+                    (host.clone(), state)
+                })
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect();
+            selections.insert(id, (user.is_none_or(|u| u.allow_link_handling), states));
+        }
+        // The package feed asks for groups of the queried users' web hosts.
+        let groups = if selections.is_empty() {
+            vec![]
+        } else {
+            p.uri_relative_filter_groups
+                .iter()
+                .filter_map(|(host, groups)| {
+                    host.as_ref()
+                        .filter(|host| web.contains(host))
+                        .map(|host| (host.clone(), groups.clone()))
+                })
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect()
+        };
+        Ok(Some(Queries {
+            verification,
+            users: selections,
+            uri_relative_filter_groups: groups,
+        }))
     }
     pub fn remove(&mut self, name: &str) -> Option<Package> {
         let i = self.attached.iter().position(|p| p.name == name)?;
@@ -181,6 +272,15 @@ impl Owner {
             broadcast_requested: broadcast,
             recovered_missing_owner: false,
         })
+    }
+}
+fn info_state(state: i32) -> i32 {
+    match state {
+        0 | 1 => state,
+        4 | 5 | 8 => 4,
+        6 => 3,
+        1024.. => state,
+        _ => 2,
     }
 }
 fn validate(input: &Input<'_>) -> Result<(), String> {
@@ -494,5 +594,72 @@ mod tests {
         assert!(p.has_auto_verify_domains);
         assert!(p.domains.is_empty());
         assert!(p.users.is_empty());
+    }
+    #[test]
+    fn queries_project_public_states_selection_priority_and_absent_user_defaults() {
+        let hosts: Vec<_> = (0..=9).map(|i| format!("h{i}.example")).collect();
+        let refs: Vec<_> = hosts.iter().map(String::as_str).collect();
+        let code = code(&refs);
+        let mut pending = blank(&input(&code), true);
+        pending.domains = hosts
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (Some(h.clone()), i as i32))
+            .collect();
+        pending.domains[9].1 = 1024;
+        pending.users = vec![User {
+            id: 10,
+            allow_link_handling: false,
+            enabled_hosts: hosts.clone(),
+        }];
+        let mut owner = Owner::new(
+            State {
+                active: vec![pending],
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        owner.add(input(&code), &SystemConfig::default()).unwrap();
+        let queries = owner
+            .queries(&code, true, &SystemConfig::default(), [0, 10])
+            .unwrap()
+            .unwrap();
+        let states: BTreeMap<_, _> = queries.verification.unwrap().1.into_iter().collect();
+        for (i, expected) in [0, 1, 2, 2, 4, 4, 3, 0, 4, 1024].into_iter().enumerate() {
+            assert_eq!(states[&hosts[i]], expected);
+        }
+        assert!(queries.users[&0].0);
+        assert!(!queries.users[&10].0);
+        for (host, state) in &queries.users[&10].1 {
+            let index = hosts.iter().position(|h| h == host).unwrap();
+            assert_eq!(
+                *state,
+                if matches!(index, 1 | 2 | 4 | 5 | 8) {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+        assert!(
+            owner
+                .queries(&code, true, &SystemConfig::default(), [10, 10])
+                .is_err()
+        );
+        assert!(
+            owner
+                .queries(&code, true, &SystemConfig::default(), [-1])
+                .is_err()
+        );
+        let mut web_only = code.clone();
+        web_only.activities[0].main.component.intents[0]
+            .filter
+            .auto_verify = false;
+        let queries = owner
+            .queries(&web_only, true, &SystemConfig::default(), [0])
+            .unwrap()
+            .unwrap();
+        assert!(queries.verification.is_none());
+        assert_eq!(queries.users[&0].1.len(), hosts.len());
     }
 }

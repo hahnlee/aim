@@ -272,7 +272,7 @@ fn attachment_inputs(directory: &Path) {
             })
             .collect::<String>();
         let xml = format!(
-            "<domain-verifications><{section}><package-state packageName='fixture.domains' id='00000000-0000-0000-0000-00000000000a' hasAutoVerifyDomains='true' signature='{signature}'><state>{domains}<domain name='gone.example' state='1'/></state><user-states><user-state userId='10' allowLinkHandling='false'><enabled-hosts><host name='h1.example'/><host name='gone.example'/></enabled-hosts></user-state></user-states></package-state></{section}></domain-verifications>"
+            "<domain-verifications><{section}><package-state packageName='fixture.domains' id='00000000-0000-0000-0000-00000000000a' hasAutoVerifyDomains='true' signature='{signature}'><state>{domains}<domain name='gone.example' state='1'/></state><user-states><user-state userId='10' allowLinkHandling='false'><enabled-hosts><host name='h1.example'/><host name='h3.example'/><host name='h6.example'/><host name='h1024.example'/><host name='gone.example'/></enabled-hosts></user-state></user-states></package-state></{section}></domain-verifications>"
         );
         fs::write(directory.join(format!("domain-owner-{case}.input")), xml).unwrap();
     }
@@ -339,6 +339,32 @@ pub fn verify_attachment(directory: &Path) {
                         .unwrap(),
                 )
                 .unwrap();
+            let values = owner
+                .queries(&code, true, &config, [0, 10])
+                .unwrap()
+                .unwrap();
+            let mut expected = Parcel::new();
+            expected.write_i32(i32::from(values.verification.is_some()));
+            let write_states = |out: &mut Parcel, states: &[(String, i32)]| {
+                out.write_i32(states.len() as i32);
+                for (host, state) in states {
+                    out.write_string16(Some(host));
+                    out.write_i32(*state);
+                }
+            };
+            if let Some((id, states)) = values.verification {
+                expected.write_string16(Some(&id));
+                write_states(&mut expected, &states);
+            }
+            for (_, (allowed, states)) in values.users {
+                expected.write_i32(i32::from(allowed));
+                write_states(&mut expected, &states);
+            }
+            assert_eq!(
+                expected.data(),
+                fs::read(directory.join(format!("domain-owner-{case}-{stage}.queries"))).unwrap(),
+                "public domain queries case={case} stage={stage}"
+            );
             assert_eq!(
                 owner.persisted(),
                 original,

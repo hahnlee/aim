@@ -113,9 +113,11 @@ public final class DomainCollectorOracle {
             var oldSetting = domainSetting(code, i == 1, "00000000-0000-0000-0000-00000000000b");
             service.addPackage((com.android.server.pm.pkg.PackageStateInternal) oldSetting, null);
             writeDomains(directory, i, "add", service);
+            writeQueries(directory, i, "add", service, oldSetting);
             var newSetting = domainSetting(code, i == 1, "00000000-0000-0000-0000-00000000000c");
             service.migrateState((com.android.server.pm.pkg.PackageStateInternal) oldSetting, (com.android.server.pm.pkg.PackageStateInternal) newSetting, null);
             writeDomains(directory, i, "migrate", service);
+            writeQueries(directory, i, "migrate", service, newSetting);
         }
     }
     private static com.android.server.pm.PackageSetting domainSetting(com.android.server.pm.pkg.AndroidPackage code, boolean system, String id) {
@@ -131,6 +133,51 @@ public final class DomainCollectorOracle {
             service.writeSettings(null, xml, false, -1);
             xml.endTag(null, "packages"); xml.endDocument();
         }
+    }
+    private static final class DomainComputer implements com.android.server.pm.Computer {
+        final com.android.server.pm.pkg.PackageStateInternal setting;
+        DomainComputer(com.android.server.pm.PackageSetting setting) { this.setting = (com.android.server.pm.pkg.PackageStateInternal) setting; }
+        public com.android.server.pm.pkg.PackageStateInternal getPackageStateInternal(String name) {
+            if (!"fixture.domains".equals(name)) throw new AssertionError("foreign domain query package");
+            return setting;
+        }
+    }
+    private static final class DomainConnection implements com.android.server.pm.verify.domain.DomainVerificationManagerInternal.Connection {
+        final DomainComputer computer;
+        int user;
+        DomainConnection(com.android.server.pm.PackageSetting setting) { computer = new DomainComputer(setting); }
+        public int getCallingUid() { return 1000; }
+        public int getCallingUserId() { return user; }
+        public int[] getAllUserIds() { return new int[] {0, 10}; }
+        public com.android.server.pm.Computer snapshot() { return computer; }
+        public boolean doesUserExist(int id) { return id == 0 || id == 10; }
+        public boolean filterAppAccess(String name, int uid, int id) {
+            if (!"fixture.domains".equals(name) || uid != 1000 || !doesUserExist(id)) throw new AssertionError("foreign domain visibility identity");
+            return false;
+        }
+        public void scheduleWriteSettings() { throw new AssertionError("unexpected query write"); }
+    }
+    private static void writeStates(android.os.Parcel out, java.util.Map<String, Integer> states) {
+        var sorted = new java.util.TreeMap<>(states);
+        out.writeInt(sorted.size());
+        for (var entry : sorted.entrySet()) { out.writeString(entry.getKey()); out.writeInt(entry.getValue()); }
+    }
+    private static void writeQueries(java.io.File directory, int caseId, String stage, com.android.server.pm.verify.domain.DomainVerificationService service, com.android.server.pm.PackageSetting setting) throws Exception {
+        var connection = new DomainConnection(setting); service.setConnection(connection);
+        var out = android.os.Parcel.obtain();
+        try {
+            var info = service.getDomainVerificationInfo("fixture.domains");
+            out.writeInt(info == null ? 0 : 1);
+            if (info != null) { out.writeString(info.getIdentifier().toString()); writeStates(out, info.getHostToStateMap()); }
+            for (int user : new int[] {0, 10}) {
+                connection.user = user;
+                var selection = service.getDomainVerificationUserState("fixture.domains", user);
+                if (selection == null) throw new AssertionError("missing attached user state");
+                out.writeInt(selection.isLinkHandlingAllowed() ? 1 : 0);
+                writeStates(out, selection.getHostToStateMap());
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "domain-owner-" + caseId + "-" + stage + ".queries").toPath(), out.marshall());
+        } finally { out.recycle(); }
     }
     private DomainCollectorOracle() {}
 }

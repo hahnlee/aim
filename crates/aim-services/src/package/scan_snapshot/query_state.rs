@@ -43,6 +43,66 @@ pub struct Context {
     pub retained_packages: BTreeMap<(i32, String), PackageInputs>,
 }
 
+impl Context {
+    /// Replace current-package domain inputs from the native attached owner.
+    /// Factory/retained domains remain separate until their owner is implemented.
+    pub fn resolve_domains(
+        mut self,
+        owner: &crate::package::scan::SigningScan,
+        domains: &crate::package::domain_verification::owner::Owner,
+        config: &crate::package::system_config::SystemConfig,
+        policies: &BTreeMap<String, bool>,
+    ) -> Result<Self, String> {
+        let expected: BTreeSet<_> = owner
+            .settings
+            .packages
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        if policies.keys().cloned().collect::<BTreeSet<_>>() != expected {
+            return Err("domain compatibility inventory differs".into());
+        }
+        for setting in &owner.settings.packages {
+            let code = owner
+                .loaded_packages()
+                .get(&setting.name)
+                .ok_or("missing domain query code")?;
+            let attached = domains
+                .package(&setting.name)
+                .ok_or("missing attached query domain owner")?;
+            if !setting
+                .domain_set_id
+                .as_ref()
+                .is_some_and(|id| id.eq_ignore_ascii_case(&attached.id))
+            {
+                return Err("query domain UUID owner differs".into());
+            }
+            let inputs = self
+                .packages
+                .get_mut(&(setting.name.clone(), false))
+                .ok_or("missing domain query inputs")?;
+            let values = domains
+                .queries(
+                    &code.package,
+                    policies[&setting.name],
+                    config,
+                    inputs.users.keys().copied(),
+                )?
+                .ok_or("missing attached query domain values")?;
+            inputs.domain_verification = values.verification;
+            inputs.uri_relative_filter_groups = values.uri_relative_filter_groups;
+            for (id, selection) in values.users {
+                inputs
+                    .users
+                    .get_mut(&id)
+                    .ok_or("domain query user disappeared")?
+                    .domain_selection = Some(selection);
+            }
+        }
+        Ok(self)
+    }
+}
+
 /// Query code and the Java replica retain the same native package owner.
 pub struct Capture {
     scan: Arc<Snapshot>,
