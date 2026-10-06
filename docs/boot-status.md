@@ -1716,8 +1716,20 @@ passes (30.90s, no skips), publisher passes (1.12s), 499 units pass (0.55s; five
 excluded), actual ART Binder regression passes (15.97s), and production build
 passes (3 rebuilt, 39 fresh, 23.4s). Nullable metadata/matching compatibility
 tracked by #964 is verified; full domain/PMS activation remains gated below.
-Other #966 generic type/error cases and full native
-PMS/facade/CTS/app gates remain open
+URI setter key errors now match original isValidDomain: a null key returns the
+exact String.length NPE; an empty key produces the original StringIndexOutOfBounds
+transport outcome, UNKNOWN_TRANSACTION, instead of a synthetic IAE. Original
+service and actual ART sender tests use reverse-inserted Bundles to confirm that
+a preceding negative-hash domain changes before the failure, while a later domain
+is unchanged. Native publication also verifies one epoch per partial change and
+unchanged disk/Store/base/cache (1.13s). Full original oracle initially failed in
+APEX notification with SIGKILL (#902), then SDK data setup with ENOSPC (#903,
+host available 1.9GiB). Removing only this task worktree's debug/release incremental
+caches increased available space to 5.7GiB; the next full oracle passed (29.24s,
+no skips). This is not a fix for either intermittent environment issue. Actual
+ART Binder passes (15.85s), 499 units pass (0.51s; five excluded), and production
+build passes (3 rebuilt, 39 fresh, 1.6s). Other #966 generic type/error cases and
+full native PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.
 
 User-state lookup

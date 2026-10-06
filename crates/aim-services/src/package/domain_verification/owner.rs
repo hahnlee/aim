@@ -465,7 +465,7 @@ impl Owner {
             .find(|p| p.name == name)
             .ok_or("URI-group package is unavailable")?;
         for (host, groups) in updates {
-            if !super::uri_groups::valid_domain(host)? {
+            if !super::uri_groups::valid_domain(host).map_err(|error| error.to_string())? {
                 continue;
             }
             if let Some(groups) = groups.as_ref().filter(|g| !g.is_empty()) {

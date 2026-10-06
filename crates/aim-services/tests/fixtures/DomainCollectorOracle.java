@@ -191,6 +191,24 @@ public final class DomainCollectorOracle {
 
 
 
+            var keyErrors = android.os.Parcel.obtain();
+            try {
+                keyErrors.writeInt(2);
+                for (String key : new String[] {null, ""}) {
+                    var keyUpdate = new android.os.Bundle();
+                    var changed = new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(1, "/key"))));
+                    keyUpdate.putParcelableArrayList("h0.example", changed); keyUpdate.putString(key, "wrong type"); keyUpdate.putParcelableArrayList("a.example", changed);
+                    try {service.setUriRelativeFilterGroups("fixture.domains", keyUpdate); throw new AssertionError("invalid URI key accepted");}
+                    catch (NullPointerException | IndexOutOfBoundsException error) {
+                        keyErrors.writeString(key); keyErrors.writeString(error.getClass().getName()); keyErrors.writeString(error.getMessage());
+                    }
+                    var afterKey = service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("a.example", "h0.example"));
+                    if (afterKey.getParcelableArrayList("a.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 1 || afterKey.getParcelableArrayList("h0.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 0) throw new AssertionError("invalid key partial mutation differs");
+                    var clearKey = new android.os.Bundle(); clearKey.putParcelableArrayList("a.example", null); service.setUriRelativeFilterGroups("fixture.domains", clearKey);
+                    if (connection.writes != 0) throw new AssertionError("invalid URI key scheduled persistence");
+                }
+                java.nio.file.Files.write(new java.io.File(directory, "domain-uri-key-errors.original").toPath(), keyErrors.marshall());
+            } finally {keyErrors.recycle();}
             var seed = new android.os.Bundle();
             var oldGroups = new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/old"))));
             seed.putParcelableArrayList("runtime.example", oldGroups); seed.putParcelableArrayList("late.example", oldGroups);

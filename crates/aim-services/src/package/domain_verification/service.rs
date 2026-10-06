@@ -15,6 +15,14 @@ pub struct DomainQueries {
     persistence: Option<Arc<Mutex<crate::package::owner::Store>>>,
 }
 
+enum UriUpdateError {
+    Exception(Exception),
+    Transport(aim_binder_host::parcel::StatusCode),
+}
+impl From<Exception> for UriUpdateError {
+    fn from(error: Exception) -> Self {Self::Exception(error)}
+}
+
 impl DomainQueries {
     pub fn from_system(system: &Arc<System>) -> Arc<Self> {
         Arc::new(Self {
@@ -592,7 +600,7 @@ impl DomainQueries {
         uid: i32,
         name: Option<&str>,
         bundle: Option<super::uri_bundle::Bundle>,
-    ) -> Result<(), Exception> {
+    ) -> Result<(), UriUpdateError> {
         let system = self.system.upgrade().ok_or_else(|| {
             Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable")
         })?;
@@ -609,7 +617,7 @@ impl DomainQueries {
                 if !Arc::ptr_eq(&capture, &system.capture_package_queries()?) {
                     continue;
                 }
-                return Err(error);
+                return Err(error.into());
             }
             let bundle = bundle.as_ref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "Attempt to invoke virtual method 'boolean android.os.Bundle.isEmpty()' on a null object reference"))?;
             let entries = bundle
@@ -629,9 +637,7 @@ impl DomainQueries {
             let result = (|| {
                 for entry in entries {
                     let domain = entry.key.as_deref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference"))?;
-                    if !super::uri_groups::valid_domain(domain).map_err(|e| {
-                        Exception::new(aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT, e)
-                    })? {
+                    if !super::uri_groups::valid_domain(domain).map_err(|_| UriUpdateError::Transport(UNKNOWN_TRANSACTION))? {
                         continue;
                     }
                     let parcels = entry.groups().map_err(|e| {
@@ -644,7 +650,7 @@ impl DomainQueries {
                         .set_uri_groups(name, &[(domain.to_owned(), Some(groups))])
                         .map_err(|e| Exception::new(EX_ILLEGAL_STATE, e))?;
                 }
-                Ok(())
+                Ok::<(), UriUpdateError>(())
             })();
             if owner.persisted() == domains.owner().persisted() {
                 return result;
@@ -688,10 +694,11 @@ impl Service for DomainQueries {
                 args.domain_to_groups_bundle,
             ) {
                 Ok(()) => api::write_set_uri_relative_filter_groups_reply(&mut reply),
-                Err(error) if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC => {
+                Err(UriUpdateError::Transport(status)) => return Err(status),
+                Err(UriUpdateError::Exception(error)) if error.code == aim_binder_host::parcel::EX_SERVICE_SPECIFIC => {
                     reply.write_exception_message(&error, None)
                 }
-                Err(error) => reply.write_exception(&error),
+                Err(UriUpdateError::Exception(error)) => reply.write_exception(&error),
             }
             return Ok(reply);
         }

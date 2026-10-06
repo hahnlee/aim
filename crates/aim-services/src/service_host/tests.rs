@@ -3355,6 +3355,36 @@ fn verify_boot_scan(
             let next = updated.prepare_domain_update(next_owner).unwrap();
             system.commit_package_domains(&bridge, next, &mut persistence.lock().unwrap()).unwrap();
         }
+        {
+            use aim_service_aidl::{WriteParcelable, android_content_pm_verify_domain_idomainverificationmanager as api};
+            for (key, action) in [(None, 1), (Some(""), 2)] {
+                let before = system.capture_package_queries().unwrap();
+                let bytes = std::fs::read(&path).unwrap(); let saved = persistence.lock().unwrap().state().settings.domain_verification.clone(); let invalidations = owner.invalidations.load(Ordering::SeqCst);
+                let mut body = Parcel::new(); body.write_i32(3);
+                for host in [Some("late.example"), key, Some("a.example")] {
+                    body.write_string16(host);
+                    if host == key {body.write_i32(0); body.write_string16(Some("wrong type"));}
+                    else {
+                        body.write_i32(11); let mut list = Parcel::new(); list.write_i32(1); list.write_i32(4);
+                        let mut value = Parcel::new(); value.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
+                        crate::package::domain_verification::uri_parcel::Group {action, filters: Some(vec![])}.write_to(&mut value);
+                        list.write_i32(value.data().len() as i32); list.write_raw(value.data(), &[]);
+                        body.write_i32(list.data().len() as i32); body.write_raw(list.data(), &[]);
+                    }
+                }
+                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(Some("android")); request.write_i32(1);
+                request.write_i32(body.data().len() as i32); request.write_i32(crate::bundle::MAGIC); request.write_raw(body.data(), &[]); request.write_bool(false);
+                let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false);
+                if key.is_none() {assert_eq!(reply.unwrap().reader().read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_NULL_POINTER);}
+                else {assert_eq!(reply.err(), Some(UNKNOWN_TRANSACTION));}
+                let after = system.capture_package_queries().unwrap(); assert_eq!(after.scan().version(), before.scan().version() + 1);
+                assert_eq!(after.domains().unwrap().owner().uri_groups("android", &["a.example".into()])[0].1[0].action, action);
+                assert!(after.domains().unwrap().owner().uri_groups("android", &["late.example".into()]).is_empty());
+                assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
+                assert_eq!(after.scan().owner().settings.domain_verification, before.scan().owner().settings.domain_verification);
+                assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+            }
+        }
         let before_parallel = system.capture_package_queries().unwrap();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);
         let barrier = std::sync::Barrier::new(4);

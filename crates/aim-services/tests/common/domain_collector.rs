@@ -697,6 +697,19 @@ pub fn verify_owner_sort(directory: &Path) {
 }
 
 pub fn verify_attachment(directory: &Path) {
+    {
+        let bytes = fs::read(directory.join("domain-uri-key-errors.original")).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        assert_eq!(reader.read_i32().unwrap(), 2);
+        for _ in 0..2 {
+            let key = reader.read_string16().unwrap();
+            let class = reader.read_string16().unwrap().unwrap(); let message = reader.read_string16().unwrap().unwrap();
+            let expected = if key.is_none() {("java.lang.NullPointerException", "Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference")} else {("java.lang.StringIndexOutOfBoundsException", "length=0; index=0")};
+            assert_eq!((class.as_str(), message.as_str()), expected);
+        }
+        assert_eq!(reader.remaining(), 0);
+    }
+
     use aim_services::package::{
         domain_verification::{
             State,

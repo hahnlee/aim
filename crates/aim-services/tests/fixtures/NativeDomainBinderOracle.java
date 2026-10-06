@@ -244,6 +244,30 @@ public final class NativeDomainBinderOracle {
             reply.readException();
             if (reply.readInt() != -74 || reply.dataAvail() != 0) throw new AssertionError("original non-serializable Binder status differs");
         } finally {data.recycle(); reply.recycle();}
+        for (String key : new String[] {null, ""}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                var bundle = new android.os.Bundle();
+                var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 1; group.filters = new java.util.ArrayList<>();
+                var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>(); groups.add(group);
+                bundle.putParcelableArrayList("runtime.example", groups); bundle.putString(key, "wrong type"); bundle.putParcelableArrayList("a.example", groups);
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(bundle, 0);
+                boolean handled = service.transact(Integer.parseInt(args[9]), data, reply, 0);
+                if (key == null) {
+                    if (!handled) throw new AssertionError("null URI key unhandled");
+                    try {reply.readException(); throw new AssertionError("null URI key accepted");}
+                    catch (NullPointerException error) {if (!"Attempt to invoke virtual method 'int java.lang.String.length()' on a null object reference".equals(error.getMessage())) throw new AssertionError("null key message differs");}
+                } else if (handled) throw new AssertionError("empty URI key did not return UNKNOWN_TRANSACTION");
+                if (reply.dataAvail() != 0) throw new AssertionError("key error framing differs");
+            } finally {data.recycle(); reply.recycle();}
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeStringList(java.util.List.of("a.example", "runtime.example"));
+                service.transact(Integer.parseInt(args[6]), data, reply, 0); reply.readException();
+                var bundle = reply.readTypedObject(android.os.Bundle.CREATOR);
+                if (bundle.getParcelableArrayList("a.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 1 || bundle.getParcelableArrayList("runtime.example", android.content.UriRelativeFilterGroupParcel.class).get(0).action != 99 || reply.dataAvail() != 0) throw new AssertionError("key error partial mutation differs");
+            } finally {data.recycle(); reply.recycle();}
+        }
         for (String alias : new String[] {"query_uri_bounds", "query_uri_invalid"}) {
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
