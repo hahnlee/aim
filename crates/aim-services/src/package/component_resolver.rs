@@ -257,18 +257,16 @@ pub enum MimeGroupError {
 }
 
 impl MimeGroupError {
-    pub fn reply(self) -> Parcel {
+    pub fn reply(self) -> aim_binder_host::parcel::Result<Parcel> {
         let mut reply = Parcel::new();
-        use aim_binder_host::parcel::{EX_NULL_POINTER, EX_UNSUPPORTED_OPERATION, Exception};
+        use aim_binder_host::parcel::{EX_NULL_POINTER, UNKNOWN_TRANSACTION, Exception};
         let exception = match self {
             Self::MissingGroup => Exception::new(EX_NULL_POINTER, "missing MIME group during component registration"),
             Self::NullType => Exception::new(EX_NULL_POINTER, "null MIME type during component registration"),
-            Self::UriMatching(error) => error.binder_exception().unwrap_or_else(|| {
-                Exception::new(EX_UNSUPPORTED_OPERATION, "non-serializable URI matching exception")
-            }),
+            Self::UriMatching(error) => error.binder_exception().ok_or(UNKNOWN_TRANSACTION)?,
         };
         reply.write_exception(&exception);
-        reply
+        Ok(reply)
     }
 }
 

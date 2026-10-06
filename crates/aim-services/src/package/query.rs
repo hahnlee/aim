@@ -338,7 +338,7 @@ impl PackageModel {
         }
         let resolution = match resolver.resolution(state) {
             Ok(resolution) => resolution,
-            Err(error) => return Answer::Reply(error.reply()),
+            Err(error) => return error.reply().map_or(Answer::NotModelled, Answer::Reply),
         };
         let q = Query {
             state,

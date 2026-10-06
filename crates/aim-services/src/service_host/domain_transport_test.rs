@@ -17,6 +17,18 @@ impl Service for DomainSetEcho {
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
+        if call.code == 1717 {
+            use aim_binder_host::parcel::{BAD_VALUE, Binder};
+            let Some(Binder::Handle(handle)) = call.data.read_binder()? else {return Err(BAD_VALUE)};
+            assert_eq!(call.data.remaining(), 0);
+            let process = self.0.upgrade().ok_or(BAD_VALUE)?;
+            assert_eq!(process.transact(handle, 1, &Parcel::new(), false).err(), Some(UNKNOWN_TRANSACTION));
+            let reply = process.transact(handle, 2, &Parcel::new(), false)?;
+            let exception = reply.reader().read_exception()?.unwrap_err();
+            assert_eq!(exception.code, aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT);
+            assert_eq!(exception.message, "invalid probe pattern");
+            let mut reply = Parcel::new(); reply.write_no_exception(); reply.write_i32(UNKNOWN_TRANSACTION); return Ok(reply);
+        }
         if call.code != api::SET_DOMAIN_VERIFICATION_STATUS {
             return Err(UNKNOWN_TRANSACTION);
         }
@@ -201,6 +213,67 @@ fn original_art_reads_large_native_domain_query_over_binder() {
         assert_eq!(allocated.scan().owner().settings.domain_verification, before_selection.scan().owner().settings.domain_verification);
         let process = system.process();
         super::register(&process, "query_domain_set", process.add_service(Arc::new(DomainSetEcho(Arc::downgrade(&process)))));
+        for (alias, pattern) in [("query_uri_bounds", "["), ("query_uri_invalid", "*")] {
+            use crate::package::{
+                intent_filter::{IntentFilter, ParsedIntentInfo, UriRelativeFilterGroup},
+                model::{PackageState, PackageUserState, State, User},
+                pkg::{Activity, AndroidPackage, Component, MainComponent, booleans},
+            };
+            let mut filter = IntentFilter::default();
+            filter.add_action("android.intent.action.VIEW");
+            filter.add_data_scheme("https");
+            filter.add_data_authority("x", None);
+            let mut group = UriRelativeFilterGroup::new(0);
+            group.add(0, 3, pattern);
+            filter.add_uri_relative_filter_group(group);
+            let pkg = AndroidPackage {
+                package_name: "fixture.uri".into(),
+                uid: 10001,
+                booleans: booleans::ENABLED | booleans::HAS_CODE,
+                activities: vec![Activity {
+                    main: MainComponent {
+                        component: Component {
+                            name: "fixture.uri.View".into(),
+                            package_name: "fixture.uri".into(),
+                            intents: vec![ParsedIntentInfo {
+                                filter,
+                                ..ParsedIntentInfo::default()
+                            }],
+                            ..Component::default()
+                        },
+                        enabled: true,
+                        exported: true,
+                        ..MainComponent::default()
+                    },
+                    ..Activity::default()
+                }],
+                ..AndroidPackage::default()
+            };
+            let package = PackageState {
+                name: "fixture.uri".into(),
+                app_id: 10001,
+                target_sdk_version: 35,
+                pkg: Some(Arc::new(pkg)),
+                users: [(0, PackageUserState::default())].into(),
+                ..PackageState::default()
+            };
+            let state = State {
+                packages: [("fixture.uri".into(), package)].into(),
+                users: [(
+                    0,
+                    User {
+                        unlocking_or_unlocked: true,
+                        ..User::default()
+                    },
+                )]
+                .into(),
+                ..State::default()
+            };
+            let (service, _) = crate::package::service::PackageQueries::new(Arc::new(
+                std::sync::RwLock::new(Arc::new(state)),
+            ));
+            super::register(&process, alias, process.add_service(service));
+        }
         let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
             "-Djava.class.path=/data/local/tmp/domain-binder/oracle.dex", "/system/bin", "NativeDomainBinderOracle"])
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_INFO.to_string())
@@ -213,6 +286,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_STATUS.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_DOMAIN_VERIFICATION_USER_SELECTION.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::SET_URI_RELATIVE_FILTER_GROUPS.to_string())
+            .arg(aim_service_aidl::android_content_pm_ipackagemanager::QUERY_INTENT_ACTIVITIES.to_string())
             .output().unwrap();
         if !output.status.success() {
             let logs = boot

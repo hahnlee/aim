@@ -16,7 +16,7 @@ use super::apps_filter::NotModelled;
 #[cfg(test)]
 use super::model::State;
 use super::query::Query;
-use super::resolve::Resolver;
+use super::resolve::{QueryError, Resolver};
 
 /// Both interfaces share the owner's published state. Each transaction
 /// captures one immutable snapshot; publication does not invalidate
@@ -131,18 +131,19 @@ impl Service for PackageQueries {
         let answer = resolved.unwrap_or_else(|| {
             let resolution = match self.resolver.resolution(&state) {
                 Ok(resolution) => resolution,
-                Err(error) => return Ok(error.reply()),
+                Err(error) => return error.reply().map_err(QueryError::Transport),
             };
             Query {
                 state: &state,
                 filter: &resolution.apps_filter,
                 calling_uid: uid,
             }
-            .answer(self.descriptor(), call.code, &mut call.data)
+            .answer(self.descriptor(), call.code, &mut call.data).map_err(QueryError::NotModelled)
         });
         Ok(match answer {
             Ok(reply) => reply,
-            Err(NotModelled(reason)) => {
+            Err(QueryError::Transport(status)) => return Err(status),
+            Err(QueryError::NotModelled(NotModelled(reason))) => {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::new(EX_UNSUPPORTED_OPERATION, reason));
                 reply

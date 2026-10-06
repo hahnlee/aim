@@ -574,10 +574,11 @@ pub fn verify_uri_dto(directory: &Path) {
             assert_eq!(Some(error.java_class()), error_class.as_deref(), "URI exception class case={case}");
             assert_eq!(Some(error.message()), error_message, "URI exception message case={case}");
             let reply = aim_services::package::component_resolver::MimeGroupError::UriMatching(error.clone()).reply();
-            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
             if let Some(expected) = error.binder_exception() {
+                let reply = reply.unwrap();
+                let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
                 assert_eq!(exception.code, expected.code); assert_eq!(exception.message, expected.message);
-            } else {assert_eq!(exception.code, aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION);}
+            } else {assert!(matches!(reply, Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION)));}
         } else {assert!(error_class.is_none() && error_message.is_none());}
         let actual = match result {
             Ok(value) => i32::from(value),

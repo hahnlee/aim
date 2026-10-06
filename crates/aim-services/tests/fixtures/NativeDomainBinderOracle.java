@@ -231,6 +231,39 @@ public final class NativeDomainBinderOracle {
             var bundle = reply.readTypedObject(android.os.Bundle.CREATOR);
             if (bundle.keySet().contains("h0.example") || !bundle.keySet().contains("runtime.example") || reply.dataAvail() != 0) throw new AssertionError("Binder mismatch/removal or later URI key differs");
         } finally {data.recycle(); reply.recycle();}
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            data.writeStrongBinder(new android.os.Binder() {
+                @Override protected boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) {
+                    if (code == 1) throw new StringIndexOutOfBoundsException("length=1; index=1");
+                    if (code == 2) throw new IllegalArgumentException("invalid probe pattern");
+                    return false;
+                }
+            });
+            android.os.ServiceManager.checkService("query_domain_set").transact(1717, data, reply, 0);
+            reply.readException();
+            if (reply.readInt() != -74 || reply.dataAvail() != 0) throw new AssertionError("original non-serializable Binder status differs");
+        } finally {data.recycle(); reply.recycle();}
+        for (String alias : new String[] {"query_uri_bounds", "query_uri_invalid"}) {
+            data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+            try {
+                data.writeInterfaceToken("android.content.pm.IPackageManager"); data.writeInt(1);
+                data.writeString8("android.intent.action.VIEW"); data.writeInt(1); data.writeString8("https://x/path");
+                data.writeString8(null); data.writeString8(null); data.writeInt(0); data.writeInt(0);
+                data.writeString8(null); data.writeString(null);
+                for (int value : new int[] {0, 0, 0, 0, -2, -1, 0, 0}) data.writeInt(value);
+                data.writeString(null); data.writeLong(0xc0000L); data.writeInt(0);
+                boolean handled = android.os.ServiceManager.checkService(alias).transact(Integer.parseInt(args[10]), data, reply, 0);
+                if (alias.equals("query_uri_bounds")) {
+                    if (handled || reply.dataAvail() != 0) throw new AssertionError("native bounds did not return original UNKNOWN_TRANSACTION");
+                } else {
+                    if (!handled) throw new AssertionError("native invalid-pattern query unhandled");
+                    try {reply.readException(); throw new AssertionError("invalid pattern accepted");}
+                    catch (IllegalArgumentException error) {if (!"Modifier must follow a token.".equals(error.getMessage())) throw new AssertionError("native invalid pattern message differs");}
+                    if (reply.dataAvail() != 0) throw new AssertionError("native invalid-pattern error framing differs");
+                }
+            } finally {data.recycle(); reply.recycle();}
+        }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private static boolean alreadyReadInlineSet;

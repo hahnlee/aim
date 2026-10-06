@@ -1672,18 +1672,30 @@ to 1,680 cases, including six malformed advanced patterns, and compares exact
 classes/messages alongside results. Visibility construction retains the typed
 matcher failure rather than replacing every error with a generic NPE; its
 NPE/IAE replies use the original category/message, and failed construction
-retains the prior resolver. Bounds errors cannot be serialized by original
-Parcel and explicitly remain unsupported at this native boundary (#964).
+retains the prior resolver. Bounds errors cannot be serialized by original Parcel. Original Java Binder
+lets them escape to JNI, which returns UNKNOWN_TRANSACTION; native visibility
+construction now returns that transport status too.
 Ordinary intent query paths now retain typed matcher failures through component
 search, preferred activities, domain filtering and safer-intent enforcement.
 The shared shadow/native Binder query frontend serializes the original NPE/IAE
-instead of reporting these errors as NotModelled; non-serializable bounds
-failures remain explicitly unmodelled (#964). A query test covers activity,
+instead of reporting these errors as NotModelled. Non-serializable bounds
+failures now return UNKNOWN_TRANSACTION from native PackageQueries; the shadow
+comparison still leaves transport status unmodelled (#964). A query test covers activity,
 service, receiver and provider queries, intent/service resolution, and a foreign
 app's explicit activity query through safer-intent checks, for null literal,
 prefix and advanced patterns and a malformed advanced pattern. Full original
 oracle passes (31.96s, no skips), 499 units pass (0.64s; five excluded), and
-production build passes (3 rebuilt, 39 fresh, 1.5s).
+production build passes (3 rebuilt, 39 fresh, 1.5s). A real original ART Binder
+callback throws a StringIndexOutOfBoundsException and returns UNKNOWN_TRANSACTION
+(-74) to native; a following IAE callback succeeds, proving the connection
+survives. Actual ART then calls native PackageQueries against controlled parsed
+metadata: bounds produces transact=false with an empty reply, while malformed
+advanced pattern returns the original IAE/message (16.55s). Resolver tests also
+cover transport status across all six query/resolve methods and explicit
+safer-intent matching, and visibility-construction bounds failures. Full original
+oracle passes (32.23s, no skips), 499 units pass (0.67s; five excluded), and
+production build passes (3 rebuilt, 39 fresh, 1.5s). Nullable XML persistence
+error parity and shadow transport-status comparison remain under #964.
 Other #966 generic type/error cases and full native
 PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.

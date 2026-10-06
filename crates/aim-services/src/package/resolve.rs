@@ -53,6 +53,15 @@ impl From<NotModelled> for ResolutionError {
     fn from(error: NotModelled) -> Self {Self::NotModelled(error)}
 }
 type Result<T> = std::result::Result<T, ResolutionError>;
+#[derive(Debug, PartialEq, Eq)]
+pub enum QueryError {
+    NotModelled(NotModelled),
+    Transport(aim_binder_host::parcel::StatusCode),
+}
+impl From<NotModelled> for QueryError {
+    fn from(error: NotModelled) -> Self {Self::NotModelled(error)}
+}
+
 
 /// `PackageManager` flags.
 pub const MATCH_DIRECT_BOOT_UNAWARE: i64 = 0x0004_0000;
@@ -1266,7 +1275,8 @@ impl Resolver {
         self.query(state, call.code, call.sender_euid as i32, &mut call.data)
             .map(|answer| match answer {
                 Ok(reply) => Answer::Reply(reply),
-                Err(NotModelled(reason)) => self.not_modelled(call.code, reason),
+                Err(QueryError::NotModelled(NotModelled(reason))) => self.not_modelled(call.code, reason),
+                Err(QueryError::Transport(_)) => self.not_modelled(call.code, "non-serializable URI matching exception"),
             })
     }
 
@@ -1279,7 +1289,7 @@ impl Resolver {
         code: u32,
         uid: i32,
         data: &mut Reader<'_>,
-    ) -> Option<apps_filter::Result<Parcel>> {
+    ) -> Option<std::result::Result<Parcel, QueryError>> {
         if !matches!(
             code,
             pm::QUERY_INTENT_ACTIVITIES
@@ -1294,7 +1304,7 @@ impl Resolver {
         }
         let r = match self.resolution(state) {
             Ok(r) => r,
-            Err(error) => return Some(Ok(error.reply())),
+            Err(error) => return Some(error.reply().map_err(QueryError::Transport)),
         };
         let mut p = Parcel::new();
         let slice = |items| ListSlice {
@@ -1307,10 +1317,10 @@ impl Resolver {
             | pm::QUERY_INTENT_RECEIVERS
             | pm::QUERY_INTENT_CONTENT_PROVIDERS => {
                 let Ok(a) = pm::QueryIntentActivities::<Intent>::read(data) else {
-                    return Some(Err(NotModelled("a malformed intent query")));
+                    return Some(Err(NotModelled("a malformed intent query").into()));
                 };
                 let Some(intent) = &a.intent else {
-                    return Some(Err(NotModelled("a null intent")));
+                    return Some(Err(NotModelled("a null intent").into()));
                 };
                 let rt = a.resolved_type.as_deref();
                 let query = match code {
@@ -1324,10 +1334,10 @@ impl Resolver {
             }
             pm::RESOLVE_INTENT | pm::RESOLVE_SERVICE => {
                 let Ok(a) = pm::ResolveIntent::<Intent>::read(data) else {
-                    return Some(Err(NotModelled("a malformed intent resolution")));
+                    return Some(Err(NotModelled("a malformed intent resolution").into()));
                 };
                 let Some(intent) = &a.intent else {
-                    return Some(Err(NotModelled("a null intent")));
+                    return Some(Err(NotModelled("a null intent").into()));
                 };
                 let resolve = match code {
                     pm::RESOLVE_INTENT => Resolution::resolve_intent,
@@ -1345,10 +1355,10 @@ impl Resolver {
             }
             pm::RESOLVE_CONTENT_PROVIDER => {
                 let Ok(a) = pm::ResolveContentProvider::read(data) else {
-                    return Some(Err(NotModelled("a malformed provider resolution")));
+                    return Some(Err(NotModelled("a malformed provider resolution").into()));
                 };
                 let Some(name) = &a.name else {
-                    return Some(Err(NotModelled("a null authority")));
+                    return Some(Err(NotModelled("a null authority").into()));
                 };
                 r.resolve_content_provider(name, a.flags, a.user_id, uid)
                     .map(|pi| pm::write_resolve_content_provider_reply(&mut p, pi.as_ref()))
@@ -1357,10 +1367,10 @@ impl Resolver {
         };
         Some(match done {
             Ok(()) => Ok(p),
-            Err(ResolutionError::NotModelled(error)) => Err(error),
+            Err(ResolutionError::NotModelled(error)) => Err(QueryError::NotModelled(error)),
             Err(ResolutionError::UriMatching(error)) => {
                 let Some(exception) = error.binder_exception() else {
-                    return Some(Err(NotModelled("non-serializable URI matching exception")));
+                    return Some(Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION)));
                 };
                 let mut reply = Parcel::new(); reply.write_exception(&exception); Ok(reply)
             }
