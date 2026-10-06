@@ -102,6 +102,30 @@ public final class NativeDomainBinderOracle {
                 if (reply.readInt() != (count == -1 ? 4 : count) || reply.dataAvail() != 0) throw new AssertionError("native DomainSet values/framing differ");
             } finally { data.recycle(); reply.recycle(); }
         }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        String identifier;
+        try {
+            data.writeInterfaceToken(args[1]); data.writeString("android");
+            if (!service.transact(Integer.parseInt(args[0]), data, reply, 0)) throw new AssertionError("pre-verifier Info unhandled");
+            reply.readException(); identifier = reply.readTypedObject(android.content.pm.verify.domain.DomainVerificationInfo.CREATOR).getIdentifier().toString();
+        } finally { data.recycle(); reply.recycle(); }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            var hosts = new android.util.ArraySet<String>(); for (int i = 0; i < 4000; i++) hosts.add("h" + i + ".example");
+            data.writeInterfaceToken(args[1]); data.writeString(identifier);
+            data.writeTypedObject(new android.content.pm.verify.domain.DomainSet(hosts), 0); data.writeInt(1);
+            if (!data.hasFileDescriptors()) throw new AssertionError("verifier request did not carry FD");
+            if (!service.transact(Integer.parseInt(args[7]), data, reply, 0)) throw new AssertionError("native verifier mutation unhandled");
+            reply.readException(); if (reply.readInt() != 0 || reply.dataAvail() != 0) throw new AssertionError("native verifier result differs");
+        } finally { data.recycle(); reply.recycle(); }
+        data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
+        try {
+            data.writeInterfaceToken(args[1]); data.writeString("android");
+            service.transact(Integer.parseInt(args[0]), data, reply, 0); reply.readException();
+            var info = reply.readTypedObject(android.content.pm.verify.domain.DomainVerificationInfo.CREATOR);
+            if (info.getHostToStateMap().size() != 4000 || reply.dataAvail() != 0) throw new AssertionError("post-verifier framing differs");
+            for (int i = 0; i < 4000; i++) if (!Integer.valueOf(1).equals(info.getHostToStateMap().get("h" + i + ".example"))) throw new AssertionError("verifier state not published");
+        } finally { data.recycle(); reply.recycle(); }
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private static boolean alreadyReadInlineSet;

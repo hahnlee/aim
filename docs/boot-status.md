@@ -1531,8 +1531,23 @@ classes are used. All 1,648 cases agree in values and errors, and all 65,536 UTF
 Character.digit results agree. The full oracle passes (29.83s, no skips); 491 units
 pass (0.51s; five excluded by default). The port retains OpenJDK notices/Classpath
 exception, with pinned ICU digit data under its own license. Method 5 integration
-remains open. Three
-domain methods and full M4 C acceptance remain open (#957/#798).
+now serves generated method 5 (2026-10-06). The endpoint accepts incoming FDs,
+uses the original UUID mode with native parsing, resolves DomainSet, validates the
+public state code before verifier authorization, then checks UUID/package/domain
+ownership. Invalid ID and unknown host statuses do not persist or publish; absent
+code returns name-not-found. Empty sets and invalid state codes retain original
+IllegalArgumentException messages. A valid request applies the existing original-
+compared native state transitions and cross-package user-selection revocation,
+then commits through the shared Store/CAS/cache-invalidation path. Authorization
+and commit capture races recapture/retry; uncommitted and committed failures stay
+explicit. Native Binder tests exercise malformed UUID/state, empty/null set,
+unknown ID/host, null host, denied verifier and trailing input, preserving file,
+capture and invalidation count. Original ART sends 4,000 hosts by ashmem FD to the
+actual DomainQueries endpoint and reads every newly published SUCCESS value with
+its original Info creator (14.62s). Units pass (491, 0.51s; five excluded by default),
+as does the publisher (1.00s). Runtime shared-writer binding remains part of full
+native bootstrap. Two domain methods (7/8) and full M4 C acceptance remain open
+(#957/#798).
 
 User-state lookup
 applies the original user-existence/cross-user/visibility contract against the

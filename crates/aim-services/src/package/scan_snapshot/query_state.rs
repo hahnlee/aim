@@ -52,6 +52,19 @@ pub struct NativeDomains {
     policies: BTreeMap<String, bool>,
 }
 impl NativeDomains {
+    pub fn collector_policy(
+        &self,
+        name: &str,
+    ) -> Result<crate::package::domain_verification::collector::Policy, String> {
+        Ok(crate::package::domain_verification::collector::Policy {
+            restrict_domains: *self
+                .policies
+                .get(name)
+                .ok_or("missing current domain policy")?,
+            linked_app: self.config.linked_apps.iter().any(|linked| linked == name),
+        })
+    }
+
     pub fn owner(&self) -> &crate::package::domain_verification::owner::Owner {
         &self.boot.owner
     }

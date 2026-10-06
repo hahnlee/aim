@@ -1958,6 +1958,8 @@ impl Service for DomainPermissions {
                 "android.permission.QUERY_ALL_PACKAGES"
                     | "android.permission.UPDATE_DOMAIN_VERIFICATION_USER_SELECTION"
                     | "android.permission.INTERACT_ACROSS_USERS"
+                    | "android.permission.DOMAIN_VERIFICATION_AGENT"
+                    | "android.permission.INTENT_FILTER_VERIFICATION_AGENT"
             )
         ));
         let mut reply = Parcel::new();
@@ -2699,7 +2701,7 @@ fn verify_boot_scan(
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
         let reply = endpoint
-            .transact(api::SET_DOMAIN_VERIFICATION_STATUS, &unsupported, false)
+            .transact(api::SET_DOMAIN_VERIFICATION_USER_SELECTION, &unsupported, false)
             .unwrap();
         assert_eq!(
             reply.reader().read_exception().unwrap().unwrap_err().code,
@@ -3179,6 +3181,36 @@ fn verify_boot_scan(
             assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, current.domains().unwrap().owner().persisted());
         }
         register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
+        {
+            let id = system.capture_package_queries().unwrap().domains().unwrap().owner().package("android").unwrap().id.clone();
+            let before = system.capture_package_queries().unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let invalidations = owner.invalidations.load(Ordering::SeqCst);
+            for (who, identifier, names, state, expected) in [
+                (client, Some("bad"), Some(vec![]), 1, -3),
+                (client, Some(id.as_str()), Some(vec![]), 0, -3),
+                (client, Some(id.as_str()), Some(vec![]), 1, -3),
+                (client, Some(id.as_str()), None, 0, -4),
+                (client, Some("00000000-0000-0000-0000-000000000000"), Some(vec![]), 1, 1),
+                (client, Some(id.as_str()), Some(vec![Some("unknown.example")]), 1, 2),
+                (client, Some(id.as_str()), Some(vec![None]), 1, 2),
+                (foreign_client, Some(id.as_str()), Some(vec![]), 1, -1),
+            ] {
+                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR);
+                request.write_string16(identifier);
+                request.write_i32(if names.is_some() {1} else {0});
+                if let Some(names) = names { request.write_bool(false); request.write_i32(names.len() as i32); for name in names { request.write_string16(name); } }
+                request.write_i32(state);
+                let reply = find(who, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_STATUS, &request, false).unwrap();
+                let result = api::read_set_domain_verification_status_reply(&mut reply.reader()).unwrap();
+                if expected >= 0 { assert_eq!(result.unwrap(), expected); } else { assert_eq!(result.unwrap_err().code, expected); }
+                request.write_i32(99);
+                assert!(find(who, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_STATUS, &request, false).is_err());
+            }
+            assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+        }
         let before_parallel = system.capture_package_queries().unwrap();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);
         let barrier = std::sync::Barrier::new(4);
