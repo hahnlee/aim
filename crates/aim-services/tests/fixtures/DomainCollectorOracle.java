@@ -154,6 +154,16 @@ public final class DomainCollectorOracle {
             catch (android.content.pm.PackageManager.NameNotFoundException expected) {}
             if (connection.writes != 0) throw new AssertionError("URI group update scheduled an unexpected settings write");
             writeUriGroups(directory, i, service, java.util.Arrays.asList(groupHosts));
+            var binderMismatch = new android.os.Bundle();
+            binderMismatch.putBinder("h0.example", new android.os.Binder());
+            service.setUriRelativeFilterGroups("fixture.domains", binderMismatch);
+            if (!service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("h0.example")).keySet().isEmpty()) throw new AssertionError("original Binder mismatch did not remove URI key");
+            if (connection.writes != 0) throw new AssertionError("Binder URI mismatch scheduled persistence");
+            var restoredGroup = new android.os.Bundle();
+            restoredGroup.putParcelableArrayList("h0.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/second")))));
+            service.setUriRelativeFilterGroups("fixture.domains", restoredGroup);
+
+
 
             var hosts = new java.util.TreeSet<String>(); hosts.add("h0.example");
             if (service.setDomainVerificationStatus(java.util.UUID.fromString("00000000-0000-0000-0000-000000000000"), hosts, 1) != 1) throw new AssertionError("invalid domain UUID status differs");

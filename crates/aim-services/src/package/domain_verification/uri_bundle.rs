@@ -3,7 +3,10 @@ use super::uri_parcel::Group;
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 use aim_service_aidl::ReadParcelable;
 
-pub struct Bundle(pub Vec<u8>);
+pub struct Bundle {
+    bytes: Vec<u8>,
+    objects: Vec<u64>,
+}
 pub struct Entry {
     pub key: Option<String>,
     pub kind: i32,
@@ -21,12 +24,16 @@ impl ReadParcelable for Bundle {
         if length < 0 {
             return Err(BAD_VALUE);
         }
-        Ok(Self(reader.since(start).0.to_vec()))
+        let (bytes, objects) = reader.since(start);
+        Ok(Self {
+            bytes: bytes.to_vec(),
+            objects,
+        })
     }
 }
 impl Bundle {
     pub fn entries(&self) -> Result<Vec<Entry>> {
-        let mut reader = Reader::new(&self.0, &[]);
+        let mut reader = Reader::new(&self.bytes, &self.objects);
         let length = reader.read_i32()?;
         if length == 0 {
             return Ok(vec![]);
@@ -70,6 +77,41 @@ impl Bundle {
             crate::package::info::java_hash(entry.key.as_deref().unwrap_or(""))
         });
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_binder_host::parcel::{Binder, Parcel};
+    #[test]
+    fn copied_bundle_rebases_binder_objects_and_retains_the_following_key() {
+        let mut body = Parcel::new();
+        body.write_i32(2);
+        body.write_string16(Some("binder.example"));
+        body.write_i32(15);
+        body.write_binder(Some(Binder::Local(0x1234)));
+        body.write_string16(Some("after.example"));
+        body.write_i32(1);
+        body.write_i32(42);
+        let mut request = Parcel::new();
+        request.write_i32(99);
+        request.write_i32(1);
+        request.write_i32(body.data().len() as i32);
+        request.write_i32(crate::bundle::MAGIC);
+        request.write_raw(body.data(), body.objects());
+        request.write_bool(false);
+        request.write_i32(88);
+        let mut reader = Reader::new(request.data(), request.objects());
+        reader.skip(8).unwrap();
+        let bundle = Bundle::read_from(&mut reader).unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 88);
+        assert_eq!(reader.remaining(), 0);
+        let entries = bundle.entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        for entry in entries {
+            assert!(entry.groups().unwrap().is_none());
+        }
     }
 }
 fn skip_value(reader: &mut Reader<'_>, kind: i32) -> Result<()> {

@@ -1628,8 +1628,15 @@ wrong-type, null/empty list and nullable DTO forms. Full original oracle passes
 filter fields with its own creators (15.45s). A stub putString declaration initially
 failed pinned-image linkage; it now belongs to BaseBundle, as original does.
 All nine domain transaction paths are present, but broad Bundle type handling,
-exact conversion/domain-error replies (#964/#957), service CTS and native startup
-writer binding remain unproven. Full native PMS/facade/CTS/app gates remain open
+exact conversion/domain-error replies (#964/#966), service CTS and native startup
+writer binding remain unproven. Owned lazy Bundles now retain relative Binder object
+offsets alongside bytes (2026-10-07), allowing unrelated IBinder values to decode
+as typed-getter mismatches. A prefixed Bundle unit verifies offset rebasing, a later
+key and call trailer. Original service oracle removes the URI key for Binder input
+without scheduling a write; actual ART sends the Binder plus a nullable URI group
+and confirms removal and the later group's survival (17.15s). Full original oracle
+passes (31.24s, no skips), 497 units pass (0.50s; five excluded by default), and
+production/final host builds pass. Other #966 generic type/error cases remain open. Full native PMS/facade/CTS/app gates remain open
 (#798); original services stay active. Method 8 frontend and full M4 C acceptance remain open (#957/#798). Both methods
 and full M4 C acceptance remain open (#957/#798).
 
