@@ -211,10 +211,13 @@ impl Entry {
             reader.skip(length)?;
             let bytes = reader.since(start).0;
             let mut parcelable = Reader::new(&bytes[..length], &[]);
-            if parcelable.read_string16()?.as_deref()
-                != Some("android.content.UriRelativeFilterGroupParcel")
-            {
-                return Ok(None);
+            match parcelable.read_string16()?.as_deref() {
+                None => {
+                    groups.push(None);
+                    continue;
+                }
+                Some("android.content.UriRelativeFilterGroupParcel") => (),
+                _ => return Ok(None),
             }
             groups.push(Some(Group::read_from(&mut parcelable)?));
         }

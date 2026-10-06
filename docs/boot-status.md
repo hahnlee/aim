@@ -1621,8 +1621,8 @@ and filter DTOs convert without nullable-string substitution. Changes use runtim
 only publication, with no Store write or cache callback; an error after earlier
 keys retains those runtime changes. Native Binder tests confirm null group metadata,
 removal, denied callers, framing rejection, empty/missing-name behavior and unchanged
-file/Store/disk base/invalidation count. Original Bundle inputs cover ten empty,
-wrong-type, null/empty list, nullable DTO and CharSequence forms. Full original oracle passes
+file/Store/disk base/invalidation count. Original Bundle inputs cover twelve empty,
+wrong-type, null/empty list, nullable DTO, CharSequence and null Parcelable-name forms. Full original oracle passes
 (30.21s, no skips), units pass (496, 0.67s; five excluded by default), publisher passes
 (0.96s), and actual original ART invokes the setter then reads action/numeric/null
 filter fields with its own creators (15.45s). A stub putString declaration initially
@@ -1649,8 +1649,15 @@ and filter element. A three-case original constructor oracle compares exact
 messages; actual ART receives the matching Binder NPEs and rereads the unchanged
 URI group after all three failures (15.53s). Full original oracle passes (30.90s,
 no skips), 497 units pass (0.57s; five excluded), and the production build passes
-(3 rebuilt, 39 fresh, 1.3s). Other #966 generic type/error cases and full native
-PMS/facade/CTS/app gates remain open
+(3 rebuilt, 39 fresh, 1.3s). A null Parcelable class name in a URI list now
+retains the null element, matching original creator behavior, and continues
+reading a following normal group. The original oracle verifies both list forms
+and the service's NPE with no group removal or settings write. The added input
+reproduced a native typed-getter mismatch before the fix; full original oracle
+now passes (32.12s, no skips), 497 units pass (0.57s; five excluded), and actual
+ART sends the null-named Parcelable and receives the original NPE while retaining
+the group (15.29s). Production build passes (3 rebuilt, 39 fresh, 1.3s).
+Other #966 generic type/error cases and full native PMS/facade/CTS/app gates remain open
 (#957/#798); original services stay active.
 
 User-state lookup

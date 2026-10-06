@@ -30,8 +30,8 @@ final class UriDtoOracle {
             java.nio.file.Files.write(new java.io.File(directory, "uri-dto.original").toPath(), out.marshall());
             var bundles = android.os.Parcel.obtain();
             try {
-                bundles.writeInt(10);
-                for (int mode = 0; mode < 10; mode++) {
+                bundles.writeInt(12);
+                for (int mode = 0; mode < 12; mode++) {
                     var bundle = new android.os.Bundle();
                     if (mode == 1) bundle.putString("x.example", "wrong type");
                     if (mode == 2) bundle.putParcelableArrayList("x.example", null);
@@ -41,13 +41,18 @@ final class UriDtoOracle {
                         if (mode == 5) {var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 99; group.filters = new java.util.ArrayList<>(); var filter = new android.content.UriRelativeFilterParcel(); filter.filter = null; group.filters.add(filter); groups.add(group);}
                         bundle.putParcelableArrayList("x.example", groups);
                     }
-                    if (mode >= 6) {
+                    if (mode >= 6 && mode < 10) {
                         bundle = styledBundle("x.example", mode);
                     }
+                    if (mode >= 10) bundle = nullNamedBundle("x.example", mode == 11);
                     var wire = android.os.Parcel.obtain();
                     try {
                         bundle.writeToParcel(wire, 0); bundles.writeInt(mode); bundles.writeByteArray(wire.marshall());
-                        if (mode >= 6 && bundle.getParcelableArrayList("x.example", android.content.UriRelativeFilterGroupParcel.class) != null) throw new AssertionError("styled URI value accepted as groups");
+                        if (mode >= 6 && mode < 10 && bundle.getParcelableArrayList("x.example", android.content.UriRelativeFilterGroupParcel.class) != null) throw new AssertionError("styled URI value accepted as groups");
+                        if (mode >= 10) {
+                            var groups = bundle.getParcelableArrayList("x.example", android.content.UriRelativeFilterGroupParcel.class);
+                            if (groups == null || groups.size() != mode - 9 || groups.get(0) != null || (mode == 11 && groups.get(1).action != 99)) throw new AssertionError("null Parcelable name/list continuation differs");
+                        }
                     }
                     finally {wire.recycle();}
                 }
@@ -85,6 +90,23 @@ final class UriDtoOracle {
                 }
             java.nio.file.Files.write(new java.io.File(directory, "uri-null-match.original").toPath(), out.marshall());
         } finally { out.recycle(); }
+    }
+    static android.os.Bundle nullNamedBundle(String key, boolean followingGroup) {
+        var list = android.os.Parcel.obtain(); var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain(); var value = android.os.Parcel.obtain();
+        try {
+            list.writeInt(followingGroup ? 2 : 1); list.writeInt(4); list.writeInt(4); list.writeString(null);
+            if (followingGroup) {
+                value.writeString("android.content.UriRelativeFilterGroupParcel");
+                var group = new android.content.UriRelativeFilterGroupParcel(); group.action = 99; group.filters = new java.util.ArrayList<>(); group.writeToParcel(value, 0);
+                list.writeInt(4); list.writeInt(value.marshall().length); list.appendFrom(value, 0, value.marshall().length);
+            }
+            int length = list.marshall().length;
+            body.writeInt(1); body.writeString(key); body.writeInt(11); body.writeInt(length); body.appendFrom(list, 0, length);
+            length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42); wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
+            var result = android.os.Bundle.CREATOR.createFromParcel(wire);
+            if (wire.dataAvail() != 0) throw new AssertionError("null-named Bundle framing differs");
+            return result;
+        } finally {list.recycle(); body.recycle(); wire.recycle(); value.recycle();}
     }
     static android.os.Bundle styledBundle(String key, int mode) {
         var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();

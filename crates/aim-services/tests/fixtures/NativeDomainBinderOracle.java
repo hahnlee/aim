@@ -178,7 +178,7 @@ public final class NativeDomainBinderOracle {
             "Attempt to invoke interface method 'int java.util.List.size()' on a null object reference",
             "Attempt to read from field 'int android.content.UriRelativeFilterParcel.uriPart' on a null object reference in method 'void android.content.UriRelativeFilter.<init>(android.content.UriRelativeFilterParcel)'"
         };
-        for (int mode = 0; mode < 3; mode++) {
+        for (int mode = 0; mode < 4; mode++) {
             data = android.os.Parcel.obtain(); reply = android.os.Parcel.obtain();
             try {
                 var bundle = new android.os.Bundle(); var groups = new java.util.ArrayList<android.content.UriRelativeFilterGroupParcel>();
@@ -186,10 +186,11 @@ public final class NativeDomainBinderOracle {
                 if (mode == 0) groups.add(null);
                 else {if (mode == 2) {group.filters = new java.util.ArrayList<>(); group.filters.add(null);} groups.add(group);}
                 bundle.putParcelableArrayList("runtime.example", groups);
+                if (mode == 3) bundle = nullNamedBundle("runtime.example");
                 data.writeInterfaceToken(args[1]); data.writeString("android"); data.writeTypedObject(bundle, 0);
                 if (!service.transact(Integer.parseInt(args[9]), data, reply, 0)) throw new AssertionError("URI conversion error unhandled");
                 try {reply.readException(); throw new AssertionError("null URI conversion accepted");}
-                catch (NullPointerException error) {if (!conversionErrors[mode].equals(error.getMessage())) throw new AssertionError("URI conversion message differs: " + error.getMessage());}
+                catch (NullPointerException error) {if (!conversionErrors[mode == 3 ? 0 : mode].equals(error.getMessage())) throw new AssertionError("URI conversion message differs: " + error.getMessage());}
                 if (reply.dataAvail() != 0) throw new AssertionError("URI conversion error framing differs");
             } finally {data.recycle(); reply.recycle();}
         }
@@ -211,5 +212,15 @@ public final class NativeDomainBinderOracle {
         System.out.println("NATIVE_DOMAIN_BINDER 4000");
     }
     private static boolean alreadyReadInlineSet;
+    private static android.os.Bundle nullNamedBundle(String key) {
+        var body = android.os.Parcel.obtain(); var wire = android.os.Parcel.obtain();
+        try {
+            body.writeInt(1); body.writeString(key); body.writeInt(11); body.writeInt(16);
+            body.writeInt(1); body.writeInt(4); body.writeInt(4); body.writeString(null);
+            int length = body.marshall().length; wire.writeInt(length); wire.writeInt(0x4c444e42);
+            wire.appendFrom(body, 0, length); wire.writeBoolean(false); wire.setDataPosition(0);
+            return android.os.Bundle.CREATOR.createFromParcel(wire);
+        } finally {body.recycle(); wire.recycle();}
+    }
     private NativeDomainBinderOracle() {}
 }

@@ -166,6 +166,11 @@ public final class DomainCollectorOracle {
             var restoredGroup = new android.os.Bundle();
             restoredGroup.putParcelableArrayList("h0.example", new java.util.ArrayList<>(android.content.UriRelativeFilterGroup.groupsToParcels(java.util.List.of(uriGroup(0, "/second")))));
             service.setUriRelativeFilterGroups("fixture.domains", restoredGroup);
+            for (boolean followingGroup : new boolean[] {false, true}) {
+                try {service.setUriRelativeFilterGroups("fixture.domains", UriDtoOracle.nullNamedBundle("h0.example", followingGroup)); throw new AssertionError("null Parcelable name accepted as URI group");}
+                catch (NullPointerException expected) {}
+                if (service.getUriRelativeFilterGroups("fixture.domains", java.util.List.of("h0.example")).keySet().isEmpty() || connection.writes != 0) throw new AssertionError("null Parcelable name changed URI key or persistence");
+            }
 
 
 

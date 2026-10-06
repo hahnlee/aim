@@ -538,6 +538,12 @@ pub fn verify_uri_dto(directory: &Path) {
                 3 => assert!(groups.unwrap().is_empty()),
                 4 => assert!(groups.unwrap()[0].is_none()),
                 5 => {let groups = groups.unwrap(); assert_eq!(groups[0].as_ref().unwrap().action, 99); assert_eq!(groups[0].as_ref().unwrap().filters.as_ref().unwrap()[0].as_ref().unwrap().filter, None);}
+                10 | 11 => {
+                    let groups = groups.unwrap();
+                    assert_eq!(groups.len(), (mode - 9) as usize);
+                    assert!(groups[0].is_none());
+                    if mode == 11 {assert_eq!(groups[1].as_ref().unwrap().action, 99);}
+                }
                 _ => unreachable!(),
             }
         }
