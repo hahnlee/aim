@@ -646,6 +646,7 @@ fn native_package_parcels_match_original_read_write() {
         ])], shared_users: vec![("group".into(), vec![])],
     };
     fs::write(directory.join("native-runtime-permissions.xml"), runtime.serialize().unwrap()).unwrap();
+    fs::write(directory.join("duplicate-runtime-permissions.xml"), b"<runtime-permissions><package name='BB'><permission name='old' granted='true' flags='1'/></package><package name='Aa'/><package name='z'/><package name='BB'><permission name='last' granted='false' flags='2'/></package><shared-user name='group'><permission name='old' granted='true' flags='1'/></shared-user><shared-user name='group'/></runtime-permissions>").unwrap();
     let boot_version_expected = common::boot_version_events::export(&directory);
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
@@ -1764,6 +1765,9 @@ fn native_package_parcels_match_original_read_write() {
         &aim_android_xml::read(&fs::read(directory.join("native-runtime-permissions.xml")).unwrap()).unwrap()
     ).unwrap();
     assert_eq!(original_runtime, native_runtime);
+    let read_runtime = |name| aim_services::package::permissions::RuntimePermissions::parse(
+        &aim_android_xml::read(&fs::read(directory.join(name)).unwrap()).unwrap()).unwrap();
+    assert_eq!(read_runtime("original-duplicate-runtime-permissions.xml"), read_runtime("duplicate-runtime-permissions.xml"));
     eprintln!("Original nullable factory write status: {}", fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap());
     assert_eq!(
         String::from_utf8(original.stdout).unwrap(),

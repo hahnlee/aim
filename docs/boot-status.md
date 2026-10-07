@@ -1148,11 +1148,15 @@ reads native XML, invokes the actual original writer and compares the resulting
 state through original getters and native parsing. This codec does not yet supply
 live version/fingerprint or synchronized permission-owner state, nor atomic
 main/backup/reserve persistence; that whole owner is tracked in #981. The full
-original ART oracle passes without skips (73.30s); 544 service units pass
+original ART oracle passes without skips (61.60s); 545 service units pass
 (6 excluded, 0.52s), including escaping and negative-flag write/read behavior.
-The existing reader still needs original ArrayMap duplicate replacement and
-nullable owner/name representation (#982/#983). Host build passes
-(3 rebuilt/10 fresh, 1.7s).
+The runtime reader now applies ArrayMap duplicate replacement: package/shared
+rows keep the last value, sort by signed Java hash and retain collision insertion
+slots (#982). A direct original fixture checks repeated BB/Aa collision keys,
+a later z key, replacement permission contents and an empty final shared row;
+original reserialization and native parsing agree.
+Nullable owner/name representation remains #983. Host build passes
+(3 rebuilt/10 fresh, 17.6s).
 System.commit_package_list_from_scan now generates rows from the immutable native
 scan/query capture, in signed Java-hash setting order. Unloaded settings and APEX
 are omitted; system-user data paths come from setting volume/storage and captured

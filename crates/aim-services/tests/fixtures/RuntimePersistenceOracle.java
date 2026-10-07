@@ -18,6 +18,11 @@ public final class RuntimePersistenceOracle {
         persistence.writeForUser(original,user);
         check(persistence.readForUser(user));
         Files.write(new File(directory,"original-runtime-permissions.xml").toPath(),Files.readAllBytes(file.toPath()));
+        Files.write(file.toPath(),Files.readAllBytes(new File(directory,"duplicate-runtime-permissions.xml").toPath()));
+        var duplicate=persistence.readForUser(user);
+        if(!new java.util.ArrayList<>(duplicate.getPackagePermissions().keySet()).equals(List.of("z","BB","Aa")) || duplicate.getPackagePermissions().get("BB").size()!=1 || !"last".equals(duplicate.getPackagePermissions().get("BB").get(0).getName()) || duplicate.getPackagePermissions().get("BB").get(0).getFlags()!=2 || !duplicate.getSharedUserPermissions().get("group").isEmpty())throw new AssertionError("runtime duplicate map replacement/order differs");
+        persistence.writeForUser(duplicate,user);
+        Files.write(new File(directory,"original-duplicate-runtime-permissions.xml").toPath(),Files.readAllBytes(file.toPath()));
     }
     private static void check(RuntimePermissionsState state) {
         if(state==null || state.getVersion()!=7 || !"finger<&\"\t\n\r".equals(state.getFingerprint()))throw new AssertionError("runtime version/fingerprint differs");

@@ -75,6 +75,22 @@ mod tests {
     use crate::package::permissions::RuntimePermission;
 
     #[test]
+    fn runtime_owner_maps_replace_duplicates_and_keep_hash_collision_slots() {
+        let bytes = b"<runtime-permissions><package name='BB'><permission name='old' granted='true' flags='1'/></package><package name='Aa'/><package name='z'/><package name='BB'><permission name='last' granted='false' flags='2'/></package><shared-user name='group'><permission name='old' granted='true' flags='1'/></shared-user><shared-user name='group'/></runtime-permissions>";
+        let state = RuntimePermissions::parse(&aim_android_xml::read(bytes).unwrap()).unwrap();
+        assert_eq!(
+            state
+                .packages
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "BB", "Aa"]
+        );
+        assert_eq!(state.packages[1].1[0].name, "last");
+        assert_eq!(state.shared_users, [("group".into(), vec![])]);
+    }
+
+    #[test]
     fn runtime_writer_retains_order_empty_states_and_revokes_one_time_grants() {
         let source = RuntimePermissions {
             version: -1,

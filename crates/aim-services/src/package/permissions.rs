@@ -68,8 +68,15 @@ impl RuntimePermissions {
                     })
                 })
                 .collect::<Result<_, String>>()?;
-            list.push((string(e, "name").unwrap_or_default(), permissions));
+            let name = string(e, "name").unwrap_or_default();
+            if let Some((_, value)) = list.iter_mut().find(|(key, _)| *key == name) {
+                *value = permissions;
+            } else {
+                list.push((name, permissions));
+            }
         }
+        r.packages.sort_by_key(|(name, _)| super::info::java_hash(name));
+        r.shared_users.sort_by_key(|(name, _)| super::info::java_hash(name));
         Ok(r)
     }
 }
