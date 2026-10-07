@@ -304,11 +304,13 @@ impl Service for Owner {
                 for user in users {
                     payload.write_i32(user);
                     payload.write_bool(user == 10);
-                    payload.write_i32(1);
-                    payload.write_string16(None);
-                    payload.write_bool(true);
-                    payload.write_bool(false);
-                    payload.write_i32(self.gid);
+                    payload.write_i32(if mode == 5 { 0 } else { 1 });
+                    if mode != 5 {
+                        payload.write_string16((mode == 4).then_some("live-runtime"));
+                        payload.write_bool(true);
+                        payload.write_bool(mode == 4);
+                        payload.write_i32(if mode == 4 { 1 << 16 } else { self.gid });
+                    }
                 }
                 if mode == 2 {
                     payload.write_i32(99);
@@ -1248,6 +1250,7 @@ fn exercise_bootstrap_on(
     let capture = crate::package::scan_snapshot::query_state::Capture::new(published.clone(), resolved.clone()).unwrap();
     let rows = crate::package::list::metadata_from_capture(&capture).unwrap();
     assert!(rows.is_empty(), "unloaded settings must not produce list rows");
+
     assert_eq!(
         resolved.packages[&("fixture".into(), false)].users[&0].gids,
         [3003, 3003]
@@ -1260,6 +1263,18 @@ fn exercise_bootstrap_on(
         )
     );
     assert_eq!(*owner.calls.lock().unwrap(), [10100, 1010100]);
+    owner.legacy_reply.store(5,Ordering::SeqCst);
+    let empty_fixed = old.runtime_permissions(&capture,0,7,None).unwrap();
+    assert_eq!(empty_fixed.packages,[(Some("fixture".into()),vec![])]);
+    assert!(empty_fixed.shared_users.iter().all(|(_,permissions)|permissions.is_empty()));
+    assert!(old.runtime_permissions(&capture,99,7,None).is_err());
+    let mut not_fixed = published.owner().clone();
+    not_fixed.capture_install_permissions_fixed(BTreeMap::from([(("fixture".into(),false),false)])).unwrap();
+    let not_fixed = crate::package::scan_snapshot::Store::new(not_fixed,usage()).unwrap().capture();
+    let not_fixed_context = old.resolve_query_context(not_fixed.owner(),query_context(&not_fixed)).unwrap();
+    let not_fixed = crate::package::scan_snapshot::query_state::Capture::new(not_fixed,not_fixed_context).unwrap();
+    assert!(old.runtime_permissions(&not_fixed,0,7,None).unwrap().packages.is_empty());
+    owner.legacy_reply.store(0,Ordering::SeqCst);
     assert_eq!(
         resolved.packages[&("fixture".into(), false)].installed_permissions,
         ["fixture.installed"]
@@ -2722,6 +2737,27 @@ fn verify_boot_scan(
     assert!(list_store.state().list.iter().all(|row| row.gids == [3003, 3003, 3003, 3003]));
     let reopened = crate::package::owner::Store::open(&list_data, &[0, 10]).unwrap().unwrap();
     assert_eq!(reopened.state().list, list_store.state().list);
+    list_store.claim_runtime_permissions(0).unwrap();
+    let runtime_file = list_data.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml");
+    let runtime_inode = aim_storage::guest_inode::GuestInode { uid:Some(1000),gid:Some(1000),mode:Some(0o600) };
+    assert!(!system.commit_runtime_permissions_from_scan(&foreign,&mut list_store,&query,0,7,Some("current".into()),runtime_inode).unwrap_err().committed);
+    for mode in [1,2,3] {
+        owner.legacy_reply.store(mode,Ordering::SeqCst);
+        assert!(!system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,7,Some("current".into()),runtime_inode).unwrap_err().committed);
+        assert!(!runtime_file.exists());
+    }
+    owner.legacy_reply.store(4,Ordering::SeqCst);
+    let live = bridge.runtime_permissions(&query,0,7,Some("current".into())).unwrap();
+    assert!(!live.shared_users.is_empty());
+    assert!(live.shared_users.iter().all(|(_,p)|p[0].granted));
+    assert!(live.packages.iter().all(|(name,_)|query.state().packages[name.as_ref().unwrap()].shared_user.is_none()));
+    system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,7,Some("current".into()),runtime_inode).unwrap();
+    let saved = list_store.state().users[0].1.runtime_permissions.as_ref().unwrap();
+    assert_eq!(saved.version,7); assert_eq!(saved.fingerprint.as_deref(),Some("current"));
+    assert!(saved.shared_users.iter().all(|(_,p)|!p[0].granted && p[0].flags == 1 << 16));
+    let reopened = crate::package::owner::Store::open(&list_data,&[0,10]).unwrap().unwrap();
+    assert_eq!(reopened.state().users[0].1.runtime_permissions.as_ref(),Some(saved));
+    owner.legacy_reply.store(0,Ordering::SeqCst);
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
     assert_eq!(

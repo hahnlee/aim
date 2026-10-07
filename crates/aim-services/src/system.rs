@@ -1221,6 +1221,29 @@ impl System {
         })
     }
 
+    /// Persist live UID permission projections under the retained boot bridge.
+    /// Metadata is supplied by the runtime persistence owner, not saved grants.
+    pub fn commit_runtime_permissions_from_scan(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &mut crate::package::owner::Store,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        user: u32,
+        version: i32,
+        fingerprint: Option<String>,
+        inode: aim_storage::guest_inode::GuestInode,
+    ) -> std::result::Result<(), crate::package::owner::WriteError> {
+        use crate::package::owner::WriteError;
+        let before = |message| WriteError { committed:false,message };
+        self.check_package_bootstrap(bridge).map_err(|error|before(format!("runtime bootstrap owner: {error:?}")))?;
+        store.validate_committed_scan(capture.scan().owner())?;
+        let id = i32::try_from(user).map_err(|error|before(format!("runtime user: {error}")))?;
+        let state = bridge.runtime_permissions(capture,id,version,fingerprint).map_err(before)?;
+        self.check_package_bootstrap(bridge).map_err(|error|before(format!("runtime bootstrap owner before commit: {error:?}")))?;
+        store.commit_runtime_permissions(user,&state,inode)?;
+        self.check_package_bootstrap(bridge).map_err(|error|WriteError { committed:true,message:format!("runtime bootstrap owner after commit: {error:?}") })
+    }
+
     /// Initialize captured users under the retained boot owner and pinned policy.
     pub fn commit_initial_package_restrictions(
         &self,

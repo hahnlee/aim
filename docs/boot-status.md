@@ -1155,11 +1155,26 @@ owned temporary file and retains the recovered old main; a reserve failure
 publishes the committed disk projection and reports committed=true. Retained
 claims recognize native outputs for retry and refuse external byte/inode changes.
 The original runtime oracle now consumes this native atomic writer's main output
-and checks identical reserve bytes before original reading. Production owner
-metadata, directory creation context, fs-verity policy and whole boot invocation
-still require #981 integration. The full
-original ART oracle passes without skips (63.77s); 548 service units pass
-(6 excluded, 0.56s), including escaping and negative-flag write/read behavior.
+and checks identical reserve bytes before original reading.
+Bridge.runtime_permissions now builds package/shared rows from the native capture
+roles, querying each current UID permission state through the retained original
+permission service. It does not read saved migration grants. Non-shared empty
+package states are included only when install permissions are fixed; every shared
+owner is included. System.commit_runtime_permissions_from_scan checks the exact
+committed scan, validates the bootstrap before capture and immediately before/after
+atomic persistence, and passes explicit version/fingerprint and inode metadata.
+Malformed/null producer records abort before file creation; persisted one-time
+grants are false while the live producer projection remains true. Per-UID queries
+are not yet one coherent permission-service generation. Production metadata and
+version/fingerprint authority, producer-wide synchronization, directory creation
+context, fs-verity policy and whole boot invocation still require #981 integration.
+The retained-bootstrap/framework-res scan passes with controlled live permission
+replies (1.15s), including malformed/null response refusal, role-aware projection,
+one-time disk grants and native reopen. 548 service units pass (6 excluded, 0.55s),
+including fixed-empty versus unfixed-empty package rows and unknown-user rejection;
+host build passes (3 rebuilt/10 fresh, 17.8s). The original ART codec/atomic oracle
+passed on the preceding revision without skips (63.77s) and was not rerun for this
+new producer projection.
 The runtime reader now applies ArrayMap duplicate replacement: package/shared
 rows keep the last value, sort by signed Java hash and retain collision insertion
 slots (#982). A direct original fixture checks repeated BB/Aa collision keys,

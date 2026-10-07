@@ -13,6 +13,7 @@ use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 mod apex;
 mod query;
+mod runtime;
 mod scan;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
 pub use query::QueryContextError;
