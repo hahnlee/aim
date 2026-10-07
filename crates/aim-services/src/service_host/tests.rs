@@ -984,6 +984,13 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert!(matches!(error.events.last(), Some(Event::FatalInput { message, .. }) if message == "keyset public-key owner is absent: 9"));
     assert_eq!(settings.key_sets.reference_counts.as_ref().unwrap().get(&2), Some(&1));
     assert_eq!(std::fs::read(&path).unwrap(), retained);
+    let mut seeded = Settings::default();
+    let mut seeded_ids = crate::package::owner::app_ids::AppIds::default();
+    let rejected = system.initialize_package_shared_users(bridge, &SystemConfig::default(), &mut seeded, &mut seeded_ids, &mut MissingGlobal).unwrap();
+    assert!(rejected.is_empty());
+    assert_eq!(seeded.shared_users.len(), 9);
+    assert!(matches!(seeded_ids.get(1000), Some(crate::package::owner::app_ids::Owner::SharedUser(name)) if name == "android.uid.system"));
+    assert!(system.initialize_package_shared_users(bridge, &SystemConfig::default(), &mut seeded, &mut seeded_ids, &mut MissingGlobal).is_err());
     // Restore the original fixture for the identity/replacement checks below.
     std::fs::write(&path, bytes).unwrap();
     let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {

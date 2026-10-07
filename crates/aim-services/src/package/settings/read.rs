@@ -39,6 +39,37 @@ pub trait ReadOwners {
 }
 
 impl Settings {
+    /// PMS creates its platform/OEM shared UID owners before any settings read.
+    /// Keep constructor state on the caller so an owner failure retains effects.
+    pub fn initialize_shared_bootstrap(
+        &mut self,
+        boot: &crate::package::owner::shared_users::Bootstrap,
+        ids: &mut AppIds,
+        owners: &mut impl ReadOwners,
+    ) -> Result<(), ReadError> {
+        if !self.packages.is_empty() || !self.shared_users.is_empty() || *ids != AppIds::default() {
+            return Err(ReadError::Owner(
+                "shared UID initialization requires a fresh settings owner".into(),
+            ));
+        }
+        let groups = boot.ordered_shared_users().map_err(ReadError::Owner)?;
+        for (name, source) in groups {
+            ids.register_existing(
+                source.app_id,
+                crate::package::owner::app_ids::Owner::SharedUser(name.into()),
+            )
+            .map_err(|error| ReadError::Owner(format!("shared UID initialization: {error:?}")))?;
+            self.shared_users.push(SharedUser {
+                name: name.into(),
+                app_id: source.app_id,
+                flags: source.flags,
+                signatures: source.signatures.clone(),
+            });
+            owners.shared_registered(self.shared_users.last().unwrap(), true)?;
+        }
+        Ok(())
+    }
+
     /// Each recursive recovery attempt resets transient tables while retaining
     /// already registered Settings and UID owners. Pending binding and related
     /// user files follow this read; their inputs remain available in `attempt`.

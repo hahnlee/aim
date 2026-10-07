@@ -1085,6 +1085,23 @@ strings and reject every truncation/trailing value. Initial fixture failures wer
 package-private generated transaction constants, missing bridge classpath and
 UID-0 security rejection; the raw transaction helper now lives in the AIDL package
 and runs through the existing system-UID policy oracle, without weakening the gate.
+System.initialize_package_shared_users now connects constructor shared UID
+inputs to fresh native Settings, AppIds and permission-owner hooks under the
+retained early bridge. Settings.initialize_shared_bootstrap consumes the existing
+platform/OEM Bootstrap owner in its original map order, registers each UID and
+constructs its shared setting/legacy state before XML reads. It rejects reuse of
+non-fresh package/shared/UID tables, returns OEM rejection records through System
+and preserves earlier constructor effects if an owner later fails. Native metadata
+retains seed flags on repeated shared-user reads. This initializes the read
+frontend; full group/member/runtime lifecycle and default PMS construction remain
+#803/#914/#798. Eight text/ABX seeded-read cases compare actual original
+addSharedUserLPw/readSettingsLPw flags/private flags, seeded UID identity and
+LegacyPermissionState byte frames. They cover untouched seeds, retained system
+flags despite XML system=false, package permissions before an XML group exists,
+conflicting saved IDs and a permitted vendor UID. Fresh-table reuse is rejected;
+System units validate retained-bridge initialization and its repeated-call error.
+The full original ART oracle passes without skips (68.43s); 534 units pass
+(5 excluded, 0.51s), and runtime build passes (3 rebuilt/39 fresh, 14.4s).
 System.recover_owned_package_settings now connects recovery to the native
 Settings record dispatcher. Package/shared UID registration and keyset records
 share one AppIds owner and one PackageReadAttempt. Every file read resets
@@ -1107,18 +1124,18 @@ counts/repeated-read handle lifetime and other global records remain incomplete
 binding and related user restoration are not yet a complete boot lifecycle.
 The boot frontend agrees with the actual-original modern domain persistence
 (333), shared UID (238) and keyset (162) projections; the full original ART
-oracle passes without skips (58.79s). Retained-bridge units exercise corrupt-file retry with registered UID
+oracle passes without skips (68.43s). Retained-bridge units exercise corrupt-file retry with registered UID
 effects retained, missing child/global owners, fatal public-key input, absent files
 and stale bridges.
 Full original-name native PMS construction, remaining frontend/group/user/
 permission/global owners and SystemServer orchestration remain #914/#912/#798.
 17 XML tests passed on the preceding revision. The current full original ART
-oracle passes without skips (58.79s), preserving eight boot version cases and
+oracle passes without skips (68.43s), preserving eight boot version cases and
 earlier domain/verifier/package/shared/keyset/permission checks. Preceding original
 API/image/template build passed (9 rebuilt/33 fresh, 85.7s), including the new
 compile-only original Settings install-permission declaration. Final host build
-is fresh (0 rebuilt/13 fresh, 0.2s); 534 service units pass (5 excluded, 0.50s).
-The retained-owner framework-res scan passes (1.21s), including owned recovery,
+is fresh (0 rebuilt/13 fresh, 0.3s); 534 service units pass (5 excluded, 0.51s).
+The retained-owner framework-res scan passes (1.16s), including owned recovery,
 domain and fatal keyset mapping checks. Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
@@ -2541,7 +2558,7 @@ false install-fixed markers, own permission bytes and active UID-owner bytes.
 They cover prior/later shared targets, a non-shared UID target, active/factory name
 separation, duplicate factory replacement, negative IDs, ignored signature children
 and partial group mutations retained without failed factory publication. The
-complete original ART oracle passes without skips (58.79s); 534 units pass
+complete original ART oracle passes without skips (68.43s); 534 units pass
 (5 excluded, 0.50s). AST imports and the stream now share the same factory publication owner: later
 same-name records replace the old value without moving unrelated records (#976).
 The text/ABX unit checks replacement path/version/appId/private flags and stable
@@ -2550,9 +2567,9 @@ factory records after excluding constructor domain/shared-ID fields; those
 runtime IDs are independently compared against actual original Settings.
 The native Store opens a disposable duplicate-factory settings file as one last
 version and preserves its original bytes. 534 service units pass (5 excluded,
-0.50s); the full original ART oracle passes without skips (58.79s), including
+0.50s); the full original ART oracle passes without skips (68.43s), including
 factory metadata/permission parity and successful AST/stream record comparisons.
-Runtime build passes (3 rebuilt/39 fresh, 1.1s); final host is fresh (0.2s).
+Runtime build passes (3 rebuilt/39 fresh, 14.4s); final host is fresh (0.2s).
 Pending fixed markers now compare through actual readLPw attachment as well as
 readSettingsLPw. The native probe mirrors readLPw's second file read before
 binding, with no user-file effects; the initial one-read probe diverged when a
@@ -2571,16 +2588,16 @@ nested items/unknown subtree skipping, partial permission retention after
 file-error retry, repeated retained packages, rejected UID registration and
 constructor state retained after invalid page-size input, and the same pending
 package recreated from reserve after a corrupt main read. The complete original
-ART oracle passes without skips (58.79s);
-534 service units pass (5 excluded, 0.50s). Current runtime build passes
-(3 rebuilt/39 fresh, 1.1s); the prior image/API/template build passed (85.7s).
+ART oracle passes without skips (68.43s);
+534 service units pass (5 excluded, 0.51s). Current runtime build passes
+(3 rebuilt/39 fresh, 14.4s); the prior image/API/template build passed (85.7s).
 Eight text/ABX install cases now compare the native event reader with the actual
 original Settings method; the four legacy-restoration graph cases use that same
 original install method. Eight runtime migration cases still use the ported loop.
 A native truncated-subtree unit retains earlier grants for users 10 and 0, nested
 items and the missing marker while excluding an unknown subtree. The first Java
 fixture compile failed on duplicate helper signatures; the redundant install loop
-was removed. Full original ART comparison passes without skips (58.79s), 532
+was removed. Full original ART comparison passes without skips (68.43s), 532
 service units pass (5 excluded, 0.50s), and the original API check/full image and
 first-boot template build pass (9 rebuilt/33 fresh, 85.7s).
 Its explicit active/factory/shared owner graph can now be assigned to SigningScan

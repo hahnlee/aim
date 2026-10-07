@@ -1137,6 +1137,25 @@ impl System {
         Ok(recovered)
     }
 
+    /// Initialize constructor shared identities under the retained early bridge.
+    /// Keep partial settings/UID/permission effects if a later owner fails.
+    pub fn initialize_package_shared_users(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        config: &crate::package::system_config::SystemConfig,
+        settings: &mut crate::package::settings::Settings,
+        ids: &mut crate::package::owner::app_ids::AppIds,
+        owners: &mut impl crate::package::settings::ReadOwners,
+    ) -> Result<Vec<crate::package::owner::shared_users::Rejected>> {
+        self.check_package_bootstrap(bridge)?;
+        let boot = crate::package::owner::shared_users::Bootstrap::new(config);
+        settings.initialize_shared_bootstrap(&boot, ids, owners).map_err(|error| {
+            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+        })?;
+        self.check_package_bootstrap(bridge)?;
+        Ok(boot.rejected)
+    }
+
     /// Recover through the native record dispatcher, sharing registration and
     /// per-attempt state across package, shared UID and keyset containers.
     pub fn recover_owned_package_settings(

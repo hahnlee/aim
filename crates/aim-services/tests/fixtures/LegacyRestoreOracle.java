@@ -40,6 +40,7 @@ public final class LegacyRestoreOracle {
         verifyInstallBindings(directory);
         verifyFactoryEvents(directory);
         verifyNullableFactoryNames(directory);
+        verifySharedSeedEvents(directory);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
@@ -162,6 +163,25 @@ public final class LegacyRestoreOracle {
         } catch(NullPointerException failure) { writeStatus="null-input"; }
         if(!"null-input".equals(writeStatus)) throw new AssertionError("original null factory serialization assumption differs");
         Files.write(new File(directory,"nullable-factory-original.write-status").toPath(),writeStatus.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+    private static void verifySharedSeedEvents(File directory) throws Exception {
+        String[] names={"android.uid.system","android.uid.phone","android.uid.log","android.uid.nfc","android.uid.bluetooth","android.uid.shell","android.uid.se","android.uid.networkstack","android.uid.uwb","android.uid.vendor.fixture"};
+        int[] ids={1000,1001,1007,1027,1002,2000,1031,1073,1083,2901};
+        for(int index=0;;index++) {
+            var input=new File(directory,"shared-seed-event-"+index+".xml");if(!input.exists())break;
+            var data=new File(directory,"shared-seed-original-"+index);var system=new File(data,"system");system.mkdirs();
+            Files.write(new File(system,"packages.xml").toPath(),Files.readAllBytes(input.toPath()));
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());
+            for(int at=0;at<ids.length;at++)settings.addSharedUserLPw(names[at],ids[at],1,8);
+            var users=new java.util.ArrayList<android.content.pm.UserInfo>();for(int id:new int[]{10,0}){var user=new android.content.pm.UserInfo();user.id=id;users.add(user);}
+            settings.readSettingsLPw(null,users,new android.util.ArrayMap<>());
+            for(int at=0;at<ids.length;at++) {
+                var owner=settings.getSettingLPr(ids[at]);String expected=new String(Files.readAllBytes(new File(directory,"shared-seed-event-"+index+"-"+ids[at]+".metadata").toPath()),java.nio.charset.StandardCharsets.UTF_8);
+                if(owner==null || !(names[at]+"|"+owner.getFlags()).equals(expected) || owner.getPrivateFlags()!=8)throw new AssertionError("original seed identity/flags differ "+index+":"+ids[at]);
+                byte[] actual=PackageLegacyPermissions.capture(ids[at],new int[]{10,0},owner.getLegacyPermissionState());
+                if(!java.util.Arrays.equals(actual,Files.readAllBytes(new File(directory,"shared-seed-event-"+index+"-"+ids[at]+".permissions").toPath())))throw new AssertionError("original seeded permission state differs "+index+":"+ids[at]);
+            }
+        }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {
         byte[] expected = Files.readAllBytes(new File(root, stem + ".input").toPath());
