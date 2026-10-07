@@ -174,6 +174,7 @@ public final class DisplacedSnapshotOracle {
         if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("initial refresh differs");
         verifyLocal(first);
         verifyVersionPage(first);
+        verifyComputerLifetime(first, next, visibility);
         verifyPublishedVersion(first, next, visibility);
         var local = new dev.aim.server.PackageLocal(store, (v, p, d, u, a, old, se, f) -> {
             throw new java.io.IOException("unused SDK owner in version fixture");
@@ -272,6 +273,39 @@ public final class DisplacedSnapshotOracle {
             catch (IllegalStateException expected) {}
         }
         permissions.mode = 0;
+    }
+    private static void verifyComputerLifetime(File first, File next,
+            dev.aim.server.PackageSnapshots.Owner visibility) throws Exception {
+        Owner[] source = { new Owner(first) };
+        var store = new dev.aim.server.PackageSnapshots.Store(
+                () -> dev.aim.server.IPackageScanSnapshot.Stub.asInterface(source[0]), visibility, true);
+        long version = store.refresh();
+        var retained = source[0].computer;
+        var oldStates = store.unfiltered();
+        var computer = store.computer();
+        try {
+            source[0] = new Owner(next);
+            store.refresh();
+            if (retained.closes != 0 || computer.getVersion() != version)
+                throw new AssertionError("publication closed retained query graph");
+            if (computer.getApplicationInfo(ORIGINAL, 0x1234567800000001L, 1010001, 10).uid != version
+                    || computer.getPackageInfo(ORIGINAL, 0x1234567800000001L, 1010001, 10).applicationInfo.uid != version
+                    || !computer.filterAppAccess(ORIGINAL, 1010001, 10))
+                throw new AssertionError("internal metadata query used current graph");
+            store.close();
+            if (source[0].computer.closes != 1 || retained.closes != 0)
+                throw new AssertionError("store close escaped capture ownership");
+            computer.close();
+            if (retained.closes != 0) throw new AssertionError("query close invalidated retained state scope");
+            oldStates.close();
+            if (retained.closes != 1) throw new AssertionError("last scope leaked query endpoint");
+            try { computer.getVersion(); throw new AssertionError("closed computer adapter accepted"); }
+            catch (IllegalStateException expected) {}
+            try { store.computer(); throw new AssertionError("closed store accepted query scope"); }
+            catch (IllegalStateException expected) {}
+        } finally {
+            computer.close(); oldStates.close(); store.close();
+        }
     }
     private static void verifyVersionPage(File directory) throws Exception {
         var path = Files.createTempFile(new File("/data/local/tmp/package-version-oracle").toPath(), "version-page-", ".bin");
@@ -417,6 +451,38 @@ public final class DisplacedSnapshotOracle {
             }
         }
     }
+    private static final class CapturedComputer extends dev.aim.server.IPackageComputer.Stub {
+        final long version;
+        int closes;
+        CapturedComputer(long version) { this.version = version; }
+        void open() { if (closes != 0) throw new IllegalStateException("fixture computer closed"); }
+        public long getVersion() { open(); return version; }
+        public android.content.pm.ApplicationInfo getApplicationInfo(String n, long flags, int user,
+                int filter, int caller, int pid) {
+            open();
+            if (!ORIGINAL.equals(n) || flags != 0x1234567800000001L || user != 10 || filter != 1010001
+                    || caller != android.os.Binder.getCallingUid() || pid != android.os.Binder.getCallingPid())
+                throw new AssertionError("internal query caller or flags changed");
+            var info = new android.content.pm.ApplicationInfo();
+            info.uid = (int) version;
+            return info;
+        }
+        public android.content.pm.PackageInfo getPackageInfo(String n, long flags, int user,
+                int filter, int caller, int pid) {
+            var info = new android.content.pm.PackageInfo();
+            info.applicationInfo = getApplicationInfo(n, flags, user, filter, caller, pid);
+            return info;
+        }
+        public boolean filterAppAccess(String n, int caller, int user) {
+            open();
+            if (!ORIGINAL.equals(n) || caller != 1010001 || user != 10)
+                throw new AssertionError("visibility query caller changed");
+            return true;
+        }
+        public void close() {
+            if (++closes != 1) throw new AssertionError("query capture closed twice");
+        }
+    }
     private static final class Owner extends dev.aim.server.IPackageScanSnapshot.Stub {
         private final File directory;
         boolean omitOriginal;
@@ -436,6 +502,11 @@ public final class DisplacedSnapshotOracle {
         private int length(String path) { byte[] bytes = read(path); return bytes == null ? -1 : bytes.length; }
         private byte[] chunk(String path, int offset, int length) { return Arrays.copyOfRange(java.util.Objects.requireNonNull(read(path)), offset, offset + length); }
         @Override public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
+        CapturedComputer computer;
+        public dev.aim.server.IPackageComputer getComputer() {
+            computer = new CapturedComputer(getVersion());
+            return computer;
+        }
         @Override public long getVersion() {
             if (failVersion) throw new IllegalStateException("fixture version failure");
             return versionOverride == null ? Long.parseLong(lines("version")[0]) : versionOverride;

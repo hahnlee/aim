@@ -183,6 +183,7 @@ impl Context {
         policies: &BTreeMap<String, bool>,
     ) -> Result<Self, String> {
         self.native_domains = None;
+        self.system.system_permissions = Some(config.system_permissions.clone());
         let expected: BTreeSet<_> = owner
             .settings
             .packages

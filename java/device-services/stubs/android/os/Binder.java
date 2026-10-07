@@ -5,6 +5,7 @@ package android.os;
 public class Binder implements IBinder {
     public Binder() { throw new RuntimeException("stub"); }
     public static final UserHandle getCallingUserHandle() { throw new RuntimeException("stub"); }
+    public static final int getCallingPid() { throw new RuntimeException("stub"); }
     public static final int getCallingUid() { throw new RuntimeException("stub"); }
     public static final long clearCallingIdentity() { throw new RuntimeException("stub"); }
     public static final void restoreCallingIdentity(long token) { throw new RuntimeException("stub"); }

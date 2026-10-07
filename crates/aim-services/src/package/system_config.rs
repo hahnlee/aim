@@ -44,6 +44,7 @@ const TIRAMISU: i32 = 33;
 /// What a partition's files may configure (`SystemConfig.ALLOW_*`).
 const ALLOW_FEATURES: u32 = 0x1;
 const ALLOW_LIBS: u32 = 0x2;
+const ALLOW_PERMISSIONS: u32 = 0x4;
 const ALLOW_APP_CONFIGS: u32 = 0x8;
 const ALLOW_HIDDENAPI_WHITELISTING: u32 = 0x40;
 const ALLOW_ALL: u32 = !0;
@@ -53,6 +54,8 @@ const ALLOW_ALL: u32 = !0;
 pub struct SystemConfig {
     /// `mSharedLibraries`, including public native libraries.
     pub libraries: BTreeMap<String, Library>,
+    /// SystemConfig exact Linux UID permission assignments.
+    pub system_permissions: BTreeMap<i32, BTreeSet<String>>,
     /// First insertion order, retained for ArrayMap hash-collision ordering.
     pub library_order: Vec<String>,
     /// `mAvailableFeatures`, as added: name and version.
@@ -106,7 +109,7 @@ impl SystemConfig {
         let vendor = ALLOW_FEATURES
             | ALLOW_LIBS
             | if first_sdk <= 27 {
-                ALLOW_APP_CONFIGS
+                ALLOW_APP_CONFIGS | ALLOW_PERMISSIONS
             } else {
                 0
             };
@@ -116,7 +119,7 @@ impl SystemConfig {
         partition("oem", ALLOW_FEATURES, None);
         partition(
             "product",
-            ALLOW_FEATURES | ALLOW_LIBS | ALLOW_HIDDENAPI_WHITELISTING | ALLOW_APP_CONFIGS,
+            ALLOW_FEATURES | ALLOW_LIBS | ALLOW_PERMISSIONS | ALLOW_HIDDENAPI_WHITELISTING | ALLOW_APP_CONFIGS,
             prop("ro.boot.hardware.sku"),
         );
         partition("system_ext", ALLOW_ALL, None);
@@ -220,6 +223,17 @@ impl SystemConfig {
         for e in root.children() {
             let name = e.string("name").map(|s| s.into_owned());
             match e.name.as_str() {
+                "assign-permission" if flags & ALLOW_PERMISSIONS != 0 => {
+                    if let (Some(permission),Some(uid)) = (name,e.string("uid")) {
+                        if let Some(uid) = permission_uid(image,prop,&uid) {
+                            self.system_permissions.entry(uid).or_default().insert(permission);
+                        } else {
+                            eprintln!("package SystemConfig: unknown assigned uid {uid} in {}",file.display());
+                        }
+                    } else {
+                        eprintln!("package SystemConfig: assign-permission missing name/uid in {}",file.display());
+                    }
+                }
                 "app-link" if flags & ALLOW_APP_CONFIGS != 0 => {
                     if let Some(package) = e.string("package") {
                         let package = package.into_owned();
@@ -391,6 +405,22 @@ fn int(s: Option<String>) -> Option<i32> {
 
 /// Integer.parseInt's decimal syntax: no whitespace, optional ASCII
 /// sign, Character.digit(char, 10) for BMP digits, checked signed range.
+fn permission_uid(image: &Path, prop: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<i32> {
+    if name.is_empty() { return None; }
+    let uid = if name.bytes().all(|b| b.is_ascii_digit()) {
+        // Process JNI uses atoi after verifying every character is a digit.
+        name.parse::<i64>().unwrap_or(i64::MAX) as i32
+    } else {
+        struct Properties<'a>(&'a dyn Fn(&str) -> Option<String>);
+        impl aim_android_init::PropertyLookup for Properties<'_> {
+            fn property(&self,name:&str) -> Option<String> { (self.0)(name) }
+        }
+        let ids = aim_android_init::rc::IdResolver::from_image(&aim_android_init::ImageRoot::new(image),&Properties(prop));
+        ids.getpwnam(name)? as i32
+    };
+    (uid>=0).then_some(uid)
+}
+
 pub(crate) fn decimal_uid(s: &str) -> Option<i32> {
     const ZEROES: &[u32] = &[
         0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66,
@@ -508,6 +538,7 @@ pub fn system(
     let config = SystemConfig::read(root, prop);
     Ok(System {
         features: config.features,
+        system_permissions: Some(config.system_permissions),
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,
@@ -525,6 +556,24 @@ pub fn system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assigns_permissions_with_partition_gates_and_bionic_uid_names() {
+        let root = std::env::temp_dir().join(format!("aim-system-permissions-{}",std::process::id()));
+        std::fs::create_dir_all(root.join("vendor/etc")).unwrap();
+        std::fs::write(root.join("vendor/etc/passwd"),"vendor_camera:x:2900:2900::/:/system/bin/sh\n").unwrap();
+        let document = aim_android_xml::read(b"<permissions><assign-permission name='p.shell' uid='shell'/><assign-permission name='p.numeric' uid='1001000'/><assign-permission name='p.vendor' uid='vendor_camera'/><assign-permission name='p.unknown' uid='unknown_name'/><assign-permission uid='root'/></permissions>").unwrap();
+        let props = |_: &str| None;
+        let mut config = SystemConfig::default();
+        config.read_root(&document,ALLOW_FEATURES,false,&root,&props,Path::new("test.xml"));
+        assert!(config.system_permissions.is_empty());
+        config.read_root(&document,ALLOW_PERMISSIONS,false,&root,&props,Path::new("test.xml"));
+        assert_eq!(config.system_permissions[&2000],["p.shell".into()].into());
+        assert_eq!(config.system_permissions[&1001000],["p.numeric".into()].into());
+        assert_eq!(config.system_permissions[&2900],["p.vendor".into()].into());
+        assert!(!config.system_permissions.contains_key(&0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn fallback_categories_replace_duplicates_and_stop_on_invalid_numbers() {

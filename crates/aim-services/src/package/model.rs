@@ -354,6 +354,8 @@ pub struct User {
 pub struct System {
     /// Original PMS selection; outer None means the owner was not captured.
     pub sdk_sandbox_package: Option<Option<String>>,
+    /// None means SystemConfig exact-UID assignments were not captured.
+    pub system_permissions: Option<BTreeMap<i32, std::collections::BTreeSet<String>>>,
     /// Native AppsFilter interaction grants, carried with each query snapshot.
     pub implicit_access: super::apps_filter::ImplicitAccess,
     /// `mAvailableFeatures`: name and version.

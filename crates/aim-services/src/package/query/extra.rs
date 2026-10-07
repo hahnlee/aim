@@ -17,6 +17,13 @@ impl ReadParcelable for VersionedPackage {
 impl Query<'_> {
     pub(super) fn extra_package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
+            pm::GET_DECLARED_SHARED_LIBRARIES => {
+                let a = args(pm::GetDeclaredSharedLibraries::read(r))?;
+                thrown(
+                    self.declared_libraries(a.package_name.as_deref(), a.flags, a.user_id),
+                    |p, v| pm::write_get_declared_shared_libraries_reply(p, v.as_ref()),
+                )
+            }
             pm::CHECK_PERMISSION => {
                 let a = args(pm::CheckPermission::read(r))?;
                 let value = self.check_package_permission(
@@ -259,6 +266,114 @@ impl Query<'_> {
         }
     }
 
+    fn declared_libraries(
+        &self,
+        name: Option<&str>,
+        flags: i64,
+        user: i32,
+    ) -> Thrown<Option<ListSlice<Library>>> {
+        if !matches!(self.calling_uid, 0 | 1000)
+            && self.check_uid_permission(
+                self.calling_uid,
+                Some("android.permission.ACCESS_SHARED_LIBRARIES"),
+            )? != 0
+        {
+            return Ok(Err(Exception::security("ACCESS_SHARED_LIBRARIES required")));
+        }
+        if let Err(e) = self.enforce_full_cross_user(user, "getDeclaredSharedLibraries")? {
+            return Ok(Err(e));
+        }
+        let Some(name) = name else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "packageName cannot be null",
+            )));
+        };
+        if self.user(user).is_none()
+            || apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some()
+        {
+            return Ok(Ok(None));
+        }
+        let libraries = self
+            .state
+            .shared_libraries
+            .as_ref()
+            .ok_or(NotModelled("the finalized shared library registry"))?;
+        let cleared = Query {
+            state: self.state,
+            filter: self.filter,
+            calling_uid: 1000,
+        };
+        let mut values = Vec::new();
+        for library in libraries {
+            if library.declaring.0 != name {
+                continue;
+            }
+            match cleared.package_info(
+                name,
+                library.declaring.1,
+                flags | MATCH_STATIC_SHARED_AND_SDK_LIBRARIES,
+                user,
+            )? {
+                Err(error) => return Ok(Err(error)),
+                Ok(None) => continue,
+                Ok(Some(_)) => {}
+            }
+            let mut value = library.clone();
+            value.dependents = self.library_consumers(library, flags, user)?;
+            value.dependents_initialized = !value.dependents.is_empty();
+            value.optional_dependents = None;
+            value.cert_digests = None;
+            values.push(Library(value));
+        }
+        Ok(Ok((!values.is_empty()).then_some(ListSlice {
+            creator: "android.content.pm.SharedLibraryInfo".into(),
+            items: values,
+        })))
+    }
+
+    fn library_consumers(
+        &self,
+        library: &super::super::model::SharedLibrary,
+        flags: i64,
+        user: i32,
+    ) -> Result<Vec<Option<(String, i64)>>, NotModelled> {
+        let Some(name) = &library.name else {
+            return Err(NotModelled("a shared library without a name"));
+        };
+        let mut consumers = Vec::new();
+        for ps in self.packages_in_order() {
+            if !info::is_available(&user_state(ps, user), flags) {
+                continue;
+            }
+            let uses = match library.kind {
+                2 => ps
+                    .uses_static_libraries
+                    .iter()
+                    .any(|(n, v)| n == name && *v == library.version),
+                3 => ps
+                    .uses_sdk_libraries
+                    .iter()
+                    .any(|l| l.name == *name && l.version_major == library.version),
+                _ => ps.pkg.as_ref().is_some_and(|p| {
+                    p.uses_libraries.contains(name) || p.uses_optional_libraries.contains(name)
+                }),
+            };
+            if !uses || self.filtered(Some(ps), self.calling_uid, user)? {
+                continue;
+            }
+            let dependent = match ps.pkg.as_ref() {
+                Some(p) if p.static_shared_library_name.is_some() => p
+                    .manifest_package_name
+                    .clone()
+                    .ok_or(NotModelled("a static library without manifest name"))?,
+                _ => ps.name.clone(),
+            };
+            consumers.push(Some((dependent, ps.version_code)));
+        }
+        Ok(consumers)
+    }
+
     fn check_package_permission(
         &self,
         name: Option<&str>,
@@ -280,7 +395,7 @@ impl Query<'_> {
         })
     }
 
-    fn check_uid_permission(&self, uid: i32, permission: Option<&str>) -> Result<i32, NotModelled> {
+    pub(super) fn check_uid_permission(&self, uid: i32, permission: Option<&str>) -> Result<i32, NotModelled> {
         let user = user_id(uid);
         if self.user(user).is_none() {
             return Ok(-1);
@@ -306,9 +421,25 @@ impl Query<'_> {
                 },
             );
         }
-        Err(NotModelled(
-            "SystemConfig system-UID permission assignments",
-        ))
+        let assignments = self
+            .state
+            .system
+            .system_permissions
+            .as_ref()
+            .ok_or(NotModelled(
+                "SystemConfig system-UID permission assignments",
+            ))?;
+        Ok(
+            if assignments.get(&uid).is_some_and(|grants| {
+                permission.is_some_and(|p| {
+                    grants.contains(p) || fuller(p).is_some_and(|full| grants.contains(full))
+                })
+            }) {
+                0
+            } else {
+                -1
+            },
+        )
     }
 
     fn appop_packages(&self, permission: Option<&str>, user: i32) -> Thrown<Vec<Option<String>>> {
@@ -805,14 +936,173 @@ fn certificate(s: &super::super::pkg::SigningDetails, bytes: Option<&[u8]>, kind
 }
 
 fn granted(grants: &[String], permission: &str) -> bool {
-    let fuller = match permission {
+    let fuller = fuller(permission);
+    grants
+        .iter()
+        .any(|p| p == permission || Some(p.as_str()) == fuller)
+}
+
+fn fuller(permission: &str) -> Option<&'static str> {
+    match permission {
         "android.permission.ACCESS_COARSE_LOCATION" => {
             Some("android.permission.ACCESS_FINE_LOCATION")
         }
         "android.permission.INTERACT_ACROSS_USERS" => Some(INTERACT_ACROSS_USERS_FULL),
         _ => None,
-    };
-    grants
-        .iter()
-        .any(|p| p == permission || Some(p.as_str()) == fuller)
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn declared_library_consumers_match_versions_users_and_raw_null_lists() {
+        let mut state = State {
+            users: [(
+                0,
+                User {
+                    id: 0,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let package = |name: &str, id: i32, version: i64| PackageState {
+            name: name.into(),
+            app_id: id,
+            version_code: version,
+            pkg: Some(Arc::new(AndroidPackage {
+                package_name: name.into(),
+                uid: id,
+                version_code: version as i32,
+                booleans: booleans::ENABLED,
+                base_apk_path: Some(format!("/data/app/{name}/base.apk")),
+                path: Some(format!("/data/app/{name}")),
+                ..Default::default()
+            })),
+            users: [(0, PackageUserState::default())].into(),
+            ..Default::default()
+        };
+        state
+            .packages
+            .insert("provider".into(), package("provider", 10100, 3));
+        let mut consumer = package("consumer", 10101, 7);
+        consumer.uses_static_libraries = vec![("lib".into(), 1)];
+        state.packages.insert("consumer".into(), consumer);
+        let mut wrong = package("wrong", 10102, 8);
+        wrong.uses_static_libraries = vec![("lib".into(), 2)];
+        state.packages.insert("wrong".into(), wrong);
+        state.shared_libraries = Some(vec![super::super::super::model::SharedLibrary {
+            name: Some("lib".into()),
+            kind: 2,
+            version: 1,
+            declaring: ("provider".into(), 3),
+            ..Default::default()
+        }]);
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        let libraries = query
+            .declared_libraries(Some("provider"), 0, 0)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(libraries.items.len(), 1);
+        assert_eq!(
+            libraries.items[0].0.dependents,
+            vec![Some(("consumer".into(), 7))]
+        );
+        assert_eq!(libraries.items[0].0.optional_dependents, None);
+        assert!(libraries.items[0].0.dependents_initialized);
+        assert!(
+            query
+                .declared_libraries(Some("provider"), 0, 42)
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn system_uid_assignments_are_exact_and_never_implicit_root_grants() {
+        let state = State {
+            users: [
+                (
+                    0,
+                    User {
+                        id: 0,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    10,
+                    User {
+                        id: 10,
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into(),
+            system: System {
+                system_permissions: Some(
+                    [
+                        (
+                            2000,
+                            ["android.permission.ACCESS_FINE_LOCATION".into()].into(),
+                        ),
+                        (1001000, [INTERACT_ACROSS_USERS_FULL.into()].into()),
+                    ]
+                    .into(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        assert_eq!(
+            query
+                .check_uid_permission(2000, Some("android.permission.ACCESS_COARSE_LOCATION"))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            query.check_uid_permission(0, Some("p.unassigned")).unwrap(),
+            -1
+        );
+        assert_eq!(
+            query
+                .check_uid_permission(1000, Some("android.permission.INTERACT_ACROSS_USERS"))
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            query
+                .check_uid_permission(1001000, Some("android.permission.INTERACT_ACROSS_USERS"))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            query
+                .check_uid_permission(42000, Some("p.unassigned"))
+                .unwrap(),
+            -1
+        );
+    }
+}
+
+struct Library(super::super::model::SharedLibrary);
+impl aim_service_aidl::WriteParcelable for Library {
+    fn write_to(&self, p: &mut Parcel) {
+        info::write_library(p, &self.0);
+    }
 }

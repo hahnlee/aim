@@ -174,6 +174,7 @@ pub fn verify(directory: &Path) {
         )
         .arg(java::bootstrap_aidl(&root))
         .arg(java::snapshot_aidl(&root))
+        .arg(java::computer_aidl(&root))
         .arg(repo.join("crates/aim-services/tests/fixtures/DisplacedSnapshotOracle.java"))
         .arg(repo.join("crates/aim-services/tests/fixtures/NativeDisplacedReadOracle.java")));
     let mut pending = vec![classes.clone()];
@@ -365,8 +366,8 @@ pub fn verify(directory: &Path) {
                 break;
             }
             if Instant::now() >= deadline {
-                let logs=reboot.command().args(["logs","-b","all","-t","200"]).output().unwrap();
-                panic!("native displaced restart did not boot: {index}\n{}\n{}",String::from_utf8_lossy(&logs.stdout),String::from_utf8_lossy(&logs.stderr));
+                let evidence = restart_failure(&reboot,&source,index);
+                panic!("native displaced restart did not boot: {index}; artifacts: {}",evidence.display());
             }
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -398,4 +399,29 @@ pub fn verify(directory: &Path) {
         );
         drop(reboot);
     }
+}
+
+/// Preserve only disposable test-owned evidence before Boot/Data cleanup.
+fn restart_failure(boot:&Boot,source:&Path,index:usize)->std::path::PathBuf {
+    let dir=std::env::temp_dir().join(format!("aim-native-restart-failure-{}-{index}",std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    for (name,args) in [
+        ("logcat",vec!["logs","-b","all"]),
+        ("processes",vec!["shell","ps","-A"]),
+        ("properties",vec!["shell","getprop"]),
+    ] {
+        let output=boot.command().args(args).output();
+        fs::write(dir.join(name),format!("{output:?}")).unwrap();
+    }
+    let keeper=std::path::PathBuf::from(format!("{}.aimctl",boot.data.display()));
+    for name in ["state","log"] {if let Ok(bytes)=fs::read(keeper.join(name)) {fs::write(dir.join(format!("keeper-{name}")),bytes).unwrap();}}
+    fs::copy(source,dir.join("native-source-packages.xml")).unwrap();
+    for relative in ["system/packages.xml","system/packages-backup.xml","system/packages.xml.reservecopy","system/users/0/package-restrictions.xml","system/users/0/package-restrictions-backup.xml","misc/apexdata/com.android.permission/access.abx","misc_de/0/apexdata/com.android.permission/access.abx","misc_de/0/apexdata/com.android.permission/runtime-permissions.xml"] {
+        let path=boot.data.join("data").join(relative);
+        match fs::read(&path) {Ok(bytes)=>{let target=dir.join("data").join(relative);fs::create_dir_all(target.parent().unwrap()).unwrap();fs::write(target,bytes).unwrap();},Err(error)=>{fs::write(dir.join(relative.replace('/',"-")+".error"),error.to_string()).unwrap();}}
+    }
+    let restored=aim_services::package::State::read(&boot.data.join("data"),&[0]);
+    fs::write(dir.join("native-reader-state"),format!("{restored:#?}")).unwrap();
+    let disk=Command::new("df").args(["-h"]).arg(&boot.data).output();fs::write(dir.join("disk"),format!("{disk:?}")).unwrap();
+    dir
 }

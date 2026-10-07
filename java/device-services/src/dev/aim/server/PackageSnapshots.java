@@ -29,17 +29,19 @@ public final class PackageSnapshots {
 
     /** Read from the native owner's read-only version page, without a Binder call. */
     @FunctionalInterface
-    public interface VersionSource {
+    public interface VersionSource extends AutoCloseable {
         long currentVersion();
+        @Override default void close() {}
     }
 
     /** One service-host lifetime; a new host Binder requires a new Store. */
-    public static final class Store {
+    public static final class Store implements AutoCloseable {
         private final Source source;
         private final VersionSource versions;
         private final Owner owner;
         private final boolean crossUserSuspensions;
         private volatile Data current;
+        private boolean closed;
 
         public Store(Source source, Owner owner, boolean crossUserSuspensions) {
             this(source, owner, crossUserSuspensions, null);
@@ -54,9 +56,10 @@ public final class PackageSnapshots {
         }
 
         public synchronized long refresh() throws RemoteException, IOException {
+            if (closed) throw new IllegalStateException("package replica store is closed");
             var endpoint = source.capture();
             if (endpoint == null) throw new IOException("missing native snapshot endpoint");
-            Data next;
+            Data next = null;
             try (var lease = new PackageScanLease(endpoint)) {
                 long version = lease.getVersion();
                 if (current != null) {
@@ -64,12 +67,20 @@ public final class PackageSnapshots {
                     if (version == current.version) return version;
                 }
                 next = lease.captureData(owner, crossUserSuspensions);
+            } catch (RemoteException | IOException | RuntimeException failure) {
+                if (next != null) {
+                    try { next.close(); } catch (RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
+                }
+                throw failure;
             }
+            Data previous = current;
             current = next;
+            if (previous != null) previous.close();
             return next.version;
         }
 
-        private Data capture() {
+        private synchronized Data capture() {
+            if (closed) throw new IllegalStateException("package replica store is closed");
             Data data = current;
             if (data == null) throw new IllegalStateException("native package replica is unavailable");
             if (versions == null) return data;
@@ -92,32 +103,80 @@ public final class PackageSnapshots {
 
         public long getVersion() { return capture().version; }
 
-        public PackageManagerLocal.UnfilteredSnapshot unfiltered() {
+        public synchronized ComputerSnapshot computer() { return new ComputerSnapshot(capture()); }
+
+        @Override
+        public synchronized void close() {
+            if (closed) return;
+            closed = true;
+            Data previous = current;
+            current = null;
+            try { if (previous != null) previous.close(); }
+            finally { if (versions != null) versions.close(); }
+        }
+
+        public synchronized PackageManagerLocal.UnfilteredSnapshot unfiltered() {
             return PackageSnapshots.unfiltered(capture());
         }
 
-        public PackageManagerLocal.FilteredSnapshot filtered(int callingUid,
+        public synchronized PackageManagerLocal.FilteredSnapshot filtered(int callingUid,
                 UserHandle user, PackageState uncommitted) {
             return PackageSnapshots.filtered(capture(), callingUid, user, uncommitted);
         }
     }
 
     /** Records must be immutable and keep their identity for the same version. */
-    public static final class Data {
+    public static final class Data implements AutoCloseable {
         private final long version;
         private final Map<String, PackageState> packages;
         private final Map<String, PackageState> disabled;
         private final Map<String, SharedUserApi> sharedUsers;
         private final Owner owner;
+        private final IPackageComputer computer;
+        private int references = 1;
+        private boolean ownerClosed;
 
         public Data(long version, Map<String, PackageState> packages,
                 Map<String, PackageState> disabled, Map<String, SharedUserApi> sharedUsers,
                 Owner owner) {
+            this(version, packages, disabled, sharedUsers, owner, null);
+        }
+
+        Data(long version, Map<String, PackageState> packages,
+                Map<String, PackageState> disabled, Map<String, SharedUserApi> sharedUsers,
+                Owner owner, IPackageComputer computer) {
             this.version = version;
+            this.computer = computer;
             this.packages = copy(packages);
             this.disabled = copy(disabled);
             this.sharedUsers = copy(sharedUsers);
             this.owner = Objects.requireNonNull(owner);
+        }
+
+        synchronized void retain() {
+            if (references == 0) throw new IllegalStateException("package query capture is released");
+            references = Math.addExact(references, 1);
+        }
+
+        @Override
+        public void close() {
+            synchronized (this) {
+                if (ownerClosed) return;
+                ownerClosed = true;
+            }
+            release();
+        }
+
+        void release() {
+            IPackageComputer endpoint;
+            synchronized (this) {
+                if (references == 0) throw new IllegalStateException("package query capture already released");
+                endpoint = --references == 0 ? computer : null;
+            }
+            if (endpoint != null) {
+                try { endpoint.close(); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            }
         }
 
         private static <T> Map<String, T> copy(Map<String, T> source) {
@@ -143,7 +202,7 @@ public final class PackageSnapshots {
         protected Data data;
         private boolean closed;
 
-        Scope(Data data) { this.data = data; }
+        Scope(Data data) { data.retain(); this.data = data; }
 
         protected void checkClosed() {
             if (closed) throw new IllegalStateException("Snapshot already closed");
@@ -151,9 +210,53 @@ public final class PackageSnapshots {
 
         @Override
         public void close() {
+            if (closed) return;
             closed = true;
+            Data previous = data;
             data = null;
+            previous.release();
         }
+    }
+
+    /** Typed internal query adapter retaining the same immutable graph as replica lookups. */
+    public static final class ComputerSnapshot extends Scope {
+        ComputerSnapshot(Data data) { super(data); }
+
+        private IPackageComputer endpoint() {
+            checkClosed();
+            if (data.computer == null) throw new IllegalStateException("native package query capture unavailable");
+            return data.computer;
+        }
+
+        public synchronized long getVersion() { checkClosed(); return data.version; }
+
+        public synchronized PackageStateInternal getPackageStateInternal(String name) {
+            checkClosed();
+            return (PackageStateInternal) data.packages.get(name);
+        }
+
+        public synchronized android.content.pm.ApplicationInfo getApplicationInfo(String name,
+                long flags, int filterCallingUid, int userId) {
+            try {
+                return endpoint().getApplicationInfo(name, flags, userId, filterCallingUid,
+                        android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid());
+            } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized android.content.pm.PackageInfo getPackageInfo(String name,
+                long flags, int filterCallingUid, int userId) {
+            try {
+                return endpoint().getPackageInfo(name, flags, userId, filterCallingUid,
+                        android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid());
+            } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized boolean filterAppAccess(String name, int callingUid, int userId) {
+            try { return endpoint().filterAppAccess(name, callingUid, userId); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        @Override public synchronized void close() { super.close(); }
     }
 
     private static final class Unfiltered extends Scope
@@ -162,6 +265,7 @@ public final class PackageSnapshots {
 
         @Override
         public PackageManagerLocal.FilteredSnapshot filtered(int callingUid, UserHandle user) {
+            checkClosed();
             return new Filtered(data, callingUid, user, this, null);
         }
 

@@ -8,6 +8,7 @@ description = "Android's system services as native macOS implementations, served
 
 [dependencies]
 aim-android-image = { path = "../aim-android-image" }
+aim-android-init = { path = "../aim-android-init" }
 aim-ashmem = { path = "../aim-ashmem" }
 aim-android-xml = { path = "../aim-android-xml" }
 aim-apps = { path = "../aim-apps" }

@@ -67,22 +67,7 @@ fn object(r: &mut Reader<'_>, kind: Kind) -> Result<Option<Object>> {
             if class != "android.graphics.Bitmap" {
                 return Err(BAD_VALUE);
             }
-            r.skip(12)?;
-            bytes(r)?;
-            r.skip(24)?;
-            match r.read_i32()? {
-                0 => {
-                    bytes(r)?;
-                }
-                1 => {
-                    r.read_i32()?;
-                    if r.read_i32()? != 0 {
-                        r.read_i32()?;
-                        r.read_fd()?;
-                    }
-                }
-                _ => return Err(BAD_VALUE),
-            }
+            bitmap(r, 0)?;
         }
     }
     let (bytes, objects) = r.since(start);
@@ -90,6 +75,34 @@ fn object(r: &mut Reader<'_>, kind: Kind) -> Result<Option<Object>> {
         bytes: bytes.to_vec(),
         objects,
     }))
+}
+/// Bitmap CREATOR's native payload followed by Java gainmap metadata.
+/// Gainmap contents use typed Bitmap; native gainmap info is 17 floats + base type.
+fn bitmap(r: &mut Reader<'_>, depth: usize) -> Result<()> {
+    if depth > 128 {
+        return Err(BAD_VALUE);
+    }
+    r.skip(12)?;
+    bytes(r)?;
+    r.skip(24)?;
+    match r.read_i32()? {
+        0 => bytes(r)?,
+        1 => {
+            r.read_i32()?;
+            if r.read_i32()? != 0 {
+                r.read_i32()?;
+                r.read_fd()?;
+            }
+        }
+        _ => return Err(BAD_VALUE),
+    }
+    if r.read_bool()? && r.read_i32()? != 0 {
+        if r.read_i32()? != 0 {
+            bitmap(r, depth + 1)?;
+        }
+        r.skip(72)?;
+    }
+    Ok(())
 }
 fn bytes(r: &mut Reader<'_>) -> Result<()> {
     let n = r.read_i32()?;
@@ -190,9 +203,19 @@ pub struct SessionParams {
     pub auto_install_dependencies_enabled: bool,
 }
 impl SessionParams {
-    pub fn has_capabilities(&self)->bool {
-        [&self.app_icon,&self.originating_uri,&self.referrer_uri,&self.data_loader_params]
-            .iter().any(|value|value.as_ref().is_some_and(|value|!value.objects.is_empty()))
+    pub fn has_capabilities(&self) -> bool {
+        [
+            &self.app_icon,
+            &self.originating_uri,
+            &self.referrer_uri,
+            &self.data_loader_params,
+        ]
+        .iter()
+        .any(|value| {
+            value
+                .as_ref()
+                .is_some_and(|value| !value.objects.is_empty())
+        })
     }
 }
 impl ReadParcelable for SessionParams {
@@ -483,7 +506,10 @@ mod tests {
         parcel.write_i32(1);
         parcel.write_i32(0);
         let file = std::fs::File::open("/dev/null").unwrap();
-        parcel.write_file(aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file)).unwrap());
+        parcel.write_file(
+            aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file)).unwrap(),
+        );
+        parcel.write_bool(false);
         let mut reader = Reader::new(parcel.data(), parcel.objects());
         let value = object(&mut reader, Kind::Bitmap).unwrap().unwrap();
         assert_eq!(value.objects.len(), 1);
@@ -500,6 +526,7 @@ mod tests {
         parcel.write_i32(0);
         parcel.write_i32(4);
         parcel.write_i32(0x01020304);
+        parcel.write_bool(false);
         let mut reader = Reader::new(parcel.data(), parcel.objects());
         let value = object(&mut reader, Kind::Bitmap).unwrap().unwrap();
         assert_eq!(value.bytes, parcel.data());

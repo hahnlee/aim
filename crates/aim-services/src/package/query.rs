@@ -722,7 +722,7 @@ impl Query<'_> {
                 .iter()
                 .filter_map(|n| self.state.packages.get(n))
                 .any(granted)),
-            None => Err(NotModelled("the permissions of a uid without packages")),
+            None => self.check_uid_permission(uid,Some(permission)).map(|result|result==0),
         }
     }
 
@@ -768,7 +768,7 @@ impl Query<'_> {
     }
 
     /// `shouldFilterApplication(ps, callingUid, userId)`.
-    fn filtered(
+    pub(crate) fn filtered(
         &self,
         ps: Option<&PackageState>,
         uid: i32,
@@ -988,6 +988,12 @@ impl Query<'_> {
         flags: i64,
         user: i32,
     ) -> Thrown<Option<PackageInfo>> {
+        self.package_info_internal(name,version_code,flags,user,self.calling_uid)
+    }
+
+    pub(crate) fn package_info_internal(
+        &self,name:&str,version_code:i64,flags:i64,user:i32,filter_uid:i32,
+    ) -> Thrown<Option<PackageInfo>> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
@@ -999,14 +1005,15 @@ impl Query<'_> {
             return Ok(Err(e));
         }
         let name = self.resolve_internal_package_name(name, version_code);
-        let uid = self.calling_uid;
+        let uid = filter_uid;
+        let visibility=Query {state:self.state,filter:self.filter,calling_uid:filter_uid};
         let factory_only = flags & MATCH_FACTORY_ONLY != 0;
         let apex = flags & MATCH_APEX != 0;
         if factory_only && let Some(ps) = self.state.disabled_system_packages.get(&name) {
             if !apex && ps.pkg.as_deref().is_some_and(|p| p.is2(APEX)) {
                 return Ok(Ok(None));
             }
-            if self.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
+            if visibility.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
                 return Ok(Ok(None));
             }
             return Ok(Ok(self.generate_package_info(ps, flags, user)?));
@@ -1018,7 +1025,7 @@ impl Query<'_> {
             if !apex && p.is2(APEX) {
                 return Ok(Ok(None));
             }
-            if self.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
+            if visibility.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
                 return Ok(Ok(None));
             }
             return Ok(Ok(self.generate_package_info(ps, flags, user)?));
@@ -1027,7 +1034,7 @@ impl Query<'_> {
             && flags & (MATCH_KNOWN_PACKAGES | MATCH_ARCHIVED_PACKAGES) != 0
             && let Some(ps) = self.state.packages.get(&name)
         {
-            if self.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
+            if visibility.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
                 return Ok(Ok(None));
             }
             return Ok(Ok(self.generate_package_info(ps, flags, user)?));
@@ -1095,6 +1102,12 @@ impl Query<'_> {
         flags: i64,
         user: i32,
     ) -> Thrown<Option<ApplicationInfo>> {
+        self.application_info_internal(name,flags,user,self.calling_uid)
+    }
+
+    pub(crate) fn application_info_internal(
+        &self,name:&str,flags:i64,user:i32,filter_uid:i32,
+    ) -> Thrown<Option<ApplicationInfo>> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
@@ -1106,12 +1119,13 @@ impl Query<'_> {
             return Ok(Err(e));
         }
         let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
+        let visibility=Query {state:self.state,filter:self.filter,calling_uid:filter_uid};
         if let Some((ps, p)) = self.package_of(&name) {
             if flags & MATCH_APEX == 0 && p.is2(APEX) {
                 return Ok(Ok(None));
             }
-            if self.filter_shared_lib(ps, user, flags)?
-                || self.filtered(Some(ps), self.calling_uid, user)?
+            if visibility.filter_shared_lib(ps, user, flags)?
+                || self.filtered(Some(ps), filter_uid, user)?
             {
                 return Ok(Ok(None));
             }

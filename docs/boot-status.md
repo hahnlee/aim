@@ -48,30 +48,49 @@ Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
 PackageManager still runs original. On the M4 C branch, the native Binder
-endpoint has 26 additional query dispatches backed by captured settings,
-permission grants and finalized library registry; missing external owners remain
+endpoint has 27 additional query dispatches backed by captured settings,
+permission grants and finalized library registry, including declared library consumers.
+SystemConfig UID permission assignments use actual bionic/partition UID names and
+exact UID values; they do not grant root unconditionally. Missing external owners remain
 explicitly unsupported (#987). Splash-theme, minimum-aspect and update-available
 setters use an installed disk owner, validate the exact generation, prepare a
 complete replacement, persist, publish committed changes and invalidate the
 original package-info cache outside the publication lock. Old captures remain
-immutable. Concurrent setter serialization is still #989. Enabled/stopped/MIME
+immutable. Scalar request decisions now run after acquiring the installed disk
+owner, against the latest generation. Concurrent splash/aspect setters both
+persist and publish, with two version updates and cache invalidations (#989). Enabled/stopped/MIME
 decisions and persistence exist, but their required effects are not connected
 (#988). Installer/session state and pinned metadata codecs exist with explicit
 policy/storage/callback owner contracts; they are not published until those owners
 and durable install/commit recovery exist (#986). FD-bearing installer records
-reject before allocation until file capabilities are owned.
+reject before allocation until file capabilities are owned. Actual original ART
+comparison passes five SessionParams/SessionInfo cases (20.47s), including nullable
+fields, maps, three URI classes, DataLoader, inline Bitmap and populated Gainmap.
+The comparison found and fixed the Java Bitmap gainmap tail; related
+notification/media codec work is #991.
 A read-only native publication page now accompanies facade captures. Native
 publication release-stores its version before returning; bootstrap teardown clears
 it. Java reads with acquire ordering, refreshes only on version changes and keeps
 old snapshot scopes. Host tests verify read-only fd transport and mutation-driven
-version changes. 575 service units pass (6 excluded, 1.21s), and the controlled
-retained-bootstrap/framework-res/Binder mutation scan passes (2.11s). These are
-component checks. The original ART scan/snapshot run executed mapped-file acquire
-reads and snapshot freshness assertions, then failed native-file restart case 4
-at its 120s boot bound (273.66s overall, #990). It is not a passing full conformance
-run. APFS compaction ENOSPC warnings occurred (#771), with causality unproved;
-the next failure captures logcat before owned fixture cleanup. Native default,
-full SystemServer facade, CTS and app gates remain incomplete (#798). The native Store retains the original ABX restriction
+version changes. A separate system-only IPackageComputer lease retains the exact
+capture after the scan lease closes and newer versions publish. Typed metadata
+queries keep actual caller UID (permissions) separate from filter UID (visibility).
+Unused scan leases release their query capture without creating a child endpoint;
+claimed endpoints release their graph on close. Java Data/Store/scope reference
+counts keep an old computer alive until the last owning scope closes. This is a
+typed adapter, not the full original Computer/PackageManagerInternal facade.
+579 service units pass (6 excluded, 1.26s), and the controlled
+retained-bootstrap/framework-res/Binder mutation/computer scan passes (2.13s).
+The host build passes (11 rebuilt/2 fresh, 19.4s).
+Original ART installer codecs pass five cases (20.47s). The complete original
+first-system-scan passes (170.46s), including snapshot/version-page/Java Computer
+adapter assertions and all six reused-data native-file restarts with unchanged
+120s bounds. Earlier restart failures (#990) coincided with host free space below
+the syscall layer's 1GiB write reserve and repeated keystore exits. Removing 24.7GiB
+of verified inactive task-owned test images cleared the failures without changing
+settings/guest code. APFS TRIM retention remains #771. These are component/native-file
+checks; native default, full SystemServer facade, CTS and app gates remain
+incomplete (#798). The native Store retains the original ABX restriction
 file backup/reserve and system ownership protocol.
 Two original-PMS boots on disposable native-written data (2026-10-02)
 reached `sys.boot_completed=1`: Settings read as disabled (`enabled=2`),

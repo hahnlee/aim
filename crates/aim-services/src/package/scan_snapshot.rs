@@ -5,6 +5,7 @@ use super::{
     scan::SigningScan,
 };
 pub mod endpoint;
+pub(crate) mod computer;
 pub mod query_state;
 pub(crate) mod version_page;
 pub mod user_record;

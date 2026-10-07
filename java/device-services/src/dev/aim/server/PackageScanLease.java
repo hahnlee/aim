@@ -405,7 +405,15 @@ public final class PackageScanLease implements AutoCloseable {
         }
         validateSharedGroups(packages, shared, false);
         validateSharedGroups(disabled, shared, true);
-        return new PackageSnapshots.Data(version, packages, disabled, shared, owner);
+        IPackageComputer computer = endpoint.getComputer();
+        if (computer == null) throw new IOException("missing native package query capture");
+        try {
+            if (computer.getVersion() != version) throw new IOException("native query capture version differs");
+            return new PackageSnapshots.Data(version, packages, disabled, shared, owner, computer);
+        } catch (RemoteException | IOException | RuntimeException failure) {
+            try { computer.close(); } catch (RemoteException closeFailure) { failure.addSuppressed(closeFailure); }
+            throw failure;
+        }
     }
 
     private void validateSharedGroups(java.util.Map<String, com.android.server.pm.pkg.PackageState> packages,

@@ -265,7 +265,8 @@ fn native_package_parcels_match_original_read_write() {
         )
         .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SdkDataOracle.java"))
         .arg(common::java::bootstrap_aidl(&data.0))
-        .arg(common::java::snapshot_aidl(&data.0)));
+        .arg(common::java::snapshot_aidl(&data.0))
+        .arg(common::java::computer_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();
     while let Some(dir) = pending.pop() {

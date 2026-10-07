@@ -1816,6 +1816,16 @@ public final class PackageRoundTripOracle {
         @Override
         public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
         @Override
+        public dev.aim.server.IPackageComputer getComputer() {
+            long captured = version;
+            return new dev.aim.server.IPackageComputer.Stub() {
+                public long getVersion() { return captured; }
+                public android.content.pm.ApplicationInfo getApplicationInfo(String n, long f, int u, int filter, int caller, int pid) { throw new AssertionError("unused application query"); }
+                public android.content.pm.PackageInfo getPackageInfo(String n, long f, int u, int filter, int caller, int pid) { throw new AssertionError("unused package query"); }
+                public boolean filterAppAccess(String n, int caller, int user) { throw new AssertionError("unused visibility query"); }
+                public void close() {}
+            };
+        }
         public long getVersion() { return version; }
         @Override
         public String[] getPackageNames(boolean disabled) {

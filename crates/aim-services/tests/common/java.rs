@@ -20,6 +20,10 @@ pub fn snapshot_aidl(dir: &Path) -> PathBuf {
     private_aidl(dir, "IPackageScanSnapshot")
 }
 
+pub fn computer_aidl(dir: &Path) -> PathBuf {
+    private_aidl(dir, "IPackageComputer")
+}
+
 pub fn bootstrap_aidl(dir: &Path) -> PathBuf {
     private_aidl(dir, "IPackageBootstrapBridge")
 }

@@ -3796,6 +3796,34 @@ fn verify_boot_scan(
         system.install_package_persistence(bridge,&current,disk.clone()).unwrap();
         assert!(system.install_package_persistence(bridge,&current,disk.clone()).is_err());
         let invalidations=owner.invalidations.load(Ordering::SeqCst);
+        use aim_service_aidl::{dev_aim_server_ipackagescansnapshot as scan_api,dev_aim_server_ipackagecomputer as computer_api};
+        let references=Arc::strong_count(&current);
+        let unused=capture_scan(client).unwrap();
+        assert_eq!(Arc::strong_count(&current),references+1);
+        let mut unused_close=Parcel::new();scan_api::Close {}.write(&mut unused_close);
+        unused.transact(scan_api::CLOSE,&unused_close,false).unwrap().reader().read_exception().unwrap().unwrap();
+        assert_eq!(Arc::strong_count(&current),references);
+        let scan_lease=capture_scan(client).unwrap();
+        let mut computer_args=Parcel::new();scan_api::GetComputer {}.write(&mut computer_args);
+        let computer_reply=scan_lease.transact(scan_api::GET_COMPUTER,&computer_args,false).unwrap();
+        let Some(Binder::Handle(handle))=scan_api::read_get_computer_reply(&mut computer_reply.reader()).unwrap().unwrap() else {panic!("remote computer expected")};
+        let computer=client.strong(handle);
+        let mut close_scan=Parcel::new();scan_api::Close {}.write(&mut close_scan);
+        scan_lease.transact(scan_api::CLOSE,&close_scan,false).unwrap().reader().read_exception().unwrap().unwrap();
+        let computer_version=|| {let mut args=Parcel::new();computer_api::GetVersion {}.write(&mut args);let reply=computer.transact(computer_api::GET_VERSION,&args,false).unwrap();computer_api::read_get_version_reply(&mut reply.reader()).unwrap()};
+        assert_eq!(computer_version().unwrap(),current.scan().version() as i64);
+        register(client,"held_computer",computer.binder());
+        let mut version_request=Parcel::new();computer_api::GetVersion {}.write(&mut version_request);
+        let denied=find(foreign_client,"held_computer").transact(computer_api::GET_VERSION,&version_request,false).unwrap();
+        assert_eq!(denied.reader().read_exception().unwrap().unwrap_err().code,-1);
+        let mut metadata=Parcel::new();computer_api::GetApplicationInfo {package_name:Some("android".into()),flags:0,user_id:0,filter_calling_uid:1000,calling_uid:1000,calling_pid:94002}.write(&mut metadata);
+        let value=computer.transact(computer_api::GET_APPLICATION_INFO,&metadata,false).unwrap();
+        let value=crate::package::reply::decode(pm::DESCRIPTOR,pm::GET_APPLICATION_INFO,&mut value.reader()).unwrap().unwrap();
+        let mut public_args=Parcel::new();pm::GetApplicationInfo {package_name:Some("android".into()),flags:0,user_id:0}.write(&mut public_args);
+        let public_reply=find(client,"query_package").transact(pm::GET_APPLICATION_INFO,&public_args,false).unwrap();
+        let expected=crate::package::reply::decode(pm::DESCRIPTOR,pm::GET_APPLICATION_INFO,&mut public_reply.reader()).unwrap().unwrap();
+        assert_ne!(value,crate::shadow::Value::Null);
+        assert_eq!(value,expected);
         let mut version_args=Parcel::new();
         host::GetPackageStateVersionPage {}.write(&mut version_args);
         let version_reply=find(client,"host").transact(host::GET_PACKAGE_STATE_VERSION_PAGE,&version_args,false).unwrap();
@@ -3824,6 +3852,47 @@ fn verify_boot_scan(
         assert_eq!(reopened.state().users[0].1.restrictions.packages.iter().find(|(name,_)|name=="android").unwrap().1.splash_screen_theme.as_deref(),Some("native-theme"));
         assert_eq!(owner.invalidations.load(Ordering::SeqCst),invalidations+1);
         assert!(system.package_persistence_owner(&current).is_err());
+        // Hold the serialization owner until both Binder requests have captured it.
+        // Both must decide from the latest generation after acquiring this lock.
+        let references = Arc::strong_count(&disk);
+        let held = disk.lock().unwrap();
+        let mut writers = Vec::new();
+        for aspect in [false,true] {
+            let endpoint = find(client,"query_package");
+            writers.push(std::thread::spawn(move || {
+                let mut args = Parcel::new();
+                let code = if aspect {
+                    pm::SetUserMinAspectRatio {package_name:Some("android".into()),aspect_ratio:4,user_id:0}.write(&mut args);
+                    pm::SET_USER_MIN_ASPECT_RATIO
+                } else {
+                    pm::SetSplashScreenTheme {package_name:Some("android".into()),theme_name:Some("parallel-zero".into()),user_id:0}.write(&mut args);
+                    pm::SET_SPLASH_SCREEN_THEME
+                };
+                let reply = endpoint.transact(code,&args,false).unwrap();
+                reply.reader().read_exception().unwrap().unwrap();
+            }));
+        }
+        let deadline = Instant::now()+Duration::from_secs(2);
+        while Arc::strong_count(&disk)<references+2 {
+            assert!(Instant::now()<deadline,"parallel mutations did not reach disk serialization owner");
+            std::thread::yield_now();
+        }
+        drop(held);
+        for writer in writers { writer.join().unwrap(); }
+        let concurrent = system.capture_package_queries().unwrap();
+        assert_eq!(concurrent.scan().version(),published.scan().version()+2);
+        assert_eq!(read_version(),concurrent.scan().version());
+        assert_eq!(concurrent.state().packages["android"].users[&0].splash_screen_theme.as_deref(),Some("parallel-zero"));
+        assert_eq!(concurrent.state().packages["android"].users[&0].min_aspect_ratio,4);
+        let reopened = crate::package::owner::Store::open(&mutation_data,&[0,10]).unwrap().unwrap();
+        let persisted = &reopened.state().users.iter().find(|(id,_)|*id==0).unwrap().1.restrictions.packages.iter().find(|(name,_)|name=="android").unwrap().1;
+        assert_eq!(persisted.splash_screen_theme.as_deref(),Some("parallel-zero"));
+        assert_eq!(persisted.min_aspect_ratio,4);
+        assert_eq!(owner.invalidations.load(Ordering::SeqCst),invalidations+3);
+        assert_eq!(computer_version().unwrap(),current.scan().version() as i64);
+        let mut close=Parcel::new();computer_api::Close {}.write(&mut close);
+        computer.transact(computer_api::CLOSE,&close,false).unwrap().reader().read_exception().unwrap().unwrap();
+        assert!(computer_version().is_err_and(|error|error.code == -5));
         let before=system.capture_package_queries().unwrap();
         args.write_i32(1);
         assert!(endpoint.transact(pm::SET_SPLASH_SCREEN_THEME,&args,false).is_err());

@@ -326,8 +326,11 @@ mod tests {
         icon.write_i32(4);
         icon.write_i32(1);
         icon.write_i32(0);
-        let file=std::fs::File::open("/dev/null").unwrap();
-        icon.write_file(aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file)).unwrap());
+        let file = std::fs::File::open("/dev/null").unwrap();
+        icon.write_file(
+            aim_binder_host::server::file_from_fd(std::os::fd::AsFd::as_fd(&file)).unwrap(),
+        );
+        icon.write_bool(false);
         let params = SessionParams {
             app_icon: Some(super::super::codec::Object {
                 bytes: icon.data().to_vec(),

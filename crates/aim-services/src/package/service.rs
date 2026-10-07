@@ -99,17 +99,16 @@ impl PackageQueries {
         let request=super::write::mutation::Request::read(call.code,call.sender_euid,&mut call.data)?;
         Some((|| {
             let request=request.map_err(QueryError::Transport)?;
-            let plan=match request.decide(query,call.sender_pid).map_err(QueryError::NotModelled)? {
-                Ok(plan)=>plan,
-                Err(error)=> {let mut reply=Parcel::new();reply.write_exception(&error);return Ok(reply);}
+            let result = if capture.is_some() {
+                let system = self.system.as_ref().and_then(|system|system.upgrade()).ok_or_else(||
+                    QueryError::NotModelled(NotModelled("native mutation owner unavailable")))?;
+                system.commit_package_mutation(&request,&self.resolver,call.sender_euid as i32,call.sender_pid)?
+            } else {
+                match request.decide(query,call.sender_pid).map_err(QueryError::NotModelled)? {
+                    Err(exception) => Err(exception),
+                    Ok(_) => Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation capture unavailable")),
+                }
             };
-            let result=(|| {
-                let system=self.system.as_ref().and_then(|system|system.upgrade()).ok_or_else(||
-                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation owner unavailable"))?;
-                let capture=capture.ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation capture unavailable"))?;
-                system.commit_package_mutation(capture,&plan).map_err(|error|Exception::new(
-                    aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))
-            })();
             let mut reply=Parcel::new();
             match result {Ok(())=>reply.write_no_exception(),Err(error)=>reply.write_exception(&error)}
             Ok(reply)

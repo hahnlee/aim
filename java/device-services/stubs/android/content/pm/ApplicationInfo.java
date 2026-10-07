@@ -2,7 +2,9 @@
 // the members used, checked against the image by the device-services node.
 package android.content.pm;
 
-public class ApplicationInfo extends PackageItemInfo {
+public class ApplicationInfo extends PackageItemInfo implements android.os.Parcelable {
+    public void writeToParcel(android.os.Parcel out, int flags) { throw new RuntimeException("stub"); }
+    public int describeContents() { throw new RuntimeException("stub"); }
     public static final android.os.Parcelable.Creator<ApplicationInfo> CREATOR = null;
     public boolean isSystemApp() { throw new RuntimeException("stub"); }
     public boolean enabled;

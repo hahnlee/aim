@@ -75,13 +75,14 @@ impl ServiceHost {
             .system
             .upgrade()
             .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system owner is unavailable"))
-            .and_then(|system| system.capture_package_scan());
+            .and_then(|system| system.capture_package_scan_and_queries());
         let mut reply = Parcel::new();
         match result {
-            Ok(snapshot) => {
-                let binder = self.process.add_service(Arc::new(
-                    crate::package::scan_snapshot::endpoint::Endpoint::new(snapshot),
-                ));
+            Ok((snapshot,queries)) => {
+                let endpoint=if let Some(queries)=queries {
+                    crate::package::scan_snapshot::endpoint::Endpoint::with_computer(snapshot,queries,&self.process)
+                } else {crate::package::scan_snapshot::endpoint::Endpoint::new(snapshot)};
+                let binder = self.process.add_service(Arc::new(endpoint));
                 host::write_capture_package_scan_reply(&mut reply, Some(binder));
             }
             Err(error) => reply.write_exception(&error),

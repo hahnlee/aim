@@ -1,5 +1,7 @@
 package dev.aim.server;
 
+import dev.aim.server.IPackageComputer;
+
 /** One captured native scan version, retained until close. System UID only. */
 interface IPackageScanSnapshot {
     long getVersion();
@@ -35,4 +37,6 @@ interface IPackageScanSnapshot {
     /** Explicit runtime owners for each active/factory setting, including unloaded code. */
     int getRuntimeStateLength(String packageName, boolean disabled);
     byte[] getRuntimeStateChunk(String packageName, boolean disabled, int offset, int length);
+    /** Query lease independent of this scan lease, against exactly the same version. */
+    IPackageComputer getComputer();
 }

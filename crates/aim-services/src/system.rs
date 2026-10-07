@@ -1092,6 +1092,13 @@ impl System {
         Ok(owner)
     }
 
+    pub(crate) fn capture_package_scan_and_queries(&self)->Result<(Arc<crate::package::scan_snapshot::Snapshot>,Option<Arc<crate::package::scan_snapshot::query_state::Capture>>)> {
+        let state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_ref().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package bootstrap unavailable"))?;
+        let snapshot=current.snapshots.as_ref().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"complete package scan unavailable"))?.capture();
+        Ok((snapshot,current.queries.clone()))
+    }
+
     pub fn capture_package_scan(&self) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
         self.package_bootstrap
             .lock()
@@ -1286,42 +1293,72 @@ impl System {
 
     pub(crate) fn commit_package_mutation(
         &self,
-        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-        plan: &crate::package::write::mutation::Plan,
-    ) -> std::result::Result<(),crate::package::owner::WriteError> {
-        use crate::package::{owner::WriteError,write::mutation::Change};
-        let before=|message:String|WriteError {committed:false,message};
-        let (bridge,persistence)=self.package_persistence_owner(capture)
-            .map_err(|error|before(format!("mutation disk owner: {error:?}")))?;
+        request: &crate::package::write::mutation::Request,
+        resolver: &crate::package::resolve::Resolver,
+        uid: i32,
+        pid: i32,
+    ) -> std::result::Result<std::result::Result<(), Exception>, crate::package::resolve::QueryError> {
+        use crate::package::{owner::WriteError, write::mutation::Change, resolve::QueryError};
+        let (bridge, persistence) = {
+            let state = self.package_bootstrap.lock().unwrap();
+            let Some(current) = state.current.as_ref() else {
+                return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation bootstrap unavailable")));
+            };
+            let Some(persistence) = current.persistence.clone() else {
+                return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native package persistence is unavailable")));
+            };
+            (current.bridge.clone(),persistence)
+        };
+        let mut disk = persistence.lock().unwrap();
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let Some(current) = state.current.as_mut().filter(|owner|
+            Arc::ptr_eq(&owner.bridge,&bridge)
+            && owner.persistence.as_ref().is_some_and(|owner|Arc::ptr_eq(owner,&persistence))) else {
+            return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"mutation bootstrap owner changed")));
+        };
+        let Some(capture) = current.queries.clone() else {
+            return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation capture unavailable")));
+        };
+        let resolution = match resolver.resolution(capture.state()) {
+            Ok(resolution)=>resolution,
+            Err(error)=> {
+                let reply=error.reply().map_err(QueryError::Transport)?;
+                return Ok(Reader::new(reply.data(),reply.objects()).read_exception().map_err(QueryError::Transport)?);
+            },
+        };
+        let query = crate::package::query::Query {state:capture.state(),filter:&resolution.apps_filter,calling_uid:uid};
+        let plan = match request.decide(&query,pid).map_err(QueryError::NotModelled)? {
+            Ok(plan) => plan,
+            Err(exception) => return Ok(Err(exception)),
+        };
         if !matches!(plan.change,Change::None|Change::SplashTheme(_)|Change::MinAspectRatio(_)|Change::UpdateAvailable(_)) {
-            return Err(before("mutation side-effect owners are unavailable".into()));
+            return Err(QueryError::NotModelled(crate::package::apps_filter::NotModelled("mutation side-effect owners are unavailable")));
         }
-        let mut disk=persistence.lock().unwrap();
-        let mut state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_mut().filter(|owner|
-            Arc::ptr_eq(&owner.bridge,&bridge) && owner.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture))
-            && owner.persistence.as_ref().is_some_and(|owner|Arc::ptr_eq(owner,&persistence)))
-            .ok_or_else(||before("mutation generation changed".into()))?;
-        disk.validate_committed_scan(capture.scan().owner())?;
-        if matches!(plan.change,Change::None) {return Ok(());}
-        let mut scan=capture.scan().owner().clone();
-        plan.apply_scan(&mut scan).map_err(before)?;
-        let update=capture.prepare_package_update(scan).map_err(before)?;
-        let result=disk.commit_mutation(plan);
-        let committed=result.is_ok() || result.as_ref().is_err_and(|error|error.committed);
+        let write_error = |error: WriteError| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string());
+        if let Err(error) = disk.validate_committed_scan(capture.scan().owner()) { return Ok(Err(write_error(error))); }
+        if matches!(plan.change,Change::None) { return Ok(Ok(())); }
+        let mut scan = capture.scan().owner().clone();
+        if let Err(message) = plan.apply_scan(&mut scan) { return Ok(Err(write_error(WriteError{committed:false,message}))); }
+        let update = match capture.prepare_package_update(scan) {
+            Ok(update) => update,
+            Err(message) => return Ok(Err(write_error(WriteError{committed:false,message}))),
+        };
+        let result = disk.commit_mutation(&plan);
+        let committed = result.is_ok() || result.as_ref().is_err_and(|error|error.committed);
         if committed {
-            current.snapshots=Some(update.store);
-            current.queries=Some(update.capture.clone());
-            if let Some(page)=&current.version_page {page.publish(update.capture.scan().version());}
-            state.version=update.capture.scan().version();
+            current.snapshots = Some(update.store);
+            current.queries = Some(update.capture.clone());
+            if let Some(page) = &current.version_page {page.publish(update.capture.scan().version());}
+            state.version = update.capture.scan().version();
         }
         drop(state);
         drop(disk);
         if committed {
-            self.check_package_bootstrap(&bridge).map_err(|error|format!("{error:?}")).and_then(|_|bridge.invalidate_package_info_cache().map_err(|error|format!("{error:?}")))
-                .map_err(|error|WriteError {committed:true,message:format!("mutation committed, cache invalidation failed: {error:?}; persistence: {result:?}")})?;
+            if let Err(error) = self.check_package_bootstrap(&bridge).map_err(|error|format!("{error:?}")).and_then(|_|bridge.invalidate_package_info_cache().map_err(|error|format!("{error:?}"))) {
+                return Ok(Err(write_error(WriteError{committed:true,message:format!("mutation committed, cache invalidation failed: {error:?}; persistence: {result:?}")})));
+            }
         }
-        result
+        Ok(result.map_err(write_error))
     }
 
     pub fn install_runtime_permission_metadata(

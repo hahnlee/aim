@@ -730,3 +730,17 @@ fn shared_library_names_use_complete_registry_and_exclude_hidden_static_library(
     let empty = call(&s,1000,false,pm::GET_SYSTEM_SHARED_LIBRARY_NAMES,|p| pm::GetSystemSharedLibraryNames {}.write(p));
     assert_eq!(pm::read_get_system_shared_library_names_reply(&mut Reader::new(empty.data(),empty.objects())).unwrap().unwrap(),None);
 }
+
+#[test]
+fn internal_metadata_keeps_permission_and_filter_identities_separate() {
+    let state=state();
+    let filter=AppsFilter::new(&state,&crate::package::apps_filter::Config::default()).unwrap();
+    let app=Query {state:&state,filter:&filter,calling_uid:10100};
+    let system=Query {state:&state,filter:&filter,calling_uid:1000};
+    assert!(app.package_info_internal(OTHER,-1,0,10,1000).unwrap().is_err_and(|error|error.code==EX_SECURITY));
+    assert!(matches!(app.application_info_internal(OTHER,0,10,1000),Err(NotModelled("a cross-user call recents may make"))));
+    assert!(system.application_info_internal(OTHER,0,0,10100).unwrap().unwrap().is_none());
+    assert!(app.application_info_internal(OTHER,0,0,1000).unwrap().unwrap().is_some());
+    // PackageInfo generation also filters with the actual caller, as AOSP does.
+    assert!(app.package_info_internal(OTHER,-1,0,0,1000).unwrap().unwrap().is_none());
+}
