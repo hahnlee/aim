@@ -1194,6 +1194,33 @@ impl System {
         Ok(result)
     }
 
+    /// Generate packages.list from native captured metadata and active-user GIDs.
+    pub fn commit_package_list_from_scan(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &mut crate::package::owner::Store,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        active_users: &[i32],
+    ) -> std::result::Result<(), crate::package::owner::WriteError> {
+        use crate::package::owner::WriteError;
+        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
+            committed: false, message: format!("package list bootstrap owner: {error:?}"),
+        })?;
+        store.validate_committed_scan(capture.scan().owner())?;
+        let mut entries = crate::package::list::metadata_from_capture(capture).map_err(|message| WriteError { committed: false, message })?;
+        for entry in &mut entries {
+            entry.gids = bridge.permission_gids(entry.uid as i32, active_users)
+                .map_err(|error| WriteError { committed: false, message: format!("package list permission owner: {error:?}") })?;
+        }
+        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
+            committed: false, message: format!("package list bootstrap owner before commit: {error:?}"),
+        })?;
+        store.commit_package_list(&entries)?;
+        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
+            committed: true, message: format!("package list bootstrap owner after commit: {error:?}"),
+        })
+    }
+
     /// Initialize captured users under the retained boot owner and pinned policy.
     pub fn commit_initial_package_restrictions(
         &self,

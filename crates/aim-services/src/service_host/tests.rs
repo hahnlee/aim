@@ -1245,6 +1245,9 @@ fn exercise_bootstrap_on(
     let resolved = old
         .resolve_query_context(published.owner(), context.clone())
         .unwrap();
+    let capture = crate::package::scan_snapshot::query_state::Capture::new(published.clone(), resolved.clone()).unwrap();
+    let rows = crate::package::list::metadata_from_capture(&capture).unwrap();
+    assert!(rows.is_empty(), "unloaded settings must not produce list rows");
     assert_eq!(
         resolved.packages[&("fixture".into(), false)].users[&0].gids,
         [3003, 3003]
@@ -2701,6 +2704,24 @@ fn verify_boot_scan(
             config,
         )
         .unwrap();
+    let rows = crate::package::list::metadata_from_capture(&query).unwrap();
+    let platform_row = rows.iter().find(|row| row.name == "android").unwrap();
+    assert_eq!(platform_row.data_dir, "/data/system");
+    assert_eq!(platform_row.installer, "@system");
+    assert!(rows.iter().all(|row| row.gids.is_empty()));
+    let list_data = data.0.join("native-list");
+    let mut list_store = crate::package::owner::Store::create(&list_data, &[0, 10]).unwrap();
+    list_store.commit_scan_settings(query.scan()).unwrap();
+    assert!(!system.commit_package_list_from_scan(&foreign, &mut list_store, &query, &[0, 10]).unwrap_err().committed);
+    assert!(!list_data.join("system/packages.list").exists());
+    owner.gid_reply.store(1, Ordering::SeqCst);
+    assert!(!system.commit_package_list_from_scan(bridge, &mut list_store, &query, &[0, 10]).unwrap_err().committed);
+    assert!(!list_data.join("system/packages.list").exists());
+    owner.gid_reply.store(0, Ordering::SeqCst);
+    system.commit_package_list_from_scan(bridge, &mut list_store, &query, &[0, 10]).unwrap();
+    assert!(list_store.state().list.iter().all(|row| row.gids == [3003, 3003, 3003, 3003]));
+    let reopened = crate::package::owner::Store::open(&list_data, &[0, 10]).unwrap().unwrap();
+    assert_eq!(reopened.state().list, list_store.state().list);
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
     assert_eq!(

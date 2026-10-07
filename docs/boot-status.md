@@ -1138,7 +1138,24 @@ files. Main/reserve bytes match, native Store reopen agrees with its published
 state, and the original Settings.readPackageRestrictionsLPr getter probe checks
 installed/stopped/not-launched/hidden/enabled, CE/DE inodes, first-install time,
 enabledCaller and enabled/disabled components. Actual scan/user generation and
-full native boot/reboot/app readiness are still separate #978 gates. Store.commit_initial_scan_restrictions now generates scalar/component
+full native boot/reboot/app readiness are still separate #978 gates. System.commit_package_list_from_scan now generates rows from the immutable native
+scan/query capture, in signed Java-hash setting order. Unloaded settings and APEX
+are omitted; system-user data paths come from setting volume/storage and captured
+installed/dataExists policy, with the original space-path omission. Parsed code
+supplies UID/version/debug/profile flags, setting owners supply seInfo and installer.
+The exact committed scan projection is checked before querying GIDs from the
+retained bootstrap permission owner for the caller's resolved active users.
+Bootstrap identity is checked again before and after commit; list read-back retains
+GID order/duplicates. The legacy IBridge GID reply also rejects trailing Parcel
+words (#980). This list entry point is not yet production first-boot orchestration;
+full kernel mapping/runtime permission writes and native PMS switch remain #798. The retained
+bootstrap/framework-res scan passes (1.19s), including generated platform rows,
+foreign-owner rejection, malformed GID refusal before writing and persisted
+multi-user GID duplicates. 542 service units pass (6 excluded, 0.54s), including
+legacy GID reply tail rejection and unloaded-setting omission; host build passes
+(3 rebuilt/10 fresh, 23.6s). Broader original packages.list comparisons and
+native boot/CTS/app acceptance are not established by these checks.
+Store.commit_initial_scan_restrictions now generates scalar/component
 package rows from the exact SigningScan.scanned_user_states and current package
 inventory, rejecting missing user owners or mismatched global settings. The
 settings check compares the actual scan writer projection against committed

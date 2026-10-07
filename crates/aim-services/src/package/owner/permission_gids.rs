@@ -25,10 +25,23 @@ pub fn query(owner: &Strong, app_id: i32, users: &[i32]) -> Result<Vec<u32>, Per
         let reply = owner
             .transact(bridge::GET_PERMISSION_GIDS_FOR_UID, &request, false)
             .map_err(PermissionGidError::Transport)?;
-        bridge::read_get_permission_gids_for_uid_reply(&mut reply.reader())
-            .map_err(PermissionGidError::Transport)?
-            .map_err(PermissionGidError::Owner)
+        let mut reader = reply.reader();
+        read_reply(&mut reader)
     })
+}
+
+fn read_reply(
+    reader: &mut aim_binder_host::parcel::Reader<'_>,
+) -> Result<Option<Vec<i32>>, PermissionGidError> {
+    let gids = bridge::read_get_permission_gids_for_uid_reply(reader)
+        .map_err(PermissionGidError::Transport)?
+        .map_err(PermissionGidError::Owner)?;
+    if reader.remaining() != 0 {
+        return Err(PermissionGidError::Transport(
+            aim_binder_host::parcel::BAD_VALUE,
+        ));
+    }
+    Ok(gids)
 }
 
 pub(crate) fn query_with(
@@ -70,4 +83,28 @@ pub(crate) fn query_with(
         }
     }
     Ok(gids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aim_binder_host::parcel::{BAD_VALUE, Reader};
+
+    #[test]
+    fn permission_reply_preserves_duplicates_and_rejects_trailing_words() {
+        let mut reply = Parcel::new();
+        reply.write_no_exception();
+        reply.write_i32(2);
+        reply.write_i32(3003);
+        reply.write_i32(3003);
+        assert_eq!(
+            read_reply(&mut Reader::new(reply.data(), &[])).unwrap(),
+            Some(vec![3003, 3003])
+        );
+        reply.write_i32(99);
+        assert_eq!(
+            read_reply(&mut Reader::new(reply.data(), &[])),
+            Err(PermissionGidError::Transport(BAD_VALUE))
+        );
+    }
 }

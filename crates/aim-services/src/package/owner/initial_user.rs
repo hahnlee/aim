@@ -5,6 +5,22 @@ use crate::package::{restrictions::UserState, scan::SigningScan};
 use aim_android_xml::{Element, Node, Value};
 
 impl Store {
+    /// Require the exact persisted projection of this completed scan.
+    pub(crate) fn validate_committed_scan(&self, scan: &SigningScan) -> Result<(), WriteError> {
+        let expected = super::scan_settings::replace(&self.settings_document, scan)
+            .map_err(WriteError::before)?;
+        let expected = crate::package::settings::Settings::parse(&expected)
+            .map_err(WriteError::before)?;
+        if super::signing::persisted(self.state.settings.clone())
+            != super::signing::persisted(expected)
+        {
+            return Err(WriteError::before(
+                "committed scan/settings ownership differs",
+            ));
+        }
+        Ok(())
+    }
+
     /// The scan owns every package/user record; missing dependencies never use
     /// constructor defaults. Resolver/domain sections come from their owners.
     pub fn commit_initial_scan_restrictions(
@@ -14,17 +30,7 @@ impl Store {
         cross_user_suspension: bool,
         mut sections: Element,
     ) -> Result<(), WriteError> {
-        let expected = super::scan_settings::replace(&self.settings_document, scan)
-            .map_err(WriteError::before)?;
-        let expected = crate::package::settings::Settings::parse(&expected)
-            .map_err(WriteError::before)?;
-        if super::signing::persisted(self.state.settings.clone())
-            != super::signing::persisted(expected)
-        {
-            return Err(WriteError::before(
-                "initial user scan/settings ownership differs",
-            ));
-        }
+        self.validate_committed_scan(scan)?;
         if sections.name != "package-restrictions" || sections.children().any(|e| e.name == "pkg") {
             return Err(WriteError::before(
                 "initial user side-owner sections are invalid",

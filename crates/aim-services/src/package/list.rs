@@ -2,6 +2,8 @@
 //! (installd, run-as, the sdcard and SELinux setup) through
 //! libpackagelistparser, one line per package as
 //! `Settings.writePackageListLPrInternal` writes it.
+//! Ported from android-16.0.0_r1, Copyright (C) The Android Open Source
+//! Project, Apache License 2.0.
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -19,6 +21,87 @@ pub struct Entry {
     pub profileable: bool,
     /// The installer's package, or `@system`, `@product` or `@null`.
     pub installer: String,
+}
+
+/// Rows from the exact native scan/query generation. Permission GIDs are
+/// resolved separately from the active-user owner before committing the file.
+pub(crate) fn metadata_from_capture(
+    capture: &super::scan_snapshot::query_state::Capture,
+) -> Result<Vec<Entry>, String> {
+    use super::pkg::{booleans, booleans2};
+    let state = capture.state();
+    let mut settings: Vec<_> = capture.scan().owner().settings.packages.iter().collect();
+    settings.sort_by_key(|p| super::info::java_hash(&p.name));
+    let mut entries = Vec::new();
+    for setting in settings {
+        let ps = state
+            .packages
+            .get(&setting.name)
+            .ok_or("missing captured package setting")?;
+        let Some(pkg) = &ps.pkg else { continue };
+        if pkg.is2(booleans2::APEX) {
+            continue;
+        }
+        let user = ps
+            .users
+            .get(&0)
+            .ok_or("packages.list requires captured system-user state")?;
+        let nullable = state
+            .system
+            .flags
+            .iter()
+            .any(|(name, enabled)| name == super::info::NULLABLE_DATA_DIR && *enabled);
+        let data_dir = if ps.name == "android" {
+            "/data/system".into()
+        } else if !user.installed && !user.data_exists && nullable {
+            "null".into()
+        } else {
+            let base = ps
+                .volume_uuid
+                .as_ref()
+                .map(|v| format!("/mnt/expand/{v}"))
+                .unwrap_or_else(|| "/data".into());
+            let kind = if ps.is.default_to_device_protected_storage {
+                "user_de"
+            } else {
+                "user"
+            };
+            format!("{base}/{kind}/0/{}", ps.name)
+        };
+        if data_dir.contains(' ') {
+            continue;
+        }
+        let profileable = !pkg.is(booleans::DISALLOW_PROFILING);
+        entries.push(Entry {
+            name: pkg.package_name.clone(),
+            uid: pkg
+                .uid
+                .try_into()
+                .map_err(|_| "invalid loaded package UID")?,
+            debuggable: pkg.is(booleans::DEBUGGABLE),
+            data_dir,
+            seinfo: ps.seinfo.clone().unwrap_or_else(|| "null".into()),
+            gids: Vec::new(),
+            profileable_from_shell: profileable && pkg.is(booleans::PROFILEABLE_BY_SHELL),
+            version_code: (i64::from(pkg.version_code_major) << 32)
+                | i64::from(pkg.version_code as u32),
+            profileable,
+            installer: if ps.is.system {
+                "@system".into()
+            } else if ps.is.product {
+                "@product".into()
+            } else {
+                ps.install_source
+                    .installer
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| "@null".into())
+            },
+        });
+    }
+    serialize(&entries)?;
+    Ok(entries)
 }
 
 /// Settings' ten-field wire format. Preserve GID order and duplicates from the
