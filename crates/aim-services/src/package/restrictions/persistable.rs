@@ -145,6 +145,107 @@ fn required<T>(value: std::result::Result<Option<T>, String>, name: &str) -> Res
 }
 
 impl Bundle {
+    /// PersistableBundle.saveToXml/XmlUtils value tags at the pinned version.
+    pub fn save(&self, name: &str) -> Result<Element> {
+        if self
+            .entries
+            .iter()
+            .any(|(_, v)| matches!(v, Value::Strings(items) if items.iter().any(Option::is_none)))
+        {
+            return Err(Error::Runtime(
+                "null string-array item cannot be serialized".into(),
+            ));
+        }
+        let mut root = Element {
+            name: name.into(),
+            attrs: vec![],
+            content: vec![],
+        };
+        for (key, value) in &self.entries {
+            let (tag, scalar) = match value {
+                Value::Null => ("null", None),
+                Value::Int(v) => ("int", Some(aim_android_xml::Value::Int(*v))),
+                Value::Long(v) => ("long", Some(aim_android_xml::Value::Long(*v))),
+                Value::Double(v) => ("double", Some(aim_android_xml::Value::Double(v.value()))),
+                Value::Bool(v) => ("boolean", Some(aim_android_xml::Value::Bool(*v))),
+                Value::String(_) => ("string", None),
+                Value::Ints(_) => ("int-array", None),
+                Value::Longs(_) => ("long-array", None),
+                Value::Doubles(_) => ("double-array", None),
+                Value::Bools(_) => ("boolean-array", None),
+                Value::Strings(_) => ("string-array", None),
+                Value::Bundle(_) => ("pbundle_as_map", None),
+            };
+            let mut e = match value {
+                Value::Bundle(bundle) => bundle.save(tag)?,
+                _ => Element {
+                    name: tag.into(),
+                    attrs: vec![],
+                    content: vec![],
+                },
+            };
+            if let Some(key) = key {
+                e.attrs
+                    .push(("name".into(), aim_android_xml::Value::String(key.clone())));
+            }
+            if let Some(value) = scalar {
+                e.attrs.push(("value".into(), value));
+            }
+            let array = match value {
+                Value::Ints(v) => Some(
+                    v.iter()
+                        .map(|v| Some(aim_android_xml::Value::Int(*v)))
+                        .collect::<Vec<_>>(),
+                ),
+                Value::Longs(v) => Some(
+                    v.iter()
+                        .map(|v| Some(aim_android_xml::Value::Long(*v)))
+                        .collect(),
+                ),
+                Value::Doubles(v) => Some(
+                    v.iter()
+                        .map(|v| Some(aim_android_xml::Value::Double(v.value())))
+                        .collect(),
+                ),
+                Value::Bools(v) => Some(
+                    v.iter()
+                        .map(|v| Some(aim_android_xml::Value::Bool(*v)))
+                        .collect(),
+                ),
+                Value::Strings(v) => Some(
+                    v.iter()
+                        .map(|v| {
+                            v.as_ref()
+                                .map(|v| aim_android_xml::Value::String(v.clone()))
+                        })
+                        .collect(),
+                ),
+                Value::String(text) => {
+                    e.content
+                        .push(Node::Token(aim_android_xml::TEXT, Some(text.clone())));
+                    None
+                }
+                _ => None,
+            };
+            if let Some(items) = array {
+                e.attrs.push((
+                    "num".into(),
+                    aim_android_xml::Value::Int(items.len() as i32),
+                ));
+                for value in items {
+                    let attrs = value.map(|v| vec![("value".into(), v)]).unwrap_or_default();
+                    e.content.push(Node::Element(Element {
+                        name: "item".into(),
+                        attrs,
+                        content: vec![],
+                    }));
+                }
+            }
+            root.content.push(Node::Element(e));
+        }
+        Ok(root)
+    }
+
     /// A text XML tree, or a tree read by `aim_android_xml::read_next` so the
     /// source parser's text/CDATA semantics are preserved.
     pub fn restore(root: &Element) -> Result<Self> {
@@ -172,6 +273,51 @@ impl Bundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_types_restore_nested_arrays_and_reject_original_null_string_write() {
+        let value = Bundle {
+            entries: vec![
+                (None, Value::Null),
+                (Some("text".into()), Value::String("<text>&".into())),
+                (Some("ints".into()), Value::Ints(vec![1, -2])),
+                (Some("longs".into()), Value::Longs(vec![i64::MIN])),
+                (Some("double".into()), Value::Double(Double::new(-0.0))),
+                (
+                    Some("doubles".into()),
+                    Value::Doubles(vec![Double::new(f64::NAN)]),
+                ),
+                (Some("bools".into()), Value::Bools(vec![true, false])),
+                (
+                    Some("strings".into()),
+                    Value::Strings(vec![Some("one".into())]),
+                ),
+                (
+                    Some("nested".into()),
+                    Value::Bundle(Bundle {
+                        entries: vec![
+                            (Some("long".into()), Value::Long(9)),
+                            (Some("int".into()), Value::Int(8)),
+                            (Some("bool".into()), Value::Bool(true)),
+                        ],
+                    }),
+                ),
+            ],
+        };
+        let root = value.save("app-extras").unwrap();
+        let restored = Bundle::restore(
+            &aim_android_xml::read(&aim_android_xml::abx::write(&root).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value, restored);
+        assert!(matches!(
+            Bundle {
+                entries: vec![(None, Value::Strings(vec![None]))]
+            }
+            .save("extras"),
+            Err(Error::Runtime(_))
+        ));
+    }
 
     #[test]
     fn duplicate_defusing_occurs_after_map_population() {

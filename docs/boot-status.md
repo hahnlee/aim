@@ -1143,27 +1143,29 @@ package rows from the exact SigningScan.scanned_user_states and current package
 inventory, rejecting missing user owners or mismatched global settings. Resolver/
 domain sections must be supplied by their separate owners. Main commit publishes
 the original scan user objects rather than parsed disk normalization, preserving
-null component sets and runtime-only state. Suspension/archive data is rejected
-explicitly until its full serializer is implemented (#979); no fields are dropped.
-The original read fixture now supplies captured SigningScan user states and uses
-this generation API rather than supplying a completed pkg XML document. The direct original
-The scan-generated initial-write/original getter oracle passes without skips
-(73.32s); 538 units pass (5 excluded, 0.54s), including absent user-owner rejection
-and live component-state preservation. Runtime build passes
-(3 rebuilt/39 fresh, 17.0s). Production scan/user readiness and full complex
-state serializers remain #978/#979.
-restriction reader initially rejected incomplete fixture dependencies (null domain
-owner, Connection and Context); it now uses the actual domain service, existing
-controlled connection bound to the actual setting name and real framework Context.
-Native initial-write/reopen and original getters agree in both cases. Full original
-ART oracle passes without skips (62.86s); API/image/template build passes
-(6 rebuilt/36 fresh, 73.8s). This verifies the writer/read boundary, not complete
-native first-boot scan generation or app/reboot acceptance.
-538 service units pass (5 excluded, 0.54s), including main-write rollback/retry,
-external byte mutation and committed reserve failure. Runtime build passes
-(3 rebuilt/39 fresh, 19.3s); retained-bootstrap/framework-res scan passes (1.28s).
-Original ART/user false-continuation checks passed on the preceding revision
-(69.53s) and were not rerun for this new initialized-write API.
+null component sets and runtime-only state. Suspension/archive serialization
+emits resolved owner rows under explicit cross-user policy, nullable params,
+quarantine, dialog and typed PersistableBundle extras. Archive state emits
+installer/time/activity/component and guest absolute icon paths.
+PersistableBundle.save covers primitive/null/string/array/nested bundle XML;
+null string-array items reject like the original serializer. Relative icon paths
+still require guest absolute-path ownership. Full policy/nullable/complex state
+conformance remains #979; production scan/user readiness remains #978.
+The original read fixture supplies captured SigningScan user states and uses
+this generation API rather than supplying a completed pkg XML document. Three
+controlled cases verify scalar/component state and actual original suspension/
+quarantine, dialog title, nested bundle/array/launcher extras, archive installer/
+time/title/component/icon getters. The reader uses the actual domain service,
+existing controlled connection bound to the actual setting name and real
+framework Context. Existing BaseBundle.get checks exact extras types and values.
+Native initial-write/reopen and original getters agree. The original ART oracle
+passes without skips (62.56s); 539 units pass (5 excluded, 0.54s), including bundle
+save/restore types, null-string-array write rejection, absent user-owner rejection,
+live component-state preservation, main-write rollback/retry, external byte
+mutation and committed reserve failure. Runtime build passes (3 rebuilt/39 fresh,
+1.3s); retained-bootstrap/framework-res scan passes (1.17s), host build passes
+(0 rebuilt/13 fresh, 0.3s). This verifies the writer/read boundary; complete native
+first-boot scan generation and app/reboot acceptance remain unverified.
 Actual original absent/no-start probes with malformed user files return false,
 preserve both files and run finally VersionInfo initialization. Native units cover
 that skip, write refusal and the contrasting failed-read retry continuation.

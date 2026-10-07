@@ -12,6 +12,7 @@ pub fn export(directory: &Path) {
     let inputs = [
         "<package-restrictions><pkg name='p' inst='true' stopped='false' enabled='0' ceDataInode='11' deDataInode='12' first-install-time='77'/></package-restrictions>",
         "<package-restrictions><pkg name='p' inst='false' stopped='true' nl='true' hidden='true' enabled='2' enabledCaller='owner' ceDataInode='21' deDataInode='22' first-install-time='88'><enabled-components><item name='p.Enabled'/></enabled-components><disabled-components><item name='p.Disabled'/></disabled-components></pkg></package-restrictions>",
+        "<package-restrictions><pkg name='p' suspended='true'><suspend-params suspending-package='android' quarantined='true'><dialog-info title='Stopped' buttonAction='0'/><app-extras><int name='count' value='3'/><pbundle_as_map name='nested'><long name='time' value='4'/></pbundle_as_map><string-array name='names' num='2'><item value='one'/><item value='two'/></string-array></app-extras><launcher-extras><boolean name='shown' value='true'/></launcher-extras></suspend-params><archive-state installer-title='Installer' archive-time='77'><archive-activity-info activity-title='Archived' original-component-name='p/.Main' icon-path='/data/archive/icon.png'/></archive-state></pkg></package-restrictions>",
     ];
     for (index, input) in inputs.iter().enumerate() {
         let data = directory.join(format!("initial-restrictions-native-{index}"));
@@ -52,6 +53,7 @@ pub fn export(directory: &Path) {
             .commit_initial_scan_restrictions(
                 &scan,
                 0,
+                false,
                 aim_android_xml::read(b"<package-restrictions/>").unwrap(),
             )
             .unwrap();

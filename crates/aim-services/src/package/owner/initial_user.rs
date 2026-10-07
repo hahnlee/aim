@@ -11,6 +11,7 @@ impl Store {
         &mut self,
         scan: &SigningScan,
         user: u32,
+        cross_user_suspension: bool,
         mut sections: Element,
     ) -> Result<(), WriteError> {
         if super::signing::persisted(self.state.settings.clone())
@@ -38,7 +39,12 @@ impl Store {
                         setting.name
                     ))
                 })?;
-            packages.push(Node::Element(initial_package(&setting.name, state)?));
+            packages.push(Node::Element(initial_package(
+                &setting.name,
+                state,
+                id,
+                cross_user_suspension,
+            )?));
             states.push((setting.name.clone(), state.clone()));
         }
         packages.append(&mut sections.content);
@@ -60,17 +66,12 @@ impl Store {
     }
 }
 
-fn initial_package(name: &str, state: &UserState) -> Result<Element, WriteError> {
-    if state
-        .suspensions
-        .as_ref()
-        .is_some_and(|owners| !owners.is_empty())
-        || state.archive_state.is_some()
-    {
-        return Err(WriteError::before(
-            "initial suspended/archive user serialization is unavailable",
-        ));
-    }
+fn initial_package(
+    name: &str,
+    state: &UserState,
+    user: i32,
+    cross_user: bool,
+) -> Result<Element, WriteError> {
     let mut pkg = element("pkg");
     attribute(&mut pkg, "name", Some(Value::String(name.into())));
     for (key, value) in [
@@ -133,6 +134,85 @@ fn initial_package(name: &str, state: &UserState) -> Result<Element, WriteError>
             }
             pkg.content.push(Node::Element(group));
         }
+    }
+    let owners = state.resolved_suspensions(user, cross_user);
+    if !owners.is_empty() {
+        attribute(&mut pkg, "suspended", Some(Value::Bool(true)));
+        for (id, owner) in owners {
+            let mut entry = element("suspend-params");
+            attribute(
+                &mut entry,
+                "suspending-package",
+                Some(Value::String(owner.package.clone())),
+            );
+            if cross_user {
+                attribute(&mut entry, "suspending-user", Some(Value::Int(id)));
+            }
+            if let Some(params) = &owner.params {
+                attribute(
+                    &mut entry,
+                    "quarantined",
+                    Some(Value::Bool(params.quarantined)),
+                );
+                if let Some(dialog) = &params.dialog {
+                    entry
+                        .content
+                        .push(Node::Element(dialog.save("dialog-info")));
+                }
+                for (tag, bundle) in [
+                    ("app-extras", &params.app_extras),
+                    ("launcher-extras", &params.launcher_extras),
+                ] {
+                    if let Some(bundle) = bundle {
+                        entry
+                            .content
+                            .push(Node::Element(bundle.save(tag).map_err(WriteError::before)?));
+                    }
+                }
+            }
+            pkg.content.push(Node::Element(entry));
+        }
+    }
+    if let Some(state) = &state.archive_state {
+        let mut archive = element("archive-state");
+        attribute(
+            &mut archive,
+            "installer-title",
+            Some(Value::String(state.installer_title.clone())),
+        );
+        attribute(
+            &mut archive,
+            "archive-time",
+            Some(Value::LongHex(state.archive_time)),
+        );
+        for activity in &state.activities {
+            let mut entry = element("archive-activity-info");
+            attribute(
+                &mut entry,
+                "activity-title",
+                Some(Value::String(activity.title.clone())),
+            );
+            attribute(
+                &mut entry,
+                "original-component-name",
+                Some(Value::String(activity.original_component_name.clone())),
+            );
+            for (tag, path) in [
+                ("icon-path", &activity.icon_path),
+                ("monochrome-icon-path", &activity.monochrome_icon_path),
+            ] {
+                if let Some(path) = path {
+                    if !path.starts_with('/') {
+                        return Err(WriteError::before(
+                            "archive icon path requires guest absolute-path ownership",
+                        ));
+                    }
+                    attribute(&mut entry, tag, Some(Value::String(path.clone())));
+                }
+            }
+            archive.content.push(Node::Element(entry));
+        }
+        pkg.content.push(Node::Element(archive));
     }
     Ok(pkg)
 }

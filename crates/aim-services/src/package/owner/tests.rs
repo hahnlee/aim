@@ -157,11 +157,11 @@ fn initial_restrictions_serialize_the_supplied_scan_user_owner() {
     let(mut store,_)=recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!()).unwrap();
     let mut scan=SigningScan::new(&SystemConfig::default(),&settings,36).unwrap();
     let root=element("package-restrictions");
-    assert!(store.commit_initial_scan_restrictions(&scan,0,root.clone()).unwrap_err().message.contains("absent"));
+    assert!(store.commit_initial_scan_restrictions(&scan,0,false,root.clone()).unwrap_err().message.contains("absent"));
     let state=UserState{ installed:false,stopped:true,enabled:2,ce_data_inode:11,first_install_time:77,enabled_components:Some(vec!["p.Enabled".into()]),min_aspect_ratio:3,..Default::default()};
     scan.capture_user_states(BTreeMap::from([(("p".into(),false),crate::package::scan::CapturedUsers { states:BTreeMap::from([(0,state.clone())]),active_aliases:Default::default() })])).unwrap();
     fs::write(&path,b"unread old bytes").unwrap();store.claim_unread_restrictions(0).unwrap();
-    store.commit_initial_scan_restrictions(&scan,0,root).unwrap();
+    store.commit_initial_scan_restrictions(&scan,0,false,root).unwrap();
     assert_eq!(store.state().users[0].1.restrictions.packages[0].1,state);
     let bytes=fs::read(&path).unwrap();let parsed=Restrictions::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
     assert_eq!(parsed.packages[0].1.min_aspect_ratio,3);

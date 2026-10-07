@@ -185,7 +185,7 @@ public final class LegacyRestoreOracle {
         }
     }
     private static void verifyInitialRestrictions(File directory, java.util.function.BiConsumer<com.android.server.pm.verify.domain.DomainVerificationService, PackageSetting> connect) throws Exception {
-        for(int index=0;index<2;index++) {
+        for(int index=0;index<3;index++) {
             var data=new File(directory,"initial-restrictions-native-"+index);
             if(android.os.Looper.myLooper()==null)android.os.Looper.prepareMainLooper();
             var context=android.app.ActivityThread.systemMain().getSystemUiContext();
@@ -199,6 +199,13 @@ public final class LegacyRestoreOracle {
             String expected=new String(Files.readAllBytes(new File(directory,"initial-restrictions-"+index+".expected").toPath()),java.nio.charset.StandardCharsets.UTF_8);
             if(!actual.equals(expected))throw new AssertionError("original native initial restriction read differs "+index+" "+actual+" != "+expected);
             if(index==1 && (!state.isComponentEnabled("p.Enabled") || !state.isComponentDisabled("p.Disabled")))throw new AssertionError("native initial components differ");
+            if(index==2 && (!state.isSuspended() || !state.isQuarantined() || state.getArchiveState()==null || state.getSuspendParams().size()!=1))throw new AssertionError("native initial suspension/archive differs");
+            if(index==2) {
+                var params=state.getSuspendParams().values().iterator().next();
+                if(!"Stopped".equals(params.getDialogInfo().getTitle()) || !Integer.valueOf(3).equals(params.getAppExtras().get("count")) || !Long.valueOf(4).equals(((android.os.PersistableBundle)params.getAppExtras().get("nested")).get("time")) || !java.util.Arrays.equals((String[])params.getAppExtras().get("names"),new String[]{"one","two"}) || !Boolean.TRUE.equals(params.getLauncherExtras().get("shown")))throw new AssertionError("native initial suspension extras differ");
+                var archive=state.getArchiveState();var activity=archive.getActivityInfos().get(0);
+                if(!"Installer".equals(archive.getInstallerTitle()) || archive.getArchiveTimeMillis()!=0x77 || !"Archived".equals(activity.getTitle()) || !"p/p.Main".equals(activity.getOriginalComponentName().flattenToString()) || !"/data/archive/icon.png".equals(activity.getIconBitmap().toString()))throw new AssertionError("native initial archive fields differ");
+            }
         }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {
