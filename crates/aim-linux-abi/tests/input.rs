@@ -10,6 +10,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use aim_host_display::input::server::Devices;
@@ -82,13 +83,11 @@ fn wait(child: &mut Child, limit: Duration) -> (bool, String) {
     let start = Instant::now();
     loop {
         if let Some(st) = child.try_wait().unwrap() {
+            // Unless the caller reads it.
             let mut out = String::new();
-            child
-                .stdout
-                .take()
-                .unwrap()
-                .read_to_string(&mut out)
-                .unwrap();
+            if let Some(mut stdout) = child.stdout.take() {
+                stdout.read_to_string(&mut out).unwrap();
+            }
             let mut err = String::new();
             child
                 .stderr
@@ -104,6 +103,40 @@ fn wait(child: &mut Child, limit: Duration) -> (bool, String) {
             return (false, "timed out".into());
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// getevent's output as it comes: it disables stdout's buffer.
+fn stream(child: &mut Child) -> Receiver<String> {
+    let mut stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n @ 1..) = stdout.read(&mut buf) {
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+        }
+    });
+    rx
+}
+
+/// Reads getevent's output into `text` until it has reported each of
+/// `devices` added: opened, with its clock chosen (`EVIOCSCLOCKID`). The
+/// clock flushes what was queued, so an event sent before is gone, as on
+/// Linux.
+fn until_added(rx: &Receiver<String>, text: &mut String, devices: &[u32]) {
+    let start = Instant::now();
+    for d in devices {
+        let node = format!(": /dev/input/event{d}\n");
+        while !text
+            .split_inclusive('\n')
+            .any(|l| l.starts_with("add device") && l.ends_with(&node))
+        {
+            let left = Duration::from_secs(60).saturating_sub(start.elapsed());
+            match rx.recv_timeout(left) {
+                Ok(chunk) => *text += &chunk,
+                Err(_) => panic!("getevent did not open event{d}:\n{text}"),
+            }
+        }
     }
 }
 
@@ -155,17 +188,9 @@ fn getevent_lists_devices_and_reads_window_input() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let start = Instant::now();
-    while [TOUCHSCREEN, KEYBOARD, MOUSE]
-        .iter()
-        .any(|&i| s.input.devices().clients(i) == 0)
-    {
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "getevent never opened the devices"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let rx = stream(&mut child);
+    let mut text = String::new();
+    until_added(&rx, &mut text, &[TOUCHSCREEN, KEYBOARD, MOUSE]);
     s.input
         .pointer(Phase::Down, 0.25, 959.75, 540.0, 960.0, t());
     s.input
@@ -198,7 +223,9 @@ fn getevent_lists_devices_and_reads_window_input() {
         },
         t(),
     );
-    let (ok, text) = wait(&mut child, Duration::from_secs(60));
+    let (ok, err) = wait(&mut child, Duration::from_secs(60));
+    text.extend(rx);
+    let text = text + &err;
     println!("{text}");
     assert!(ok, "{text}");
     // getevent reads one event per ready device per poll: compare each
@@ -296,19 +323,17 @@ fn getevent_sees_hotplugged_devices() {
         .unwrap();
     // getevent starts watching well within this.
     std::thread::sleep(Duration::from_secs(3));
+    let rx = stream(&mut child);
+    let mut text = String::new();
     let devs = Devices::create(&device_dir(&s.socket), devices(1080, 1920, 254.0, 254.0))
         .expect("devices");
-    let start = Instant::now();
-    while devs.clients(KEYBOARD) == 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "the new keyboard was not opened"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    until_added(&rx, &mut text, &[KEYBOARD]);
     let now = monotonic_ns();
     devs.emit(KEYBOARD, now, &[(1, 30, 1)]);
-    let (ok, text) = wait(&mut child, Duration::from_secs(30));
+    let (ok, err) = wait(&mut child, Duration::from_secs(30));
+    // The rest, to the end of its output.
+    text.extend(rx);
+    let text = text + &err;
     println!("{text}");
     assert!(ok, "{text}");
     assert!(text.contains("add device"), "{text}");
