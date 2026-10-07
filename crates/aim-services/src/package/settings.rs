@@ -609,6 +609,60 @@ impl PackageReadAttempt {
 }
 
 impl Settings {
+    /// readDisabledSysPackageLPw constructs locally and publishes only after the
+    /// body. Factory settings never register an AppIds slot or set install-fixed.
+    pub fn read_factory(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        start: &Element,
+        mut permissions: impl FnMut(
+            &mut Package,
+            &mut aim_android_xml::pull::Reader<'_>,
+        ) -> Result<(), ReadError>,
+    ) -> Result<usize, ReadError> {
+        use aim_android_xml::pull::Event;
+        if string(start, "codePath").is_none() {
+            return Err(ReadError::FatalInput("factory code path is null".into()));
+        }
+        let mut package = package_attributes(start)?.ok_or_else(|| {
+            ReadError::Owner("nullable factory package identity is not represented".into())
+        })?;
+        package.flags = FLAG_SYSTEM;
+        package.private_flags = if package.code_path.contains("/priv-app/") {
+            PRIVATE_FLAG_PRIVILEGED
+        } else {
+            0
+        };
+        package.domain_set_id = Some("00000000-0000-0000-0000-000000000000".into());
+        if defaulted(start.int("userId"), 0) <= 0 {
+            package.shared_user_app_id = Some(package.app_id);
+        }
+        let outer = reader.depth();
+        loop {
+            match reader.next()? {
+                Event::Start(child) if child.name == "perms" => permissions(&mut package, reader)?,
+                Event::Start(child) => {
+                    libraries(&mut package, &child)?;
+                    signatures::skip(reader)?;
+                }
+                Event::End(_) if reader.depth() <= outer => break,
+                Event::EndDocument => break,
+                _ => {}
+            }
+        }
+        let index = self
+            .disabled_system_packages
+            .iter()
+            .position(|p| p.name == package.name)
+            .unwrap_or(self.disabled_system_packages.len());
+        if index == self.disabled_system_packages.len() {
+            self.disabled_system_packages.push(package);
+        } else {
+            self.disabled_system_packages[index] = package;
+        }
+        Ok(index)
+    }
+
     /// Preserve the complete consumed persistence document while applying its
     /// incremental owners. Owner/input failures return before any document export.
     pub fn read_document(

@@ -6,6 +6,13 @@ use aim_android_xml::{Element, pull::Reader};
 /// Owners whose state is outside the persisted Settings record. Implementations
 /// must report missing dependencies; recovery only retries File errors.
 pub trait ReadOwners {
+    fn factory_record(
+        &mut self,
+        settings: &mut Settings,
+        reader: &mut Reader<'_>,
+        start: &Element,
+        ids: &AppIds,
+    ) -> Result<(), ReadError>;
     fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError>;
     fn package_registered(&mut self, package: &Package, created: bool) -> Result<(), ReadError>;
     fn shared_registered(&mut self, group: &SharedUser, created: bool) -> Result<(), ReadError>;
@@ -47,6 +54,7 @@ impl Settings {
         *attempt = PackageReadAttempt::default();
         self.read_document(bytes, |settings, reader, start| {
             match start.name.as_str() {
+                "updated-package" => owners.factory_record(settings, reader, &start, ids)?,
                 "package" => {
                     settings.read_package_with_ids(
                         reader,

@@ -56,9 +56,11 @@ pub fn export(directory: &Path) {
         // Native registration hooks construct original SettingBase owners.
         let mut packages = BTreeMap::new();
         let mut groups = BTreeMap::new();
+        let mut factories = BTreeMap::new();
         let mut owners = InstallRead {
             users: &[10, 0],
             packages: &mut packages,
+            factories: &mut factories,
             shared_users: &mut groups,
             remaining: &mut Remaining,
         };
@@ -110,6 +112,7 @@ pub fn export(directory: &Path) {
         let mut owners = InstallRead {
             users: &[],
             packages: &mut packages,
+            factories: &mut factories,
             shared_users: &mut groups,
             remaining: &mut Remaining,
         };
@@ -146,7 +149,7 @@ pub fn export(directory: &Path) {
             for (mode, xml) in ["<packages><package name='q' codePath='/changed' userId='10002' domainSetId='00000000-0000-0000-0000-000000000003'/></packages>".into(), body.to_owned(), body.replace("</package></packages>", "<unknown><"), body.to_owned()].into_iter().enumerate() {
                 let bytes = if mode == 1 { aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap()).unwrap() } else { xml.into_bytes() };
                 fs::write(directory.join(format!("install-binding-{index}.reread-{mode}")), &bytes).unwrap();
-                let mut owners = InstallRead { users: &[10,0], packages: &mut packages, shared_users: &mut groups, remaining: &mut Remaining };
+                let mut owners = InstallRead { users: &[10,0], packages: &mut packages, factories: &mut factories, shared_users: &mut groups, remaining: &mut Remaining };
                 let read = settings.read_owned_document(&bytes, &mut ids, &mut attempt, true, &mut owners);
                 if matches!(read, Err(ReadError::File(_))) { settings.read_owned_document(b"<packages/>", &mut ids, &mut attempt, true, &mut owners).unwrap(); } else { read.unwrap(); }
                 let package = settings.packages.iter().find(|p| p.name == "q").unwrap();
@@ -159,8 +162,18 @@ pub fn export(directory: &Path) {
     }
 }
 
-struct Remaining;
+pub(crate) struct Remaining;
 impl ReadOwners for Remaining {
+    fn factory_record(
+        &mut self,
+        _: &mut Settings,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+        _: &AppIds,
+    ) -> Result<(), ReadError> {
+        panic!("factory outside projection")
+    }
+
     fn start_attempt(&mut self, _: &Settings, _: &[Package]) -> Result<(), ReadError> {
         Ok(())
     }

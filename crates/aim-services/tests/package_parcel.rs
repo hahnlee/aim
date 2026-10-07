@@ -16,6 +16,7 @@ mod common {
     pub mod package_child_events;
     pub mod shared_read_events;
     pub mod install_read_events;
+    pub mod factory_read_events;
     pub mod key_set_events;
     pub mod verifier_events;
     pub mod legacy_domain_events;
@@ -629,6 +630,7 @@ fn native_package_parcels_match_original_read_write() {
     }).collect();
     eprintln!("original modern domain event cases: {}", modern_domain_inputs.len());
     common::install_read_events::export(&directory);
+    common::factory_read_events::export(&directory);
     let boot_version_expected = common::boot_version_events::export(&directory);
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();

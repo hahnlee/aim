@@ -38,6 +38,7 @@ public final class LegacyRestoreOracle {
     }
     public static void verify(File directory) throws Exception {
         verifyInstallBindings(directory);
+        verifyFactoryEvents(directory);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
@@ -119,6 +120,28 @@ public final class LegacyRestoreOracle {
             }
 
 
+        }
+    }
+    private static void verifyFactoryEvents(File directory) throws Exception {
+        for(int index=0;;index++) {
+            var input=new File(directory,"factory-event-"+index+".xml"); if(!input.exists()) break;
+            var data=new File(directory,"factory-event-original-"+index);var system=new File(data,"system");system.mkdirs();
+            Files.write(new File(system,"packages.xml").toPath(),Files.readAllBytes(input.toPath()));
+            Files.write(new File(system,"packages.xml.reservecopy").toPath(),"<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var users=new java.util.ArrayList<android.content.pm.UserInfo>(); for(int id:new int[]{10,0}){var user=new android.content.pm.UserInfo();user.id=id;users.add(user);}
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());settings.readSettingsLPw(null,users,new android.util.ArrayMap<>());
+            for(String name:new String[]{"p","f"}) {
+                var p=settings.getDisabledSystemPkgLPr(name);
+                String trace=p==null?"absent":p.getFlags()+"|"+p.getPrivateFlags()+"|"+p.getAppId()+"|"+p.hasSharedUser()+"|"+p.getDomainSetId()+"|"+p.getVersionCode()+"|"+p.getPathString()+"|"+p.isInstallPermissionsFixed();
+                String expected=new String(Files.readAllBytes(new File(directory,"factory-event-"+index+"-"+name+".metadata").toPath()),java.nio.charset.StandardCharsets.UTF_8);
+                if(!trace.equals(expected))throw new AssertionError("original factory metadata differs "+index+":"+name+" "+trace+" != "+expected);
+                if(p!=null && !java.util.Arrays.equals(PackageLegacyPermissions.capture(p.getAppId(),new int[]{10,0},p.getLegacyPermissionState()),Files.readAllBytes(new File(directory,"factory-event-"+index+"-"+name+".permissions").toPath())))throw new AssertionError("original factory own permissions differ "+index+":"+name);
+            }
+            for(int id:new int[]{10001,10002,10003}) {
+                var p=settings.getSettingLPr(id);var expected=new File(directory,"factory-event-"+index+"-"+id+".uid");
+                if(p==null){if(expected.exists())throw new AssertionError("factory incorrectly registered UID");}
+                else if(!expected.exists() || !java.util.Arrays.equals(PackageLegacyPermissions.capture(id,new int[]{10,0},p.getLegacyPermissionState()),Files.readAllBytes(expected.toPath())))throw new AssertionError("factory UID permission target differs "+index+":"+id);
+            }
         }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {

@@ -14,11 +14,43 @@ use std::collections::BTreeMap;
 pub struct InstallRead<'a, T> {
     pub users: &'a [i32],
     pub packages: &'a mut BTreeMap<String, Migration>,
+    pub factories: &'a mut BTreeMap<String, Migration>,
     pub shared_users: &'a mut BTreeMap<String, Migration>,
     pub remaining: &'a mut T,
 }
 
 impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
+    fn factory_record(
+        &mut self,
+        settings: &mut Settings,
+        reader: &mut Reader<'_>,
+        start: &Element,
+        ids: &AppIds,
+    ) -> Result<(), ReadError> {
+        let mut own = Migration::default();
+        let index = settings.read_factory(reader, start, |package, reader| {
+            if !package.shared_user {
+                return own.read_install_events(reader, self.users);
+            }
+            let state = match ids.get(package.uid_owner_id()) {
+                Some(Owner::Package(name)) => self.packages.get_mut(name),
+                Some(Owner::SharedUser(name)) => self.shared_users.get_mut(name),
+                Some(Owner::DetachedPackage(_)) => {
+                    return Err(ReadError::Owner(
+                        "detached factory permission binding is unavailable".into(),
+                    ));
+                }
+                None => return Ok(()),
+            }
+            .ok_or_else(|| {
+                ReadError::Owner("registered factory permission target is unavailable".into())
+            })?;
+            state.read_install_events(reader, self.users)
+        })?;
+        self.factories
+            .insert(settings.disabled_system_packages[index].name.clone(), own);
+        Ok(())
+    }
     fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError> {
         self.remaining.start_attempt(settings, pending)
     }

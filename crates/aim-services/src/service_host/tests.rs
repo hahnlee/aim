@@ -929,6 +929,7 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     // Missing global owner is not a corrupt-file retry and preserves pending inputs.
     struct MissingGlobal;
     impl crate::package::settings::ReadOwners for MissingGlobal {
+        fn factory_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &crate::package::owner::app_ids::AppIds) -> std::result::Result<(), ReadError> { Err(ReadError::Owner("factory unavailable".into())) }
         fn start_attempt(&mut self, _: &Settings, _: &[crate::package::settings::Package]) -> std::result::Result<(), ReadError> { Ok(()) }
         fn package_registered(&mut self, _: &crate::package::settings::Package, _: bool) -> std::result::Result<(), ReadError> { Ok(()) }
         fn shared_registered(&mut self, _: &crate::package::settings::SharedUser, _: bool) -> std::result::Result<(), ReadError> { Ok(()) }
