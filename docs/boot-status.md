@@ -1140,8 +1140,11 @@ installed/stopped/not-launched/hidden/enabled, CE/DE inodes, first-install time,
 enabledCaller and enabled/disabled components. Actual scan/user generation and
 full native boot/reboot/app readiness are still separate #978 gates. Store.commit_initial_scan_restrictions now generates scalar/component
 package rows from the exact SigningScan.scanned_user_states and current package
-inventory, rejecting missing user owners or mismatched global settings. Resolver/
-domain sections must be supplied by their separate owners. Main commit publishes
+inventory, rejecting missing user owners or mismatched global settings. The
+settings check compares the actual scan writer projection against committed
+state, so legitimate old-path/legacy-time normalization and APEX omission do not
+reject a committed scan. Uncommitted metadata still rejects before user writes.
+Resolver/domain sections must be supplied by their separate owners. Main commit publishes
 the original scan user objects rather than parsed disk normalization, preserving
 null component sets and runtime-only state. Suspension/archive serialization
 emits resolved owner rows under explicit cross-user policy, nullable params,
@@ -1171,13 +1174,18 @@ quarantine, dialog title, nested bundle/array/launcher extras, archive installer
 time/title/component/icon getters. The reader uses the actual domain service,
 existing controlled connection bound to the actual setting name and real
 framework Context. Existing BaseBundle.get checks exact extras types and values.
+The fixture commits scan-generated packages.xml before user restrictions, and
+keeps that native file for original reading instead of replacing it with a sample.
 Native initial-write/reopen and original getters agree. The original ART oracle
-passes without skips (62.56s); 539 units pass (5 excluded, 0.54s), including bundle
+passes without skips (64.19s); 541 units pass (6 excluded, 1.86s), including bundle
 save/restore types, null-string-array write rejection, absent user-owner rejection,
 live component-state preservation, main-write rollback/retry, external byte
-mutation and committed reserve failure. Runtime build passes (3 rebuilt/39 fresh,
-1.3s); retained-bootstrap/framework-res scan passes (1.17s), host build passes
-(0 rebuilt/13 fresh, 0.3s). This verifies the writer/read boundary; complete native
+mutation and committed reserve failure, committed scan normalization and rejection
+of uncommitted metadata. Host build passes (3 rebuilt/10 fresh, 16.0s).
+The first ART attempt hit ENOSPC (#903); removing this worktree's regenerable
+release incremental cache allowed the complete latest fixture to pass. The
+retained-bootstrap/framework-res scan previously passed (1.17s) and was not
+rerun for this writer check. This verifies the writer/read boundary; complete native
 first-boot scan generation and app/reboot acceptance remain unverified.
 Actual original absent/no-start probes with malformed user files return false,
 preserve both files and run finally VersionInfo initialization. Native units cover

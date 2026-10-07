@@ -14,8 +14,12 @@ impl Store {
         cross_user_suspension: bool,
         mut sections: Element,
     ) -> Result<(), WriteError> {
+        let expected = super::scan_settings::replace(&self.settings_document, scan)
+            .map_err(WriteError::before)?;
+        let expected = crate::package::settings::Settings::parse(&expected)
+            .map_err(WriteError::before)?;
         if super::signing::persisted(self.state.settings.clone())
-            != super::signing::persisted(scan.settings.clone())
+            != super::signing::persisted(expected)
         {
             return Err(WriteError::before(
                 "initial user scan/settings ownership differs",

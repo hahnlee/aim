@@ -48,6 +48,10 @@ pub fn export(directory: &Path) {
             },
         )]))
         .unwrap();
+        let snapshot = aim_services::package::scan_snapshot::Store::new(
+            scan.clone(), aim_services::package::owner::usage::Usage::new(["p"]),
+        ).unwrap().capture();
+        store.commit_scan_settings(&snapshot).unwrap();
         store.claim_unread_restrictions(0).unwrap();
         store
             .commit_initial_scan_restrictions(
@@ -62,7 +66,6 @@ pub fn export(directory: &Path) {
             bytes,
             fs::read(path.with_file_name("package-restrictions.xml.reservecopy")).unwrap()
         );
-        fs::write(data.join("system/packages.xml"), settings_xml).unwrap();
         let reopened = aim_services::package::owner::Store::open(&data, &[0])
             .unwrap()
             .unwrap();

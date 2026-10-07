@@ -156,6 +156,8 @@ fn initial_restrictions_serialize_the_supplied_scan_user_owner() {
     let current=Version{sdk_version:36,database_version:3,..Default::default()};
     let(mut store,_)=recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!()).unwrap();
     let mut scan=SigningScan::new(&SystemConfig::default(),&settings,36).unwrap();
+    let snapshot = crate::package::scan_snapshot::Store::new(scan.clone(), super::usage::Usage::new(["p"])).unwrap().capture();
+    store.commit_scan_settings(&snapshot).unwrap();
     let root=element("package-restrictions");
     assert!(store.commit_initial_scan_restrictions(&scan,0,false,root.clone()).unwrap_err().message.contains("absent"));
     let state=UserState{ installed:false,stopped:true,enabled:2,ce_data_inode:11,first_install_time:77,enabled_components:Some(vec!["p.Enabled".into()]),min_aspect_ratio:3,..Default::default()};
@@ -166,6 +168,30 @@ fn initial_restrictions_serialize_the_supplied_scan_user_owner() {
     let bytes=fs::read(&path).unwrap();let parsed=Restrictions::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
     assert_eq!(parsed.packages[0].1.min_aspect_ratio,3);
     assert_eq!(parsed.packages[0].1.enabled_components,Some(vec!["p.Enabled".into()]));
+}
+
+#[test]
+fn initialized_users_follow_committed_scan_normalization_and_reject_new_metadata() {
+    use crate::package::{settings::{Settings, Version}, scan::{SigningScan, CapturedUsers}, restrictions::UserState};
+    let data = Data::new(); data.settings();
+    fs::remove_file(data.0.join("system/packages.xml")).unwrap();
+    let mut settings = Settings::parse(&aim_android_xml::read(b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap()).unwrap();
+    let current = Version { sdk_version: 36, database_version: 3, ..Default::default() };
+    let (mut store, _) = recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0], &mut settings, &current, |_,_| panic!()).unwrap();
+    let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+    scan.settings.packages[0].old_paths = Some(vec![Some("/old".into())]);
+    scan.settings.packages[0].legacy_first_install_time = 123;
+    scan.capture_user_states(BTreeMap::from([(("p".into(), false), CapturedUsers {
+        states: BTreeMap::from([(0, UserState::initialized())]), active_aliases: Default::default(),
+    })])).unwrap();
+    let snapshot = crate::package::scan_snapshot::Store::new(scan.clone(), super::usage::Usage::new(["p"])).unwrap().capture();
+    store.commit_scan_settings(&snapshot).unwrap();
+    assert_ne!(signing::persisted(store.state.settings.clone()), signing::persisted(scan.settings.clone()));
+    store.claim_unread_restrictions(0).unwrap();
+    let mut changed = scan.clone(); changed.settings.packages[0].version_code = 7;
+    assert!(!store.commit_initial_scan_restrictions(&changed, 0, false, element("package-restrictions")).unwrap_err().committed);
+    store.commit_initial_scan_restrictions(&scan, 0, false, element("package-restrictions")).unwrap();
+    assert_eq!(store.state.users[0].1.restrictions.packages[0].1, UserState::initialized());
 }
 
 pub(super) struct Data(pub(super) PathBuf);
