@@ -77,7 +77,8 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/api/sdk/PackageLocal.java"),
         )
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java")));
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java"))
+        .args(sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/com/android/permission/persistence"))));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
@@ -134,6 +135,7 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/LegacyRestoreOracle.java"),
         )
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/RuntimePersistenceOracle.java"))
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
@@ -298,6 +300,7 @@ fn native_package_parcels_match_original_read_write() {
         &[
             "/system/framework/services.jar",
             "/system/framework/aim-services.jar",
+            "/apex/com.android.permission/javalib/service-permission.jar",
         ],
     )
     .unwrap();
@@ -635,6 +638,14 @@ fn native_package_parcels_match_original_read_write() {
     common::factory_read_events::export(&directory);
     common::seed_read_events::export(&directory);
     common::initial_restrictions::export(&directory);
+    let runtime = aim_services::package::permissions::RuntimePermissions {
+        version: 7, fingerprint: Some("finger<&\"\t\n\r".into()),
+        packages: vec![("p".into(), vec![
+            aim_services::package::permissions::RuntimePermission { name: "ordinary".into(), granted: true, flags: 17 },
+            aim_services::package::permissions::RuntimePermission { name: "one-time".into(), granted: true, flags: 1<<16 },
+        ])], shared_users: vec![("group".into(), vec![])],
+    };
+    fs::write(directory.join("native-runtime-permissions.xml"), runtime.serialize().unwrap()).unwrap();
     let boot_version_expected = common::boot_version_events::export(&directory);
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
@@ -1737,7 +1748,7 @@ fn native_package_parcels_match_original_read_write() {
     common::domain_enforcer::export(&directory);
     let original = boot.command().args([
         "shell", "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar",
+        "-Djava.class.path=/data/local/tmp/package-parcels/oracle.dex:/system/framework/services.jar:/apex/com.android.permission/javalib/service-permission.jar",
         "/system/bin", "PackageRoundTripOracle", "/data/local/tmp/package-parcels",
     ]).output().unwrap();
     assert!(
@@ -1746,6 +1757,13 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8_lossy(&original.stdout),
         String::from_utf8_lossy(&original.stderr)
     );
+    let original_runtime = aim_services::package::permissions::RuntimePermissions::parse(
+        &aim_android_xml::read(&fs::read(directory.join("original-runtime-permissions.xml")).unwrap()).unwrap()
+    ).unwrap();
+    let native_runtime = aim_services::package::permissions::RuntimePermissions::parse(
+        &aim_android_xml::read(&fs::read(directory.join("native-runtime-permissions.xml")).unwrap()).unwrap()
+    ).unwrap();
+    assert_eq!(original_runtime, native_runtime);
     eprintln!("Original nullable factory write status: {}", fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap());
     assert_eq!(
         String::from_utf8(original.stdout).unwrap(),

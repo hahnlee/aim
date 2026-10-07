@@ -1138,7 +1138,22 @@ files. Main/reserve bytes match, native Store reopen agrees with its published
 state, and the original Settings.readPackageRestrictionsLPr getter probe checks
 installed/stopped/not-launched/hidden/enabled, CE/DE inodes, first-install time,
 enabledCaller and enabled/disabled components. Actual scan/user generation and
-full native boot/reboot/app readiness are still separate #978 gates. System.commit_package_list_from_scan now generates rows from the immutable native
+full native boot/reboot/app readiness are still separate #978 gates. RuntimePermissions.serialize now provides the permission module's text XML
+format with explicit version/fingerprint, package/shared owner order, empty owners,
+hex flags and one-time grants written as false without clearing their flags.
+Attribute escaping preserves tabs/newlines/CR; invalid XML characters reject.
+Negative flags retain the original unsigned-hex writer behavior and signed-reader
+failure. The direct original persistence oracle uses disposable user 42 files,
+reads native XML, invokes the actual original writer and compares the resulting
+state through original getters and native parsing. This codec does not yet supply
+live version/fingerprint or synchronized permission-owner state, nor atomic
+main/backup/reserve persistence; that whole owner is tracked in #981. The full
+original ART oracle passes without skips (73.30s); 544 service units pass
+(6 excluded, 0.52s), including escaping and negative-flag write/read behavior.
+The existing reader still needs original ArrayMap duplicate replacement and
+nullable owner/name representation (#982/#983). Host build passes
+(3 rebuilt/10 fresh, 1.7s).
+System.commit_package_list_from_scan now generates rows from the immutable native
 scan/query capture, in signed Java-hash setting order. Unloaded settings and APEX
 are omitted; system-user data paths come from setting volume/storage and captured
 installed/dataExists policy, with the original space-path omission. Parsed code

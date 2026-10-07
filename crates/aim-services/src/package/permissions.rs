@@ -11,11 +11,13 @@
 //!   fingerprint;
 //! - `runtime-permissions.xml` beside the user's `access.abx`
 //!   (`RuntimePermissionsPersistenceImpl` in the permission module, always
-//!   text XML): the legacy runtime permission state, of which Android 16
-//!   writes only the version, the default grants' fingerprint and the
-//!   shared users.
+//!   text XML): the legacy runtime permission state, with version, the
+//!   default grants' fingerprint and package/shared permission lists. The
+//!   writer clears one-time grants while retaining their flags.
 
 use aim_android_xml::Element;
+
+mod runtime_write;
 
 use super::{children, string};
 

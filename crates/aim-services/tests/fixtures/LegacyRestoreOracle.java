@@ -42,6 +42,7 @@ public final class LegacyRestoreOracle {
         verifyNullableFactoryNames(directory);
         verifySharedSeedEvents(directory);
         verifyInitialRestrictions(directory,connect);
+        com.android.permission.persistence.RuntimePersistenceOracle.verify(directory);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
