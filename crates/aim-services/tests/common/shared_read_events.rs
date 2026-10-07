@@ -102,13 +102,6 @@ impl ReadOwners for ProjectionOwners {
     fn public_key(&mut self, _: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
         panic!("key outside shared UID projection")
     }
-    fn finish_key_sets(
-        &mut self,
-        _: &mut Settings,
-        _: &std::collections::BTreeMap<i64, i32>,
-    ) -> Result<(), ReadError> {
-        panic!("keyset outside shared UID projection")
-    }
     fn global_record(
         &mut self,
         _: &mut Settings,

@@ -9,6 +9,54 @@ mod registration;
 pub(super) use persistence::{replace_for_scan, replace_registered};
 pub use registration::{register, restore};
 
+/// addRefCountsFromSavedPackagesLPw after a complete persistence container.
+/// Use read-event counts, including pending/replaced roles, rather than deriving
+/// them from the final package map. Missing public keys are an uncaught input error.
+pub fn finish_read(
+    settings: &mut Settings,
+    refs: &BTreeMap<i64, i32>,
+) -> Result<(), crate::package::settings::ReadError> {
+    use crate::package::settings::ReadError;
+    let counts = settings.key_sets.reference_counts.get_or_insert_with(|| {
+        settings
+            .key_sets
+            .key_sets
+            .iter()
+            .map(|(id, _)| (*id, 0))
+            .collect()
+    });
+    for (id, count) in refs {
+        if let Some(value) = counts.get_mut(id) {
+            *value = *count;
+        } else {
+            eprintln!("Encountered non-existent key-set reference when reading settings: {id}");
+        }
+    }
+    let mut orphans = Vec::new();
+    for (id, keys) in &settings.key_sets.key_sets {
+        if counts.get(id) == Some(&0) {
+            eprintln!("Encountered key-set w/out package references when reading settings: {id}");
+            orphans.push(*id);
+        }
+        for key in keys {
+            if !settings
+                .key_sets
+                .public_keys
+                .iter()
+                .any(|(id, _)| id == key)
+            {
+                return Err(ReadError::FatalInput(format!(
+                    "keyset public-key owner is absent: {key}"
+                )));
+            }
+        }
+    }
+    for id in orphans {
+        registration::release(settings, id);
+    }
+    Ok(())
+}
+
 /// Signing sets and defined aliases each hold a reference; upgrade sets do
 /// not. Public keys are referenced by key sets, not by packages. Validate the
 /// pool structure before changing this stage; absent saved role handles are

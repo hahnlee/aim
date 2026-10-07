@@ -2,7 +2,6 @@
 use super::{Package, PackageReadAttempt, ReadError, Settings, SharedUser};
 use crate::package::owner::app_ids::AppIds;
 use aim_android_xml::{Element, pull::Reader};
-use std::collections::BTreeMap;
 
 /// Owners whose state is outside the persisted Settings record. Implementations
 /// must report missing dependencies; recovery only retries File errors.
@@ -20,11 +19,6 @@ pub trait ReadOwners {
         start: &Element,
     ) -> Result<bool, ReadError>;
     fn public_key(&mut self, encoded: &[u8]) -> Result<Option<Vec<u8>>, ReadError>;
-    fn finish_key_sets(
-        &mut self,
-        settings: &mut Settings,
-        refs: &BTreeMap<i64, i32>,
-    ) -> Result<(), ReadError>;
     fn global_record(
         &mut self,
         settings: &mut Settings,
@@ -73,14 +67,12 @@ impl Settings {
                     )?;
                 }
                 "keyset-settings" => {
-                    // Both callbacks mutate the same external owner in sequence.
-                    let owners = std::cell::RefCell::new(&mut *owners);
                     settings.read_key_sets(
                         reader,
                         start,
                         &attempt.key_set_refs,
-                        |bytes| owners.borrow_mut().public_key(bytes),
-                        |settings, refs| owners.borrow_mut().finish_key_sets(settings, refs),
+                        |bytes| owners.public_key(bytes),
+                        crate::package::owner::key_sets::finish_read,
                     )?;
                 }
                 "domain-verifications" => {

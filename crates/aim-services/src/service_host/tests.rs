@@ -925,14 +925,13 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert!(attempt.key_set_refs.is_empty());
     assert!(attempt.first_install_times.is_empty());
     assert!(!path.exists());
-    std::fs::write(&path, b"<packages><package name='pending' codePath='/pending' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000002'/><keyset-settings version='1'/></packages>").unwrap();
-    // Missing owner is not a corrupt-file retry and preserves pending inputs.
+    std::fs::write(&path, b"<packages><package name='pending' codePath='/pending' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000002'/><preferred-activities/></packages>").unwrap();
+    // Missing global owner is not a corrupt-file retry and preserves pending inputs.
     struct MissingGlobal;
     impl crate::package::settings::ReadOwners for MissingGlobal {
         fn package_child(&mut self, _: &mut crate::package::settings::Package, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
         fn shared_child(&mut self, _: &mut crate::package::settings::SharedUser, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
         fn public_key(&mut self, _: &[u8]) -> std::result::Result<Option<Vec<u8>>, ReadError> { panic!("unexpected key") }
-        fn finish_key_sets(&mut self, _: &mut Settings, _: &std::collections::BTreeMap<i64,i32>) -> std::result::Result<(), ReadError> { Err(ReadError::Owner("keyset owner unavailable".into())) }
         fn global_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
     }
     let retained = std::fs::read(&path).unwrap();
@@ -975,6 +974,12 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert!(matches!(report.events.last(), Some(Event::Absent)));
     assert_eq!(settings.domain_verification, saved_domains);
     assert!(!path.exists());
+    std::fs::write(&path, b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><proper-signing-keyset identifier='2'/></package><keyset-settings version='1'><keysets><keyset identifier='2'><key-id identifier='9'/></keyset></keysets></keyset-settings></packages>").unwrap();
+    let retained = std::fs::read(&path).unwrap();
+    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::FatalInput { message, .. }) if message == "keyset public-key owner is absent: 9"));
+    assert_eq!(settings.key_sets.reference_counts.as_ref().unwrap().get(&2), Some(&1));
+    assert_eq!(std::fs::read(&path).unwrap(), retained);
     // Restore the original fixture for the identity/replacement checks below.
     std::fs::write(&path, bytes).unwrap();
     let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {

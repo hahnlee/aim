@@ -1096,23 +1096,29 @@ containers now decode through the native persistence reader
 and merge into pending/restored maps before scan attachment. The UUID mode comes
 from the retained original bootstrap bridge before file selection. Prior legacy
 and modern maps survive retries; an invalid UUID prevents publication of its
-whole detached container. Missing key factory, keyset finalization and other
-global record implementations still require explicit owners. Pending
+whole detached container. Keyset read finalization now runs directly in the native keyset owner using
+per-attempt role counts, including pending and replaced aliases. It reports
+missing saved keyset references, applies known counts, rejects missing public-key
+mappings as uncaught input after earlier count changes, and prunes orphaned sets.
+The external finalization callback and its RefCell adapter are removed from the
+owned frontend. Public-key factory decoding, full runtime public-key reference
+counts/repeated-read handle lifetime and other global records remain incomplete
+(#824/#916/#914). Pending
 binding and related user restoration are not yet a complete boot lifecycle.
 The boot frontend agrees with the actual-original modern domain persistence
-(333), shared UID (238) and keyset (158) projections; the full original ART
-oracle passes without skips (73.63s). Retained-bridge units exercise corrupt-file retry with registered UID
-effects retained, missing child/finalization owners, fatal input, absent files
+(333), shared UID (238) and keyset (162) projections; the full original ART
+oracle passes without skips (64.05s). Retained-bridge units exercise corrupt-file retry with registered UID
+effects retained, missing child/global owners, fatal public-key input, absent files
 and stale bridges.
 Full original-name native PMS construction, remaining frontend/group/user/
 permission/global owners and SystemServer orchestration remain #914/#912/#798.
 17 XML tests passed on the preceding revision. The current full original ART
-oracle passes without skips (73.63s), preserving eight boot version cases and
+oracle passes without skips (64.05s), preserving eight boot version cases and
 earlier domain/verifier/package/shared/keyset/permission checks. The preceding
 image/template build passed (10 rebuilt/32 fresh, 77.4s). This change adds no
-image/Java inputs. Host rebuild passes (3 rebuilt/10 fresh, 1.8s); 531 service
-units pass (5 excluded, 0.56s). The retained-owner framework-res scan passes
-(1.18s), including the owned recovery and domain container checks. Compile-only persistence/state-map API declarations
+image/Java inputs. Host rebuild passes (3 rebuilt/10 fresh, 4.5s); 531 service
+units pass (5 excluded, 0.51s). The retained-owner framework-res scan passes
+(1.21s), including owned recovery, domain and fatal keyset mapping checks. Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
 Source: pinned DomainVerificationPersistence.java, DomainVerificationSettings.java,

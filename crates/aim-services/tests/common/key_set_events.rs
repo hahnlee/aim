@@ -22,6 +22,14 @@ pub fn inputs() -> Vec<Vec<u8>> {
             out.push(aim_android_xml::abx::write(&root).unwrap());
         }
     }
+    for records in [
+        "<package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><defined-keyset alias='same' identifier='2'/><defined-keyset alias='same' identifier='2'/></package>",
+        "<package name='pending' codePath='/pending' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000002'><proper-signing-keyset identifier='3'/></package>",
+    ] {
+        let bytes = format!("{prefix}{records}<keyset-settings version='1'><keysets><keyset identifier='2'/><keyset identifier='3'/><keyset identifier='4'/></keysets><lastIssuedKeyId value='9'/><lastIssuedKeySetId value='7'/></keyset-settings></packages>").into_bytes();
+        out.push(bytes.clone());
+        out.push(aim_android_xml::abx::write(&aim_android_xml::read(&bytes).unwrap()).unwrap());
+    }
     let binary = aim_android_xml::abx::write(&aim_android_xml::read(format!("{prefix}<keyset-settings version='1'><lastIssuedKeyId value='9'/><keysets><keyset identifier='2'/></keysets><lastIssuedKeySetId value='7'/></keyset-settings></packages>").as_bytes()).unwrap()).unwrap();
     for end in 1..binary.len() {
         if let Ok(mut reader) = aim_android_xml::pull::Reader::new(&binary[..end]) {
@@ -127,22 +135,6 @@ impl ReadOwners for ProjectionOwners {
     }
     fn public_key(&mut self, _: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
         panic!("public key outside this projection")
-    }
-    fn finish_key_sets(
-        &mut self,
-        state: &mut Settings,
-        refs: &std::collections::BTreeMap<i64, i32>,
-    ) -> Result<(), ReadError> {
-        let counts = state
-            .key_sets
-            .reference_counts
-            .get_or_insert_with(Default::default);
-        for (id, count) in refs {
-            if let Some(value) = counts.get_mut(id) {
-                *value = *count;
-            }
-        }
-        key_sets::restore(state).map_err(ReadError::Owner)
     }
     fn global_record(
         &mut self,
