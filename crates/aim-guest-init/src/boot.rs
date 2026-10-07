@@ -956,6 +956,9 @@ impl Boot {
     /// init's main loop. Returns when the queue is idle (dry run), on a
     /// fatal error or shutdown, or at the timeout.
     pub fn run(&mut self) -> &BootReport {
+        if self.options.mode == RunMode::Run {
+            self.sweep_memfds();
+        }
         let deadline = self.options.timeout.map(|t| Instant::now() + t);
         self.executor.stop_at = deadline;
         let dry = self.options.mode == RunMode::DryRun;
@@ -1097,6 +1100,27 @@ impl Boot {
         &self.report
     }
 
+    fn sweep_memfds(&mut self) {
+        match std::process::Command::new(&self.linux_run.binary)
+            .arg("--sweep-memfds")
+            .output()
+        {
+            Ok(output) if output.status.success() => self
+                .report
+                .log
+                .push(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            Ok(output) => self.report.log.push(format!(
+                "memfd cleanup failed: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Err(error) => self
+                .report
+                .log
+                .push(format!("memfd cleanup failed: {error}")),
+        }
+    }
+
     fn finish(&mut self) {
         if self.options.mode == RunMode::Run {
             self.executor
@@ -1104,6 +1128,7 @@ impl Boot {
                 .kill_all(self.executor.launcher.as_mut());
             std::thread::sleep(Duration::from_millis(100));
             let _ = self.executor.poll_processes();
+            self.sweep_memfds();
         }
         self.report.fatal = self.executor.fatal.clone();
         self.report.timeline.extend(self.data.borrow().timeline());

@@ -331,6 +331,17 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         std::thread::sleep(Duration::from_millis(100));
     };
     drop(children);
+    let cleanup = Command::new(program("linux-run"))
+        .arg("--sweep-memfds")
+        .output()
+        .map_err(|error| format!("memfd cleanup: {error}"))?;
+    if !cleanup.status.success() {
+        return Err(format!(
+            "memfd cleanup: {}: {}",
+            cleanup.status,
+            String::from_utf8_lossy(&cleanup.stderr)
+        ));
+    }
     Ok(if status.success() || stopping.is_some() {
         ExitCode::SUCCESS
     } else {

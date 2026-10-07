@@ -4766,7 +4766,15 @@ BINDER_WRITE_READ went from 14.8 to 8.7 µs of kernel time in the caller
 up to `sys.boot_completed`, and from 25.8 to 10.0 µs while Settings
 started twice and Chrome once (0.98 to 0.33 s in all; one boot each). A process no longer sweeps the memfd
 directory at its first memfd_create (2.2 ms with 48 memfds alive; 49
-calls in a boot averaged 2.9 ms).
+calls in a boot averaged 2.9 ms). Guest-init now sweeps unused backing files
+once at instance startup and after stopping its processes (#1008);
+`linux-run --sweep-memfds` performs the same owner cleanup between batches.
+It requires the memfd mark, an exclusive nonblocking lock and matching inode
+before unlinking; live descriptors and cross-process reopening retain their
+backing names. The creator takes its shared lock before marking the file, so
+cleanup also collects newly released files without a five-second delay.
+The accumulated 93,754 unused files occupied 65.568 GiB; owner cleanup
+reclaimed them and restored approximately 78 GiB of free space.
 
 A binder read that waits for work no longer blocks a thread of the
 binder daemon: it parks, and the daemon thread that brings the work

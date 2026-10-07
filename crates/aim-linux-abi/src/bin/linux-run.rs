@@ -62,6 +62,8 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --exec EXECFN          PROGRAM is followed by the full argv (argv[0]
                          included) and EXECFN is AT_EXECFN, as after execve
 
+  linux-run --sweep-memfds reclaim unused host memfd backing files
+
   linux-run --audio-io   (internal) the audio host module's CoreAudio
                          process, started by the module itself
   linux-run [RUNTIME OPTIONS] --fork-child FDS
@@ -100,6 +102,13 @@ fn host_environment() -> Vec<Vec<u8>> {
 }
 
 fn main() {
+    if std::env::args_os().skip(1).collect::<Vec<_>>() == ["--sweep-memfds"] {
+        println!(
+            "reclaimed {} unused memfd backing files",
+            aim_linux_abi::sys::sweep_unused_memfds()
+        );
+        return;
+    }
     let mut args = std::env::args_os().skip(1);
     let mut root = PathBuf::from("/");
     // Unset: the default, looked up (and migrated) only when used.

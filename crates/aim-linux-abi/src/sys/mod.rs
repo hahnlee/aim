@@ -94,6 +94,11 @@ pub use window::init as init_heap_window;
 /// it is traced.
 pub static TRACE: AtomicBool = AtomicBool::new(false);
 
+/// Reclaims unused host memfd backing names after guest shutdown.
+pub fn sweep_unused_memfds() -> u64 {
+    memfd::sweep_unused()
+}
+
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
 }
