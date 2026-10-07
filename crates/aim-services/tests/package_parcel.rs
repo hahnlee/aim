@@ -645,7 +645,16 @@ fn native_package_parcels_match_original_read_write() {
             aim_services::package::permissions::RuntimePermission { name: Some("one-time".into()), granted: true, flags: 1<<16 },
         ])], shared_users: vec![(Some("group".into()), vec![])],
     };
-    fs::write(directory.join("native-runtime-permissions.xml"), runtime.serialize().unwrap()).unwrap();
+    let runtime_data = directory.join("runtime-native-store");
+    let mut runtime_store = aim_services::package::owner::Store::create(&runtime_data, &[42]).unwrap();
+    runtime_store.claim_runtime_permissions(42).unwrap();
+    runtime_store.commit_runtime_permissions(42, &runtime, aim_storage::guest_inode::GuestInode {
+        uid: Some(1000), gid: Some(1000), mode: Some(0o600),
+    }).unwrap();
+    let runtime_path = runtime_data.join("misc_de/42/apexdata/com.android.permission/runtime-permissions.xml");
+    let runtime_bytes = fs::read(&runtime_path).unwrap();
+    assert_eq!(runtime_bytes, fs::read(runtime_path.with_file_name("runtime-permissions.xml.reservecopy")).unwrap());
+    fs::write(directory.join("native-runtime-permissions.xml"), runtime_bytes).unwrap();
     fs::write(directory.join("nullable-runtime-owners.xml"), b"<runtime-permissions><package><permission name='old' granted='true' flags='1'/></package><package name=''/><package><permission name='last' granted='false' flags='2'/></package><shared-user/><shared-user name=''/></runtime-permissions>").unwrap();
     fs::write(directory.join("nullable-runtime-permission.xml"), b"<runtime-permissions><package name='p'><permission granted='true' flags='1'/></package></runtime-permissions>").unwrap();
     fs::write(directory.join("duplicate-runtime-permissions.xml"), b"<runtime-permissions><package name='BB'><permission name='old' granted='true' flags='1'/></package><package name='Aa'/><package name='z'/><package name='BB'><permission name='last' granted='false' flags='2'/></package><shared-user name='group'><permission name='old' granted='true' flags='1'/></shared-user><shared-user name='group'/></runtime-permissions>").unwrap();

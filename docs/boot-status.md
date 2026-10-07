@@ -1146,10 +1146,20 @@ Negative flags retain the original unsigned-hex writer behavior and signed-reade
 failure. The direct original persistence oracle uses disposable user 42 files,
 reads native XML, invokes the actual original writer and compares the resulting
 state through original getters and native parsing. This codec does not yet supply
-live version/fingerprint or synchronized permission-owner state, nor atomic
-main/backup/reserve persistence; that whole owner is tracked in #981. The full
-original ART oracle passes without skips (62.81s); 546 service units pass
-(6 excluded, 0.54s), including escaping and negative-flag write/read behavior.
+live version/fingerprint or synchronized permission-owner state; that whole owner
+is tracked in #981. Store now explicitly claims runtime main/.bak/.new/reserve
+inode identities and bytes. commit_runtime_permissions requires current state and
+complete guest creation metadata, restores a legacy backup, writes/syncs .new,
+renames to main and then writes/syncs the reserve. Main-write failure removes the
+owned temporary file and retains the recovered old main; a reserve failure
+publishes the committed disk projection and reports committed=true. Retained
+claims recognize native outputs for retry and refuse external byte/inode changes.
+The original runtime oracle now consumes this native atomic writer's main output
+and checks identical reserve bytes before original reading. Production owner
+metadata, directory creation context, fs-verity policy and whole boot invocation
+still require #981 integration. The full
+original ART oracle passes without skips (63.77s); 548 service units pass
+(6 excluded, 0.56s), including escaping and negative-flag write/read behavior.
 The runtime reader now applies ArrayMap duplicate replacement: package/shared
 rows keep the last value, sort by signed Java hash and retain collision insertion
 slots (#982). A direct original fixture checks repeated BB/Aa collision keys,
@@ -1163,7 +1173,8 @@ permission attributes return a serialization error rather than inventing an XML
 name. The direct original fixture checks nullable identities, repeated null keys
 and main-file preservation after original null-attribute writer failures (#983).
 Both null-owner and null-permission writes leave the original main bytes intact.
-Host build passes (3 rebuilt/10 fresh, 24.0s).
+Host build passes (3 rebuilt/10 fresh, 24.5s), including runtime atomic
+rollback/retry, external byte mutation refusal and committed reserve failure.
 System.commit_package_list_from_scan now generates rows from the immutable native
 scan/query capture, in signed Java-hash setting order. Unloaded settings and APEX
 are omitted; system-user data paths come from setting volume/storage and captured

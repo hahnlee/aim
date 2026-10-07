@@ -9,20 +9,20 @@ use std::{
     path::PathBuf,
 };
 
-pub(super) struct Claim {
-    paths: [PathBuf; 3],
+pub(super) struct Claim<const N: usize = 3> {
+    pub(super) paths: [PathBuf; N],
     directory: File,
-    files: [Option<OwnedFile>; 3],
+    files: [Option<OwnedFile>; N],
 }
 
-impl Claim {
-    fn inspect(paths: [PathBuf; 3]) -> Result<Self, String> {
+impl<const N: usize> Claim<N> {
+    pub(super) fn inspect(paths: [PathBuf; N]) -> Result<Self, String> {
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(paths[0].parent().unwrap())
             .map_err(|e| e.to_string())?;
-        let mut files = [None, None, None];
+        let mut files = std::array::from_fn(|_| None);
         for (index, path) in paths.iter().enumerate() {
             let mut file = match OpenOptions::new()
                 .read(true)
@@ -34,7 +34,7 @@ impl Claim {
                 Err(error) => return Err(format!("{}: {error}", path.display())),
             };
             if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-                return Err("unread restriction input is not a regular file".into());
+                return Err("claimed input is not a regular file".into());
             }
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -50,12 +50,12 @@ impl Claim {
         })
     }
 
-    fn check(&self) -> Result<(), String> {
+    pub(super) fn check(&self) -> Result<(), String> {
         let owned = self.directory.metadata().map_err(|e| e.to_string())?;
         let current =
             fs::symlink_metadata(self.paths[0].parent().unwrap()).map_err(|e| e.to_string())?;
         if !current.is_dir() || owned.dev() != current.dev() || owned.ino() != current.ino() {
-            return Err("restriction directory identity changed outside owner".into());
+            return Err("claimed directory identity changed outside owner".into());
         }
         for (path, expected) in self.paths.iter().zip(&self.files) {
             match (fs::symlink_metadata(path), expected) {
@@ -64,16 +64,16 @@ impl Claim {
                     if fs::read(path).map_err(|e| e.to_string())?.as_slice()
                         != file.payload.as_ref()
                     {
-                        return Err("unread restrictions changed outside native owner".into());
+                        return Err("claimed files changed outside native owner".into());
                     }
                 }
-                _ => return Err("unread restriction identity changed outside native owner".into()),
+                _ => return Err("claimed file identity changed outside native owner".into()),
             }
         }
         Ok(())
     }
 
-    fn retain_outputs(&mut self, opened: Vec<OwnedFile>) -> Result<(), String> {
+    pub(super) fn retain_outputs(&mut self, opened: Vec<OwnedFile>) -> Result<(), String> {
         let mut known: Vec<_> = self.files.iter_mut().filter_map(Option::take).collect();
         known.extend(opened);
         for (index, path) in self.paths.iter().enumerate() {
@@ -83,13 +83,13 @@ impl Claim {
                     let file = known
                         .iter()
                         .find(|file| file.same_file(&meta))
-                        .ok_or("restriction output identity changed outside owner")?;
+                        .ok_or("claimed output identity changed outside owner")?;
                     self.files[index] = Some(OwnedFile {
                         file: file.file.try_clone().map_err(|e| e.to_string())?,
                         payload: fs::read(path).map_err(|e| e.to_string())?.into(),
                     });
                 }
-                _ => return Err("restriction output path changed outside owner".into()),
+                _ => return Err("claimed output path changed outside owner".into()),
             }
         }
         Ok(())
