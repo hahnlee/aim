@@ -88,6 +88,7 @@ impl ReadOwners for ProjectionOwners {
         _: &mut Package,
         _: &mut Reader<'_>,
         _: &Element,
+        _: &AppIds,
     ) -> Result<bool, ReadError> {
         Ok(false)
     }

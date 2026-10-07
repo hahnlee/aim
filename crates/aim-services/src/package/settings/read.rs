@@ -11,6 +11,7 @@ pub trait ReadOwners {
         package: &mut Package,
         reader: &mut Reader<'_>,
         start: &Element,
+        ids: &AppIds,
     ) -> Result<bool, ReadError>;
     fn shared_child(
         &mut self,
@@ -43,13 +44,13 @@ impl Settings {
         self.read_document(bytes, |settings, reader, start| {
             match start.name.as_str() {
                 "package" => {
-                    settings.read_package(
+                    settings.read_package_with_ids(
                         reader,
                         start,
                         ids,
                         attempt,
-                        |package, reader, child| {
-                            let handled = owners.package_child(package, reader, child)?;
+                        |package, reader, child, ids| {
+                            let handled = owners.package_child(package, reader, child, ids)?;
                             require_child_owner(handled, child, &["perms", "domain-verification"])
                         },
                     )?;

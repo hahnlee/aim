@@ -37,6 +37,7 @@ public final class LegacyRestoreOracle {
         new Settings(java.util.Map.of()).readInstallPermissionsLPr(parser, state, users);
     }
     public static void verify(File directory) throws Exception {
+        verifyInstallBindings(directory);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
@@ -70,6 +71,29 @@ public final class LegacyRestoreOracle {
                         || replica.getAppId() != owner.getAppId() || !replica.hasSharedUser() || replica.isInstallPermissionsFixed()) throw new AssertionError("factory original metadata owner differs");
                 compareBytes(root, stem, replica.getAppId(), replica.getLegacyPermissionState());
             } finally { in.recycle(); }
+        }
+    }
+    private static void verifyInstallBindings(File directory) throws Exception {
+        for (int index=0; ; index++) {
+            var input=new File(directory,"install-binding-"+index+".xml"); if(!input.exists()) break;
+            var data=new File(directory,"install-binding-original-"+index); var system=new File(data,"system"); system.mkdirs();
+            Files.write(new File(system,"packages.xml").toPath(),Files.readAllBytes(input.toPath()));
+            Files.write(new File(system,"packages.xml.reservecopy").toPath(),"<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var users=new java.util.ArrayList<android.content.pm.UserInfo>();
+            for(int id:new int[]{10,0}) { var user=new android.content.pm.UserInfo(); user.id=id; users.add(user); }
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());
+            settings.readSettingsLPw(null,users,new android.util.ArrayMap<>());
+            for(int id:new int[]{10001,10002}) {
+                var owner=settings.getSettingLPr(id); var expected=new File(directory,"install-binding-"+index+"-"+id+".input");
+                if(owner==null) { if(expected.exists()) throw new AssertionError("native UID owner unexpectedly exists"); }
+                else {
+                    byte[] actual=PackageLegacyPermissions.capture(id,new int[]{10,0},owner.getLegacyPermissionState());
+                    if(!expected.exists() || !java.util.Arrays.equals(actual,Files.readAllBytes(expected.toPath()))) throw new AssertionError("original install UID binding differs "+index+":"+id);
+                }
+            }
+            var pkg=settings.getPackagesLocked().get("p");
+            String fixed=pkg==null?"absent":Boolean.toString(pkg.isInstallPermissionsFixed());
+            if(!fixed.equals(new String(Files.readAllBytes(new File(directory,"install-binding-"+index+".fixed").toPath()),java.nio.charset.StandardCharsets.UTF_8))) throw new AssertionError("original install fixed flag differs "+index);
         }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {

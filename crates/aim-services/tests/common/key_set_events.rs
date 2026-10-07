@@ -122,6 +122,7 @@ impl ReadOwners for ProjectionOwners {
         _: &mut Package,
         _: &mut aim_android_xml::pull::Reader<'_>,
         _: &aim_android_xml::Element,
+        _: &AppIds,
     ) -> Result<bool, ReadError> {
         Ok(false)
     }

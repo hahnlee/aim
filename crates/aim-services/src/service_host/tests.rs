@@ -929,7 +929,7 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     // Missing global owner is not a corrupt-file retry and preserves pending inputs.
     struct MissingGlobal;
     impl crate::package::settings::ReadOwners for MissingGlobal {
-        fn package_child(&mut self, _: &mut crate::package::settings::Package, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
+        fn package_child(&mut self, _: &mut crate::package::settings::Package, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &crate::package::owner::app_ids::AppIds) -> std::result::Result<bool, ReadError> { Ok(false) }
         fn shared_child(&mut self, _: &mut crate::package::settings::SharedUser, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
         fn public_key(&mut self, _: &[u8]) -> std::result::Result<Option<Vec<u8>>, ReadError> { panic!("unexpected key") }
         fn global_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }

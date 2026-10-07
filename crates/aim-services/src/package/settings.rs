@@ -714,10 +714,29 @@ impl Settings {
         start: &Element,
         ids: &mut super::owner::app_ids::AppIds,
         attempt: &mut PackageReadAttempt,
-        read_owner: impl FnMut(
+        mut read_owner: impl FnMut(
             &mut Package,
             &mut aim_android_xml::pull::Reader<'_>,
             &Element,
+        ) -> Result<bool, ReadError>,
+    ) -> Result<PackageReadOutcome, ReadError> {
+        self.read_package_with_ids(reader, start, ids, attempt, |package, reader, child, _| {
+            read_owner(package, reader, child)
+        })
+    }
+
+    /// Child owners see the exact UID slots after registration at this event.
+    pub fn read_package_with_ids(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        start: &Element,
+        ids: &mut super::owner::app_ids::AppIds,
+        attempt: &mut PackageReadAttempt,
+        mut read_owner: impl FnMut(
+            &mut Package,
+            &mut aim_android_xml::pull::Reader<'_>,
+            &Element,
+            &super::owner::app_ids::AppIds,
         ) -> Result<bool, ReadError>,
     ) -> Result<PackageReadOutcome, ReadError> {
         let Some(mut incoming) = package_header(start)? else {
@@ -782,7 +801,7 @@ impl Settings {
             reader,
             &mut attempt.signatures,
             &mut attempt.key_set_refs,
-            read_owner,
+            |package, reader, child| read_owner(package, reader, child, ids),
         )?;
         if first_install_time != 0 {
             attempt
