@@ -1088,7 +1088,6 @@ impl System {
         data: &std::path::Path,
         users: &[u32],
         settings: &mut crate::package::settings::Settings,
-        current_version: &crate::package::settings::Version,
         mut read: impl FnMut(
             &[u8],
             &mut crate::package::settings::Settings,
@@ -1112,10 +1111,18 @@ impl System {
             events: Vec::new(),
             message,
         })?;
+        let current_version = bridge.current_package_version().map_err(|error| Error {
+            events: Vec::new(),
+            message: format!("current settings build owner: {error:?}"),
+        })?;
+        check().map_err(|message| Error {
+            events: Vec::new(),
+            message,
+        })?;
         let recovered = Plan::inspect(data)?.recover_boot(
             users,
             settings,
-            current_version,
+            &current_version,
             |bytes, settings| {
                 check().map_err(ReadError::Owner)?;
                 let document = read(bytes, settings)?;

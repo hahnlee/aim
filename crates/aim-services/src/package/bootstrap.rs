@@ -12,8 +12,8 @@ use aim_binder_host::{
 use aim_service_aidl::dev_aim_server_ipackagebootstrapbridge as bridge;
 
 mod apex;
-mod scan;
 mod query;
+mod scan;
 pub use apex::{ActiveApex, ApexInventory, ApexPackage};
 pub use query::QueryContextError;
 pub use scan::{
@@ -99,6 +99,23 @@ fn read_shared_uid_migration(
     } else {
         super::scan::SharedUidMigration::NewInstallOnly
     })
+}
+
+fn read_current_package_version(
+    bytes: &[u8],
+) -> aim_binder_host::parcel::Result<super::settings::Version> {
+    let mut reader = aim_binder_host::parcel::Reader::new(bytes, &[]);
+    let current = super::settings::Version {
+        volume_uuid: None,
+        sdk_version: reader.read_i32()?,
+        database_version: reader.read_i32()?,
+        build_fingerprint: reader.read_string16()?,
+        fingerprint: reader.read_string16()?,
+    };
+    if reader.remaining() != 0 || bytes.len() % 4 != 0 {
+        return Err(aim_binder_host::parcel::BAD_VALUE);
+    }
+    Ok(current)
 }
 
 impl Bridge {
@@ -192,6 +209,24 @@ impl Bridge {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
         ApexInventory::read_original_record(&bytes).map_err(OwnerError::Transport)
+    }
+
+    pub fn current_package_version(&self) -> Result<super::settings::Version, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::GetCurrentPackageVersion {}.write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::GET_CURRENT_PACKAGE_VERSION, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let bytes = bridge::read_get_current_package_version_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
+            .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        read_current_package_version(&bytes).map_err(OwnerError::Transport)
     }
 
     pub fn scan_users(&self) -> Result<ScanUsers, OwnerError> {
@@ -398,6 +433,25 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_version_frame_retains_nulls_and_rejects_truncation_or_trailing_data() {
+        let mut data = Parcel::new();
+        data.write_i32(36);
+        data.write_i32(3);
+        data.write_string16(Some("build"));
+        data.write_string16(None);
+        let version = read_current_package_version(data.data()).unwrap();
+        assert_eq!(version.sdk_version, 36);
+        assert_eq!(version.database_version, 3);
+        assert_eq!(version.build_fingerprint.as_deref(), Some("build"));
+        assert!(version.fingerprint.is_none());
+        for end in 0..data.data().len() {
+            assert!(read_current_package_version(&data.data()[..end]).is_err());
+        }
+        data.write_i32(99);
+        assert!(read_current_package_version(data.data()).is_err());
+    }
+
     #[test]
     fn migration_policy_reply_preserves_owner_failure_and_rejects_truncation_or_tails() {
         use super::super::scan::SharedUidMigration;

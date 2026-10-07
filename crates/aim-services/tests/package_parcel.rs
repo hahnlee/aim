@@ -4346,6 +4346,13 @@ fn native_package_parcels_match_original_read_write() {
         assert_eq!(fs::read_to_string(directory.join(format!("modern-domain-event-status-{index}"))).unwrap(), expected.1, "original modern domain status {index}");
         assert_eq!(state, expected.0, "original modern domain event {index}");
     }
+    {
+        let bytes = fs::read(directory.join("current-package-version.original")).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        assert_eq!(reader.read_i32().unwrap(),36); assert_eq!(reader.read_i32().unwrap(),3);
+        assert!(reader.read_string16().unwrap().is_some()); assert!(reader.read_string16().unwrap().is_some());
+        assert_eq!(reader.remaining(),0);
+    }
     for (index, expected) in boot_version_expected.iter().enumerate() {
         assert_eq!(fs::read_to_string(directory.join(format!("boot-version-output-{index}"))).unwrap(), *expected, "original boot VersionInfo {index}");
     }

@@ -1072,11 +1072,28 @@ original forceCurrent values; the oracle checks the pinned SDK/database versions
 Current build-owner delivery, complete user/permission/group/global state and
 SystemServer orchestration remain #914/#912/#798; this does not prove native PMS
 construction/default activation or full current-fingerprint delivery.
-17 XML tests and 530 service units pass (5 service tests excluded, 0.49s).
-Full original ART oracle passes without skips (62.02s), retaining previous domain/
-verifier/package/shared/keyset/read-and-retirement/permission comparisons. Explicit
-retained-owner framework-res scan passes (1.19s). Image/template build passes
-(9 rebuilt/33 fresh, 72.7s). Compile-only persistence/state-map API declarations
+Current build values now come from retained original bootstrap AIDL ownership.
+PackageBootVersion.capture calls the image's Settings.VersionInfo.forceCurrent
+and emits SDK/database/build/partition values in a Parcel frame. The bridge's
+getCurrentPackageVersion is system-UID-only; native Bridge decodes the generated
+transaction reply and rejects null/truncated/trailing/misaligned frames.
+System.recover_package_settings requests these values before file selection,
+revalidates the same bridge after the call and uses them in boot recovery;
+caller-supplied fixture/current values are no longer its input. Actual original
+system-UID policy oracle verifies all four payload values against forceCurrent,
+and the untrusted-UID policy path verifies denial. Native frame tests retain null
+strings and reject every truncation/trailing value. Initial fixture failures were
+package-private generated transaction constants, missing bridge classpath and
+UID-0 security rejection; the raw transaction helper now lives in the AIDL package
+and runs through the existing system-UID policy oracle, without weakening the gate.
+Full original-name native PMS construction, remaining frontend/group/user/
+permission/global owners and SystemServer orchestration remain #914/#912/#798.
+17 XML tests and 531 service units pass (5 service tests excluded, 1.09s).
+Full original ART oracle passes without skips (74.27s), preserving eight boot
+version cases and earlier domain/verifier/package/shared/keyset/permission checks.
+Explicit retained-owner framework-res scan passes (1.16s). Image/template build
+passes (10 rebuilt/32 fresh, 77.4s); final runtime rebuild passes
+(3 rebuilt/39 fresh, 1.2s). Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
 The prior retained-owner framework-res scan passed (1.45s) and was not rerun.

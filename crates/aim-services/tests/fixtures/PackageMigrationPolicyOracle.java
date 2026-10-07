@@ -43,6 +43,7 @@ public final class PackageMigrationPolicyOracle {
                 verifyTestBase(new java.io.File(args[0]));
                 verifyQueryOwners(new java.io.File(args[0]));
                 verifyDomainPolicy(new java.io.File(args[0]));
+                com.android.server.pm.ScanSettingsWriteOracle.verifyCurrentVersion(new java.io.File(args[0]), currentVersionPayload());
                 verifyCacheInvalidation(new java.io.File(args[0]));
                 verifyVerifierIdentity(new java.io.File(args[0]));
                 System.out.println("MIGRATION_POLICY " + (bestEffort ? 1 : 0));
@@ -223,11 +224,12 @@ public final class PackageMigrationPolicyOracle {
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerificationSettingsV2Enabled,
                 IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache,
                 IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid,
-                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled}) {
+                IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled,
+                IPackageBootstrapBridge.Stub.TRANSACTION_getCurrentPackageVersion}) {
             var request = android.os.Parcel.obtain(); var reply = android.os.Parcel.obtain();
             try {
                 request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
-                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache || code == IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled) {
+                if (code == IPackageBootstrapBridge.Stub.TRANSACTION_invalidatePackageInfoCache || code == IPackageBootstrapBridge.Stub.TRANSACTION_isDomainSetUuidStrictValidationEnabled || code == IPackageBootstrapBridge.Stub.TRANSACTION_getCurrentPackageVersion) {
                     // No arguments.
                 } else if (code == IPackageBootstrapBridge.Stub.TRANSACTION_isDomainVerifierUid) {
                     request.writeInt(10073);
@@ -254,6 +256,16 @@ public final class PackageMigrationPolicyOracle {
                 reply.readException();
             } catch (SecurityException expected) { return; }
             throw new AssertionError("untrusted test-base caller accepted");
+        } finally { request.recycle(); reply.recycle(); }
+    }
+    public static byte[] currentVersionPayload() throws Exception {
+        var request=android.os.Parcel.obtain(); var reply=android.os.Parcel.obtain();
+        try {
+            request.writeInterfaceToken("dev.aim.server.IPackageBootstrapBridge");
+            if(!new PackageBootstrapBridge().asBinder().transact(IPackageBootstrapBridge.Stub.TRANSACTION_getCurrentPackageVersion,request,reply,0)) throw new AssertionError("build-version transaction unhandled");
+            reply.readException(); var bytes=reply.createByteArray();
+            if(bytes==null || reply.dataAvail()!=0) throw new AssertionError("build-version reply malformed");
+            return bytes;
         } finally { request.recycle(); reply.recycle(); }
     }
     private PackageMigrationPolicyOracle() {}

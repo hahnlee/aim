@@ -76,6 +76,15 @@ public final class ScanSettingsWriteOracle {
             xml.endTag(null, "packages"); xml.endDocument();
         }
     }
+    public static void verifyCurrentVersion(java.io.File directory, byte[] payload) throws Exception {
+        var current=new Settings.VersionInfo(); current.forceCurrent();
+        var values=android.os.Parcel.obtain();
+        try {
+            values.unmarshall(payload,0,payload.length); values.setDataPosition(0);
+            if(values.readInt()!=current.sdkVersion || values.readInt()!=current.databaseVersion || !java.util.Objects.equals(values.readString(),current.buildFingerprint) || !java.util.Objects.equals(values.readString(),current.fingerprint) || values.dataAvail()!=0) throw new AssertionError("original build-version owner differs");
+        } finally { values.recycle(); }
+        java.nio.file.Files.write(new java.io.File(directory,"current-package-version.original").toPath(),payload);
+    }
     private static void verifyBootVersionEvents(java.io.File directory) throws Exception {
         for (int index=0; index<8; index++) {
             var data=new java.io.File(directory,"boot-version-original-"+index); var system=new java.io.File(data,"system"); system.mkdirs();

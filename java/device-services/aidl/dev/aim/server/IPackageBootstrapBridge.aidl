@@ -39,4 +39,6 @@ interface IPackageBootstrapBridge {
     boolean isDomainVerificationSettingsV2Enabled(String packageName, int targetSdk);
     /** UUID.fromString mode of the original service process. */
     boolean isDomainSetUuidStrictValidationEnabled();
+    /** Current original Settings.VersionInfo.forceCurrent values, parcel-encoded. */
+    byte[] getCurrentPackageVersion();
 }

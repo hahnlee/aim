@@ -186,6 +186,12 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::GET_CURRENT_PACKAGE_VERSION => {
+                let mut current = Parcel::new(); current.write_i32(36); current.write_i32(3);
+                current.write_string16(Some("fixture-build")); current.write_string16(Some("fixture-partitions"));
+                aim_service_aidl::write_byte_array(&mut reply, Some(current.data()));
+                return Ok(reply);
+            }
             bootstrap::IS_SIGNING_DEBUGGABLE => {
                 reply.write_bool(self.signing_debuggable.load(Ordering::SeqCst))
             }
@@ -900,13 +906,12 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     let path = root.join("system/packages.xml");
     let bytes = b"<packages><version sdkVersion='36' databaseVersion='3'/><extension value='keep'/></packages>";
     std::fs::write(&path, bytes).unwrap();
-    let current_version = crate::package::settings::Version {sdk_version:36,database_version:3,build_fingerprint:Some("fixture-build".into()),fingerprint:Some("fixture-partitions".into()),..Default::default()};
     let mut settings = Settings::default();
-    let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
+    let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
     assert!(!report.first_boot);
     assert_eq!(store.state().settings.versions[0].sdk_version, 36);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    let error = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |_, state| {
+    let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {
         state.find_or_create_version(None).database_version = 8;
         Err(ReadError::Owner("native settings owner unavailable".into()))
     }).err().unwrap();
@@ -914,7 +919,7 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert_eq!(settings.versions[0].database_version, 8);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     if let Some(replace) = &mut replace {
-        let error = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |bytes, state| {
+        let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| {
             let document = state.read_document(bytes, |_,_,_| Ok(false))?;
             replace();
             Ok(document)
@@ -923,7 +928,7 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let backup = root.join("system/packages-backup.xml");
         std::fs::write(&backup, bytes).unwrap();
-        let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |_,_| panic!("stale bridge read settings")).err().unwrap();
+        let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, |_,_| panic!("stale bridge read settings")).err().unwrap();
         assert!(stale.events.is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(std::fs::read(&backup).unwrap(), bytes);
@@ -1630,6 +1635,7 @@ fn exercise_bootstrap_on(
     assert!(Arc::ptr_eq(&old, &system.package_bootstrap().unwrap()));
     owner.malformed_bcp.store(false, Ordering::SeqCst);
     owner.reject.store(true, Ordering::SeqCst);
+    assert!(matches!(old.current_package_version(), Err(crate::package::bootstrap::OwnerError::Owner(_))));
     assert!(matches!(
         old.library_policy("fixture.package", 31),
         Err(crate::package::libraries::NativePolicyError::Owner(_))
@@ -1683,6 +1689,7 @@ fn exercise_bootstrap_on(
     let previous_version = system.capture_package_scan().unwrap().version();
     let prior_domains = system.capture_package_domains().ok();
     let prior_domain_state = prior_domains.as_ref().map(|d| d.owner().persisted());
+    owner.reject.store(false, Ordering::SeqCst);
     verify_settings_boot_entry(&system, &old, Some(&mut || attach(&second, Some(replacement)).unwrap()));
     assert!(system.capture_package_domains().is_err());
     assert!(domain_names(&second).is_err_and(|e| e.code == -5));
