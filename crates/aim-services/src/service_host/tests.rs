@@ -2762,6 +2762,23 @@ fn verify_boot_scan(
     assert!(saved.shared_users.iter().all(|(_,p)|!p[0].granted && p[0].flags == 1 << 16));
     let reopened = crate::package::owner::Store::open(&list_data,&[0,10]).unwrap().unwrap();
     assert_eq!(reopened.state().users[0].1.runtime_permissions.as_ref(),Some(saved));
+    // A failed later user must not erase either that request or earlier commits.
+    runtime_metadata.set_version(0,8); runtime_metadata.set_version(10,9);
+    list_store.claim_runtime_permissions(10).unwrap();
+    let inodes = BTreeMap::from([(0,runtime_inode)]);
+    let error = system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap_err();
+    assert_eq!(error.user,10); assert_eq!(error.completed,[0]); assert!(!error.error.committed);
+    assert_eq!(runtime_metadata.pending_write_requests(),[10]);
+    assert_eq!(list_store.state().users[0].1.runtime_permissions.as_ref().unwrap().version,8);
+    owner.legacy_reply.store(1,Ordering::SeqCst);
+    let inodes = BTreeMap::from([(0,runtime_inode),(10,runtime_inode)]);
+    assert!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap_err().completed.is_empty());
+    assert_eq!(runtime_metadata.pending_write_requests(),[10]);
+    owner.legacy_reply.store(4,Ordering::SeqCst);
+    assert_eq!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap(),[10]);
+    assert!(runtime_metadata.pending_write_requests().is_empty());
+    assert_eq!(list_store.state().users[1].1.runtime_permissions.as_ref().unwrap().version,9);
+    assert!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap().is_empty());
     owner.legacy_reply.store(0,Ordering::SeqCst);
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));

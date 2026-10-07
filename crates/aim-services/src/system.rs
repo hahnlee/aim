@@ -1260,6 +1260,25 @@ impl System {
         self.check_package_bootstrap(bridge).map_err(|error|WriteError { committed:true,message:format!("runtime bootstrap owner after commit: {error:?}") })
     }
 
+    /// Drain requested runtime writes at a synchronous persistence boundary.
+    /// Failed users remain queued, including a main commit with reserve failure.
+    pub fn flush_runtime_permission_requests(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &mut crate::package::owner::Store,
+        capture: &crate::package::scan_snapshot::query_state::Capture,
+        metadata: &mut crate::package::owner::runtime_metadata::State,
+        inodes: &std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
+    ) -> std::result::Result<Vec<u32>,crate::package::owner::runtime_metadata::FlushError> {
+        use crate::package::owner::WriteError;
+        metadata.flush_with(|user,current| {
+            let id = u32::try_from(user).map_err(|_|WriteError { committed:false,message:"negative runtime permission user".into() })?;
+            let inode = inodes.get(&id).copied().ok_or_else(||WriteError { committed:false,message:"missing runtime permission creation owner".into() })?;
+            self.commit_runtime_permissions_from_scan(bridge,store,capture,id,current,inode)?;
+            Ok(id)
+        })
+    }
+
     /// Initialize captured users under the retained boot owner and pinned policy.
     pub fn commit_initial_package_restrictions(
         &self,

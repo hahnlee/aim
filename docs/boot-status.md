@@ -1169,7 +1169,20 @@ defaults, version mutations, controller upgrade comparisons, user removal and
 mandatory pending write requests. Updating a fingerprint before controller setup
 fails without changing state. System configures the extended fingerprint from the
 retained original PackagePartitions identity and supplied controller version;
-callers no longer pass arbitrary version/fingerprint values to the disk commit. The
+callers no longer pass arbitrary version/fingerprint values to the disk commit. Metadata write requests
+now remain queued until a complete successful write acknowledges the user.
+System.flush_runtime_permission_requests provides a synchronous persistence
+boundary in user order, returns already completed users with a later failure,
+and retains both failed and unattempted users. A main commit with reserve failure
+also remains queued for repair/retry. The destructive take-all request API is
+removed. Controlled scan integration persists user 0, fails user 10 on missing
+creation metadata/producer responses, retries user 10 and reopens disk state;
+a separate queue test covers committed reserve failures with a later user still
+pending. Timed asynchronous scheduling and whole-boot invocation remain #981. Latest checks:
+550 service units pass (6 excluded, 0.55s), retained-bootstrap/framework-res
+scan passes (1.16s), host build passes (3 rebuilt/10 fresh, 16.5s). Original ART
+metadata/atomic comparisons passed on the preceding metadata revision (61.42s);
+they were not rerun for this request-drain coordinator. The
 original Settings metadata fixture checks constructor defaults, missing-controller
 failure, version -1/7, current partition fingerprint extension and controller
 upgrade transitions. Its setters schedule asynchronous writes, so its empty graph
