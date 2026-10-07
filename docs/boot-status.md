@@ -48,8 +48,23 @@ Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
 PackageManager still runs original. On the M4 C branch, the native Binder
-endpoint has 27 additional query dispatches backed by captured settings,
-permission grants and finalized library registry, including declared library consumers.
+endpoint has 70 IPackageManager method dispatches (154 remaining), backed by
+captured settings, permissions and finalized library registry. Native-interface
+audio playback capture reads actual visible ApplicationInfo flags (10 of 14 native
+methods). Shared/declared library consumers, paths, APEX directories, protected
+broadcasts, initial non-stopped packages, sandbox name, user stopped/suspended/
+quarantined state, harmful warnings and app metadata source are exposed. Activity
+filter enumeration uses registered filters with current MIME groups in manifest
+order. Permission-controller selection is explicit at the complete policy gate;
+unselected captures reject that getter. Library equal-hash ordering remains #992;
+module-provider resource loading remains #993. App metadata missing-package errors
+now preserve the original ParcelableException cause and envelope. Generic opaque
+exception payloads reject Binder/FD objects until a capability owner exists;
+class/message bytes are forwarded without native class lookup. Three binder-host
+envelope/capability refusal tests pass. Actual original
+Parcel reading and reverse write/decode/rewrite pass in the full package oracle
+(62.95s). That comparison exposed a common reply helper that rebuilt exceptions
+from only code/message; it now retains the complete exception.
 SystemConfig UID permission assignments use actual bionic/partition UID names and
 exact UID values; they do not grant root unconditionally. Missing external owners remain
 explicitly unsupported (#987). Splash-theme, minimum-aspect and update-available
@@ -79,12 +94,23 @@ Unused scan leases release their query capture without creating a child endpoint
 claimed endpoints release their graph on close. Java Data/Store/scope reference
 counts keep an old computer alive until the last owning scope closes. This is a
 typed adapter, not the full original Computer/PackageManagerInternal facade.
-579 service units pass (6 excluded, 1.26s), and the controlled
-retained-bootstrap/framework-res/Binder mutation/computer scan passes (2.13s).
-The host build passes (11 rebuilt/2 fresh, 19.4s).
+Its public UID/name/instant/SDK/installer calls and explicit uninstall filtering
+are implemented separately from internal UID lookup (no public user/flag checks)
+and original caller-based name normalization. Java internal read helpers use
+captured parsed code/state and preserve their distinct defaults.
+592 service units pass (6 excluded, 0.89s), and the controlled
+retained-bootstrap/framework-res/Binder mutation/computer scan passes (2.57s).
+The host build passes (6 rebuilt/7 fresh, 19.3s). Concrete installer policy,
+AtomicFile session XML and stage owners now create/open/list/recover/abandon real
+sessions with mandatory creation metadata and SELinux label providers. Inode/byte
+claims reject external replacement, post-rename failures report committed state,
+and recovery denial overrides grants independently of XML ordering. Nineteen
+focused installer tests pass, including same-byte/inode substitution refusal,
+committed claim-refresh failure and grant/deny order/legacy priority; complete live policy, callback ownership, async
+persistence, original XML interoperability and install/commit remain #986.
 Original ART installer codecs pass five cases (20.47s). The complete original
-first-system-scan passes (170.46s), including snapshot/version-page/Java Computer
-adapter assertions and all six reused-data native-file restarts with unchanged
+first-system-scan passes (184.79s), including snapshot/version-page/expanded Java
+Computer adapter assertions and all six reused-data native-file restarts with unchanged
 120s bounds. Earlier restart failures (#990) coincided with host free space below
 the syscall layer's 1GiB write reserve and repeated keystore exits. Removing 24.7GiB
 of verified inactive task-owned test images cleared the failures without changing

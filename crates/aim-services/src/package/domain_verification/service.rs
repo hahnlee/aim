@@ -77,6 +77,7 @@ impl DomainQueries {
                 code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
                 message: String::new(),
                 service_specific: 1,
+                    parcelable: None,
             };
             if !visible {
                 return Err(missing());
@@ -188,6 +189,7 @@ impl DomainQueries {
                     code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
                     message: String::new(),
                     service_specific: 1,
+                    parcelable: None,
                 })?;
             if hosts.is_empty() {
                 return Err(Exception::new(
@@ -329,6 +331,7 @@ impl DomainQueries {
             code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
             message: String::new(),
             service_specific: 1,
+                    parcelable: None,
         };
         if !allowed {
             return Err(missing());
@@ -496,6 +499,7 @@ impl DomainQueries {
                     code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
                     message: String::new(),
                     service_specific: 1,
+                    parcelable: None,
                 })?;
             if hosts.is_empty() {
                 return Err(Exception::new(
@@ -632,6 +636,7 @@ impl DomainQueries {
                     code: aim_binder_host::parcel::EX_SERVICE_SPECIFIC,
                     message: String::new(),
                     service_specific: 1,
+                    parcelable: None,
                 })?;
             let mut owner = domains.owner().clone();
             let result = (|| {

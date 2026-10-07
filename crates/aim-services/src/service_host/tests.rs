@@ -3824,6 +3824,26 @@ fn verify_boot_scan(
         let expected=crate::package::reply::decode(pm::DESCRIPTOR,pm::GET_APPLICATION_INFO,&mut public_reply.reader()).unwrap().unwrap();
         assert_ne!(value,crate::shadow::Value::Null);
         assert_eq!(value,expected);
+        let mut args=Parcel::new();computer_api::GetPackageUid {package_name:Some("android".into()),flags:0,user_id:0,calling_uid:1000,calling_pid:94002}.write(&mut args);
+        let reply=computer.transact(computer_api::GET_PACKAGE_UID,&args,false).unwrap();assert_eq!(computer_api::read_get_package_uid_reply(&mut reply.reader()).unwrap().unwrap(),1000);
+        let mut args=Parcel::new();computer_api::GetPackagesForUid {uid:1000,calling_uid:1000,calling_pid:94002}.write(&mut args);
+        let reply=computer.transact(computer_api::GET_PACKAGES_FOR_UID,&args,false).unwrap();assert!(computer_api::read_get_packages_for_uid_reply(&mut reply.reader()).unwrap().unwrap().unwrap().contains(&Some("android".into())));
+        let mut args=Parcel::new();computer_api::GetNameForUid {uid:1000,calling_uid:1000,calling_pid:94002}.write(&mut args);
+        let reply=computer.transact(computer_api::GET_NAME_FOR_UID,&args,false).unwrap();assert!(computer_api::read_get_name_for_uid_reply(&mut reply.reader()).unwrap().unwrap().is_some());
+        let mut args=Parcel::new();computer_api::IsInstantApp {package_name:Some("android".into()),user_id:0,calling_uid:1000,calling_pid:94002}.write(&mut args);
+        let reply=computer.transact(computer_api::IS_INSTANT_APP,&args,false).unwrap();assert!(!computer_api::read_is_instant_app_reply(&mut reply.reader()).unwrap().unwrap());
+        let mut args=Parcel::new();computer_api::GetTargetSdkVersion {package_name:Some("android".into()),calling_uid:1000,calling_pid:94002}.write(&mut args);
+        let reply=computer.transact(computer_api::GET_TARGET_SDK_VERSION,&args,false).unwrap();assert_eq!(computer_api::read_get_target_sdk_version_reply(&mut reply.reader()).unwrap().unwrap(),current.state().packages["android"].pkg.as_ref().unwrap().target_sdk_version);
+        let mut args=Parcel::new();computer_api::GetInstallerPackageName {package_name:Some("android".into()),user_id:0,calling_uid:1000,calling_pid:94002}.write(&mut args);
+        let reply=computer.transact(computer_api::GET_INSTALLER_PACKAGE_NAME,&args,false).unwrap();computer_api::read_get_installer_package_name_reply(&mut reply.reader()).unwrap().unwrap();
+        for filter_uninstalled in [false,true] {
+            let mut args=Parcel::new();computer_api::FilterAppAccess {package_name:None,calling_uid:1000,user_id:0,filter_uninstalled}.write(&mut args);
+            let reply=computer.transact(computer_api::FILTER_APP_ACCESS,&args,false).unwrap();assert_eq!(computer_api::read_filter_app_access_reply(&mut reply.reader()).unwrap().unwrap(),filter_uninstalled);
+        }
+        let mut internal_uid=Parcel::new();computer_api::GetPackageUidInternal {package_name:Some("android".into()),flags:0,user_id:42}.write(&mut internal_uid);
+        let reply=computer.transact(computer_api::GET_PACKAGE_UID_INTERNAL,&internal_uid,false).unwrap();assert_eq!(computer_api::read_get_package_uid_internal_reply(&mut reply.reader()).unwrap().unwrap(),4201000);
+        let mut internal_name=Parcel::new();computer_api::ResolveInternalPackageName {package_name:Some("android".into()),version_code:-1,calling_uid:1000}.write(&mut internal_name);
+        let reply=computer.transact(computer_api::RESOLVE_INTERNAL_PACKAGE_NAME,&internal_name,false).unwrap();assert_eq!(computer_api::read_resolve_internal_package_name_reply(&mut reply.reader()).unwrap().unwrap(),Some("android".into()));
         let mut version_args=Parcel::new();
         host::GetPackageStateVersionPage {}.write(&mut version_args);
         let version_reply=find(client,"host").transact(host::GET_PACKAGE_STATE_VERSION_PAGE,&version_args,false).unwrap();

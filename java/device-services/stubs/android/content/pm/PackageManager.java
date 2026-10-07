@@ -8,6 +8,7 @@ public abstract class PackageManager {
     public static final String ACTION_REQUEST_PERMISSIONS_FOR_OTHER = "android.content.pm.action.REQUEST_PERMISSIONS_FOR_OTHER";
     public static final String EXTRA_REQUEST_PERMISSIONS_NAMES = "android.content.pm.extra.REQUEST_PERMISSIONS_NAMES";
     public static final String EXTRA_REQUEST_PERMISSIONS_RESULTS = "android.content.pm.extra.REQUEST_PERMISSIONS_RESULTS";
+    public static final int VERSION_CODE_HIGHEST = -1;
     public static final int PERMISSION_GRANTED = 0;
     public static final int PERMISSION_DENIED = -1;
     public static final int GET_PERMISSIONS = 4096;
@@ -24,7 +25,10 @@ public abstract class PackageManager {
 
     public static void invalidatePackageInfoCache() { throw new RuntimeException("stub"); }
 
-    public static class NameNotFoundException extends android.util.AndroidException {}
+    public static class NameNotFoundException extends android.util.AndroidException {
+        public NameNotFoundException() {}
+        public NameNotFoundException(String name) {}
+    }
 
     public abstract ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException;
 

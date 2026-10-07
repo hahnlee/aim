@@ -808,3 +808,22 @@ fn intent_queries_return_uri_matcher_exceptions_instead_of_not_modelled() {
         }
     }
 }
+
+#[test]
+fn all_intent_filters_keep_manifest_order_and_apply_registered_mime_groups() {
+    let mut state=state();
+    let ps=Arc::make_mut(&mut state).packages.get_mut("a.viewer").unwrap();
+    ps.mime_groups=vec![(Some("images".into()),vec![Some("image/png".into())])];
+    Arc::make_mut(ps.pkg.as_mut().unwrap()).activities[0].main.component.intents[0].filter.mime_groups=Some(vec!["images".into()]);
+    let resolver=Resolver::default();
+    let invoke=|name| {
+        let mut data=Parcel::new();pm::GetAllIntentFilters {package_name:name}.write(&mut data);
+        resolver.query(&state,pm::GET_ALL_INTENT_FILTERS,1000,&mut Reader::new(data.data(),data.objects())).unwrap().unwrap()
+    };
+    let reply=invoke(Some("a.viewer".into()));let mut r=Reader::new(reply.data(),reply.objects());r.read_exception().unwrap().unwrap();assert_eq!(r.read_i32().unwrap(),1);assert_eq!(r.read_i32().unwrap(),2);assert_eq!(r.read_string16().unwrap().as_deref(),Some("android.content.IntentFilter"));
+    assert_eq!(r.read_i32().unwrap(),1);let first=IntentFilter::read(&mut r,&mut Plain).unwrap();assert!(first.types.unwrap().contains(&"image/png".into()));
+    assert_eq!(r.read_i32().unwrap(),1);let second=IntentFilter::read(&mut r,&mut Plain).unwrap();assert_eq!(second.schemes,Some(vec!["https".into()]));assert_eq!(r.remaining(),0);
+    for name in [None,Some("".into()),Some("missing".into())] {
+        let reply=invoke(name);let mut r=Reader::new(reply.data(),reply.objects());r.read_exception().unwrap().unwrap();assert_eq!(r.read_i32().unwrap(),1);assert_eq!(r.read_i32().unwrap(),0);assert_eq!(r.remaining(),0);
+    }
+}

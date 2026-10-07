@@ -17,6 +17,113 @@ impl ReadParcelable for VersionedPackage {
 impl Query<'_> {
     pub(super) fn extra_package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
+            pm::GET_APP_METADATA_SOURCE => {
+                let a = args(pm::GetAppMetadataSource::read(r))?;
+                thrown(
+                    self.app_metadata_source(a.package_name.as_deref(), a.user_id),
+                    pm::write_get_app_metadata_source_reply,
+                )
+            }
+            pm::GET_PERMISSION_CONTROLLER_PACKAGE_NAME => {
+                args(pm::GetPermissionControllerPackageName::read(r))?;
+                thrown(self.permission_controller(), |p, v| {
+                    pm::write_get_permission_controller_package_name_reply(p, &Some(v))
+                })
+            }
+            pm::GET_SHARED_LIBRARIES => {
+                let a = args(pm::GetSharedLibraries::read(r))?;
+                thrown(
+                    self.shared_libraries(a.package_name.as_deref(), a.flags, a.user_id),
+                    |p, v| pm::write_get_shared_libraries_reply(p, v.as_ref()),
+                )
+            }
+            pm::GET_SYSTEM_SHARED_LIBRARY_NAMES_AND_PATHS => {
+                args(pm::GetSystemSharedLibraryNamesAndPaths::read(r))?;
+                let entries = self.system_library_paths()?;
+                Ok(reply(|p| {
+                    pm::write_get_system_shared_library_names_and_paths_reply(p, &Some(entries))
+                }))
+            }
+            pm::GET_SDK_SANDBOX_PACKAGE_NAME => {
+                args(pm::GetSdkSandboxPackageName::read(r))?;
+                let name = self
+                    .state
+                    .system
+                    .sdk_sandbox_package
+                    .as_ref()
+                    .ok_or(NotModelled("the SDK sandbox package selection"))?;
+                Ok(reply(|p| {
+                    pm::write_get_sdk_sandbox_package_name_reply(p, name)
+                }))
+            }
+            pm::GET_ALL_APEX_DIRECTORIES => {
+                args(pm::GetAllApexDirectories::read(r))?;
+                if !matches!(self.calling_uid, 0 | 1000) {
+                    return thrown(
+                        Ok(Err(Exception::security(
+                            "getAllApexDirectories can only be called by system or root",
+                        ))),
+                        |_, _: ()| {},
+                    );
+                }
+                let apex = self
+                    .state
+                    .apex_inventory
+                    .as_ref()
+                    .ok_or(NotModelled("the active APEX inventory"))?;
+                let paths = Some(
+                    apex.active
+                        .iter()
+                        .map(|a| Some(a.mount_path.clone()))
+                        .collect(),
+                );
+                Ok(reply(|p| {
+                    pm::write_get_all_apex_directories_reply(p, &paths)
+                }))
+            }
+            pm::GET_INITIAL_NON_STOPPED_SYSTEM_PACKAGES => {
+                args(pm::GetInitialNonStoppedSystemPackages::read(r))?;
+                let names = self
+                    .state
+                    .system
+                    .initial_non_stopped_system_packages
+                    .as_ref()
+                    .ok_or(NotModelled("the initial non-stopped system package owner"))?;
+                Ok(reply(|p| {
+                    pm::write_get_initial_non_stopped_system_packages_reply(
+                        p,
+                        &Some(names.iter().cloned().map(Some).collect()),
+                    )
+                }))
+            }
+            pm::IS_PROTECTED_BROADCAST => {
+                let a = args(pm::IsProtectedBroadcast::read(r))?;
+                let prefix = a.action_name.as_ref().is_some_and(|name| {
+                    [
+                        "android.net.netmon.lingerExpired",
+                        "com.android.server.sip.SipWakeupTimer",
+                        "com.android.internal.telephony.data-reconnect",
+                        "android.net.netmon.launchCaptivePortalApp",
+                    ]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                });
+                let protected = if prefix {
+                    true
+                } else {
+                    let known = self
+                        .state
+                        .protected_broadcasts
+                        .as_ref()
+                        .ok_or(NotModelled("the registered protected-broadcast owner"))?;
+                    a.action_name
+                        .as_ref()
+                        .is_some_and(|name| known.contains(name))
+                };
+                Ok(reply(|p| {
+                    pm::write_is_protected_broadcast_reply(p, protected)
+                }))
+            }
             pm::GET_DECLARED_SHARED_LIBRARIES => {
                 let a = args(pm::GetDeclaredSharedLibraries::read(r))?;
                 thrown(
@@ -266,6 +373,205 @@ impl Query<'_> {
         }
     }
 
+    fn app_metadata_source(&self, name: Option<&str>, user: i32) -> Thrown<i32> {
+        if !matches!(self.calling_uid, 0 | 1000)
+            && !self.uid_has_permission(self.calling_uid, "android.permission.GET_APP_METADATA")?
+        {
+            return Ok(Err(Exception::security(
+                "GET_APP_METADATA permission required",
+            )));
+        }
+        let ps = name.and_then(|name| self.state.packages.get(name));
+        if ps.is_none() || self.filtered_including_uninstalled(ps, user)? {
+            let mut payload = Parcel::new();
+            payload.write_string16(Some("android.os.ParcelableException"));
+            payload.write_string16(Some(
+                "android.content.pm.PackageManager$NameNotFoundException",
+            ));
+            payload.write_string16(name);
+            let message = match name {
+                Some(name) => {
+                    format!("android.content.pm.PackageManager$NameNotFoundException: {name}")
+                }
+                None => "android.content.pm.PackageManager$NameNotFoundException".into(),
+            };
+            return Ok(Err(Exception::parcelable(Some(&message), &payload)
+                .map_err(|_| {
+                    NotModelled("metadata exception payload requires capability ownership")
+                })?));
+        }
+        Ok(Ok(ps.unwrap().app_metadata_source.ok_or(NotModelled(
+            "the PackageSetting app metadata source",
+        ))?))
+    }
+
+    fn permission_controller(&self) -> Thrown<String> {
+        let selected = self
+            .state
+            .system
+            .permission_controller_package
+            .as_ref()
+            .ok_or(NotModelled("the native permission controller selection"))?;
+        if let Some(package) = selected {
+            if self
+                .visible_user_state(package, user_id(self.calling_uid))?
+                .is_some()
+            {
+                return Ok(Ok(package.clone()));
+            }
+        }
+        Ok(Err(Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+            "PermissionController is not found",
+        )))
+    }
+
+    fn shared_libraries(
+        &self,
+        package: Option<&str>,
+        flags: i64,
+        user: i32,
+    ) -> Thrown<Option<ListSlice<Library>>> {
+        if self.user(user).is_none()
+            || apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some()
+        {
+            return Ok(Ok(None));
+        }
+        let flags = match self.update_flags_for_package(flags, user)? {
+            Ok(flags) => flags,
+            Err(e) => return Ok(Err(e)),
+        };
+        let privileged = matches!(self.calling_uid, 0 | 1000)
+            || self.check_uid_permission(self.calling_uid, Some(INSTALL_PACKAGES))? == 0
+            || self.check_uid_permission(
+                self.calling_uid,
+                Some("android.permission.DELETE_PACKAGES"),
+            )? == 0;
+        let can_see = if privileged {
+            true
+        } else {
+            match self.request_installs(package, user)? {
+                Err(e) => return Ok(Err(e)),
+                Ok(requests) => {
+                    requests
+                        || self.check_uid_permission(
+                            self.calling_uid,
+                            Some("android.permission.REQUEST_DELETE_PACKAGES"),
+                        )? == 0
+                        || self.check_uid_permission(
+                            self.calling_uid,
+                            Some("android.permission.ACCESS_SHARED_LIBRARIES"),
+                        )? == 0
+                }
+            }
+        };
+        let libraries = self
+            .state
+            .shared_libraries
+            .as_ref()
+            .ok_or(NotModelled("the finalized shared library registry"))?;
+        let cleared = Query {
+            state: self.state,
+            filter: self.filter,
+            calling_uid: 1000,
+        };
+        let mut values = Vec::new();
+        let mut blocked = HashSet::new();
+        for library in libraries {
+            if blocked.contains(&library.name) {
+                continue;
+            }
+            if matches!(library.kind, 2 | 3) && !can_see {
+                blocked.insert(library.name.clone());
+                continue;
+            }
+            match cleared.package_info(
+                &library.declaring.0,
+                library.declaring.1,
+                flags | MATCH_STATIC_SHARED_AND_SDK_LIBRARIES,
+                user,
+            )? {
+                Err(e) => return Ok(Err(e)),
+                Ok(None) => continue,
+                Ok(Some(_)) => {}
+            }
+            let mut value = library.clone();
+            value.dependents = self.library_consumers(library, flags, user)?;
+            value.dependents_initialized = !value.dependents.is_empty();
+            value.optional_dependents = None;
+            value.cert_digests = None;
+            if library.kind == 3 {
+                let independence = self
+                    .state
+                    .system
+                    .flags
+                    .iter()
+                    .find(|(n, _)| n == "android.content.pm.sdk_lib_independence")
+                    .map(|(_, on)| *on)
+                    .ok_or(NotModelled("the sdk_lib_independence flag owner"))?;
+                if independence {
+                    let optional: Vec<_> = value
+                        .dependents
+                        .iter()
+                        .filter(|dependent| {
+                            dependent.as_ref().is_some_and(|(name, _)| {
+                                self.state.packages.values().any(|ps| {
+                                    let external = ps.pkg.as_ref().map_or_else(
+                                        || ps.name.clone(),
+                                        |p| Self::external_name(p),
+                                    );
+                                    external == *name
+                                        && ps.version_code == dependent.as_ref().unwrap().1
+                                        && ps.uses_sdk_libraries.iter().any(|l| {
+                                            Some(&l.name) == library.name.as_ref()
+                                                && l.version_major == library.version
+                                                && l.optional
+                                        })
+                                })
+                            })
+                        })
+                        .cloned()
+                        .collect();
+                    value.optional_dependents = (!optional.is_empty()).then_some(optional);
+                }
+            }
+            values.push(Library(value));
+        }
+        Ok(Ok((!values.is_empty()).then_some(ListSlice {
+            creator: "android.content.pm.SharedLibraryInfo".into(),
+            items: values,
+        })))
+    }
+
+    fn request_installs(&self, name: Option<&str>, user: i32) -> Thrown<bool> {
+        let name = name.unwrap_or_default();
+        let uid = match self.package_uid(name, 0, user)? {
+            Ok(uid) => uid,
+            Err(e) => return Ok(Err(e)),
+        };
+        if uid != self.calling_uid && !matches!(self.calling_uid, 0 | 1000) {
+            return Ok(Err(Exception::security(format!(
+                "Caller uid {} does not own package {name}",
+                self.calling_uid
+            ))));
+        }
+        let Some((ps, pkg)) = self.package_of(name) else {
+            return Ok(Ok(false));
+        };
+        if user_state(ps, user).instant_app
+            || pkg.target_sdk_version < 26
+            || !pkg
+                .requested_permissions
+                .iter()
+                .any(|p| p == "android.permission.REQUEST_INSTALL_PACKAGES")
+        {
+            return Ok(Ok(false));
+        }
+        Err(NotModelled(
+            "unknown-sources user restrictions and external source policy",
+        ))
+    }
+
     fn declared_libraries(
         &self,
         name: Option<&str>,
@@ -395,7 +701,11 @@ impl Query<'_> {
         })
     }
 
-    pub(super) fn check_uid_permission(&self, uid: i32, permission: Option<&str>) -> Result<i32, NotModelled> {
+    pub(super) fn check_uid_permission(
+        &self,
+        uid: i32,
+        permission: Option<&str>,
+    ) -> Result<i32, NotModelled> {
         let user = user_id(uid);
         if self.user(user).is_none() {
             return Ok(-1);
@@ -473,14 +783,22 @@ impl Query<'_> {
     }
 
     fn system_library_names(&self) -> Result<Option<Vec<Option<String>>>, NotModelled> {
+        let entries = self.system_library_paths()?;
+        Ok((!entries.is_empty()).then(|| entries.into_iter().map(|(name, _)| name).collect()))
+    }
+
+    fn system_library_paths(&self) -> Result<Vec<(Option<String>, Option<String>)>, NotModelled> {
         let libraries = self
             .state
             .shared_libraries
             .as_ref()
             .ok_or(NotModelled("the finalized shared library registry"))?;
-        let mut names = Vec::new();
+        let mut entries = Vec::new();
         for library in libraries {
-            let visible = if library.kind != super::super::libraries::TYPE_STATIC {
+            if entries.iter().any(|(name, _)| name == &library.name) {
+                continue;
+            }
+            let visible = if library.kind != 2 {
                 true
             } else {
                 let ps = library
@@ -494,12 +812,12 @@ impl Query<'_> {
                         MATCH_STATIC_SHARED_AND_SDK_LIBRARIES,
                     )?
             };
-            if visible && !names.contains(&library.name) {
-                names.push(library.name.clone());
+            if visible {
+                entries.push((library.name.clone(), library.path.clone()));
             }
         }
-        names.sort_by_key(|name| name.as_deref().map_or(0, super::super::info::java_hash));
-        Ok((!names.is_empty()).then_some(names))
+        entries.sort_by_key(|(name, _)| name.as_deref().map_or(0, info::java_hash));
+        Ok(entries)
     }
 
     fn is_instant(&self, name: &str, user: i32) -> Thrown<bool> {
@@ -785,7 +1103,14 @@ impl Query<'_> {
     }
 
     fn installer_package(&self, name: &str) -> Thrown<Option<String>> {
-        let Some(source) = self.install_source(name, user_id(self.calling_uid))? else {
+        self.installer_package_internal(name, user_id(self.calling_uid))
+    }
+    pub(crate) fn installer_package_internal(
+        &self,
+        name: &str,
+        user: i32,
+    ) -> Thrown<Option<String>> {
+        let Some(source) = self.install_source(name, user)? else {
             return Ok(Err(Exception::illegal_argument(format!(
                 "Unknown package: {name}"
             ))));
@@ -957,6 +1282,61 @@ mod permission_tests {
     use super::*;
 
     #[test]
+    fn app_metadata_source_uses_settings_and_encodes_missing_target_cause() {
+        let state = State {
+            packages: [(
+                "p".into(),
+                PackageState {
+                    name: "p".into(),
+                    app_id: 10100,
+                    app_metadata_source: Some(2),
+                    users: [(0, PackageUserState::default())].into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            users: [(
+                0,
+                User {
+                    id: 0,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            system: System {
+                permission_controller_package: Some(Some("p".into())),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        assert_eq!(query.app_metadata_source(Some("p"), 0).unwrap().unwrap(), 2);
+        assert_eq!(query.permission_controller().unwrap().unwrap(), "p");
+        let error = query
+            .app_metadata_source(Some("missing"), 0)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, aim_binder_host::parcel::EX_PARCELABLE);
+        let payload = error.parcelable.unwrap();
+        let mut reader = Reader::new(payload.bytes(), &[]);
+        assert_eq!(
+            reader.read_string16().unwrap().as_deref(),
+            Some("android.os.ParcelableException")
+        );
+        assert_eq!(
+            reader.read_string16().unwrap().as_deref(),
+            Some("android.content.pm.PackageManager$NameNotFoundException")
+        );
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("missing"));
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
     fn declared_library_consumers_match_versions_users_and_raw_null_lists() {
         let mut state = State {
             users: [(
@@ -1025,6 +1405,183 @@ mod permission_tests {
                 .unwrap()
                 .unwrap()
                 .is_none()
+        );
+        drop(query);
+        drop(filter);
+        state
+            .system
+            .flags
+            .push(("android.content.pm.sdk_lib_independence".into(), true));
+        state
+            .packages
+            .get_mut("consumer")
+            .unwrap()
+            .uses_sdk_libraries = vec![super::super::super::settings::UsesSdkLibrary {
+            name: "sdk".into(),
+            version_major: 1,
+            optional: true,
+        }];
+        state
+            .shared_libraries
+            .as_mut()
+            .unwrap()
+            .push(super::super::super::model::SharedLibrary {
+                name: Some("sdk".into()),
+                kind: 3,
+                version: 1,
+                declaring: ("provider".into(), 3),
+                ..Default::default()
+            });
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        let shared = query
+            .shared_libraries(Some("unowned"), 0, 0)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(shared.items.len(), 2);
+        assert_eq!(
+            shared.items[1].0.optional_dependents,
+            Some(vec![Some(("consumer".into(), 7))])
+        );
+        assert_eq!(
+            shared.items[1].0.dependents,
+            vec![Some(("consumer".into(), 7))]
+        );
+        drop(query);
+        drop(filter);
+        state.system.flags[0].1 = false;
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        let shared = query
+            .shared_libraries(Some("unowned"), 0, 0)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(shared.items[1].0.optional_dependents, None);
+    }
+
+    #[test]
+    fn metadata_queries_distinguish_missing_owners_empty_and_foreign_callers() {
+        let mut state = State {
+            system: System {
+                sdk_sandbox_package: Some(None),
+                initial_non_stopped_system_packages: Some(vec!["system.nonstopped".into()]),
+                ..Default::default()
+            },
+            apex_inventory: Some(super::super::super::bootstrap::ApexInventory {
+                packages: Some(vec![]),
+                active: vec![],
+            }),
+            protected_broadcasts: Some(["p.protected".into()].into()),
+            ..Default::default()
+        };
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        let mut args = Parcel::new();
+        pm::GetSdkSandboxPackageName {}.write(&mut args);
+        let reply = query
+            .extra_package(
+                pm::GET_SDK_SANDBOX_PACKAGE_NAME,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        assert_eq!(
+            pm::read_get_sdk_sandbox_package_name_reply(&mut Reader::new(
+                reply.data(),
+                reply.objects()
+            ))
+            .unwrap()
+            .unwrap(),
+            None
+        );
+        let mut args = Parcel::new();
+        pm::GetAllApexDirectories {}.write(&mut args);
+        let reply = query
+            .extra_package(
+                pm::GET_ALL_APEX_DIRECTORIES,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        assert_eq!(
+            pm::read_get_all_apex_directories_reply(&mut Reader::new(
+                reply.data(),
+                reply.objects()
+            ))
+            .unwrap()
+            .unwrap(),
+            Some(vec![])
+        );
+        let foreign = Query {
+            calling_uid: 2000,
+            ..query
+        };
+        let reply = foreign
+            .extra_package(
+                pm::GET_ALL_APEX_DIRECTORIES,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        assert_eq!(
+            Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_SECURITY
+        );
+        let mut args = Parcel::new();
+        pm::IsProtectedBroadcast {
+            action_name: Some("p.protected".into()),
+        }
+        .write(&mut args);
+        let reply = foreign
+            .extra_package(
+                pm::IS_PROTECTED_BROADCAST,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        assert!(
+            pm::read_is_protected_broadcast_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap()
+        );
+        drop(foreign);
+        drop(filter);
+        state.protected_broadcasts = None;
+        let filter = AppsFilter::new(&state, &Default::default()).unwrap();
+        let query = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 2000,
+        };
+        let mut args = Parcel::new();
+        pm::IsProtectedBroadcast {
+            action_name: Some("android.net.netmon.lingerExpired.42".into()),
+        }
+        .write(&mut args);
+        let reply = query
+            .extra_package(
+                pm::IS_PROTECTED_BROADCAST,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        assert!(
+            pm::read_is_protected_broadcast_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap()
         );
     }
 

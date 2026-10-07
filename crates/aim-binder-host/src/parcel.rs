@@ -48,6 +48,7 @@ pub const EX_NULL_POINTER: i32 = -4;
 pub const EX_ILLEGAL_STATE: i32 = -5;
 pub const EX_UNSUPPORTED_OPERATION: i32 = -7;
 pub const EX_SERVICE_SPECIFIC: i32 = -8;
+pub const EX_PARCELABLE: i32 = -9;
 /// A reply header that precedes the exception code.
 const EX_HAS_STRICTMODE_REPLY_HEADER: i32 = -128;
 
@@ -67,6 +68,20 @@ pub struct Exception {
     pub message: String,
     /// `EX_SERVICE_SPECIFIC`'s error code.
     pub service_specific: i32,
+    /// Opaque writeParcelable payload, retained without loading exception classes.
+    pub parcelable: Option<ParcelableException>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParcelableException {
+    bytes: Vec<u8>,
+    null_message: bool,
+}
+
+impl ParcelableException {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl Exception {
@@ -75,7 +90,24 @@ impl Exception {
             code,
             message: message.into(),
             service_specific: 0,
+            parcelable: None,
         }
+    }
+
+    /// The caller supplies the original writeParcelable class/body bytes.
+    pub fn parcelable(message: Option<&str>, payload: &Parcel) -> Result<Self> {
+        if !payload.objects().is_empty() {
+            return Err(BAD_VALUE);
+        }
+        Ok(Self {
+            code: EX_PARCELABLE,
+            message: message.unwrap_or_default().into(),
+            service_specific: 0,
+            parcelable: Some(ParcelableException {
+                bytes: payload.data().to_vec(),
+                null_message: message.is_none(),
+            }),
+        })
     }
 
     pub fn security(message: impl Into<String>) -> Self {
@@ -240,7 +272,18 @@ impl Parcel {
     /// `writeException`: the code, the message and an empty remote stack
     /// trace.
     pub fn write_exception(&mut self, exception: &Exception) {
-        self.write_exception_message(exception, Some(&exception.message));
+        self.write_exception_message(
+            exception,
+            if exception
+                .parcelable
+                .as_ref()
+                .is_some_and(|p| p.null_message)
+            {
+                None
+            } else {
+                Some(&exception.message)
+            },
+        );
     }
 
     /// Exception framing when the original Java exception has a null message.
@@ -251,6 +294,13 @@ impl Parcel {
         self.write_i32(0);
         if exception.code == EX_SERVICE_SPECIFIC {
             self.write_i32(exception.service_specific);
+        } else if exception.code == EX_PARCELABLE {
+            let start = self.position();
+            self.write_i32(0);
+            if let Some(payload) = &exception.parcelable {
+                self.write_raw(&payload.bytes, &[]);
+                self.set_i32_at(start, (self.position() - start) as i32);
+            }
         }
     }
 
@@ -458,7 +508,8 @@ impl<'a> Reader<'a> {
         if code == 0 {
             return Ok(Ok(()));
         }
-        let message = self.read_string16()?.unwrap_or_default();
+        let raw_message = self.read_string16()?;
+        let message = raw_message.clone().unwrap_or_default();
         let trace = self.read_i32()?;
         if trace > 0 {
             self.read_string16()?;
@@ -468,10 +519,29 @@ impl<'a> Reader<'a> {
         } else {
             0
         };
+        let parcelable = if code == EX_PARCELABLE {
+            let length = self.read_i32()?;
+            if length < 4 || length % 4 != 0 {
+                return Err(BAD_VALUE);
+            }
+            let start = self.position();
+            self.take(length as usize - 4)?;
+            let (bytes, objects) = self.since(start);
+            if !objects.is_empty() {
+                return Err(BAD_VALUE);
+            }
+            Some(ParcelableException {
+                bytes: bytes.to_vec(),
+                null_message: raw_message.is_none(),
+            })
+        } else {
+            None
+        };
         Ok(Err(Exception {
             code,
             message,
             service_specific,
+            parcelable,
         }))
     }
 }
@@ -479,6 +549,72 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parcelable_exception_preserves_opaque_class_body_and_null_message() {
+        let mut payload = Parcel::new();
+        payload.write_string16(Some("org.example.UnknownException"));
+        payload.write_string16(None);
+        payload.write_i64(0x123456789);
+        let exception = Exception::parcelable(None, &payload).unwrap();
+        let mut parcel = Parcel::new();
+        parcel.write_exception(&exception);
+        let mut reader = Reader::new(parcel.data(), parcel.objects());
+        let decoded = reader.read_exception().unwrap().unwrap_err();
+        assert_eq!(reader.remaining(), 0);
+        assert_eq!(decoded, exception);
+        let mut forwarded = Parcel::new();
+        forwarded.write_exception(&decoded);
+        assert_eq!(forwarded.data(), parcel.data());
+        assert_eq!(forwarded.objects(), parcel.objects());
+    }
+
+    #[test]
+    fn parcelable_exception_refuses_binder_and_owned_fd_objects() {
+        use std::os::fd::AsFd;
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let file = crate::server::file_from_fd(file.as_fd()).unwrap();
+        let mut binder = Parcel::new();
+        binder.write_string16(Some("org.example.BinderException"));
+        binder.write_binder(Some(Binder::Handle(1)));
+        let mut descriptor = Parcel::new();
+        descriptor.write_string16(Some("org.example.FileException"));
+        descriptor.write_file(file);
+        for payload in [binder, descriptor] {
+            assert_eq!(
+                Exception::parcelable(Some("failure"), &payload),
+                Err(BAD_VALUE)
+            );
+            let mut incoming = Parcel::new();
+            incoming.write_i32(EX_PARCELABLE);
+            incoming.write_string16(Some("failure"));
+            incoming.write_i32(0);
+            let start = incoming.position();
+            incoming.write_i32(0);
+            incoming.write_raw_files(payload.data(), payload.objects(), payload.files());
+            incoming.set_i32_at(start, (incoming.position() - start) as i32);
+            assert_eq!(
+                Reader::new(incoming.data(), incoming.objects()).read_exception(),
+                Err(BAD_VALUE)
+            );
+        }
+    }
+
+    #[test]
+    fn parcelable_exception_rejects_invalid_or_truncated_envelopes() {
+        for length in [-1, 0, 3, 5, 8] {
+            let mut parcel = Parcel::new();
+            parcel.write_i32(EX_PARCELABLE);
+            parcel.write_string16(Some("failure"));
+            parcel.write_i32(0);
+            parcel.write_i32(length);
+            assert!(
+                Reader::new(parcel.data(), parcel.objects())
+                    .read_exception()
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn strings_round_trip_with_padding() {

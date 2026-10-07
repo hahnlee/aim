@@ -235,6 +235,72 @@ public final class PackageSnapshots {
             return (PackageStateInternal) data.packages.get(name);
         }
 
+        public synchronized int getPackageUidInternal(String name, long flags, int userId) {
+            try { return endpoint().getPackageUidInternal(name, flags, userId); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized boolean isPackageEphemeral(int userId, String name) {
+            PackageStateInternal state = getPackageStateInternal(name);
+            return state != null && state.getUserStateOrDefault(userId).isInstantApp();
+        }
+
+        public synchronized int getPackageTargetSdkVersion(String name) {
+            PackageStateInternal state = getPackageStateInternal(name);
+            return state != null && state.getPkg() != null ? state.getPkg().getTargetSdkVersion()
+                    : android.os.Build.VERSION_CODES.CUR_DEVELOPMENT;
+        }
+
+        public synchronized com.android.server.pm.pkg.AndroidPackage getPackage(String name) {
+            String resolved;
+            try {
+                resolved = endpoint().resolveInternalPackageName(name,
+                        android.content.pm.PackageManager.VERSION_CODE_HIGHEST,
+                        android.os.Binder.getCallingUid());
+            } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            PackageStateInternal state = getPackageStateInternal(resolved);
+            return state == null ? null : state.getAndroidPackage();
+        }
+
+        public synchronized com.android.server.pm.pkg.AndroidPackage getAndroidPackage(String name) {
+            return getPackage(name);
+        }
+
+        public synchronized android.util.ArrayMap<String, PackageStateInternal> getPackageStates() {
+            checkClosed();
+            var result = new android.util.ArrayMap<String, PackageStateInternal>();
+            data.packages.forEach((name, state) -> result.put(name, (PackageStateInternal) state));
+            return result;
+        }
+
+        public synchronized void forEachPackageState(java.util.function.Consumer<PackageStateInternal> action) {
+            for (var state : getPackageStates().values()) action.accept(state);
+        }
+
+        public synchronized void forEachPackage(java.util.function.Consumer<com.android.server.pm.pkg.AndroidPackage> action) {
+            for (var state : getPackageStates().values()) {
+                if (state.getPkg() != null) action.accept(state.getPkg());
+            }
+        }
+
+        public synchronized SharedUserApi getSharedUserApi(int appId) {
+            checkClosed();
+            for (var group : data.sharedUsers.values()) if (group.getAppId() == appId) return group;
+            for (var state : data.packages.values()) {
+                if (state.getAppId() == appId) throw new ClassCastException("app ID belongs to a package setting");
+            }
+            return null;
+        }
+
+        public synchronized android.util.ArraySet<PackageStateInternal> getSharedUserPackages(int appId) {
+            var result = new android.util.ArraySet<PackageStateInternal>();
+            SharedUserApi group = getSharedUserApi(appId);
+            if (group != null) {
+                for (var state : group.getPackageStates()) result.add((PackageStateInternal) state);
+            }
+            return result;
+        }
+
         public synchronized android.content.pm.ApplicationInfo getApplicationInfo(String name,
                 long flags, int filterCallingUid, int userId) {
             try {
@@ -251,8 +317,44 @@ public final class PackageSnapshots {
             } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         }
 
-        public synchronized boolean filterAppAccess(String name, int callingUid, int userId) {
-            try { return endpoint().filterAppAccess(name, callingUid, userId); }
+        public synchronized boolean filterAppAccess(String name, int callingUid, int userId, boolean filterUninstalled) {
+            try { return endpoint().filterAppAccess(name, callingUid, userId, filterUninstalled); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized int getPackageUid(String name, long flags, int userId) {
+            try { return endpoint().getPackageUid(name, flags, userId,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized String[] getPackagesForUid(int uid) {
+            try { return endpoint().getPackagesForUid(uid,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized String getNameForUid(int uid) {
+            try { return endpoint().getNameForUid(uid,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized boolean isInstantApp(String name, int userId) {
+            try { return endpoint().isInstantApp(name, userId,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized int getTargetSdkVersion(String name) {
+            try { return endpoint().getTargetSdkVersion(name,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized String getInstallerPackageName(String name, int userId) {
+            try { return endpoint().getInstallerPackageName(name, userId,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
             catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         }
 

@@ -290,12 +290,83 @@ public final class DisplacedSnapshotOracle {
                 throw new AssertionError("publication closed retained query graph");
             if (computer.getApplicationInfo(ORIGINAL, 0x1234567800000001L, 1010001, 10).uid != version
                     || computer.getPackageInfo(ORIGINAL, 0x1234567800000001L, 1010001, 10).applicationInfo.uid != version
-                    || !computer.filterAppAccess(ORIGINAL, 1010001, 10))
+                    || !computer.filterAppAccess(ORIGINAL, 1010001, 10, true)
+                    || computer.filterAppAccess(ORIGINAL, 1010001, 10, false))
                 throw new AssertionError("internal metadata query used current graph");
+            if (computer.getPackageUid(ORIGINAL, 0x1234567800000001L, 10) != version
+                    || !java.util.Arrays.equals(computer.getPackagesForUid(1010001),
+                            new String[] { ORIGINAL, Long.toString(version) })
+                    || !computer.getNameForUid(1010001).equals(Long.toString(version))
+                    || !computer.isInstantApp(ORIGINAL, 10)
+                    || computer.getTargetSdkVersion(ORIGINAL) != version
+                    || !computer.getInstallerPackageName(ORIGINAL, 10).equals(Long.toString(version)))
+                throw new AssertionError("expanded query adapter escaped retained version");
+            var capturedStates = oldStates.getPackageStates();
+            var original = (com.android.server.pm.pkg.PackageStateInternal) capturedStates.get(ORIGINAL);
+            if (computer.getPackageUidInternal(ORIGINAL, 0x1234567800000001L, 10) != version
+                    || computer.getPackageTargetSdkVersion(ORIGINAL) != original.getPkg().getTargetSdkVersion()
+                    || computer.getPackageTargetSdkVersion("fixture.missing") != android.os.Build.VERSION_CODES.CUR_DEVELOPMENT
+                    || computer.isPackageEphemeral(10, ORIGINAL) != original.getUserStateOrDefault(10).isInstantApp()
+                    || computer.isPackageEphemeral(10, "fixture.missing")
+                    || computer.getAndroidPackage("fixture.normalized") != original.getAndroidPackage()
+                    || computer.getPackage(ORIGINAL) != original.getAndroidPackage()
+                    || computer.getPackage("fixture.missing") != null)
+                throw new AssertionError("internal read adapter used public query semantics");
+            var internalStates = computer.getPackageStates();
+            if (!internalStates.equals(capturedStates)) throw new AssertionError("internal state inventory changed");
+            var visitedStates = new java.util.ArrayList<com.android.server.pm.pkg.PackageStateInternal>();
+            computer.forEachPackageState(visitedStates::add);
+            if (!visitedStates.equals(new java.util.ArrayList<>(internalStates.values())))
+                throw new AssertionError("internal package iteration order changed");
+            var visitedPackages = new java.util.ArrayList<com.android.server.pm.pkg.AndroidPackage>();
+            computer.forEachPackage(visitedPackages::add);
+            var expectedPackages = new java.util.ArrayList<com.android.server.pm.pkg.AndroidPackage>();
+            for (var state : internalStates.values()) if (state.getPkg() != null) expectedPackages.add(state.getPkg());
+            if (!visitedPackages.equals(expectedPackages)) throw new AssertionError("internal parsed package iteration changed");
+            internalStates.clear();
+            if (computer.getPackageStates().size() != capturedStates.size())
+                throw new AssertionError("caller changed captured inventory");
+            if (computer.getSharedUserApi(-1) != null || !computer.getSharedUserPackages(-1).isEmpty())
+                throw new AssertionError("unknown shared UID returned owner");
+            for (var group : oldStates.getSharedUsers().values()) {
+                if (computer.getSharedUserApi(group.getAppId()) != group
+                        || !computer.getSharedUserPackages(group.getAppId()).equals(group.getPackageStates()))
+                    throw new AssertionError("shared UID replica identity changed");
+            }
+            for (var state : capturedStates.values()) {
+                if (state.hasSharedUser()) continue;
+                try { computer.getSharedUserApi(state.getAppId()); throw new AssertionError("package UID treated as shared"); }
+                catch (ClassCastException expected) {}
+                try { computer.getSharedUserPackages(state.getAppId()); throw new AssertionError("package UID returned shared members"); }
+                catch (ClassCastException expected) {}
+            }
             store.close();
             if (source[0].computer.closes != 1 || retained.closes != 0)
                 throw new AssertionError("store close escaped capture ownership");
             computer.close();
+            Runnable[] closedQueries = {
+                () -> computer.getPackageUid(ORIGINAL, 0x1234567800000001L, 10),
+                () -> computer.getPackagesForUid(1010001),
+                () -> computer.getNameForUid(1010001),
+                () -> computer.isInstantApp(ORIGINAL, 10),
+                () -> computer.getTargetSdkVersion(ORIGINAL),
+                () -> computer.getInstallerPackageName(ORIGINAL, 10),
+                () -> computer.filterAppAccess(ORIGINAL, 1010001, 10, true),
+                () -> computer.getPackageUidInternal(ORIGINAL, 0x1234567800000001L, 10),
+                () -> computer.isPackageEphemeral(10, ORIGINAL),
+                () -> computer.getPackageTargetSdkVersion(ORIGINAL),
+                () -> computer.getAndroidPackage("fixture.normalized"),
+                () -> computer.getPackage(ORIGINAL),
+                () -> computer.getPackageStates(),
+                () -> computer.forEachPackageState(value -> {}),
+                () -> computer.forEachPackage(value -> {}),
+                () -> computer.getSharedUserApi(-1),
+                () -> computer.getSharedUserPackages(-1),
+            };
+            for (Runnable query : closedQueries) {
+                try { query.run(); throw new AssertionError("closed expanded query adapter accepted"); }
+                catch (IllegalStateException expected) {}
+            }
             if (retained.closes != 0) throw new AssertionError("query close invalidated retained state scope");
             oldStates.close();
             if (retained.closes != 1) throw new AssertionError("last scope leaked query endpoint");
@@ -473,11 +544,57 @@ public final class DisplacedSnapshotOracle {
             info.applicationInfo = getApplicationInfo(n, flags, user, filter, caller, pid);
             return info;
         }
-        public boolean filterAppAccess(String n, int caller, int user) {
+        public boolean filterAppAccess(String n, int caller, int user, boolean filterUninstalled) {
             open();
             if (!ORIGINAL.equals(n) || caller != 1010001 || user != 10)
                 throw new AssertionError("visibility query caller changed");
-            return true;
+            return filterUninstalled;
+        }
+        private void caller(int uid, int pid) {
+            open();
+            if (uid != android.os.Binder.getCallingUid() || pid != android.os.Binder.getCallingPid())
+                throw new AssertionError("actual internal query caller changed");
+        }
+        private void packageUser(String name, int user) {
+            if (!ORIGINAL.equals(name) || user != 10) throw new AssertionError("internal package identity changed");
+        }
+        public int getPackageUid(String name, long flags, int user, int uid, int pid) {
+            caller(uid, pid); packageUser(name, user);
+            if (flags != 0x1234567800000001L) throw new AssertionError("internal UID flags truncated");
+            return (int) version;
+        }
+        public String[] getPackagesForUid(int target, int uid, int pid) {
+            caller(uid, pid);
+            if (target != 1010001) throw new AssertionError("target UID changed");
+            return new String[] { ORIGINAL, Long.toString(version) };
+        }
+        public String getNameForUid(int target, int uid, int pid) {
+            caller(uid, pid);
+            if (target != 1010001) throw new AssertionError("target UID changed");
+            return Long.toString(version);
+        }
+        public boolean isInstantApp(String name, int user, int uid, int pid) {
+            caller(uid, pid); packageUser(name, user); return true;
+        }
+        public int getTargetSdkVersion(String name, int uid, int pid) {
+            caller(uid, pid);
+            if (!ORIGINAL.equals(name)) throw new AssertionError("target SDK identity changed");
+            return (int) version;
+        }
+        public String getInstallerPackageName(String name, int user, int uid, int pid) {
+            caller(uid, pid); packageUser(name, user); return Long.toString(version);
+        }
+        public int getPackageUidInternal(String name, long flags, int userId) {
+            open(); packageUser(name, userId);
+            if (flags != 0x1234567800000001L) throw new AssertionError("internal system UID flags changed");
+            return (int) version;
+        }
+        public String resolveInternalPackageName(String name, long versionCode, int callerUid) {
+            open();
+            if (versionCode != android.content.pm.PackageManager.VERSION_CODE_HIGHEST
+                    || callerUid != android.os.Binder.getCallingUid())
+                throw new AssertionError("package normalization caller changed");
+            return name.equals("fixture.normalized") ? ORIGINAL : name;
         }
         public void close() {
             if (++closes != 1) throw new AssertionError("query capture closed twice");

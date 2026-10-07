@@ -63,6 +63,11 @@ impl From<NotModelled> for QueryError {
 }
 
 
+struct FilterParcelable(IntentFilter);
+impl aim_service_aidl::WriteParcelable for FilterParcelable {
+    fn write_to(&self,p:&mut Parcel) {self.0.write(p);}
+}
+
 /// `PackageManager` flags.
 pub const MATCH_DIRECT_BOOT_UNAWARE: i64 = 0x0004_0000;
 pub const MATCH_DIRECT_BOOT_AWARE: i64 = 0x0008_0000;
@@ -1299,6 +1304,7 @@ impl Resolver {
                 | pm::RESOLVE_INTENT
                 | pm::RESOLVE_SERVICE
                 | pm::RESOLVE_CONTENT_PROVIDER
+                | pm::GET_ALL_INTENT_FILTERS
         ) {
             return None;
         }
@@ -1306,6 +1312,25 @@ impl Resolver {
             Ok(r) => r,
             Err(error) => return Some(error.reply().map_err(QueryError::Transport)),
         };
+        if code==pm::GET_ALL_INTENT_FILTERS {
+            return Some((|| {
+                let a=pm::GetAllIntentFilters::read(data).map_err(QueryError::Transport)?;
+                if data.remaining()!=0 {return Err(QueryError::Transport(BAD_VALUE));}
+                let query=Query {state,filter:&r.apps_filter,calling_uid:uid};
+                let package=state.packages.get(a.package_name.as_deref().unwrap_or_default());
+                let mut filters=Vec::new();
+                if let Some(package)=package.filter(|package|package.pkg.is_some()) {
+                    if !query.filtered_including_uninstalled(Some(package),user_id(uid))? {
+                        use super::intent_resolver::Entry;
+                        for entry in r.components.activities.entries().iter().filter(|entry|entry.package==package.name) {
+                            filters.push(FilterParcelable(entry.filter().clone()));
+                        }
+                    }
+                }
+                let slice=ListSlice {creator:"android.content.IntentFilter".into(),items:filters};
+                let mut reply=Parcel::new();pm::write_get_all_intent_filters_reply(&mut reply,Some(&slice));Ok(reply)
+            })());
+        }
         let mut p = Parcel::new();
         let slice = |items| ListSlice {
             creator: "android.content.pm.ResolveInfo".into(),

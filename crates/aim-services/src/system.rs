@@ -1279,6 +1279,7 @@ impl System {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn package_persistence_owner(
         &self,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,

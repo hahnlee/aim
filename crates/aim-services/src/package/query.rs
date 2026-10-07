@@ -375,11 +375,7 @@ fn args<T>(read: ParcelResult<T>) -> Result<T, NotModelled> {
     read.map_err(|_| NotModelled("a call that does not read"))
 }
 
-fn exception(code: i32, message: String) -> Parcel {
-    let mut p = Parcel::new();
-    p.write_exception(&Exception::new(code, message));
-    p
-}
+
 
 fn reply(write: impl FnOnce(&mut Parcel)) -> Parcel {
     let mut p = Parcel::new();
@@ -394,7 +390,7 @@ type Thrown<T> = Result<Result<T, Exception>, NotModelled>;
 fn thrown<T>(r: Thrown<T>, write: impl FnOnce(&mut Parcel, T)) -> Answered {
     Ok(match r? {
         Ok(v) => reply(|p| write(p, v)),
-        Err(e) => exception(e.code, e.message),
+        Err(e) => {let mut reply=Parcel::new();reply.write_exception(&e);reply},
     })
 }
 
@@ -412,6 +408,7 @@ impl Query<'_> {
 
     fn package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
+            pm::IS_PACKAGE_SUSPENDED_FOR_USER|pm::IS_PACKAGE_QUARANTINED_FOR_USER|pm::IS_PACKAGE_STOPPED_FOR_USER|pm::GET_HARMFUL_APP_WARNING=>self.user_status(code,r),
             pm::GET_PACKAGE_INFO => {
                 let a = args(pm::GetPackageInfo::read(r))?;
                 let name = a.package_name.unwrap_or_default();
@@ -549,6 +546,22 @@ impl Query<'_> {
     fn native(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         let caller_user = user_id(self.calling_uid);
         match code {
+            native::IS_AUDIO_PLAYBACK_CAPTURE_ALLOWED=> {
+                let a=args(native::IsAudioPlaybackCaptureAllowed::read(r))?;
+                let value=if let Some(names)=a.package_names {
+                    (|| {
+                        let mut values=vec![false;names.len()];
+                        for (index,name) in names.iter().enumerate().rev() {
+                            let info=match self.application_info(name.as_deref().unwrap_or_default(),0,caller_user)? {
+                                Ok(info)=>info,Err(error)=>return Ok(Err(error)),
+                            };
+                            values[index]=info.is_some_and(|info|info.private_flags & (1<<27)!=0);
+                        }
+                        Ok(Ok(values))
+                    })()
+                } else {Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER,"null packageNames")))};
+                thrown(value,|p,v|native::write_is_audio_playback_capture_allowed_reply(p,&Some(v)))
+            }
             native::GET_NAMES_FOR_UIDS => {
                 let a = args(native::GetNamesForUids::read(r))?;
                 let names = self.names_for_uids(a.uids.as_deref())?.map(|names| {
@@ -1438,17 +1451,22 @@ impl Query<'_> {
         if let Err(e) = self.enforce_cross_user(user, false, false, "getPackageUid")? {
             return Ok(Err(e));
         }
-        let uid = self.calling_uid;
+        Ok(Ok(self.package_uid_internal(name,flags,user,self.calling_uid)?))
+    }
+
+    pub(crate) fn package_uid_internal(&self,name:&str,flags:i64,user:i32,filter_uid:i32)->Result<i32,NotModelled> {
+        let uid = filter_uid;
+        let visibility=Query {state:self.state,filter:self.filter,calling_uid:filter_uid};
         if let Some((ps, p)) = self.package_of(name)
             && (flags & MATCH_SYSTEM_ONLY == 0 || ps.is.system)
         {
             let resolved =
-                self.resolve_internal_package_name(&p.package_name, VERSION_CODE_HIGHEST);
+                visibility.resolve_internal_package_name(&p.package_name, VERSION_CODE_HIGHEST);
             if let Some(rps) = self.state.packages.get(&resolved)
                 && user_state(rps, user).installed
                 && !self.filtered(Some(rps), uid, user)?
             {
-                return Ok(Ok(info::uid(user, p.uid)));
+                return Ok(info::uid(user, p.uid));
             }
         }
         if flags & (MATCH_KNOWN_PACKAGES | MATCH_ARCHIVED_PACKAGES) != 0
@@ -1456,9 +1474,9 @@ impl Query<'_> {
             && (flags & MATCH_SYSTEM_ONLY == 0 || ps.is.system)
             && !self.filtered(Some(ps), uid, user)?
         {
-            return Ok(Ok(info::uid(user, ps.app_id)));
+            return Ok(info::uid(user, ps.app_id));
         }
-        Ok(Ok(-1))
+        Ok(-1)
     }
 
     /// `getActivityInfoInternal`, filtered for `filter_uid`.
@@ -1870,3 +1888,4 @@ fn compare_signature_arrays(s1: Option<&[Vec<u8>]>, s2: Option<&[Vec<u8>]>) -> i
 mod tests;
 
 mod extra;
+mod user_status;

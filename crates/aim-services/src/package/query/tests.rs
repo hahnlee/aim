@@ -744,3 +744,51 @@ fn internal_metadata_keeps_permission_and_filter_identities_separate() {
     // PackageInfo generation also filters with the actual caller, as AOSP does.
     assert!(app.package_info_internal(OTHER,-1,0,0,1000).unwrap().unwrap().is_none());
 }
+
+#[test]
+fn user_status_queries_enforce_full_cross_user_and_hide_unknown_packages() {
+    let mut state=state();
+    let ps=state.packages.get_mut(APP).unwrap();
+    let user=ps.users.get_mut(&0).unwrap();user.stopped=true;user.suspended_by=vec!["android".into()];user.quarantined=true;
+    ps.users.insert(10,PackageUserState {stopped:true,..Default::default()});
+    state.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap().granted_permissions.push(INTERACT_ACROSS_USERS.into());
+    for code in [pm::IS_PACKAGE_STOPPED_FOR_USER,pm::IS_PACKAGE_SUSPENDED_FOR_USER,pm::IS_PACKAGE_QUARANTINED_FOR_USER] {
+        let invoke=|uid,name:Option<&str>,user|call(&state,uid,false,code,|p| {
+            p.write_interface_token(pm::DESCRIPTOR);p.write_string16(name);p.write_i32(user);
+        });
+        let own=invoke(10100,Some(APP),0);let mut r=Reader::new(own.data(),own.objects());r.read_exception().unwrap().unwrap();assert!(r.read_bool().unwrap());assert_eq!(r.remaining(),0);
+        let hidden=invoke(10100,Some(OTHER),0);assert_eq!(Reader::new(hidden.data(),hidden.objects()).read_exception().unwrap().unwrap_err().code,EX_ILLEGAL_ARGUMENT);
+        let missing=invoke(1000,None,0);assert_eq!(Reader::new(missing.data(),missing.objects()).read_exception().unwrap().unwrap_err().code,EX_ILLEGAL_ARGUMENT);
+        let weak=invoke(10100,Some(APP),10);assert_eq!(Reader::new(weak.data(),weak.objects()).read_exception().unwrap().unwrap_err().code,EX_SECURITY);
+        let negative=invoke(1000,Some(APP),-1);assert_eq!(Reader::new(negative.data(),negative.objects()).read_exception().unwrap().unwrap_err().code,EX_ILLEGAL_ARGUMENT);
+    }
+}
+
+#[test]
+fn harmful_warning_requires_permission_and_preserves_nullable_text() {
+    let mut state=state();state.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap().harmful_app_warning=Some("위험 <warning>".into());
+    let invoke=|state:&State,uid,name|call(state,uid,false,pm::GET_HARMFUL_APP_WARNING,|p|pm::GetHarmfulAppWarning {package_name:name,user_id:0}.write(p));
+    let denied=invoke(&state,10100,Some(APP.into()));assert_eq!(Reader::new(denied.data(),denied.objects()).read_exception().unwrap().unwrap_err().code,EX_SECURITY);
+    state.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap().granted_permissions.push("android.permission.SET_HARMFUL_APP_WARNINGS".into());
+    let warning=invoke(&state,10100,Some(APP.into()));let mut r=Reader::new(warning.data(),warning.objects());r.read_exception().unwrap().unwrap();assert_eq!(r.read_i32().unwrap(),1);assert_eq!(r.read_i32().unwrap(),1);assert_eq!(r.read_string8().unwrap().as_deref(),Some("위험 <warning>"));assert_eq!(r.remaining(),0);
+    let missing=invoke(&state,1000,Some("missing".into()));assert_eq!(Reader::new(missing.data(),missing.objects()).read_exception().unwrap().unwrap_err().code,EX_ILLEGAL_ARGUMENT);
+    let empty=invoke(&state,1000,Some(OTHER.into()));let mut r=Reader::new(empty.data(),empty.objects());r.read_exception().unwrap().unwrap();assert_eq!(r.read_i32().unwrap(),0);assert_eq!(r.remaining(),0);
+}
+
+#[test]
+fn native_audio_capture_uses_visible_application_info_in_input_order() {
+    let mut state=state();let package=state.packages.get_mut(APP).unwrap();Arc::make_mut(package.pkg.as_mut().unwrap()).booleans|=booleans::ALLOW_AUDIO_PLAYBACK_CAPTURE;
+    let value=call(&state,1000,true,native::IS_AUDIO_PLAYBACK_CAPTURE_ALLOWED,|p|native::IsAudioPlaybackCaptureAllowed {package_names:Some(vec![Some(OTHER.into()),Some(APP.into()),None,Some("missing".into())])}.write(p));
+    let mut r=Reader::new(value.data(),value.objects());assert_eq!(native::read_is_audio_playback_capture_allowed_reply(&mut r).unwrap().unwrap(),Some(vec![false,true,false,false]));assert_eq!(r.remaining(),0);
+    let null=call(&state,1000,true,native::IS_AUDIO_PLAYBACK_CAPTURE_ALLOWED,|p|native::IsAudioPlaybackCaptureAllowed {package_names:None}.write(p));assert_eq!(Reader::new(null.data(),null.objects()).read_exception().unwrap().unwrap_err().code,-4);
+}
+
+#[test]
+fn internal_uid_query_uses_fixed_filter_without_public_user_or_flag_checks() {
+    let state=state();let filter=AppsFilter::new(&state,&Default::default()).unwrap();
+    let query=Query {state:&state,filter:&filter,calling_uid:10100};
+    assert_eq!(query.package_uid_internal(OTHER,0,42,1000).unwrap(),4210101);
+    assert_eq!(query.package_uid(OTHER,0,42).unwrap().unwrap(),-1);
+    assert_eq!(query.package_uid_internal(OTHER,MATCH_SYSTEM_ONLY,0,1000).unwrap(),-1);
+    assert_eq!(query.package_uid_internal("missing",0,0,1000).unwrap(),-1);
+}

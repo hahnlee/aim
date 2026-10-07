@@ -268,7 +268,28 @@ public final class PackageRoundTripOracle {
         } finally { android.os.SystemProperties.set(key, ""); }
     }
 
+    private static void verifyParcelableException(java.io.File directory) throws Exception {
+        byte[] bytes=java.nio.file.Files.readAllBytes(new java.io.File(directory,"native-metadata-missing-exception.parcel").toPath());
+        android.os.Parcel parcel=android.os.Parcel.obtain();
+        try {
+            parcel.unmarshall(bytes,0,bytes.length);parcel.setDataPosition(0);
+            try {parcel.readException();throw new AssertionError("native missing metadata did not throw");}
+            catch(android.os.ParcelableException exception) {
+                Throwable cause=exception.getCause();
+                if (!(cause instanceof android.content.pm.PackageManager.NameNotFoundException)
+                        || !"missing.metadata".equals(cause.getMessage())) throw new AssertionError("native metadata cause differs",exception);
+            }
+            if(parcel.dataAvail()!=0) throw new AssertionError("native metadata exception has a trailing payload");
+        } finally {parcel.recycle();}
+        parcel=android.os.Parcel.obtain();
+        try {
+            parcel.writeException(new android.os.ParcelableException(new android.content.pm.PackageManager.NameNotFoundException("missing.metadata")));
+            java.nio.file.Files.write(new java.io.File(directory,"original-metadata-missing-exception.parcel").toPath(),parcel.marshall());
+        } finally {parcel.recycle();}
+    }
+
     private static void verify(String[] args) throws Exception {
+        verifyParcelableException(new java.io.File(args[0]));
         verifyOriginalDomainIds();
         DomainCollectorOracle.verify(new java.io.File(args[0]));
         verifyOriginalScanUsers(new java.io.File(args[0]));
@@ -1822,7 +1843,15 @@ public final class PackageRoundTripOracle {
                 public long getVersion() { return captured; }
                 public android.content.pm.ApplicationInfo getApplicationInfo(String n, long f, int u, int filter, int caller, int pid) { throw new AssertionError("unused application query"); }
                 public android.content.pm.PackageInfo getPackageInfo(String n, long f, int u, int filter, int caller, int pid) { throw new AssertionError("unused package query"); }
-                public boolean filterAppAccess(String n, int caller, int user) { throw new AssertionError("unused visibility query"); }
+                public boolean filterAppAccess(String n, int caller, int user, boolean filterUninstalled) { throw new AssertionError("unused visibility query"); }
+                public int getPackageUid(String n, long f, int u, int caller, int pid) { throw new AssertionError("unused UID query"); }
+                public String[] getPackagesForUid(int target, int caller, int pid) { throw new AssertionError("unused UID packages query"); }
+                public String getNameForUid(int target, int caller, int pid) { throw new AssertionError("unused UID name query"); }
+                public boolean isInstantApp(String n, int u, int caller, int pid) { throw new AssertionError("unused instant query"); }
+                public int getTargetSdkVersion(String n, int caller, int pid) { throw new AssertionError("unused target SDK query"); }
+                public String getInstallerPackageName(String n, int u, int caller, int pid) { throw new AssertionError("unused installer query"); }
+                public int getPackageUidInternal(String n, long f, int u) { throw new AssertionError("unused internal UID query"); }
+                public String resolveInternalPackageName(String n, long v, int caller) { throw new AssertionError("unused normalization query"); }
                 public void close() {}
             };
         }

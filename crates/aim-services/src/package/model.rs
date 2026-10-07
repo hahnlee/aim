@@ -34,6 +34,8 @@ pub struct State {
     pub renamed_packages: Option<Vec<(String, String)>>,
     /// Complete finalized native SharedLibraries name/version owner.
     pub shared_libraries: Option<Vec<SharedLibrary>>,
+    /// Broadcast names registered from the accepted native code set.
+    pub protected_broadcasts: Option<std::collections::BTreeSet<String>>,
     pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,
     pub apex_inventory: Option<super::bootstrap::ApexInventory>,
     pub scan_users: Option<super::bootstrap::ScanUsers>,
@@ -77,6 +79,7 @@ pub struct PackageState {
     pub setting_flags: Option<(i32, i32)>,
     /// Outer None means the real-name owner was not captured.
     pub real_name: Option<Option<String>>,
+    pub app_metadata_source: Option<i32>,
     /// The shared user's name (`getSharedUser`; `hasSharedUser`).
     pub shared_user: Option<String>,
     /// Declared relationship can outlive its registered shared UID group.
@@ -354,8 +357,11 @@ pub struct User {
 pub struct System {
     /// Original PMS selection; outer None means the owner was not captured.
     pub sdk_sandbox_package: Option<Option<String>>,
+    /// Native boot selection, frozen across query generations.
+    pub permission_controller_package: Option<Option<String>>,
     /// None means SystemConfig exact-UID assignments were not captured.
     pub system_permissions: Option<BTreeMap<i32, std::collections::BTreeSet<String>>>,
+    pub initial_non_stopped_system_packages: Option<Vec<String>>,
     /// Native AppsFilter interaction grants, carried with each query snapshot.
     pub implicit_access: super::apps_filter::ImplicitAccess,
     /// `mAvailableFeatures`: name and version.

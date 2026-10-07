@@ -63,6 +63,10 @@ pub struct SystemConfig {
     pub hidden_api_allowlist: Vec<String>,
     /// Domain verification's linked apps, in original ArraySet order.
     pub linked_apps: Vec<String>,
+    pub staged_installers: BTreeSet<String>,
+    pub modules_installer: Option<String>,
+    /// Fatal installer declaration error; native creation must reject this policy.
+    pub installer_policy_error: Option<String>,
     /// Initial system packages explicitly exempted from stopped state.
     pub initial_non_stopped_system_packages: BTreeSet<String>,
     /// Preinstalled packages requiring fresh factory signatures during boot.
@@ -240,6 +244,14 @@ impl SystemConfig {
                         if !self.linked_apps.contains(&package) {
                             self.linked_apps.push(package);
                         }
+                    }
+                }
+                "whitelisted-staged-installer" if flags & ALLOW_APP_CONFIGS != 0 => {
+                    let package=e.string("package").map(|value|value.into_owned());
+                    if let Some(package)=&package {self.staged_installers.insert(package.clone());}
+                    if e.string("isModulesInstaller").is_some_and(|value|value == "true") {
+                        if self.modules_installer.is_some() {self.installer_policy_error=Some("Multiple modules installers".into());}
+                        else {self.modules_installer=package;}
                     }
                 }
                 "update-ownership" => {
@@ -539,6 +551,7 @@ pub fn system(
     Ok(System {
         features: config.features,
         system_permissions: Some(config.system_permissions),
+        initial_non_stopped_system_packages: Some({let mut names:Vec<_>=config.initial_non_stopped_system_packages.into_iter().collect();names.sort_by_key(|name|super::info::java_hash(name));names}),
         // `FeatureInfo.GL_ES_VERSION_UNDEFINED` without the property.
         gl_es_version: int(prop("ro.opengles.version")).unwrap_or(0),
         hidden_api_allowlist: config.hidden_api_allowlist,

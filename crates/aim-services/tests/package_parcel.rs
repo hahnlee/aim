@@ -331,6 +331,18 @@ fn native_package_parcels_match_original_read_write() {
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
     write_library_owner_fixture(&directory);
+    {
+        use aim_binder_host::parcel::{Parcel,Reader};
+        use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+        let state=aim_services::package::model::State::default();
+        let filter=aim_services::package::apps_filter::AppsFilter::new(&state,&Default::default()).unwrap();
+        let query=aim_services::package::query::Query {state:&state,filter:&filter,calling_uid:1000};
+        let mut args=Parcel::new();
+        pm::GetAppMetadataSource {package_name:Some("missing.metadata".into()),user_id:0}.write(&mut args);
+        let reply=query.answer(pm::DESCRIPTOR,pm::GET_APP_METADATA_SOURCE,&mut Reader::new(args.data(),args.objects())).unwrap();
+        fs::write(directory.join("native-metadata-missing-exception.parcel"),reply.data()).unwrap();
+    }
+
     let framework =
         aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
     let system = aim_services::package::system_config::system(
@@ -1770,6 +1782,22 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8_lossy(&original.stdout),
         String::from_utf8_lossy(&original.stderr)
     );
+    {
+        use aim_binder_host::parcel::{Parcel,Reader,EX_PARCELABLE};
+        let bytes=fs::read(directory.join("original-metadata-missing-exception.parcel")).unwrap();
+        let mut reader=Reader::new(&bytes,&[]);
+        let exception=reader.read_exception().unwrap().unwrap_err();
+        assert_eq!(exception.code,EX_PARCELABLE);
+        assert_eq!(reader.remaining(),0);
+        let payload=exception.parcelable.as_ref().unwrap();
+        let mut cause=Reader::new(payload.bytes(),&[]);
+        assert_eq!(cause.read_string16().unwrap().as_deref(),Some("android.os.ParcelableException"));
+        assert_eq!(cause.read_string16().unwrap().as_deref(),Some("android.content.pm.PackageManager$NameNotFoundException"));
+        assert_eq!(cause.read_string16().unwrap().as_deref(),Some("missing.metadata"));
+        assert_eq!(cause.remaining(),0);
+        let mut rewritten=Parcel::new();rewritten.write_exception(&exception);
+        assert_eq!(rewritten.data(),bytes.as_slice());
+    }
     let original_runtime = aim_services::package::permissions::RuntimePermissions::parse(
         &aim_android_xml::read(&fs::read(directory.join("original-runtime-permissions.xml")).unwrap()).unwrap()
     ).unwrap();

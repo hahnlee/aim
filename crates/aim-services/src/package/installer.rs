@@ -9,7 +9,10 @@ use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
 pub mod codec;
 pub mod endpoint;
+pub mod native;
+pub mod policy;
 pub mod service;
+pub mod storage;
 
 const INSTALL_APEX: i32 = 0x00020000;
 const INSTALL_ENABLE_ROLLBACK: i32 = 0x00040000;
@@ -130,7 +133,10 @@ impl Sessions {
         install_permission: bool,
     ) -> Result<i32, Exception> {
         if record.params.has_capabilities() {
-            return Err(Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,"native install file capability owner unavailable"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                "native install file capability owner unavailable",
+            ));
         }
         let id = self.create(
             record.installer_uid,
@@ -147,6 +153,26 @@ impl Sessions {
         )?;
         self.0.lock().unwrap().records.insert(id, record);
         Ok(id)
+    }
+    pub fn restore(&self, records: Vec<(Session, Record)>) -> Result<(), Exception> {
+        let mut state = self.0.lock().unwrap();
+        if !state.sessions.is_empty() || !state.allocated.is_empty() {
+            return Err(self::state("installer recovery requires fresh owner"));
+        }
+        let mut next = State::default();
+        for (session, record) in records {
+            if session.id <= 0
+                || !next.allocated.insert(session.id)
+                || session.installer_uid != record.installer_uid
+                || session.user != record.user
+            {
+                return Err(self::state("invalid recovered session identity"));
+            }
+            next.records.insert(session.id, record);
+            next.sessions.insert(session.id, session);
+        }
+        *state = next;
+        Ok(())
     }
     pub fn records(&self) -> Vec<(Session, Record)> {
         let state = self.0.lock().unwrap();
@@ -359,6 +385,8 @@ impl Sessions {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    Created { id: i32, user: u32 },
+    Finished { id: i32, user: u32, success: bool },
     Active { id: i32, user: u32, active: bool },
     Progress { id: i32, user: u32, progress: f32 },
 }
@@ -474,6 +502,9 @@ pub struct Record {
     pub installer_package: Option<String>,
     pub installer_attribution_tag: Option<String>,
     pub created_millis: i64,
+    pub initiating_package: Option<String>,
+    pub originating_package: Option<String>,
+    pub installer_package_uid: i32,
 }
 impl Record {
     pub fn info(
