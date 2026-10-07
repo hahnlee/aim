@@ -1248,7 +1248,20 @@ removes the earlier bootstrap-to-metadata inversion (#985). A bounded concurrenc
 probe holds metadata while a reader waits and confirms query capture remains
 available; both worker threads join. Controlled Binder setter-to-flush checks
 persist version 13 and acknowledge the installed queue while foreign flushes leave
-requests intact. Controlled Binder tests
+requests intact. Runtime metadata mutations now assign
+monotonic per-user deadlines with the pinned 700–1299ms integer jitter. Repeated
+changes preserve the first mutation and cap postponement at two seconds; user
+removal and successful acknowledgement cancel deadlines. The installed-owner
+process_due_runtime_permission_requests boundary processes only elapsed requests,
+retaining failed requests. Clock-injected policy tests cover debounce/cap/removal;
+controlled Binder tests show no early write, failed due-time producer retention
+and successful due-time persistence. Automatic worker wakeup/lifecycle remains
+unwired, so this is deadline processing rather than a complete async scheduler
+(#981). 553 service units pass (6 excluded,
+0.58s), retained-bootstrap/framework-res/Binder deadline scan passes (1.17s),
+host build passes (3 rebuilt/10 fresh, 14.3s). No new original differential or
+CTS/app gate was performed for the timing policy.
+ Controlled Binder tests
 cover default/updated versions, request creation, install refusal, stale captures,
 invalid input and permission denial. These endpoints remain test aliases pending
 the native default/CTS/app gates (#798); metadata scheduling and coherent grant

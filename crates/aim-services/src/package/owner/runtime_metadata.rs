@@ -2,6 +2,9 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::legacy_permissions::Metadata;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
+
+mod schedule;
 
 /// Constructor sparse defaults are version 0, null fingerprint and upgrade=true.
 /// Write requests must be consumed by the runtime persistence scheduler.
@@ -12,6 +15,7 @@ pub struct State {
     upgrade_needed: BTreeMap<i32, bool>,
     extended_fingerprint: Option<String>,
     writes: BTreeSet<i32>,
+    schedule: schedule::Schedule,
 }
 
 impl State {
@@ -22,7 +26,7 @@ impl State {
                 self.fingerprints.insert(user, state.fingerprint.clone());
             }
             if state.rewrite_requested {
-                self.writes.insert(user);
+                self.request_write(user);
             }
         }
     }
@@ -37,7 +41,7 @@ impl State {
     }
     pub fn set_version(&mut self, user: i32, version: i32) {
         self.versions.insert(user, version);
-        self.writes.insert(user);
+        self.request_write(user);
     }
     pub fn set_controller_version(&mut self, partition_fingerprint: &str, version: i64) {
         let extended = format!("{partition_fingerprint}?pc_version={version}");
@@ -54,21 +58,47 @@ impl State {
             .ok_or("permission controller version is not set")?;
         self.fingerprints.insert(user, Some(fingerprint));
         self.upgrade_needed.insert(user, false);
-        self.writes.insert(user);
+        self.request_write(user);
         Ok(())
+    }
+    fn request_write(&mut self, user: i32) {
+        self.writes.insert(user);
+        let delay = Duration::from_millis(700 + u64::from(unsafe { libc::arc4random_uniform(600) }));
+        self.schedule.request(user, Instant::now(), delay);
+    }
+    pub fn next_write_deadline(&self) -> Option<Instant> {
+        self.schedule.next()
+    }
+    pub fn due_write_requests(&self, now: Instant) -> Vec<i32> {
+        self.schedule.due(now)
     }
     pub fn pending_write_requests(&self) -> Vec<i32> {
         self.writes.iter().copied().collect()
     }
     pub(crate) fn acknowledge_write(&mut self, user: i32) {
         self.writes.remove(&user);
+        self.schedule.remove(user);
     }
     pub(crate) fn flush_with(
         &mut self,
         mut write: impl FnMut(i32, &Self) -> Result<u32, super::WriteError>,
     ) -> Result<Vec<u32>, FlushError> {
+        self.flush_selected(self.pending_write_requests(), &mut write)
+    }
+    pub(crate) fn flush_due_with(
+        &mut self,
+        now: Instant,
+        write: impl FnMut(i32, &Self) -> Result<u32, super::WriteError>,
+    ) -> Result<Vec<u32>, FlushError> {
+        self.flush_selected(self.due_write_requests(now), write)
+    }
+    fn flush_selected(
+        &mut self,
+        users: Vec<i32>,
+        mut write: impl FnMut(i32, &Self) -> Result<u32, super::WriteError>,
+    ) -> Result<Vec<u32>, FlushError> {
         let mut completed = Vec::new();
-        for user in self.pending_write_requests() {
+        for user in users {
             match write(user, self) {
                 Ok(id) => {
                     self.acknowledge_write(user);
@@ -90,6 +120,7 @@ impl State {
         self.fingerprints.remove(&user);
         self.upgrade_needed.remove(&user);
         self.writes.remove(&user);
+        self.schedule.remove(user);
     }
 }
 

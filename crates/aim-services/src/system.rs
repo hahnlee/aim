@@ -1291,6 +1291,31 @@ impl System {
         Ok(completed)
     }
 
+    /// Process elapsed async deadlines using the currently installed owner.
+    pub fn process_due_runtime_permission_requests(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &mut crate::package::owner::Store,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        inodes: &std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
+        now: std::time::Instant,
+    ) -> std::result::Result<Vec<u32>,crate::package::owner::runtime_metadata::FlushError> {
+        let fail=|error:Exception|crate::package::owner::runtime_metadata::FlushError {
+            user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message:format!("runtime deadline owner: {error:?}")},
+        };
+        self.check_package_bootstrap(bridge).map_err(fail)?;
+        let owner=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
+        let mut metadata=owner.lock().unwrap();
+        let current=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
+        if !Arc::ptr_eq(&owner,&current) { return Err(fail(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime deadline owner changed"))); }
+        metadata.flush_due_with(now,|user,state| {
+            let id=u32::try_from(user).map_err(|_|crate::package::owner::WriteError {committed:false,message:"negative runtime deadline user".into()})?;
+            let inode=inodes.get(&id).copied().ok_or_else(||crate::package::owner::WriteError {committed:false,message:"missing runtime deadline creation owner".into()})?;
+            self.commit_runtime_permissions_from_scan(bridge,store,capture,id,state,inode)?;
+            Ok(id)
+        })
+    }
+
     /// Restore saved permission roles and metadata under one retained boot bridge.
     pub fn restore_package_runtime_permissions(
         &self,
