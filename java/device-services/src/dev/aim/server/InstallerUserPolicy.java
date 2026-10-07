@@ -10,6 +10,16 @@ import com.android.server.pm.UserManagerInternal;
 public final class InstallerUserPolicy {
     private InstallerUserPolicy() {}
 
+    public static boolean shellDebuggingRestricted(int userId) {
+        if (userId < 0) throw new IllegalArgumentException("Invalid userId " + userId);
+        var users = LocalServices.getService(UserManagerInternal.class);
+        if (users == null) throw new IllegalStateException("shell user policy owner is unavailable");
+        boolean restricted = users.hasUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, userId);
+        if (users != LocalServices.getService(UserManagerInternal.class))
+            throw new IllegalStateException("shell policy owner changed during capture");
+        return restricted;
+    }
+
     public static byte[] capture(int userId) {
         if (userId < 0) throw new IllegalArgumentException("Invalid userId " + userId);
         var users = LocalServices.getService(UserManagerInternal.class);

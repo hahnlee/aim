@@ -48,7 +48,7 @@ Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
 PackageManager still runs original. On the M4 C branch, the native Binder
-endpoint has 78 IPackageManager method dispatches (146 remaining), backed by
+endpoint has 83 IPackageManager method dispatches (141 remaining), backed by
 captured settings, permissions and finalized library registry. Native-interface
 audio playback capture reads actual visible ApplicationInfo flags; the module
 metadata provider getter reads its configured owner (11 of 14 native methods). Shared/declared library consumers, paths, APEX directories, protected
@@ -78,20 +78,24 @@ publication owner; warning text consumes original spans before persisting its
 string, and category no-ops keep the current generation. Update ownership can
 be relinquished by its actual owner, system or shell; a removed owner is a no-op
 and original root has no exemption. Durable settings preserve installer fields. Shell-debugging policy
-remains an explicit external-owner dependency (#987). Scalar request decisions now run after acquiring the installed disk
+now comes from a current UM-only leaf, independent of DPM startup, for harmful
+warning reads/writes. Each call checks the retained bootstrap before publication. Scalar request decisions now run after acquiring the installed disk
 owner, against the latest generation. Concurrent splash/aspect setters both
 persist and publish, with two version updates and cache invalidations (#989). Enabled/stopped/MIME
 decisions and persistence exist, but their required effects are not connected
 (#988). Installer/session state and pinned metadata codecs exist with explicit
 policy/storage/callback owner contracts. A retained bootstrap can install a native
 installer Binder with real session storage, five oneway callbacks and per-call
-original UM/DPM policy reads. It handles 15 of 26 top-level methods and 12 of 34
+original UM/DPM policy reads. It handles 15 of 26 top-level methods and 19 of 34
 session methods; default publication and durable install/commit recovery remain
-#986. The original policy record oracle passes in 19.29s without skips using
+#986. The original policy record oracle passes in 36.99s without skips using
 fixture UM/DPM owners. This does not prove live SystemServer policy or SELinux
-restorecon. The complete derived-image build passes (72.1s); the original
-first-system-scan test passes all six restart cases (169.40s, no skips). FD-bearing installer records
-reject before allocation until file capabilities are owned. Actual original ART
+restorecon. The complete derived-image build passes (89.8s); the original
+first-system-scan test passes all six restart cases (174.25s, no skips). Session names, real read-only file descriptors, split markers, sealing, transfer
+and loader metadata use concrete stage/record owners; child graphs persist and
+recover. Thirty-six installer tests pass. Legal guest symlink and complete virtual
+credential/mode handling remain #1001; host symlinks are refused. Other FD-bearing
+installer records reject before allocation until their capabilities are owned. Actual original ART
 comparison passes five SessionParams/SessionInfo cases (20.47s), including nullable
 fields, maps, three URI classes, DataLoader, inline Bitmap and populated Gainmap.
 The comparison found and fixed the Java Bitmap gainmap tail; related
@@ -106,18 +110,22 @@ queries keep actual caller UID (permissions) separate from filter UID (visibilit
 Unused scan leases release their query capture without creating a child endpoint;
 claimed endpoints release their graph on close. Java Data/Store/scope reference
 counts keep an old computer alive until the last owning scope closes. This is a
-typed adapter with 19 private Binder methods, not the full original
+typed adapter with 21 private Binder methods, not the full original
 Computer/PackageManagerInternal facade. Names normalize through the captured
 rename table and visible library owner; UID target SDK uses actual retained/shared
-UID owners. The integrated service units pass 617 tests (six input-dependent tests
-excluded); the explicit retained native scan passes in 2.27s without skips.
+UID owners. A paged, version-bound UID registry supplies current, shared and
+retained slots; Java getters do not infer those selections from names. The
+integrated service units pass 630 tests (six input-dependent tests
+excluded); the explicit retained native scan passes in 2.33s without skips.
 Its public UID/name/instant/SDK/installer calls and explicit uninstall filtering
 are implemented separately from internal UID lookup (no public user/flag checks)
 and original caller-based name normalization. Java internal read helpers use
 captured parsed code/state and preserve their distinct defaults.
-592 service units pass (6 excluded, 0.89s), and the controlled
-retained-bootstrap/framework-res/Binder mutation/computer scan passes (2.57s).
-The host build passes (6 rebuilt/7 fresh, 19.3s). Concrete installer policy,
+The full derived-image build passes with 9 rebuilt/33 fresh nodes and no failures.
+Native registration state preserves instrumentation/property/provider collision
+order and normalized provider authority aliases across capture publication and
+scalar updates (#997/#999/#1000). Provider PackageInfo/facade base normalization
+remains #1002; profile AppOps preflight remains #998. Concrete installer policy,
 AtomicFile session XML and stage owners now create/open/list/recover/abandon real
 sessions with mandatory creation metadata and SELinux label providers. Inode/byte
 claims reject external replacement, post-rename failures report committed state,

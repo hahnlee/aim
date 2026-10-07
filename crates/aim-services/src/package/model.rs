@@ -34,6 +34,7 @@ pub struct State {
     pub renamed_packages: Option<Vec<(String, String)>>,
     /// Complete finalized native SharedLibraries name/version owner.
     pub shared_libraries: Option<Vec<SharedLibrary>>,
+    pub package_registry: Option<Arc<super::registry::Registry>>,
     /// Broadcast names registered from the accepted native code set.
     pub protected_broadcasts: Option<std::collections::BTreeSet<String>>,
     pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,

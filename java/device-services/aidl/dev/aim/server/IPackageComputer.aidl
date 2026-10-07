@@ -30,4 +30,6 @@ interface IPackageComputer {
             int filterCallingUid, int callingUid, int callingPid);
     String getPackageStateFilteredName(String packageName, int callingUid, int userId);
     int getUidTargetSdkVersion(int uid);
+    int getUidOwnerRegistryLength();
+    byte[] getUidOwnerRegistryChunk(int offset, int length);
 }

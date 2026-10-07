@@ -332,6 +332,14 @@ public final class DisplacedSnapshotOracle {
                 if (computer.getDisabledSystemPackage(entry.getKey()) != entry.getValue())
                     throw new AssertionError("disabled setting replica identity changed");
             }
+            if (computer.getPackageStateInternal("fixture.by-caller", 1010001) != original
+                    || computer.getPackageStateInternal("fixture.by-caller", 1010002) != null)
+                throw new AssertionError("normalization cache merged caller identities");
+            int resolutions = retained.resolutions;
+            if (computer.getPackageStateInternal("fixture.by-caller", 1010001) != original
+                    || computer.getPackageStateInternal("fixture.by-caller", 1010002) != null
+                    || retained.resolutions != resolutions)
+                throw new AssertionError("unchanged captured lookup repeated native normalization");
             var internalStates = computer.getPackageStates();
             if (!internalStates.equals(capturedStates)) throw new AssertionError("internal state inventory changed");
             var visitedStates = new java.util.ArrayList<com.android.server.pm.pkg.PackageStateInternal>();
@@ -348,18 +356,46 @@ public final class DisplacedSnapshotOracle {
                 throw new AssertionError("caller changed captured inventory");
             if (computer.getSharedUserApi(-1) != null || !computer.getSharedUserPackages(-1).isEmpty())
                 throw new AssertionError("unknown shared UID returned owner");
-            for (var group : oldStates.getSharedUsers().values()) {
-                if (computer.getSharedUserApi(group.getAppId()) != group
-                        || !computer.getSharedUserPackages(group.getAppId()).equals(group.getPackageStates()))
-                    throw new AssertionError("shared UID replica identity changed");
+            var uidOwners = dev.aim.server.PackageUidOwners.read(retained.uidRegistry, version,
+                    capturedStates, oldStates.getSharedUsers(), true);
+            for (var entry : uidOwners.entrySet()) {
+                int appId = entry.getKey();
+                Object owner = entry.getValue();
+                var expectedCode = new java.util.ArrayList<com.android.server.pm.pkg.AndroidPackage>();
+                android.content.pm.SigningDetails signing;
+                if (owner instanceof com.android.server.pm.pkg.SharedUserApi group) {
+                    if (computer.getSharedUserApi(appId) != group || computer.getSharedUser(appId) != group
+                            || !computer.getSharedUserPackages(appId).equals(group.getPackageStates()))
+                        throw new AssertionError("registered shared UID replica identity changed");
+                    for (var state : group.getPackageStates()) if (state.getAndroidPackage() != null) expectedCode.add(state.getAndroidPackage());
+                    signing = group.getSigningDetails();
+                } else {
+                    var state = (com.android.server.pm.pkg.PackageStateInternal) owner;
+                    if (state.getPkg() != null) expectedCode.add(state.getPkg());
+                    signing = state.getSigningDetails();
+                    try { computer.getSharedUserApi(appId); throw new AssertionError("package UID treated as shared"); }
+                    catch (ClassCastException expected) {}
+                    try { computer.getSharedUserPackages(appId); throw new AssertionError("package UID returned shared members"); }
+                    catch (ClassCastException expected) {}
+                }
+                if (!computer.getPackagesForAppId(appId).equals(expectedCode)
+                        || !java.util.Arrays.equals(signingBytes(computer.getSigningDetails(appId)), signingBytes(signing)))
+                    throw new AssertionError("registered UID parsed/signing owner changed");
             }
-            for (var state : capturedStates.values()) {
-                if (state.hasSharedUser()) continue;
-                try { computer.getSharedUserApi(state.getAppId()); throw new AssertionError("package UID treated as shared"); }
-                catch (ClassCastException expected) {}
-                try { computer.getSharedUserPackages(state.getAppId()); throw new AssertionError("package UID returned shared members"); }
-                catch (ClassCastException expected) {}
-            }
+            if (!computer.getPackagesForAppId(-1).isEmpty()
+                    || computer.getSigningDetails(-1) != android.content.pm.SigningDetails.UNKNOWN
+                    || !computer.getSharedUsers().equals(oldStates.getSharedUsers())
+                    || !computer.getDisabledSystemPackageStates().equals(oldStates.getDisabledSystemPackageStates())
+                    || computer.getCeDataInode(ORIGINAL, 10) != original.getUserStateOrDefault(10).getCeDataInode()
+                    || computer.getCeDataInode("fixture.missing", 10) != 0
+                    || computer.wasPackageEverLaunched(ORIGINAL, 10) != !original.getUserStateOrDefault(10).isNotLaunched()
+                    || computer.isPackagePersistent(ORIGINAL) != (original.isSystem() && original.getPkg().isPersistent())
+                    || computer.isPackagePersistent("fixture.missing")
+                    || computer.getSigningDetails("fixture.missing") != null
+                    || !java.util.Arrays.equals(signingBytes(computer.getSigningDetails(ORIGINAL)), signingBytes(original.getPkg().getSigningDetails())))
+                throw new AssertionError("captured record getter changed original semantics");
+            try { computer.wasPackageEverLaunched("fixture.missing", 10); throw new AssertionError("missing launch owner accepted"); }
+            catch (IllegalArgumentException expected) {}
             store.close();
             if (source[0].computer.closes != 1 || retained.closes != 0)
                 throw new AssertionError("store close escaped capture ownership");
@@ -391,6 +427,15 @@ public final class DisplacedSnapshotOracle {
                 () -> computer.getPackageStateFiltered("fixture.normalized", 1010001, 10),
                 () -> computer.getUidTargetSdkVersion(1010001),
                 () -> computer.getDisabledSystemPackage("fixture.missing"),
+                () -> computer.getPackagesForAppId(-1),
+                () -> computer.getSharedUser(-1),
+                () -> computer.getSharedUsers(),
+                () -> computer.getDisabledSystemPackageStates(),
+                () -> computer.getCeDataInode(ORIGINAL, 10),
+                () -> computer.wasPackageEverLaunched(ORIGINAL, 10),
+                () -> computer.isPackagePersistent(ORIGINAL),
+                () -> computer.getSigningDetails(ORIGINAL),
+                () -> computer.getSigningDetails(-1),
             };
             for (Runnable query : closedQueries) {
                 try { query.run(); throw new AssertionError("closed expanded query adapter accepted"); }
@@ -406,6 +451,12 @@ public final class DisplacedSnapshotOracle {
         } finally {
             computer.close(); oldStates.close(); store.close();
         }
+    }
+    private static byte[] signingBytes(android.content.pm.SigningDetails signing) {
+        if (signing == null) return null;
+        var out = android.os.Parcel.obtain();
+        try { signing.writeToParcel(out, 0); return out.marshall(); }
+        finally { out.recycle(); }
     }
     private static void verifyVersionPage(File directory) throws Exception {
         var path = Files.createTempFile(new File("/data/local/tmp/package-version-oracle").toPath(), "version-page-", ".bin");
@@ -553,8 +604,10 @@ public final class DisplacedSnapshotOracle {
     }
     private static final class CapturedComputer extends dev.aim.server.IPackageComputer.Stub {
         final long version;
+        final byte[] uidRegistry;
+        int resolutions;
         int closes;
-        CapturedComputer(long version) { this.version = version; }
+        CapturedComputer(long version, byte[] uidRegistry) { this.version = version; this.uidRegistry = uidRegistry; }
         void open() { if (closes != 0) throw new IllegalStateException("fixture computer closed"); }
         public long getVersion() { open(); return version; }
         public android.content.pm.ApplicationInfo getApplicationInfo(String n, long flags, int user,
@@ -620,6 +673,13 @@ public final class DisplacedSnapshotOracle {
         }
         public String resolveInternalPackageName(String name, long versionCode, int callerUid) {
             open();
+            resolutions++;
+            if ("fixture.by-caller".equals(name)) {
+                if (versionCode != android.content.pm.PackageManager.VERSION_CODE_HIGHEST
+                        || (callerUid != 1010001 && callerUid != 1010002))
+                    throw new AssertionError("cached normalizer caller changed");
+                return callerUid == 1010001 ? ORIGINAL : "fixture.missing";
+            }
             int expectedCaller = "fixture.explicit".equals(name) ? 1010001 : android.os.Binder.getCallingUid();
             if (versionCode != android.content.pm.PackageManager.VERSION_CODE_HIGHEST || callerUid != expectedCaller)
                 throw new AssertionError("package normalization caller changed");
@@ -662,6 +722,10 @@ public final class DisplacedSnapshotOracle {
             if (uid != 1010001) throw new AssertionError("UID SDK target changed");
             return (int) version;
         }
+        public int getUidOwnerRegistryLength() { open(); return uidRegistry.length; }
+        public byte[] getUidOwnerRegistryChunk(int offset, int length) {
+            open(); return java.util.Arrays.copyOfRange(uidRegistry, offset, offset + length);
+        }
         public void close() {
             if (++closes != 1) throw new AssertionError("query capture closed twice");
         }
@@ -687,7 +751,7 @@ public final class DisplacedSnapshotOracle {
         @Override public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
         CapturedComputer computer;
         public dev.aim.server.IPackageComputer getComputer() {
-            computer = new CapturedComputer(getVersion());
+            computer = new CapturedComputer(getVersion(), java.util.Objects.requireNonNull(read("uid-registry")));
             return computer;
         }
         @Override public long getVersion() {

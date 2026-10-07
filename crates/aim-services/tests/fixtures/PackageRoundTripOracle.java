@@ -1920,6 +1920,10 @@ public final class PackageRoundTripOracle {
                 public android.content.pm.PackageInfo getPackageInfoInternal(String n, long version, long flags, int u, int filter, int caller, int pid) { throw new AssertionError("unused internal metadata query"); }
                 public String getPackageStateFilteredName(String n,int caller,int user) { throw new AssertionError("unused filtered state query"); }
                 public int getUidTargetSdkVersion(int uid) { throw new AssertionError("unused UID target SDK query"); }
+                // This controlled DTO-copy owner declares no UID slots; native UID selection is tested separately.
+                private byte[] uidRegistry() {var p=android.os.Parcel.obtain();try {p.writeLong(captured);p.writeInt(0);return p.marshall();}finally {p.recycle();}}
+                public int getUidOwnerRegistryLength() {return uidRegistry().length;}
+                public byte[] getUidOwnerRegistryChunk(int offset,int length) {byte[] bytes=uidRegistry();if(offset<0 || length<=0 || offset>bytes.length-length) throw new IllegalArgumentException("invalid registry chunk");return java.util.Arrays.copyOfRange(bytes,offset,offset+length);}
                 public void close() {}
             };
         }

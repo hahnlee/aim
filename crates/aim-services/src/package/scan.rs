@@ -102,7 +102,7 @@ struct DisabledCodeBinding {
 }
 
 impl LoadedPackage {
-    fn new(
+    pub(in crate::package) fn new(
         package: AndroidPackage,
         collected_signing: sign::SigningDetails,
     ) -> Result<Self, String> {

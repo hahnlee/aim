@@ -1603,13 +1603,9 @@ impl Query<'_> {
         let Some((ps, p)) = self.package_of(&c.package) else {
             return Ok(Ok(None));
         };
-        let Some(pr) = p
-            .providers
-            .iter()
-            .find(|pr| pr.main.component.name == c.class)
-        else {
-            return Ok(Ok(None));
-        };
+        let registered=self.state.package_registry.as_ref().map(|r|r.providers().into_iter().find(|row|row.package==ps.name && row.value.main.component.name==c.class).map(|row|&row.value));
+        let pr=match registered {Some(pr)=>pr,None=>p.providers.iter().rev().find(|pr|pr.main.component.name==c.class)};
+        let Some(pr)=pr else {return Ok(Ok(None));};
         if !info::is_enabled_and_matches(ps, &pr.main, flags, user)
             || self.filtered(Some(ps), self.calling_uid, user)?
         {

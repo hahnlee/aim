@@ -13,6 +13,7 @@ pub mod setting_record;
 pub mod library_record;
 pub mod shared_record;
 mod retained_record;
+mod uid_record;
 pub mod runtime_record;
 use std::{
     collections::BTreeSet,
@@ -33,6 +34,11 @@ pub struct Snapshot {
     version: u64,
     owner: SigningScan,
     usage: Usage,
+}
+
+/// Exact registered UID-slot projection for the facade's retained capture.
+pub fn uid_owner_registry(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
+    uid_record::captured(snapshot)
 }
 
 impl Snapshot {

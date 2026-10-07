@@ -9,6 +9,14 @@ impl WriteParcelable for Warning {
 }
 impl Query<'_> {
     pub(super) fn user_status(&self, code: u32, r: &mut Reader<'_>) -> Answered {
+        self.user_status_with_shell(code, r, None)
+    }
+    pub(crate) fn user_status_with_shell(
+        &self,
+        code: u32,
+        r: &mut Reader<'_>,
+        restricted: Option<bool>,
+    ) -> Answered {
         match code {
             pm::IS_PACKAGE_SUSPENDED_FOR_USER
             | pm::IS_PACKAGE_QUARANTINED_FOR_USER
@@ -58,7 +66,9 @@ impl Query<'_> {
             pm::GET_HARMFUL_APP_WARNING => {
                 let a = args(pm::GetHarmfulAppWarning::read(r))?;
                 let value = (|| {
-                    if let Err(error) = self.full_cross_user(a.user_id, true)? {
+                    if let Err(error) =
+                        self.full_cross_user_with_shell(a.user_id, true, restricted)?
+                    {
                         return Ok(Err(error));
                     }
                     if !matches!(app_id(self.calling_uid), ROOT_UID | SYSTEM_UID)
@@ -93,13 +103,29 @@ impl Query<'_> {
         }
     }
     pub(crate) fn full_cross_user(&self, user: i32, check_shell: bool) -> Thrown<()> {
+        self.full_cross_user_with_shell(user, check_shell, None)
+    }
+    pub(crate) fn full_cross_user_with_shell(
+        &self,
+        user: i32,
+        check_shell: bool,
+        restricted: Option<bool>,
+    ) -> Thrown<()> {
         if user < 0 {
             return Ok(Err(Exception::illegal_argument(format!(
                 "Invalid userId {user}"
             ))));
         }
         if check_shell && self.calling_uid == apps_filter::SHELL_UID {
-            return Err(NotModelled("UserManager shell-debugging restriction"));
+            match restricted {
+                None => return Err(NotModelled("UserManager shell-debugging restriction")),
+                Some(true) => {
+                    return Ok(Err(Exception::security(
+                        "Shell does not have permission to access user",
+                    )));
+                }
+                Some(false) => {}
+            }
         }
         if user == user_id(self.calling_uid) || matches!(self.calling_uid, ROOT_UID | SYSTEM_UID) {
             return Ok(Ok(()));

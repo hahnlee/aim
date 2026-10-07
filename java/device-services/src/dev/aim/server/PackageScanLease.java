@@ -409,7 +409,8 @@ public final class PackageScanLease implements AutoCloseable {
         if (computer == null) throw new IOException("missing native package query capture");
         try {
             if (computer.getVersion() != version) throw new IOException("native query capture version differs");
-            return new PackageSnapshots.Data(version, packages, disabled, shared, owner, computer);
+            var uidOwners = PackageUidOwners.capture(computer, version, packages, shared, crossUserSuspensions);
+            return new PackageSnapshots.Data(version, packages, disabled, shared, owner, computer, uidOwners);
         } catch (RemoteException | IOException | RuntimeException failure) {
             try { computer.close(); } catch (RemoteException closeFailure) { failure.addSuppressed(closeFailure); }
             throw failure;

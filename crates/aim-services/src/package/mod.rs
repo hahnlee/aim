@@ -28,6 +28,7 @@ pub mod parse;
 pub mod pkg;
 pub mod preferred;
 pub mod query;
+pub mod registry;
 pub mod reply;
 pub mod permissions;
 pub mod resolve;

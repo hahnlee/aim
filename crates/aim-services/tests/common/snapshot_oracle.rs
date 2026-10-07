@@ -1,11 +1,11 @@
 //! Complete native capture exported to the original ART snapshot assembler.
 use super::{
     java,
-    runtime::{Boot, Data, run},
+    runtime::{run, Boot, Data},
 };
 use aim_service_aidl::WriteParcelable;
 use aim_services::package::scan_snapshot::{
-    Snapshot, endpoint, runtime_record, setting_record, shared_record, user_record,
+    endpoint, runtime_record, setting_record, shared_record, user_record, Snapshot,
 };
 use std::{
     fs,
@@ -16,6 +16,11 @@ use std::{
 
 pub fn export(directory: &Path, snapshot: &std::sync::Arc<Snapshot>) {
     fs::create_dir_all(directory.join("group")).unwrap();
+    fs::write(
+        directory.join("uid-registry"),
+        aim_services::package::scan_snapshot::uid_owner_registry(snapshot).unwrap(),
+    )
+    .unwrap();
     fs::write(directory.join("version"), snapshot.version().to_string()).unwrap();
     for (settings, factory, scope) in [
         (&snapshot.owner().settings.packages, false, "active"),
@@ -159,6 +164,7 @@ pub fn verify(directory: &Path) {
         "dev/aim/server/PackageRuntimeFeed.java",
         "dev/aim/server/PackageUserScopeFeed.java",
         "dev/aim/server/PackageSnapshots.java",
+        "dev/aim/server/PackageUidOwners.java",
         "dev/aim/server/PackageVersionPage.java",
         "dev/aim/server/PackageLocal.java",
     ];
@@ -238,11 +244,18 @@ pub fn verify(directory: &Path) {
         );
         std::thread::sleep(Duration::from_secs(1));
     }
-    let version_dir=boot.data.join("data/local/tmp/package-version-oracle");
+    let version_dir = boot.data.join("data/local/tmp/package-version-oracle");
     fs::create_dir(&version_dir).unwrap();
-    aim_storage::guest_inode::record(&version_dir,aim_storage::guest_inode::GuestInode {
-        uid:Some(1000),gid:Some(1000),mode:Some(0o700),..Default::default()
-    }).unwrap();
+    aim_storage::guest_inode::record(
+        &version_dir,
+        aim_storage::guest_inode::GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o700),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let guest = boot.data.join("data/local/tmp/displaced-snapshots");
     fs::create_dir(&guest).unwrap();
     let mut pending = vec![(directory.join("captures"), guest.clone())];
@@ -366,8 +379,11 @@ pub fn verify(directory: &Path) {
                 break;
             }
             if Instant::now() >= deadline {
-                let evidence = restart_failure(&reboot,&source,index);
-                panic!("native displaced restart did not boot: {index}; artifacts: {}",evidence.display());
+                let evidence = restart_failure(&reboot, &source, index);
+                panic!(
+                    "native displaced restart did not boot: {index}; artifacts: {}",
+                    evidence.display()
+                );
             }
             std::thread::sleep(Duration::from_secs(1));
         }
@@ -383,45 +399,71 @@ pub fn verify(directory: &Path) {
         let restored = aim_services::package::State::read(&reboot.data.join("data"), &[0])
             .unwrap()
             .unwrap();
-        assert!(
-            restored
-                .settings
-                .packages
-                .iter()
-                .any(|p| p.name == "android")
-        );
-        assert!(
-            restored
-                .settings
-                .packages
-                .iter()
-                .any(|p| p.name == "com.google.android.gsf")
-        );
+        assert!(restored
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == "android"));
+        assert!(restored
+            .settings
+            .packages
+            .iter()
+            .any(|p| p.name == "com.google.android.gsf"));
         drop(reboot);
     }
 }
 
 /// Preserve only disposable test-owned evidence before Boot/Data cleanup.
-fn restart_failure(boot:&Boot,source:&Path,index:usize)->std::path::PathBuf {
-    let dir=std::env::temp_dir().join(format!("aim-native-restart-failure-{}-{index}",std::process::id()));
+fn restart_failure(boot: &Boot, source: &Path, index: usize) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "aim-native-restart-failure-{}-{index}",
+        std::process::id()
+    ));
     fs::create_dir_all(&dir).unwrap();
-    for (name,args) in [
-        ("logcat",vec!["logs","-b","all"]),
-        ("processes",vec!["shell","ps","-A"]),
-        ("properties",vec!["shell","getprop"]),
+    for (name, args) in [
+        ("logcat", vec!["logs", "-b", "all"]),
+        ("processes", vec!["shell", "ps", "-A"]),
+        ("properties", vec!["shell", "getprop"]),
     ] {
-        let output=boot.command().args(args).output();
-        fs::write(dir.join(name),format!("{output:?}")).unwrap();
+        let output = boot.command().args(args).output();
+        fs::write(dir.join(name), format!("{output:?}")).unwrap();
     }
-    let keeper=std::path::PathBuf::from(format!("{}.aimctl",boot.data.display()));
-    for name in ["state","log"] {if let Ok(bytes)=fs::read(keeper.join(name)) {fs::write(dir.join(format!("keeper-{name}")),bytes).unwrap();}}
-    fs::copy(source,dir.join("native-source-packages.xml")).unwrap();
-    for relative in ["system/packages.xml","system/packages-backup.xml","system/packages.xml.reservecopy","system/users/0/package-restrictions.xml","system/users/0/package-restrictions-backup.xml","misc/apexdata/com.android.permission/access.abx","misc_de/0/apexdata/com.android.permission/access.abx","misc_de/0/apexdata/com.android.permission/runtime-permissions.xml"] {
-        let path=boot.data.join("data").join(relative);
-        match fs::read(&path) {Ok(bytes)=>{let target=dir.join("data").join(relative);fs::create_dir_all(target.parent().unwrap()).unwrap();fs::write(target,bytes).unwrap();},Err(error)=>{fs::write(dir.join(relative.replace('/',"-")+".error"),error.to_string()).unwrap();}}
+    let keeper = std::path::PathBuf::from(format!("{}.aimctl", boot.data.display()));
+    for name in ["state", "log"] {
+        if let Ok(bytes) = fs::read(keeper.join(name)) {
+            fs::write(dir.join(format!("keeper-{name}")), bytes).unwrap();
+        }
     }
-    let restored=aim_services::package::State::read(&boot.data.join("data"),&[0]);
-    fs::write(dir.join("native-reader-state"),format!("{restored:#?}")).unwrap();
-    let disk=Command::new("df").args(["-h"]).arg(&boot.data).output();fs::write(dir.join("disk"),format!("{disk:?}")).unwrap();
+    fs::copy(source, dir.join("native-source-packages.xml")).unwrap();
+    for relative in [
+        "system/packages.xml",
+        "system/packages-backup.xml",
+        "system/packages.xml.reservecopy",
+        "system/users/0/package-restrictions.xml",
+        "system/users/0/package-restrictions-backup.xml",
+        "misc/apexdata/com.android.permission/access.abx",
+        "misc_de/0/apexdata/com.android.permission/access.abx",
+        "misc_de/0/apexdata/com.android.permission/runtime-permissions.xml",
+    ] {
+        let path = boot.data.join("data").join(relative);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let target = dir.join("data").join(relative);
+                fs::create_dir_all(target.parent().unwrap()).unwrap();
+                fs::write(target, bytes).unwrap();
+            }
+            Err(error) => {
+                fs::write(
+                    dir.join(relative.replace('/', "-") + ".error"),
+                    error.to_string(),
+                )
+                .unwrap();
+            }
+        }
+    }
+    let restored = aim_services::package::State::read(&boot.data.join("data"), &[0]);
+    fs::write(dir.join("native-reader-state"), format!("{restored:#?}")).unwrap();
+    let disk = Command::new("df").args(["-h"]).arg(&boot.data).output();
+    fs::write(dir.join("disk"), format!("{disk:?}")).unwrap();
     dir
 }

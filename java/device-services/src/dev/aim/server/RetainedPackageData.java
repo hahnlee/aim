@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Function;
 
-/** One unparsed setting instance retained by its captured shared UID owner. */
+/** One unparsed setting instance retained by a captured UID owner. */
 public final class RetainedPackageData {
     private final byte[] bytes;
     private final PackageSettingData setting;
@@ -16,6 +16,15 @@ public final class RetainedPackageData {
     private final List<PackageUserStateData> users;
 
     RetainedPackageData(byte[] bytes, long version, String name, int appId, String groupName) {
+        this(bytes, version, name, appId, groupName, true);
+    }
+
+    static RetainedPackageData detached(byte[] bytes, long version, String name, int appId) {
+        return new RetainedPackageData(bytes, version, name, appId, null, false);
+    }
+
+    private RetainedPackageData(byte[] bytes, long version, String name, int appId,
+            String groupName, boolean shared) {
         this.bytes = Objects.requireNonNull(bytes).clone();
         if (bytes.length == 0 || (bytes.length & 3) != 0) throw new IllegalArgumentException("invalid retained envelope");
         Parcel in = Parcel.obtain();
@@ -40,7 +49,7 @@ public final class RetainedPackageData {
             users = List.copyOf(values);
             if (in.dataAvail() != 0 || setting.getVersion() != version
                     || !setting.getPackageName().equals(name) || setting.appId != appId
-                    || setting.isFactory() || !setting.sharedUser || setting.sharedUserAppId != appId
+                    || setting.isFactory() || setting.sharedUser != shared || shared && setting.sharedUserAppId != appId
                     || !Objects.equals(signing.getSharedGroupName(), groupName)
                     || runtime.hasCode()) throw new IllegalArgumentException("retained setting identity differs");
             // Resolve every original owner before a replica can be published.

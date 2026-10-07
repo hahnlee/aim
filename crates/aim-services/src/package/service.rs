@@ -301,6 +301,20 @@ impl Service for PackageQueries {
                 }
                 return Ok(reply);
             }
+            if !self.native && call.code == pm::GET_HARMFUL_APP_WARNING && uid == 2000 && capture.is_some() {
+                let position = call.data.position();
+                let args = pm::GetHarmfulAppWarning::read(&mut call.data).map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 { return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+                call.data.set_position(position);
+                if args.user_id >= 0 {
+                    let system = self.system.as_ref().and_then(|owner| owner.upgrade()).ok_or(QueryError::NotModelled(NotModelled("native system owner unavailable")))?;
+                    let restricted = match system.package_shell_debugging_policy(args.user_id) {
+                        Ok(value) => value,
+                        Err(error) => { let mut reply = Parcel::new(); reply.write_exception(&error); return Ok(reply); }
+                    };
+                    return query.user_status_with_shell(call.code, &mut call.data, Some(restricted)).map_err(QueryError::NotModelled);
+                }
+            }
             if !self.native
                 && matches!(
                     call.code,

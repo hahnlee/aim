@@ -16,12 +16,14 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Computer {
     capture: Mutex<Option<Arc<Capture>>>,
     resolver: Resolver,
+    uid_registry: Mutex<Option<Vec<u8>>>,
 }
 impl Computer {
     pub(crate) fn new(capture: Arc<Capture>) -> Self {
         Self {
             capture: Mutex::new(Some(capture)),
             resolver: Resolver::default(),
+            uid_registry: Mutex::new(None),
         }
     }
 }
@@ -59,6 +61,8 @@ impl Service for Computer {
             VersionedInfo(api::GetPackageInfoInternal),
             FilteredState(api::GetPackageStateFilteredName),
             UidTargetSdk(api::GetUidTargetSdkVersion),
+            UidRegistryLength,
+            UidRegistryChunk(api::GetUidOwnerRegistryChunk),
         }
         let action = match call.code {
             api::GET_VERSION => {
@@ -139,6 +143,13 @@ impl Service for Computer {
             api::GET_UID_TARGET_SDK_VERSION => {
                 Action::UidTargetSdk(api::GetUidTargetSdkVersion::read(&mut call.data)?)
             }
+            api::GET_UID_OWNER_REGISTRY_LENGTH => {
+                api::GetUidOwnerRegistryLength::read(&mut call.data)?;
+                Action::UidRegistryLength
+            }
+            api::GET_UID_OWNER_REGISTRY_CHUNK => {
+                Action::UidRegistryChunk(api::GetUidOwnerRegistryChunk::read(&mut call.data)?)
+            }
             _ => return Err(UNKNOWN_TRANSACTION),
         };
         if call.data.remaining() != 0 {
@@ -147,6 +158,7 @@ impl Service for Computer {
         let mut reply = Parcel::new();
         if matches!(action, Action::Close) {
             self.capture.lock().unwrap().take();
+            self.uid_registry.lock().unwrap().take();
             api::write_close_reply(&mut reply);
             return Ok(reply);
         }
@@ -159,6 +171,43 @@ impl Service for Computer {
         };
         if matches!(action, Action::Version) {
             api::write_get_version_reply(&mut reply, capture.scan().version() as i64);
+            return Ok(reply);
+        }
+        if matches!(
+            action,
+            Action::UidRegistryLength | Action::UidRegistryChunk(_)
+        ) {
+            let mut registry = self.uid_registry.lock().unwrap();
+            if registry.is_none() {
+                match super::uid_record::captured(capture.scan()) {
+                    Ok(bytes) => *registry = Some(bytes),
+                    Err(error) => {
+                        reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, error));
+                        return Ok(reply);
+                    }
+                }
+            }
+            let bytes = registry.as_ref().unwrap();
+            match action {
+                Action::UidRegistryLength => {
+                    api::write_get_uid_owner_registry_length_reply(&mut reply, bytes.len() as i32)
+                }
+                Action::UidRegistryChunk(a) => {
+                    let range = (a.offset >= 0 && a.length > 0 && a.length <= 65536)
+                        .then(|| (a.offset as usize).checked_add(a.length as usize))
+                        .flatten();
+                    match range.and_then(|end| bytes.get(a.offset as usize..end)) {
+                        Some(chunk) => api::write_get_uid_owner_registry_chunk_reply(
+                            &mut reply,
+                            &Some(chunk.to_vec()),
+                        ),
+                        None => reply.write_exception(&Exception::illegal_argument(
+                            "invalid UID registry chunk",
+                        )),
+                    }
+                }
+                _ => unreachable!(),
+            }
             return Ok(reply);
         }
         let resolution = match self.resolver.resolution(capture.state()) {

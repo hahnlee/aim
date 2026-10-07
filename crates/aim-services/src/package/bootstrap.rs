@@ -119,10 +119,10 @@ fn read_current_package_version(
     Ok(current)
 }
 
-fn read_installer_user_policy(
+fn read_installer_user_policy_record(
     bytes: &[u8],
     user: i32,
-) -> aim_binder_host::parcel::Result<Option<super::installer::policy::UserPolicy>> {
+) -> aim_binder_host::parcel::Result<(bool, super::installer::policy::UserPolicy)> {
     use aim_binder_host::parcel::{BAD_VALUE, Reader};
     let mut reader = Reader::new(bytes, &[]);
     if reader.read_i32()? != user {
@@ -142,6 +142,12 @@ fn read_installer_user_policy(
     if reader.remaining() != 0 {
         return Err(BAD_VALUE);
     }
+    Ok((exists, policy))
+}
+
+#[cfg(test)]
+fn read_installer_user_policy(bytes: &[u8], user: i32) -> aim_binder_host::parcel::Result<Option<super::installer::policy::UserPolicy>> {
+    let (exists, policy) = read_installer_user_policy_record(bytes, user)?;
     Ok(exists.then_some(policy))
 }
 
@@ -238,10 +244,10 @@ impl Bridge {
         ApexInventory::read_original_record(&bytes).map_err(OwnerError::Transport)
     }
 
-    pub fn installer_user_policy(
+    fn installer_user_policy_record(
         &self,
         user: i32,
-    ) -> Result<Option<super::installer::policy::UserPolicy>, OwnerError> {
+    ) -> Result<(bool, super::installer::policy::UserPolicy), OwnerError> {
         let mut data = Parcel::new();
         bridge::GetInstallerUserPolicy { user_id: user }.write(&mut data);
         let reply = self
@@ -256,7 +262,26 @@ impl Bridge {
         if reader.remaining() != 0 {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
-        read_installer_user_policy(&bytes, user).map_err(OwnerError::Transport)
+        read_installer_user_policy_record(&bytes, user).map_err(OwnerError::Transport)
+    }
+
+    pub fn installer_user_policy(&self, user: i32) -> Result<Option<super::installer::policy::UserPolicy>, OwnerError> {
+        let (exists, policy) = self.installer_user_policy_record(user)?;
+        Ok(exists.then_some(policy))
+    }
+
+    pub fn shell_debugging_restricted(&self, user: i32) -> Result<bool, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::IsShellDebuggingRestricted { user_id: user }.write(&mut data);
+        let reply = self.owner.transact(bridge::IS_SHELL_DEBUGGING_RESTRICTED, &data, false).map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        reader.read_exception().map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
+        let restricted = match reader.read_i32().map_err(OwnerError::Transport)? {
+            0 => false, 1 => true,
+            _ => return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)),
+        };
+        if reader.remaining() != 0 { return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE)); }
+        Ok(restricted)
     }
 
     pub fn restore_installer_context(&self, path: &str) -> Result<(), OwnerError> {
@@ -522,6 +547,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(!super::read_installer_user_policy_record(parcel.data(), 10).unwrap().1.disallow_debugging_features);
         parcel.set_i32_at(8, 2);
         assert!(super::read_installer_user_policy(parcel.data(), 10).is_err());
         parcel.set_i32_at(8, 1);

@@ -215,6 +215,7 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
         )
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageUidOwners.java"))
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageStateReplica.java"),

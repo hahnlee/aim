@@ -35,6 +35,7 @@ pub trait Owners: Send + Sync {
     ) -> Result<(Record, bool), Exception>;
     fn session_created(&self, id: i32, user: u32) -> Result<(), Exception>;
     fn prepare_stage(&self, session: &Session, record: &Record) -> Result<(), Exception>;
+    fn session_operations(&self) -> Option<Arc<dyn super::SessionOperations>>;
     fn publish_session(&self, node: Arc<SessionNode>) -> Result<Binder, Exception>;
     fn notify(&self, event: Event);
     fn enforce_cross_user(&self, uid: u32, user: i32, operation: &str) -> Result<(), Exception>;
@@ -229,6 +230,7 @@ impl Service for Endpoint {
                     }
                     let owners = self.owners.clone();
                     let node = Arc::new(SessionNode {
+                        operations: self.owners.session_operations(),
                         sessions: self.sessions.clone(),
                         id,
                         notify: Arc::new(move |event| owners.notify(event)),
@@ -347,6 +349,9 @@ mod tests {
         }
         fn prepare_stage(&self, _: &Session, _: &Record) -> Result<(), Exception> {
             panic!("unexpected preparation")
+        }
+        fn session_operations(&self) -> Option<Arc<dyn super::super::SessionOperations>> {
+            panic!("unexpected session owner")
         }
         fn publish_session(&self, _: Arc<SessionNode>) -> Result<Binder, Exception> {
             panic!("unexpected publication")

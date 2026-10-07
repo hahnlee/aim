@@ -29,6 +29,7 @@ pub struct NativeOwners {
     publisher: Publisher,
     callback: Callback,
     errors: Mutex<Vec<String>>,
+    this: std::sync::Weak<Self>,
 }
 fn disk_error(error: storage::Error) -> Exception {
     Exception::new(
@@ -88,7 +89,8 @@ impl NativeOwners {
             }) as super::callbacks::Visibility)
         });
         let callbacks = super::callbacks::Registry::new(process, visibility)?;
-        let owner = Arc::new(Self {
+        let owner = Arc::new_cyclic(|this| Self {
+            this: this.clone(),
             sessions,
             source,
             resolver: Resolver::default(),
@@ -209,6 +211,11 @@ impl Owners for NativeOwners {
             .unwrap()
             .prepare_stage(session, record)
             .map_err(disk_error)
+    }
+    fn session_operations(&self) -> Option<Arc<dyn super::SessionOperations>> {
+        self.this
+            .upgrade()
+            .map(|owner| owner as Arc<dyn super::SessionOperations>)
     }
     fn publish_session(&self, node: Arc<SessionNode>) -> Result<Binder, Exception> {
         (self.publisher)(node)
@@ -535,9 +542,26 @@ mod tests {
         events: Arc<Mutex<Vec<Event>>>,
         policy_source: PolicySource,
     ) -> Arc<NativeOwners> {
+        make_owner_with_source(
+            data,
+            sessions,
+            nodes,
+            events,
+            policy_source,
+            Arc::new(|| Ok(state())),
+        )
+    }
+    fn make_owner_with_source(
+        data: &Data,
+        sessions: Arc<Sessions>,
+        nodes: Arc<Mutex<Vec<Arc<dyn Service>>>>,
+        events: Arc<Mutex<Vec<Event>>>,
+        policy_source: PolicySource,
+        query_source: QuerySource,
+    ) -> Arc<NativeOwners> {
         NativeOwners::open(
             sessions,
-            Arc::new(|| Ok(state())),
+            query_source,
             policy_source,
             SystemConfig::default(),
             disk(data),
@@ -1109,5 +1133,579 @@ mod tests {
         drop(endpoint);
         drop(owner);
         drop(worker);
+    }
+    #[test]
+    fn session_names_read_fd_split_marker_loader_query_and_abandon_use_real_owner() {
+        use aim_service_aidl::android_content_pm_ipackageinstallersession as session_api;
+        use std::io::Read;
+        let data = Data::new();
+        let sessions = Arc::new(Sessions::default());
+        let nodes = Arc::new(Mutex::new(Vec::new()));
+        let owner = make_owner(
+            &data,
+            sessions.clone(),
+            nodes.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let worker = owner.take_callback_worker().unwrap();
+        let endpoint = super::super::endpoint::Endpoint {
+            sessions: sessions.clone(),
+            owners: owner.clone(),
+        };
+        let mut p = Parcel::new();
+        aidl::CreateSession {
+            params: Some(request()),
+            installer_package_name: Some("fixture".into()),
+            installer_attribution_tag: None,
+            user_id: 0,
+        }
+        .write(&mut p);
+        let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &p);
+        let id = aidl::read_create_session_reply(&mut Reader::new(reply.data(), reply.objects()))
+            .unwrap()
+            .unwrap();
+        let mut p = Parcel::new();
+        aidl::OpenSession { session_id: id }.write(&mut p);
+        call(&endpoint, aidl::OPEN_SESSION, 10100, &p);
+        let node = nodes.lock().unwrap()[0].clone();
+        let stage = data.0.join(format!("app/vmdl{id}.tmp"));
+        std::fs::write(stage.join("base.apk"), b"real read capability").unwrap();
+        std::fs::write(stage.join("app.metadata"), b"private metadata").unwrap();
+        let mut p = Parcel::new();
+        session_api::GetNames {}.write(&mut p);
+        let reply = call(node.as_ref(), session_api::GET_NAMES, 10100, &p);
+        assert_eq!(
+            session_api::read_get_names_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap(),
+            Some(vec![Some("base.apk".into())])
+        );
+        let mut p = Parcel::new();
+        session_api::OpenRead {
+            name: Some("base.apk".into()),
+        }
+        .write(&mut p);
+        let reply = call(node.as_ref(), session_api::OPEN_READ, 10100, &p);
+        let mut reader = Reader::new(reply.data(), reply.objects());
+        reader.read_exception().unwrap().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        assert_eq!(reader.read_i32().unwrap(), 0);
+        reader.read_fd().unwrap();
+        assert_eq!(reader.remaining(), 0);
+        let fd = aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
+        let mut file = std::fs::File::from(fd);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"real read capability");
+        use std::os::fd::AsRawFd;
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
+            libc::O_RDONLY
+        );
+        let owned_target = data.0.join("outside-stage");
+        std::fs::write(&owned_target, b"owned fixture only").unwrap();
+        std::os::unix::fs::symlink(&owned_target, stage.join("escape.apk")).unwrap();
+        let mut p = Parcel::new();
+        session_api::OpenRead {
+            name: Some("escape.apk".into()),
+        }
+        .write(&mut p);
+        let reply = call(node.as_ref(), session_api::OPEN_READ, 10100, &p);
+        assert!(
+            Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .is_err()
+        );
+        assert!(reply.files().is_empty());
+        let mut p = Parcel::new();
+        session_api::RemoveSplit {
+            split_name: Some("feature".into()),
+        }
+        .write(&mut p);
+        call(node.as_ref(), session_api::REMOVE_SPLIT, 10100, &p).data();
+        let marker = stage.join("feature.removed");
+        assert!(marker.is_file());
+        assert_eq!(
+            aim_storage::guest_inode::read(&marker)
+                .unwrap()
+                .unwrap()
+                .mode,
+            Some(0)
+        );
+        let mut p = Parcel::new();
+        session_api::OpenRead {
+            name: Some("feature.removed".into()),
+        }
+        .write(&mut p);
+        let reply = call(node.as_ref(), session_api::OPEN_READ, 10100, &p);
+        assert!(
+            Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .is_err()
+        );
+        assert!(reply.files().is_empty());
+        let mut p = Parcel::new();
+        session_api::GetDataLoaderParams {}.write(&mut p);
+        let reply = call(node.as_ref(), session_api::GET_DATA_LOADER_PARAMS, 1000, &p);
+        let mut reader = Reader::new(reply.data(), reply.objects());
+        reader.read_exception().unwrap().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 0);
+        assert_eq!(reader.remaining(), 0);
+        let mut p = Parcel::new();
+        session_api::Abandon {}.write(&mut p);
+        let reply = call(node.as_ref(), session_api::ABANDON, 10100, &p);
+        session_api::read_abandon_reply(&mut Reader::new(reply.data(), reply.objects()))
+            .unwrap()
+            .unwrap();
+        assert!(!stage.exists());
+        assert!(disk(&data).recovered().unwrap().is_empty());
+        owner.shutdown_callbacks();
+        nodes.lock().unwrap().clear();
+        drop(node);
+        drop(endpoint);
+        drop(owner);
+        drop(worker);
+    }
+    #[test]
+    fn child_relationship_binder_changes_survive_file_owner_recovery() {
+        use aim_service_aidl::android_content_pm_ipackageinstallersession as session_api;
+        let data = Data::new();
+        let sessions = Arc::new(Sessions::default());
+        let nodes = Arc::new(Mutex::new(Vec::new()));
+        let owner = make_owner(
+            &data,
+            sessions.clone(),
+            nodes.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let worker = owner.take_callback_worker().unwrap();
+        let endpoint = super::super::endpoint::Endpoint {
+            sessions: sessions.clone(),
+            owners: owner.clone(),
+        };
+        let create = |multi| {
+            let mut params = request();
+            params.multi_package = multi;
+            let mut p = Parcel::new();
+            aidl::CreateSession {
+                params: Some(params),
+                installer_package_name: Some("fixture".into()),
+                installer_attribution_tag: None,
+                user_id: 0,
+            }
+            .write(&mut p);
+            let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &p);
+            aidl::read_create_session_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap()
+        };
+        let parent = create(true);
+        let child = create(false);
+        let mut p = Parcel::new();
+        aidl::OpenSession { session_id: parent }.write(&mut p);
+        call(&endpoint, aidl::OPEN_SESSION, 10100, &p);
+        let node = nodes.lock().unwrap()[0].clone();
+        let mut p = Parcel::new();
+        session_api::AddChildSessionId { session_id: child }.write(&mut p);
+        let reply = call(node.as_ref(), session_api::ADD_CHILD_SESSION_ID, 10100, &p);
+        reply.data();
+        let recovered = disk(&data).recovered().unwrap();
+        assert_eq!(
+            recovered
+                .iter()
+                .find(|(s, _)| s.id == child)
+                .unwrap()
+                .0
+                .parent,
+            parent
+        );
+        assert!(
+            recovered
+                .iter()
+                .find(|(s, _)| s.id == parent)
+                .unwrap()
+                .0
+                .children
+                .contains(&child)
+        );
+        let mut p = Parcel::new();
+        session_api::RemoveChildSessionId { session_id: child }.write(&mut p);
+        call(
+            node.as_ref(),
+            session_api::REMOVE_CHILD_SESSION_ID,
+            10100,
+            &p,
+        );
+        let recovered = disk(&data).recovered().unwrap();
+        assert_eq!(
+            recovered
+                .iter()
+                .find(|(s, _)| s.id == child)
+                .unwrap()
+                .0
+                .parent,
+            -1
+        );
+        assert!(
+            recovered
+                .iter()
+                .find(|(s, _)| s.id == parent)
+                .unwrap()
+                .0
+                .children
+                .is_empty()
+        );
+
+        let mut p = Parcel::new();
+        aidl::OpenSession { session_id: child }.write(&mut p);
+        call(&endpoint, aidl::OPEN_SESSION, 10100, &p);
+        let mut p = Parcel::new();
+        session_api::AddChildSessionId { session_id: child }.write(&mut p);
+        let reply = call(node.as_ref(), session_api::ADD_CHILD_SESSION_ID, 10100, &p);
+        session_api::read_add_child_session_id_reply(&mut Reader::new(
+            reply.data(),
+            reply.objects(),
+        ))
+        .unwrap()
+        .unwrap();
+        let mut p = Parcel::new();
+        session_api::Seal {}.write(&mut p);
+        let reply = call(node.as_ref(), session_api::SEAL, 10100, &p);
+        session_api::read_seal_reply(&mut Reader::new(reply.data(), reply.objects()))
+            .unwrap()
+            .unwrap();
+        let recovered = disk(&data).recovered().unwrap();
+        assert!(recovered.iter().all(|(s, _)| s.sealed));
+        let mut p = Parcel::new();
+        session_api::RemoveChildSessionId { session_id: child }.write(&mut p);
+        let reply = call(
+            node.as_ref(),
+            session_api::REMOVE_CHILD_SESSION_ID,
+            10100,
+            &p,
+        );
+        assert!(
+            session_api::read_remove_child_session_id_reply(&mut Reader::new(
+                reply.data(),
+                reply.objects()
+            ))
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(sessions.snapshot(child).unwrap().parent, parent);
+        owner.shutdown_callbacks();
+        nodes.lock().unwrap().clear();
+        drop(node);
+        drop(endpoint);
+        drop(owner);
+        drop(worker);
+    }
+    #[test]
+    fn transfer_seals_and_moves_actual_installer_authority_and_persisted_source() {
+        use aim_service_aidl::android_content_pm_ipackageinstallersession as session_api;
+        let data = Data::new();
+        let sessions = Arc::new(Sessions::default());
+        let nodes = Arc::new(Mutex::new(Vec::new()));
+        let mut captured = (*state()).clone();
+        Arc::make_mut(
+            captured
+                .packages
+                .get_mut("fixture")
+                .unwrap()
+                .pkg
+                .as_mut()
+                .unwrap(),
+        )
+        .queries_packages
+        .push("new.installer".into());
+        captured.packages.insert(
+            "new.installer".into(),
+            crate::package::model::PackageState {
+                name: "new.installer".into(),
+                app_id: 10101,
+                pkg: Some(Arc::new(crate::package::pkg::AndroidPackage {
+                    package_name: "new.installer".into(),
+                    uid: 10101,
+                    target_sdk_version: 35,
+                    ..Default::default()
+                })),
+                users: [(
+                    0,
+                    crate::package::model::PackageUserState {
+                        granted_permissions: vec!["android.permission.INSTALL_PACKAGES".into()],
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            },
+        );
+        let captured = Arc::new(captured);
+        let owner = make_owner_with_source(
+            &data,
+            sessions.clone(),
+            nodes.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(|_, _| Ok(device())),
+            Arc::new(move || Ok(captured.clone())),
+        );
+        let worker = owner.take_callback_worker().unwrap();
+        let endpoint = super::super::endpoint::Endpoint {
+            sessions: sessions.clone(),
+            owners: owner.clone(),
+        };
+        let mut p = Parcel::new();
+        aidl::CreateSession {
+            params: Some(request()),
+            installer_package_name: Some("fixture".into()),
+            installer_attribution_tag: Some("old tag".into()),
+            user_id: 0,
+        }
+        .write(&mut p);
+        let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &p);
+        let id = aidl::read_create_session_reply(&mut Reader::new(reply.data(), reply.objects()))
+            .unwrap()
+            .unwrap();
+        let mut p = Parcel::new();
+        aidl::OpenSession { session_id: id }.write(&mut p);
+        call(&endpoint, aidl::OPEN_SESSION, 10100, &p);
+        let node = nodes.lock().unwrap()[0].clone();
+        let mut p = Parcel::new();
+        session_api::Transfer {
+            package_name: Some("new.installer".into()),
+        }
+        .write(&mut p);
+        let reply = call(node.as_ref(), session_api::TRANSFER, 10100, &p);
+        session_api::read_transfer_reply(&mut Reader::new(reply.data(), reply.objects()))
+            .unwrap()
+            .unwrap();
+        let stored = disk(&data).recovered().unwrap();
+        assert_eq!(stored[0].0.installer_uid, 10101);
+        assert!(stored[0].0.sealed);
+        assert_eq!(
+            stored[0].1.installer_package.as_deref(),
+            Some("new.installer")
+        );
+        assert_eq!(
+            stored[0].1.initiating_package.as_deref(),
+            Some("new.installer")
+        );
+        assert_eq!(stored[0].1.installer_attribution_tag, None);
+        let mut p = Parcel::new();
+        session_api::GetNames {}.write(&mut p);
+        let reply = call(node.as_ref(), session_api::GET_NAMES, 10100, &p);
+        assert!(
+            session_api::read_get_names_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .is_err()
+        );
+        let reply = call(node.as_ref(), session_api::GET_NAMES, 10101, &p);
+        assert_eq!(
+            session_api::read_get_names_reply(&mut Reader::new(reply.data(), reply.objects()))
+                .unwrap()
+                .unwrap(),
+            Some(vec![])
+        );
+        owner.shutdown_callbacks();
+        nodes.lock().unwrap().clear();
+        drop(node);
+        drop(endpoint);
+        drop(owner);
+        drop(worker);
+    }
+}
+
+impl super::SessionOperations for NativeOwners {
+    fn names(&self, id: i32, uid: u32) -> Result<Vec<Option<String>>, Exception> {
+        self.sessions.with_record(id, |session, record| {
+            if uid != 0
+                && uid != session.installer_uid
+                && !(session.sealed && self.is_verifier(uid)?)
+            {
+                return Err(Exception::security(format!(
+                    "Session does not belong to uid {uid}"
+                )));
+            }
+            if !session.prepared || session.destroyed {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Session is not prepared or destroyed",
+                ));
+            }
+            if record.params.data_loader_params.is_some() {
+                return Err(Exception::new(
+                    aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION,
+                    "Native data-loader file inventory unavailable",
+                ));
+            }
+            self.disk
+                .lock()
+                .unwrap()
+                .names(session, record)
+                .map_err(disk_error)
+        })
+    }
+    fn open_read(
+        &self,
+        id: i32,
+        uid: u32,
+        name: Option<String>,
+    ) -> Result<aim_binder_driver::File, Exception> {
+        self.sessions.with_record(id, |session, record| {
+            if record.params.data_loader_params.is_some() {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Cannot read regular files in a data loader installation session.",
+                ));
+            }
+            if uid != 0 && uid != session.installer_uid {
+                return Err(Exception::security(format!(
+                    "Session does not belong to uid {uid}"
+                )));
+            }
+            if !session.prepared || session.destroyed {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Session is not prepared or destroyed",
+                ));
+            }
+            if !name.as_deref().is_some_and(storage::valid_filename) {
+                return Err(Exception::illegal_argument("Invalid name"));
+            }
+            let file = self
+                .disk
+                .lock()
+                .unwrap()
+                .read_file(session, record, name.as_deref())
+                .map_err(disk_error)?;
+            use std::os::fd::AsFd;
+            aim_binder_host::server::file_from_fd(file.as_fd())
+                .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Cannot retain session read FD"))
+        })
+    }
+    fn remove_split(&self, id: i32, uid: u32, name: Option<String>) -> Result<(), Exception> {
+        self.sessions.with_record(id, |session, record| {
+            if record.params.data_loader_params.is_some() {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Cannot remove splits in a data loader installation session.",
+                ));
+            }
+            if record
+                .params
+                .app_package_name
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Must specify package name to remove a split",
+                ));
+            }
+            if uid != 0 && uid != session.installer_uid {
+                return Err(Exception::security(format!(
+                    "Session does not belong to uid {uid}"
+                )));
+            }
+            if !session.prepared || session.destroyed {
+                return Err(Exception::new(
+                    EX_ILLEGAL_STATE,
+                    "Session is not prepared or destroyed",
+                ));
+            }
+            let marker = format!("{}.removed", name.as_deref().unwrap_or("null"));
+            if !storage::valid_filename(&marker) {
+                return Err(Exception::illegal_argument(format!(
+                    "Invalid marker: {marker}"
+                )));
+            }
+            self.disk
+                .lock()
+                .unwrap()
+                .remove_split(session, record, name.as_deref())
+                .map_err(disk_error)
+        })
+    }
+    fn abandon_session(&self, id: i32, uid: u32) -> Result<(), Exception> {
+        let ids = self.sessions.abandon(id, uid)?;
+        self.abandon_stage(&ids)
+    }
+    fn data_loader(&self, id: i32, uid: u32) -> Result<Option<super::codec::Object>, Exception> {
+        self.query(uid, |query| {
+            if !policy::permission(query, "android.permission.USE_INSTALLER_V2")? {
+                return Err(Exception::security(
+                    "getDataLoaderParams requires USE_INSTALLER_V2",
+                ));
+            }
+            self.sessions
+                .with_record(id, |_, record| Ok(record.params.data_loader_params.clone()))
+        })
+    }
+    fn transfer_session(&self, id: i32, uid: u32, name: Option<String>) -> Result<(), Exception> {
+        let name = name
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| Exception::illegal_argument("destination package cannot be empty"))?;
+        let (_, record) = self
+            .sessions
+            .records()
+            .into_iter()
+            .find(|(session, _)| session.id == id)
+            .ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "Unknown session"))?;
+        let new_uid = self.query(uid, |query| {
+            let app = query
+                .application_info(&name, 0, record.user as i32)
+                .map_err(policy::unknown)??;
+            let Some(app) = app else {
+                let mut payload = aim_binder_host::parcel::Parcel::new();
+                payload.write_string16(Some("android.os.ParcelableException"));
+                payload.write_string16(Some(
+                    "android.content.pm.PackageManager$NameNotFoundException",
+                ));
+                payload.write_string16(Some(&name));
+                let message =
+                    format!("android.content.pm.PackageManager$NameNotFoundException: {name}");
+                return Err(
+                    Exception::parcelable(Some(&message), &payload).map_err(|_| {
+                        Exception::new(EX_ILLEGAL_STATE, "NameNotFoundException capability payload")
+                    })?,
+                );
+            };
+            if !query
+                .uid_has_permission(app.uid, "android.permission.INSTALL_PACKAGES")
+                .map_err(policy::unknown)?
+            {
+                return Err(Exception::security(format!(
+                    "Destination package {name} does not have INSTALL_PACKAGES permission"
+                )));
+            }
+            Ok(app.uid as u32)
+        })?;
+        let mask = 0x80 | 0x100000 | 0x1000 | 0x800 | 0x4000 | 0x10000 | 0x8000;
+        if record.params.install_flags & mask == record.params.install_flags
+            && record.params.abi_override.is_none()
+            && record.params.volume_uuid.is_none()
+        {
+            return Err(Exception::security(
+                "Can only transfer sessions that use public options",
+            ));
+        }
+        self.sessions.transfer(id, uid, name, new_uid)?;
+        self.persist()
+    }
+    fn seal_session(&self, id: i32, uid: u32) -> Result<(), Exception> {
+        match self.sessions.seal(id, uid) {
+            Ok(_) => self.persist(),
+            Err((failed, error)) => {
+                if !failed.is_empty() {
+                    self.abandon_stage(&failed)?;
+                }
+                Err(error)
+            }
+        }
+    }
+    fn graph_changed(&self) -> Result<(), Exception> {
+        self.persist()
     }
 }

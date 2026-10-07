@@ -188,6 +188,13 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::IS_SHELL_DEBUGGING_RESTRICTED => {
+                let user = call.data.read_i32()?;
+                assert!(user >= 0);
+                assert_eq!(call.data.remaining(), 0);
+                reply.write_i32(match self.users_reply.load(Ordering::SeqCst) { 2 => 1, 3 => 2, _ => 0 });
+                return Ok(reply);
+            }
             bootstrap::GET_INSTALLER_USER_POLICY => {
                 let user = call.data.read_i32()?;
                 assert_eq!(call.data.remaining(), 0);
@@ -195,7 +202,7 @@ impl Service for Owner {
                 policy.write_i32(user);
                 policy.write_i32(i32::from(user == 0));
                 policy.write_i32(i32::from(self.users_reply.load(Ordering::SeqCst) == 1));
-                policy.write_i32(0);
+                policy.write_i32(match self.users_reply.load(Ordering::SeqCst) { 2 => 1, 3 => 2, _ => 0 });
                 policy.write_i32(1);
                 aim_service_aidl::write_byte_array(&mut reply, Some(policy.data()));
                 return Ok(reply);
@@ -1380,6 +1387,7 @@ fn exercise_bootstrap_on(
     let first = open(94003, 1000);
     let second = open(94004, 1000);
     let foreign = open(94005, 19001);
+    let shell = open(94007, 2000);
     let _processes = Processes {
         driver: driver.clone(),
         processes: vec![
@@ -1388,6 +1396,7 @@ fn exercise_bootstrap_on(
             first.clone(),
             second.clone(),
             foreign.clone(),
+            shell.clone(),
         ],
     };
     let registry = Arc::new(Registry {
@@ -1578,7 +1587,14 @@ fn exercise_bootstrap_on(
     owner.users_reply.store(1, Ordering::SeqCst);
     assert!(policy_source(1000, 0).unwrap().users[&0].disallow_install_apps);
     assert!(!policy_source(1000, 99).unwrap().users.contains_key(&99));
+    owner.users_reply.store(2, Ordering::SeqCst);
+    assert!(system.package_shell_debugging_policy(0).unwrap());
+    // A nonexistent user's restriction still comes from the actual owner record.
+    assert!(system.package_shell_debugging_policy(99).unwrap());
+    owner.users_reply.store(3, Ordering::SeqCst);
+    assert!(system.package_shell_debugging_policy(0).is_err());
     owner.users_reply.store(0, Ordering::SeqCst);
+    assert!(!system.package_shell_debugging_policy(0).unwrap());
     let labeler = system.package_installer_labeler(&old).unwrap();
     let guest = "/data/app/vmdl42.tmp";
     labeler(std::path::Path::new("unused-label-host-path"), guest).unwrap();
@@ -1928,6 +1944,22 @@ fn exercise_bootstrap_on(
     owner.apex_reply.store(2, Ordering::SeqCst);
     assert!(old.resolve_boot(&config, &|_| None).is_err());
     owner.apex_reply.store(0, Ordering::SeqCst);
+    let shell_endpoint = find(&shell, "query_package");
+    let mut warning = Parcel::new();
+    aim_service_aidl::android_content_pm_ipackagemanager::GetHarmfulAppWarning {
+        package_name: Some("fixture".into()), user_id: 0,
+    }.write(&mut warning);
+    owner.users_reply.store(2, Ordering::SeqCst);
+    let denied = shell_endpoint.transact(aim_service_aidl::android_content_pm_ipackagemanager::GET_HARMFUL_APP_WARNING, &warning, false).unwrap();
+    let error = denied.reader().read_exception().unwrap().unwrap_err();
+    assert_eq!(error.code, aim_binder_host::parcel::EX_SECURITY);
+    assert_eq!(error.message, "Shell does not have permission to access user");
+    owner.users_reply.store(3, Ordering::SeqCst);
+    let malformed = shell_endpoint.transact(aim_service_aidl::android_content_pm_ipackagemanager::GET_HARMFUL_APP_WARNING, &warning, false).unwrap();
+    assert_eq!(malformed.reader().read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_ILLEGAL_STATE);
+    warning.write_i32(123);
+    assert!(shell_endpoint.transact(aim_service_aidl::android_content_pm_ipackagemanager::GET_HARMFUL_APP_WARNING, &warning, false).is_err());
+    owner.users_reply.store(0, Ordering::SeqCst);
     let installer_fixture = verify_installer_binding(&system, &native, &first, &old);
     if run_scan {
         verify_boot_scan(
@@ -5449,6 +5481,20 @@ fn verify_boot_scan(
                 .unwrap()
                 .unwrap()
         );
+        let expected_registry = crate::package::scan_snapshot::uid_owner_registry(current.scan()).unwrap();
+        let mut registry_length = Parcel::new();
+        computer_api::GetUidOwnerRegistryLength {}.write(&mut registry_length);
+        let reply = computer.transact(computer_api::GET_UID_OWNER_REGISTRY_LENGTH, &registry_length, false).unwrap();
+        let length = computer_api::read_get_uid_owner_registry_length_reply(&mut reply.reader()).unwrap().unwrap();
+        assert_eq!(length as usize, expected_registry.len());
+        let mut actual_registry = Vec::new();
+        while actual_registry.len() < expected_registry.len() {
+            let mut chunk = Parcel::new();
+            computer_api::GetUidOwnerRegistryChunk { offset: actual_registry.len() as i32, length: (expected_registry.len() - actual_registry.len()).min(65536) as i32 }.write(&mut chunk);
+            let reply = computer.transact(computer_api::GET_UID_OWNER_REGISTRY_CHUNK, &chunk, false).unwrap();
+            actual_registry.extend(computer_api::read_get_uid_owner_registry_chunk_reply(&mut reply.reader()).unwrap().unwrap().unwrap());
+        }
+        assert_eq!(actual_registry, expected_registry);
         let mut version_args = Parcel::new();
         host::GetPackageStateVersionPage {}.write(&mut version_args);
         let version_reply = find(client, "host")
@@ -5665,6 +5711,8 @@ fn verify_boot_scan(
             .unwrap()
             .unwrap();
         assert!(computer_version().is_err_and(|error| error.code == -5));
+        let closed = computer.transact(computer_api::GET_UID_OWNER_REGISTRY_LENGTH, &registry_length, false).unwrap();
+        assert_eq!(computer_api::read_get_uid_owner_registry_length_reply(&mut closed.reader()).unwrap().unwrap_err().code, -5);
         let before = system.capture_package_queries().unwrap();
         args.write_i32(1);
         assert!(

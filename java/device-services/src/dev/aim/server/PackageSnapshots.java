@@ -133,24 +133,38 @@ public final class PackageSnapshots {
         private final Map<String, SharedUserApi> sharedUsers;
         private final Owner owner;
         private final IPackageComputer computer;
+        private final Map<Integer, Object> uidOwners;
+        private record NameKey(String name, int callingUid) {}
+        private final Map<NameKey, String> resolvedNames = new java.util.HashMap<>();
         private int references = 1;
         private boolean ownerClosed;
 
         public Data(long version, Map<String, PackageState> packages,
                 Map<String, PackageState> disabled, Map<String, SharedUserApi> sharedUsers,
                 Owner owner) {
-            this(version, packages, disabled, sharedUsers, owner, null);
+            this(version, packages, disabled, sharedUsers, owner, null, null);
         }
 
         Data(long version, Map<String, PackageState> packages,
                 Map<String, PackageState> disabled, Map<String, SharedUserApi> sharedUsers,
-                Owner owner, IPackageComputer computer) {
+                Owner owner, IPackageComputer computer, Map<Integer, Object> uidOwners) {
             this.version = version;
             this.computer = computer;
+            this.uidOwners = uidOwners;
             this.packages = copy(packages);
             this.disabled = copy(disabled);
             this.sharedUsers = copy(sharedUsers);
             this.owner = Objects.requireNonNull(owner);
+        }
+
+        synchronized String resolveName(String name, int callingUid) throws RemoteException {
+            if (computer == null) throw new IllegalStateException("native package query capture unavailable");
+            var key = new NameKey(name, callingUid);
+            if (resolvedNames.containsKey(key)) return resolvedNames.get(key);
+            String resolved = computer.resolveInternalPackageName(name,
+                    android.content.pm.PackageManager.VERSION_CODE_HIGHEST, callingUid);
+            resolvedNames.put(key, resolved);
+            return resolved;
         }
 
         synchronized void retain() {
@@ -231,8 +245,8 @@ public final class PackageSnapshots {
         public synchronized long getVersion() { checkClosed(); return data.version; }
 
         private String resolvePackageName(String name, int callingUid) {
-            try { return endpoint().resolveInternalPackageName(name,
-                    android.content.pm.PackageManager.VERSION_CODE_HIGHEST, callingUid); }
+            checkClosed();
+            try { return data.resolveName(name, callingUid); }
             catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         }
 
@@ -305,22 +319,78 @@ public final class PackageSnapshots {
             }
         }
 
-        public synchronized SharedUserApi getSharedUserApi(int appId) {
+        private Object uidOwner(int appId) {
             checkClosed();
-            for (var group : data.sharedUsers.values()) if (group.getAppId() == appId) return group;
-            for (var state : data.packages.values()) {
-                if (state.getAppId() == appId) throw new ClassCastException("app ID belongs to a package setting");
-            }
-            return null;
+            if (data.uidOwners == null) throw new IllegalStateException("registered UID owner capture unavailable");
+            return data.uidOwners.get(appId);
+        }
+
+        public synchronized SharedUserApi getSharedUserApi(int appId) {
+            return (SharedUserApi) uidOwner(appId);
         }
 
         public synchronized android.util.ArraySet<PackageStateInternal> getSharedUserPackages(int appId) {
             var result = new android.util.ArraySet<PackageStateInternal>();
             SharedUserApi group = getSharedUserApi(appId);
-            if (group != null) {
-                for (var state : group.getPackageStates()) result.add((PackageStateInternal) state);
+            if (group != null) for (var state : group.getPackageStates()) result.add((PackageStateInternal) state);
+            return result;
+        }
+
+        public synchronized java.util.List<com.android.server.pm.pkg.AndroidPackage> getPackagesForAppId(int appId) {
+            Object owner = uidOwner(appId);
+            var result = new java.util.ArrayList<com.android.server.pm.pkg.AndroidPackage>();
+            if (owner instanceof SharedUserApi group) {
+                for (var state : group.getPackageStates()) if (state.getAndroidPackage() != null) result.add(state.getAndroidPackage());
+            } else if (owner instanceof PackageStateInternal state && state.getPkg() != null) {
+                result.add(state.getPkg());
             }
             return result;
+        }
+
+        public synchronized SharedUserApi getSharedUser(int appId) { return getSharedUserApi(appId); }
+
+        public synchronized android.util.ArrayMap<String, SharedUserApi> getSharedUsers() {
+            checkClosed();
+            var result = new android.util.ArrayMap<String, SharedUserApi>();
+            result.putAll(data.sharedUsers);
+            return result;
+        }
+
+        public synchronized android.util.ArrayMap<String, PackageStateInternal> getDisabledSystemPackageStates() {
+            checkClosed();
+            var result = new android.util.ArrayMap<String, PackageStateInternal>();
+            data.disabled.forEach((name, state) -> result.put(name, (PackageStateInternal) state));
+            return result;
+        }
+
+        public synchronized long getCeDataInode(String name, int userId) {
+            PackageStateInternal state = getPackageStateInternal(name);
+            return state == null ? 0 : state.getUserStateOrDefault(userId).getCeDataInode();
+        }
+
+        public synchronized boolean wasPackageEverLaunched(String name, int userId) {
+            PackageStateInternal state = getPackageStateInternal(name);
+            if (state == null) throw new IllegalArgumentException("Unknown package: " + name);
+            return !state.getUserStateOrDefault(userId).isNotLaunched();
+        }
+
+        public synchronized boolean isPackagePersistent(String name) {
+            PackageStateInternal state = getPackageStateInternal(name);
+            return state != null && state.getPkg() != null && state.isSystem() && state.getPkg().isPersistent();
+        }
+
+        public synchronized android.content.pm.SigningDetails getSigningDetails(String name) {
+            checkClosed();
+            PackageState state = data.packages.get(name);
+            var pkg = state == null ? null : state.getAndroidPackage();
+            return pkg == null ? null : pkg.getSigningDetails();
+        }
+
+        public synchronized android.content.pm.SigningDetails getSigningDetails(int uid) {
+            Object owner = uidOwner(android.os.UserHandle.getAppId(uid));
+            if (owner instanceof SharedUserApi group) return group.getSigningDetails();
+            if (owner instanceof PackageStateInternal state) return state.getSigningDetails();
+            return android.content.pm.SigningDetails.UNKNOWN;
         }
 
         public synchronized android.content.pm.ApplicationInfo getApplicationInfo(String name,

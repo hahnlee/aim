@@ -402,6 +402,78 @@ impl Sessions {
         Ok(ids)
     }
 
+    pub(crate) fn transfer(
+        &self,
+        id: i32,
+        uid: u32,
+        destination: String,
+        new_uid: u32,
+    ) -> Result<(), Exception> {
+        let mut state = self.0.lock().unwrap();
+        let session = state
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| self::state("Unknown session"))?;
+        session.owner(uid)?;
+        session.mutable()?;
+        session.sealed = true;
+        session.installer_uid = new_uid;
+        let record = state
+            .records
+            .get_mut(&id)
+            .ok_or_else(|| self::state("Session parameter owner unavailable"))?;
+        record.installer_uid = new_uid;
+        record.installer_package = Some(destination.clone());
+        record.installer_package_uid = new_uid as i32;
+        record.initiating_package = Some(destination);
+        record.originating_package = None;
+        record.installer_attribution_tag = None;
+        Ok(())
+    }
+    pub(crate) fn seal(&self, id: i32, uid: u32) -> Result<Vec<i32>, (Vec<i32>, Exception)> {
+        let mut state = self.0.lock().unwrap();
+        let session = state
+            .sessions
+            .get(&id)
+            .ok_or_else(|| (Vec::new(), self::state("Unknown session")))?;
+        if session.parent != -1 {
+            return Err((
+                Vec::new(),
+                self::state("seal can't be called on a child session"),
+            ));
+        }
+        session.owner(uid).map_err(|error| (Vec::new(), error))?;
+        let ids: Vec<_> = std::iter::once(id)
+            .chain(session.children.iter().copied())
+            .collect();
+        let mut sealed = Vec::new();
+        for id in ids {
+            let session = state.sessions.get_mut(&id).unwrap();
+            if !session.prepared || session.destroyed {
+                session.destroyed = true;
+                return Err((vec![id], self::state("Package is not valid")));
+            }
+            session.sealed = true;
+            sealed.push(id);
+        }
+        Ok(sealed)
+    }
+    pub(crate) fn with_record<T>(
+        &self,
+        id: i32,
+        action: impl FnOnce(&Session, &Record) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
+        let state = self.0.lock().unwrap();
+        let session = state
+            .sessions
+            .get(&id)
+            .ok_or_else(|| self::state("Unknown session"))?;
+        let record = state
+            .records
+            .get(&id)
+            .ok_or_else(|| self::state("Session parameter owner unavailable"))?;
+        action(session, record)
+    }
     fn change<T>(
         &self,
         id: i32,
@@ -424,7 +496,23 @@ pub enum Event {
     Progress { id: i32, user: u32, progress: f32 },
 }
 
+pub trait SessionOperations: Send + Sync {
+    fn names(&self, id: i32, uid: u32) -> Result<Vec<Option<String>>, Exception>;
+    fn open_read(
+        &self,
+        id: i32,
+        uid: u32,
+        name: Option<String>,
+    ) -> Result<aim_binder_driver::File, Exception>;
+    fn remove_split(&self, id: i32, uid: u32, name: Option<String>) -> Result<(), Exception>;
+    fn abandon_session(&self, id: i32, uid: u32) -> Result<(), Exception>;
+    fn data_loader(&self, id: i32, uid: u32) -> Result<Option<codec::Object>, Exception>;
+    fn transfer_session(&self, id: i32, uid: u32, name: Option<String>) -> Result<(), Exception>;
+    fn seal_session(&self, id: i32, uid: u32) -> Result<(), Exception>;
+    fn graph_changed(&self) -> Result<(), Exception>;
+}
 pub struct SessionNode {
+    pub operations: Option<Arc<dyn SessionOperations>>,
     pub sessions: Arc<Sessions>,
     pub id: i32,
     /// Called after releasing the session lock; the owner must enqueue the
@@ -489,6 +577,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let saved = events.clone();
         let node = SessionNode {
+            operations: None,
             sessions: sessions.clone(),
             id,
             notify: Arc::new(move |event| saved.lock().unwrap().push(event)),

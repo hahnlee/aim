@@ -315,6 +315,7 @@ impl SigningScan {
             candidate.record.settings.name.clone(),
             std::sync::Arc::new(loaded),
         );
+        staged.package_registry.register(staged.loaded[name].clone()).map_err(|message|SigningError::Rejected(super::Error {package:name.clone(),path:candidate.record.settings.code_path.clone(),phase:"registration",message}))?;
         staged.pending_metadata.remove(name);
         let setting = staged.seinfo_setting_for_scan(name).map_err(|message| {
             SigningError::Rejected(super::Error {

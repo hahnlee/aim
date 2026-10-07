@@ -10,5 +10,6 @@ public final class UserHandle {
     public int getIdentifier() { throw new RuntimeException("stub"); }
     public UserHandle(int userId) { throw new RuntimeException("stub"); }
     public static UserHandle of(int userId) { throw new RuntimeException("stub"); }
+    public static int getAppId(int uid) { throw new RuntimeException("stub"); }
     public static int getUserId(int uid) { throw new RuntimeException("stub"); }
 }

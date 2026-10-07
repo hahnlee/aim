@@ -137,6 +137,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public boolean isShellDebuggingRestricted(int userId) {
+        enforceSystemUid();
+        return InstallerUserPolicy.shellDebuggingRestricted(userId);
+    }
+
+    @Override
     public boolean isSigningDebuggable() {
         enforceSystemUid();
         return android.os.Build.isDebuggable();

@@ -206,6 +206,14 @@ impl Request {
         }))
     }
     pub fn decide(&self, q: &Query<'_>, pid: i32) -> Result<Result<Plan, Exception>, NotModelled> {
+        self.decide_with_shell(q, pid, None)
+    }
+    pub(crate) fn decide_with_shell(
+        &self,
+        q: &Query<'_>,
+        pid: i32,
+        restricted: Option<bool>,
+    ) -> Result<Result<Plan, Exception>, NotModelled> {
         if let Self::Invalid(error) = self {
             return Ok(Err(error.clone()));
         }
@@ -303,7 +311,7 @@ impl Request {
             warning,
         } = self
         {
-            if let Err(error) = q.full_cross_user(*user, true)? {
+            if let Err(error) = q.full_cross_user_with_shell(*user, true, restricted)? {
                 return Ok(Err(error));
             }
             if !permission(q, "android.permission.SET_HARMFUL_APP_WARNINGS")? {
@@ -847,6 +855,43 @@ mod tests {
             .decide(&q, 1)
             .unwrap()
             .is_err()
+        );
+    }
+    #[test]
+    fn harmful_warning_uses_live_shell_restriction_before_permission() {
+        let mut state = state();
+        state.system.system_permissions = Some(
+            [(
+                2000,
+                ["android.permission.SET_HARMFUL_APP_WARNINGS".into()].into(),
+            )]
+            .into(),
+        );
+        let filter = AppsFilter::new(&state, &Config::default()).unwrap();
+        let q = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 2000,
+        };
+        let request = Request::HarmfulWarning {
+            package: Some("fixture".into()),
+            user: 0,
+            warning: None,
+        };
+        assert!(request.decide_with_shell(&q, 1, None).is_err());
+        assert_eq!(
+            request
+                .decide_with_shell(&q, 1, Some(true))
+                .unwrap()
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        assert!(
+            request
+                .decide_with_shell(&q, 1, Some(false))
+                .unwrap()
+                .is_ok()
         );
     }
     #[test]

@@ -36,6 +36,7 @@ pub struct SigningScan {
     pub settings: Settings,
     pub identities: Bootstrap,
     pub libraries: Registry,
+    pub(super) package_registry: crate::package::registry::Registry,
     pub update_ownership: crate::package::owner::update_ownership::UpdateOwnership,
     pub installers: crate::package::owner::install_sources::Installers,
     pub(super) disabled_users: BTreeMap<String, super::disabled::DisabledUserStates>,
@@ -299,12 +300,18 @@ impl SigningScan {
                 filter,
                 ..Default::default()
             });
+        self.package_registry.register(self.loaded[name].clone()).unwrap();
     }
 
     /// Native-parsed active code, admitted only after every scan metadata gate.
     /// Settings and user state remain in their owners; this is not a query replica.
     pub fn loaded_packages(&self) -> &BTreeMap<String, Arc<super::LoadedPackage>> {
         &self.loaded
+    }
+
+    pub fn package_registry(&self)->Result<&crate::package::registry::Registry,String> {
+        self.package_registry.validate(&self.loaded)?;
+        Ok(&self.package_registry)
     }
 
     /// Verified disabled factory code, kept apart from active UID membership.
@@ -363,6 +370,7 @@ impl SigningScan {
             .retain(|(name, _, _, _)| name != &record.settings.name);
         self.scanned_users.remove(&record.settings.name);
         self.loaded.remove(&record.settings.name);
+        self.package_registry.remove(&record.settings.name);
         self.pending_metadata.remove(&record.settings.name);
         self.apex_origins.remove(&record.settings.name);
     }
@@ -823,6 +831,7 @@ impl SigningScan {
             identities,
             settings: restored,
             libraries: Registry::new(config),
+            package_registry: Default::default(),
             update_ownership: Default::default(),
             installers: crate::package::owner::install_sources::Installers::restore(settings),
             // readDisabledSysPackageLPw creates fresh settings; it does not

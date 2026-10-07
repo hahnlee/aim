@@ -17,6 +17,65 @@ impl ReadParcelable for VersionedPackage {
 impl Query<'_> {
     pub(super) fn extra_package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
+            pm::GET_PROPERTY_AS_USER => {
+                let a = args(pm::GetPropertyAsUser::read(r))?;
+                thrown(
+                    self.package_property(
+                        a.property_name.as_deref(),
+                        a.package_name.as_deref(),
+                        a.class_name.as_deref(),
+                        a.user_id,
+                    ),
+                    |p, v| pm::write_get_property_as_user_reply(p, v.as_ref()),
+                )
+            }
+            pm::QUERY_PROPERTY => {
+                let a = args(pm::QueryProperty::read(r))?;
+                thrown(
+                    self.query_properties(a.property_name.as_deref(), a.component_type),
+                    |p, v| {
+                        pm::write_query_property_reply(
+                            p,
+                            Some(&ListSlice {
+                                creator: "android.content.pm.PackageManager$Property".into(),
+                                items: v,
+                            }),
+                        )
+                    },
+                )
+            }
+            pm::QUERY_CONTENT_PROVIDERS => {
+                let a = args(pm::QueryContentProviders::read(r))?;
+                thrown(
+                    self.content_providers(
+                        a.process_name.as_deref(),
+                        a.uid,
+                        a.flags,
+                        a.meta_data_key.as_deref(),
+                    ),
+                    |p, v| {
+                        pm::write_query_content_providers_reply(
+                            p,
+                            Some(&ListSlice {
+                                creator: "android.content.pm.ProviderInfo".into(),
+                                items: v,
+                            }),
+                        )
+                    },
+                )
+            }
+            pm::GET_INTENT_FILTER_VERIFICATIONS => {
+                args(pm::GetIntentFilterVerifications::read(r))?;
+                // IPackageManagerBase explicitly retires this API with an empty slice.
+                Ok(reply(|p| {
+                    pm::write_get_intent_filter_verifications_reply(p, Some(&EmptyListSlice))
+                }))
+            }
+            pm::HAS_SYSTEM_UID_ERRORS => {
+                args(pm::HasSystemUidErrors::read(r))?;
+                // The pinned IPackageManagerBase unconditionally reports false.
+                Ok(reply(|p| pm::write_has_system_uid_errors_reply(p, false)))
+            }
             pm::GET_INSTRUMENTATION_INFO_AS_USER => {
                 let a = args(pm::GetInstrumentationInfoAsUser::<ComponentName>::read(r))?;
                 thrown(
@@ -412,6 +471,247 @@ impl Query<'_> {
         }
     }
 
+    fn cross_profile_property(&self, user: i32) -> Thrown<()> {
+        let uid = self.calling_uid;
+        if user < 0 || user == user_id(uid) || matches!(app_id(uid), ROOT_UID | SYSTEM_UID) {
+            return self.enforce_cross_user(user, false, false, "getPropertyAsUser");
+        }
+        if self.uid_has_permission(uid, INTERACT_ACROSS_USERS_FULL)?
+            || self.uid_has_permission(uid, INTERACT_ACROSS_USERS)?
+        {
+            return Ok(Ok(()));
+        }
+        let caller = self.user(user_id(uid));
+        let target = self.user(user);
+        let same = caller.zip(target).is_some_and(|(c, t)| {
+            c.profile_group_id >= 0 && c.profile_group_id == t.profile_group_id
+        });
+        if same && self.uid_has_permission(uid, "android.permission.INTERACT_ACROSS_PROFILES")? {
+            return Err(NotModelled("cross-profile property AppOps preflight owner"));
+        }
+        let profiles = if same {
+            " or android.permission.INTERACT_ACROSS_PROFILES"
+        } else {
+            ""
+        };
+        Ok(Err(Exception::security(format!(
+            "getPropertyAsUser: UID {uid} requires {INTERACT_ACROSS_USERS_FULL} or {INTERACT_ACROSS_USERS}{profiles} to access user {user}."
+        ))))
+    }
+
+    pub(super) fn package_property(
+        &self,
+        name: Option<&str>,
+        package: Option<&str>,
+        class: Option<&str>,
+        user: i32,
+    ) -> Thrown<Option<Property>> {
+        let (Some(name), Some(package)) = (name, package) else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null property or package name",
+            )));
+        };
+        if let Err(e) = self.cross_profile_property(user)? {
+            return Ok(Err(e));
+        }
+        let resolved = self.resolve_internal_package_name(package, VERSION_CODE_HIGHEST);
+        if self.visible_user_state(&resolved, user)?.is_none() {
+            return Ok(Ok(None));
+        }
+        if let Some(registry) = &self.state.package_registry {
+            return Ok(Ok(registry
+                .property(name, package, class)
+                .cloned()
+                .map(Property::checked)
+                .transpose()?));
+        }
+        let Some((_, pkg)) = self.package_of(package) else {
+            return Ok(Ok(None));
+        };
+        if class.is_none() {
+            return Ok(Ok(pkg
+                .properties
+                .iter()
+                .flatten()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, property)| Property::checked(property.clone()))
+                .transpose()?));
+        }
+        for kind in [1, 4, 2, 3] {
+            if let Some(property) = properties(pkg, kind)
+                .into_iter()
+                .rev()
+                .flat_map(|p| p.iter().rev())
+                .find(|(key, p)| key == name && p.class_name.as_deref() == class)
+                .map(|(_, p)| Property::checked(p.clone()))
+                .transpose()?
+            {
+                return Ok(Ok(Some(property)));
+            }
+        }
+        Ok(Ok(None))
+    }
+
+    pub(super) fn query_properties(&self, name: Option<&str>, kind: i32) -> Thrown<Vec<Property>> {
+        let Some(name) = name else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null property name",
+            )));
+        };
+        if !(1..=5).contains(&kind) {
+            return Ok(Ok(Vec::new()));
+        }
+        if let Some(registry) = &self.state.package_registry {
+            let mut result = Vec::new();
+            for (package, properties) in registry.property_packages(name, kind) {
+                let resolved = self.resolve_internal_package_name(package, VERSION_CODE_HIGHEST);
+                if self
+                    .visible_user_state(&resolved, user_id(self.calling_uid))?
+                    .is_none()
+                {
+                    continue;
+                }
+                for property in properties {
+                    result.push(Property::checked(property.clone())?);
+                }
+            }
+            return Ok(Ok(result));
+        }
+        let mut packages = self.packages_in_order();
+        if packages
+            .windows(2)
+            .any(|p| info::java_hash(&p[0].name) == info::java_hash(&p[1].name))
+        {
+            return Err(NotModelled(
+                "property package registry collision insertion order",
+            ));
+        }
+        let mut result = Vec::new();
+        for ps in packages.drain(..) {
+            let Some(pkg) = ps.pkg.as_deref() else {
+                continue;
+            };
+            if self.filtered_including_uninstalled(Some(ps), user_id(self.calling_uid))? {
+                continue;
+            }
+            for group in properties(pkg, kind) {
+                for (key, property) in group {
+                    if key == name {
+                        result.push(Property::checked(property.clone())?);
+                    }
+                }
+            }
+        }
+        Ok(Ok(result))
+    }
+
+    pub(super) fn content_providers(
+        &self,
+        process: Option<&str>,
+        uid: i32,
+        flags: i64,
+        metadata: Option<&str>,
+    ) -> Thrown<Vec<info::ProviderInfo>> {
+        let user = if process.is_some() {
+            user_id(uid)
+        } else {
+            user_id(self.calling_uid)
+        };
+        if let Err(e) = self.enforce_cross_user(user, false, false, "queryContentProviders")? {
+            return Ok(Err(e));
+        }
+        if self.user(user).is_none() {
+            return Ok(Ok(Vec::new()));
+        }
+        let flags = self.update_flags_for_component(flags, user);
+        let mut registered: Vec<(&PackageState, &AndroidPackage, &super::super::pkg::Provider)> =
+            Vec::new();
+        for ps in self.state.packages.values() {
+            let Some(pkg) = ps.pkg.as_deref() else {
+                continue;
+            };
+            for provider in &pkg.providers {
+                if let Some(index) = registered.iter().position(|(_, _, p)| {
+                    p.main.component.package_name == provider.main.component.package_name
+                        && p.main.component.name == provider.main.component.name
+                }) {
+                    registered[index] = (ps, pkg, provider);
+                } else {
+                    registered.push((ps, pkg, provider));
+                }
+            }
+        }
+        if let Some(registry) = &self.state.package_registry {
+            registered.clear();
+            for provider in registry.providers() {
+                let (ps, pkg) = self
+                    .package_of(&provider.package)
+                    .ok_or(NotModelled("registered provider has no current code"))?;
+                registered.push((ps, pkg, &provider.value));
+            }
+        }
+        let hash = |p: &super::super::pkg::Provider| {
+            info::java_hash(&p.main.component.package_name)
+                .wrapping_add(info::java_hash(&p.main.component.name))
+        };
+        registered.sort_by_key(|(_, _, p)| hash(p));
+        if self.state.package_registry.is_none()
+            && registered.windows(2).any(|p| hash(p[0].2) == hash(p[1].2))
+        {
+            return Err(NotModelled("provider registry collision insertion order"));
+        }
+        let mut result = Vec::new();
+        for (ps, pkg, provider) in registered.into_iter().rev() {
+            let Some(authority) = provider.authority.as_deref() else {
+                continue;
+            };
+            if self.state.package_registry.is_none() && provider.syncable && authority.contains(';')
+            {
+                return Err(NotModelled("syncable provider registered authority owner"));
+            }
+            if let Some(process) = process {
+                let owner = provider
+                    .main
+                    .process_name
+                    .as_deref()
+                    .ok_or(NotModelled("provider process owner"))?;
+                if owner != process || app_id(pkg.uid) != app_id(uid) {
+                    continue;
+                }
+            }
+            if let Some(key) = metadata {
+                let Some(values) = &provider.main.component.meta_data else {
+                    return Ok(Err(Exception::new(
+                        aim_binder_host::parcel::EX_NULL_POINTER,
+                        "provider metadata is null",
+                    )));
+                };
+                if !values.0.iter().any(|(name, _)| name == key) {
+                    continue;
+                }
+            }
+            let state = user_state(ps, user);
+            if !info::is_enabled_and_matches(ps, &provider.main, flags, user)
+                || self.filtered(Some(ps), self.calling_uid, user)?
+            {
+                continue;
+            }
+            if let Some(info) = info::generate_provider_info(
+                &self.target(ps, pkg, &state, user),
+                provider,
+                flags,
+                None,
+            ) {
+                result.push(info);
+            }
+        }
+        result.sort_by_key(|p| std::cmp::Reverse(p.init_order));
+        Ok(Ok(result))
+    }
+
     pub(super) fn instrumentation_info(
         &self,
         component: Option<&ComponentName>,
@@ -435,9 +735,19 @@ impl Query<'_> {
         let Some((ps, pkg)) = self.package_of(&component.package) else {
             return Ok(Ok(None));
         };
-        let instrument = pkg.instrumentations.iter().rev().find(|i| {
-            i.component.name == component.class && i.component.package_name == component.package
-        });
+        let instrument = if let Some(registry) = &self.state.package_registry {
+            registry
+                .instruments()
+                .into_iter()
+                .find(|i| {
+                    i.package == component.package && i.value.component.name == component.class
+                })
+                .map(|i| &i.value)
+        } else {
+            pkg.instrumentations.iter().rev().find(|i| {
+                i.component.name == component.class && i.component.package_name == component.package
+            })
+        };
         if let Some(instrument) = instrument {
             let caller = if apps_filter::is_isolated(self.calling_uid) {
                 self.state
@@ -507,14 +817,24 @@ impl Query<'_> {
                 }
             }
         }
+        if let Some(registry) = &self.state.package_registry {
+            registered.clear();
+            for instrument in registry.instruments() {
+                let (ps, pkg) = self.package_of(&instrument.package).ok_or(NotModelled(
+                    "registered instrumentation has no current code",
+                ))?;
+                registered.push((ps, pkg, &instrument.value));
+            }
+        }
         let hash = |i: &super::super::pkg::Instrumentation| {
             info::java_hash(&i.component.package_name)
                 .wrapping_add(info::java_hash(&i.component.name))
         };
         registered.sort_by_key(|(_, _, i)| hash(i));
-        if registered
-            .windows(2)
-            .any(|pair| hash(pair[0].2) == hash(pair[1].2))
+        if self.state.package_registry.is_none()
+            && registered
+                .windows(2)
+                .any(|pair| hash(pair[0].2) == hash(pair[1].2))
         {
             return Err(NotModelled(
                 "instrumentation registry collision insertion order",
@@ -1949,5 +2269,82 @@ pub(super) struct Instrumentation(pub(super) info::InstrumentationInfo);
 impl aim_service_aidl::WriteParcelable for Instrumentation {
     fn write_to(&self, p: &mut Parcel) {
         self.0.write(p);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Property(pub(super) super::super::pkg::Property, PropertyWireValue);
+#[derive(Clone, Debug)]
+enum PropertyWireValue {
+    Bool(bool),
+    Float(f32),
+    Int(i32),
+    Resource(i32),
+    String(Option<String>),
+}
+impl Property {
+    fn checked(raw: super::super::pkg::Property) -> Result<Self, NotModelled> {
+        use super::super::pkg::PropertyValue;
+        let value = match &raw.value {
+            PropertyValue::Bool(v) => PropertyWireValue::Bool(*v),
+            PropertyValue::Float(v) => PropertyWireValue::Float(*v),
+            PropertyValue::Int(v) => PropertyWireValue::Int(*v),
+            PropertyValue::Resource(v) => PropertyWireValue::Resource(*v),
+            PropertyValue::String(v) => PropertyWireValue::String(v.clone()),
+            PropertyValue::Unknown(_) => return Err(NotModelled("unknown parsed property type")),
+        };
+        Ok(Self(raw, value))
+    }
+}
+impl aim_service_aidl::WriteParcelable for Property {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_string16(self.0.name.as_deref());
+        p.write_i32(match self.1 {
+            PropertyWireValue::Bool(_) => 1,
+            PropertyWireValue::Float(_) => 2,
+            PropertyWireValue::Int(_) => 3,
+            PropertyWireValue::Resource(_) => 4,
+            PropertyWireValue::String(_) => 5,
+        });
+        p.write_string16(self.0.package_name.as_deref());
+        p.write_string16(self.0.class_name.as_deref());
+        match &self.1 {
+            PropertyWireValue::Bool(v) => p.write_bool(*v),
+            PropertyWireValue::Float(v) => p.write_f32(*v),
+            PropertyWireValue::Int(v) | PropertyWireValue::Resource(v) => p.write_i32(*v),
+            PropertyWireValue::String(v) => p.write_string16(v.as_deref()),
+        }
+    }
+}
+fn properties(pkg: &AndroidPackage, kind: i32) -> Vec<&[(String, super::super::pkg::Property)]> {
+    match kind {
+        1 => pkg
+            .activities
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        2 => pkg
+            .receivers
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        3 => pkg
+            .services
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        4 => pkg
+            .providers
+            .iter()
+            .filter_map(|p| p.main.component.properties.as_deref())
+            .collect(),
+        5 => pkg.properties.as_deref().into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+struct EmptyListSlice;
+impl aim_service_aidl::WriteParcelable for EmptyListSlice {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_i32(0);
     }
 }

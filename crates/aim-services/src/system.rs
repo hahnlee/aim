@@ -1527,6 +1527,14 @@ impl System {
         Ok((current.bridge.clone(), persistence))
     }
 
+    pub(crate) fn package_shell_debugging_policy(&self, user: i32) -> Result<bool> {
+        let bridge = self.package_bootstrap()?;
+        let restricted = bridge.shell_debugging_restricted(user).map_err(|error| Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("shell user policy owner: {error:?}")))?;
+        self.check_package_bootstrap(&bridge)?;
+        Ok(restricted)
+    }
+
     pub(crate) fn commit_package_mutation(
         &self,
         request: &crate::package::write::mutation::Request,
@@ -1553,6 +1561,17 @@ impl System {
             (current.bridge.clone(), persistence)
         };
         let mut disk = persistence.lock().unwrap();
+        let restricted = match request {
+            crate::package::write::mutation::Request::HarmfulWarning { user, .. } if uid == 2000 && *user >= 0 => {
+                if let Err(error) = self.check_package_bootstrap(&bridge) { return Ok(Err(error)); }
+                let policy = match bridge.shell_debugging_restricted(*user) {
+                    Ok(value) => value,
+                    Err(error) => return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, format!("shell user policy owner: {error:?}")))),
+                };
+                Some(policy)
+            }
+            _ => None,
+        };
         let mut state = self.package_bootstrap.lock().unwrap();
         let Some(current) = state.current.as_mut().filter(|owner| {
             Arc::ptr_eq(&owner.bridge, &bridge)
@@ -1587,7 +1606,7 @@ impl System {
             calling_uid: uid,
         };
         let plan = match request
-            .decide(&query, pid)
+            .decide_with_shell(&query, pid, restricted)
             .map_err(QueryError::NotModelled)?
         {
             Ok(plan) => plan,

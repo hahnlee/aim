@@ -13,7 +13,7 @@ impl Service for SessionNode {
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         // Decode before mutation: trailing bytes must not change state.
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         enum Action {
             Set(f32),
             Add(f32),
@@ -21,8 +21,36 @@ impl Service for SessionNode {
             AddChild(i32),
             RemoveChild(i32),
             Read,
+            Names,
+            OpenRead(Option<String>),
+            RemoveSplit(Option<String>),
+            Abandon,
+            Loader,
+            Seal,
+            Transfer(Option<String>),
         }
         let action = match call.code {
+            aidl::TRANSFER => Action::Transfer(aidl::Transfer::read(&mut call.data)?.package_name),
+            aidl::SEAL => {
+                aidl::Seal::read(&mut call.data)?;
+                Action::Seal
+            }
+            aidl::GET_NAMES => {
+                aidl::GetNames::read(&mut call.data)?;
+                Action::Names
+            }
+            aidl::OPEN_READ => Action::OpenRead(aidl::OpenRead::read(&mut call.data)?.name),
+            aidl::REMOVE_SPLIT => {
+                Action::RemoveSplit(aidl::RemoveSplit::read(&mut call.data)?.split_name)
+            }
+            aidl::ABANDON => {
+                aidl::Abandon::read(&mut call.data)?;
+                Action::Abandon
+            }
+            aidl::GET_DATA_LOADER_PARAMS => {
+                aidl::GetDataLoaderParams::read(&mut call.data)?;
+                Action::Loader
+            }
             aidl::SET_CLIENT_PROGRESS => {
                 Action::Set(aidl::SetClientProgress::read(&mut call.data)?.progress)
             }
@@ -84,7 +112,61 @@ impl Service for SessionNode {
             return Err(BAD_VALUE);
         }
         let mut reply = Parcel::new();
-        let result = match action {
+        let result = match action.clone() {
+            Action::Transfer(name) => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.transfer_session(self.id, call.sender_euid, name)),
+            Action::Seal => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.seal_session(self.id, call.sender_euid)),
+            Action::Names => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.names(self.id, call.sender_euid))
+                .map(|names| aidl::write_get_names_reply(&mut reply, &Some(names))),
+            Action::OpenRead(name) => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.open_read(self.id, call.sender_euid, name))
+                .map(|file| {
+                    reply.write_no_exception();
+                    reply.write_i32(1);
+                    reply.write_i32(0);
+                    reply.write_file(file);
+                }),
+            Action::RemoveSplit(name) => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.remove_split(self.id, call.sender_euid, name)),
+            Action::Abandon => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.abandon_session(self.id, call.sender_euid)),
+            Action::Loader => self
+                .operations
+                .as_ref()
+                .ok_or_else(missing)
+                .and_then(|owner| owner.data_loader(self.id, call.sender_euid))
+                .map(|value| {
+                    reply.write_no_exception();
+                    if let Some(value) = value {
+                        let mut reader =
+                            aim_binder_host::parcel::Reader::new(&value.bytes, &value.objects);
+                        reader.read_string16().unwrap();
+                        reply.write_i32(1);
+                        reply.write_raw(&value.bytes[reader.position()..], &[]);
+                    } else {
+                        reply.write_i32(0);
+                    }
+                }),
             Action::Set(value) => self
                 .sessions
                 .progress(self.id, call.sender_euid, value, false)
@@ -106,8 +188,22 @@ impl Service for SessionNode {
                     (self.notify)(event);
                 }
             }),
-            Action::AddChild(id) => self.sessions.add_child(self.id, id, call.sender_euid),
-            Action::RemoveChild(id) => self.sessions.remove_child(self.id, id, call.sender_euid),
+            Action::AddChild(id) => self
+                .sessions
+                .add_child(self.id, id, call.sender_euid)
+                .and_then(|()| {
+                    self.operations
+                        .as_ref()
+                        .map_or(Ok(()), |owner| owner.graph_changed())
+                }),
+            Action::RemoveChild(id) => self
+                .sessions
+                .remove_child(self.id, id, call.sender_euid)
+                .and_then(|()| {
+                    self.operations
+                        .as_ref()
+                        .map_or(Ok(()), |owner| owner.graph_changed())
+                }),
             Action::Read => self
                 .sessions
                 .snapshot(self.id)
@@ -148,7 +244,10 @@ impl Service for SessionNode {
         };
         match result {
             Ok(()) => {
-                if !matches!(action, Action::Read) {
+                if !matches!(
+                    action,
+                    Action::Read | Action::Names | Action::OpenRead(_) | Action::Loader
+                ) {
                     reply.write_no_exception();
                 }
             }
@@ -156,4 +255,11 @@ impl Service for SessionNode {
         }
         Ok(reply)
     }
+}
+
+fn missing() -> Exception {
+    Exception::new(
+        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+        "Native session storage owner unavailable",
+    )
 }

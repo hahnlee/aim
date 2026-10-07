@@ -54,8 +54,16 @@ public final class InstallerUserPolicyOracle {
             try { InstallerUserPolicy.capture(-1); throw new AssertionError("negative user accepted"); }
             catch (IllegalArgumentException expected) {}
             missing();
+            try { InstallerUserPolicy.shellDebuggingRestricted(USER); throw new AssertionError("missing shell policy owner accepted"); }
+            catch (IllegalStateException expected) {}
             var users = new FixtureUsers();
             LocalServices.addService(UserManagerInternal.class, users);
+            for (int flags : new int[] { 0, 4 }) {
+                users.flags = flags;
+                if (InstallerUserPolicy.shellDebuggingRestricted(USER) != (flags == 4))
+                    throw new AssertionError("shell restriction changed without DPM or existing user");
+            }
+            users.flags = 0;
             missing();
             LocalServices.removeServiceForTest(UserManagerInternal.class);
             var policy = new FixtureDevicePolicy();
@@ -82,7 +90,17 @@ public final class InstallerUserPolicyOracle {
             users.failure = failure;
             try { InstallerUserPolicy.capture(USER); throw new AssertionError("owner failure swallowed"); }
             catch (IllegalArgumentException expected) { if (expected != failure) throw expected; }
+            try { InstallerUserPolicy.shellDebuggingRestricted(USER); throw new AssertionError("shell owner failure swallowed"); }
+            catch (IllegalArgumentException expected) { if (expected != failure) throw expected; }
             users.failure = null;
+            users.replace = () -> {
+                LocalServices.removeServiceForTest(UserManagerInternal.class);
+                LocalServices.addService(UserManagerInternal.class, new FixtureUsers());
+            };
+            try { InstallerUserPolicy.shellDebuggingRestricted(USER); throw new AssertionError("replaced shell policy owner accepted"); }
+            catch (IllegalStateException expected) {}
+            LocalServices.removeServiceForTest(UserManagerInternal.class);
+            LocalServices.addService(UserManagerInternal.class, users);
             users.replace = () -> {
                 LocalServices.removeServiceForTest(UserManagerInternal.class);
                 LocalServices.addService(UserManagerInternal.class, new FixtureUsers());

@@ -413,6 +413,97 @@ impl Store {
         (self.labeler)(&path, &self.guest_stage(session, record).unwrap())?;
         Ok(())
     }
+    pub fn names(&self, session: &Session, record: &Record) -> Result<Vec<Option<String>>, Error> {
+        if session.parameters.multi_package {
+            return Ok(Vec::new());
+        }
+        let path = self.stage_path(session, record)?;
+        let mut names = Vec::new();
+        match fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    let name = entry
+                        .map_err(before)?
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned();
+                    if name != "app.metadata" {
+                        names.push(Some(name));
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) => {}
+            Err(error) => return Err(before(error)),
+        }
+        Ok(names)
+    }
+    pub fn read_file(
+        &self,
+        session: &Session,
+        record: &Record,
+        name: Option<&str>,
+    ) -> Result<std::fs::File, Error> {
+        let name = name
+            .filter(|name| valid_filename(name))
+            .ok_or_else(|| before("invalid session filename"))?;
+        let path = self.stage_path(session, record)?.join(name);
+        if guest_inode::read(&path)
+            .map_err(before)?
+            .and_then(|inode| inode.mode)
+            .is_some_and(|mode| mode & 0o444 == 0)
+        {
+            return Err(before(std::io::Error::from_raw_os_error(libc::EACCES)));
+        }
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(before)
+    }
+    pub fn remove_split(
+        &self,
+        session: &Session,
+        record: &Record,
+        name: Option<&str>,
+    ) -> Result<(), Error> {
+        let marker = format!("{}.removed", name.unwrap_or("null"));
+        if !valid_filename(&marker) {
+            return Err(before("invalid split marker"));
+        }
+        let path = self.stage_path(session, record)?.join(marker);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(before(error)),
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(before)?;
+        guest_inode::record(
+            &path,
+            GuestInode {
+                mode: Some(0),
+                ..self.stage_inode
+            },
+        )
+        .map_err(before)?;
+        (self.labeler)(
+            &path,
+            &format!(
+                "{}/{}",
+                self.guest_stage(session, record).unwrap(),
+                path.file_name().unwrap().to_string_lossy()
+            ),
+        )?;
+        Ok(())
+    }
     pub fn resolved_path(
         &self,
         session: &Session,
@@ -737,4 +828,11 @@ mod tests {
             );
         }
     }
+}
+
+pub(crate) fn valid_filename(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "." | "..")
+        && !name.contains(['\0', '/'])
+        && name.len() <= 255
 }

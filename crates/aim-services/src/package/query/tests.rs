@@ -835,3 +835,55 @@ fn instrumentation_queries_keep_last_component_and_preserve_requested_metadata_a
     let reply=query.answer(pm::DESCRIPTOR,pm::GET_INSTRUMENTATION_INFO_AS_USER,&mut Reader::new(args.data(),args.objects())).unwrap();
     let mut reader=Reader::new(reply.data(),reply.objects());reader.read_exception().unwrap().unwrap();assert_eq!(reader.read_i32().unwrap(),1);
 }
+
+#[test]
+fn property_routes_use_location_priority_visibility_and_reject_unknown_types() {
+    use crate::package::pkg::{Property,PropertyValue,Provider};
+    let mut state=state();
+    let code=Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
+    let property=|class:Option<&str>,value|Property{name:Some("owned".into()),package_name:Some(APP.into()),class_name:class.map(str::to_owned),value};
+    code.properties=Some(vec![("owned".into(),property(None,PropertyValue::Resource(0x7f010001)))]);
+    code.activities[0].main.component.properties=Some(vec![("owned".into(),property(Some("org.example.app.Main"),PropertyValue::Int(1)))]);
+    let mut provider=Provider::default();provider.main.component.name="org.example.app.Main".into();provider.main.component.package_name=APP.into();provider.main.component.properties=Some(vec![("owned".into(),property(Some("org.example.app.Main"),PropertyValue::Int(2)))]);code.providers.push(provider);
+    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
+    let query=Query{state:&state,filter:&filter,calling_uid:1000};
+    let application=query.package_property(Some("owned"),Some(APP),None,0).unwrap().unwrap().unwrap();
+    assert_eq!(application.0.value,PropertyValue::Resource(0x7f010001));
+    let component=query.package_property(Some("owned"),Some(APP),Some("org.example.app.Main"),0).unwrap().unwrap().unwrap();
+    assert_eq!(component.0.value,PropertyValue::Int(1));
+    let providers=query.query_properties(Some("owned"),4).unwrap().unwrap();assert_eq!(providers.len(),1);assert_eq!(providers[0].0.value,PropertyValue::Int(2));
+    assert!(query.query_properties(Some("owned"),0).unwrap().unwrap().is_empty());
+    let mut args=Parcel::new();pm::GetPropertyAsUser{property_name:Some("owned".into()),package_name:Some(APP.into()),class_name:None,user_id:0}.write(&mut args);
+    let reply=query.answer(pm::DESCRIPTOR,pm::GET_PROPERTY_AS_USER,&mut Reader::new(args.data(),args.objects())).unwrap();
+    let mut reader=Reader::new(reply.data(),reply.objects());reader.read_exception().unwrap().unwrap();assert_eq!(reader.read_i32().unwrap(),1);assert_eq!(reader.read_string16().unwrap().as_deref(),Some("owned"));assert_eq!(reader.read_i32().unwrap(),4);assert_eq!(reader.read_string16().unwrap().as_deref(),Some(APP));assert_eq!(reader.read_string16().unwrap(),None);assert_eq!(reader.read_i32().unwrap(),0x7f010001);assert_eq!(reader.remaining(),0);
+    drop(query);drop(filter);
+    Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap()).properties.as_mut().unwrap()[0].1.value=PropertyValue::Unknown(99);
+    let filter=AppsFilter::new(&state,&Default::default()).unwrap();let query=Query{state:&state,filter:&filter,calling_uid:1000};
+    assert!(query.package_property(Some("owned"),Some(APP),None,0).is_err());assert!(query.query_properties(Some("owned"),5).is_err());
+}
+
+#[test]
+fn content_provider_query_filters_process_uid_metadata_and_orders_initialization() {
+    use crate::package::pkg::Provider;
+    let mut state=state();
+    let code=Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap());
+    code.providers=[("p.Low",1),("p.High",9)].map(|(name,order)| {
+        let mut provider=Provider::default();provider.main.component.name=name.into();provider.main.component.package_name=APP.into();provider.main.enabled=true;provider.main.exported=true;provider.main.direct_boot_aware=true;provider.main.process_name=Some("process".into());provider.main.component.meta_data=Some(MetaData(vec![("metadata-key".into(),Meta::Int(7))]));provider.authority=Some(format!("authority.{order}"));provider.init_order=order;provider
+    }).into();
+    let filter=AppsFilter::new(&state,&Default::default()).unwrap();let query=Query{state:&state,filter:&filter,calling_uid:1000};
+    let providers=query.content_providers(Some("process"),10100,GET_META_DATA,Some("metadata-key")).unwrap().unwrap();
+    assert_eq!(providers.len(),2);assert_eq!(providers[0].init_order,9);assert_eq!(providers[1].init_order,1);assert!(providers[0].info.item.meta_data.is_some());
+    assert!(query.content_providers(Some("process"),10101,0,None).unwrap().unwrap().is_empty());
+    assert!(query.content_providers(Some("different"),10100,0,None).unwrap().unwrap().is_empty());
+    assert!(query.content_providers(None,99999999,0,Some("missing-key")).unwrap().unwrap().is_empty());
+    assert_eq!(query.content_providers(None,99999999,0,None).unwrap().unwrap().len(),2);
+}
+
+#[test]
+fn retired_aosp_reads_preserve_exact_empty_slice_and_false_contracts() {
+    let state=state();
+    let reply=call(&state,10100,false,pm::HAS_SYSTEM_UID_ERRORS,|p|pm::HasSystemUidErrors{}.write(p));
+    assert!(!pm::read_has_system_uid_errors_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap());
+    let reply=call(&state,10100,false,pm::GET_INTENT_FILTER_VERIFICATIONS,|p|pm::GetIntentFilterVerifications{package_name:None}.write(p));
+    let mut reader=Reader::new(reply.data(),reply.objects());reader.read_exception().unwrap().unwrap();assert_eq!(reader.read_i32().unwrap(),1);assert_eq!(reader.read_i32().unwrap(),0);assert_eq!(reader.remaining(),0);
+}

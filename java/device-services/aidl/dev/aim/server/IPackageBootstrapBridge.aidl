@@ -45,4 +45,6 @@ interface IPackageBootstrapBridge {
     void restoreInstallerContext(String path);
     /** Current original user/DPM owners: user ID, exists, install/debug restrictions, managed. */
     byte[] getInstallerUserPolicy(int userId);
+    /** Current UserManager shell restriction, independent of DPM startup. */
+    boolean isShellDebuggingRestricted(int userId);
 }

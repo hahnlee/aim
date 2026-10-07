@@ -566,6 +566,7 @@ impl Capture {
             uid_owners: Some(uid_owners),
             renamed_packages: Some(owner.settings.renamed_packages.clone()),
             shared_libraries: Some(scan.owner().libraries.entries().cloned().collect()),
+            package_registry: Some(Arc::new(scan.owner().package_registry()?.clone())),
             protected_broadcasts: Some(
                 scan.owner()
                     .loaded_packages()

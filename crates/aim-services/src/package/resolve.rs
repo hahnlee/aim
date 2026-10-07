@@ -1003,17 +1003,15 @@ impl Resolution {
             Some((u, a)) => (a, uri::parse_int(u).unwrap_or(-10000)),
             None => (name, user),
         };
-        let provider = self.components.provider_by_authority(authority);
-        if provider.is_some() && user != user_id(calling_uid) {
+        let native=self.state.package_registry.as_ref().map(|r|r.authority(authority));
+        let legacy=if native.is_none() {self.components.provider_by_authority(authority)} else {None};
+        let exists=native.as_ref().is_some_and(|p|p.is_some()) || legacy.is_some();
+        if exists && user != user_id(calling_uid) {
             return Err(NotModelled("another user's provider (URI grants)").into());
         }
-        self.enforce_cross_user(calling_uid, user)?;
-        let Some(registered) = provider else {
-            return Ok(None);
-        };
-        let Some(ps) = self.state.packages.get(&registered.package) else {
-            return Ok(None);
-        };
+        self.enforce_cross_user(calling_uid,user)?;
+        let package=match native {Some(Some(row))=>row.package.as_str(),Some(None)=>return Ok(None),None=>match legacy {Some(row)=>row.package.as_str(),None=>return Ok(None)}};
+        let Some(ps)=self.state.packages.get(package) else {return Ok(None);};
         let Some(pkg) = ps.pkg.as_deref() else {
             return Ok(None);
         };
@@ -1028,11 +1026,9 @@ impl Resolution {
         let Some(app) = generate_application_info(&t, flags) else {
             return Ok(None);
         };
-        let mut provider = Cow::Borrowed(&pkg.providers[registered.index]);
-        if let Some(copy) = &registered.copy {
-            let p = provider.to_mut();
-            p.authority = Some(copy.clone());
-            p.syncable = false;
+        let mut provider=if let Some(Some(row))=native {Cow::Borrowed(&row.value)} else {Cow::Borrowed(&pkg.providers[legacy.unwrap().index])};
+        if let Some(copy)=legacy.and_then(|registered|registered.copy.as_ref()) {
+            let p=provider.to_mut();p.authority=Some(copy.clone());p.syncable=false;
         }
         let Some(pi) = generate_provider_info(&t, &provider, flags, Some(Arc::new(app))) else {
             return Ok(None);

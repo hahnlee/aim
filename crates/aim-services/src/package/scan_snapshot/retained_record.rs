@@ -1,7 +1,7 @@
 //! Complete unparsed shared-setting instance, distinct from the current name owner.
 use crate::package::owner::{app_ids::DetachedSetting, shared_users::SharedUser};
 use aim_binder_host::parcel::Parcel;
-use aim_service_aidl::{WriteParcelable, write_byte_array};
+use aim_service_aidl::{write_byte_array, WriteParcelable};
 
 pub(super) fn captured(
     version: u64,
@@ -9,6 +9,37 @@ pub(super) fn captured(
     group: &SharedUser,
     value: &DetachedSetting,
 ) -> Result<Vec<u8>, String> {
+    let mut signing = Parcel::new();
+    super::endpoint::PackageSigningState::retained(version, &value.package, group_name, group)?
+        .write_to(&mut signing);
+    write(version, value, signing.data())
+}
+
+pub(super) fn detached(version: u64, value: &DetachedSetting) -> Result<Vec<u8>, String> {
+    use crate::package::sign::SigningDetails;
+    let setting = &value.package;
+    if setting.shared_user {
+        return Err("detached UID slot has a shared setting".into());
+    }
+    let details = setting
+        .signatures
+        .as_ref()
+        .map(SigningDetails::from_saved)
+        .transpose()?;
+    let mut signing = Parcel::new();
+    signing.write_i64(version as i64);
+    signing.write_string16(Some(&setting.name));
+    signing.write_i32(setting.app_id);
+    signing.write_bool(false);
+    signing.write_string16(None);
+    signing.write_i32(0);
+    signing.write_string16(None);
+    super::endpoint::write_signing(&mut signing, details.as_ref());
+    super::endpoint::write_signing(&mut signing, None);
+    write(version, value, signing.data())
+}
+
+fn write(version: u64, value: &DetachedSetting, signing: &[u8]) -> Result<Vec<u8>, String> {
     let setting = &value.package;
     let legacy = value
         .legacy
@@ -28,10 +59,7 @@ pub(super) fn captured(
     let metadata =
         super::setting_record::write(version, setting, false, Some(legacy), Some(fixed))?;
     write_byte_array(&mut p, Some(&metadata));
-    let mut signing = Parcel::new();
-    super::endpoint::PackageSigningState::retained(version, setting, group_name, group)?
-        .write_to(&mut signing);
-    write_byte_array(&mut p, Some(signing.data()));
+    write_byte_array(&mut p, Some(signing));
     let runtime = super::runtime_record::write(version, setting, false, false, runtime)?;
     write_byte_array(&mut p, Some(&runtime));
     let mut transient = Parcel::new();
