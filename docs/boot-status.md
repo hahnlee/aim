@@ -1121,8 +1121,23 @@ reading restriction/runtime-permission files, including Store document loading
 (#977). Access/list state stays with its separate owners. Recursive failRead keeps
 its outer true continuation and restores package-user files; related errors remain
 visible. Users whose restriction documents were skipped cannot be mutated by
-enabled/removal/preferred writes until actual owner readiness. Unparsed first-boot
-file claims and initialized writes remain #978; no skipped document is rewritten.
+enabled/removal/preferred writes until actual owner readiness. Store now exposes
+claim_unread_restrictions and commit_initial_restrictions: the claim opens regular
+main/backup/reserve files without XML parsing (O_NOFOLLOW), pins descriptors and
+bytes, and verifies directory/file identity and contents before the initialized
+write. The completed document must have exactly the current package inventory;
+external changes reject before mutation. The original atomic-write owner handles
+backup/main/reserve, and failed main writes retain recognized output claims for
+retry. Main commit with reserve failure publishes state and clears unread guards.
+Native fault checks cover malformed input, old backup preservation, successful
+retry, same-inode outside writes and committed reserve failure. Real native scan/
+user readiness, whole first-boot owner handoff and original reboot/app checks
+remain #978; ordinary writes remain guarded before this explicit initialization.
+537 service units pass (5 excluded, 0.56s), including main-write rollback/retry,
+external byte mutation and committed reserve failure. Runtime build passes
+(3 rebuilt/39 fresh, 19.3s); retained-bootstrap/framework-res scan passes (1.28s).
+Original ART/user false-continuation checks passed on the preceding revision
+(69.53s) and were not rerun for this new initialized-write API.
 Actual original absent/no-start probes with malformed user files return false,
 preserve both files and run finally VersionInfo initialization. Native units cover
 that skip, write refusal and the contrasting failed-read retry continuation.
@@ -1158,7 +1173,7 @@ oracle passes without skips (69.53s), preserving eight boot version cases and
 earlier domain/verifier/package/shared/keyset/permission checks. Preceding original
 API/image/template build passed (9 rebuilt/33 fresh, 85.7s), including the new
 compile-only original Settings install-permission declaration. Final host build
-is fresh (0 rebuilt/13 fresh, 0.3s); 536 service units pass (5 excluded, 0.59s).
+is fresh (0 rebuilt/13 fresh, 0.3s); 537 service units pass (5 excluded, 0.56s).
 The retained-owner framework-res scan passes (1.27s), including owned recovery,
 domain and fatal keyset mapping checks. Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
@@ -2613,7 +2628,7 @@ file-error retry, repeated retained packages, rejected UID registration and
 constructor state retained after invalid page-size input, and the same pending
 package recreated from reserve after a corrupt main read. The complete original
 ART oracle passes without skips (69.53s);
-536 service units pass (5 excluded, 0.59s). Current runtime build passes
+537 service units pass (5 excluded, 0.56s). Current runtime build passes
 (3 rebuilt/39 fresh, 15.5s); the prior image/API/template build passed (85.7s).
 Eight text/ABX install cases now compare the native event reader with the actual
 original Settings method; the four legacy-restoration graph cases use that same

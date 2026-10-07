@@ -115,6 +115,39 @@ fn false_boot_continuation_skips_package_user_files_but_retry_continues_them() {
     assert_eq!(fs::read(&restrictions).unwrap(), b"malformed package user file");
 }
 
+#[test]
+fn unread_restriction_claim_detects_external_changes_and_survives_failed_first_write() {
+    use crate::package::settings::{Settings,Version};
+    let data = Data::new(); let path = data.settings(); fs::remove_file(data.0.join("system/packages.xml")).unwrap();
+    fs::write(&path, b"unparsed malformed main").unwrap();
+    let backup = path.with_file_name("package-restrictions-backup.xml"); let reserve = sibling(&path, ".reservecopy");
+    fs::write(&reserve, b"unparsed malformed reserve").unwrap();
+    let current = Version {sdk_version:36,database_version:3,..Default::default()}; let mut settings=Settings::default();
+    let (mut store,_) = recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!("absent input read")).unwrap();
+    store.claim_unread_restrictions(0).unwrap();
+    let root=aim_android_xml::read(b"<package-restrictions/>").unwrap();
+    let error=store.commit_initial_restrictions_using(0,root.clone(),|file,_|{file.write_all(b"partial")?;Err(io::Error::other("injected first write"))}).unwrap_err();
+    assert!(!error.committed); assert!(!path.exists());
+    assert_eq!(fs::read(&backup).unwrap(),b"unparsed malformed main");
+    store.commit_initial_restrictions(0,root.clone()).unwrap();
+    assert!(!backup.exists()); assert_eq!(fs::read(&path).unwrap(),fs::read(&reserve).unwrap());
+    assert_eq!(aim_android_xml::read(&fs::read(&path).unwrap()).unwrap(),root);
+    assert!(!store.unread_restrictions.contains(&0));
+
+    let committed=Data::new();let target=committed.settings();fs::remove_file(committed.0.join("system/packages.xml")).unwrap();
+    let (mut owner,_) = recovery::Plan::inspect(&committed.0).unwrap().recover_boot(&[0],&mut Settings::default(),&current,|_,_|panic!()).unwrap();
+    owner.claim_unread_restrictions(0).unwrap();let copy=sibling(&target,".reservecopy");
+    let error=owner.commit_initial_restrictions_using(0,root.clone(),|file,bytes| { file.write_all(bytes)?;fs::remove_file(&copy)?;Ok(()) }).unwrap_err();
+    assert!(error.committed);assert!(!owner.unread_restrictions.contains(&0));
+    assert_eq!(aim_android_xml::read(&fs::read(&target).unwrap()).unwrap(),root);
+
+    let other=Data::new();let target=other.settings();fs::remove_file(other.0.join("system/packages.xml")).unwrap();fs::write(&target,b"before").unwrap();
+    let (mut store,_) = recovery::Plan::inspect(&other.0).unwrap().recover_boot(&[0],&mut Settings::default(),&current,|_,_|panic!()).unwrap();
+    store.claim_unread_restrictions(0).unwrap(); fs::write(&target,b"outside writer").unwrap();
+    assert!(!store.commit_initial_restrictions(0,root).unwrap_err().committed);
+    assert_eq!(fs::read(&target).unwrap(),b"outside writer");
+}
+
 pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {

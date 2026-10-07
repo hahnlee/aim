@@ -39,6 +39,7 @@ pub mod shared_users;
 pub mod shared_processes;
 mod signing;
 mod scan_settings;
+mod unread;
 pub mod recovery;
 pub mod update_ownership;
 pub mod usage;
@@ -93,6 +94,7 @@ pub struct Store {
     state: State,
     restrictions: BTreeMap<u32, Element>,
     unread_restrictions: BTreeSet<u32>,
+    unread_claims: BTreeMap<u32, unread::Claim>,
     settings_document: Element,
     settings_present: bool,
     first_write_files: Vec<OwnedFile>,
@@ -170,6 +172,7 @@ impl Store {
             state,
             restrictions,
             unread_restrictions: if restore_restrictions { BTreeSet::new() } else { users.iter().copied().collect() },
+            unread_claims: BTreeMap::new(),
             settings_document,
             settings_present,
             first_write_files: Vec::new(),
