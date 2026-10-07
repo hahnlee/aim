@@ -401,6 +401,9 @@ public final class DomainCollectorOracle {
         DomainComputer(java.util.Map<String, com.android.server.pm.pkg.PackageStateInternal> settings) { this.settings = settings; }
         public com.android.server.pm.pkg.PackageStateInternal getPackageStateInternal(String name) { return settings.get(name); }
     }
+    public static void connectLegacySettingsReader(com.android.server.pm.verify.domain.DomainVerificationService service, com.android.server.pm.PackageSetting setting) {
+        service.setConnection(new DomainConnection(java.util.Map.of(setting.getPackageName(), (com.android.server.pm.pkg.PackageStateInternal)setting)));
+    }
     private static final class DomainConnection implements com.android.server.pm.verify.domain.DomainVerificationManagerInternal.Connection {
         final DomainComputer computer;
         int user;

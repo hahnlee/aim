@@ -36,11 +36,12 @@ public final class LegacyRestoreOracle {
         }
         new Settings(java.util.Map.of()).readInstallPermissionsLPr(parser, state, users);
     }
-    public static void verify(File directory) throws Exception {
+    public static void verify(File directory, java.util.function.BiConsumer<com.android.server.pm.verify.domain.DomainVerificationService, PackageSetting> connect) throws Exception {
         verifyInstallBindings(directory);
         verifyFactoryEvents(directory);
         verifyNullableFactoryNames(directory);
         verifySharedSeedEvents(directory);
+        verifyInitialRestrictions(directory,connect);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
@@ -181,6 +182,23 @@ public final class LegacyRestoreOracle {
                 byte[] actual=PackageLegacyPermissions.capture(ids[at],new int[]{10,0},owner.getLegacyPermissionState());
                 if(!java.util.Arrays.equals(actual,Files.readAllBytes(new File(directory,"shared-seed-event-"+index+"-"+ids[at]+".permissions").toPath())))throw new AssertionError("original seeded permission state differs "+index+":"+ids[at]);
             }
+        }
+    }
+    private static void verifyInitialRestrictions(File directory, java.util.function.BiConsumer<com.android.server.pm.verify.domain.DomainVerificationService, PackageSetting> connect) throws Exception {
+        for(int index=0;index<2;index++) {
+            var data=new File(directory,"initial-restrictions-native-"+index);
+            if(android.os.Looper.myLooper()==null)android.os.Looper.prepareMainLooper();
+            var context=android.app.ActivityThread.systemMain().getSystemUiContext();
+            var domain=new com.android.server.pm.verify.domain.DomainVerificationService(context,new com.android.server.SystemConfig(false),null);
+            var settings=new Settings(data,null,null,domain,null,new PackageManagerTracedLock());
+            settings.readSettingsLPw(null,java.util.List.of(),new android.util.ArrayMap<>());
+            connect.accept(domain,settings.getPackagesLocked().get("p"));
+            settings.readPackageRestrictionsLPr(0,new android.util.ArrayMap<>());
+            var state=settings.getPackagesLocked().get("p").readUserState(0);
+            String actual=state.isInstalled()+"|"+state.isStopped()+"|"+state.isNotLaunched()+"|"+state.isHidden()+"|"+state.getEnabledState()+"|"+state.getCeDataInode()+"|"+state.getDeDataInode()+"|"+state.getFirstInstallTimeMillis()+"|"+state.getLastDisableAppCaller();
+            String expected=new String(Files.readAllBytes(new File(directory,"initial-restrictions-"+index+".expected").toPath()),java.nio.charset.StandardCharsets.UTF_8);
+            if(!actual.equals(expected))throw new AssertionError("original native initial restriction read differs "+index+" "+actual+" != "+expected);
+            if(index==1 && (!state.isComponentEnabled("p.Enabled") || !state.isComponentDisabled("p.Disabled")))throw new AssertionError("native initial components differ");
         }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {

@@ -1,6 +1,7 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public final class Settings {
+    void readPackageRestrictionsLPr(int userId, android.util.ArrayMap<String, Long> originalFirstInstallTimes) { throw new RuntimeException("stub"); }
     void readInstallPermissionsLPr(com.android.modules.utils.TypedXmlPullParser parser,
         com.android.server.pm.permission.LegacyPermissionState state,
         java.util.List<android.content.pm.UserInfo> users) throws java.io.IOException {

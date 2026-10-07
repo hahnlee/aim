@@ -18,6 +18,7 @@ mod common {
     pub mod install_read_events;
     pub mod factory_read_events;
     pub mod seed_read_events;
+    pub mod initial_restrictions;
     pub mod key_set_events;
     pub mod verifier_events;
     pub mod legacy_domain_events;
@@ -633,6 +634,7 @@ fn native_package_parcels_match_original_read_write() {
     common::install_read_events::export(&directory);
     common::factory_read_events::export(&directory);
     common::seed_read_events::export(&directory);
+    common::initial_restrictions::export(&directory);
     let boot_version_expected = common::boot_version_events::export(&directory);
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();

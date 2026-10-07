@@ -1132,7 +1132,20 @@ retry. Main commit with reserve failure publishes state and clears unread guards
 Native fault checks cover malformed input, old backup preservation, successful
 retry, same-inode outside writes and committed reserve failure. Real native scan/
 user readiness, whole first-boot owner handoff and original reboot/app checks
-remain #978; ordinary writes remain guarded before this explicit initialization.
+remain #978; ordinary writes remain guarded before this explicit initialization. Native initial-write interoperability now has two controlled
+initialized user documents over the previously unread malformed main/reserve
+files. Main/reserve bytes match, native Store reopen agrees with its published
+state, and the original Settings.readPackageRestrictionsLPr getter probe checks
+installed/stopped/not-launched/hidden/enabled, CE/DE inodes, first-install time,
+enabledCaller and enabled/disabled components. Actual scan/user generation and
+full native boot/reboot/app readiness are still separate #978 gates. The direct original
+restriction reader initially rejected incomplete fixture dependencies (null domain
+owner, Connection and Context); it now uses the actual domain service, existing
+controlled connection bound to the actual setting name and real framework Context.
+Native initial-write/reopen and original getters agree in both cases. Full original
+ART oracle passes without skips (62.86s); API/image/template build passes
+(6 rebuilt/36 fresh, 73.8s). This verifies the writer/read boundary, not complete
+native first-boot scan generation or app/reboot acceptance.
 537 service units pass (5 excluded, 0.56s), including main-write rollback/retry,
 external byte mutation and committed reserve failure. Runtime build passes
 (3 rebuilt/39 fresh, 19.3s); retained-bootstrap/framework-res scan passes (1.28s).
@@ -1169,7 +1182,7 @@ and stale bridges.
 Full original-name native PMS construction, remaining frontend/group/user/
 permission/global owners and SystemServer orchestration remain #914/#912/#798.
 17 XML tests passed on the preceding revision. The current full original ART
-oracle passes without skips (69.53s), preserving eight boot version cases and
+oracle passes without skips (62.86s), preserving eight boot version cases and
 earlier domain/verifier/package/shared/keyset/permission checks. Preceding original
 API/image/template build passed (9 rebuilt/33 fresh, 85.7s), including the new
 compile-only original Settings install-permission declaration. Final host build
