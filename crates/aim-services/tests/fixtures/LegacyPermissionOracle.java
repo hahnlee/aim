@@ -77,7 +77,8 @@ public final class LegacyPermissionOracle {
             try (var input = new java.io.FileInputStream(new java.io.File(directory, "legacy-migration-" + i + ".xml"))) {
                 var parser = android.util.Xml.resolvePullParser(input);
                 while (parser.next() != 2) {}
-                readMigration(parser, state, i % 8 >= 4);
+                if (i % 8 >= 4) readRuntimeMigration(parser, state);
+                else com.android.server.pm.LegacyRestoreOracle.readInstall(parser, state);
             }
             // Port of Settings.readPermissionsState on the original destination owner.
             state.putPermissionState(new LegacyPermissionState.PermissionState("modern", true, false, Integer.MIN_VALUE), 0);
@@ -95,9 +96,9 @@ public final class LegacyPermissionOracle {
             if (!java.util.Arrays.equals(actual, PackageLegacyPermissions.capture(10042, new int[] {10, 0, 11}, setting.getLegacyPermissionState()))) throw new AssertionError("copySettingBase shares legacy state");
         }
     }
-    // Pinned Settings.readInstallPermissionsLPr / parseLegacyPermissionsLPr.
-    private static void readMigration(com.android.modules.utils.TypedXmlPullParser parser,
-            LegacyPermissionState state, boolean runtime) throws Exception {
+    // Pinned Settings.parseLegacyPermissionsLPr (runtime migration).
+    private static void readRuntimeMigration(com.android.modules.utils.TypedXmlPullParser parser,
+            LegacyPermissionState state) throws Exception {
         int depth = parser.getDepth(), event;
         while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {
             if (event == 3 || event == 4) continue;
@@ -105,11 +106,7 @@ public final class LegacyPermissionOracle {
                 String name = parser.getAttributeValue(null, "name");
                 boolean granted = parser.getAttributeBoolean(null, "granted", true);
                 int flags = parser.getAttributeIntHex(null, "flags", 0);
-                if (runtime) state.putPermissionState(new LegacyPermissionState.PermissionState(name, true, granted, flags), 10);
-                else for (int user : new int[] {10, 0}) state.putPermissionState(new LegacyPermissionState.PermissionState(name, false, granted, flags), user);
-            } else if (!runtime) {
-                int skippedDepth = parser.getDepth();
-                while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > skippedDepth)) {}
+                state.putPermissionState(new LegacyPermissionState.PermissionState(name, true, granted, flags), 10);
             }
         }
     }

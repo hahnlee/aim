@@ -80,17 +80,36 @@ impl Migration {
     /// Settings.readInstallPermissionsLPr: every install permission goes to
     /// every enumerated user. Unknown subtrees are skipped; nested items are read.
     pub fn read_install(&mut self, root: &Element, users: &[i32]) -> Result<(), String> {
-        for item in root.children() {
-            if item.name != "item" {
-                continue;
+        let bytes = aim_android_xml::abx::write(root)?;
+        let mut reader = aim_android_xml::pull::Reader::new(&bytes)?;
+        reader.next()?;
+        self.read_install_events(&mut reader, users).map_err(|error| error.to_string())
+    }
+
+    /// Consume an already opened perms container. Each item mutates every
+    /// resolved user's owner immediately; later XML errors retain those effects.
+    pub fn read_install_events(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        users: &[i32],
+    ) -> Result<(), crate::package::settings::ReadError> {
+        use aim_android_xml::pull::Event;
+        use crate::package::settings::ReadError;
+        let outer = reader.depth();
+        loop {
+            match reader.next()? {
+                Event::Start(item) if item.name == "item" => {
+                    let permission = xml_permission(&item, false);
+                    for &user in users {
+                        self.put(user, permission.clone()).map_err(ReadError::Owner)?;
+                    }
+                }
+                Event::Start(_) => crate::package::settings::skip(reader)?,
+                Event::End(_) if reader.depth() <= outer => return Ok(()),
+                Event::EndDocument => return Ok(()),
+                _ => {}
             }
-            let permission = xml_permission(item, false);
-            for &user in users {
-                self.put(user, permission.clone())?;
-            }
-            self.read_install(item, users)?;
         }
-        Ok(())
     }
 
     /// Settings.parseLegacyPermissionsLPr: unknown elements are visited rather
@@ -158,6 +177,22 @@ mod tests {
     use super::*;
     fn xml(text: &str) -> Element {
         aim_android_xml::read_next(text.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn install_events_keep_prior_users_when_a_later_subtree_is_truncated() {
+        let mut migration = Migration::default();
+        migration.set_missing(10, true).unwrap();
+        let mut reader = aim_android_xml::pull::Reader::new(b"<perms><item name='first' flags='17'/><item name='outer'><item name='inner'/></item><unknown><item name='ignored'/><").unwrap();
+        reader.next().unwrap();
+        assert!(matches!(migration.read_install_events(&mut reader, &[10, 0]), Err(crate::package::settings::ReadError::File(_))));
+        for user in [10, 0] {
+            assert_eq!(migration.permission(user, Some("first")).unwrap().unwrap().flags, 0x17);
+            assert!(migration.permission(user, Some("outer")).unwrap().is_some());
+            assert!(migration.permission(user, Some("inner")).unwrap().is_some());
+            assert!(migration.permission(user, Some("ignored")).unwrap().is_none());
+        }
+        assert!(migration.is_missing(10).unwrap());
     }
 
     #[test]

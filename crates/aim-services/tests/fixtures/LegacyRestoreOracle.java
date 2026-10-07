@@ -1,6 +1,6 @@
 /* Ported from android-16.0.0_r1 Settings reader loops.
  * Copyright (C) The Android Open Source Project, Apache License 2.0.
- * Private Settings methods are not invoked: parsers and setting owners are original. */
+ * Install permission reads invoke original Settings; remaining restore loops are ported. */
 package com.android.server.pm;
 
 import com.android.modules.utils.TypedXmlPullParser;
@@ -28,6 +28,13 @@ public final class LegacyRestoreOracle {
     private void seed(String name, int id) {
         var owner = new SharedUserSetting(name, 0, 0);
         owner.mAppId = id; shared.put(name, owner); visible.put(id, owner);
+    }
+    public static void readInstall(TypedXmlPullParser parser, LegacyPermissionState state) throws Exception {
+        var users = new java.util.ArrayList<android.content.pm.UserInfo>();
+        for (int id : new int[] {10, 0}) {
+            var user = new android.content.pm.UserInfo(); user.id = id; users.add(user);
+        }
+        new Settings(java.util.Map.of()).readInstallPermissionsLPr(parser, state, users);
     }
     public static void verify(File directory) throws Exception {
         for (int i = 0; i < 4; i++) {
@@ -121,18 +128,6 @@ public final class LegacyRestoreOracle {
             if (event == 3 || event == 4) continue;
             if ("perms".equals(parser.getName())) readInstall(parser, owner.getLegacyPermissionState());
             else skip(parser);
-        }
-    }
-    private void readInstall(TypedXmlPullParser parser, LegacyPermissionState state) throws Exception {
-        int depth = parser.getDepth(), event;
-        while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {
-            if (event == 3 || event == 4) continue;
-            if ("item".equals(parser.getName())) {
-                String name = parser.getAttributeValue(null, "name");
-                boolean granted = parser.getAttributeBoolean(null, "granted", true);
-                int flags = parser.getAttributeIntHex(null, "flags", 0);
-                for (int user : users) state.putPermissionState(new LegacyPermissionState.PermissionState(name, false, granted, flags), user);
-            } else skip(parser);
         }
     }
     private static void skip(TypedXmlPullParser parser) throws Exception {

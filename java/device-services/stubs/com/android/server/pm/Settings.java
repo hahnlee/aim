@@ -1,6 +1,11 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public final class Settings {
+    void readInstallPermissionsLPr(com.android.modules.utils.TypedXmlPullParser parser,
+        com.android.server.pm.permission.LegacyPermissionState state,
+        java.util.List<android.content.pm.UserInfo> users) throws java.io.IOException {
+        throw new RuntimeException("stub");
+    }
     void writePackageLPr(com.android.modules.utils.TypedXmlSerializer serializer,
         java.util.ArrayList<android.content.pm.Signature> certificates, PackageSetting setting)
         throws java.io.IOException { throw new RuntimeException("stub"); }

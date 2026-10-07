@@ -1629,7 +1629,10 @@ fn native_package_parcels_match_original_read_write() {
             if case >= 4 {
                 migration.read_legacy_runtime(&root, 10).unwrap();
             } else {
-                migration.read_install(&root, &[10, 0]).unwrap();
+                let bytes = fs::read(directory.join(format!("legacy-migration-{index}.xml"))).unwrap();
+                let mut reader = aim_android_xml::pull::Reader::new(&bytes).unwrap();
+                reader.next().unwrap();
+                migration.read_install_events(&mut reader, &[10, 0]).unwrap();
             }
             migration
                 .read_runtime(

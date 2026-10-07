@@ -22,6 +22,7 @@ mod read;
 pub use read::ReadOwners;
 pub use super::owner::recovery::ReadError;
 pub use signatures::SignatureReader;
+pub(in crate::package) use signatures::skip;
 
 /// `ApplicationInfo.FLAG_SYSTEM`.
 pub const FLAG_SYSTEM: i32 = 1 << 0;
