@@ -18,6 +18,8 @@ use super::{children, string};
 mod signatures;
 mod key_sets;
 mod verifier;
+mod read;
+pub use read::ReadOwners;
 pub use super::owner::recovery::ReadError;
 pub use signatures::SignatureReader;
 

@@ -1,7 +1,7 @@
 //! Keyset record/retry projections; public-key factory coverage is separate.
 use aim_services::package::{
     owner::{app_ids::AppIds, key_sets},
-    settings::{PackageReadAttempt, ReadError, Settings},
+    settings::{Package, PackageReadAttempt, ReadError, ReadOwners, Settings, SharedUser},
 };
 
 pub fn inputs() -> Vec<Vec<u8>> {
@@ -47,33 +47,7 @@ pub fn read(bytes: &[u8]) -> (Settings, &'static str) {
     let mut state = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = state.read_document(bytes, |state, reader, start| {
-        match start.name.as_str() {
-            "package" => {
-                state.read_package(reader, start, &mut ids, &mut attempt, |_, _, _| Ok(false))?;
-            }
-            "keyset-settings" => state.read_key_sets(
-                reader,
-                start,
-                &attempt.key_set_refs,
-                |_| panic!("public key outside this projection"),
-                |state, refs| {
-                    let counts = state
-                        .key_sets
-                        .reference_counts
-                        .get_or_insert_with(Default::default);
-                    for (id, count) in refs {
-                        if let Some(value) = counts.get_mut(id) {
-                            *value = *count;
-                        }
-                    }
-                    key_sets::restore(state).map_err(ReadError::Owner)
-                },
-            )?,
-            _ => return Ok(false),
-        }
-        Ok(true)
-    });
+    let result = state.read_owned_document(bytes, &mut ids, &mut attempt, &mut ProjectionOwners);
     let status = if matches!(result, Err(ReadError::FatalInput(_))) {
         "fatal"
     } else {
@@ -131,4 +105,51 @@ pub fn trace(state: &Settings, status: &str) -> String {
 
 pub fn retire(state: &mut Settings) {
     key_sets::clear_package(state, "p").unwrap();
+}
+
+struct ProjectionOwners;
+impl ReadOwners for ProjectionOwners {
+    fn package_child(
+        &mut self,
+        _: &mut Package,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
+    fn shared_child(
+        &mut self,
+        _: &mut SharedUser,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+    ) -> Result<bool, ReadError> {
+        panic!("shared UID outside keyset projection")
+    }
+    fn public_key(&mut self, _: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
+        panic!("public key outside this projection")
+    }
+    fn finish_key_sets(
+        &mut self,
+        state: &mut Settings,
+        refs: &std::collections::BTreeMap<i64, i32>,
+    ) -> Result<(), ReadError> {
+        let counts = state
+            .key_sets
+            .reference_counts
+            .get_or_insert_with(Default::default);
+        for (id, count) in refs {
+            if let Some(value) = counts.get_mut(id) {
+                *value = *count;
+            }
+        }
+        key_sets::restore(state).map_err(ReadError::Owner)
+    }
+    fn global_record(
+        &mut self,
+        _: &mut Settings,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
 }

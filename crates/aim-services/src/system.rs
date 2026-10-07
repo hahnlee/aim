@@ -1082,7 +1082,7 @@ impl System {
     /// Recover settings under the same retained early owner used by native scan.
     /// Missing/replaced bridges abort before selection or frontend publication.
     /// The caller supplies complete record owners and keeps partial mutations.
-    pub fn recover_package_settings(
+    pub(crate) fn recover_package_settings(
         &self,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         data: &std::path::Path,
@@ -1134,6 +1134,46 @@ impl System {
             events: recovered.1.events.clone(),
             message,
         })?;
+        Ok(recovered)
+    }
+
+    /// Recover through the native record dispatcher, sharing registration and
+    /// per-attempt state across package, shared UID and keyset containers.
+    pub fn recover_owned_package_settings(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        data: &std::path::Path,
+        users: &[u32],
+        settings: &mut crate::package::settings::Settings,
+        ids: &mut crate::package::owner::app_ids::AppIds,
+        attempt: &mut crate::package::settings::PackageReadAttempt,
+        owners: &mut impl crate::package::settings::ReadOwners,
+    ) -> std::result::Result<
+        (
+            crate::package::owner::Store,
+            crate::package::owner::recovery::Report,
+        ),
+        crate::package::owner::recovery::Error,
+    > {
+        use crate::package::{
+            owner::recovery::{Error, ReadError},
+            settings::PackageReadAttempt,
+        };
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| Error {
+                events: Vec::new(),
+                message: format!("settings bootstrap owner: {error:?}"),
+            })?;
+        *attempt = PackageReadAttempt::default();
+        let recovered =
+            self.recover_package_settings(bridge, data, users, settings, |bytes, settings| {
+                let read = settings.read_owned_document(bytes, ids, attempt, owners);
+                if matches!(read, Err(ReadError::File(_))) {
+                    // failRead recursively starts a new attempt even if no file remains.
+                    *attempt = PackageReadAttempt::default();
+                }
+                read
+            })?;
         Ok(recovered)
     }
 

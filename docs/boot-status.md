@@ -1062,8 +1062,8 @@ reads/no-start-tag retain existing version owners and add only missing core
 volumes before related user state restoration. The outer finally path also
 initializes missing versions after uncaught input/native owner errors. Generic
 file-only recovery keeps its separate semantics. System.recover_package_settings
-now requires current build-version input and uses this boot lifecycle while
-retaining its bootstrap identity guards. Units cover absence/no-start/success,
+uses current build-version values from the retained original bridge and this
+boot lifecycle while retaining its bootstrap identity guards. Units cover absence/no-start/success,
 Store/settings coherence and selected-file preservation after fatal verifier input.
 Actual original Settings.readLPw agrees on eight lifecycle cases: absent/empty/
 valid data, saved internal/external versions, failed-read retry with absent or
@@ -1086,14 +1086,29 @@ strings and reject every truncation/trailing value. Initial fixture failures wer
 package-private generated transaction constants, missing bridge classpath and
 UID-0 security rejection; the raw transaction helper now lives in the AIDL package
 and runs through the existing system-UID policy oracle, without weakening the gate.
+System.recover_owned_package_settings now connects recovery to the native
+Settings record dispatcher. Package/shared UID registration and keyset records
+share one AppIds owner and one PackageReadAttempt. Every file read resets
+attempt tables; File retry and absent input clear transient tables while keeping
+registered settings and UID effects. Owner/fatal errors retain current attempt
+inputs and preserve the selected file. Required package legacy permission/domain
+and shared permission children reject missing handlers. Key factory, keyset
+finalization and remaining global records still require explicit owners. Pending
+binding and related user restoration are not yet a complete boot lifecycle.
+The owned frontend agrees with the existing actual-original shared UID (238)
+and keyset (158) projections; the full original ART oracle passes without skips
+(71.19s). Retained-bridge units exercise corrupt-file retry with registered UID
+effects retained, missing child/finalization owners, fatal input, absent files
+and stale bridges.
 Full original-name native PMS construction, remaining frontend/group/user/
 permission/global owners and SystemServer orchestration remain #914/#912/#798.
-17 XML tests and 531 service units pass (5 service tests excluded, 1.09s).
-Full original ART oracle passes without skips (74.27s), preserving eight boot
-version cases and earlier domain/verifier/package/shared/keyset/permission checks.
-Explicit retained-owner framework-res scan passes (1.16s). Image/template build
-passes (10 rebuilt/32 fresh, 77.4s); final runtime rebuild passes
-(3 rebuilt/39 fresh, 1.2s). Compile-only persistence/state-map API declarations
+17 XML tests passed on the preceding revision. The current full original ART
+oracle passes without skips (71.19s), preserving eight boot version cases and
+earlier domain/verifier/package/shared/keyset/permission checks. The preceding
+image/template build passed (10 rebuilt/32 fresh, 77.4s). This change adds no
+image/Java inputs. Host rebuild passes (3 rebuilt/10 fresh, 13.9s); 531 service
+units pass (5 excluded, 0.50s). The retained-owner framework-res scan passes
+(1.17s), including the owned recovery entry checks. Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
 The prior retained-owner framework-res scan passed (1.45s) and was not rerun.

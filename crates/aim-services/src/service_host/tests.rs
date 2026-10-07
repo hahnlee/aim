@@ -911,6 +911,57 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert!(!report.first_boot);
     assert_eq!(store.state().settings.versions[0].sdk_version, 36);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    // Use the production record dispatcher with the same retained bridge.
+    let mut ids = crate::package::owner::app_ids::AppIds::default();
+    let mut attempt = crate::package::settings::PackageReadAttempt::default();
+    let mut owners = MissingGlobal;
+    let package = b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><proper-signing-keyset identifier='2'/><";
+    std::fs::write(&path, package).unwrap();
+    let (_, report) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut owners).unwrap();
+    assert!(matches!(report.events.last(), Some(Event::Absent)));
+    assert!(!report.first_boot);
+    assert_eq!(settings.packages[0].name, "p");
+    assert!(ids.get(10001).is_some());
+    assert!(attempt.key_set_refs.is_empty());
+    assert!(attempt.first_install_times.is_empty());
+    assert!(!path.exists());
+    std::fs::write(&path, b"<packages><package name='pending' codePath='/pending' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000002'/><keyset-settings version='1'/></packages>").unwrap();
+    // Missing owner is not a corrupt-file retry and preserves pending inputs.
+    struct MissingGlobal;
+    impl crate::package::settings::ReadOwners for MissingGlobal {
+        fn package_child(&mut self, _: &mut crate::package::settings::Package, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
+        fn shared_child(&mut self, _: &mut crate::package::settings::SharedUser, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
+        fn public_key(&mut self, _: &[u8]) -> std::result::Result<Option<Vec<u8>>, ReadError> { panic!("unexpected key") }
+        fn finish_key_sets(&mut self, _: &mut Settings, _: &std::collections::BTreeMap<i64,i32>) -> std::result::Result<(), ReadError> { Err(ReadError::Owner("keyset owner unavailable".into())) }
+        fn global_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
+    }
+    let retained = std::fs::read(&path).unwrap();
+    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::OwnerFailed { .. })));
+    assert_eq!(attempt.pending[0].name, "pending");
+    assert_eq!(std::fs::read(&path).unwrap(), retained);
+    std::fs::write(&path, b"<packages><package name='legacy' codePath='/legacy' userId='10003' domainSetId='00000000-0000-0000-0000-000000000003'><perms/></package></packages>").unwrap();
+    let retained = std::fs::read(&path).unwrap();
+    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::OwnerFailed { message, .. }) if message == "settings child owner unavailable: perms"));
+    assert!(ids.get(10003).is_some());
+    assert!(attempt.pending.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), retained);
+    std::fs::write(&path, b"<packages><package name='fatal' codePath='/fatal' userId='10004' it='1' domainSetId='00000000-0000-0000-0000-000000000004'><proper-signing-keyset identifier='8'/></package><keyset-settings version='1'><keysets><key-id identifier='9'/></keysets></keyset-settings></packages>").unwrap();
+    let retained = std::fs::read(&path).unwrap();
+    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::FatalInput { .. })));
+    assert_eq!(attempt.key_set_refs.get(&8), Some(&1));
+    assert!(attempt.first_install_times.contains_key("fatal"));
+    assert_eq!(std::fs::read(&path).unwrap(), retained);
+    std::fs::remove_file(&path).unwrap();
+    let (_, report) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).unwrap();
+    assert!(report.first_boot);
+    assert!(attempt.key_set_refs.is_empty());
+    assert!(attempt.first_install_times.is_empty());
+    assert!(ids.get(10004).is_some());
+    // Restore the original fixture for the identity/replacement checks below.
+    std::fs::write(&path, bytes).unwrap();
     let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {
         state.find_or_create_version(None).database_version = 8;
         Err(ReadError::Owner("native settings owner unavailable".into()))
@@ -930,6 +981,11 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
         std::fs::write(&backup, bytes).unwrap();
         let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, |_,_| panic!("stale bridge read settings")).err().unwrap();
         assert!(stale.events.is_empty());
+        attempt.key_set_refs.insert(77, 1);
+        let stale = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
+        assert!(stale.events.is_empty());
+        assert_eq!(attempt.key_set_refs.get(&77), Some(&1));
+
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(std::fs::read(&backup).unwrap(), bytes);
     }

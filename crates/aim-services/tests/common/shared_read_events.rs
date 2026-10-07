@@ -1,8 +1,8 @@
 //! Package/shared UID read-order projections against original Settings.readLPw.
-use aim_android_xml::pull::Reader;
+use aim_android_xml::{Element, pull::Reader};
 use aim_services::package::{
     owner::app_ids::AppIds,
-    settings::{PackageReadAttempt, Settings},
+    settings::{Package, PackageReadAttempt, ReadError, ReadOwners, Settings, SharedUser},
 };
 
 pub fn inputs() -> Vec<Vec<u8>> {
@@ -52,29 +52,7 @@ pub fn read(bytes: &[u8]) -> Settings {
     let mut settings = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = (|| -> Result<(), aim_services::package::settings::ReadError> {
-        let mut reader = Reader::new(bytes)?;
-        settings.read_events(&mut reader, |settings, reader, start| {
-            match start.name.as_str() {
-                "package" => {
-                    settings
-                        .read_package(reader, start, &mut ids, &mut attempt, |_, _, _| Ok(false))?;
-                }
-                "shared-user" => {
-                    settings.read_shared_user(
-                        reader,
-                        start,
-                        &mut ids,
-                        &mut attempt,
-                        |_, _, _| Ok(false),
-                    )?;
-                }
-                _ => return Ok(false),
-            }
-            Ok(true)
-        })?;
-        Ok(())
-    })();
+    let result = settings.read_owned_document(bytes, &mut ids, &mut attempt, &mut ProjectionOwners);
     if result.is_err() {
         // failRead re-enters with an empty reserve and clears attempt tables.
         attempt = PackageReadAttempt::default();
@@ -100,4 +78,43 @@ pub fn trace(settings: &Settings) -> String {
     packages.sort();
     groups.sort();
     format!("{}|{}", packages.join(";"), groups.join(";"))
+}
+
+// This projection deliberately excludes external legacy/user/global owners.
+struct ProjectionOwners;
+impl ReadOwners for ProjectionOwners {
+    fn package_child(
+        &mut self,
+        _: &mut Package,
+        _: &mut Reader<'_>,
+        _: &Element,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
+    fn shared_child(
+        &mut self,
+        _: &mut SharedUser,
+        _: &mut Reader<'_>,
+        _: &Element,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
+    fn public_key(&mut self, _: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
+        panic!("key outside shared UID projection")
+    }
+    fn finish_key_sets(
+        &mut self,
+        _: &mut Settings,
+        _: &std::collections::BTreeMap<i64, i32>,
+    ) -> Result<(), ReadError> {
+        panic!("keyset outside shared UID projection")
+    }
+    fn global_record(
+        &mut self,
+        _: &mut Settings,
+        _: &mut Reader<'_>,
+        _: &Element,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
 }
