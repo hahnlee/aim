@@ -148,6 +148,26 @@ fn unread_restriction_claim_detects_external_changes_and_survives_failed_first_w
     assert_eq!(fs::read(&target).unwrap(),b"outside writer");
 }
 
+#[test]
+fn initial_restrictions_serialize_the_supplied_scan_user_owner() {
+    use crate::package::{settings::{Settings,Version},scan::SigningScan,system_config::SystemConfig,restrictions::UserState};
+    let data=Data::new();let path=data.settings();fs::remove_file(data.0.join("system/packages.xml")).unwrap();
+    let mut settings=Settings::parse(&aim_android_xml::read(b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap()).unwrap();
+    let current=Version{sdk_version:36,database_version:3,..Default::default()};
+    let(mut store,_)=recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[0],&mut settings,&current,|_,_|panic!()).unwrap();
+    let mut scan=SigningScan::new(&SystemConfig::default(),&settings,36).unwrap();
+    let root=element("package-restrictions");
+    assert!(store.commit_initial_scan_restrictions(&scan,0,root.clone()).unwrap_err().message.contains("absent"));
+    let state=UserState{ installed:false,stopped:true,enabled:2,ce_data_inode:11,first_install_time:77,enabled_components:Some(vec!["p.Enabled".into()]),min_aspect_ratio:3,..Default::default()};
+    scan.capture_user_states(BTreeMap::from([(("p".into(),false),crate::package::scan::CapturedUsers { states:BTreeMap::from([(0,state.clone())]),active_aliases:Default::default() })])).unwrap();
+    fs::write(&path,b"unread old bytes").unwrap();store.claim_unread_restrictions(0).unwrap();
+    store.commit_initial_scan_restrictions(&scan,0,root).unwrap();
+    assert_eq!(store.state().users[0].1.restrictions.packages[0].1,state);
+    let bytes=fs::read(&path).unwrap();let parsed=Restrictions::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+    assert_eq!(parsed.packages[0].1.min_aspect_ratio,3);
+    assert_eq!(parsed.packages[0].1.enabled_components,Some(vec!["p.Enabled".into()]));
+}
+
 pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {

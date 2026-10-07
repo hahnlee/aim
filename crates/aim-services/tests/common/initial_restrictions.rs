@@ -2,9 +2,11 @@
 use aim_services::package::{
     owner::recovery,
     restrictions::Restrictions,
+    scan::{CapturedUsers, SigningScan},
     settings::{Settings, Version},
+    system_config::SystemConfig,
 };
-use std::{fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 pub fn export(directory: &Path) {
     let settings_xml=b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>";
     let inputs = [
@@ -34,9 +36,25 @@ pub fn export(directory: &Path) {
             })
             .unwrap();
         assert!(report.first_boot);
-        store.claim_unread_restrictions(0).unwrap();
         let root = aim_android_xml::read(input.as_bytes()).unwrap();
-        store.commit_initial_restrictions(0, root).unwrap();
+        let state = Restrictions::parse(&root).unwrap().packages.remove(0).1;
+        let mut scan = SigningScan::new(&SystemConfig::default(), &settings, 36).unwrap();
+        scan.capture_user_states(BTreeMap::from([(
+            ("p".into(), false),
+            CapturedUsers {
+                states: BTreeMap::from([(0, state)]),
+                active_aliases: Default::default(),
+            },
+        )]))
+        .unwrap();
+        store.claim_unread_restrictions(0).unwrap();
+        store
+            .commit_initial_scan_restrictions(
+                &scan,
+                0,
+                aim_android_xml::read(b"<package-restrictions/>").unwrap(),
+            )
+            .unwrap();
         let bytes = fs::read(&path).unwrap();
         assert_eq!(
             bytes,

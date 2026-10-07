@@ -1138,7 +1138,20 @@ files. Main/reserve bytes match, native Store reopen agrees with its published
 state, and the original Settings.readPackageRestrictionsLPr getter probe checks
 installed/stopped/not-launched/hidden/enabled, CE/DE inodes, first-install time,
 enabledCaller and enabled/disabled components. Actual scan/user generation and
-full native boot/reboot/app readiness are still separate #978 gates. The direct original
+full native boot/reboot/app readiness are still separate #978 gates. Store.commit_initial_scan_restrictions now generates scalar/component
+package rows from the exact SigningScan.scanned_user_states and current package
+inventory, rejecting missing user owners or mismatched global settings. Resolver/
+domain sections must be supplied by their separate owners. Main commit publishes
+the original scan user objects rather than parsed disk normalization, preserving
+null component sets and runtime-only state. Suspension/archive data is rejected
+explicitly until its full serializer is implemented (#979); no fields are dropped.
+The original read fixture now supplies captured SigningScan user states and uses
+this generation API rather than supplying a completed pkg XML document. The direct original
+The scan-generated initial-write/original getter oracle passes without skips
+(73.32s); 538 units pass (5 excluded, 0.54s), including absent user-owner rejection
+and live component-state preservation. Runtime build passes
+(3 rebuilt/39 fresh, 17.0s). Production scan/user readiness and full complex
+state serializers remain #978/#979.
 restriction reader initially rejected incomplete fixture dependencies (null domain
 owner, Connection and Context); it now uses the actual domain service, existing
 controlled connection bound to the actual setting name and real framework Context.
@@ -1146,7 +1159,7 @@ Native initial-write/reopen and original getters agree in both cases. Full origi
 ART oracle passes without skips (62.86s); API/image/template build passes
 (6 rebuilt/36 fresh, 73.8s). This verifies the writer/read boundary, not complete
 native first-boot scan generation or app/reboot acceptance.
-537 service units pass (5 excluded, 0.56s), including main-write rollback/retry,
+538 service units pass (5 excluded, 0.54s), including main-write rollback/retry,
 external byte mutation and committed reserve failure. Runtime build passes
 (3 rebuilt/39 fresh, 19.3s); retained-bootstrap/framework-res scan passes (1.28s).
 Original ART/user false-continuation checks passed on the preceding revision
@@ -1182,11 +1195,11 @@ and stale bridges.
 Full original-name native PMS construction, remaining frontend/group/user/
 permission/global owners and SystemServer orchestration remain #914/#912/#798.
 17 XML tests passed on the preceding revision. The current full original ART
-oracle passes without skips (62.86s), preserving eight boot version cases and
+oracle passes without skips (73.32s), preserving eight boot version cases and
 earlier domain/verifier/package/shared/keyset/permission checks. Preceding original
 API/image/template build passed (9 rebuilt/33 fresh, 85.7s), including the new
 compile-only original Settings install-permission declaration. Final host build
-is fresh (0 rebuilt/13 fresh, 0.3s); 537 service units pass (5 excluded, 0.56s).
+is fresh (0 rebuilt/13 fresh, 0.2s); 538 service units pass (5 excluded, 0.54s).
 The retained-owner framework-res scan passes (1.27s), including owned recovery,
 domain and fatal keyset mapping checks. Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
@@ -2641,7 +2654,7 @@ file-error retry, repeated retained packages, rejected UID registration and
 constructor state retained after invalid page-size input, and the same pending
 package recreated from reserve after a corrupt main read. The complete original
 ART oracle passes without skips (69.53s);
-537 service units pass (5 excluded, 0.56s). Current runtime build passes
+538 service units pass (5 excluded, 0.54s). Current runtime build passes
 (3 rebuilt/39 fresh, 15.5s); the prior image/API/template build passed (85.7s).
 Eight text/ABX install cases now compare the native event reader with the actual
 original Settings method; the four legacy-restoration graph cases use that same

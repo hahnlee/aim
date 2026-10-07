@@ -40,6 +40,7 @@ pub mod shared_processes;
 mod signing;
 mod scan_settings;
 mod unread;
+mod initial_user;
 pub mod recovery;
 pub mod update_ownership;
 pub mod usage;
