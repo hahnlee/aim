@@ -1,6 +1,12 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 public final class Settings {
+    int getDefaultRuntimePermissionsVersion(int userId) { throw new RuntimeException("stub"); }
+    void setDefaultRuntimePermissionsVersion(int version, int userId) { throw new RuntimeException("stub"); }
+    void setPermissionControllerVersion(long version) { throw new RuntimeException("stub"); }
+    void updateRuntimePermissionsFingerprint(int userId) { throw new RuntimeException("stub"); }
+    boolean isPermissionUpgradeNeeded(int userId) { throw new RuntimeException("stub"); }
+    com.android.permission.persistence.RuntimePermissionsState getLegacyPermissionsState(int userId) { throw new RuntimeException("stub"); }
     void readPackageRestrictionsLPr(int userId, android.util.ArrayMap<String, Long> originalFirstInstallTimes) { throw new RuntimeException("stub"); }
     void readInstallPermissionsLPr(com.android.modules.utils.TypedXmlPullParser parser,
         com.android.server.pm.permission.LegacyPermissionState state,

@@ -1221,6 +1221,23 @@ impl System {
         })
     }
 
+    /// Use the retained original PackagePartitions build identity for controller metadata.
+    pub fn set_runtime_permission_controller_version(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        metadata: &mut crate::package::owner::runtime_metadata::State,
+        version: i64,
+    ) -> Result<()> {
+        self.check_package_bootstrap(bridge)?;
+        let build = bridge.current_package_version().map_err(|error|Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("runtime build owner: {error:?}")))?;
+        let fingerprint = build.fingerprint.ok_or_else(||Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,"missing runtime partition fingerprint"))?;
+        self.check_package_bootstrap(bridge)?;
+        metadata.set_controller_version(&fingerprint,version);
+        Ok(())
+    }
+
     /// Persist live UID permission projections under the retained boot bridge.
     /// Metadata is supplied by the runtime persistence owner, not saved grants.
     pub fn commit_runtime_permissions_from_scan(
@@ -1229,8 +1246,7 @@ impl System {
         store: &mut crate::package::owner::Store,
         capture: &crate::package::scan_snapshot::query_state::Capture,
         user: u32,
-        version: i32,
-        fingerprint: Option<String>,
+        metadata: &crate::package::owner::runtime_metadata::State,
         inode: aim_storage::guest_inode::GuestInode,
     ) -> std::result::Result<(), crate::package::owner::WriteError> {
         use crate::package::owner::WriteError;
@@ -1238,7 +1254,7 @@ impl System {
         self.check_package_bootstrap(bridge).map_err(|error|before(format!("runtime bootstrap owner: {error:?}")))?;
         store.validate_committed_scan(capture.scan().owner())?;
         let id = i32::try_from(user).map_err(|error|before(format!("runtime user: {error}")))?;
-        let state = bridge.runtime_permissions(capture,id,version,fingerprint).map_err(before)?;
+        let state = bridge.runtime_permissions(capture,id,metadata.version(id),metadata.fingerprint(id).map(str::to_owned)).map_err(before)?;
         self.check_package_bootstrap(bridge).map_err(|error|before(format!("runtime bootstrap owner before commit: {error:?}")))?;
         store.commit_runtime_permissions(user,&state,inode)?;
         self.check_package_bootstrap(bridge).map_err(|error|WriteError { committed:true,message:format!("runtime bootstrap owner after commit: {error:?}") })

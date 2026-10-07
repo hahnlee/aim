@@ -1162,19 +1162,35 @@ permission service. It does not read saved migration grants. Non-shared empty
 package states are included only when install permissions are fixed; every shared
 owner is included. System.commit_runtime_permissions_from_scan checks the exact
 committed scan, validates the bootstrap before capture and immediately before/after
-atomic persistence, and passes explicit version/fingerprint and inode metadata.
+atomic persistence, and uses runtime_metadata::State for version/fingerprint plus explicit inode
+metadata. That native sparse owner restores captured read metadata, retains null
+fingerprint presence, implements original version-0/upgrade-true constructor
+defaults, version mutations, controller upgrade comparisons, user removal and
+mandatory pending write requests. Updating a fingerprint before controller setup
+fails without changing state. System configures the extended fingerprint from the
+retained original PackagePartitions identity and supplied controller version;
+callers no longer pass arbitrary version/fingerprint values to the disk commit. The
+original Settings metadata fixture checks constructor defaults, missing-controller
+failure, version -1/7, current partition fingerprint extension and controller
+upgrade transitions. Its setters schedule asynchronous writes, so its empty graph
+supplies the required legacy producer and actual original persistence factory;
+UID lookups on that empty graph reject. Initial null producer/persistence
+dependencies caused signal 11 failures after metadata comparisons (#984); the
+corrected full original run passes without skips (61.42s), including the async
+writer. 549 service units pass (6 excluded, 0.57s), retained-bootstrap/framework-res
+scan passes (1.25s), API/image/template build passes (6 rebuilt/36 fresh, 70.9s).
 Malformed/null producer records abort before file creation; persisted one-time
 grants are false while the live producer projection remains true. Per-UID queries
 are not yet one coherent permission-service generation. Production metadata and
-version/fingerprint authority, producer-wide synchronization, directory creation
+metadata owner lifecycle/scheduler binding, controller-version authority,
+producer-wide synchronization, directory creation
 context, fs-verity policy and whole boot invocation still require #981 integration.
 The retained-bootstrap/framework-res scan passes with controlled live permission
 replies (1.15s), including malformed/null response refusal, role-aware projection,
 one-time disk grants and native reopen. 548 service units pass (6 excluded, 0.55s),
 including fixed-empty versus unfixed-empty package rows and unknown-user rejection;
-host build passes (3 rebuilt/10 fresh, 17.8s). The original ART codec/atomic oracle
-passed on the preceding revision without skips (63.77s) and was not rerun for this
-new producer projection.
+host build passes (3 rebuilt/10 fresh, 17.8s). The original ART codec/atomic/metadata oracle
+passes without skips (61.42s); coherent producer-wide capture remains unverified.
 The runtime reader now applies ArrayMap duplicate replacement: package/shared
 rows keep the last value, sort by signed Java hash and retain collision insertion
 slots (#982). A direct original fixture checks repeated BB/Aa collision keys,

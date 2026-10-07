@@ -42,6 +42,7 @@ mod scan_settings;
 mod unread;
 mod initial_user;
 mod runtime_permissions;
+pub mod runtime_metadata;
 pub mod recovery;
 pub mod update_ownership;
 pub mod usage;

@@ -2737,13 +2737,18 @@ fn verify_boot_scan(
     assert!(list_store.state().list.iter().all(|row| row.gids == [3003, 3003, 3003, 3003]));
     let reopened = crate::package::owner::Store::open(&list_data, &[0, 10]).unwrap().unwrap();
     assert_eq!(reopened.state().list, list_store.state().list);
+    let mut runtime_metadata = crate::package::owner::runtime_metadata::State::default();
+    system.set_runtime_permission_controller_version(bridge,&mut runtime_metadata,12).unwrap();
+    runtime_metadata.set_version(0,7);
+    runtime_metadata.update_fingerprint(0).unwrap();
+    assert_eq!(runtime_metadata.fingerprint(0),Some("fixture-partitions?pc_version=12"));
     list_store.claim_runtime_permissions(0).unwrap();
     let runtime_file = list_data.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml");
     let runtime_inode = aim_storage::guest_inode::GuestInode { uid:Some(1000),gid:Some(1000),mode:Some(0o600) };
-    assert!(!system.commit_runtime_permissions_from_scan(&foreign,&mut list_store,&query,0,7,Some("current".into()),runtime_inode).unwrap_err().committed);
+    assert!(!system.commit_runtime_permissions_from_scan(&foreign,&mut list_store,&query,0,&runtime_metadata,runtime_inode).unwrap_err().committed);
     for mode in [1,2,3] {
         owner.legacy_reply.store(mode,Ordering::SeqCst);
-        assert!(!system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,7,Some("current".into()),runtime_inode).unwrap_err().committed);
+        assert!(!system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,&runtime_metadata,runtime_inode).unwrap_err().committed);
         assert!(!runtime_file.exists());
     }
     owner.legacy_reply.store(4,Ordering::SeqCst);
@@ -2751,9 +2756,9 @@ fn verify_boot_scan(
     assert!(!live.shared_users.is_empty());
     assert!(live.shared_users.iter().all(|(_,p)|p[0].granted));
     assert!(live.packages.iter().all(|(name,_)|query.state().packages[name.as_ref().unwrap()].shared_user.is_none()));
-    system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,7,Some("current".into()),runtime_inode).unwrap();
+    system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,&runtime_metadata,runtime_inode).unwrap();
     let saved = list_store.state().users[0].1.runtime_permissions.as_ref().unwrap();
-    assert_eq!(saved.version,7); assert_eq!(saved.fingerprint.as_deref(),Some("current"));
+    assert_eq!(saved.version,7); assert_eq!(saved.fingerprint.as_deref(),Some("fixture-partitions?pc_version=12"));
     assert!(saved.shared_users.iter().all(|(_,p)|!p[0].granted && p[0].flags == 1 << 16));
     let reopened = crate::package::owner::Store::open(&list_data,&[0,10]).unwrap().unwrap();
     assert_eq!(reopened.state().users[0].1.runtime_permissions.as_ref(),Some(saved));

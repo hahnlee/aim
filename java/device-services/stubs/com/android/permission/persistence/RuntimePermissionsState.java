@@ -1,3 +1,4 @@
+// Compile-only pinned permission module API; never included in device-services.jar.
 package com.android.permission.persistence;
 public class RuntimePermissionsState {
     public RuntimePermissionsState(int version, String fingerprint, java.util.Map<String, java.util.List<PermissionState>> packages, java.util.Map<String, java.util.List<PermissionState>> shared) { throw new RuntimeException("stub"); }

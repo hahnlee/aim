@@ -43,6 +43,7 @@ public final class LegacyRestoreOracle {
         verifySharedSeedEvents(directory);
         verifyInitialRestrictions(directory,connect);
         com.android.permission.persistence.RuntimePersistenceOracle.verify(directory);
+        verifyRuntimeMetadata(directory);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
@@ -184,6 +185,35 @@ public final class LegacyRestoreOracle {
                 if(!java.util.Arrays.equals(actual,Files.readAllBytes(new File(directory,"shared-seed-event-"+index+"-"+ids[at]+".permissions").toPath())))throw new AssertionError("original seeded permission state differs "+index+":"+ids[at]);
             }
         }
+    }
+    private static void verifyRuntimeMetadata(File directory) throws Exception {
+        if(android.os.Looper.myLooper()==null)android.os.Looper.prepareMainLooper();
+        // This Settings graph has no packages/groups. Its asynchronous metadata
+        // write still requires the original legacy permission producer interface.
+        var permissions=new com.android.server.pm.permission.LegacyPermissionDataProvider() {
+            public void writeLegacyPermissionStateTEMP() {}
+            public int[] getGidsForUid(int appId) { throw new IllegalStateException("empty metadata graph has no UID owner"); }
+            public com.android.server.pm.permission.LegacyPermissionState getLegacyPermissionState(int appId) { throw new IllegalStateException("empty metadata graph has no UID owner"); }
+        };
+        var settings=new Settings(new File(directory,"runtime-metadata-settings"),com.android.permission.persistence.RuntimePermissionsPersistence.createInstance(),permissions,null,null,new PackageManagerTracedLock());
+        System.err.println("runtime metadata: constructed");
+        int user=43;
+        if(settings.getDefaultRuntimePermissionsVersion(user)!=0 || !settings.isPermissionUpgradeNeeded(user) || settings.getLegacyPermissionsState(user).getFingerprint()!=null)throw new AssertionError("original runtime sparse defaults differ");
+        boolean rejected=false;
+        try { settings.updateRuntimePermissionsFingerprint(user); } catch(RuntimeException expected) { rejected=true; }
+        if(!rejected)throw new AssertionError("original fingerprint update accepted missing controller");
+        System.err.println("runtime metadata: missing controller rejected");
+        var build=new Settings.VersionInfo();build.forceCurrent();
+        settings.setPermissionControllerVersion(12);
+        settings.setDefaultRuntimePermissionsVersion(-1,user);
+        if(settings.getDefaultRuntimePermissionsVersion(user)!=-1)throw new AssertionError("original runtime upgrade version differs");
+        settings.setDefaultRuntimePermissionsVersion(7,user);
+        settings.updateRuntimePermissionsFingerprint(user);
+        if(settings.getDefaultRuntimePermissionsVersion(user)!=7 || settings.isPermissionUpgradeNeeded(user) || !(build.fingerprint+"?pc_version=12").equals(settings.getLegacyPermissionsState(user).getFingerprint()))throw new AssertionError("original runtime controller metadata differs");
+        System.err.println("runtime metadata: version/fingerprint matched");
+        settings.setPermissionControllerVersion(13);
+        if(!settings.isPermissionUpgradeNeeded(user))throw new AssertionError("original runtime controller upgrade transition differs");
+        System.err.println("runtime metadata: upgrade matched");
     }
     private static void verifyInitialRestrictions(File directory, java.util.function.BiConsumer<com.android.server.pm.verify.domain.DomainVerificationService, PackageSetting> connect) throws Exception {
         for(int index=0;index<3;index++) {
