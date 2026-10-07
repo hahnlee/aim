@@ -1,0 +1,28 @@
+# The Tradefed harness of the pinned CTS release (upstream/cts.lock: URL and
+# SIZE) and the host-side modules run with it (docs/cts.md). Tradefed finds
+# its jars and the modules by their paths in the release, so
+# `tools/cts-module.py --tradefed` fetches these entries into
+# _build/cts-tradefed at the same paths. Tradefed and the modules are
+# Apache-2.0 AOSP with their test libraries, like the rest of the release: a
+# local test input, never shipped or committed.
+
+# entry|sha256 of the inflated file
+# The harness, for its classic console (USE_ATS=false; the ATS console jars
+# are not fetched).
+"android-cts/tools/compatibility-host-util.jar|ef7d48981051319a77f461fc40b03d6fa2e8285bc376a593629a847996260cdd"
+"android-cts/tools/compatibility-tradefed.jar|805c79f489f439fc90a7281de20ea9fff280788a42d1b8e376e04e79a0f95d89"
+"android-cts/tools/cts-tradefed|097b23cc4ed0c1ca22b22d432f4cb6fe8832b306f1394c6f17b2a978e652b7f1"
+"android-cts/tools/cts-tradefed.jar|5179feff5311eda3be252651c0d194d527a630930116c15568f013de2b6193f9"
+"android-cts/tools/loganalysis.jar|47b7dfeae5e0dcc99494ccf556e4794c69637a2fd583ca9b85494abb0aeb82ff"
+"android-cts/tools/test-utils-script|0b5277b2ebbeb4a25fc2ad42016592c039151343efd32a70781de50080d15167"
+"android-cts/tools/tradefed.jar|d1ea44a7cd0a811bdb4340e11eb6cdb24bd3176d1e603d1cece2e79b05ffa882"
+"android-cts/tools/version.txt|0d31f9770245402db6434c6492c2123933deabc62ab835c14a6d06f1f878708d"
+# PackageManager, slice A's host-side modules (docs/m4-packagemanager.md, "CTS").
+"android-cts/testcases/CtsPackageManagerParsingHostTestCases/CtsPackageManagerParsingHostTestCases.config|2bfa543e93541cd3e47304fa53b9a93f1225ecaba7411bf6c564dafcf8c19193"
+"android-cts/testcases/CtsPackageManagerParsingHostTestCases/CtsPackageManagerParsingHostTestCases.jar|a9008d0ff85c3fd1f45607539ac5bf74976ca36a82a1b9d10e7541fd58198d2b"
+"android-cts/testcases/CtsPackageManagerPreferredActivityHostTestCases/CtsPackageManagerPreferredActivityApp.apk|41129af4fa6de90c1d2c56cc0608e7ced9fb9acf0e11963576c6e763b947e5f4"
+"android-cts/testcases/CtsPackageManagerPreferredActivityHostTestCases/CtsPackageManagerPreferredActivityHostTestCases.config|332596d5ea1be2b2ebcf6fc05027f6dc08eab44ddc5ced22912fdaa1f4df2357"
+"android-cts/testcases/CtsPackageManagerPreferredActivityHostTestCases/CtsPackageManagerPreferredActivityHostTestCases.jar|757f55e7b3aabfa65622892cb546aff28cc0a789f6680f994d5d1c92962c7e4e"
+"android-cts/testcases/CtsPackageSettingHostTestCases/CtsPackageSettingHostTestCases.config|c267cf70db2eb05f6c622c80d02da17e43ae1b72fffa117c63de2dfaf6b43277"
+"android-cts/testcases/CtsPackageSettingHostTestCases/CtsPackageSettingHostTestCases.jar|a20022a01ec93d26bf4976d753ef0043d1b9fc4f14978dfcb7d9315c7f0f016d"
+"android-cts/testcases/CtsPackageSettingHostTestCases/PackageSettingTestApp.apk|b2d60f399ae431ca8e3021cf9bb20887155e09b4c23380449fb4d681127a6414"
