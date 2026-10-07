@@ -39,6 +39,7 @@ public final class LegacyRestoreOracle {
     public static void verify(File directory) throws Exception {
         verifyInstallBindings(directory);
         verifyFactoryEvents(directory);
+        verifyNullableFactoryNames(directory);
         for (int i = 0; i < 4; i++) {
             var root = new File(directory, "legacy-restore-" + i);
             var oracle = new LegacyRestoreOracle();
@@ -143,6 +144,24 @@ public final class LegacyRestoreOracle {
                 else if(!expected.exists() || !java.util.Arrays.equals(PackageLegacyPermissions.capture(id,new int[]{10,0},p.getLegacyPermissionState()),Files.readAllBytes(expected.toPath())))throw new AssertionError("factory UID permission target differs "+index+":"+id);
             }
         }
+    }
+    private static void verifyNullableFactoryNames(File directory) throws Exception {
+        String xml="<packages><updated-package codePath='/system/app/first' userId='10003' version='1'/><updated-package name='' codePath='/system/app/empty' userId='10004' version='2'/><updated-package codePath='/system/app/last' userId='10005' version='3'/></packages>";
+        var data=new File(directory,"nullable-factory-original");var system=new File(data,"system");system.mkdirs();
+        Files.write(new File(system,"packages.xml").toPath(),xml.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());
+        settings.readSettingsLPw(null,java.util.List.of(),new android.util.ArrayMap<>());
+        var unnamed=settings.getDisabledSystemPkgLPr(null);var empty=settings.getDisabledSystemPkgLPr("");
+        if(unnamed==null || empty==null || unnamed==empty || unnamed.getPackageName()!=null || !"".equals(empty.getPackageName()) || unnamed.getVersionCode()!=3 || empty.getVersionCode()!=2) throw new AssertionError("original nullable factory identity assumption differs");
+        Files.write(new File(directory,"nullable-factory-original.metadata").toPath(),(unnamed.getAppId()+"|"+unnamed.getPathString()+"|"+empty.getAppId()+"|"+empty.getPathString()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String writeStatus="ok";
+        try {
+            var output=new java.io.ByteArrayOutputStream();var serializer=android.util.Xml.resolveSerializer(output);serializer.startDocument(null,true);serializer.startTag(null,"packages");
+            settings.writeDisabledSysPackageLPr(serializer,unnamed);serializer.endTag(null,"packages");serializer.endDocument();
+            Files.write(new File(directory,"nullable-factory-original.write").toPath(),output.toByteArray());
+        } catch(NullPointerException failure) { writeStatus="null-input"; }
+        if(!"null-input".equals(writeStatus)) throw new AssertionError("original null factory serialization assumption differs");
+        Files.write(new File(directory,"nullable-factory-original.write-status").toPath(),writeStatus.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {
         byte[] expected = Files.readAllBytes(new File(root, stem + ".input").toPath());

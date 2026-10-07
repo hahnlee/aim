@@ -1741,6 +1741,7 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8_lossy(&original.stdout),
         String::from_utf8_lossy(&original.stderr)
     );
+    eprintln!("Original nullable factory write status: {}", fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap());
     assert_eq!(
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
