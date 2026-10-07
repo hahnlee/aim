@@ -1137,6 +1137,63 @@ impl System {
         Ok(recovered)
     }
 
+    /// Run the exclusive frontend through readLPw completion before user files.
+    /// The same retained bridge protects file reads and pending/group completion.
+    pub fn recover_package_settings_frontend(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        data: &std::path::Path,
+        users: &[u32],
+        settings: &mut crate::package::settings::Settings,
+        mut frontend: impl FnMut(
+            crate::package::owner::recovery::ReadStage<'_>,
+            &mut crate::package::settings::Settings,
+        ) -> std::result::Result<
+            Option<aim_android_xml::Element>,
+            crate::package::settings::ReadError,
+        >,
+    ) -> std::result::Result<
+        (
+            crate::package::owner::Store,
+            crate::package::owner::recovery::Report,
+        ),
+        crate::package::owner::recovery::Error,
+    > {
+        use crate::package::owner::recovery::{Error, Plan, ReadError};
+        let check = || {
+            self.check_package_bootstrap(bridge)
+                .map_err(|error| format!("settings bootstrap owner: {error:?}"))
+        };
+        check().map_err(|message| Error {
+            events: Vec::new(),
+            message,
+        })?;
+        let current = bridge.current_package_version().map_err(|error| Error {
+            events: Vec::new(),
+            message: format!("current settings build owner: {error:?}"),
+        })?;
+        check().map_err(|message| Error {
+            events: Vec::new(),
+            message,
+        })?;
+        let result = Plan::inspect(data)?.recover_boot_frontend(
+            users,
+            settings,
+            &current,
+            |stage, settings| {
+                check().map_err(ReadError::Owner)?;
+                let root = frontend(stage, settings)?;
+                check().map_err(ReadError::Owner)?;
+                Ok(root)
+            },
+        )?;
+        check().map_err(|message| Error {
+            events: result.1.events.clone(),
+            message,
+        })?;
+        Ok(result)
+    }
+
     /// Initialize constructor shared identities under the retained early bridge.
     /// Keep partial settings/UID/permission effects if a later owner fails.
     pub fn initialize_package_shared_users(

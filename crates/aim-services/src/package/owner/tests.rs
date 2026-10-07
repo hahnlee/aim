@@ -40,6 +40,46 @@ fn duplicate_factory_import_opens_one_owner_without_rewriting_the_source() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
+#[test]
+fn boot_frontend_completion_precedes_related_files_and_preserves_input_on_failure() {
+    use crate::package::{settings::{Settings, Version, PackageReadAttempt}, owner::app_ids::AppIds};
+    use recovery::{ReadStage, ReadError, Event};
+    let data = Data::new(); let restrictions = data.settings();
+    let path = data.0.join("system/packages.xml");
+    let bytes = b"<packages><package name='pending' codePath='/pending' sharedUserId='10100' domainSetId='00000000-0000-0000-0000-000000000001'/><shared-user name='group' userId='10100'/></packages>";
+    fs::write(&path, bytes).unwrap(); fs::write(&restrictions, b"bad related input").unwrap();
+    let mut settings = Settings::default(); let mut ids = AppIds::default(); let mut attempt = PackageReadAttempt::default();
+    let current = Version { sdk_version: 36, database_version: 3, ..Default::default() };
+    let error = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut settings, &current, |stage, state| match stage {
+        ReadStage::File(bytes) => state.read_document(bytes, |state, reader, start| {
+            match start.name.as_str() {
+                "package" => { state.read_package(reader,start,&mut ids,&mut attempt,|_,_,_|Ok(false))?; }
+                "shared-user" => { state.read_shared_user(reader,start,&mut ids,&mut attempt,|_,_,_|Ok(false))?; }
+                _ => return Ok(false),
+            } Ok(true)
+        }),
+        ReadStage::Complete => {
+            assert_eq!(state.versions.len(), 2);
+            attempt.resolve_pending(state, &mut ids, |_,_,_,_| Err("binding owner unavailable".into())).map_err(ReadError::Owner)?;
+            Ok(None)
+        }
+    }).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "binding owner unavailable"));
+    assert!(settings.packages.is_empty()); assert_eq!(attempt.pending.len(), 1);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let (store, _) = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut settings, &current, |stage, state| match stage {
+        ReadStage::File(bytes) => state.read_document(bytes, |_,reader,_| { crate::package::settings::skip(reader)?; Ok(true) }),
+        ReadStage::Complete => {
+            attempt.resolve_pending(state, &mut ids, |_,_,_,_| Ok(())).map_err(ReadError::Owner)?;
+            fs::write(&restrictions, b"<package-restrictions><pkg name='pending' inst='false'/></package-restrictions>").unwrap();
+            Ok(None)
+        }
+    }).unwrap();
+    assert_eq!(store.state().settings.packages[0].name, "pending");
+    assert!(!store.state().users[0].1.restrictions.packages[0].1.installed);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
 pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {

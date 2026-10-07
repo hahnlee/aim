@@ -911,6 +911,22 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert!(!report.first_boot);
     assert_eq!(store.state().settings.versions[0].sdk_version, 36);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let mut phases = Vec::new();
+    let (_, report) = system.recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
+        match stage {
+            crate::package::owner::recovery::ReadStage::File(bytes) => { phases.push("read"); state.read_document(bytes, |_,_,_| Ok(false)) }
+            crate::package::owner::recovery::ReadStage::Complete => { phases.push("complete"); assert_eq!(state.versions.len(), 2); Ok(None) }
+        }
+    }).unwrap();
+    assert!(!report.first_boot); assert_eq!(phases, ["read", "complete"]);
+    let error = system.recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
+        match stage {
+            crate::package::owner::recovery::ReadStage::File(bytes) => state.read_document(bytes, |_,_,_| Ok(false)),
+            crate::package::owner::recovery::ReadStage::Complete => Err(ReadError::Owner("frontend binding owner unavailable".into())),
+        }
+    }).err().unwrap();
+    assert!(matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "frontend binding owner unavailable"));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
     // Use the production record dispatcher with the same retained bridge.
     let mut ids = crate::package::owner::app_ids::AppIds::default();
     let mut attempt = crate::package::settings::PackageReadAttempt::default();

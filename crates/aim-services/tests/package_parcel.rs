@@ -838,6 +838,7 @@ fn native_package_parcels_match_original_read_write() {
                 Event::OpenFailed(source) => format!("open-failed.{source:?}"),
                 Event::RemoveFailed(source) => format!("remove-failed.{source:?}"),
                 Event::Absent => "absent".into(),
+                Event::CompletionFailed(_) => "completion-failed".into(),
             })
             .collect::<Vec<_>>()
             .join(",");

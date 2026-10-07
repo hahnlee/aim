@@ -28,6 +28,14 @@ pub enum Event {
     OpenFailed(Source),
     RemoveFailed(Source),
     Absent,
+    CompletionFailed(String),
+}
+
+/// Exclusive boot frontend stages. Completion runs after version initialization
+/// and before related user/runtime files are restored or a Store is published.
+pub enum ReadStage<'a> {
+    File(&'a [u8]),
+    Complete,
 }
 
 /// Errors caught by original Settings recovery enter ResilientAtomicFile.failRead.
@@ -225,9 +233,18 @@ impl Plan {
         self,
         users: &[u32],
         settings: &mut Settings,
-        parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
+        mut parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
     ) -> Result<(Store, Report), Error> {
-        self.recover_inner(users, settings, parse, None)
+        self.recover_inner(
+            users,
+            settings,
+            |stage, settings| match stage {
+                ReadStage::File(bytes) => parse(bytes, settings),
+                ReadStage::Complete => unreachable!("completion disabled for record-only recovery"),
+            },
+            None,
+            false,
+        )
     }
 
     /// Native Settings boot lifecycle with values supplied by the pinned build
@@ -237,9 +254,32 @@ impl Plan {
         users: &[u32],
         settings: &mut Settings,
         current: &crate::package::settings::Version,
-        parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
+        mut parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
     ) -> Result<(Store, Report), Error> {
-        let result = self.recover_inner(users, settings, parse, Some(current));
+        let result = self.recover_inner(
+            users,
+            settings,
+            |stage, settings| match stage {
+                ReadStage::File(bytes) => parse(bytes, settings),
+                ReadStage::Complete => unreachable!("completion disabled for record-only recovery"),
+            },
+            Some(current),
+            false,
+        );
+        settings.ensure_boot_versions(current);
+        result
+    }
+
+    /// Complete pending/group owners on the original readLPw continuation path.
+    /// Return None from Complete; native owner errors do not invoke failRead.
+    pub fn recover_boot_frontend(
+        self,
+        users: &[u32],
+        settings: &mut Settings,
+        current: &crate::package::settings::Version,
+        frontend: impl FnMut(ReadStage<'_>, &mut Settings) -> Result<Option<Element>, ReadError>,
+    ) -> Result<(Store, Report), Error> {
+        let result = self.recover_inner(users, settings, frontend, Some(current), true);
         settings.ensure_boot_versions(current);
         result
     }
@@ -248,8 +288,9 @@ impl Plan {
         mut self,
         users: &[u32],
         settings: &mut Settings,
-        mut parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
+        mut parse: impl FnMut(ReadStage<'_>, &mut Settings) -> Result<Option<Element>, ReadError>,
         current: Option<&crate::package::settings::Version>,
+        complete: bool,
     ) -> Result<(Store, Report), Error> {
         let mut events = Vec::new();
         let mut failed = false;
@@ -303,6 +344,7 @@ impl Plan {
                         first_boot: !failed,
                         events,
                     },
+                    if complete { Some(&mut parse) } else { None },
                 );
             };
             let source = self.inputs[index].as_ref().unwrap().source;
@@ -313,7 +355,10 @@ impl Plan {
                 self.remove(0, &mut events, true)?;
                 self.remove(2, &mut events, true)?;
             }
-            match parse(&self.inputs[index].as_ref().unwrap().file.payload, settings) {
+            match parse(
+                ReadStage::File(&self.inputs[index].as_ref().unwrap().file.payload),
+                settings,
+            ) {
                 Ok(Some(document)) => {
                     if let Some(current) = current {
                         settings.ensure_boot_versions(current);
@@ -326,6 +371,7 @@ impl Plan {
                             first_boot: false,
                             events,
                         },
+                        if complete { Some(&mut parse) } else { None },
                     );
                 }
                 Ok(None) => {
@@ -341,6 +387,7 @@ impl Plan {
                             first_boot: !failed,
                             events,
                         },
+                        if complete { Some(&mut parse) } else { None },
                     );
                 }
                 Err(ReadError::Owner(message)) => {
@@ -369,14 +416,42 @@ impl Plan {
     fn finish(
         mut self,
         users: &[u32],
-        settings: &Settings,
+        settings: &mut Settings,
         document: Option<Element>,
-        report: Report,
+        mut report: Report,
+        frontend: Option<
+            &mut dyn FnMut(ReadStage<'_>, &mut Settings) -> Result<Option<Element>, ReadError>,
+        >,
     ) -> Result<(Store, Report), Error> {
         self.check().map_err(|message| Error {
             events: report.events.clone(),
             message,
         })?;
+        if !report.first_boot {
+            if let Some(frontend) = frontend {
+                let result = frontend(ReadStage::Complete, settings).and_then(|root| {
+                    if root.is_some() {
+                        Err(ReadError::Owner(
+                            "completion returned a persistence document".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(error) = result {
+                    let message = error.to_string();
+                    report.events.push(Event::CompletionFailed(message.clone()));
+                    return Err(Error {
+                        events: report.events,
+                        message,
+                    });
+                }
+                self.check().map_err(|message| Error {
+                    events: report.events.clone(),
+                    message,
+                })?;
+            }
+        }
         let state =
             State::read_related(&self.data, users, settings.clone()).map_err(|message| Error {
                 events: report.events.clone(),
