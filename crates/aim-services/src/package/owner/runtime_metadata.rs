@@ -93,6 +93,47 @@ impl State {
     }
 }
 
+impl super::Store {
+    /// Restore saved migration roles and their runtime metadata as one candidate.
+    /// First-boot false continuations must keep constructor metadata instead.
+    pub(crate) fn restore_runtime_permission_owners(
+        &self,
+        scan: &mut crate::package::scan::SigningScan,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<State, super::WriteError> {
+        if !self.settings_present || !self.unread_restrictions.is_empty() {
+            return Err(super::WriteError::before(
+                "runtime restoration was skipped by the boot reader",
+            ));
+        }
+        let mut candidate = scan.clone();
+        candidate
+            .restore_legacy_permissions_from_data(&self.data, &self.state, config)
+            .map_err(super::WriteError::before)?;
+        let restored = candidate
+            .legacy_restoration_metadata()
+            .map_err(super::WriteError::before)?
+            .ok_or_else(|| {
+                super::WriteError::before("runtime restoration metadata is unavailable")
+            })?;
+        let expected = self
+            .state
+            .users
+            .iter()
+            .map(|(id, _)| i32::try_from(*id).map_err(super::WriteError::before))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if restored.users.keys().copied().collect::<BTreeSet<_>>() != expected {
+            return Err(super::WriteError::before(
+                "runtime restored user inventory differs",
+            ));
+        }
+        let mut metadata = State::default();
+        metadata.restore(restored);
+        *scan = candidate;
+        Ok(metadata)
+    }
+}
+
 /// Earlier users may have committed even when a later requested write failed.
 #[derive(Debug)]
 pub struct FlushError {
@@ -115,6 +156,60 @@ impl std::error::Error for FlushError {
 mod tests {
     use super::*;
     use crate::package::owner::legacy_permissions::UserMetadata;
+
+    #[test]
+    fn store_runtime_restore_carries_versions_and_rewrites_without_partial_scan_changes() {
+        use crate::package::{
+            owner::{Store, tests::Data},
+            scan::SigningScan,
+            system_config::SystemConfig,
+        };
+        let data = Data::new();
+        data.settings();
+        let dir = data.0.join("misc_de/0/apexdata/com.android.permission");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("runtime-permissions.xml"),b"<runtime-permissions version='7' fingerprint='saved'><package name='example.app'/></runtime-permissions>").unwrap();
+        let store = Store::open(&data.0, &[0, 10]).unwrap().unwrap();
+        let mut scan =
+            SigningScan::new(&SystemConfig::default(), &store.state.settings, 36).unwrap();
+        let metadata = store
+            .restore_runtime_permission_owners(&mut scan, &SystemConfig::default())
+            .unwrap();
+        assert_eq!(metadata.version(0), 7);
+        assert_eq!(metadata.fingerprint(0), Some("saved"));
+        assert_eq!(metadata.version(10), 0);
+        assert_eq!(metadata.pending_write_requests(), [10]);
+        assert!(scan.legacy_restoration_metadata().unwrap().is_some());
+        let before = scan.clone();
+        scan.settings.packages[0].app_id += 1;
+        let changed = scan.clone();
+        assert!(
+            store
+                .restore_runtime_permission_owners(&mut scan, &SystemConfig::default())
+                .is_err()
+        );
+        assert_eq!(scan, changed);
+        assert_ne!(scan, before);
+        let fresh = Data::new();
+        let mut settings = crate::package::settings::Settings::default();
+        let current = crate::package::settings::Version {
+            sdk_version: 36,
+            database_version: 3,
+            ..Default::default()
+        };
+        let (store, _) = super::super::recovery::Plan::inspect(&fresh.0)
+            .unwrap()
+            .recover_boot(&[0], &mut settings, &current, |_, _| panic!())
+            .unwrap();
+        let mut scan = SigningScan::new(&SystemConfig::default(), &settings, 36).unwrap();
+        let before = scan.clone();
+        assert!(
+            store
+                .restore_runtime_permission_owners(&mut scan, &SystemConfig::default())
+                .is_err()
+        );
+        assert_eq!(scan, before);
+    }
 
     #[test]
     fn flush_retains_committed_failures_and_later_requests_until_success() {

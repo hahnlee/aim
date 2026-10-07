@@ -1169,7 +1169,19 @@ defaults, version mutations, controller upgrade comparisons, user removal and
 mandatory pending write requests. Updating a fingerprint before controller setup
 fails without changing state. System configures the extended fingerprint from the
 retained original PackagePartitions identity and supplied controller version;
-callers no longer pass arbitrary version/fingerprint values to the disk commit. Metadata write requests
+callers no longer pass arbitrary version/fingerprint values to the disk commit. Saved boot restoration now
+creates runtime metadata and legacy migration roles together from the Store's
+captured read state. User inventory must match exactly; missing captured metadata,
+foreign setting identities and false-read/skipped user restoration reject. The
+candidate scan is published only after the retained bootstrap identity recheck.
+First-boot constructor metadata remains separate from saved restoration; no file
+is reopened to fabricate a skipped read result. The restore unit verifies
+saved version/fingerprint, missing-file rewrite requests, changed package identity
+rejection and skipped first-boot immutability; System bridge tests cover restored
+metadata transfer and missing-user inventory refusal. 551 service units pass
+(6 excluded, 0.56s), host build passes (3 rebuilt/10 fresh, 19.8s). Original ART
+metadata/atomic comparison previously passed (61.42s); no new original rerun was
+made for this restore coordinator. Metadata write requests
 now remain queued until a complete successful write acknowledges the user.
 System.flush_runtime_permission_requests provides a synchronous persistence
 boundary in user order, returns already completed users with a later failure,

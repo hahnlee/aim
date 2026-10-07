@@ -1221,6 +1221,23 @@ impl System {
         })
     }
 
+    /// Restore saved permission roles and metadata under one retained boot bridge.
+    pub fn restore_package_runtime_permissions(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &crate::package::owner::Store,
+        scan: &mut crate::package::scan::SigningScan,
+        config: &crate::package::system_config::SystemConfig,
+    ) -> Result<crate::package::owner::runtime_metadata::State> {
+        self.check_package_bootstrap(bridge)?;
+        let mut candidate = scan.clone();
+        let metadata = store.restore_runtime_permission_owners(&mut candidate,config).map_err(|error|Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+        self.check_package_bootstrap(bridge)?;
+        *scan = candidate;
+        Ok(metadata)
+    }
+
     /// Use the retained original PackagePartitions build identity for controller metadata.
     pub fn set_runtime_permission_controller_version(
         &self,

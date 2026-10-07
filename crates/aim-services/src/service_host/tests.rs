@@ -912,6 +912,14 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
     assert!(!report.first_boot);
     assert_eq!(store.state().settings.versions[0].sdk_version, 36);
+    let mut restored_scan = crate::package::scan::SigningScan::new(&SystemConfig::default(),&store.state().settings,36).unwrap();
+    let before_runtime = restored_scan.clone();
+    assert!(system.restore_package_runtime_permissions(bridge,&store,&mut restored_scan,&SystemConfig::default()).is_err());
+    assert_eq!(restored_scan,before_runtime);
+    let runtime_store = crate::package::owner::Store::open(&root,&[0]).unwrap().unwrap();
+    let runtime_metadata = system.restore_package_runtime_permissions(bridge,&runtime_store,&mut restored_scan,&SystemConfig::default()).unwrap();
+    assert_eq!(runtime_metadata.pending_write_requests(),[0]);
+    assert!(restored_scan.legacy_restoration_metadata().unwrap().is_some());
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     let mut phases = Vec::new();
     let (_, report) = system.recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
