@@ -117,6 +117,11 @@ pub fn retire(state: &mut Settings) {
 
 struct ProjectionOwners;
 impl ReadOwners for ProjectionOwners {
+    fn start_attempt(&mut self, _: &Settings, _: &[Package]) -> Result<(), ReadError> { Ok(()) }
+
+    fn package_registered(&mut self, _: &Package, _: bool) -> Result<(), ReadError> { Ok(()) }
+    fn shared_registered(&mut self, _: &SharedUser, _: bool) -> Result<(), ReadError> { Ok(()) }
+
     fn package_child(
         &mut self,
         _: &mut Package,

@@ -6,6 +6,9 @@ use aim_android_xml::{Element, pull::Reader};
 /// Owners whose state is outside the persisted Settings record. Implementations
 /// must report missing dependencies; recovery only retries File errors.
 pub trait ReadOwners {
+    fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError>;
+    fn package_registered(&mut self, package: &Package, created: bool) -> Result<(), ReadError>;
+    fn shared_registered(&mut self, group: &SharedUser, created: bool) -> Result<(), ReadError>;
     fn package_child(
         &mut self,
         package: &mut Package,
@@ -40,28 +43,46 @@ impl Settings {
         domain_uuid_strict_validation: bool,
         owners: &mut impl ReadOwners,
     ) -> Result<Option<Element>, ReadError> {
+        owners.start_attempt(self, &attempt.pending)?;
         *attempt = PackageReadAttempt::default();
         self.read_document(bytes, |settings, reader, start| {
             match start.name.as_str() {
                 "package" => {
+                    let existing = start
+                        .string("name")
+                        .is_some_and(|name| settings.packages.iter().any(|p| p.name == name));
                     settings.read_package_with_ids(
                         reader,
                         start,
                         ids,
                         attempt,
                         |package, reader, child, ids| {
+                            let Some(child) = child else {
+                                owners.package_registered(
+                                    package,
+                                    package.shared_user || !existing,
+                                )?;
+                                return Ok(true);
+                            };
                             let handled = owners.package_child(package, reader, child, ids)?;
                             require_child_owner(handled, child, &["perms", "domain-verification"])
                         },
                     )?;
                 }
                 "shared-user" => {
-                    settings.read_shared_user(
+                    let existing = start
+                        .string("name")
+                        .is_some_and(|name| settings.shared_users.iter().any(|g| g.name == name));
+                    settings.read_shared_user_with_owner(
                         reader,
                         start,
                         ids,
                         attempt,
                         |group, reader, child| {
+                            let Some(child) = child else {
+                                owners.shared_registered(group, !existing)?;
+                                return Ok(true);
+                            };
                             let handled = owners.shared_child(group, reader, child)?;
                             require_child_owner(handled, child, &["perms"])
                         },

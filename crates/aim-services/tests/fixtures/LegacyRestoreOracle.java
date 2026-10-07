@@ -78,7 +78,8 @@ public final class LegacyRestoreOracle {
             var input=new File(directory,"install-binding-"+index+".xml"); if(!input.exists()) break;
             var data=new File(directory,"install-binding-original-"+index); var system=new File(data,"system"); system.mkdirs();
             Files.write(new File(system,"packages.xml").toPath(),Files.readAllBytes(input.toPath()));
-            Files.write(new File(system,"packages.xml.reservecopy").toPath(),"<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var reserve=new File(directory,"install-binding-"+index+".reserve");
+            Files.write(new File(system,"packages.xml.reservecopy").toPath(),reserve.exists()?Files.readAllBytes(reserve.toPath()):"<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
             var users=new java.util.ArrayList<android.content.pm.UserInfo>();
             for(int id:new int[]{10,0}) { var user=new android.content.pm.UserInfo(); user.id=id; users.add(user); }
             var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());

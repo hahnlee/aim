@@ -721,10 +721,14 @@ impl Settings {
         ) -> Result<bool, ReadError>,
     ) -> Result<PackageReadOutcome, ReadError> {
         self.read_package_with_ids(reader, start, ids, attempt, |package, reader, child, _| {
-            read_owner(package, reader, child)
+            match child {
+                Some(child) => read_owner(package, reader, child),
+                None => Ok(false),
+            }
         })
     }
 
+    /// None reports registration before body parsing; Some reports a child.
     /// Child owners see the exact UID slots after registration at this event.
     pub fn read_package_with_ids(
         &mut self,
@@ -735,7 +739,7 @@ impl Settings {
         mut read_owner: impl FnMut(
             &mut Package,
             &mut aim_android_xml::pull::Reader<'_>,
-            &Element,
+            Option<&Element>,
             &super::owner::app_ids::AppIds,
         ) -> Result<bool, ReadError>,
     ) -> Result<PackageReadOutcome, ReadError> {
@@ -796,12 +800,13 @@ impl Settings {
             let index = self.packages.len() - 1;
             (&mut self.packages[index], PackageReadOutcome::Active(index))
         };
+        read_owner(target, reader, None, ids)?;
         target.set_page_size_compat(defaulted(start.int("pageSizeCompat"), 0))?;
         target.read_children(
             reader,
             &mut attempt.signatures,
             &mut attempt.key_set_refs,
-            |package, reader, child| read_owner(package, reader, child, ids),
+            |package, reader, child| read_owner(package, reader, Some(child), ids),
         )?;
         if first_install_time != 0 {
             attempt
@@ -823,6 +828,28 @@ impl Settings {
             &mut SharedUser,
             &mut aim_android_xml::pull::Reader<'_>,
             &Element,
+        ) -> Result<bool, ReadError>,
+    ) -> Result<SharedReadOutcome, ReadError> {
+        self.read_shared_user_with_owner(reader, start, ids, attempt, |group, reader, child| {
+            match child {
+                Some(child) => read_owner(group, reader, child),
+                None => Ok(false),
+            }
+        })
+    }
+
+    /// None reports registration before body parsing; Some reports a child.
+    /// Registration precedes external SettingBase construction and body events.
+    pub fn read_shared_user_with_owner(
+        &mut self,
+        reader: &mut aim_android_xml::pull::Reader<'_>,
+        start: &Element,
+        ids: &mut super::owner::app_ids::AppIds,
+        attempt: &mut PackageReadAttempt,
+        mut read_owner: impl FnMut(
+            &mut SharedUser,
+            &mut aim_android_xml::pull::Reader<'_>,
+            Option<&Element>,
         ) -> Result<bool, ReadError>,
     ) -> Result<SharedReadOutcome, ReadError> {
         use aim_android_xml::pull::Event;
@@ -862,6 +889,7 @@ impl Settings {
             self.shared_users.len() - 1
         };
         let group = &mut self.shared_users[index];
+        read_owner(group, reader, None)?;
         let outer = reader.depth();
         loop {
             match reader.next()? {
@@ -871,7 +899,7 @@ impl Settings {
                         .read(reader, &child, &mut group.signatures)?;
                 }
                 Event::Start(child) => {
-                    if !read_owner(group, reader, &child)? {
+                    if !read_owner(group, reader, Some(&child))? {
                         signatures::skip(reader)?;
                     }
                 }

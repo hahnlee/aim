@@ -1164,6 +1164,10 @@ impl System {
                 events: Vec::new(),
                 message: format!("settings bootstrap owner: {error:?}"),
             })?;
+        owners.start_attempt(settings, &attempt.pending).map_err(|error| Error {
+            events: Vec::new(),
+            message: error.to_string(),
+        })?;
         *attempt = PackageReadAttempt::default();
         let strict = bridge
             .domain_uuid_strict_validation()
@@ -1176,6 +1180,7 @@ impl System {
                 let read = settings.read_owned_document(bytes, ids, attempt, strict, owners);
                 if matches!(read, Err(ReadError::File(_))) {
                     // failRead recursively starts a new attempt even if no file remains.
+                    owners.start_attempt(settings, &attempt.pending)?;
                     *attempt = PackageReadAttempt::default();
                 }
                 read

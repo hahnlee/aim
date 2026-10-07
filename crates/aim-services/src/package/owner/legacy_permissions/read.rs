@@ -9,7 +9,8 @@ use aim_android_xml::{Element, pull::Reader};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Bind explicit SettingBase owners to the UID slots visible at each XML event.
-/// Constructors supply the maps; unavailable native owners fail explicitly.
+/// Successful registration creates empty SettingBase owners in supplied maps.
+/// Existing owners retain earlier permission state across repeats and retries.
 pub struct InstallRead<'a, T> {
     pub users: &'a [i32],
     pub packages: &'a mut BTreeMap<String, Migration>,
@@ -19,6 +20,30 @@ pub struct InstallRead<'a, T> {
 }
 
 impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
+    fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError> {
+        for package in pending {
+            if !settings
+                .packages
+                .iter()
+                .any(|active| active.name == package.name)
+            {
+                self.packages.remove(&package.name);
+                self.install_permissions_fixed.remove(&package.name);
+            }
+        }
+        self.remaining.start_attempt(settings, pending)
+    }
+
+    fn package_registered(&mut self, package: &Package, created: bool) -> Result<(), ReadError> {
+        register(&mut *self.packages, &package.name, created)?;
+        self.remaining.package_registered(package, created)
+    }
+
+    fn shared_registered(&mut self, group: &SharedUser, created: bool) -> Result<(), ReadError> {
+        register(&mut *self.shared_users, &group.name, created)?;
+        self.remaining.shared_registered(group, created)
+    }
+
     fn package_child(
         &mut self,
         package: &mut Package,
@@ -85,5 +110,23 @@ impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
         start: &Element,
     ) -> Result<bool, ReadError> {
         self.remaining.global_record(settings, reader, start)
+    }
+}
+
+fn register(
+    owners: &mut BTreeMap<String, Migration>,
+    name: &str,
+    created: bool,
+) -> Result<(), ReadError> {
+    use std::collections::btree_map::Entry;
+    match (owners.entry(name.into()), created) {
+        (Entry::Vacant(slot), true) => {
+            slot.insert(Migration::default());
+            Ok(())
+        }
+        (Entry::Occupied(_), false) => Ok(()),
+        _ => Err(ReadError::Owner(
+            "legacy constructor identity differs from registered setting".into(),
+        )),
     }
 }
