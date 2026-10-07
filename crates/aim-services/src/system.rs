@@ -1194,6 +1194,28 @@ impl System {
         Ok(result)
     }
 
+    /// Initialize captured users under the retained boot owner and pinned policy.
+    pub fn commit_initial_package_restrictions(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &mut crate::package::owner::Store,
+        scan: &crate::package::scan::SigningScan,
+        user: u32,
+        sections: aim_android_xml::Element,
+    ) -> std::result::Result<(), crate::package::owner::WriteError> {
+        use crate::package::owner::WriteError;
+        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
+            committed: false,
+            message: format!("initial user bootstrap owner: {error:?}"),
+        })?;
+        store.commit_initial_scan_restrictions(scan, user,
+            crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS, sections)?;
+        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
+            committed: true,
+            message: format!("initial user bootstrap owner after commit: {error:?}"),
+        })
+    }
+
     /// Initialize constructor shared identities under the retained early bridge.
     /// Keep partial settings/UID/permission effects if a later owner fails.
     pub fn initialize_package_shared_users(

@@ -1152,7 +1152,18 @@ installer/time/activity/component and guest absolute icon paths.
 PersistableBundle.save covers primitive/null/string/array/nested bundle XML;
 null string-array items reject like the original serializer. Relative icon paths
 still require guest absolute-path ownership. Full policy/nullable/complex state
-conformance remains #979; production scan/user readiness remains #978.
+conformance remains #979; production scan/user readiness remains #978. The
+pinned original Settings DEX contains no suspending-user read or write: its
+31-unit readSuspensionParamsLPr forwards the current user to UserPackage.of,
+and writePackageRestrictions writes only suspending-package. An explicit image
+inspection checks the reader instructions/argument registers and both writer
+overloads. The native pinned policy is therefore false, rather than a fallback
+for missing Flags classes or aconfig entries. System.commit_initial_package_restrictions
+uses that policy with retained bootstrap checks; replacement after a successful
+commit reports committed=true. Production first-boot invocation remains #978. The
+explicit pinned DEX inspection passes (0.01s); 540 service units pass (6 excluded,
+0.55s), host build passes (3 rebuilt/10 fresh, 17.3s). These checks do not run
+production native first boot or the CTS/app gates.
 The original read fixture supplies captured SigningScan user states and uses
 this generation API rather than supplying a completed pkg XML document. Three
 controlled cases verify scalar/component state and actual original suspension/

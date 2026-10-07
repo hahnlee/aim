@@ -19,6 +19,11 @@ use super::{children, string};
 /// `PackageManager.COMPONENT_ENABLED_STATE_DEFAULT`.
 pub const COMPONENT_ENABLED_STATE_DEFAULT: i32 = 0;
 
+/// The pinned Settings DEX removes cross-user suspension reads and writes.
+/// `pinned_settings_suspension_policy` checks both compiled methods.
+pub const PINNED_CROSS_USER_SUSPENSIONS: bool = false;
+
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Restrictions {
     /// By package name.
@@ -724,5 +729,62 @@ mod component_tests {
             state.packages[0].1.enabled_components.as_deref(),
             Some(["zzzzzz", "", "B", "BB", "Aa"].map(String::from).as_slice())
         );
+    }
+}
+
+#[cfg(test)]
+mod pinned_policy_tests {
+    #[test]
+    #[ignore = "requires pinned original image; run explicitly"]
+    fn pinned_settings_suspension_policy() {
+        use aim_android_image::dex::{Dex, instruction_units, units};
+        let jar = aim_apps::apk::Apk::open(&aim_paths::original_image().join("system/framework/services.jar")).unwrap();
+        let mut found = false;
+        for index in 1.. {
+            let name = if index == 1 { "classes.dex".into() } else { format!("classes{index}.dex") };
+            let Some(bytes) = jar.file_if_present(&name).unwrap() else { break };
+            let dex = Dex::parse(&bytes).unwrap();
+            let Some(class) = dex.class("Lcom/android/server/pm/Settings;") else { continue };
+            found = true;
+            let reader = dex.methods_named(class, "readSuspensionParamsLPr").unwrap();
+            assert_eq!(reader.len(), 1);
+            let code = units(&bytes, &reader[0]).unwrap();
+            let mut opcodes = Vec::new();
+            let mut at = 0;
+            while at < code.len() {
+                opcodes.push(code[at] & 0xff);
+                at += instruction_units(&code, at).unwrap();
+            }
+            // This compiled reader forwards the current user directly to
+            // UserPackage.of; no int attribute read or flag branch survives.
+            assert_eq!(opcodes, [0x1b,0x12,0x72,0x0c,0x39,0x1a,0x1a,0x71,0x11,0x71,0x0c,0x71,0x0c,0x71,0x0c,0x11]);
+            let header = reader[0].insns_off - 16;
+            let registers = u16::from_le_bytes(bytes[header..header+2].try_into().unwrap());
+            let inputs = u16::from_le_bytes(bytes[header+2..header+4].try_into().unwrap());
+            assert_eq!((registers, inputs), (4, 2));
+            assert_eq!((code[18], code[20]), (0x2071, 0x0002));
+            assert_eq!(dex.method(u32::from(code[19])).unwrap(), ("Landroid/content/pm/UserPackage;".into(), "of".into(), "(ILjava/lang/String;)Landroid/content/pm/UserPackage;".into()));
+            let writers = dex.methods_named(class, "writePackageRestrictions").unwrap();
+            assert!(!writers.is_empty());
+            let mut suspension = false;
+            for writer in writers {
+                let code = units(&bytes, &writer).unwrap();
+                let mut at = 0;
+                while at < code.len() {
+                    let op = code[at] & 0xff;
+                    if op == 0x1a || op == 0x1b {
+                        let mut id = u32::from(code[at+1]);
+                        if op == 0x1b { id |= u32::from(code[at+2]) << 16; }
+                        let value = dex.string(id).unwrap();
+                        assert_ne!(value, "suspending-user");
+                        suspension |= value == "suspending-package";
+                    }
+                    at += instruction_units(&code, at).unwrap();
+                }
+            }
+            assert!(suspension);
+        }
+        assert!(found, "original Settings was not inspected");
+        assert!(!super::PINNED_CROSS_USER_SUSPENSIONS);
     }
 }
