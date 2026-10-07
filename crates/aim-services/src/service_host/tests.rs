@@ -960,6 +960,21 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert!(attempt.key_set_refs.is_empty());
     assert!(attempt.first_install_times.is_empty());
     assert!(ids.get(10004).is_some());
+    let domains = b"<packages><domain-verifications-legacy><user-states packageName='legacy'><user-state userId='0' state='2'/></user-states></domain-verifications-legacy><domain-verifications><active><package-state packageName='p' id='1-2-3-4-5'><state><domain name='example.test' state='1'/></state></package-state></active></domain-verifications><domain-verifications><restored><package-state packageName='restore' id='2-3-4-5-6' signature='saved'/></restored></domain-verifications></packages>";
+    std::fs::write(&path, domains).unwrap();
+    let (store, _) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).unwrap();
+    let saved_domains = settings.domain_verification.clone();
+    assert_eq!(saved_domains.active[0].id, "00000001-0002-0003-0004-000000000005");
+    assert_eq!(saved_domains.restored[0].name, "restore");
+    assert_eq!(saved_domains.legacy, [(Some("legacy".into()), vec![(0, 2)])]);
+    assert_eq!(store.state().settings.domain_verification, saved_domains);
+    assert_eq!(std::fs::read(&path).unwrap(), domains);
+    // One invalid UUID aborts the detached container; earlier maps survive retry.
+    std::fs::write(&path, b"<packages><domain-verifications><active><package-state packageName='new' id='3-4-5-6-7'/><package-state packageName='bad' id='bad'/></active></domain-verifications></packages>").unwrap();
+    let (_, report) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).unwrap();
+    assert!(matches!(report.events.last(), Some(Event::Absent)));
+    assert_eq!(settings.domain_verification, saved_domains);
+    assert!(!path.exists());
     // Restore the original fixture for the identity/replacement checks below.
     std::fs::write(&path, bytes).unwrap();
     let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {

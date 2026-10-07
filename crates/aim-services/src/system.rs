@@ -1165,9 +1165,15 @@ impl System {
                 message: format!("settings bootstrap owner: {error:?}"),
             })?;
         *attempt = PackageReadAttempt::default();
+        let strict = bridge
+            .domain_uuid_strict_validation()
+            .map_err(|error| Error {
+                events: Vec::new(),
+                message: format!("settings domain UUID owner: {error:?}"),
+            })?;
         let recovered =
             self.recover_package_settings(bridge, data, users, settings, |bytes, settings| {
-                let read = settings.read_owned_document(bytes, ids, attempt, owners);
+                let read = settings.read_owned_document(bytes, ids, attempt, strict, owners);
                 if matches!(read, Err(ReadError::File(_))) {
                     // failRead recursively starts a new attempt even if no file remains.
                     *attempt = PackageReadAttempt::default();

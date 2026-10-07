@@ -1069,9 +1069,8 @@ Actual original Settings.readLPw agrees on eight lifecycle cases: absent/empty/
 valid data, saved internal/external versions, failed-read retry with absent or
 empty reserve, and fatal input. Fingerprints are normalized to equality with the
 original forceCurrent values; the oracle checks the pinned SDK/database versions.
-Current build-owner delivery, complete user/permission/group/global state and
-SystemServer orchestration remain #914/#912/#798; this does not prove native PMS
-construction/default activation or full current-fingerprint delivery.
+Complete user/permission/group/global state and SystemServer orchestration
+remain #914/#912/#798; native PMS construction/default activation is unproven.
 Current build values now come from retained original bootstrap AIDL ownership.
 PackageBootVersion.capture calls the image's Settings.VersionInfo.forceCurrent
 and emits SDK/database/build/partition values in a Parcel frame. The bridge's
@@ -1092,26 +1091,30 @@ share one AppIds owner and one PackageReadAttempt. Every file read resets
 attempt tables; File retry and absent input clear transient tables while keeping
 registered settings and UID effects. Owner/fatal errors retain current attempt
 inputs and preserve the selected file. Required package legacy permission/domain
-and shared permission children reject missing handlers. Key factory, keyset
-finalization and remaining global records still require explicit owners. Pending
+and shared permission children reject missing handlers. Boot modern domain
+containers now decode through the native persistence reader
+and merge into pending/restored maps before scan attachment. The UUID mode comes
+from the retained original bootstrap bridge before file selection. Prior legacy
+and modern maps survive retries; an invalid UUID prevents publication of its
+whole detached container. Missing key factory, keyset finalization and other
+global record implementations still require explicit owners. Pending
 binding and related user restoration are not yet a complete boot lifecycle.
-The owned frontend agrees with the existing actual-original shared UID (238)
-and keyset (158) projections; the full original ART oracle passes without skips
-(71.19s). Retained-bridge units exercise corrupt-file retry with registered UID
+The boot frontend agrees with the actual-original modern domain persistence
+(333), shared UID (238) and keyset (158) projections; the full original ART
+oracle passes without skips (73.63s). Retained-bridge units exercise corrupt-file retry with registered UID
 effects retained, missing child/finalization owners, fatal input, absent files
 and stale bridges.
 Full original-name native PMS construction, remaining frontend/group/user/
 permission/global owners and SystemServer orchestration remain #914/#912/#798.
 17 XML tests passed on the preceding revision. The current full original ART
-oracle passes without skips (71.19s), preserving eight boot version cases and
+oracle passes without skips (73.63s), preserving eight boot version cases and
 earlier domain/verifier/package/shared/keyset/permission checks. The preceding
 image/template build passed (10 rebuilt/32 fresh, 77.4s). This change adds no
-image/Java inputs. Host rebuild passes (3 rebuilt/10 fresh, 13.9s); 531 service
-units pass (5 excluded, 0.50s). The retained-owner framework-res scan passes
-(1.17s), including the owned recovery entry checks. Compile-only persistence/state-map API declarations
+image/Java inputs. Host rebuild passes (3 rebuilt/10 fresh, 1.8s); 531 service
+units pass (5 excluded, 0.56s). The retained-owner framework-res scan passes
+(1.18s), including the owned recovery and domain container checks. Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
-The prior retained-owner framework-res scan passed (1.45s) and was not rerun.
 Source: pinned DomainVerificationPersistence.java, DomainVerificationSettings.java,
 DomainVerificationLegacySettings.java and SettingsXml.java.
  An original

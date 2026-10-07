@@ -1,8 +1,8 @@
 //! Detached original domain persistence read/write projections; live merge is separate.
 use aim_android_xml::pull::{Event, Reader};
 use aim_services::package::{
-    domain_verification::{State, uuid},
-    settings::ReadError,
+    domain_verification::State,
+    settings::{ReadError, Settings},
 };
 
 pub fn inputs() -> Vec<Vec<u8>> {
@@ -39,10 +39,9 @@ pub fn inputs() -> Vec<Vec<u8>> {
 pub fn read(bytes: &[u8]) -> (State, &'static str) {
     let mut reader = Reader::with_document(bytes).unwrap();
     reader.next().unwrap();
-    match State::read_events(&mut reader, |id| {
-        uuid::parse(id, true).map_err(ReadError::File)
-    }) {
-        Ok(result) => (result.state, "ok"),
+    let mut settings = Settings::default();
+    match settings.read_boot_domains(&mut reader, true) {
+        Ok(()) => (settings.domain_verification, "ok"),
         Err(ReadError::File(_)) => (State::default(), "invalid"),
         Err(error) => panic!("unexpected domain owner error: {error}"),
     }

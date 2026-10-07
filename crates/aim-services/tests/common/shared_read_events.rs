@@ -52,7 +52,7 @@ pub fn read(bytes: &[u8]) -> Settings {
     let mut settings = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = settings.read_owned_document(bytes, &mut ids, &mut attempt, &mut ProjectionOwners);
+    let result = settings.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut ProjectionOwners);
     if result.is_err() {
         // failRead re-enters with an empty reserve and clears attempt tables.
         attempt = PackageReadAttempt::default();

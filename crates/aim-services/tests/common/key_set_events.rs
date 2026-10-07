@@ -47,7 +47,7 @@ pub fn read(bytes: &[u8]) -> (Settings, &'static str) {
     let mut state = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = state.read_owned_document(bytes, &mut ids, &mut attempt, &mut ProjectionOwners);
+    let result = state.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut ProjectionOwners);
     let status = if matches!(result, Err(ReadError::FatalInput(_))) {
         "fatal"
     } else {

@@ -42,6 +42,7 @@ impl Settings {
         bytes: &[u8],
         ids: &mut AppIds,
         attempt: &mut PackageReadAttempt,
+        domain_uuid_strict_validation: bool,
         owners: &mut impl ReadOwners,
     ) -> Result<Option<Element>, ReadError> {
         *attempt = PackageReadAttempt::default();
@@ -82,10 +83,43 @@ impl Settings {
                         |settings, refs| owners.borrow_mut().finish_key_sets(settings, refs),
                     )?;
                 }
+                "domain-verifications" => {
+                    settings.read_boot_domains(reader, domain_uuid_strict_validation)?;
+                }
                 _ => return owners.global_record(settings, reader, start),
             }
             Ok(true)
         })
+    }
+
+    /// Constructor-time domain reads precede package attachment. Keep pending
+    /// maps across retries, and publish a container only after UUID decoding.
+    pub fn read_boot_domains(
+        &mut self,
+        reader: &mut Reader<'_>,
+        strict: bool,
+    ) -> Result<(), ReadError> {
+        use crate::package::domain_verification::{State, owner::Owner, uuid};
+        let result = State::read_events(reader, |id| {
+            uuid::parse(id, strict).map_err(ReadError::File)
+        })?;
+        let mut owner = Owner::new(
+            self.domain_verification.clone(),
+            self.legacy_domain_info.clone(),
+        );
+        let diagnostics = owner
+            .read_settings(result, |_| {
+                Err("boot persistence read unexpectedly requires attached domain code".into())
+            })
+            .map_err(ReadError::Owner)?;
+        self.domain_verification = owner.persisted();
+        for error in diagnostics {
+            eprintln!(
+                "domain SettingsXml depth {}: {}",
+                error.depth, error.message
+            );
+        }
+        Ok(())
     }
 }
 
