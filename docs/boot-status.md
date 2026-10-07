@@ -1255,11 +1255,19 @@ removal and successful acknowledgement cancel deadlines. The installed-owner
 process_due_runtime_permission_requests boundary processes only elapsed requests,
 retaining failed requests. Clock-injected policy tests cover debounce/cap/removal;
 controlled Binder tests show no early write, failed due-time producer retention
-and successful due-time persistence. Automatic worker wakeup/lifecycle remains
-unwired, so this is deadline processing rather than a complete async scheduler
-(#981). 553 service units pass (6 excluded,
-0.58s), retained-bootstrap/framework-res/Binder deadline scan passes (1.17s),
-host build passes (3 rebuilt/10 fresh, 14.3s). No new original differential or
+and successful due-time persistence. The owned runtime timer now subscribes to metadata mutation wakeups, waits for
+monotonic deadlines and invokes the installed-owner persistence boundary. Its
+caller-held guard stops and joins the thread on drop; failed writes remain queued,
+are logged and exposed as structured errors, and await mutation or explicit retry
+instead of spinning. Joined guards detach so the owner can start a new timer.
+System.start_runtime_permission_worker supplies current query capture, retained
+bridge, explicit Store and creation metadata. Controlled Binder mutation to version
+14 now persists automatically without a manual deadline pump; worker unit coverage
+includes failure/retry and restart after join. Production bootstrap must still own
+this guard and teardown order; coherent producer snapshot and creation/controller
+policy remain #981, and native default/CTS/app gates remain #798. 554 service units pass (6 excluded,
+0.97s), retained-bootstrap/framework-res/Binder automatic-worker scan passes (2.28s),
+host build passes (3 rebuilt/10 fresh, 20.0s). No new original differential or
 CTS/app gate was performed for the timing policy.
  Controlled Binder tests
 cover default/updated versions, request creation, install refusal, stale captures,

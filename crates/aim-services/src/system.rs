@@ -1316,6 +1316,26 @@ impl System {
         })
     }
 
+    /// Caller owns this worker guard and must drop it before boot teardown.
+    pub fn start_runtime_permission_worker(
+        self: &Arc<Self>,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: Arc<Mutex<crate::package::owner::Store>>,
+        inodes: std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
+    ) -> Result<crate::package::owner::runtime_metadata::worker::Worker> {
+        self.check_package_bootstrap(bridge)?;
+        let capture=self.capture_package_queries()?;
+        let metadata=self.runtime_permission_metadata_owner(&capture)?;
+        let system=Arc::downgrade(self);let bridge=bridge.clone();
+        crate::package::owner::runtime_metadata::worker::Worker::start(&metadata,move|now| {
+            let fail=|message:String|crate::package::owner::runtime_metadata::FlushError {user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message}};
+            let system=system.upgrade().ok_or_else(||fail("runtime system owner stopped".into()))?;
+            system.check_package_bootstrap(&bridge).map_err(|error|fail(format!("runtime worker bootstrap: {error:?}")))?;
+            let capture=system.capture_package_queries().map_err(|error|fail(format!("runtime worker capture: {error:?}")))?;
+            system.process_due_runtime_permission_requests(&bridge,&mut store.lock().unwrap(),&capture,&inodes,now)
+        }).map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))
+    }
+
     /// Restore saved permission roles and metadata under one retained boot bridge.
     pub fn restore_package_runtime_permissions(
         &self,

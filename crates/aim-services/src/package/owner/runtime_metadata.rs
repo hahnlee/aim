@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 mod schedule;
+pub mod worker;
 
 /// Constructor sparse defaults are version 0, null fingerprint and upgrade=true.
 /// Write requests must be consumed by the runtime persistence scheduler.
@@ -16,6 +17,7 @@ pub struct State {
     extended_fingerprint: Option<String>,
     writes: BTreeSet<i32>,
     schedule: schedule::Schedule,
+    wake: Option<worker::Wake>,
 }
 
 impl State {
@@ -65,6 +67,7 @@ impl State {
         self.writes.insert(user);
         let delay = Duration::from_millis(700 + u64::from(unsafe { libc::arc4random_uniform(600) }));
         self.schedule.request(user, Instant::now(), delay);
+        if let Some(wake)=&self.wake { wake.notify(); }
     }
     pub fn next_write_deadline(&self) -> Option<Instant> {
         self.schedule.next()

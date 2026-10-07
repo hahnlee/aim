@@ -2841,6 +2841,20 @@ fn verify_boot_scan(
         assert!(pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().is_err_and(|error|error.code == -3));
         let mut data=Parcel::new();pm::GetRuntimePermissionsVersion {user_id:0}.write(&mut data);data.write_i32(99);
         assert_eq!(endpoint.transact(pm::GET_RUNTIME_PERMISSIONS_VERSION,&data,false).err().unwrap(),aim_binder_host::parcel::BAD_VALUE);
+        let worker_store=Arc::new(Mutex::new(list_store));
+        owner.legacy_reply.store(4,Ordering::SeqCst);
+        let worker=system.start_runtime_permission_worker(bridge,worker_store.clone(),inodes.clone()).unwrap();
+        let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:14,user_id:0}.write(&mut data);
+        let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
+        pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(5);
+        loop {
+            if worker_store.lock().unwrap().state().users[0].1.runtime_permissions.as_ref().unwrap().version==14 {break;}
+            assert!(Instant::now()<deadline,"automatic runtime worker did not persist Binder mutation");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker.take_error().is_none());assert!(installed.lock().unwrap().pending_write_requests().is_empty());
+        drop(worker);owner.legacy_reply.store(0,Ordering::SeqCst);
     }
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
