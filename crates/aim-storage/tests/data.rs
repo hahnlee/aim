@@ -63,8 +63,15 @@ fn deleted_data_returns_to_the_host_at_stop() {
     assert!(written.allocated >= empty + (1 << 30) - (64 << 20));
     fs::remove_file(dir.join("big")).unwrap();
     image.detach().unwrap();
-    let stopped = data::usage(&dir).unwrap().allocated;
+    let mut stopped = data::usage(&dir).unwrap().allocated;
     eprintln!("after delete and stop {stopped}");
+    // APFS does not always TRIM at the unmount after compaction (once in 20
+    // to 30 stops); the space then returns at a later stop (#771).
+    if stopped >= empty + (64 << 20) {
+        DataImage::attach(&dir, None).unwrap().detach().unwrap();
+        stopped = data::usage(&dir).unwrap().allocated;
+        eprintln!("after a second stop {stopped}");
+    }
     assert!(
         stopped < empty + (64 << 20),
         "the image kept {} MiB of the deleted GiB",
