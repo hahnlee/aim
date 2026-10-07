@@ -159,6 +159,7 @@ pub fn verify(directory: &Path) {
         "dev/aim/server/PackageRuntimeFeed.java",
         "dev/aim/server/PackageUserScopeFeed.java",
         "dev/aim/server/PackageSnapshots.java",
+        "dev/aim/server/PackageVersionPage.java",
         "dev/aim/server/PackageLocal.java",
     ];
     run(Command::new(jdk.join("bin/javac"))
@@ -236,6 +237,11 @@ pub fn verify(directory: &Path) {
         );
         std::thread::sleep(Duration::from_secs(1));
     }
+    let version_dir=boot.data.join("data/local/tmp/package-version-oracle");
+    fs::create_dir(&version_dir).unwrap();
+    aim_storage::guest_inode::record(&version_dir,aim_storage::guest_inode::GuestInode {
+        uid:Some(1000),gid:Some(1000),mode:Some(0o700),..Default::default()
+    }).unwrap();
     let guest = boot.data.join("data/local/tmp/displaced-snapshots");
     fs::create_dir(&guest).unwrap();
     let mut pending = vec![(directory.join("captures"), guest.clone())];
@@ -358,10 +364,10 @@ pub fn verify(directory: &Path) {
             if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "native displaced restart did not boot: {index}"
-            );
+            if Instant::now() >= deadline {
+                let logs=reboot.command().args(["logs","-b","all","-t","200"]).output().unwrap();
+                panic!("native displaced restart did not boot: {index}\n{}\n{}",String::from_utf8_lossy(&logs.stdout),String::from_utf8_lossy(&logs.stderr));
+            }
             std::thread::sleep(Duration::from_secs(1));
         }
         for name in ["android", "com.google.android.gsf"] {

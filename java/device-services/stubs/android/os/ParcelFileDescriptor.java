@@ -6,6 +6,12 @@ import java.io.FileDescriptor;
 
 public class ParcelFileDescriptor implements Parcelable, java.io.Closeable {
     public static final Parcelable.Creator<ParcelFileDescriptor> CREATOR = null;
+    public static final int MODE_READ_ONLY = 0x10000000;
+    public static ParcelFileDescriptor open(java.io.File file, int mode) throws java.io.FileNotFoundException { throw new RuntimeException("stub"); }
+
+    public static class AutoCloseInputStream extends java.io.FileInputStream {
+        public AutoCloseInputStream(ParcelFileDescriptor descriptor) { super(descriptor.getFileDescriptor()); }
+    }
 
     public static ParcelFileDescriptor fromFd(int fd) throws java.io.IOException { throw new RuntimeException("stub"); }
     public FileDescriptor getFileDescriptor() { throw new RuntimeException("stub"); }

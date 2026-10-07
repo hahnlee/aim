@@ -246,6 +246,11 @@ pub struct RuntimeDomainUpdate {
     pub(crate) capture: Arc<Capture>,
 }
 
+pub(crate) struct PackageUpdate {
+    pub(crate) store: super::Store,
+    pub(crate) capture: Arc<Capture>,
+}
+
 /// Query code and the Java replica retain the same native package owner.
 pub struct Capture {
     scan: Arc<Snapshot>,
@@ -348,6 +353,20 @@ impl Capture {
             store,
             capture,
         })
+    }
+
+    /// Prepare a complete replacement before any native mutation commits disk.
+    pub(crate) fn prepare_package_update(
+        self: &Arc<Self>,
+        owner: crate::package::scan::SigningScan,
+    ) -> Result<PackageUpdate,String> {
+        let version=self.scan.version().checked_add(1).ok_or("package version exhausted")?;
+        let store=super::Store::new_replica_at_version(owner,self.scan.usage().clone(),version)
+            .map_err(|error|format!("package mutation scan: {error:?}"))?;
+        let mut context=(*self.context).clone();
+        context.scan_version=version;
+        let capture=Self::new(store.capture(),context)?;
+        Ok(PackageUpdate {store,capture})
     }
 
     pub fn new(scan: Arc<Snapshot>, mut context: Context) -> Result<Arc<Self>, String> {
@@ -500,6 +519,8 @@ impl Capture {
             disabled_system_packages: disabled,
             shared_users,
             uid_owners: Some(uid_owners),
+            renamed_packages: Some(owner.settings.renamed_packages.clone()),
+            shared_libraries: Some(scan.owner().libraries.entries().cloned().collect()),
             // These records are original-feed import inputs, not query owners.
             shared_process_inputs: BTreeMap::new(),
             user_scopes: BTreeMap::new(),
@@ -671,6 +692,8 @@ fn project(
     Ok(model::PackageState {
         name: s.name.clone(),
         app_id: s.app_id,
+        setting_flags: Some((s.flags, s.private_flags)),
+        real_name: Some(s.real_name.clone()),
         shared_user,
         shared_user_app_id: s.shared_app_id(),
         path: s.code_path.clone(),

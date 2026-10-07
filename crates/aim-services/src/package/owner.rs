@@ -41,6 +41,7 @@ mod signing;
 mod scan_settings;
 mod unread;
 mod initial_user;
+mod mutation;
 mod runtime_permissions;
 pub mod runtime_metadata;
 pub mod recovery;

@@ -542,7 +542,7 @@ impl Query<'_> {
                     pm::write_check_signatures_reply,
                 )
             }
-            _ => Err(NotModelled("a method not modelled")),
+            _ => self.extra_package(code, r),
         }
     }
 
@@ -1854,3 +1854,5 @@ fn compare_signature_arrays(s1: Option<&[Vec<u8>]>, s2: Option<&[Vec<u8>]>) -> i
 
 #[cfg(test)]
 mod tests;
+
+mod extra;

@@ -27,15 +27,28 @@ public final class PackageSnapshots {
         IPackageScanSnapshot capture() throws RemoteException;
     }
 
+    /** Read from the native owner's read-only version page, without a Binder call. */
+    @FunctionalInterface
+    public interface VersionSource {
+        long currentVersion();
+    }
+
     /** One service-host lifetime; a new host Binder requires a new Store. */
     public static final class Store {
         private final Source source;
+        private final VersionSource versions;
         private final Owner owner;
         private final boolean crossUserSuspensions;
         private volatile Data current;
 
         public Store(Source source, Owner owner, boolean crossUserSuspensions) {
+            this(source, owner, crossUserSuspensions, null);
+        }
+
+        public Store(Source source, Owner owner, boolean crossUserSuspensions,
+                VersionSource versions) {
             this.source = Objects.requireNonNull(source);
+            this.versions = versions;
             this.owner = Objects.requireNonNull(owner);
             this.crossUserSuspensions = crossUserSuspensions;
         }
@@ -59,6 +72,21 @@ public final class PackageSnapshots {
         private Data capture() {
             Data data = current;
             if (data == null) throw new IllegalStateException("native package replica is unavailable");
+            if (versions == null) return data;
+            long observed = versions.currentVersion();
+            if (observed < data.version)
+                throw new IllegalStateException("native package version moved backwards");
+            if (observed == data.version) return data;
+            try {
+                refresh();
+            } catch (RemoteException failure) {
+                throw failure.rethrowFromSystemServer();
+            } catch (IOException failure) {
+                throw new IllegalStateException("native package replica refresh failed", failure);
+            }
+            data = current;
+            if (data.version < observed)
+                throw new IllegalStateException("native package capture predates published version");
             return data;
         }
 

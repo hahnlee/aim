@@ -622,3 +622,111 @@ fn native_uid_slots_preserve_detached_and_shared_member_states() {
         ])
     );
 }
+
+#[test]
+fn additional_queries_preserve_user_visibility_and_permission_selection() {
+    let mut s = state();
+    let ps = s.packages.get_mut(APP).unwrap();
+    ps.is.privileged = true;
+    ps.mime_groups = vec![(Some("images".into()), vec![Some("image/png".into())])];
+    let u = ps.users.get_mut(&0).unwrap();
+    u.gids = vec![3003, 3003];
+    u.install_reason = 4;
+    u.granted_permissions = vec!["p.granted".into()];
+    let available = call(&s, 1000, false, pm::IS_PACKAGE_AVAILABLE, |p| pm::IsPackageAvailable { package_name: Some(APP.into()), user_id: 0 }.write(p));
+    assert_eq!(pm::read_is_package_available_reply(&mut Reader::new(available.data(), available.objects())).unwrap().unwrap(), true);
+    let gids = call(&s, 1000, false, pm::GET_PACKAGE_GIDS, |p| pm::GetPackageGids { package_name: Some(APP.into()), flags: 0, user_id: 0 }.write(p));
+    assert_eq!(pm::read_get_package_gids_reply(&mut Reader::new(gids.data(), gids.objects())).unwrap().unwrap(), Some(vec![3003,3003]));
+    let hidden = s.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap();
+    hidden.hidden = true;
+    let available = call(&s, 1000, false, pm::IS_PACKAGE_AVAILABLE, |p| pm::IsPackageAvailable { package_name: Some(APP.into()), user_id: 0 }.write(p));
+    assert!(!pm::read_is_package_available_reply(&mut Reader::new(available.data(), available.objects())).unwrap().unwrap());
+    s.packages.get_mut(APP).unwrap().users.get_mut(&0).unwrap().hidden = false;
+    let list = call(&s, 1000, false, pm::GET_PACKAGES_HOLDING_PERMISSIONS, |p| pm::GetPackagesHoldingPermissions { permissions: Some(vec![Some("p.denied".into()),Some("p.granted".into()),Some("p.granted".into())]), flags: 0, user_id: 0 }.write(p));
+    assert!(Reader::new(list.data(), list.objects()).read_exception().unwrap().is_ok());
+    let filter = AppsFilter::new(&s, &Default::default()).unwrap();
+    let query = Query { state: &s, filter: &filter, calling_uid: 1000 };
+    let result = query.packages_holding_permissions(&[Some("p.denied".into()),Some("p.granted".into()),Some("p.granted".into())],0,0).unwrap().unwrap();
+    assert_eq!(result.len(),1);
+    assert_eq!(result[0].requested_permissions,Some(vec!["p.granted".into(),"p.granted".into()]));
+    let owned = call(&s,10100,false,pm::GET_MIME_GROUP, |p| pm::GetMimeGroup { package_name:Some(APP.into()),group:Some("images".into()) }.write(p));
+    assert_eq!(pm::read_get_mime_group_reply(&mut Reader::new(owned.data(),owned.objects())).unwrap().unwrap(),Some(vec![Some("image/png".into())]));
+    let denied = call(&s,10101,false,pm::GET_MIME_GROUP, |p| pm::GetMimeGroup { package_name:Some(APP.into()),group:Some("images".into()) }.write(p));
+    assert_eq!(Reader::new(denied.data(),denied.objects()).read_exception().unwrap().unwrap_err().code,EX_SECURITY);
+}
+
+#[test]
+fn uid_signatures_use_settings_lineage_without_loaded_code() {
+    let mut s = state();
+    for name in [APP,OTHER] {
+        let ps = s.packages.get_mut(name).unwrap();
+        ps.pkg = None;
+        ps.signatures = Some(super::super::settings::Signatures { signatures: vec![vec![2]],past_signatures:Some(vec![(vec![1],0),(vec![2],0)]),..Default::default() });
+    }
+    let same = call(&s,1000,false,pm::CHECK_UID_SIGNATURES, |p| pm::CheckUidSignatures {uid1:10100,uid2:10101}.write(p));
+    assert_eq!(pm::read_check_uid_signatures_reply(&mut Reader::new(same.data(),same.objects())).unwrap().unwrap(),SIGNATURE_MATCH);
+    let old = call(&s,1000,false,pm::HAS_UID_SIGNING_CERTIFICATE, |p| pm::HasUidSigningCertificate {uid:10100,signing_certificate:Some(vec![1]),flags:0}.write(p));
+    assert!(pm::read_has_uid_signing_certificate_reply(&mut Reader::new(old.data(),old.objects())).unwrap().unwrap());
+    for name in [APP,OTHER] { s.packages.get_mut(name).unwrap().signatures = None; }
+    let unsigned = call(&s,1000,false,pm::CHECK_UID_SIGNATURES, |p| pm::CheckUidSignatures {uid1:10100,uid2:10101}.write(p));
+    assert_eq!(pm::read_check_uid_signatures_reply(&mut Reader::new(unsigned.data(),unsigned.objects())).unwrap().unwrap(),SIGNATURE_NEITHER_SIGNED);
+    s.packages.get_mut(APP).unwrap().signatures = Some(super::super::settings::Signatures {signatures:vec![vec![2]],..Default::default()});
+    s.packages.get_mut(APP).unwrap().signatures.as_mut().unwrap().signatures.push(vec![3]);
+    s.packages.get_mut(APP).unwrap().signatures.as_mut().unwrap().past_signatures=None;
+    let multi = call(&s,1000,false,pm::HAS_UID_SIGNING_CERTIFICATE, |p| pm::HasUidSigningCertificate {uid:10100,signing_certificate:Some(vec![2]),flags:0}.write(p));
+    assert!(!pm::read_has_uid_signing_certificate_reply(&mut Reader::new(multi.data(),multi.objects())).unwrap().unwrap());
+}
+
+#[test]
+fn raw_uid_flags_and_name_translation_use_captured_settings() {
+    let mut s = state();
+    let ps = s.packages.get_mut(APP).unwrap();
+    ps.setting_flags = Some((0x1240,0x4560));
+    ps.real_name = Some(Some("canonical.app".into()));
+    s.renamed_packages = Some(vec![("canonical.app".into(),APP.into())]);
+    let flags = call(&s,1000,false,pm::GET_FLAGS_FOR_UID,|p| pm::GetFlagsForUid {uid:10100}.write(p));
+    assert_eq!(pm::read_get_flags_for_uid_reply(&mut Reader::new(flags.data(),flags.objects())).unwrap().unwrap(),0x1240);
+    let private = call(&s,1000,false,pm::GET_PRIVATE_FLAGS_FOR_UID,|p| pm::GetPrivateFlagsForUid {uid:10100}.write(p));
+    assert_eq!(pm::read_get_private_flags_for_uid_reply(&mut Reader::new(private.data(),private.objects())).unwrap().unwrap(),0x4560);
+    s.system.sdk_sandbox_package = Some(Some(APP.into()));
+    let sdk = call(&s,1000,false,pm::GET_FLAGS_FOR_UID,|p| pm::GetFlagsForUid {uid:20000}.write(p));
+    assert_eq!(pm::read_get_flags_for_uid_reply(&mut Reader::new(sdk.data(),sdk.objects())).unwrap().unwrap(),0x1240);
+    let canonical = call(&s,1000,false,pm::CURRENT_TO_CANONICAL_PACKAGE_NAMES,|p| pm::CurrentToCanonicalPackageNames {names:Some(vec![Some(APP.into()),None,Some("unknown".into())])}.write(p));
+    assert_eq!(pm::read_current_to_canonical_package_names_reply(&mut Reader::new(canonical.data(),canonical.objects())).unwrap().unwrap(),Some(vec![Some("canonical.app".into()),None,Some("unknown".into())]));
+    let current = call(&s,1000,false,pm::CANONICAL_TO_CURRENT_PACKAGE_NAMES,|p| pm::CanonicalToCurrentPackageNames {names:Some(vec![Some("canonical.app".into())])}.write(p));
+    assert_eq!(pm::read_canonical_to_current_package_names_reply(&mut Reader::new(current.data(),current.objects())).unwrap().unwrap(),Some(vec![Some(APP.into())]));
+}
+
+#[test]
+fn permission_queries_follow_fuller_grants_and_manifest_appop_requests() {
+    let mut s = state();
+    let ps = s.packages.get_mut(APP).unwrap();
+    ps.users.get_mut(&0).unwrap().granted_permissions = vec!["android.permission.ACCESS_FINE_LOCATION".into()];
+    Arc::make_mut(ps.pkg.as_mut().unwrap()).requested_permissions = vec!["p.appop".into()];
+    let package_grant = call(&s,1000,false,pm::CHECK_PERMISSION,|p| pm::CheckPermission {perm_name:Some("android.permission.ACCESS_COARSE_LOCATION".into()),pkg_name:Some(APP.into()),user_id:0}.write(p));
+    assert_eq!(pm::read_check_permission_reply(&mut Reader::new(package_grant.data(),package_grant.objects())).unwrap().unwrap(),0);
+    let uid_grant = call(&s,10101,false,pm::CHECK_UID_PERMISSION,|p| pm::CheckUidPermission {perm_name:Some("android.permission.ACCESS_COARSE_LOCATION".into()),uid:10100}.write(p));
+    assert_eq!(pm::read_check_uid_permission_reply(&mut Reader::new(uid_grant.data(),uid_grant.objects())).unwrap().unwrap(),0);
+    let no_user = call(&s,1000,false,pm::CHECK_PERMISSION,|p| pm::CheckPermission {perm_name:Some("android.permission.ACCESS_FINE_LOCATION".into()),pkg_name:Some(APP.into()),user_id:42}.write(p));
+    assert_eq!(pm::read_check_permission_reply(&mut Reader::new(no_user.data(),no_user.objects())).unwrap().unwrap(),-1);
+    let request = call(&s,1000,false,pm::GET_APP_OP_PERMISSION_PACKAGES,|p| pm::GetAppOpPermissionPackages {permission_name:Some("p.appop".into()),user_id:0}.write(p));
+    assert_eq!(pm::read_get_app_op_permission_packages_reply(&mut Reader::new(request.data(),request.objects())).unwrap().unwrap(),Some(vec![Some(APP.into())]));
+    Arc::make_mut(s.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap()).booleans2 |= APEX;
+    let apex = call(&s,1000,false,pm::GET_APP_OP_PERMISSION_PACKAGES,|p| pm::GetAppOpPermissionPackages {permission_name:Some("p.appop".into()),user_id:0}.write(p));
+    assert_eq!(pm::read_get_app_op_permission_packages_reply(&mut Reader::new(apex.data(),apex.objects())).unwrap().unwrap(),Some(vec![]));
+}
+
+#[test]
+fn shared_library_names_use_complete_registry_and_exclude_hidden_static_library() {
+    let mut s = state();
+    s.shared_libraries = Some(vec![
+        super::super::model::SharedLibrary {name:Some("builtin".into()),kind:0,..Default::default()},
+        super::super::model::SharedLibrary {name:Some("builtin".into()),kind:1,..Default::default()},
+        super::super::model::SharedLibrary {name:Some("static.missing".into()),kind:2,package_name:Some("missing".into()),..Default::default()},
+    ]);
+    let names = call(&s,1000,false,pm::GET_SYSTEM_SHARED_LIBRARY_NAMES,|p| pm::GetSystemSharedLibraryNames {}.write(p));
+    assert_eq!(pm::read_get_system_shared_library_names_reply(&mut Reader::new(names.data(),names.objects())).unwrap().unwrap(),Some(vec![Some("builtin".into())]));
+    s.shared_libraries=Some(vec![]);
+    let empty = call(&s,1000,false,pm::GET_SYSTEM_SHARED_LIBRARY_NAMES,|p| pm::GetSystemSharedLibraryNames {}.write(p));
+    assert_eq!(pm::read_get_system_shared_library_names_reply(&mut Reader::new(empty.data(),empty.objects())).unwrap().unwrap(),None);
+}

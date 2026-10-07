@@ -47,9 +47,32 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
-PackageManager still runs original. On the M4 C branch, native
-`package::owner::Store` writes enabled settings to the original ABX
-restriction file with backup, reserve copy and system ownership (#798).
+PackageManager still runs original. On the M4 C branch, the native Binder
+endpoint has 26 additional query dispatches backed by captured settings,
+permission grants and finalized library registry; missing external owners remain
+explicitly unsupported (#987). Splash-theme, minimum-aspect and update-available
+setters use an installed disk owner, validate the exact generation, prepare a
+complete replacement, persist, publish committed changes and invalidate the
+original package-info cache outside the publication lock. Old captures remain
+immutable. Concurrent setter serialization is still #989. Enabled/stopped/MIME
+decisions and persistence exist, but their required effects are not connected
+(#988). Installer/session state and pinned metadata codecs exist with explicit
+policy/storage/callback owner contracts; they are not published until those owners
+and durable install/commit recovery exist (#986). FD-bearing installer records
+reject before allocation until file capabilities are owned.
+A read-only native publication page now accompanies facade captures. Native
+publication release-stores its version before returning; bootstrap teardown clears
+it. Java reads with acquire ordering, refreshes only on version changes and keeps
+old snapshot scopes. Host tests verify read-only fd transport and mutation-driven
+version changes. 575 service units pass (6 excluded, 1.21s), and the controlled
+retained-bootstrap/framework-res/Binder mutation scan passes (2.11s). These are
+component checks. The original ART scan/snapshot run executed mapped-file acquire
+reads and snapshot freshness assertions, then failed native-file restart case 4
+at its 120s boot bound (273.66s overall, #990). It is not a passing full conformance
+run. APFS compaction ENOSPC warnings occurred (#771), with causality unproved;
+the next failure captures logcat before owned fixture cleanup. Native default,
+full SystemServer facade, CTS and app gates remain incomplete (#798). The native Store retains the original ABX restriction
+file backup/reserve and system ownership protocol.
 Two original-PMS boots on disposable native-written data (2026-10-02)
 reached `sys.boot_completed=1`: Settings read as disabled (`enabled=2`),
 then after a native reset to default, Settings launched successfully

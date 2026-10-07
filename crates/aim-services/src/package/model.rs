@@ -30,6 +30,10 @@ pub struct State {
     pub shared_users: BTreeMap<String, SharedUser>,
     /// Native AppIdSettingMap slots; None is the original shadow-feed model.
     pub uid_owners: Option<BTreeMap<i32, UidOwner>>,
+    /// Settings renamed-package table; absent in the shadow feed.
+    pub renamed_packages: Option<Vec<(String, String)>>,
+    /// Complete finalized native SharedLibraries name/version owner.
+    pub shared_libraries: Option<Vec<SharedLibrary>>,
     pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,
     pub apex_inventory: Option<super::bootstrap::ApexInventory>,
     pub scan_users: Option<super::bootstrap::ScanUsers>,
@@ -69,6 +73,10 @@ pub struct Platform {
 pub struct PackageState {
     pub name: String,
     pub app_id: i32,
+    /// Raw SettingBase flags; absent in the legacy shadow feed.
+    pub setting_flags: Option<(i32, i32)>,
+    /// Outer None means the real-name owner was not captured.
+    pub real_name: Option<Option<String>>,
     /// The shared user's name (`getSharedUser`; `hasSharedUser`).
     pub shared_user: Option<String>,
     /// Declared relationship can outlive its registered shared UID group.

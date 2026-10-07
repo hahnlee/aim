@@ -6,6 +6,7 @@ use super::{
 };
 pub mod endpoint;
 pub mod query_state;
+pub(crate) mod version_page;
 pub mod user_record;
 pub mod setting_record;
 pub mod library_record;

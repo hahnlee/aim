@@ -107,6 +107,7 @@ pub fn export(directory: &Path, snapshot: &Arc<Snapshot>) {
         Context {
             scan_version: snapshot.version(),
             native_domains: None,
+            boot_classes: None,
             nonce: None,
             system: model::System {
                 sdk_sandbox_package: Some(None),

@@ -1,5 +1,6 @@
 package dev.aim.server;
 
+import android.os.ParcelFileDescriptor;
 import dev.aim.server.IBridge;
 import dev.aim.server.IPackageScanSnapshot;
 import dev.aim.server.IPackageBootstrapBridge;
@@ -31,4 +32,6 @@ interface IServiceHost {
     long addPackageSigningOverride(in byte[] oldDetails, in byte[] newDetails);
     long removePackageSigningOverride(in byte[] oldDetails);
     long clearPackageSigningOverrides();
+    /** Read-only shared page: little-endian state version at aligned offset zero. */
+    ParcelFileDescriptor getPackageStateVersionPage();
 }

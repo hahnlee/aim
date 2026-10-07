@@ -22,6 +22,7 @@
 mod apk;
 mod change;
 pub mod enabled;
+pub mod mutation;
 mod oracle;
 mod session;
 #[cfg(test)]

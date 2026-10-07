@@ -3778,6 +3778,57 @@ fn verify_boot_scan(
         register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
         oracle(system, bridge, config, &persistence);
     }
+    {
+        use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+        let current=system.capture_package_queries().unwrap();
+        let mutation_data=data.0.join("native-mutations");
+        let mut initial=crate::package::settings::Settings::default();
+        let (mut disk,_)=crate::package::owner::recovery::Plan::inspect(&mutation_data).unwrap()
+            .recover_boot(&[0,10],&mut initial,&bridge.current_package_version().unwrap(),|_,_|panic!("missing first-boot settings must not read")).unwrap();
+        disk.commit_scan_settings(query.scan()).unwrap();
+        disk.commit_domains(&current.domains().unwrap().owner().persisted()).unwrap();
+        for user in [0,10] {
+            disk.claim_unread_restrictions(user).unwrap();
+            disk.commit_initial_scan_restrictions(current.scan().owner(),user,false,aim_android_xml::Element {name:"package-restrictions".into(),attrs:Vec::new(),content:Vec::new()}).unwrap();
+        }
+        let disk=Arc::new(Mutex::new(disk));
+        assert!(system.install_package_persistence(&foreign,&current,disk.clone()).is_err());
+        system.install_package_persistence(bridge,&current,disk.clone()).unwrap();
+        assert!(system.install_package_persistence(bridge,&current,disk.clone()).is_err());
+        let invalidations=owner.invalidations.load(Ordering::SeqCst);
+        let mut version_args=Parcel::new();
+        host::GetPackageStateVersionPage {}.write(&mut version_args);
+        let version_reply=find(client,"host").transact(host::GET_PACKAGE_STATE_VERSION_PAGE,&version_args,false).unwrap();
+        let mut reader=version_reply.reader();reader.read_exception().unwrap().unwrap();
+        assert_eq!(reader.read_i32().unwrap(),1);assert_eq!(reader.read_i32().unwrap(),0);
+        let fd=aim_binder_host::server::file_fd(&client.file(reader.read_fd().unwrap()).unwrap()).unwrap();
+        assert_eq!(reader.remaining(),0);
+        use std::os::fd::AsRawFd;
+        struct VersionMapping(*mut libc::c_void);
+        impl Drop for VersionMapping {fn drop(&mut self) {unsafe {libc::munmap(self.0,4096);}}}
+        let mapped=VersionMapping(unsafe {libc::mmap(std::ptr::null_mut(),4096,libc::PROT_READ,libc::MAP_SHARED,fd.as_raw_fd(),0)});
+        assert_ne!(mapped.0,libc::MAP_FAILED);
+        let read_version=||u64::from_le(unsafe {&*mapped.0.cast::<std::sync::atomic::AtomicU64>()}.load(Ordering::Acquire));
+        assert_eq!(read_version(),current.scan().version());
+        let endpoint=find(client,"query_package");
+        let mut args=Parcel::new();
+        pm::SetSplashScreenTheme {package_name:Some("android".into()),theme_name:Some("native-theme".into()),user_id:0}.write(&mut args);
+        let reply=endpoint.transact(pm::SET_SPLASH_SCREEN_THEME,&args,false).unwrap();
+        reply.reader().read_exception().unwrap().unwrap();
+        let published=system.capture_package_queries().unwrap();
+        assert_eq!(published.scan().version(),current.scan().version()+1);
+        assert_eq!(read_version(),published.scan().version());
+        assert_eq!(published.state().packages["android"].users[&0].splash_screen_theme.as_deref(),Some("native-theme"));
+        assert_ne!(current.state().packages["android"].users[&0].splash_screen_theme.as_deref(),Some("native-theme"));
+        let reopened=crate::package::owner::Store::open(&mutation_data,&[0,10]).unwrap().unwrap();
+        assert_eq!(reopened.state().users[0].1.restrictions.packages.iter().find(|(name,_)|name=="android").unwrap().1.splash_screen_theme.as_deref(),Some("native-theme"));
+        assert_eq!(owner.invalidations.load(Ordering::SeqCst),invalidations+1);
+        assert!(system.package_persistence_owner(&current).is_err());
+        let before=system.capture_package_queries().unwrap();
+        args.write_i32(1);
+        assert!(endpoint.transact(pm::SET_SPLASH_SCREEN_THEME,&args,false).is_err());
+        assert!(Arc::ptr_eq(&before,&system.capture_package_queries().unwrap()));
+    }
     drop(data);
 }
 

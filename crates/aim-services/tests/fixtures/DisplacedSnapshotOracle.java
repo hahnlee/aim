@@ -32,6 +32,7 @@ public final class DisplacedSnapshotOracle {
         int reads;
         int mode;
         Runnable replace;
+        public void writeLegacyPermissionStateTEMP() { throw new AssertionError("unused legacy migration owner"); }
         public int[] getGidsForUid(int uid) { throw new AssertionError("unused GID owner"); }
         public com.android.server.pm.permission.LegacyPermissionState getLegacyPermissionState(int id) { throw new AssertionError("unused legacy owner"); }
         public java.util.Set<String> getInstalledPermissions(String name) {
@@ -172,6 +173,8 @@ public final class DisplacedSnapshotOracle {
         long version = source[0].getVersion();
         if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("initial refresh differs");
         verifyLocal(first);
+        verifyVersionPage(first);
+        verifyPublishedVersion(first, next, visibility);
         var local = new dev.aim.server.PackageLocal(store, (v, p, d, u, a, old, se, f) -> {
             throw new java.io.IOException("unused SDK owner in version fixture");
         }, signing);
@@ -269,6 +272,72 @@ public final class DisplacedSnapshotOracle {
             catch (IllegalStateException expected) {}
         }
         permissions.mode = 0;
+    }
+    private static void verifyVersionPage(File directory) throws Exception {
+        var path = Files.createTempFile(new File("/data/local/tmp/package-version-oracle").toPath(), "version-page-", ".bin");
+        try (var writer = new java.io.RandomAccessFile(path.toFile(), "rw")) {
+            writer.setLength(Long.BYTES);
+            writer.write(java.nio.ByteBuffer.allocate(Long.BYTES)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(31).array());
+            writer.getFD().sync();
+            var descriptor = android.os.ParcelFileDescriptor.open(path.toFile(),
+                    android.os.ParcelFileDescriptor.MODE_READ_ONLY);
+            var page = new dev.aim.server.PackageVersionPage(descriptor);
+            try (page) {
+                if (descriptor.getFileDescriptor().valid())
+                    throw new AssertionError("mapped page retained descriptor ownership");
+                if (page.currentVersion() != 31) throw new AssertionError("initial mapped version differs");
+                writer.seek(0);
+                writer.write(java.nio.ByteBuffer.allocate(Long.BYTES)
+                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(32).array());
+                writer.getFD().sync();
+                if (page.currentVersion() != 32) throw new AssertionError("mapped page missed publication");
+                Files.delete(path);
+                if (page.currentVersion() != 32) throw new AssertionError("unlinked version page lost mapping");
+            }
+            try { page.currentVersion(); throw new AssertionError("closed version page accepted"); }
+            catch (IllegalStateException expected) {}
+        } finally {
+            Files.deleteIfExists(path);
+        }
+    }
+    private static void verifyPublishedVersion(File first, File next,
+            dev.aim.server.PackageSnapshots.Owner visibility) throws Exception {
+        Owner[] source = { new Owner(first) };
+        long[] published = { source[0].getVersion() };
+        int[] captures = { 0 };
+        var store = new dev.aim.server.PackageSnapshots.Store(() -> {
+            captures[0]++;
+            return dev.aim.server.IPackageScanSnapshot.Stub.asInterface(source[0]);
+        }, visibility, true, () -> published[0]);
+        store.refresh();
+        try (var old = store.unfiltered()) {
+            var original = old.getPackageStates().get(ORIGINAL);
+            try (var same = store.unfiltered()) {
+                if (same.getPackageStates().get(ORIGINAL) != original || captures[0] != 1)
+                    throw new AssertionError("unchanged published version recaptured graph");
+            }
+            published[0]++;
+            try { store.unfiltered(); throw new AssertionError("stale capture accepted after publication"); }
+            catch (IllegalStateException expected) {}
+            source[0] = new Owner(next);
+            source[0].omitOriginal = true;
+            try { store.unfiltered(); throw new AssertionError("failed automatic refresh returned stale data"); }
+            catch (IllegalStateException expected) {}
+            source[0] = new Owner(next);
+            try (var newer = store.unfiltered()) {
+                if (newer.getPackageStates().get(ORIGINAL) == original)
+                    throw new AssertionError("published version did not replace replica");
+                if (old.getPackageStates().get(ORIGINAL) != original)
+                    throw new AssertionError("automatic refresh changed retained snapshot");
+            }
+            int count = captures[0];
+            if (store.getVersion() != published[0] || captures[0] != count)
+                throw new AssertionError("unchanged version issued capture");
+            published[0]--;
+            try { store.unfiltered(); throw new AssertionError("backwards published version accepted"); }
+            catch (IllegalStateException expected) {}
+        }
     }
     private static void verifyLocal(File first) throws Exception {
         int[] caller = { -1, -1 };

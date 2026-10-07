@@ -90,6 +90,32 @@ impl PackageQueries {
 }
 
 impl PackageQueries {
+    fn mutation(
+        &self,
+        call: &mut Call<'_>,
+        capture: Option<&Arc<super::scan_snapshot::query_state::Capture>>,
+        query: &Query<'_>,
+    ) -> Option<Result<Parcel,QueryError>> {
+        let request=super::write::mutation::Request::read(call.code,call.sender_euid,&mut call.data)?;
+        Some((|| {
+            let request=request.map_err(QueryError::Transport)?;
+            let plan=match request.decide(query,call.sender_pid).map_err(QueryError::NotModelled)? {
+                Ok(plan)=>plan,
+                Err(error)=> {let mut reply=Parcel::new();reply.write_exception(&error);return Ok(reply);}
+            };
+            let result=(|| {
+                let system=self.system.as_ref().and_then(|system|system.upgrade()).ok_or_else(||
+                    Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation owner unavailable"))?;
+                let capture=capture.ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation capture unavailable"))?;
+                system.commit_package_mutation(capture,&plan).map_err(|error|Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))
+            })();
+            let mut reply=Parcel::new();
+            match result {Ok(())=>reply.write_no_exception(),Err(error)=>reply.write_exception(&error)}
+            Ok(reply)
+        })())
+    }
+
     fn runtime_version(
         &self,
         call: &mut Call<'_>,
@@ -232,6 +258,9 @@ impl Service for PackageQueries {
                 )
             {
                 return self.runtime_version(call, capture.as_ref(), &query);
+            }
+            if !self.native && matches!(call.code,pm::SET_SPLASH_SCREEN_THEME|pm::SET_USER_MIN_ASPECT_RATIO|pm::SET_UPDATE_AVAILABLE) {
+                if let Some(answer)=self.mutation(call,capture.as_ref(),&query) {return answer;}
             }
             query
                 .answer(self.descriptor(), call.code, &mut call.data)

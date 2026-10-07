@@ -50,6 +50,22 @@ impl ServiceHost {
         Ok(reply)
     }
 
+    fn package_state_version_page(&self,call:&mut Call<'_>)->Reply {
+        host::GetPackageStateVersionPage::read(&mut call.data)?;
+        if call.data.remaining()!=0 {return Err(aim_binder_host::parcel::BAD_VALUE);}
+        let result=self.system.upgrade().ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"native system unavailable"))
+            .and_then(|system|system.package_state_version_page());
+        let mut reply=Parcel::new();
+        match result {
+            Ok(file)=> {
+                reply.write_no_exception();reply.write_i32(1);
+                reply.write_i32(0);reply.write_file(file);
+            },
+            Err(error)=>reply.write_exception(&error),
+        }
+        Ok(reply)
+    }
+
     fn capture_package_scan(&self, call: &mut Call<'_>) -> Reply {
         host::CapturePackageScan::read(&mut call.data)?;
         if call.data.remaining() != 0 {
@@ -238,6 +254,7 @@ impl Service for ServiceHost {
             && call.code != host::ADD_PACKAGE_SIGNING_OVERRIDE
             && call.code != host::REMOVE_PACKAGE_SIGNING_OVERRIDE
             && call.code != host::CLEAR_PACKAGE_SIGNING_OVERRIDES
+            && call.code != host::GET_PACKAGE_STATE_VERSION_PAGE
         {
             return Err(UNKNOWN_TRANSACTION);
         }
@@ -250,6 +267,7 @@ impl Service for ServiceHost {
                 || call.code == host::ADD_PACKAGE_SIGNING_OVERRIDE
                 || call.code == host::REMOVE_PACKAGE_SIGNING_OVERRIDE
                 || call.code == host::CLEAR_PACKAGE_SIGNING_OVERRIDES
+                || call.code == host::GET_PACKAGE_STATE_VERSION_PAGE
             {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::security(
@@ -272,6 +290,8 @@ impl Service for ServiceHost {
             self.mutate_package_signing(call)
         } else if call.code == host::RECONCILE_PACKAGE_SDK_DATA {
             self.reconcile_package_sdk_data(call)
+        } else if call.code == host::GET_PACKAGE_STATE_VERSION_PAGE {
+            self.package_state_version_page(call)
         } else if call.code == host::CAPTURE_PACKAGE_SCAN {
             self.capture_package_scan(call)
         } else if call.code == host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE {

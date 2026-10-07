@@ -55,8 +55,10 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         IBinder binder = ServiceManager.checkService("aim.service_host");
         if (binder == null) throw new IllegalStateException("native service host is unavailable");
         var host = IServiceHost.Stub.asInterface(binder);
-        var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions);
-        snapshots.refresh();
+        var versions = new PackageVersionPage(host.getPackageStateVersionPage());
+        var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions, versions);
+        try { snapshots.refresh(); }
+        catch (RemoteException | java.io.IOException | RuntimeException failure) { versions.close(); throw failure; }
         return snapshots;
     }
 
@@ -106,8 +108,10 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
         IBinder binder = ServiceManager.checkService("aim.service_host");
         if (binder == null) throw new IllegalStateException("native service host is unavailable");
         var host = IServiceHost.Stub.asInterface(binder);
-        var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions);
-        snapshots.refresh();
+        var versions = new PackageVersionPage(host.getPackageStateVersionPage());
+        var snapshots = new PackageSnapshots.Store(host::capturePackageScan, owner, crossUserSuspensions, versions);
+        try { snapshots.refresh(); }
+        catch (RemoteException | java.io.IOException | RuntimeException failure) { versions.close(); throw failure; }
         return new PackageLocal(snapshots, sdkDataOwner(host), signingOwner(host));
     }
 

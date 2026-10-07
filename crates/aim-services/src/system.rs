@@ -147,6 +147,8 @@ struct PackageBootstrap {
     queries: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
     runtime_metadata: Option<Arc<Mutex<crate::package::owner::runtime_metadata::State>>>,
     runtime_worker: Option<crate::package::owner::runtime_metadata::worker::StopHandle>,
+    persistence: Option<Arc<Mutex<crate::package::owner::Store>>>,
+    version_page: Option<crate::package::scan_snapshot::version_page::VersionPage>,
 }
 
 impl Drop for PackageBootstrap {
@@ -501,6 +503,8 @@ impl System {
             queries: None,
             runtime_metadata: None,
             runtime_worker: None,
+            persistence: None,
+            version_page: None,
         });
         self.process.link_to_death(
             &bridge.owner,
@@ -629,6 +633,7 @@ impl System {
         let snapshot =
             result.map_err(|error| fail(&format!("package scan publication failed: {error:?}")))?;
         current.queries = None;
+        if let Some(page)=&current.version_page {page.publish(snapshot.version());}
         state.version = snapshot.version();
         Ok(snapshot)
     }
@@ -665,6 +670,7 @@ impl System {
         let capture = Capture::new(store.capture(), context).map_err(fail)?;
         current.snapshots = Some(store);
         current.queries = Some(capture.clone());
+        if let Some(page)=&current.version_page {page.publish(version);}
         state.version = version;
         Ok(capture)
     }
@@ -698,6 +704,17 @@ impl System {
         }
         current.queries = Some(capture.clone());
         Ok(capture)
+    }
+
+    pub(crate) fn package_state_version_page(&self)->Result<aim_binder_driver::File> {
+        let mut state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_mut().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package bootstrap unavailable"))?;
+        let version=current.queries.as_ref().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package queries unavailable"))?.scan().version();
+        if current.version_page.is_none() {
+            current.version_page=Some(crate::package::scan_snapshot::version_page::VersionPage::new(version)
+                .map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?);
+        }
+        current.version_page.as_ref().unwrap().file().map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))
     }
 
     pub fn capture_package_queries(
@@ -916,6 +933,7 @@ impl System {
         }
         current.snapshots = Some(update.store);
         current.queries = Some(update.capture.clone());
+        if let Some(page)=&current.version_page {page.publish(update.capture.scan().version());}
         state.version = update.capture.scan().version();
         Ok(Some(update.capture))
     }
@@ -1006,7 +1024,8 @@ impl System {
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
             current.snapshots = Some(update.store);
             current.queries = Some(update.capture.clone());
-            state.version = update.capture.scan().version();
+            if let Some(page)=&current.version_page {page.publish(update.capture.scan().version());}
+        state.version = update.capture.scan().version();
         }
         let committed = result.is_ok() || result.as_ref().is_err_and(|e| e.committed);
         drop(state);
@@ -1229,6 +1248,80 @@ impl System {
         self.check_package_bootstrap(bridge).map_err(|error| WriteError {
             committed: true, message: format!("package list bootstrap owner after commit: {error:?}"),
         })
+    }
+
+    /// Retain the exclusive disk owner for native Binder mutations.
+    pub fn install_package_persistence(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        persistence: Arc<Mutex<crate::package::owner::Store>>,
+    ) -> Result<()> {
+        // Disk owner precedes bootstrap in the lock order, as in persistence.
+        let disk = persistence.lock().unwrap();
+        disk.validate_committed_scan(capture.scan().owner()).map_err(|error|
+            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state.current.as_mut().filter(|owner|
+            Arc::ptr_eq(&owner.bridge,bridge) && owner.queries.as_ref().is_some_and(|q|Arc::ptr_eq(q,capture)))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package persistence generation changed"))?;
+        if current.persistence.is_some() {
+            return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package persistence owner already installed"));
+        }
+        current.persistence=Some(persistence.clone());
+        Ok(())
+    }
+
+    pub(crate) fn package_persistence_owner(
+        &self,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+    ) -> Result<(Arc<crate::package::bootstrap::Bridge>,Arc<Mutex<crate::package::owner::Store>>)> {
+        let state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_ref().filter(|owner|owner.queries.as_ref().is_some_and(|q|Arc::ptr_eq(q,capture)))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package persistence generation changed"))?;
+        let persistence=current.persistence.clone().ok_or_else(||Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,"native package persistence is unavailable"))?;
+        Ok((current.bridge.clone(),persistence))
+    }
+
+    pub(crate) fn commit_package_mutation(
+        &self,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        plan: &crate::package::write::mutation::Plan,
+    ) -> std::result::Result<(),crate::package::owner::WriteError> {
+        use crate::package::{owner::WriteError,write::mutation::Change};
+        let before=|message:String|WriteError {committed:false,message};
+        let (bridge,persistence)=self.package_persistence_owner(capture)
+            .map_err(|error|before(format!("mutation disk owner: {error:?}")))?;
+        if !matches!(plan.change,Change::None|Change::SplashTheme(_)|Change::MinAspectRatio(_)|Change::UpdateAvailable(_)) {
+            return Err(before("mutation side-effect owners are unavailable".into()));
+        }
+        let mut disk=persistence.lock().unwrap();
+        let mut state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_mut().filter(|owner|
+            Arc::ptr_eq(&owner.bridge,&bridge) && owner.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture))
+            && owner.persistence.as_ref().is_some_and(|owner|Arc::ptr_eq(owner,&persistence)))
+            .ok_or_else(||before("mutation generation changed".into()))?;
+        disk.validate_committed_scan(capture.scan().owner())?;
+        if matches!(plan.change,Change::None) {return Ok(());}
+        let mut scan=capture.scan().owner().clone();
+        plan.apply_scan(&mut scan).map_err(before)?;
+        let update=capture.prepare_package_update(scan).map_err(before)?;
+        let result=disk.commit_mutation(plan);
+        let committed=result.is_ok() || result.as_ref().is_err_and(|error|error.committed);
+        if committed {
+            current.snapshots=Some(update.store);
+            current.queries=Some(update.capture.clone());
+            if let Some(page)=&current.version_page {page.publish(update.capture.scan().version());}
+            state.version=update.capture.scan().version();
+        }
+        drop(state);
+        drop(disk);
+        if committed {
+            self.check_package_bootstrap(&bridge).map_err(|error|format!("{error:?}")).and_then(|_|bridge.invalidate_package_info_cache().map_err(|error|format!("{error:?}")))
+                .map_err(|error|WriteError {committed:true,message:format!("mutation committed, cache invalidation failed: {error:?}; persistence: {result:?}")})?;
+        }
+        result
     }
 
     pub fn install_runtime_permission_metadata(

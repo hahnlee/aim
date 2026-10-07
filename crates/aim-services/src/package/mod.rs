@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub mod component_resolver;
 pub mod domain_verification;
 pub mod intent;
+pub mod installer;
 pub mod intent_filter;
 pub mod info;
 pub mod intent_resolver;
