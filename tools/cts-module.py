@@ -7,7 +7,11 @@ range requests, inflated and checked against their pinned sha256.
 The CTS is a test input (docs/system-services.md, "Conformance"): it is
 never shipped or committed.
 
-Usage: cts-module.py [--list PATTERN]
+Usage: cts-module.py [--tradefed] [--list PATTERN]
+  --tradefed      fetch the entries of upstream/cts-tradefed.lock instead:
+                  the Tradefed harness and the host-side modules, into
+                  _build/cts-tradefed at their paths in the archive, where
+                  the harness looks for them (docs/cts.md)
   --list PATTERN  print the entries of the archive whose name contains
                   PATTERN (to pin new ones), instead of fetching
 """
@@ -22,9 +26,9 @@ import zlib
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def lock():
+def lock(name="cts.lock"):
     values, entries = {}, []
-    for line in open(os.path.join(ROOT, "upstream/cts.lock")):
+    for line in open(os.path.join(ROOT, "upstream", name)):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -79,17 +83,23 @@ def central_directory(url, size):
 
 
 def main():
+    args = sys.argv[1:]
+    tradefed = "--tradefed" in args
+    if tradefed:
+        args.remove("--tradefed")
     values, pinned = lock()
     url, size = values["URL"], int(values["SIZE"])
     entries = central_directory(url, size)
-    if len(sys.argv) == 3 and sys.argv[1] == "--list":
+    if len(args) == 2 and args[0] == "--list":
         for name, (_, csize, usize, _) in sorted(entries.items()):
-            if sys.argv[2] in name:
+            if args[1] in name:
                 print(f"{usize:>12} {name}")
         return
-    dest_root = os.path.join(ROOT, "_build", "cts")
+    if tradefed:
+        pinned = lock("cts-tradefed.lock")[1]
+    dest_root = os.path.join(ROOT, "_build", "cts-tradefed" if tradefed else "cts")
     for name, want in pinned:
-        dest = os.path.join(dest_root, os.path.basename(name))
+        dest = os.path.join(dest_root, name if tradefed else os.path.basename(name))
         if os.path.exists(dest) and hashlib.sha256(open(dest, "rb").read()).hexdigest() == want:
             continue
         offset, csize, usize, method = entries[name]
@@ -100,7 +110,7 @@ def main():
         got = hashlib.sha256(data).hexdigest()
         if len(data) != usize or got != want:
             sys.exit(f"cts-module: {name}: sha256 {got}, pinned {want}")
-        os.makedirs(dest_root, exist_ok=True)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         with open(dest + ".partial", "wb") as f:
             f.write(data)
         os.replace(dest + ".partial", dest)

@@ -79,3 +79,15 @@ on property:sys.boot_completed=1 && property:vendor.aim.mac.time_zone=*
 # and on each change of the Mac's.
 on property:sys.boot_completed=1 && property:vendor.aim.mac.keyboard_layout=*
     exec_background - system system -- /system_ext/bin/aim-keyboard layout ${vendor.aim.mac.keyboard_layout}
+
+# The debug port (docs/cts.md). With no USB gadget, adbd listens on TCP:
+# on the Mac's loopback only, at the port the boot names
+# (`--androidboot aim.adb.port=PORT`), else at the emulator's 5555. A
+# named port also turns USB debugging on, as the user would in Developer
+# options, once the persistent properties are loaded; it stays on, as there.
+# init.usb.rc then starts adbd, and AdbService reports debugging enabled.
+on early-init
+    setprop service.adb.listen_addrs tcp:localhost:${ro.boot.aim.adb.port:-5555}
+
+on post-fs-data && property:ro.boot.aim.adb.port=*
+    setprop persist.sys.usb.config adb
