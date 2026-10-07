@@ -91,6 +91,8 @@ pub enum PermissionOwner {
 /// system package an update replaced), whose flags the reader derives.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    /// SettingBase runtime marker; not serialized in packages.xml.
+    pub install_permissions_fixed: bool,
     pub transient: super::owner::transient::State,
     pub name: String,
     pub real_name: Option<String>,
@@ -782,6 +784,7 @@ impl Settings {
             incoming.leaving_shared_user = existing.leaving_shared_user;
             incoming.shared_user_app_id = existing.shared_user_app_id;
             incoming.transient = existing.transient.clone();
+            incoming.install_permissions_fixed = existing.install_permissions_fixed;
             let progress = incoming.loading_progress;
             incoming.loading_progress = existing.loading_progress;
             incoming.set_loading_progress(progress);

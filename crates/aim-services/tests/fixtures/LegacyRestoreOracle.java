@@ -95,6 +95,14 @@ public final class LegacyRestoreOracle {
             var pkg=settings.getPackagesLocked().get("p");
             String fixed=pkg==null?"absent":Boolean.toString(pkg.isInstallPermissionsFixed());
             if(!fixed.equals(new String(Files.readAllBytes(new File(directory,"install-binding-"+index+".fixed").toPath()),java.nio.charset.StandardCharsets.UTF_8))) throw new AssertionError("original install fixed flag differs "+index);
+            settings.readLPw(null,java.util.List.of());
+            for(String name:new String[]{"p","q"}) {
+                var bound=settings.getPackagesLocked().get(name);
+                String marker=bound==null?"absent":Boolean.toString(bound.isInstallPermissionsFixed());
+                String expected=new String(Files.readAllBytes(new File(directory,"install-binding-"+index+".bound-fixed-"+name).toPath()),java.nio.charset.StandardCharsets.UTF_8);
+                if(!marker.equals(expected)) throw new AssertionError("original pending fixed identity differs "+index+":"+name);
+            }
+
         }
     }
     private void compareBytes(File root, String stem, int id, LegacyPermissionState state) throws Exception {

@@ -31,6 +31,7 @@ pub(super) fn persisted(mut settings: Settings) -> Settings {
         .chain(&mut settings.disabled_system_packages)
     {
         package.leaving_shared_user = Some(false);
+        package.install_permissions_fixed = false;
     }
     for signatures in settings
         .packages

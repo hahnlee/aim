@@ -6,7 +6,7 @@ use crate::package::{
     settings::{Package, ReadError, ReadOwners, Settings, SharedUser},
 };
 use aim_android_xml::{Element, pull::Reader};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Bind explicit SettingBase owners to the UID slots visible at each XML event.
 /// Successful registration creates empty SettingBase owners in supplied maps.
@@ -15,27 +15,20 @@ pub struct InstallRead<'a, T> {
     pub users: &'a [i32],
     pub packages: &'a mut BTreeMap<String, Migration>,
     pub shared_users: &'a mut BTreeMap<String, Migration>,
-    pub install_permissions_fixed: &'a mut BTreeSet<String>,
     pub remaining: &'a mut T,
 }
 
 impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
     fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError> {
-        for package in pending {
-            if !settings
-                .packages
-                .iter()
-                .any(|active| active.name == package.name)
-            {
-                self.packages.remove(&package.name);
-                self.install_permissions_fixed.remove(&package.name);
-            }
-        }
         self.remaining.start_attempt(settings, pending)
     }
 
     fn package_registered(&mut self, package: &Package, created: bool) -> Result<(), ReadError> {
-        register(&mut *self.packages, &package.name, created)?;
+        // Pending objects are owned individually by PackageReadAttempt, never
+        // inserted into the name-keyed UID owner map before attachment.
+        if !package.shared_user {
+            register(&mut *self.packages, &package.name, created)?;
+        }
         self.remaining.package_registered(package, created)
     }
 
@@ -77,7 +70,7 @@ impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
             ReadError::Owner("registered legacy permission owner is unavailable".into())
         })?;
         state.read_install_events(reader, self.users)?;
-        self.install_permissions_fixed.insert(package.name.clone());
+        package.install_permissions_fixed = true;
         Ok(true)
     }
 

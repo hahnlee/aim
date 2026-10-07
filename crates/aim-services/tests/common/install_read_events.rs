@@ -7,11 +7,7 @@ use aim_services::package::{
     },
     settings::{Package, PackageReadAttempt, ReadError, ReadOwners, Settings, SharedUser},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 pub fn export(directory: &Path) {
     let own = "<package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><perms><item name='own'/></perms></package>";
@@ -27,6 +23,9 @@ pub fn export(directory: &Path) {
         format!("<packages>{own}<package name='p' codePath='/other' userId='10001' domainSetId='00000000-0000-0000-0000-000000000003'><perms><item name='repeat'/></perms></package></packages>"),
         format!("<packages>{own}<package name='rejected' codePath='/rejected' userId='10001' domainSetId='00000000-0000-0000-0000-000000000003'><perms><item name='ignored'/></perms></package></packages>"),
         "<packages><package name='p' codePath='/p' userId='10001' pageSizeCompat='128' domainSetId='00000000-0000-0000-0000-000000000001'><perms><item name='unread'/></perms></package></packages>".into(),
+        format!("<packages>{group}{shared}<package name='q' codePath='/second' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000003'/></packages>"),
+        format!("<packages>{group}<package name='q' codePath='/first' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000003'/>{shared}</packages>"),
+        format!("<packages>{}{group}{} </packages>", own.replace("<perms><item name='own'/></perms>", ""), shared.replace("name='q'", "name='p'")),
     ];
     let mut inputs = Vec::new();
     for text in documents {
@@ -57,16 +56,15 @@ pub fn export(directory: &Path) {
         // Native registration hooks construct original SettingBase owners.
         let mut packages = BTreeMap::new();
         let mut groups = BTreeMap::new();
-        let mut fixed = BTreeSet::new();
         let mut owners = InstallRead {
             users: &[10, 0],
             packages: &mut packages,
             shared_users: &mut groups,
-            install_permissions_fixed: &mut fixed,
             remaining: &mut Remaining,
         };
         let read = settings.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut owners);
-        if matches!(read, Err(ReadError::File(_))) {
+        let retried = matches!(read, Err(ReadError::File(_)));
+        if retried {
             settings
                 .read_owned_document(
                     if index == retry_index {
@@ -98,16 +96,51 @@ pub fn export(directory: &Path) {
                 .unwrap();
             }
         }
-        let flag = if settings.packages.iter().any(|p| p.name == "p") {
-            fixed.contains("p").to_string()
-        } else {
-            "absent".into()
-        };
+        let flag = settings
+            .packages
+            .iter()
+            .find(|p| p.name == "p")
+            .map(|p| p.install_permissions_fixed.to_string())
+            .unwrap_or_else(|| "absent".into());
         fs::write(
             directory.join(format!("install-binding-{index}.fixed")),
             flag,
         )
         .unwrap();
+        let mut owners = InstallRead {
+            users: &[],
+            packages: &mut packages,
+            shared_users: &mut groups,
+            remaining: &mut Remaining,
+        };
+        let selected: &[u8] = if retried {
+            if index == retry_index {
+                reserve
+            } else {
+                b"<packages/>"
+            }
+        } else {
+            bytes
+        };
+        settings
+            .read_owned_document(selected, &mut ids, &mut attempt, true, &mut owners)
+            .unwrap();
+        attempt
+            .resolve_pending(&mut settings, &mut ids, |_, _, _, _| Ok(()))
+            .unwrap();
+        for name in ["p", "q"] {
+            let flag = settings
+                .packages
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.install_permissions_fixed.to_string())
+                .unwrap_or_else(|| "absent".into());
+            fs::write(
+                directory.join(format!("install-binding-{index}.bound-fixed-{name}")),
+                flag,
+            )
+            .unwrap();
+        }
     }
 }
 
