@@ -1147,7 +1147,8 @@ fn exercise_bootstrap_on(
         assert_eq!(error, *sdk_failure.0.lock().unwrap());
         assert_eq!(reader.remaining(), 0);
     }
-    let (_, queries) = crate::package::service::PackageQueries::from_system(&system);
+    let (package, queries) = crate::package::service::PackageQueries::from_system(&system);
+    register(&native, "query_package", native.add_service(package));
     register(&native, "query_native", native.add_service(queries));
     let domains = crate::package::domain_verification::service::DomainQueries::from_system(&system);
     register(&native, "query_domains", native.add_service(domains));
@@ -2788,6 +2789,30 @@ fn verify_boot_scan(
     assert_eq!(list_store.state().users[1].1.runtime_permissions.as_ref().unwrap().version,9);
     assert!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap().is_empty());
     owner.legacy_reply.store(0,Ordering::SeqCst);
+    {
+        use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+        let endpoint=find(client,"query_package");
+        let get=|user| { let mut data=Parcel::new();pm::GetRuntimePermissionsVersion {user_id:user}.write(&mut data);
+            let reply=endpoint.transact(pm::GET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
+            pm::read_get_runtime_permissions_version_reply(&mut reply.reader()).unwrap() };
+        assert!(get(0).is_err_and(|error|error.code == -5));
+        let installed=Arc::new(Mutex::new(runtime_metadata.clone()));
+        assert!(system.install_runtime_permission_metadata(&foreign,installed.clone()).is_err());
+        system.install_runtime_permission_metadata(bridge,installed.clone()).unwrap();
+        assert!(system.install_runtime_permission_metadata(bridge,installed.clone()).is_err());
+        assert!(system.with_runtime_permission_metadata(&old_query,|metadata|metadata.version(0)).is_err());
+        assert_eq!(get(0).unwrap(),8);assert_eq!(get(99).unwrap(),0);
+        assert!(get(-1).is_err_and(|error|error.code == -3));
+        let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:13,user_id:0}.write(&mut data);
+        let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
+        pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().unwrap();
+        assert_eq!(get(0).unwrap(),13);assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
+        let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:-1,user_id:0}.write(&mut data);
+        let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
+        assert!(pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().is_err_and(|error|error.code == -3));
+        let mut data=Parcel::new();pm::GetRuntimePermissionsVersion {user_id:0}.write(&mut data);data.write_i32(99);
+        assert_eq!(endpoint.transact(pm::GET_RUNTIME_PERMISSIONS_VERSION,&data,false).err().unwrap(),aim_binder_host::parcel::BAD_VALUE);
+    }
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
     assert_eq!(

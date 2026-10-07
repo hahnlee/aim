@@ -1231,6 +1231,22 @@ and main-file preservation after original null-attribute writer failures (#983).
 Both null-owner and null-permission writes leave the original main bytes intact.
 Host build passes (3 rebuilt/10 fresh, 24.5s), including runtime atomic
 rollback/retry, external byte mutation refusal and committed reserve failure.
+Native IPackageManager now handles generated getRuntimePermissionsVersion and
+setRuntimePermissionsVersion transactions against an explicitly installed runtime
+metadata owner. A bootstrap may install that owner only once. Access is tied to
+the exact current query capture; absent metadata or stale captures reject. The
+endpoint rejects trailing data and negative arguments before checking original
+ADJUST_RUNTIME_PERMISSIONS_POLICY/UPGRADE_RUNTIME_PERMISSIONS permissions,
+including root/system app-ID and isolated-UID Context rules. Setters enqueue real
+runtime writes; no missing-owner version is invented. Controlled Binder tests
+cover default/updated versions, request creation, install refusal, stale captures,
+invalid input and permission denial. These endpoints remain test aliases pending
+the native default/CTS/app gates (#798); metadata scheduling and coherent grant
+capture still require #981. 552 service units pass
+(6 excluded, 0.55s), retained-bootstrap/framework-res/Binder scan passes (1.25s),
+host build passes (3 rebuilt/10 fresh, 15.4s). Source permission/argument rules were
+checked at the pinned version; no new original Binder differential run or CTS/app
+gate was performed for these two endpoints.
 System.commit_package_list_from_scan now generates rows from the immutable native
 scan/query capture, in signed Java-hash setting order. Unloaded settings and APEX
 are omitted; system-user data paths come from setting volume/storage and captured

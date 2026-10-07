@@ -1,4 +1,4 @@
-//! Binder query endpoints for M4 C. They consume an owned scan snapshot,
+//! Binder package endpoints for M4 C. They consume an owned scan snapshot,
 //! never the original PMS's shadow feed. These endpoints are not yet
 //! registered by guest-init: native scanning, mutation side effects and
 //! the SystemServer facade must pass the C gates first (#798).
@@ -25,6 +25,7 @@ pub struct PackageQueries {
     source: Source,
     resolver: Arc<Resolver>,
     native: bool,
+    system: Option<std::sync::Weak<crate::system::System>>,
 }
 
 enum Source {
@@ -41,6 +42,7 @@ enum Source {
 impl PackageQueries {
     pub fn from_system(system: &Arc<crate::system::System>) -> (Arc<Self>, Arc<Self>) {
         let system = Arc::downgrade(system);
+        let runtime_system = system.clone();
         let source = Arc::new(move || {
             system
                 .upgrade()
@@ -58,11 +60,13 @@ impl PackageQueries {
                 source: Source::Native(source.clone()),
                 resolver: resolver.clone(),
                 native: false,
+                system: Some(runtime_system.clone()),
             }),
             Arc::new(Self {
                 source: Source::Native(source),
                 resolver,
                 native: true,
+                system: Some(runtime_system),
             }),
         )
     }
@@ -73,13 +77,96 @@ impl PackageQueries {
             source: Source::Fixture(state.clone()),
             resolver: resolver.clone(),
             native: false,
+            system: None,
         });
         let package_native = Arc::new(Self {
             source: Source::Fixture(state),
             resolver,
             native: true,
+            system: None,
         });
         (package, package_native)
+    }
+}
+
+impl PackageQueries {
+    fn runtime_version(
+        &self,
+        call: &mut Call<'_>,
+        capture: Option<&Arc<super::scan_snapshot::query_state::Capture>>,
+        query: &Query<'_>,
+    ) -> Result<Parcel, QueryError> {
+        let (user, version) = if call.code == pm::GET_RUNTIME_PERMISSIONS_VERSION {
+            let args = pm::GetRuntimePermissionsVersion::read(&mut call.data)
+                .map_err(QueryError::Transport)?;
+            (args.user_id, None)
+        } else {
+            let args = pm::SetRuntimePermissionsVersion::read(&mut call.data)
+                .map_err(QueryError::Transport)?;
+            (args.user_id, Some(args.version))
+        };
+        if call.data.remaining() != 0 {
+            return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        let result = (|| {
+            if user < 0 || version.is_some_and(|value| value < 0) {
+                return Ok(Err(Exception::illegal_argument(
+                    "runtime version and user must be nonnegative",
+                )));
+            }
+            let uid = query.calling_uid;
+            if super::apps_filter::is_isolated(uid) {
+                return Ok(Err(Exception::security(
+                    "isolated callers cannot change runtime permission policy",
+                )));
+            }
+            if uid % 100_000 != 0
+                && uid % 100_000 != 1000
+                && !query.uid_has_permission(
+                    uid,
+                    "android.permission.ADJUST_RUNTIME_PERMISSIONS_POLICY",
+                )?
+                && !query
+                    .uid_has_permission(uid, "android.permission.UPGRADE_RUNTIME_PERMISSIONS")?
+            {
+                return Ok(Err(Exception::security(
+                    "runtime permission version requires policy adjustment or upgrade permission",
+                )));
+            }
+            let Some(system) = self.system.as_ref().and_then(|system| system.upgrade()) else {
+                return Ok(Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "runtime metadata system owner is unavailable",
+                )));
+            };
+            let Some(capture) = capture else {
+                return Ok(Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native runtime metadata capture is unavailable",
+                )));
+            };
+            Ok(
+                system.with_runtime_permission_metadata(capture, |metadata| {
+                    if let Some(version) = version {
+                        metadata.set_version(user, version);
+                    }
+                    metadata.version(user)
+                }),
+            )
+        })()
+        .map_err(QueryError::NotModelled)?;
+        let mut reply = Parcel::new();
+        match result {
+            Err(error) => reply.write_exception(&error),
+            Ok(value) => {
+                if version.is_some() {
+                    pm::write_set_runtime_permissions_version_reply(&mut reply);
+                } else {
+                    pm::write_get_runtime_permissions_version_reply(&mut reply, value);
+                }
+            }
+        }
+        Ok(reply)
     }
 }
 
@@ -133,12 +220,22 @@ impl Service for PackageQueries {
                 Ok(resolution) => resolution,
                 Err(error) => return error.reply().map_err(QueryError::Transport),
             };
-            Query {
+            let query = Query {
                 state: &state,
                 filter: &resolution.apps_filter,
                 calling_uid: uid,
+            };
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::GET_RUNTIME_PERMISSIONS_VERSION | pm::SET_RUNTIME_PERMISSIONS_VERSION
+                )
+            {
+                return self.runtime_version(call, capture.as_ref(), &query);
             }
-            .answer(self.descriptor(), call.code, &mut call.data).map_err(QueryError::NotModelled)
+            query
+                .answer(self.descriptor(), call.code, &mut call.data)
+                .map_err(QueryError::NotModelled)
         });
         Ok(match answer {
             Ok(reply) => reply,
@@ -198,6 +295,79 @@ mod tests {
             sender_euid: uid,
             data: Reader::new(data.data(), &[]),
         })
+    }
+
+    #[test]
+    fn runtime_version_checks_arguments_before_caller_permissions() {
+        let state = State {
+            packages: [(
+                "caller".into(),
+                PackageState {
+                    name: "caller".into(),
+                    app_id: 10100,
+                    users: [(0, PackageUserState::default())].into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            users: [(
+                0,
+                User {
+                    id: 0,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let (endpoint, _) = PackageQueries::new(Arc::new(RwLock::new(Arc::new(state))));
+        for user in [-1, 0] {
+            let mut data = Parcel::new();
+            pm::GetRuntimePermissionsVersion { user_id: user }.write(&mut data);
+            let reply = call(&endpoint, pm::GET_RUNTIME_PERMISSIONS_VERSION, 10100, &data).unwrap();
+            let error =
+                pm::read_get_runtime_permissions_version_reply(&mut Reader::new(reply.data(), &[]))
+                    .unwrap()
+                    .unwrap_err();
+            assert_eq!(
+                error.code,
+                if user < 0 {
+                    EX_ILLEGAL_ARGUMENT
+                } else {
+                    aim_binder_host::parcel::EX_SECURITY
+                }
+            );
+        }
+        let mut isolated = Parcel::new();
+        pm::GetRuntimePermissionsVersion { user_id: 0 }.write(&mut isolated);
+        let reply = call(
+            &endpoint,
+            pm::GET_RUNTIME_PERMISSIONS_VERSION,
+            99000,
+            &isolated,
+        )
+        .unwrap();
+        assert_eq!(
+            pm::read_get_runtime_permissions_version_reply(&mut Reader::new(reply.data(), &[]))
+                .unwrap()
+                .unwrap_err()
+                .code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        let mut data = Parcel::new();
+        pm::SetRuntimePermissionsVersion {
+            version: -1,
+            user_id: 0,
+        }
+        .write(&mut data);
+        let reply = call(&endpoint, pm::SET_RUNTIME_PERMISSIONS_VERSION, 10100, &data).unwrap();
+        assert_eq!(
+            pm::read_set_runtime_permissions_version_reply(&mut Reader::new(reply.data(), &[]))
+                .unwrap()
+                .unwrap_err()
+                .code,
+            EX_ILLEGAL_ARGUMENT
+        );
     }
 
     #[test]

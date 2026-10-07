@@ -145,6 +145,7 @@ struct PackageBootstrap {
     bridge: Arc<crate::package::bootstrap::Bridge>,
     snapshots: Option<crate::package::scan_snapshot::Store>,
     queries: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
+    runtime_metadata: Option<Arc<Mutex<crate::package::owner::runtime_metadata::State>>>,
 }
 
 /// Told of a bridge attached, with its handle.
@@ -491,6 +492,7 @@ impl System {
             bridge: bridge.clone(),
             snapshots: None,
             queries: None,
+            runtime_metadata: None,
         });
         self.process.link_to_death(
             &bridge.owner,
@@ -1219,6 +1221,34 @@ impl System {
         self.check_package_bootstrap(bridge).map_err(|error| WriteError {
             committed: true, message: format!("package list bootstrap owner after commit: {error:?}"),
         })
+    }
+
+    pub fn install_runtime_permission_metadata(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        metadata: Arc<Mutex<crate::package::owner::runtime_metadata::State>>,
+    ) -> Result<()> {
+        let mut state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_mut().filter(|owner|Arc::ptr_eq(&owner.bridge,bridge))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata bootstrap owner changed"))?;
+        if current.runtime_metadata.is_some() {
+            return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner is already installed"));
+        }
+        current.runtime_metadata=Some(metadata);
+        Ok(())
+    }
+
+    pub(crate) fn with_runtime_permission_metadata<T>(
+        &self,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        action: impl FnOnce(&mut crate::package::owner::runtime_metadata::State)->T,
+    ) -> Result<T> {
+        let state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_ref().filter(|owner|owner.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture)))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata query generation changed"))?;
+        let metadata=current.runtime_metadata.as_ref().ok_or_else(||Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner is unavailable"))?;
+        Ok(action(&mut metadata.lock().unwrap()))
     }
 
     /// Restore saved permission roles and metadata under one retained boot bridge.
