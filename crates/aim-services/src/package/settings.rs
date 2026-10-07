@@ -650,6 +650,10 @@ impl Settings {
                 _ => {}
             }
         }
+        Ok(self.put_factory(package))
+    }
+
+    fn put_factory(&mut self, package: Package) -> usize {
         let index = self
             .disabled_system_packages
             .iter()
@@ -660,7 +664,7 @@ impl Settings {
         } else {
             self.disabled_system_packages[index] = package;
         }
-        Ok(index)
+        index
     }
 
     /// Preserve the complete consumed persistence document while applying its
@@ -1118,7 +1122,7 @@ impl Settings {
                         s.packages.push(p);
                     }
                 }
-                "updated-package" => s.disabled_system_packages.push(updated_package(e)?),
+                "updated-package" => { s.put_factory(updated_package(e)?); }
                 "shared-user" => {
                     if let Some(u) = shared_user(e, &mut certificates)? {
                         s.shared_users.push(u);
@@ -1651,6 +1655,23 @@ fn key_sets(e: &Element) -> Result<KeySets, String> {
 #[cfg(test)]
 mod install_source_tests {
     use super::*;
+    #[test]
+    fn factory_import_replaces_duplicate_names_without_moving_other_records() {
+        let xml = b"<packages><updated-package name='f' codePath='/system/priv-app/old' userId='10001' version='1'/><updated-package name='other' codePath='/system/app/other' userId='10002'/><updated-package name='f' codePath='/system/app/new' userId='10003' version='2'/></packages>";
+        let root = aim_android_xml::read(xml).unwrap();
+        for bytes in [xml.to_vec(), aim_android_xml::abx::write(&root).unwrap()] {
+            let settings = Settings::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+            let factories = settings.disabled_system_packages;
+            assert_eq!(factories.len(), 2);
+            assert_eq!(factories[0].name, "f");
+            assert_eq!(factories[0].code_path, "/system/app/new");
+            assert_eq!(factories[0].version_code, 2);
+            assert_eq!(factories[0].app_id, 10003);
+            assert_eq!(factories[0].private_flags, 0);
+            assert_eq!(factories[1].name, "other");
+        }
+    }
+
     #[test]
     fn empty_owner_normalizes_attributes_and_signing_requires_initiator() {
         for orphan in [false, true] {

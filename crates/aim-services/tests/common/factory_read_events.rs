@@ -52,6 +52,22 @@ pub fn export(directory: &Path) {
         } else {
             read.unwrap();
         }
+        if let Ok(root) = aim_android_xml::read(bytes) {
+            let ast = Settings::parse(&root).unwrap();
+            let normalize = |mut factories: Vec<aim_services::package::settings::Package>| {
+                // These IDs are constructor/runtime inputs rather than saved XML.
+                for p in &mut factories {
+                    p.domain_set_id = None;
+                    p.shared_user_app_id = None;
+                }
+                factories
+            };
+            assert_eq!(
+                normalize(ast.disabled_system_packages),
+                normalize(state.disabled_system_packages.clone()),
+                "factory AST/stream import differs on case {index}"
+            );
+        }
         for name in ["p", "f"] {
             let setting = state
                 .disabled_system_packages

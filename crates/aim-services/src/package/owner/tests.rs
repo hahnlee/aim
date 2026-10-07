@@ -25,6 +25,21 @@ fn current_leaving_bits_are_not_persisted_or_invented_by_disk_readers() {
         None
     );
 }
+#[test]
+fn duplicate_factory_import_opens_one_owner_without_rewriting_the_source() {
+    let data = Data::new();
+    data.settings();
+    let path = data.0.join("system/packages.xml");
+    let bytes = b"<packages><package name='example.app' codePath='/data/app/example' userId='10100'/><updated-package name='example.app' codePath='/system/priv-app/old' userId='10100' version='1'/><updated-package name='example.app' codePath='/system/app/new' userId='10100' version='2'/></packages>";
+    std::fs::write(&path, bytes).unwrap();
+    let store = Store::open(&data.0, &[]).unwrap().unwrap();
+    let factories = &store.state().settings.disabled_system_packages;
+    assert_eq!(factories.len(), 1);
+    assert_eq!(factories[0].version_code, 2);
+    assert_eq!(factories[0].code_path, "/system/app/new");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
 pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {
