@@ -146,6 +146,13 @@ struct PackageBootstrap {
     snapshots: Option<crate::package::scan_snapshot::Store>,
     queries: Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
     runtime_metadata: Option<Arc<Mutex<crate::package::owner::runtime_metadata::State>>>,
+    runtime_worker: Option<crate::package::owner::runtime_metadata::worker::StopHandle>,
+}
+
+impl Drop for PackageBootstrap {
+    fn drop(&mut self) {
+        if let Some(worker)=&self.runtime_worker { worker.stop(); }
+    }
 }
 
 /// Told of a bridge attached, with its handle.
@@ -493,6 +500,7 @@ impl System {
             snapshots: None,
             queries: None,
             runtime_metadata: None,
+            runtime_worker: None,
         });
         self.process.link_to_death(
             &bridge.owner,
@@ -1326,14 +1334,33 @@ impl System {
         self.check_package_bootstrap(bridge)?;
         let capture=self.capture_package_queries()?;
         let metadata=self.runtime_permission_metadata_owner(&capture)?;
-        let system=Arc::downgrade(self);let bridge=bridge.clone();
-        crate::package::owner::runtime_metadata::worker::Worker::start(&metadata,move|now| {
+        let system=Arc::downgrade(self);let worker_bridge=bridge.clone();let bridge=bridge.clone();
+        let worker=crate::package::owner::runtime_metadata::worker::Worker::start(&metadata,move|now| {
             let fail=|message:String|crate::package::owner::runtime_metadata::FlushError {user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message}};
             let system=system.upgrade().ok_or_else(||fail("runtime system owner stopped".into()))?;
             system.check_package_bootstrap(&bridge).map_err(|error|fail(format!("runtime worker bootstrap: {error:?}")))?;
             let capture=system.capture_package_queries().map_err(|error|fail(format!("runtime worker capture: {error:?}")))?;
             system.process_due_runtime_permission_requests(&bridge,&mut store.lock().unwrap(),&capture,&inodes,now)
-        }).map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))
+        }).map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+        let registered={
+            let mut state=self.package_bootstrap.lock().unwrap();
+            if let Some(current)=state.current.as_mut().filter(|owner|Arc::ptr_eq(&owner.bridge,&worker_bridge)) {
+                current.runtime_worker=Some(worker.stop_handle());true
+            } else {false}
+        };
+        if !registered {
+            drop(worker);
+            return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime bootstrap changed while starting worker"));
+        }
+        Ok(worker)
+    }
+
+    pub fn stop_runtime_permission_worker(&self,bridge:&Arc<crate::package::bootstrap::Bridge>) -> Result<()> {
+        let mut state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_mut().filter(|owner|Arc::ptr_eq(&owner.bridge,bridge))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime worker bootstrap owner changed"))?;
+        if let Some(worker)=current.runtime_worker.take() {worker.stop();}
+        Ok(())
     }
 
     /// Restore saved permission roles and metadata under one retained boot bridge.

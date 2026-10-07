@@ -2854,6 +2854,10 @@ fn verify_boot_scan(
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(worker.take_error().is_none());assert!(installed.lock().unwrap().pending_write_requests().is_empty());
+        assert!(system.stop_runtime_permission_worker(&foreign).is_err());
+        system.stop_runtime_permission_worker(bridge).unwrap();
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while !worker.is_finished() {assert!(Instant::now()<deadline,"bootstrap stop failed to stop worker");std::thread::yield_now();}
         drop(worker);owner.legacy_reply.store(0,Ordering::SeqCst);
     }
     let retained_domains = system.capture_package_domains().unwrap();

@@ -1263,11 +1263,15 @@ instead of spinning. Joined guards detach so the owner can start a new timer.
 System.start_runtime_permission_worker supplies current query capture, retained
 bridge, explicit Store and creation metadata. Controlled Binder mutation to version
 14 now persists automatically without a manual deadline pump; worker unit coverage
-includes failure/retry and restart after join. Production bootstrap must still own
-this guard and teardown order; coherent producer snapshot and creation/controller
-policy remain #981, and native default/CTS/app gates remain #798. 554 service units pass (6 excluded,
-0.97s), retained-bootstrap/framework-res/Binder automatic-worker scan passes (2.28s),
-host build passes (3 rebuilt/10 fresh, 20.0s). No new original differential or
+includes failure/retry and restart after join. The retained bootstrap now owns a
+cancellation handle: replacement/death stops its timer without joining under the
+bootstrap lock. Explicit stop rejects foreign bootstrap owners; the caller-held
+guard joins outside that lock. Idle cancellation and Binder-driven persistence
+followed by owner stop are verified. Production bootstrap must still retain and
+join the guard; coherent producer snapshot and creation/controller policy remain
+#981, and native default/CTS/app gates remain #798. 555 service units pass (6 excluded,
+0.77s), retained-bootstrap/framework-res/Binder automatic-worker scan passes (2.24s),
+host build passes (3 rebuilt/10 fresh, 23.1s). No new original differential or
 CTS/app gate was performed for the timing policy.
  Controlled Binder tests
 cover default/updated versions, request creation, install refusal, stale captures,

@@ -21,6 +21,16 @@ impl Wake {
         cv.notify_all();
     }
 }
+/// Bootstrap teardown signals cancellation without joining under its lock.
+#[derive(Clone)]
+pub struct StopHandle(Wake);
+impl StopHandle {
+    pub fn stop(&self) {
+        let (lock, cv) = &*self.0.0;
+        lock.lock().unwrap().1 = true;
+        cv.notify_all();
+    }
+}
 pub struct Worker {
     wake: Wake,
     metadata: Weak<Mutex<State>>,
@@ -106,6 +116,12 @@ impl Worker {
             }
         }
     }
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle(self.wake.clone())
+    }
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
     /// Explicit wake after an external failure is repaired; no busy retry loop.
     pub fn retry(&self) {
         self.wake.notify();
@@ -116,9 +132,7 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        let (lock, cv) = &*self.wake.0;
-        lock.lock().unwrap().1 = true;
-        cv.notify_all();
+        self.stop_handle().stop();
         if let Some(thread) = self.thread.take() {
             thread.join().expect("runtime timer panicked");
         }
@@ -135,6 +149,20 @@ impl Drop for Worker {
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+    #[test]
+    fn bootstrap_stop_wakes_idle_worker_without_joining_under_owner_lock() {
+        let metadata = Arc::new(Mutex::new(State::default()));
+        let worker = Worker::start(&metadata, |_| panic!("idle worker must not write")).unwrap();
+        worker.stop_handle().stop();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !worker.is_finished() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        drop(worker);
+        assert!(metadata.lock().unwrap().wake.is_none());
+    }
+
     #[test]
     fn worker_wakes_on_mutation_reports_failure_retries_and_restarts_after_join() {
         let metadata = Arc::new(Mutex::new(State::default()));
