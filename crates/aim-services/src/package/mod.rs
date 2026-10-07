@@ -655,7 +655,7 @@ mod tests {
         let legacy = &rp.packages[0].1;
         assert!(legacy[0].granted && legacy[0].flags == 0x300);
         assert!(!legacy[1].granted);
-        assert_eq!(rp.shared_users, [("android.uid.system".into(), Vec::new())]);
+        assert_eq!(rp.shared_users, [(Some("android.uid.system".into()), Vec::new())]);
     }
 
     #[test]

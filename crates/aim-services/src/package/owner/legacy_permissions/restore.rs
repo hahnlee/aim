@@ -90,7 +90,7 @@ pub(in crate::package) fn read(
                     .packages
                     .iter()
                     .rev()
-                    .find(|(name, _)| name == &package.name)
+                    .find(|(name, _)| name.as_deref() == Some(package.name.as_str()))
                 {
                     migration.read_runtime(id, permissions)?;
                     restored
@@ -106,7 +106,7 @@ pub(in crate::package) fn read(
                     .shared_users
                     .iter()
                     .rev()
-                    .find(|(entry, _)| entry == name)
+                    .find(|(entry, _)| entry.as_deref() == Some(name.as_str()))
                 {
                     migration.read_runtime(id, permissions)?;
                 } else if internal_sdk >= 30 {

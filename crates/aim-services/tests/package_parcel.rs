@@ -640,12 +640,14 @@ fn native_package_parcels_match_original_read_write() {
     common::initial_restrictions::export(&directory);
     let runtime = aim_services::package::permissions::RuntimePermissions {
         version: 7, fingerprint: Some("finger<&\"\t\n\r".into()),
-        packages: vec![("p".into(), vec![
-            aim_services::package::permissions::RuntimePermission { name: "ordinary".into(), granted: true, flags: 17 },
-            aim_services::package::permissions::RuntimePermission { name: "one-time".into(), granted: true, flags: 1<<16 },
-        ])], shared_users: vec![("group".into(), vec![])],
+        packages: vec![(Some("p".into()), vec![
+            aim_services::package::permissions::RuntimePermission { name: Some("ordinary".into()), granted: true, flags: 17 },
+            aim_services::package::permissions::RuntimePermission { name: Some("one-time".into()), granted: true, flags: 1<<16 },
+        ])], shared_users: vec![(Some("group".into()), vec![])],
     };
     fs::write(directory.join("native-runtime-permissions.xml"), runtime.serialize().unwrap()).unwrap();
+    fs::write(directory.join("nullable-runtime-owners.xml"), b"<runtime-permissions><package><permission name='old' granted='true' flags='1'/></package><package name=''/><package><permission name='last' granted='false' flags='2'/></package><shared-user/><shared-user name=''/></runtime-permissions>").unwrap();
+    fs::write(directory.join("nullable-runtime-permission.xml"), b"<runtime-permissions><package name='p'><permission granted='true' flags='1'/></package></runtime-permissions>").unwrap();
     fs::write(directory.join("duplicate-runtime-permissions.xml"), b"<runtime-permissions><package name='BB'><permission name='old' granted='true' flags='1'/></package><package name='Aa'/><package name='z'/><package name='BB'><permission name='last' granted='false' flags='2'/></package><shared-user name='group'><permission name='old' granted='true' flags='1'/></shared-user><shared-user name='group'/></runtime-permissions>").unwrap();
     let boot_version_expected = common::boot_version_events::export(&directory);
     let defaults_inputs = common::settings_defaults::inputs();
@@ -1660,12 +1662,12 @@ fn native_package_parcels_match_original_read_write() {
                     0,
                     &[
                         RuntimePermission {
-                            name: "modern".into(),
+                            name: Some("modern".into()),
                             granted: false,
                             flags: i32::MIN,
                         },
                         RuntimePermission {
-                            name: "seed".into(),
+                            name: Some("seed".into()),
                             granted: true,
                             flags: 0x408030,
                         },

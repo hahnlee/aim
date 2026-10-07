@@ -135,7 +135,7 @@ impl Migration {
             self.put(
                 user,
                 Permission {
-                    name: Some(state.name.clone()),
+                    name: state.name.clone(),
                     runtime: true,
                     granted: state.granted,
                     flags: state.flags,
@@ -298,7 +298,7 @@ mod tests {
             .read_runtime(
                 0,
                 &[crate::package::permissions::RuntimePermission {
-                    name: "camera".into(),
+                    name: Some("camera".into()),
                     granted: false,
                     flags: i32::MIN,
                 }],

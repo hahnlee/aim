@@ -1148,15 +1148,22 @@ reads native XML, invokes the actual original writer and compares the resulting
 state through original getters and native parsing. This codec does not yet supply
 live version/fingerprint or synchronized permission-owner state, nor atomic
 main/backup/reserve persistence; that whole owner is tracked in #981. The full
-original ART oracle passes without skips (61.60s); 545 service units pass
-(6 excluded, 0.52s), including escaping and negative-flag write/read behavior.
+original ART oracle passes without skips (62.81s); 546 service units pass
+(6 excluded, 0.54s), including escaping and negative-flag write/read behavior.
 The runtime reader now applies ArrayMap duplicate replacement: package/shared
 rows keep the last value, sort by signed Java hash and retain collision insertion
 slots (#982). A direct original fixture checks repeated BB/Aa collision keys,
 a later z key, replacement permission contents and an empty final shared row;
 original reserialization and native parsing agree.
-Nullable owner/name representation remains #983. Host build passes
-(3 rebuilt/10 fresh, 17.6s).
+Runtime package/shared keys and permission names now retain Option<String>,
+so null and empty-string identities stay distinct, including their hash-zero
+collision slots. Migration receives nullable permission names without coercion;
+known package/shared restoration matches only Some(name). Null owner or
+permission attributes return a serialization error rather than inventing an XML
+name. The direct original fixture checks nullable identities, repeated null keys
+and main-file preservation after original null-attribute writer failures (#983).
+Both null-owner and null-permission writes leave the original main bytes intact.
+Host build passes (3 rebuilt/10 fresh, 24.0s).
 System.commit_package_list_from_scan now generates rows from the immutable native
 scan/query capture, in signed Java-hash setting order. Unloaded settings and APEX
 are omitted; system-user data paths come from setting volume/storage and captured

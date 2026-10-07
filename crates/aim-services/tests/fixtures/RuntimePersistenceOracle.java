@@ -23,6 +23,19 @@ public final class RuntimePersistenceOracle {
         if(!new java.util.ArrayList<>(duplicate.getPackagePermissions().keySet()).equals(List.of("z","BB","Aa")) || duplicate.getPackagePermissions().get("BB").size()!=1 || !"last".equals(duplicate.getPackagePermissions().get("BB").get(0).getName()) || duplicate.getPackagePermissions().get("BB").get(0).getFlags()!=2 || !duplicate.getSharedUserPermissions().get("group").isEmpty())throw new AssertionError("runtime duplicate map replacement/order differs");
         persistence.writeForUser(duplicate,user);
         Files.write(new File(directory,"original-duplicate-runtime-permissions.xml").toPath(),Files.readAllBytes(file.toPath()));
+        var nullOwners=Files.readAllBytes(new File(directory,"nullable-runtime-owners.xml").toPath());
+        Files.write(file.toPath(),nullOwners);
+        var nullable=persistence.readForUser(user);
+        var keys=new java.util.ArrayList<>(nullable.getPackagePermissions().keySet());
+        if(keys.size()!=2 || keys.get(0)!=null || !"".equals(keys.get(1)) || !"last".equals(nullable.getPackagePermissions().get(null).get(0).getName()) || !nullable.getSharedUserPermissions().containsKey(null) || !nullable.getSharedUserPermissions().containsKey(""))throw new AssertionError("nullable runtime owner identities differ");
+        persistence.writeForUser(nullable,user);
+        if(!java.util.Arrays.equals(nullOwners,Files.readAllBytes(file.toPath())))throw new AssertionError("original null-owner write did not restore its file");
+        var nullPermission=Files.readAllBytes(new File(directory,"nullable-runtime-permission.xml").toPath());
+        Files.write(file.toPath(),nullPermission);
+        nullable=persistence.readForUser(user);
+        if(nullable.getPackagePermissions().get("p").get(0).getName()!=null)throw new AssertionError("null runtime permission became a string");
+        persistence.writeForUser(nullable,user);
+        if(!java.util.Arrays.equals(nullPermission,Files.readAllBytes(file.toPath())))throw new AssertionError("original null-permission write did not restore its file");
     }
     private static void check(RuntimePermissionsState state) {
         if(state==null || state.getVersion()!=7 || !"finger<&\"\t\n\r".equals(state.getFingerprint()))throw new AssertionError("runtime version/fingerprint differs");
