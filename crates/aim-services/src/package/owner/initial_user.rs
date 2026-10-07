@@ -121,20 +121,6 @@ fn initial_package(
             attribute(&mut pkg, key, Some(Value::String(value.clone())));
         }
     }
-    for (key, values) in [
-        ("enabled-components", &state.enabled_components),
-        ("disabled-components", &state.disabled_components),
-    ] {
-        if let Some(values) = values.as_ref().filter(|v| !v.is_empty()) {
-            let mut group = element(key);
-            for name in values {
-                let mut item = element("item");
-                attribute(&mut item, "name", Some(Value::String(name.clone())));
-                group.content.push(Node::Element(item));
-            }
-            pkg.content.push(Node::Element(group));
-        }
-    }
     let owners = state.resolved_suspensions(user, cross_user);
     if !owners.is_empty() {
         attribute(&mut pkg, "suspended", Some(Value::Bool(true)));
@@ -171,6 +157,20 @@ fn initial_package(
                 }
             }
             pkg.content.push(Node::Element(entry));
+        }
+    }
+    for (key, values) in [
+        ("enabled-components", &state.enabled_components),
+        ("disabled-components", &state.disabled_components),
+    ] {
+        if let Some(values) = values.as_ref().filter(|v| !v.is_empty()) {
+            let mut group = element(key);
+            for name in values {
+                let mut item = element("item");
+                attribute(&mut item, "name", Some(Value::String(name.clone())));
+                group.content.push(Node::Element(item));
+            }
+            pkg.content.push(Node::Element(group));
         }
     }
     if let Some(state) = &state.archive_state {
@@ -215,4 +215,36 @@ fn initial_package(
         pkg.content.push(Node::Element(archive));
     }
     Ok(pkg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::restrictions::{Suspension, SuspendingUser};
+
+    #[test]
+    fn initialized_suspension_policy_preserves_nullable_owners_and_child_order() {
+        let state = UserState {
+            suspensions: Some(vec![Suspension {
+                package: "owner".into(),
+                user: SuspendingUser::Resolved(12),
+                params: None,
+            }]),
+            enabled_components: Some(vec!["p.Main".into()]),
+            disabled_components: Some(vec!["p.Other".into()]),
+            ..Default::default()
+        };
+        for cross_user in [false, true] {
+            let pkg = initial_package("p", &state, 10, cross_user).unwrap();
+            let children: Vec<_> = pkg.content.iter().filter_map(|n| match n {
+                Node::Element(e) => Some(e),
+                _ => None,
+            }).collect();
+            assert_eq!(children.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                ["suspend-params", "enabled-components", "disabled-components"]);
+            assert_eq!(children[0].int("suspending-user").unwrap(), cross_user.then_some(12));
+            assert!(children[0].content.is_empty());
+            assert_eq!(pkg.bool("suspended").unwrap(), Some(true));
+        }
+    }
 }

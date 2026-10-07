@@ -1145,7 +1145,9 @@ domain sections must be supplied by their separate owners. Main commit publishes
 the original scan user objects rather than parsed disk normalization, preserving
 null component sets and runtime-only state. Suspension/archive serialization
 emits resolved owner rows under explicit cross-user policy, nullable params,
-quarantine, dialog and typed PersistableBundle extras. Archive state emits
+quarantine, dialog and typed PersistableBundle extras. Suspension children precede
+component lists, matching the pinned writer; nullable params retain the owner row
+without a fabricated params body. Archive state emits
 installer/time/activity/component and guest absolute icon paths.
 PersistableBundle.save covers primitive/null/string/array/nested bundle XML;
 null string-array items reject like the original serializer. Relative icon paths
