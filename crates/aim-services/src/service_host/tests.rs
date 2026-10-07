@@ -2800,6 +2800,21 @@ fn verify_boot_scan(
         assert!(system.install_runtime_permission_metadata(&foreign,installed.clone()).is_err());
         system.install_runtime_permission_metadata(bridge,installed.clone()).unwrap();
         assert!(system.install_runtime_permission_metadata(bridge,installed.clone()).is_err());
+        let held=installed.lock().unwrap();
+        let baseline=Arc::strong_count(&installed);
+        let reader_system=system.clone();let reader_capture=query.clone();
+        let reader=std::thread::spawn(move||reader_system.with_runtime_permission_metadata(&reader_capture,|metadata|metadata.version(0)));
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while Arc::strong_count(&installed)==baseline && Instant::now()<deadline { std::thread::yield_now(); }
+        let waiting_owner=Arc::strong_count(&installed)>baseline;
+        let (tx,rx)=std::sync::mpsc::channel();let capture_system=system.clone();
+        let checker=std::thread::spawn(move||tx.send(capture_system.capture_package_queries().is_ok()).unwrap());
+        let bootstrap_free=rx.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        assert_eq!(reader.join().unwrap().unwrap(),8);
+        checker.join().unwrap();
+        assert!(waiting_owner,"metadata reader never retained the owner before waiting");
+        assert_eq!(bootstrap_free.unwrap(),true,"blocked metadata reader retained the bootstrap lock");
         assert!(system.with_runtime_permission_metadata(&old_query,|metadata|metadata.version(0)).is_err());
         assert_eq!(get(0).unwrap(),8);assert_eq!(get(99).unwrap(),0);
         assert!(get(-1).is_err_and(|error|error.code == -3));
@@ -2807,6 +2822,13 @@ fn verify_boot_scan(
         let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
         pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().unwrap();
         assert_eq!(get(0).unwrap(),13);assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
+        owner.legacy_reply.store(4,Ordering::SeqCst);
+        assert!(system.flush_installed_runtime_permission_requests(&foreign,&mut list_store,&query,&inodes).is_err());
+        assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
+        assert_eq!(system.flush_installed_runtime_permission_requests(bridge,&mut list_store,&query,&inodes).unwrap(),[0]);
+        assert!(installed.lock().unwrap().pending_write_requests().is_empty());
+        assert_eq!(list_store.state().users[0].1.runtime_permissions.as_ref().unwrap().version,13);
+        owner.legacy_reply.store(0,Ordering::SeqCst);
         let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:-1,user_id:0}.write(&mut data);
         let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
         assert!(pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().is_err_and(|error|error.code == -3));

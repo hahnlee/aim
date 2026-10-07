@@ -1238,13 +1238,23 @@ the exact current query capture; absent metadata or stale captures reject. The
 endpoint rejects trailing data and negative arguments before checking original
 ADJUST_RUNTIME_PERMISSIONS_POLICY/UPGRADE_RUNTIME_PERMISSIONS permissions,
 including root/system app-ID and isolated-UID Context rules. Setters enqueue real
-runtime writes; no missing-owner version is invented. Controlled Binder tests
+runtime writes; no missing-owner version is invented. The installed-owner flush
+now consumes that same metadata Arc, so Binder-enqueued changes reach atomic
+persistence. Foreign bootstrap checks also run on empty queues; completed effects
+are retained if bootstrap identity changes after flushing. Binder operations clone
+the owner under bootstrap lock, release it before waiting on metadata, then
+recheck current capture/owner under consistent metadata-to-bootstrap order. This
+removes the earlier bootstrap-to-metadata inversion (#985). A bounded concurrency
+probe holds metadata while a reader waits and confirms query capture remains
+available; both worker threads join. Controlled Binder setter-to-flush checks
+persist version 13 and acknowledge the installed queue while foreign flushes leave
+requests intact. Controlled Binder tests
 cover default/updated versions, request creation, install refusal, stale captures,
 invalid input and permission denial. These endpoints remain test aliases pending
 the native default/CTS/app gates (#798); metadata scheduling and coherent grant
 capture still require #981. 552 service units pass
-(6 excluded, 0.55s), retained-bootstrap/framework-res/Binder scan passes (1.25s),
-host build passes (3 rebuilt/10 fresh, 15.4s). Source permission/argument rules were
+(6 excluded, 0.55s), retained-bootstrap/framework-res/Binder scan passes (1.29s),
+host build passes (3 rebuilt/10 fresh, 16.4s). Source permission/argument rules were
 checked at the pinned version; no new original Binder differential run or CTS/app
 gate was performed for these two endpoints.
 System.commit_package_list_from_scan now generates rows from the immutable native

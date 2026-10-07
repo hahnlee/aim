@@ -1238,17 +1238,57 @@ impl System {
         Ok(())
     }
 
+    fn runtime_permission_metadata_owner(
+        &self,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+    ) -> Result<Arc<Mutex<crate::package::owner::runtime_metadata::State>>> {
+        let state=self.package_bootstrap.lock().unwrap();
+        let current=state.current.as_ref().filter(|owner|owner.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture)))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata query generation changed"))?;
+        current.runtime_metadata.clone().ok_or_else(||Exception::new(
+            aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner is unavailable"))
+    }
+
     pub(crate) fn with_runtime_permission_metadata<T>(
         &self,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
         action: impl FnOnce(&mut crate::package::owner::runtime_metadata::State)->T,
     ) -> Result<T> {
+        // Never wait for metadata while holding the bootstrap lock: flushes
+        // hold metadata while checking the bootstrap around owner calls.
+        let owner=self.runtime_permission_metadata_owner(capture)?;
+        let mut metadata=owner.lock().unwrap();
         let state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_ref().filter(|owner|owner.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture)))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata query generation changed"))?;
-        let metadata=current.runtime_metadata.as_ref().ok_or_else(||Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner is unavailable"))?;
-        Ok(action(&mut metadata.lock().unwrap()))
+        let current=state.current.as_ref().filter(|current|current.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture))
+            && current.runtime_metadata.as_ref().is_some_and(|current|Arc::ptr_eq(current,&owner)))
+            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata generation changed while waiting"))?;
+        let _=current;
+        Ok(action(&mut metadata))
+    }
+
+    /// Persist the exact metadata owner mutated by Binder setters.
+    pub fn flush_installed_runtime_permission_requests(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        store: &mut crate::package::owner::Store,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        inodes: &std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
+    ) -> std::result::Result<Vec<u32>,crate::package::owner::runtime_metadata::FlushError> {
+        let fail=|error:Exception|crate::package::owner::runtime_metadata::FlushError {
+            user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message:format!("installed runtime metadata: {error:?}")},
+        };
+        self.check_package_bootstrap(bridge).map_err(fail)?;
+        let owner=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
+        let mut metadata=owner.lock().unwrap();
+        let current=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
+        if !Arc::ptr_eq(&owner,&current) {
+            return Err(fail(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner changed while waiting")));
+        }
+        let completed=self.flush_runtime_permission_requests(bridge,store,capture,&mut metadata,inodes)?;
+        self.check_package_bootstrap(bridge).map_err(|error|crate::package::owner::runtime_metadata::FlushError {
+            user:-1,completed:completed.clone(),error:crate::package::owner::WriteError {committed:!completed.is_empty(),message:format!("runtime bootstrap after flush: {error:?}")},
+        })?;
+        Ok(completed)
     }
 
     /// Restore saved permission roles and metadata under one retained boot bridge.
