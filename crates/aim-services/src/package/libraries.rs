@@ -117,12 +117,18 @@ impl LibraryPackage for ScanPackage {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Registry {
     entries: BTreeMap<String, BTreeMap<i64, SharedLibrary>>,
+    /// First insertion order resolves ArrayMap equal-hash collisions.
+    order: Vec<String>,
 }
 
 impl Registry {
     pub fn new(config: &SystemConfig) -> Self {
         let mut registry = Self::default();
-        for entry in config.libraries.values() {
+        let mut names=config.library_order.clone();
+        for name in config.libraries.keys() { if !names.contains(name) {names.push(name.clone());} }
+        names.sort_by_key(|name|super::info::java_hash(name));
+        for name in names {
+            let entry=&config.libraries[&name];
             registry.insert(SharedLibrary {
                 path: Some(entry.filename.clone()),
                 name: Some(entry.name.clone()),
@@ -160,7 +166,9 @@ impl Registry {
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &SharedLibrary> {
-        self.entries.values().flat_map(|versions| versions.values())
+        let mut names=self.order.iter().collect::<Vec<_>>();
+        names.sort_by_key(|name|super::info::java_hash(name));
+        names.into_iter().flat_map(|name|self.entries[name].values())
     }
 
     /// RemovePackageHelper.cleanPackageDataStructuresLILPw uses exact library
@@ -186,6 +194,7 @@ impl Registry {
             versions.remove(&version);
             if versions.is_empty() {
                 self.entries.remove(name);
+                self.order.retain(|n|n!=name);
             }
         }
     }
@@ -319,8 +328,10 @@ impl Registry {
     }
 
     fn insert(&mut self, library: SharedLibrary) {
+        let name=library.name.clone().unwrap();
+        if !self.entries.contains_key(&name) {self.order.push(name.clone());}
         self.entries
-            .entry(library.name.clone().unwrap())
+            .entry(name)
             .or_default()
             .insert(library.version, library);
     }

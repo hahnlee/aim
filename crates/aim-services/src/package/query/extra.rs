@@ -17,6 +17,45 @@ impl ReadParcelable for VersionedPackage {
 impl Query<'_> {
     pub(super) fn extra_package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
+            pm::GET_INSTRUMENTATION_INFO_AS_USER => {
+                let a = args(pm::GetInstrumentationInfoAsUser::<ComponentName>::read(r))?;
+                thrown(
+                    self.instrumentation_info(a.class_name.as_ref(), i64::from(a.flags), a.user_id),
+                    |p, v| pm::write_get_instrumentation_info_as_user_reply(p, v.as_ref()),
+                )
+            }
+            pm::QUERY_INSTRUMENTATION_AS_USER => {
+                let a = args(pm::QueryInstrumentationAsUser::read(r))?;
+                thrown(
+                    self.instrumentations(
+                        a.target_package.as_deref(),
+                        i64::from(a.flags),
+                        a.user_id,
+                    ),
+                    |p, v| {
+                        pm::write_query_instrumentation_as_user_reply(
+                            p,
+                            Some(&ListSlice {
+                                creator: "android.content.pm.InstrumentationInfo".into(),
+                                items: v,
+                            }),
+                        )
+                    },
+                )
+            }
+            pm::GET_INSTALLED_MODULES => {
+                let a = args(pm::GetInstalledModules::read(r))?;
+                thrown(self.installed_modules(a.flags), |p, v| {
+                    pm::write_get_installed_modules_reply(p, Some(&v))
+                })
+            }
+            pm::GET_MODULE_INFO => {
+                let a = args(pm::GetModuleInfo::read(r))?;
+                thrown(
+                    self.module_info(a.package_name.as_deref(), a.flags),
+                    |p, v| pm::write_get_module_info_reply(p, v.as_ref()),
+                )
+            }
             pm::GET_APP_METADATA_SOURCE => {
                 let a = args(pm::GetAppMetadataSource::read(r))?;
                 thrown(
@@ -370,6 +409,226 @@ impl Query<'_> {
                 Ok(reply(|p| pm::write_check_uid_signatures_reply(p, value)))
             }
             _ => Err(NotModelled("a method not modelled")),
+        }
+    }
+
+    pub(super) fn instrumentation_info(
+        &self,
+        component: Option<&ComponentName>,
+        flags: i64,
+        user: i32,
+    ) -> Thrown<Option<Instrumentation>> {
+        if let Err(e) =
+            self.enforce_cross_user(user, false, false, "getInstrumentationInfoAsUser")?
+        {
+            return Ok(Err(e));
+        }
+        if self.user(user).is_none() {
+            return Ok(Ok(None));
+        }
+        let Some(component) = component else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null instrumentation component",
+            )));
+        };
+        let Some((ps, pkg)) = self.package_of(&component.package) else {
+            return Ok(Ok(None));
+        };
+        let instrument = pkg.instrumentations.iter().rev().find(|i| {
+            i.component.name == component.class && i.component.package_name == component.package
+        });
+        if let Some(instrument) = instrument {
+            let caller = if apps_filter::is_isolated(self.calling_uid) {
+                self.state
+                    .system
+                    .isolated_owners
+                    .iter()
+                    .find(|(uid, _)| *uid == self.calling_uid)
+                    .map(|(_, owner)| *owner)
+                    .ok_or(NotModelled("an isolated instrumentation caller's owner"))?
+            } else {
+                self.calling_uid
+            };
+            let instant = apps_filter::instant_app_package_name(self.state, caller)?.is_some();
+            let target_visible = instant
+                && !user_state(ps, user).instant_app
+                && apps_filter::is_caller_same_app(
+                    self.state,
+                    instrument.target_package.as_deref(),
+                    caller,
+                )?;
+            if !target_visible && self.filtered(Some(ps), self.calling_uid, user)? {
+                return Ok(Ok(None));
+            }
+            let state = user_state(ps, user);
+            return Ok(Ok(info::generate_instrumentation_info(
+                &self.target(ps, pkg, &state, user),
+                instrument,
+                flags,
+            )
+            .map(Instrumentation)));
+        }
+        if self.filtered(Some(ps), self.calling_uid, user)? {
+            return Ok(Ok(None));
+        }
+        Ok(Ok(None))
+    }
+
+    pub(super) fn instrumentations(
+        &self,
+        target: Option<&str>,
+        flags: i64,
+        user: i32,
+    ) -> Thrown<Vec<Instrumentation>> {
+        if let Err(e) = self.enforce_cross_user(user, false, false, "queryInstrumentationAsUser")? {
+            return Ok(Err(e));
+        }
+        if self.user(user).is_none() {
+            return Ok(Ok(Vec::new()));
+        }
+        let mut registered: Vec<(
+            &PackageState,
+            &AndroidPackage,
+            &super::super::pkg::Instrumentation,
+        )> = Vec::new();
+        for ps in self.state.packages.values() {
+            let Some(pkg) = ps.pkg.as_deref() else {
+                continue;
+            };
+            for instrument in &pkg.instrumentations {
+                if let Some(index) = registered.iter().position(|(_, _, i)| {
+                    i.component.package_name == instrument.component.package_name
+                        && i.component.name == instrument.component.name
+                }) {
+                    registered[index] = (ps, pkg, instrument);
+                } else {
+                    registered.push((ps, pkg, instrument));
+                }
+            }
+        }
+        let hash = |i: &super::super::pkg::Instrumentation| {
+            info::java_hash(&i.component.package_name)
+                .wrapping_add(info::java_hash(&i.component.name))
+        };
+        registered.sort_by_key(|(_, _, i)| hash(i));
+        if registered
+            .windows(2)
+            .any(|pair| hash(pair[0].2) == hash(pair[1].2))
+        {
+            return Err(NotModelled(
+                "instrumentation registry collision insertion order",
+            ));
+        }
+        let mut result = Vec::new();
+        for (ps, pkg, instrument) in registered {
+            if target.is_some() && target != instrument.target_package.as_deref() {
+                continue;
+            }
+            if self.filtered(Some(ps), self.calling_uid, user)? {
+                continue;
+            }
+            let state = user_state(ps, user);
+            if let Some(info) = info::generate_instrumentation_info(
+                &self.target(ps, pkg, &state, user),
+                instrument,
+                flags,
+            ) {
+                result.push(Instrumentation(info));
+            }
+        }
+        Ok(Ok(result))
+    }
+
+    pub(super) fn module_metadata_package(&self) -> Thrown<Option<String>> {
+        let owner = self
+            .state
+            .system
+            .module_metadata
+            .as_ref()
+            .ok_or(NotModelled("native module metadata owner unavailable"))?;
+        if !owner.loaded() {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "Call to getVersion before metadata loaded",
+            )));
+        }
+        Ok(Ok(owner.provider().map(str::to_owned)))
+    }
+
+    fn installed_modules(
+        &self,
+        flags: i32,
+    ) -> Thrown<Vec<Option<super::super::module_metadata::ModuleInfo>>> {
+        let owner = self
+            .state
+            .system
+            .module_metadata
+            .as_ref()
+            .ok_or(NotModelled("native module metadata owner unavailable"))?;
+        if !owner.loaded() {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "Call to getInstalledModules before metadata loaded",
+            )));
+        }
+        if flags & 0x20000 != 0 {
+            return Ok(Ok(owner.modules().iter().cloned().map(Some).collect()));
+        }
+        let packages = match self
+            .installed_packages(i64::from(flags) | MATCH_APEX, user_id(self.calling_uid))?
+        {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+        Ok(Ok(packages
+            .iter()
+            .filter_map(|p| {
+                owner
+                    .modules()
+                    .iter()
+                    .find(|m| m.package == p.package_name)
+                    .cloned()
+                    .map(Some)
+            })
+            .collect()))
+    }
+
+    fn module_info(
+        &self,
+        name: Option<&str>,
+        flags: i32,
+    ) -> Thrown<Option<super::super::module_metadata::ModuleInfo>> {
+        let owner = self
+            .state
+            .system
+            .module_metadata
+            .as_ref()
+            .ok_or(NotModelled("native module metadata owner unavailable"))?;
+        if !owner.loaded() {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "Call to getModuleInfo before metadata loaded",
+            )));
+        }
+        if flags & 1 != 0 {
+            if name.is_none() && !owner.modules().is_empty() {
+                return Ok(Err(Exception::new(
+                    aim_binder_host::parcel::EX_NULL_POINTER,
+                    "null APEX module name",
+                )));
+            }
+            Ok(Ok(owner
+                .modules()
+                .iter()
+                .find(|m| m.apex.as_deref() == name)
+                .cloned()))
+        } else {
+            Ok(Ok(owner
+                .modules()
+                .iter()
+                .find(|m| m.package.as_deref() == name)
+                .cloned()))
         }
     }
 
@@ -1316,6 +1575,27 @@ mod permission_tests {
             calling_uid: 1000,
         };
         assert_eq!(query.app_metadata_source(Some("p"), 0).unwrap().unwrap(), 2);
+        let mut args = Parcel::new();
+        pm::GetAppMetadataSource {
+            package_name: Some("missing".into()),
+            user_id: 0,
+        }
+        .write(&mut args);
+        let reply = query
+            .answer(
+                pm::DESCRIPTOR,
+                pm::GET_APP_METADATA_SOURCE,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        let mut reader = Reader::new(reply.data(), reply.objects());
+        let dispatched = pm::read_get_app_metadata_source_reply(&mut reader)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(dispatched.code, aim_binder_host::parcel::EX_PARCELABLE);
+        assert!(dispatched.parcelable.is_some());
+        assert_eq!(reader.remaining(), 0);
+
         assert_eq!(query.permission_controller().unwrap().unwrap(), "p");
         let error = query
             .app_metadata_source(Some("missing"), 0)
@@ -1661,5 +1941,13 @@ struct Library(super::super::model::SharedLibrary);
 impl aim_service_aidl::WriteParcelable for Library {
     fn write_to(&self, p: &mut Parcel) {
         info::write_library(p, &self.0);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Instrumentation(pub(super) info::InstrumentationInfo);
+impl aim_service_aidl::WriteParcelable for Instrumentation {
+    fn write_to(&self, p: &mut Parcel) {
+        self.0.write(p);
     }
 }

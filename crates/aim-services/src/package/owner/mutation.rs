@@ -17,7 +17,7 @@ impl Store {
                     enabled,
                 );
             }
-            Change::UpdateAvailable(_) | Change::MimeGroup { .. } => {
+            Change::UpdateAvailable(_) | Change::MimeGroup { .. } | Change::CategoryHint(_) => {
                 let mut root = self.settings_document.clone();
                 let entry = root
                     .content
@@ -33,6 +33,11 @@ impl Store {
                     })
                     .ok_or_else(|| WriteError::before("mutation package absent"))?;
                 match &plan.change {
+                    Change::CategoryHint(category) => attribute(
+                        entry,
+                        "categoryHint",
+                        (*category != -1).then_some(Value::Int(*category)),
+                    ),
                     Change::UpdateAvailable(available) => attribute(
                         entry,
                         "updateAvailable",
@@ -98,6 +103,11 @@ impl Store {
                 "splash-screen-theme",
                 theme.clone().map(Value::String),
             ),
+            Change::HarmfulWarning(warning) => attribute(
+                entry,
+                "harmful-app-warning",
+                warning.clone().map(Value::String),
+            ),
             Change::MinAspectRatio(ratio) => attribute(
                 entry,
                 "min-aspect-ratio",
@@ -140,6 +150,7 @@ mod tests {
         for change in [
             Change::SplashTheme(Some("new<&".into())),
             Change::MinAspectRatio(7),
+            Change::HarmfulWarning(Some(" ⚠<&😀 ".into())),
             Change::Stopped {
                 stopped: false,
                 not_launched: false,
@@ -161,7 +172,24 @@ mod tests {
         assert!(state.hidden);
         assert_eq!(state.enabled, 3);
         assert_eq!(state.min_aspect_ratio, 7);
+        assert_eq!(state.harmful_app_warning.as_deref(), Some(" ⚠<&😀 "));
         assert_eq!(state.splash_screen_theme.as_deref(), Some("new<&"));
+        store
+            .commit_mutation(&Plan {
+                package: "example.app".into(),
+                user: Some(0),
+                change: Change::HarmfulWarning(None),
+            })
+            .unwrap();
+        assert!(
+            Store::open(&data.0, &[0]).unwrap().unwrap().state.users[0]
+                .1
+                .restrictions
+                .packages[0]
+                .1
+                .harmful_app_warning
+                .is_none()
+        );
         store
             .commit_mutation(&Plan {
                 package: "example.app".into(),
@@ -178,6 +206,24 @@ mod tests {
                 .splash_screen_theme,
             None
         );
+    }
+    #[test]
+    fn category_override_is_durable_and_undefined_removes_only_hint() {
+        let data = Data::new();
+        data.settings();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        for value in [7, -123, -1] {
+            store
+                .commit_mutation(&Plan {
+                    package: "example.app".into(),
+                    user: None,
+                    change: Change::CategoryHint(value),
+                })
+                .unwrap();
+            let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+            assert_eq!(reopened.state().settings.packages[0].category_hint, value);
+            assert_eq!(reopened.state().settings.packages[0].name, "example.app");
+        }
     }
     #[test]
     fn package_mutation_preserves_group_neighbors_and_update_state() {

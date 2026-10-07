@@ -23,6 +23,16 @@ pub enum Request {
         user: i32,
         theme: Option<String>,
     },
+    CategoryHint {
+        package: Option<String>,
+        category: i32,
+        caller: Option<String>,
+    },
+    HarmfulWarning {
+        package: Option<String>,
+        user: i32,
+        warning: Option<String>,
+    },
     MinAspectRatio {
         package: String,
         user: i32,
@@ -49,6 +59,8 @@ pub enum Change {
         was_stopped: bool,
     },
     SplashTheme(Option<String>),
+    HarmfulWarning(Option<String>),
+    CategoryHint(i32),
     MinAspectRatio(i32),
     MimeGroup {
         group: Option<String>,
@@ -61,6 +73,12 @@ pub struct Plan {
     pub package: String,
     pub user: Option<i32>,
     pub change: Change,
+}
+struct Warning(Option<String>);
+impl aim_service_aidl::ReadParcelable for Warning {
+    fn read_from(r: &mut Reader<'_>) -> Result<Self, i32> {
+        crate::clip::char_sequence(r).map(Self)
+    }
 }
 impl Request {
     pub fn read(code: u32, uid: u32, r: &mut Reader<'_>) -> Option<Result<Self, i32>> {
@@ -95,6 +113,22 @@ impl Request {
                         package,
                         user: a.user_id,
                         theme: a.theme_name,
+                    }
+                }
+                pm::SET_APPLICATION_CATEGORY_HINT => {
+                    let a = pm::SetApplicationCategoryHint::read(r)?;
+                    Self::CategoryHint {
+                        package: a.package_name,
+                        category: a.category_hint,
+                        caller: a.caller_package_name,
+                    }
+                }
+                pm::SET_HARMFUL_APP_WARNING => {
+                    let a = pm::SetHarmfulAppWarning::<Warning>::read(r)?;
+                    Self::HarmfulWarning {
+                        package: a.package_name,
+                        user: a.user_id,
+                        warning: a.warning.and_then(|value| value.0),
                     }
                 }
                 pm::SET_USER_MIN_ASPECT_RATIO => {
@@ -147,6 +181,8 @@ impl Request {
                 | pm::SET_APPLICATION_ENABLED_SETTING
                 | pm::SET_PACKAGE_STOPPED_STATE
                 | pm::SET_SPLASH_SCREEN_THEME
+                | pm::SET_HARMFUL_APP_WARNING
+                | pm::SET_APPLICATION_CATEGORY_HINT
                 | pm::SET_USER_MIN_ASPECT_RATIO
                 | pm::SET_MIME_GROUP
                 | pm::SET_UPDATE_AVAILABLE
@@ -165,8 +201,91 @@ impl Request {
         if let Self::Invalid(error) = self {
             return Ok(Err(error.clone()));
         }
+        if let Self::CategoryHint {
+            package,
+            category,
+            caller,
+        } = self
+        {
+            if apps_filter::instant_app_package_name(q.state, q.calling_uid)?.is_some() {
+                return Ok(Err(Exception::security(
+                    "Instant applications don't have access to this method",
+                )));
+            }
+            let user = apps_filter::user_id(q.calling_uid);
+            let caller_uid = match q.package_uid(caller.as_deref().unwrap_or_default(), 0, user)? {
+                Ok(uid) => uid,
+                Err(error) => return Ok(Err(error)),
+            };
+            if caller_uid != q.calling_uid {
+                return Ok(Err(Exception::security(format!(
+                    "Package {} does not belong to {}",
+                    caller.as_deref().unwrap_or("null"),
+                    q.calling_uid
+                ))));
+            }
+            let target = package.as_deref().unwrap_or_default();
+            let name = q.internal_resolve_name(target, -1)?;
+            let state = q.state.packages.get(&name);
+            if state.is_none_or(|state| !info::user_state(state, user).installed)
+                || q.filtered_including_uninstalled(state, user)?
+            {
+                return Ok(Err(Exception::illegal_argument(format!(
+                    "Unknown target package {}",
+                    package.as_deref().unwrap_or("null")
+                ))));
+            }
+            let state = state.unwrap();
+            if caller != &state.install_source.installer {
+                return Ok(Err(Exception::illegal_argument(format!(
+                    "Calling package {} is not installer for {}",
+                    caller.as_deref().unwrap_or("null"),
+                    target
+                ))));
+            }
+            return Ok(Ok(Plan {
+                package: name,
+                user: None,
+                change: if state.category_override == *category {
+                    Change::None
+                } else {
+                    Change::CategoryHint(*category)
+                },
+            }));
+        }
+        if let Self::HarmfulWarning {
+            package,
+            user,
+            warning,
+        } = self
+        {
+            if let Err(error) = q.full_cross_user(*user, true)? {
+                return Ok(Err(error));
+            }
+            if !permission(q, "android.permission.SET_HARMFUL_APP_WARNINGS")? {
+                return Ok(Err(Exception::security(
+                    "Caller must have the android.permission.SET_HARMFUL_APP_WARNINGS permission.",
+                )));
+            }
+            let Some(package) = package
+                .as_ref()
+                .filter(|name| q.state.packages.contains_key(*name))
+            else {
+                return Ok(Err(Exception::illegal_argument(format!(
+                    "Unknown package: {}",
+                    package.as_deref().unwrap_or("null")
+                ))));
+            };
+            return Ok(Ok(Plan {
+                package: package.clone(),
+                user: Some(*user),
+                change: Change::HarmfulWarning(warning.clone()),
+            }));
+        }
         let (package, user) = match self {
-            Self::Invalid(_) => unreachable!(),
+            Self::Invalid(_) | Self::HarmfulWarning { .. } | Self::CategoryHint { .. } => {
+                unreachable!()
+            }
             Self::Enabled(s) => (&s.package, Some(s.user)),
             Self::Stopped { package, user, .. }
             | Self::SplashTheme { package, user, .. }
@@ -354,6 +473,7 @@ impl Plan {
                 }
             }
             Change::UpdateAvailable(value) => ps.is.update_available = *value,
+            Change::CategoryHint(value) => ps.category_override = *value,
             change => {
                 let user = self.user.expect("user mutation");
                 let current = ps.users.entry(user).or_default();
@@ -375,6 +495,9 @@ impl Plan {
                         current.not_launched = *not_launched;
                     }
                     Change::SplashTheme(theme) => current.splash_screen_theme = theme.clone(),
+                    Change::HarmfulWarning(warning) => {
+                        current.harmful_app_warning = warning.clone()
+                    }
                     Change::MinAspectRatio(ratio) => current.min_aspect_ratio = *ratio,
                     _ => unreachable!(),
                 }
@@ -400,6 +523,15 @@ impl Plan {
                     .find(|(name, _)| name == group)
                     .ok_or("mutation MIME group absent")?;
                 *current = types.iter().cloned().map(Some).collect();
+                Ok(())
+            }
+            Change::CategoryHint(value) => {
+                scan.settings
+                    .packages
+                    .iter_mut()
+                    .find(|package| package.name == self.package)
+                    .ok_or("mutation package absent")?
+                    .category_hint = *value;
                 Ok(())
             }
             Change::UpdateAvailable(value) => {
@@ -436,6 +568,9 @@ impl Plan {
                         current.not_launched = *not_launched;
                     }
                     Change::SplashTheme(theme) => current.splash_screen_theme = theme.clone(),
+                    Change::HarmfulWarning(warning) => {
+                        current.harmful_app_warning = warning.clone()
+                    }
                     Change::MinAspectRatio(ratio) => current.min_aspect_ratio = *ratio,
                     _ => unreachable!(),
                 }
@@ -453,6 +588,10 @@ pub fn reply(code: u32) -> aim_binder_host::parcel::Parcel {
         }
         pm::SET_PACKAGE_STOPPED_STATE => pm::write_set_package_stopped_state_reply(&mut reply),
         pm::SET_SPLASH_SCREEN_THEME => pm::write_set_splash_screen_theme_reply(&mut reply),
+        pm::SET_HARMFUL_APP_WARNING => pm::write_set_harmful_app_warning_reply(&mut reply),
+        pm::SET_APPLICATION_CATEGORY_HINT => {
+            pm::write_set_application_category_hint_reply(&mut reply)
+        }
         pm::SET_USER_MIN_ASPECT_RATIO => pm::write_set_user_min_aspect_ratio_reply(&mut reply),
         pm::SET_MIME_GROUP => pm::write_set_mime_group_reply(&mut reply),
         pm::SET_UPDATE_AVAILABLE => pm::write_set_update_available_reply(&mut reply),
@@ -496,6 +635,205 @@ mod tests {
             .into(),
             ..Default::default()
         }
+    }
+    #[test]
+    fn category_hint_requires_recorded_installer_and_keeps_noop_generation() {
+        let mut state = state();
+        state.renamed_packages = Some(Vec::new());
+        let ps = state.packages.get_mut("fixture").unwrap();
+        ps.pkg = Some(std::sync::Arc::new(crate::package::pkg::AndroidPackage {
+            package_name: "fixture".into(),
+            uid: 10100,
+            ..Default::default()
+        }));
+        ps.install_source.installer = Some("fixture".into());
+        ps.category_override = 4;
+        let decide = |state: &model::State, caller: Option<String>, category| {
+            let filter = AppsFilter::new(state, &Config::default()).unwrap();
+            Request::CategoryHint {
+                package: Some("fixture".into()),
+                caller,
+                category,
+            }
+            .decide(
+                &Query {
+                    state,
+                    filter: &filter,
+                    calling_uid: 10100,
+                },
+                1,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            decide(&state, Some("fixture".into()), 4).unwrap().change,
+            Change::None
+        );
+        let plan = decide(&state, Some("fixture".into()), -123).unwrap();
+        assert_eq!(plan.change, Change::CategoryHint(-123)); // original accepts any int
+        let mut next = state.clone();
+        plan.apply(&mut next);
+        assert_eq!(next.packages["fixture"].category_override, -123);
+        assert_eq!(
+            decide(&state, None, 5).unwrap_err().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        state
+            .packages
+            .get_mut("fixture")
+            .unwrap()
+            .install_source
+            .installer = None;
+        assert_eq!(
+            decide(&state, Some("fixture".into()), 5).unwrap_err().code,
+            aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+        );
+    }
+    #[test]
+    fn harmful_warning_mutates_uninstalled_hidden_state_and_rejects_unknown_package() {
+        let mut state = state();
+        let user = state
+            .packages
+            .get_mut("fixture")
+            .unwrap()
+            .users
+            .get_mut(&0)
+            .unwrap();
+        user.installed = false;
+        user.hidden = true;
+        let filter = AppsFilter::new(&state, &Config::default()).unwrap();
+        let q = Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        let request = Request::HarmfulWarning {
+            package: Some("fixture".into()),
+            user: 0,
+            warning: Some(" ⚠<&😀 ".into()),
+        };
+        let plan = request.decide(&q, 1).unwrap().unwrap();
+        let mut next = state.clone();
+        plan.apply(&mut next);
+        assert_eq!(
+            next.packages["fixture"].users[&0]
+                .harmful_app_warning
+                .as_deref(),
+            Some(" ⚠<&😀 ")
+        );
+        for package in [None, Some("missing".into())] {
+            assert_eq!(
+                Request::HarmfulWarning {
+                    package,
+                    user: 0,
+                    warning: None
+                }
+                .decide(&q, 1)
+                .unwrap()
+                .unwrap_err()
+                .code,
+                aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+            );
+        }
+        assert!(
+            Request::HarmfulWarning {
+                package: Some("fixture".into()),
+                user: -1,
+                warning: None
+            }
+            .decide(&q, 1)
+            .unwrap()
+            .is_err()
+        );
+    }
+    #[test]
+    fn harmful_warning_checks_permission_before_package_and_requires_full_cross_user() {
+        let mut state = state();
+        let request = Request::HarmfulWarning {
+            package: None,
+            user: 0,
+            warning: None,
+        };
+        let decide = |state: &model::State, request: &Request| {
+            let filter = AppsFilter::new(state, &Config::default()).unwrap();
+            request
+                .decide(
+                    &Query {
+                        state,
+                        filter: &filter,
+                        calling_uid: 10100,
+                    },
+                    1,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            decide(&state, &request).unwrap_err().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        state
+            .packages
+            .get_mut("fixture")
+            .unwrap()
+            .users
+            .get_mut(&0)
+            .unwrap()
+            .granted_permissions
+            .extend([
+                "android.permission.SET_HARMFUL_APP_WARNINGS".into(),
+                "android.permission.INTERACT_ACROSS_USERS".into(),
+            ]);
+        assert_eq!(
+            decide(&state, &request).unwrap_err().code,
+            aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT
+        );
+        let other = Request::HarmfulWarning {
+            package: Some("fixture".into()),
+            user: 10,
+            warning: None,
+        };
+        assert_eq!(
+            decide(&state, &other).unwrap_err().code,
+            aim_binder_host::parcel::EX_SECURITY
+        );
+        state
+            .packages
+            .get_mut("fixture")
+            .unwrap()
+            .users
+            .get_mut(&0)
+            .unwrap()
+            .granted_permissions
+            .push("android.permission.INTERACT_ACROSS_USERS_FULL".into());
+        assert!(decide(&state, &other).is_ok());
+    }
+    #[test]
+    fn harmful_warning_generated_decoder_consumes_styled_text_and_rejects_tail() {
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        parcel.write_interface_token(pm::DESCRIPTOR);
+        parcel.write_string16(Some("fixture"));
+        parcel.write_i32(1); // non-null typed CharSequence
+        parcel.write_i32(0); // SpannedString
+        parcel.write_string8(Some("warning😀"));
+        parcel.write_i32(2); // ForegroundColorSpan
+        parcel.write_i32(0xff123456u32 as i32);
+        for value in [0, 7, 0] {
+            parcel.write_i32(value);
+        }
+        parcel.write_i32(0); // spans end
+        parcel.write_i32(0); // user
+        assert!(
+            matches!(Request::read(pm::SET_HARMFUL_APP_WARNING, 1000, &mut Reader::new(parcel.data(), &[])), Some(Ok(Request::HarmfulWarning { warning: Some(value), .. })) if value == "warning😀")
+        );
+        parcel.write_i32(123);
+        assert!(matches!(
+            Request::read(
+                pm::SET_HARMFUL_APP_WARNING,
+                1000,
+                &mut Reader::new(parcel.data(), &[])
+            ),
+            Some(Err(BAD_VALUE))
+        ));
     }
     #[test]
     fn stopped_transition_clears_first_launch_only_on_actual_change() {

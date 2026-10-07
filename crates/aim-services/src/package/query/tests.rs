@@ -792,3 +792,46 @@ fn internal_uid_query_uses_fixed_filter_without_public_user_or_flag_checks() {
     assert_eq!(query.package_uid_internal(OTHER,MATCH_SYSTEM_ONLY,0,1000).unwrap(),-1);
     assert_eq!(query.package_uid_internal("missing",0,0,1000).unwrap(),-1);
 }
+
+#[test]
+fn internal_identity_reads_separate_actual_comparison_and_query_uids() {
+    let mut state=state();
+    Arc::make_mut(state.packages.get_mut(APP).unwrap().pkg.as_mut().unwrap()).queries_packages=vec!["new.target".into()];
+    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
+    let system=Query {state:&state,filter:&filter,calling_uid:1000};
+    assert!(system.internal_same_app(Some(APP),0,110100,0).unwrap().unwrap());
+    assert!(!system.internal_same_app(None,0,10100,0).unwrap().unwrap());
+    assert!(!system.internal_same_app(Some("missing"),0,10100,0).unwrap().unwrap());
+    assert!(!system.internal_filter_uid(20100,20100).unwrap());
+    assert!(system.internal_filter_uid(20100,10100).unwrap());
+    assert!(system.internal_filter_uid(42000,1000).unwrap());
+    assert!(system.internal_can_query(10100,Some("new.target")).unwrap().unwrap());
+    assert!(!system.internal_can_query(10101,Some("new.target")).unwrap().unwrap());
+    assert!(system.internal_can_query(42000,None).unwrap().unwrap());
+    assert!(!system.internal_can_query(42000,Some(APP)).unwrap().unwrap());
+}
+
+#[test]
+fn instrumentation_queries_keep_last_component_and_preserve_requested_metadata_and_users() {
+    let mut state=state();
+    let package=state.packages.get_mut(APP).unwrap();
+    let code=Arc::make_mut(package.pkg.as_mut().unwrap());
+    let instrumentation=|target:&str| super::super::pkg::Instrumentation {component:Component {package_name:APP.into(),name:"p.Instrument".into(),meta_data:Some(MetaData(vec![("instrument-key".into(),Meta::Int(7))])),..Default::default()},target_package:Some(target.into()),handle_profiling:true,..Default::default()};
+    code.instrumentations=vec![instrumentation("old-target"),instrumentation("new-target")];
+    let filter=AppsFilter::new(&state,&Default::default()).unwrap();
+    let query=Query {state:&state,filter:&filter,calling_uid:1000};
+    let component=ComponentName{package:APP.into(),class:"p.Instrument".into()};
+    let info=query.instrumentation_info(Some(&component),GET_META_DATA,0).unwrap().unwrap().unwrap();
+    assert_eq!(info.0.target_package.as_deref(),Some("new-target"));
+    assert!(info.0.handle_profiling);
+    assert!(info.0.item.meta_data.is_some());
+    assert_eq!(info.0.source_dir.as_deref(),Some("/data/app/org.example.app/base.apk"));
+    let infos=query.instrumentations(None,0,0).unwrap().unwrap();
+    assert_eq!(infos.len(),1);
+    assert!(infos[0].0.item.meta_data.is_none());
+    assert!(query.instrumentations(Some("old-target"),0,0).unwrap().unwrap().is_empty());
+    assert!(query.instrumentation_info(Some(&component),0,42).unwrap().unwrap().is_none());
+    let mut args=Parcel::new();args.write_interface_token(pm::DESCRIPTOR);args.write_i32(1);args.write_string16(Some(APP));args.write_string16(Some("p.Instrument"));args.write_i32(0);args.write_i32(0);
+    let reply=query.answer(pm::DESCRIPTOR,pm::GET_INSTRUMENTATION_INFO_AS_USER,&mut Reader::new(args.data(),args.objects())).unwrap();
+    let mut reader=Reader::new(reply.data(),reply.objects());reader.read_exception().unwrap().unwrap();assert_eq!(reader.read_i32().unwrap(),1);
+}

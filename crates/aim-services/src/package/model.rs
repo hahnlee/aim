@@ -359,6 +359,7 @@ pub struct System {
     pub sdk_sandbox_package: Option<Option<String>>,
     /// Native boot selection, frozen across query generations.
     pub permission_controller_package: Option<Option<String>>,
+    pub module_metadata: Option<Arc<super::module_metadata::Owner>>,
     /// None means SystemConfig exact-UID assignments were not captured.
     pub system_permissions: Option<BTreeMap<i32, std::collections::BTreeSet<String>>>,
     pub initial_non_stopped_system_packages: Option<Vec<String>>,

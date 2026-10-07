@@ -7,11 +7,13 @@ use std::sync::{Arc, Mutex};
 
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
+pub mod callbacks;
 pub mod codec;
 pub mod endpoint;
 pub mod native;
 pub mod policy;
 pub mod service;
+pub mod silent;
 pub mod storage;
 
 const INSTALL_APEX: i32 = 0x00020000;
@@ -153,6 +155,36 @@ impl Sessions {
         )?;
         self.0.lock().unwrap().records.insert(id, record);
         Ok(id)
+    }
+    pub fn update_label(
+        &self,
+        id: i32,
+        uid: u32,
+        label: Option<String>,
+    ) -> Result<Option<Event>, Exception> {
+        let mut state = self.0.lock().unwrap();
+        let session = state
+            .sessions
+            .get(&id)
+            .ok_or_else(|| Exception::security(format!("Caller has no access to session {id}")))?;
+        if uid != 0 && uid != session.installer_uid {
+            return Err(Exception::security(format!(
+                "Caller has no access to session {id}"
+            )));
+        }
+        let user = session.user;
+        let label = label.ok_or_else(|| {
+            Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "null appLabel")
+        })?;
+        let record = state
+            .records
+            .get_mut(&id)
+            .ok_or_else(|| self::state("session parameter owner unavailable"))?;
+        if record.params.app_label.as_deref() == Some(&label) {
+            return Ok(None);
+        }
+        record.params.app_label = Some(label);
+        Ok(Some(Event::Badging { id, user }))
     }
     pub fn restore(&self, records: Vec<(Session, Record)>) -> Result<(), Exception> {
         let mut state = self.0.lock().unwrap();
@@ -385,6 +417,7 @@ impl Sessions {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    Badging { id: i32, user: u32 },
     Created { id: i32, user: u32 },
     Finished { id: i32, user: u32, success: bool },
     Active { id: i32, user: u32, active: bool },
@@ -567,6 +600,18 @@ impl Record {
             session_error_code: 0,
             session_error_message: Some(String::new()),
             ..Default::default()
+        }
+    }
+}
+
+impl Event {
+    pub fn identity(&self) -> (i32, u32) {
+        match *self {
+            Self::Created { id, user }
+            | Self::Badging { id, user }
+            | Self::Active { id, user, .. }
+            | Self::Progress { id, user, .. }
+            | Self::Finished { id, user, .. } => (id, user),
         }
     }
 }

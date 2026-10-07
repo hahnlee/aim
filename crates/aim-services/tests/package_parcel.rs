@@ -332,6 +332,15 @@ fn native_package_parcels_match_original_read_write() {
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
     write_library_owner_fixture(&directory);
     {
+        use aim_services::package::system_config::{SystemConfig,Library};
+        let mut config=SystemConfig::default();
+        config.library_order=vec!["BB".into(),"Aa".into()];
+        config.libraries=["BB","Aa"].map(|name|(name.into(),Library{name:name.into(),filename:format!("/system/framework/{name}.jar"),dependencies:vec![],on_bootclasspath_since:None,on_bootclasspath_before:None,can_be_safely_ignored:false,native:false})).into();
+        let registry=aim_services::package::libraries::Registry::new(&config);
+        fs::write(directory.join("library-collision-order.native-order"),registry.entries().map(|l|l.name.as_deref().unwrap()).collect::<Vec<_>>().join("\n")).unwrap();
+    }
+
+    {
         use aim_binder_host::parcel::{Parcel,Reader};
         use aim_service_aidl::android_content_pm_ipackagemanager as pm;
         let state=aim_services::package::model::State::default();
@@ -343,6 +352,14 @@ fn native_package_parcels_match_original_read_write() {
         fs::write(directory.join("native-metadata-missing-exception.parcel"),reply.data()).unwrap();
     }
 
+    {
+        use aim_service_aidl::WriteParcelable;
+        for (index,apks) in [None,Some(vec![]),Some(vec![Some("one".into()),Some("two".into())])].into_iter().enumerate() {
+            let info=aim_services::package::module_metadata::ModuleInfo{name:Some("모듈".into()),package:Some("module.package".into()),hidden:true,apex:Some("module.apex".into()),apks};
+            let mut parcel=aim_binder_host::parcel::Parcel::new();info.write_to(&mut parcel);
+            fs::write(directory.join(format!("module-info-{index}.native-wire")),parcel.data()).unwrap();
+        }
+    }
     let framework =
         aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
     let system = aim_services::package::system_config::system(
@@ -1798,6 +1815,19 @@ fn native_package_parcels_match_original_read_write() {
         let mut rewritten=Parcel::new();rewritten.write_exception(&exception);
         assert_eq!(rewritten.data(),bytes.as_slice());
     }
+    {
+        use aim_service_aidl::{ReadParcelable,WriteParcelable};
+        let bytes=fs::read(directory.join("module-info.original-wire")).unwrap();
+        let mut reader=aim_binder_host::parcel::Reader::new(&bytes,&[]);
+        let info=aim_services::package::module_metadata::ModuleInfo::read_from(&mut reader).unwrap();
+        assert_eq!(reader.remaining(),0);
+        assert_eq!(info.name.as_deref(),Some("original module"));
+        assert_eq!(info.apex.as_deref(),Some("original.apex"));
+        assert_eq!(info.apks,Some(vec![Some("one".into()),Some("two".into())]));
+        let mut rewritten=aim_binder_host::parcel::Parcel::new();info.write_to(&mut rewritten);
+        assert_eq!(rewritten.data(),bytes);
+    }
+    verify_native_module_resources(&directory,&files);
     let original_runtime = aim_services::package::permissions::RuntimePermissions::parse(
         &aim_android_xml::read(&fs::read(directory.join("original-runtime-permissions.xml")).unwrap()).unwrap()
     ).unwrap();
@@ -5848,4 +5878,42 @@ fn export_retained_snapshot(
             &shared_record::captured(snapshot, name).unwrap().unwrap(),
         );
     }
+}
+
+
+fn verify_native_module_resources(directory:&std::path::Path,cache_files:&[std::path::PathBuf]) {
+    use aim_service_aidl::ReadParcelable;
+    use aim_services::package::{module_metadata::{ModuleInfo,Owner,ApexLinks},bootstrap::ApexInventory,scan::ApexScanResult,model,parse::{Platform,resources::Config},pkg::AndroidPackage};
+    let bytes=fs::read(directory.join("module-resources.original-wire")).unwrap();
+    let mut reader=aim_binder_host::parcel::Reader::new(&bytes,&[]);
+    let provider=reader.read_string16().unwrap().unwrap();
+    let count=reader.read_i32().unwrap();
+    assert!(count>0,"actual module metadata has no records");
+    let expected=(0..count).map(|_|ModuleInfo::read_from(&mut reader).unwrap()).collect::<Vec<_>>();
+    assert_eq!(reader.remaining(),0);
+    let inventory=ApexInventory::read_original_record(&fs::read(directory.join("apex-inventory-parse.original")).unwrap()).unwrap();
+    let results=inventory.packages.iter().flatten().enumerate().map(|(index,info)|ApexScanResult {info:info.clone(),package:AndroidPackage::read_cache_entry(&fs::read(directory.join(format!("apex-parse-{index}.original"))).unwrap()).unwrap(),signing:aim_services::package::sign::SigningDetails::unknown()}).collect::<Vec<_>>();
+    let cached=cache_files.iter().map(|file|AndroidPackage::read_cache_entry(&fs::read(file).unwrap()).unwrap()).collect::<Vec<_>>();
+    let mut registrations=Vec::new();
+    let mut seen_modules=std::collections::BTreeSet::new();
+    for module in &expected {
+        if !seen_modules.insert(module.apex.clone()) {continue;}
+        for name in module.apks.iter().flatten().flatten() {
+            let package=cached.iter().find(|package|&package.package_name==name && package.base_apk_path.as_ref().is_some_and(|path|inventory.active.iter().any(|a|a.module_name==module.apex && path.starts_with(&format!("{}/",a.mount_path))))).unwrap_or_else(||panic!("APK-in-APEX registration cache unavailable: {name}"));
+            registrations.push(package.clone());
+        }
+    }
+    let links=ApexLinks::from_scan(&results,&inventory,&registrations).unwrap();
+    let root=aim_paths::derived_image();
+    let platform=Platform::load(&root,Default::default()).unwrap();
+    let source=cached.iter().find(|package|package.package_name==provider).expect("module metadata provider parser cache absent");
+    let guest=source.path.as_ref().unwrap();
+    let parsed=aim_services::package::parse::parse(&root.join(guest.trim_start_matches('/')),guest,1<<4,&platform).unwrap();
+    let mut code=AndroidPackage::read_cache_entry(&parsed.to_cache_entry().bytes).unwrap();
+    code.uid=19031;
+    let state=model::State {packages:[(provider.clone(),model::PackageState {name:provider.clone(),app_id:19031,pkg:Some(std::sync::Arc::new(code)),users:[(0,model::PackageUserState::default())].into(),..Default::default()})].into(),users:[(0,model::User{id:0,..Default::default()})].into(),..Default::default()};
+    let owner=Owner::load(&state,&platform,Config {language:*b"en",country:*b"US",sdk_version:platform.sdk as u16,..Default::default()},&|path|Ok(root.join(path.trim_start_matches('/'))),&links).unwrap();
+    assert!(owner.loaded(),"module resources were not loaded: {:?}",owner.diagnostic());
+    assert_eq!(owner.provider(),Some(provider.as_str()));
+    assert_eq!(owner.modules(),expected.as_slice(),"native XML/configured text/APEX projection differs from original resource values");
 }

@@ -149,11 +149,20 @@ struct PackageBootstrap {
     runtime_worker: Option<crate::package::owner::runtime_metadata::worker::StopHandle>,
     persistence: Option<Arc<Mutex<crate::package::owner::Store>>>,
     version_page: Option<crate::package::scan_snapshot::version_page::VersionPage>,
+    installer: Option<(
+        Arc<crate::package::installer::native::NativeOwners>,
+        aim_binder_host::parcel::Binder,
+    )>,
 }
 
 impl Drop for PackageBootstrap {
     fn drop(&mut self) {
-        if let Some(worker)=&self.runtime_worker { worker.stop(); }
+        if let Some((installer, _)) = &self.installer {
+            installer.shutdown_callbacks();
+        }
+        if let Some(worker) = &self.runtime_worker {
+            worker.stop();
+        }
     }
 }
 
@@ -505,6 +514,7 @@ impl System {
             runtime_worker: None,
             persistence: None,
             version_page: None,
+            installer: None,
         });
         self.process.link_to_death(
             &bridge.owner,
@@ -706,15 +716,42 @@ impl System {
         Ok(capture)
     }
 
-    pub(crate) fn package_state_version_page(&self)->Result<aim_binder_driver::File> {
-        let mut state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_mut().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package bootstrap unavailable"))?;
-        let version=current.queries.as_ref().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package queries unavailable"))?.scan().version();
+    pub(crate) fn package_state_version_page(&self) -> Result<aim_binder_driver::File> {
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state.current.as_mut().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package bootstrap unavailable",
+            )
+        })?;
+        let version = current
+            .queries
+            .as_ref()
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package queries unavailable",
+                )
+            })?
+            .scan()
+            .version();
         if current.version_page.is_none() {
-            current.version_page=Some(crate::package::scan_snapshot::version_page::VersionPage::new(version)
-                .map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?);
+            current.version_page = Some(
+                crate::package::scan_snapshot::version_page::VersionPage::new(version).map_err(
+                    |error| {
+                        Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+                    },
+                )?,
+            );
         }
-        current.version_page.as_ref().unwrap().file().map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))
+        current
+            .version_page
+            .as_ref()
+            .unwrap()
+            .file()
+            .map_err(|error| {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+            })
     }
 
     pub fn capture_package_queries(
@@ -1092,11 +1129,30 @@ impl System {
         Ok(owner)
     }
 
-    pub(crate) fn capture_package_scan_and_queries(&self)->Result<(Arc<crate::package::scan_snapshot::Snapshot>,Option<Arc<crate::package::scan_snapshot::query_state::Capture>>)> {
-        let state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_ref().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package bootstrap unavailable"))?;
-        let snapshot=current.snapshots.as_ref().ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"complete package scan unavailable"))?.capture();
-        Ok((snapshot,current.queries.clone()))
+    pub(crate) fn capture_package_scan_and_queries(
+        &self,
+    ) -> Result<(
+        Arc<crate::package::scan_snapshot::Snapshot>,
+        Option<Arc<crate::package::scan_snapshot::query_state::Capture>>,
+    )> {
+        let state = self.package_bootstrap.lock().unwrap();
+        let current = state.current.as_ref().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package bootstrap unavailable",
+            )
+        })?;
+        let snapshot = current
+            .snapshots
+            .as_ref()
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "complete package scan unavailable",
+                )
+            })?
+            .capture();
+        Ok((snapshot, current.queries.clone()))
     }
 
     pub fn capture_package_scan(&self) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {
@@ -1239,22 +1295,163 @@ impl System {
         active_users: &[i32],
     ) -> std::result::Result<(), crate::package::owner::WriteError> {
         use crate::package::owner::WriteError;
-        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
-            committed: false, message: format!("package list bootstrap owner: {error:?}"),
-        })?;
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: false,
+                message: format!("package list bootstrap owner: {error:?}"),
+            })?;
         store.validate_committed_scan(capture.scan().owner())?;
-        let mut entries = crate::package::list::metadata_from_capture(capture).map_err(|message| WriteError { committed: false, message })?;
+        let mut entries =
+            crate::package::list::metadata_from_capture(capture).map_err(|message| WriteError {
+                committed: false,
+                message,
+            })?;
         for entry in &mut entries {
-            entry.gids = bridge.permission_gids(entry.uid as i32, active_users)
-                .map_err(|error| WriteError { committed: false, message: format!("package list permission owner: {error:?}") })?;
+            entry.gids = bridge
+                .permission_gids(entry.uid as i32, active_users)
+                .map_err(|error| WriteError {
+                    committed: false,
+                    message: format!("package list permission owner: {error:?}"),
+                })?;
         }
-        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
-            committed: false, message: format!("package list bootstrap owner before commit: {error:?}"),
-        })?;
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: false,
+                message: format!("package list bootstrap owner before commit: {error:?}"),
+            })?;
         store.commit_package_list(&entries)?;
-        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
-            committed: true, message: format!("package list bootstrap owner after commit: {error:?}"),
-        })
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: true,
+                message: format!("package list bootstrap owner after commit: {error:?}"),
+            })
+    }
+
+    /// Caller retains the joining guard outside bootstrap publication locks.
+    pub fn install_package_installer(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
+        owner: Arc<crate::package::installer::native::NativeOwners>,
+    ) -> Result<crate::package::installer::callbacks::CallbackWorker> {
+        let worker = owner.take_callback_worker().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "installer callback guard already taken",
+            )
+        })?;
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_mut()
+            .filter(|current| {
+                Arc::ptr_eq(&current.bridge, bridge)
+                    && current
+                        .queries
+                        .as_ref()
+                        .is_some_and(|query| Arc::ptr_eq(query, capture))
+            })
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "installer bootstrap generation changed",
+                )
+            })?;
+        if current.installer.is_some() {
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "native installer already installed",
+            ));
+        }
+        let endpoint = crate::package::installer::endpoint::Endpoint {
+            sessions: owner.sessions.clone(),
+            owners: owner.clone(),
+        };
+        let binder = self.process.add_service(Arc::new(endpoint));
+        current.installer = Some((owner, binder));
+        Ok(worker)
+    }
+
+    pub(crate) fn package_installer(&self) -> Result<aim_binder_host::parcel::Binder> {
+        let state = self.package_bootstrap.lock().unwrap();
+        let current = state.current.as_ref().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "installer bootstrap unavailable",
+            )
+        })?;
+        current
+            .installer
+            .as_ref()
+            .map(|(_, binder)| *binder)
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native package installer unavailable",
+                )
+            })
+    }
+
+    pub fn package_installer_policy_source(
+        self: &Arc<Self>,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+        base: crate::package::installer::native::PolicySource,
+    ) -> Result<crate::package::installer::native::PolicySource> {
+        self.check_package_bootstrap(bridge)?;
+        let system = Arc::downgrade(self);
+        let bridge = bridge.clone();
+        Ok(Arc::new(move |uid, user| {
+            let system = system.upgrade().ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "installer system owner stopped",
+                )
+            })?;
+            system.check_package_bootstrap(&bridge)?;
+            let mut policy = base(uid, user)?;
+            match bridge.installer_user_policy(user).map_err(|error| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("installer user policy owner: {error:?}"),
+                )
+            })? {
+                Some(user_policy) => {
+                    policy.users.insert(user, user_policy);
+                }
+                None => {
+                    policy.users.remove(&user);
+                }
+            }
+            system.check_package_bootstrap(&bridge)?;
+            Ok(policy)
+        }))
+    }
+
+    pub fn package_installer_labeler(
+        self: &Arc<Self>,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+    ) -> Result<crate::package::installer::storage::Labeler> {
+        self.check_package_bootstrap(bridge)?;
+        let system = Arc::downgrade(self);
+        let bridge = bridge.clone();
+        Ok(Arc::new(move |_, guest| {
+            let fail = |message: String| crate::package::installer::storage::Error {
+                committed: false,
+                message,
+            };
+            let system = system
+                .upgrade()
+                .ok_or_else(|| fail("installer system owner stopped".into()))?;
+            system
+                .check_package_bootstrap(&bridge)
+                .map_err(|error| fail(format!("installer label bootstrap: {error:?}")))?;
+            bridge
+                .restore_installer_context(guest)
+                .map_err(|error| fail(format!("installer label owner: {error:?}")))?;
+            system
+                .check_package_bootstrap(&bridge)
+                .map_err(|error| fail(format!("installer label owner changed: {error:?}")))
+        }))
     }
 
     /// Retain the exclusive disk owner for native Binder mutations.
@@ -1266,16 +1463,34 @@ impl System {
     ) -> Result<()> {
         // Disk owner precedes bootstrap in the lock order, as in persistence.
         let disk = persistence.lock().unwrap();
-        disk.validate_committed_scan(capture.scan().owner()).map_err(|error|
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+        disk.validate_committed_scan(capture.scan().owner())
+            .map_err(|error| {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+            })?;
         let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state.current.as_mut().filter(|owner|
-            Arc::ptr_eq(&owner.bridge,bridge) && owner.queries.as_ref().is_some_and(|q|Arc::ptr_eq(q,capture)))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package persistence generation changed"))?;
+        let current = state
+            .current
+            .as_mut()
+            .filter(|owner| {
+                Arc::ptr_eq(&owner.bridge, bridge)
+                    && owner
+                        .queries
+                        .as_ref()
+                        .is_some_and(|q| Arc::ptr_eq(q, capture))
+            })
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package persistence generation changed",
+                )
+            })?;
         if current.persistence.is_some() {
-            return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package persistence owner already installed"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "package persistence owner already installed",
+            ));
         }
-        current.persistence=Some(persistence.clone());
+        current.persistence = Some(persistence.clone());
         Ok(())
     }
 
@@ -1283,13 +1498,33 @@ impl System {
     pub(crate) fn package_persistence_owner(
         &self,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-    ) -> Result<(Arc<crate::package::bootstrap::Bridge>,Arc<Mutex<crate::package::owner::Store>>)> {
-        let state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_ref().filter(|owner|owner.queries.as_ref().is_some_and(|q|Arc::ptr_eq(q,capture)))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"package persistence generation changed"))?;
-        let persistence=current.persistence.clone().ok_or_else(||Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE,"native package persistence is unavailable"))?;
-        Ok((current.bridge.clone(),persistence))
+    ) -> Result<(
+        Arc<crate::package::bootstrap::Bridge>,
+        Arc<Mutex<crate::package::owner::Store>>,
+    )> {
+        let state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_ref()
+            .filter(|owner| {
+                owner
+                    .queries
+                    .as_ref()
+                    .is_some_and(|q| Arc::ptr_eq(q, capture))
+            })
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "package persistence generation changed",
+                )
+            })?;
+        let persistence = current.persistence.clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "native package persistence is unavailable",
+            )
+        })?;
+        Ok((current.bridge.clone(), persistence))
     }
 
     pub(crate) fn commit_package_mutation(
@@ -1298,65 +1533,134 @@ impl System {
         resolver: &crate::package::resolve::Resolver,
         uid: i32,
         pid: i32,
-    ) -> std::result::Result<std::result::Result<(), Exception>, crate::package::resolve::QueryError> {
-        use crate::package::{owner::WriteError, write::mutation::Change, resolve::QueryError};
+    ) -> std::result::Result<std::result::Result<(), Exception>, crate::package::resolve::QueryError>
+    {
+        use crate::package::{owner::WriteError, resolve::QueryError, write::mutation::Change};
         let (bridge, persistence) = {
             let state = self.package_bootstrap.lock().unwrap();
             let Some(current) = state.current.as_ref() else {
-                return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation bootstrap unavailable")));
+                return Ok(Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native mutation bootstrap unavailable",
+                )));
             };
             let Some(persistence) = current.persistence.clone() else {
-                return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native package persistence is unavailable")));
+                return Ok(Err(Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "native package persistence is unavailable",
+                )));
             };
-            (current.bridge.clone(),persistence)
+            (current.bridge.clone(), persistence)
         };
         let mut disk = persistence.lock().unwrap();
         let mut state = self.package_bootstrap.lock().unwrap();
-        let Some(current) = state.current.as_mut().filter(|owner|
-            Arc::ptr_eq(&owner.bridge,&bridge)
-            && owner.persistence.as_ref().is_some_and(|owner|Arc::ptr_eq(owner,&persistence))) else {
-            return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"mutation bootstrap owner changed")));
+        let Some(current) = state.current.as_mut().filter(|owner| {
+            Arc::ptr_eq(&owner.bridge, &bridge)
+                && owner
+                    .persistence
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &persistence))
+        }) else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "mutation bootstrap owner changed",
+            )));
         };
         let Some(capture) = current.queries.clone() else {
-            return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation capture unavailable")));
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "native mutation capture unavailable",
+            )));
         };
         let resolution = match resolver.resolution(capture.state()) {
-            Ok(resolution)=>resolution,
-            Err(error)=> {
-                let reply=error.reply().map_err(QueryError::Transport)?;
-                return Ok(Reader::new(reply.data(),reply.objects()).read_exception().map_err(QueryError::Transport)?);
-            },
+            Ok(resolution) => resolution,
+            Err(error) => {
+                let reply = error.reply().map_err(QueryError::Transport)?;
+                return Ok(Reader::new(reply.data(), reply.objects())
+                    .read_exception()
+                    .map_err(QueryError::Transport)?);
+            }
         };
-        let query = crate::package::query::Query {state:capture.state(),filter:&resolution.apps_filter,calling_uid:uid};
-        let plan = match request.decide(&query,pid).map_err(QueryError::NotModelled)? {
+        let query = crate::package::query::Query {
+            state: capture.state(),
+            filter: &resolution.apps_filter,
+            calling_uid: uid,
+        };
+        let plan = match request
+            .decide(&query, pid)
+            .map_err(QueryError::NotModelled)?
+        {
             Ok(plan) => plan,
             Err(exception) => return Ok(Err(exception)),
         };
-        if !matches!(plan.change,Change::None|Change::SplashTheme(_)|Change::MinAspectRatio(_)|Change::UpdateAvailable(_)) {
-            return Err(QueryError::NotModelled(crate::package::apps_filter::NotModelled("mutation side-effect owners are unavailable")));
+        if !matches!(
+            plan.change,
+            Change::None
+                | Change::SplashTheme(_)
+                | Change::HarmfulWarning(_)
+                | Change::CategoryHint(_)
+                | Change::MinAspectRatio(_)
+                | Change::UpdateAvailable(_)
+        ) {
+            return Err(QueryError::NotModelled(
+                crate::package::apps_filter::NotModelled(
+                    "mutation side-effect owners are unavailable",
+                ),
+            ));
         }
-        let write_error = |error: WriteError| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string());
-        if let Err(error) = disk.validate_committed_scan(capture.scan().owner()) { return Ok(Err(write_error(error))); }
-        if matches!(plan.change,Change::None) { return Ok(Ok(())); }
+        let write_error = |error: WriteError| {
+            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+        };
+        if let Err(error) = disk.validate_committed_scan(capture.scan().owner()) {
+            return Ok(Err(write_error(error)));
+        }
+        if matches!(plan.change, Change::None) {
+            return Ok(Ok(()));
+        }
         let mut scan = capture.scan().owner().clone();
-        if let Err(message) = plan.apply_scan(&mut scan) { return Ok(Err(write_error(WriteError{committed:false,message}))); }
+        if let Err(message) = plan.apply_scan(&mut scan) {
+            return Ok(Err(write_error(WriteError {
+                committed: false,
+                message,
+            })));
+        }
         let update = match capture.prepare_package_update(scan) {
             Ok(update) => update,
-            Err(message) => return Ok(Err(write_error(WriteError{committed:false,message}))),
+            Err(message) => {
+                return Ok(Err(write_error(WriteError {
+                    committed: false,
+                    message,
+                })));
+            }
         };
         let result = disk.commit_mutation(&plan);
-        let committed = result.is_ok() || result.as_ref().is_err_and(|error|error.committed);
+        let committed = result.is_ok() || result.as_ref().is_err_and(|error| error.committed);
         if committed {
             current.snapshots = Some(update.store);
             current.queries = Some(update.capture.clone());
-            if let Some(page) = &current.version_page {page.publish(update.capture.scan().version());}
+            if let Some(page) = &current.version_page {
+                page.publish(update.capture.scan().version());
+            }
             state.version = update.capture.scan().version();
         }
         drop(state);
         drop(disk);
         if committed {
-            if let Err(error) = self.check_package_bootstrap(&bridge).map_err(|error|format!("{error:?}")).and_then(|_|bridge.invalidate_package_info_cache().map_err(|error|format!("{error:?}"))) {
-                return Ok(Err(write_error(WriteError{committed:true,message:format!("mutation committed, cache invalidation failed: {error:?}; persistence: {result:?}")})));
+            if let Err(error) = self
+                .check_package_bootstrap(&bridge)
+                .map_err(|error| format!("{error:?}"))
+                .and_then(|_| {
+                    bridge
+                        .invalidate_package_info_cache()
+                        .map_err(|error| format!("{error:?}"))
+                })
+            {
+                return Ok(Err(write_error(WriteError {
+                    committed: true,
+                    message: format!(
+                        "mutation committed, cache invalidation failed: {error:?}; persistence: {result:?}"
+                    ),
+                })));
             }
         }
         Ok(result.map_err(write_error))
@@ -1367,13 +1671,24 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         metadata: Arc<Mutex<crate::package::owner::runtime_metadata::State>>,
     ) -> Result<()> {
-        let mut state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_mut().filter(|owner|Arc::ptr_eq(&owner.bridge,bridge))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata bootstrap owner changed"))?;
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_mut()
+            .filter(|owner| Arc::ptr_eq(&owner.bridge, bridge))
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "runtime metadata bootstrap owner changed",
+                )
+            })?;
         if current.runtime_metadata.is_some() {
-            return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner is already installed"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "runtime metadata owner is already installed",
+            ));
         }
-        current.runtime_metadata=Some(metadata);
+        current.runtime_metadata = Some(metadata);
         Ok(())
     }
 
@@ -1381,27 +1696,60 @@ impl System {
         &self,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
     ) -> Result<Arc<Mutex<crate::package::owner::runtime_metadata::State>>> {
-        let state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_ref().filter(|owner|owner.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture)))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata query generation changed"))?;
-        current.runtime_metadata.clone().ok_or_else(||Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner is unavailable"))
+        let state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_ref()
+            .filter(|owner| {
+                owner
+                    .queries
+                    .as_ref()
+                    .is_some_and(|query| Arc::ptr_eq(query, capture))
+            })
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "runtime metadata query generation changed",
+                )
+            })?;
+        current.runtime_metadata.clone().ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "runtime metadata owner is unavailable",
+            )
+        })
     }
 
     pub(crate) fn with_runtime_permission_metadata<T>(
         &self,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-        action: impl FnOnce(&mut crate::package::owner::runtime_metadata::State)->T,
+        action: impl FnOnce(&mut crate::package::owner::runtime_metadata::State) -> T,
     ) -> Result<T> {
         // Never wait for metadata while holding the bootstrap lock: flushes
         // hold metadata while checking the bootstrap around owner calls.
-        let owner=self.runtime_permission_metadata_owner(capture)?;
-        let mut metadata=owner.lock().unwrap();
-        let state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_ref().filter(|current|current.queries.as_ref().is_some_and(|query|Arc::ptr_eq(query,capture))
-            && current.runtime_metadata.as_ref().is_some_and(|current|Arc::ptr_eq(current,&owner)))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata generation changed while waiting"))?;
-        let _=current;
+        let owner = self.runtime_permission_metadata_owner(capture)?;
+        let mut metadata = owner.lock().unwrap();
+        let state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_ref()
+            .filter(|current| {
+                current
+                    .queries
+                    .as_ref()
+                    .is_some_and(|query| Arc::ptr_eq(query, capture))
+                    && current
+                        .runtime_metadata
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            })
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "runtime metadata generation changed while waiting",
+                )
+            })?;
+        let _ = current;
         Ok(action(&mut metadata))
     }
 
@@ -1411,21 +1759,41 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         store: &mut crate::package::owner::Store,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-        inodes: &std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
-    ) -> std::result::Result<Vec<u32>,crate::package::owner::runtime_metadata::FlushError> {
-        let fail=|error:Exception|crate::package::owner::runtime_metadata::FlushError {
-            user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message:format!("installed runtime metadata: {error:?}")},
+        inodes: &std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
+    ) -> std::result::Result<Vec<u32>, crate::package::owner::runtime_metadata::FlushError> {
+        let fail = |error: Exception| crate::package::owner::runtime_metadata::FlushError {
+            user: -1,
+            completed: Vec::new(),
+            error: crate::package::owner::WriteError {
+                committed: false,
+                message: format!("installed runtime metadata: {error:?}"),
+            },
         };
         self.check_package_bootstrap(bridge).map_err(fail)?;
-        let owner=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
-        let mut metadata=owner.lock().unwrap();
-        let current=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
-        if !Arc::ptr_eq(&owner,&current) {
-            return Err(fail(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime metadata owner changed while waiting")));
+        let owner = self
+            .runtime_permission_metadata_owner(capture)
+            .map_err(fail)?;
+        let mut metadata = owner.lock().unwrap();
+        let current = self
+            .runtime_permission_metadata_owner(capture)
+            .map_err(fail)?;
+        if !Arc::ptr_eq(&owner, &current) {
+            return Err(fail(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "runtime metadata owner changed while waiting",
+            )));
         }
-        let completed=self.flush_runtime_permission_requests(bridge,store,capture,&mut metadata,inodes)?;
-        self.check_package_bootstrap(bridge).map_err(|error|crate::package::owner::runtime_metadata::FlushError {
-            user:-1,completed:completed.clone(),error:crate::package::owner::WriteError {committed:!completed.is_empty(),message:format!("runtime bootstrap after flush: {error:?}")},
+        let completed =
+            self.flush_runtime_permission_requests(bridge, store, capture, &mut metadata, inodes)?;
+        self.check_package_bootstrap(bridge).map_err(|error| {
+            crate::package::owner::runtime_metadata::FlushError {
+                user: -1,
+                completed: completed.clone(),
+                error: crate::package::owner::WriteError {
+                    committed: !completed.is_empty(),
+                    message: format!("runtime bootstrap after flush: {error:?}"),
+                },
+            }
         })?;
         Ok(completed)
     }
@@ -1436,21 +1804,45 @@ impl System {
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         store: &mut crate::package::owner::Store,
         capture: &Arc<crate::package::scan_snapshot::query_state::Capture>,
-        inodes: &std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
+        inodes: &std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
         now: std::time::Instant,
-    ) -> std::result::Result<Vec<u32>,crate::package::owner::runtime_metadata::FlushError> {
-        let fail=|error:Exception|crate::package::owner::runtime_metadata::FlushError {
-            user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message:format!("runtime deadline owner: {error:?}")},
+    ) -> std::result::Result<Vec<u32>, crate::package::owner::runtime_metadata::FlushError> {
+        let fail = |error: Exception| crate::package::owner::runtime_metadata::FlushError {
+            user: -1,
+            completed: Vec::new(),
+            error: crate::package::owner::WriteError {
+                committed: false,
+                message: format!("runtime deadline owner: {error:?}"),
+            },
         };
         self.check_package_bootstrap(bridge).map_err(fail)?;
-        let owner=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
-        let mut metadata=owner.lock().unwrap();
-        let current=self.runtime_permission_metadata_owner(capture).map_err(fail)?;
-        if !Arc::ptr_eq(&owner,&current) { return Err(fail(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime deadline owner changed"))); }
-        metadata.flush_due_with(now,|user,state| {
-            let id=u32::try_from(user).map_err(|_|crate::package::owner::WriteError {committed:false,message:"negative runtime deadline user".into()})?;
-            let inode=inodes.get(&id).copied().ok_or_else(||crate::package::owner::WriteError {committed:false,message:"missing runtime deadline creation owner".into()})?;
-            self.commit_runtime_permissions_from_scan(bridge,store,capture,id,state,inode)?;
+        let owner = self
+            .runtime_permission_metadata_owner(capture)
+            .map_err(fail)?;
+        let mut metadata = owner.lock().unwrap();
+        let current = self
+            .runtime_permission_metadata_owner(capture)
+            .map_err(fail)?;
+        if !Arc::ptr_eq(&owner, &current) {
+            return Err(fail(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "runtime deadline owner changed",
+            )));
+        }
+        metadata.flush_due_with(now, |user, state| {
+            let id = u32::try_from(user).map_err(|_| crate::package::owner::WriteError {
+                committed: false,
+                message: "negative runtime deadline user".into(),
+            })?;
+            let inode =
+                inodes
+                    .get(&id)
+                    .copied()
+                    .ok_or_else(|| crate::package::owner::WriteError {
+                        committed: false,
+                        message: "missing runtime deadline creation owner".into(),
+                    })?;
+            self.commit_runtime_permissions_from_scan(bridge, store, capture, id, state, inode)?;
             Ok(id)
         })
     }
@@ -1460,37 +1852,85 @@ impl System {
         self: &Arc<Self>,
         bridge: &Arc<crate::package::bootstrap::Bridge>,
         store: Arc<Mutex<crate::package::owner::Store>>,
-        inodes: std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
+        inodes: std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
     ) -> Result<crate::package::owner::runtime_metadata::worker::Worker> {
         self.check_package_bootstrap(bridge)?;
-        let capture=self.capture_package_queries()?;
-        let metadata=self.runtime_permission_metadata_owner(&capture)?;
-        let system=Arc::downgrade(self);let worker_bridge=bridge.clone();let bridge=bridge.clone();
-        let worker=crate::package::owner::runtime_metadata::worker::Worker::start(&metadata,move|now| {
-            let fail=|message:String|crate::package::owner::runtime_metadata::FlushError {user:-1,completed:Vec::new(),error:crate::package::owner::WriteError {committed:false,message}};
-            let system=system.upgrade().ok_or_else(||fail("runtime system owner stopped".into()))?;
-            system.check_package_bootstrap(&bridge).map_err(|error|fail(format!("runtime worker bootstrap: {error:?}")))?;
-            let capture=system.capture_package_queries().map_err(|error|fail(format!("runtime worker capture: {error:?}")))?;
-            system.process_due_runtime_permission_requests(&bridge,&mut store.lock().unwrap(),&capture,&inodes,now)
-        }).map_err(|error|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
-        let registered={
-            let mut state=self.package_bootstrap.lock().unwrap();
-            if let Some(current)=state.current.as_mut().filter(|owner|Arc::ptr_eq(&owner.bridge,&worker_bridge)) {
-                current.runtime_worker=Some(worker.stop_handle());true
-            } else {false}
+        let capture = self.capture_package_queries()?;
+        let metadata = self.runtime_permission_metadata_owner(&capture)?;
+        let system = Arc::downgrade(self);
+        let worker_bridge = bridge.clone();
+        let bridge = bridge.clone();
+        let worker =
+            crate::package::owner::runtime_metadata::worker::Worker::start(&metadata, move |now| {
+                let fail = |message: String| crate::package::owner::runtime_metadata::FlushError {
+                    user: -1,
+                    completed: Vec::new(),
+                    error: crate::package::owner::WriteError {
+                        committed: false,
+                        message,
+                    },
+                };
+                let system = system
+                    .upgrade()
+                    .ok_or_else(|| fail("runtime system owner stopped".into()))?;
+                system
+                    .check_package_bootstrap(&bridge)
+                    .map_err(|error| fail(format!("runtime worker bootstrap: {error:?}")))?;
+                let capture = system
+                    .capture_package_queries()
+                    .map_err(|error| fail(format!("runtime worker capture: {error:?}")))?;
+                system.process_due_runtime_permission_requests(
+                    &bridge,
+                    &mut store.lock().unwrap(),
+                    &capture,
+                    &inodes,
+                    now,
+                )
+            })
+            .map_err(|error| {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+            })?;
+        let registered = {
+            let mut state = self.package_bootstrap.lock().unwrap();
+            if let Some(current) = state
+                .current
+                .as_mut()
+                .filter(|owner| Arc::ptr_eq(&owner.bridge, &worker_bridge))
+            {
+                current.runtime_worker = Some(worker.stop_handle());
+                true
+            } else {
+                false
+            }
         };
         if !registered {
             drop(worker);
-            return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime bootstrap changed while starting worker"));
+            return Err(Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "runtime bootstrap changed while starting worker",
+            ));
         }
         Ok(worker)
     }
 
-    pub fn stop_runtime_permission_worker(&self,bridge:&Arc<crate::package::bootstrap::Bridge>) -> Result<()> {
-        let mut state=self.package_bootstrap.lock().unwrap();
-        let current=state.current.as_mut().filter(|owner|Arc::ptr_eq(&owner.bridge,bridge))
-            .ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"runtime worker bootstrap owner changed"))?;
-        if let Some(worker)=current.runtime_worker.take() {worker.stop();}
+    pub fn stop_runtime_permission_worker(
+        &self,
+        bridge: &Arc<crate::package::bootstrap::Bridge>,
+    ) -> Result<()> {
+        let mut state = self.package_bootstrap.lock().unwrap();
+        let current = state
+            .current
+            .as_mut()
+            .filter(|owner| Arc::ptr_eq(&owner.bridge, bridge))
+            .ok_or_else(|| {
+                Exception::new(
+                    aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    "runtime worker bootstrap owner changed",
+                )
+            })?;
+        if let Some(worker) = current.runtime_worker.take() {
+            worker.stop();
+        }
         Ok(())
     }
 
@@ -1504,8 +1944,11 @@ impl System {
     ) -> Result<crate::package::owner::runtime_metadata::State> {
         self.check_package_bootstrap(bridge)?;
         let mut candidate = scan.clone();
-        let metadata = store.restore_runtime_permission_owners(&mut candidate,config).map_err(|error|Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+        let metadata = store
+            .restore_runtime_permission_owners(&mut candidate, config)
+            .map_err(|error| {
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string())
+            })?;
         self.check_package_bootstrap(bridge)?;
         *scan = candidate;
         Ok(metadata)
@@ -1519,12 +1962,20 @@ impl System {
         version: i64,
     ) -> Result<()> {
         self.check_package_bootstrap(bridge)?;
-        let build = bridge.current_package_version().map_err(|error|Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("runtime build owner: {error:?}")))?;
-        let fingerprint = build.fingerprint.ok_or_else(||Exception::new(
-            aim_binder_host::parcel::EX_ILLEGAL_STATE,"missing runtime partition fingerprint"))?;
+        let build = bridge.current_package_version().map_err(|error| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                format!("runtime build owner: {error:?}"),
+            )
+        })?;
+        let fingerprint = build.fingerprint.ok_or_else(|| {
+            Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                "missing runtime partition fingerprint",
+            )
+        })?;
         self.check_package_bootstrap(bridge)?;
-        metadata.set_controller_version(&fingerprint,version);
+        metadata.set_controller_version(&fingerprint, version);
         Ok(())
     }
 
@@ -1540,14 +1991,30 @@ impl System {
         inode: aim_storage::guest_inode::GuestInode,
     ) -> std::result::Result<(), crate::package::owner::WriteError> {
         use crate::package::owner::WriteError;
-        let before = |message| WriteError { committed:false,message };
-        self.check_package_bootstrap(bridge).map_err(|error|before(format!("runtime bootstrap owner: {error:?}")))?;
+        let before = |message| WriteError {
+            committed: false,
+            message,
+        };
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| before(format!("runtime bootstrap owner: {error:?}")))?;
         store.validate_committed_scan(capture.scan().owner())?;
-        let id = i32::try_from(user).map_err(|error|before(format!("runtime user: {error}")))?;
-        let state = bridge.runtime_permissions(capture,id,metadata.version(id),metadata.fingerprint(id).map(str::to_owned)).map_err(before)?;
-        self.check_package_bootstrap(bridge).map_err(|error|before(format!("runtime bootstrap owner before commit: {error:?}")))?;
-        store.commit_runtime_permissions(user,&state,inode)?;
-        self.check_package_bootstrap(bridge).map_err(|error|WriteError { committed:true,message:format!("runtime bootstrap owner after commit: {error:?}") })
+        let id = i32::try_from(user).map_err(|error| before(format!("runtime user: {error}")))?;
+        let state = bridge
+            .runtime_permissions(
+                capture,
+                id,
+                metadata.version(id),
+                metadata.fingerprint(id).map(str::to_owned),
+            )
+            .map_err(before)?;
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| before(format!("runtime bootstrap owner before commit: {error:?}")))?;
+        store.commit_runtime_permissions(user, &state, inode)?;
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: true,
+                message: format!("runtime bootstrap owner after commit: {error:?}"),
+            })
     }
 
     /// Drain requested runtime writes at a synchronous persistence boundary.
@@ -1558,13 +2025,19 @@ impl System {
         store: &mut crate::package::owner::Store,
         capture: &crate::package::scan_snapshot::query_state::Capture,
         metadata: &mut crate::package::owner::runtime_metadata::State,
-        inodes: &std::collections::BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
-    ) -> std::result::Result<Vec<u32>,crate::package::owner::runtime_metadata::FlushError> {
+        inodes: &std::collections::BTreeMap<u32, aim_storage::guest_inode::GuestInode>,
+    ) -> std::result::Result<Vec<u32>, crate::package::owner::runtime_metadata::FlushError> {
         use crate::package::owner::WriteError;
-        metadata.flush_with(|user,current| {
-            let id = u32::try_from(user).map_err(|_|WriteError { committed:false,message:"negative runtime permission user".into() })?;
-            let inode = inodes.get(&id).copied().ok_or_else(||WriteError { committed:false,message:"missing runtime permission creation owner".into() })?;
-            self.commit_runtime_permissions_from_scan(bridge,store,capture,id,current,inode)?;
+        metadata.flush_with(|user, current| {
+            let id = u32::try_from(user).map_err(|_| WriteError {
+                committed: false,
+                message: "negative runtime permission user".into(),
+            })?;
+            let inode = inodes.get(&id).copied().ok_or_else(|| WriteError {
+                committed: false,
+                message: "missing runtime permission creation owner".into(),
+            })?;
+            self.commit_runtime_permissions_from_scan(bridge, store, capture, id, current, inode)?;
             Ok(id)
         })
     }
@@ -1579,16 +2052,22 @@ impl System {
         sections: aim_android_xml::Element,
     ) -> std::result::Result<(), crate::package::owner::WriteError> {
         use crate::package::owner::WriteError;
-        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
-            committed: false,
-            message: format!("initial user bootstrap owner: {error:?}"),
-        })?;
-        store.commit_initial_scan_restrictions(scan, user,
-            crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS, sections)?;
-        self.check_package_bootstrap(bridge).map_err(|error| WriteError {
-            committed: true,
-            message: format!("initial user bootstrap owner after commit: {error:?}"),
-        })
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: false,
+                message: format!("initial user bootstrap owner: {error:?}"),
+            })?;
+        store.commit_initial_scan_restrictions(
+            scan,
+            user,
+            crate::package::restrictions::PINNED_CROSS_USER_SUSPENSIONS,
+            sections,
+        )?;
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: true,
+                message: format!("initial user bootstrap owner after commit: {error:?}"),
+            })
     }
 
     /// Initialize constructor shared identities under the retained early bridge.

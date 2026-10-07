@@ -8,6 +8,8 @@ public interface IPackageManager extends android.os.IInterface {
     ApplicationInfo getApplicationInfo(String packageName, long flags, int userId) throws RemoteException;
     PackageInfo getPackageInfo(String packageName, long flags, int userId) throws RemoteException;
     String getSdkSandboxPackageName() throws RemoteException;
+    ModuleInfo getModuleInfo(String packageName,int flags) throws RemoteException;
+    java.util.List<ModuleInfo> getInstalledModules(int flags) throws RemoteException;
     boolean isFirstBoot() throws RemoteException;
     boolean isDeviceUpgrading() throws RemoteException;
     void registerPackageMonitorCallback(android.os.IRemoteCallback callback, int userId) throws RemoteException;

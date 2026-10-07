@@ -6,6 +6,7 @@ public class BaseBundle {
     BaseBundle() { throw new RuntimeException("stub"); }
     public void putString(String key, String value) { throw new RuntimeException("stub"); }
     public String getString(String key) { throw new RuntimeException("stub"); }
+    public int getInt(String key) { throw new RuntimeException("stub"); }
     public Object get(String key) { throw new RuntimeException("stub"); }
     public java.util.Set<String> keySet() { throw new RuntimeException("stub"); }
 }

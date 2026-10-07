@@ -116,6 +116,27 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public void restoreInstallerContext(String path) {
+        enforceSystemUid();
+        if (path == null || !(path.startsWith("/data/app/")
+                || path.startsWith("/data/app-staging/")
+                || (path.equals("/data/system/install_sessions.xml")
+                    || path.equals("/data/system/install_sessions.xml.new")
+                    || path.equals("/data/system/install_sessions.xml.bak")))
+                || path.contains("/../") || path.contains("/./")
+                || path.endsWith("/..") || path.endsWith("/."))
+            throw new IllegalArgumentException("invalid installer context path");
+        if (!android.os.SELinux.restorecon(new java.io.File(path)))
+            throw new IllegalStateException("installer restorecon failed: " + path);
+    }
+
+    @Override
+    public byte[] getInstallerUserPolicy(int userId) {
+        enforceSystemUid();
+        return InstallerUserPolicy.capture(userId);
+    }
+
+    @Override
     public boolean isSigningDebuggable() {
         enforceSystemUid();
         return android.os.Build.isDebuggable();

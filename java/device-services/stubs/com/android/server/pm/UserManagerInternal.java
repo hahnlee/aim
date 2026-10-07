@@ -10,4 +10,6 @@ public abstract class UserManagerInternal {
     public UserManagerInternal() { throw new RuntimeException("stub"); }
     public abstract void addUserVisibilityListener(UserVisibilityListener listener);
     public abstract int[] getUserIds();
+    public abstract boolean exists(int userId);
+    public abstract boolean hasUserRestriction(String restriction, int userId);
 }

@@ -22,4 +22,12 @@ interface IPackageComputer {
     int getPackageUidInternal(String packageName, long flags, int userId);
     /** Original renamed/static-library normalization, before a captured parsed-package lookup. */
     String resolveInternalPackageName(String packageName, long versionCode, int callingUid);
+    boolean isSameApp(String packageName, long flags, int comparisonUid, int userId,
+            int callingUid, int callingPid);
+    boolean filterUidAccess(int targetUid, int callingUid);
+    boolean canQueryPackage(int queryUid, String targetPackageName, int callingUid, int callingPid);
+    PackageInfo getPackageInfoInternal(String packageName, long versionCode, long flags, int userId,
+            int filterCallingUid, int callingUid, int callingPid);
+    String getPackageStateFilteredName(String packageName, int callingUid, int userId);
+    int getUidTargetSdkVersion(int uid);
 }

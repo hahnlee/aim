@@ -301,6 +301,15 @@ public final class DisplacedSnapshotOracle {
                     || computer.getTargetSdkVersion(ORIGINAL) != version
                     || !computer.getInstallerPackageName(ORIGINAL, 10).equals(Long.toString(version)))
                 throw new AssertionError("expanded query adapter escaped retained version");
+            if (computer.getApplicationInfoInternal(ORIGINAL, 0x1234567800000001L, 1010001, 10).uid != version
+                    || computer.getPackageInfoInternal(ORIGINAL, 42L, 0x1234567800000001L, 1010001, 10).applicationInfo.uid != version
+                    || !computer.isSameApp(ORIGINAL, 0x1234567800000001L, 1010001, 10)
+                    || !computer.isSameApp(ORIGINAL, 1010001, 10)
+                    || computer.isSameApp(null, 1010001, 10)
+                    || !computer.filterAppAccess(1010001, 10002)
+                    || !computer.canQueryPackage(1010001, "fixture.query.target")
+                    || !computer.canQueryPackage(1010001, null))
+                throw new AssertionError("internal caller identity or versioned metadata changed");
             var capturedStates = oldStates.getPackageStates();
             var original = (com.android.server.pm.pkg.PackageStateInternal) capturedStates.get(ORIGINAL);
             if (computer.getPackageUidInternal(ORIGINAL, 0x1234567800000001L, 10) != version
@@ -312,6 +321,17 @@ public final class DisplacedSnapshotOracle {
                     || computer.getPackage(ORIGINAL) != original.getAndroidPackage()
                     || computer.getPackage("fixture.missing") != null)
                 throw new AssertionError("internal read adapter used public query semantics");
+            if (computer.getPackageStateInternal("fixture.normalized") != original
+                    || computer.getPackageStateInternal("fixture.explicit", 1010001) != original
+                    || computer.getPackageStateFiltered("fixture.normalized", 1010001, 10) != original
+                    || computer.getPackageStateFiltered("fixture.hidden", 1010001, 10) != null
+                    || computer.getUidTargetSdkVersion(1010001) != version
+                    || computer.getDisabledSystemPackage("fixture.missing") != null)
+                throw new AssertionError("normalized/filtered/UID state adapter changed");
+            for (var entry : oldStates.getDisabledSystemPackageStates().entrySet()) {
+                if (computer.getDisabledSystemPackage(entry.getKey()) != entry.getValue())
+                    throw new AssertionError("disabled setting replica identity changed");
+            }
             var internalStates = computer.getPackageStates();
             if (!internalStates.equals(capturedStates)) throw new AssertionError("internal state inventory changed");
             var visitedStates = new java.util.ArrayList<com.android.server.pm.pkg.PackageStateInternal>();
@@ -352,6 +372,11 @@ public final class DisplacedSnapshotOracle {
                 () -> computer.getTargetSdkVersion(ORIGINAL),
                 () -> computer.getInstallerPackageName(ORIGINAL, 10),
                 () -> computer.filterAppAccess(ORIGINAL, 1010001, 10, true),
+                () -> computer.getApplicationInfoInternal(ORIGINAL, 0x1234567800000001L, 1010001, 10),
+                () -> computer.getPackageInfoInternal(ORIGINAL, 42L, 0x1234567800000001L, 1010001, 10),
+                () -> computer.isSameApp(ORIGINAL, 1010001, 10),
+                () -> computer.filterAppAccess(1010001, 10002),
+                () -> computer.canQueryPackage(1010001, "fixture.query.target"),
                 () -> computer.getPackageUidInternal(ORIGINAL, 0x1234567800000001L, 10),
                 () -> computer.isPackageEphemeral(10, ORIGINAL),
                 () -> computer.getPackageTargetSdkVersion(ORIGINAL),
@@ -362,6 +387,10 @@ public final class DisplacedSnapshotOracle {
                 () -> computer.forEachPackage(value -> {}),
                 () -> computer.getSharedUserApi(-1),
                 () -> computer.getSharedUserPackages(-1),
+                () -> computer.getPackageStateInternal("fixture.explicit", 1010001),
+                () -> computer.getPackageStateFiltered("fixture.normalized", 1010001, 10),
+                () -> computer.getUidTargetSdkVersion(1010001),
+                () -> computer.getDisabledSystemPackage("fixture.missing"),
             };
             for (Runnable query : closedQueries) {
                 try { query.run(); throw new AssertionError("closed expanded query adapter accepted"); }
@@ -591,10 +620,47 @@ public final class DisplacedSnapshotOracle {
         }
         public String resolveInternalPackageName(String name, long versionCode, int callerUid) {
             open();
-            if (versionCode != android.content.pm.PackageManager.VERSION_CODE_HIGHEST
-                    || callerUid != android.os.Binder.getCallingUid())
+            int expectedCaller = "fixture.explicit".equals(name) ? 1010001 : android.os.Binder.getCallingUid();
+            if (versionCode != android.content.pm.PackageManager.VERSION_CODE_HIGHEST || callerUid != expectedCaller)
                 throw new AssertionError("package normalization caller changed");
-            return name.equals("fixture.normalized") ? ORIGINAL : name;
+            return "fixture.normalized".equals(name) || "fixture.explicit".equals(name) ? ORIGINAL : name;
+        }
+        public boolean isSameApp(String name, long flags, int comparisonUid, int userId,
+                int callingUid, int callingPid) {
+            caller(callingUid, callingPid);
+            if (comparisonUid != 1010001 || userId != 10
+                    || (flags != 0 && flags != 0x1234567800000001L))
+                throw new AssertionError("same-app caller or flags changed");
+            return ORIGINAL.equals(name);
+        }
+        public boolean filterUidAccess(int targetUid, int callingUid) {
+            open();
+            if (targetUid != 1010001 || callingUid != 10002)
+                throw new AssertionError("UID filter caller changed");
+            return true;
+        }
+        public boolean canQueryPackage(int queryUid, String target, int callingUid, int callingPid) {
+            caller(callingUid, callingPid);
+            if (queryUid != 1010001 || (target != null && !target.equals("fixture.query.target")))
+                throw new AssertionError("query package identity changed");
+            return true;
+        }
+        public android.content.pm.PackageInfo getPackageInfoInternal(String name, long versionCode,
+                long flags, int userId, int filterUid, int callingUid, int callingPid) {
+            if (versionCode != 42L) throw new AssertionError("package metadata version code changed");
+            return getPackageInfo(name, flags, userId, filterUid, callingUid, callingPid);
+        }
+        public String getPackageStateFilteredName(String name, int caller, int user) {
+            open();
+            if (caller != 1010001 || user != 10) throw new AssertionError("filtered state caller changed");
+            if ("fixture.hidden".equals(name)) return null;
+            if (!"fixture.normalized".equals(name)) throw new AssertionError("filtered state name changed");
+            return ORIGINAL;
+        }
+        public int getUidTargetSdkVersion(int uid) {
+            open();
+            if (uid != 1010001) throw new AssertionError("UID SDK target changed");
+            return (int) version;
         }
         public void close() {
             if (++closes != 1) throw new AssertionError("query capture closed twice");

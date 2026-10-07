@@ -480,6 +480,7 @@ struct Package {
 /// A resource table (`resources.arsc`).
 pub struct Table {
     strings: Strings,
+    styled_strings: HashMap<u32, ()>,
     packages: Vec<Package>,
 }
 
@@ -497,22 +498,37 @@ impl Table {
             return Err(bad("not a resource table"));
         }
         let mut strings = None;
+        let mut styled_strings = HashMap::new();
         let mut packages = Vec::new();
         for c in chunks(&top.data[top.header..]) {
             let c = c?;
             match c.kind {
-                STRING_POOL => strings = Some(Strings::parse(c.data)?),
+                STRING_POOL => {
+                    strings = Some(Strings::parse(c.data)?);
+                    let count = u32_at(c.data, 8)? as usize;
+                    let styles = u32_at(c.data, 12)? as usize;
+                    for i in 0..styles {
+                        if u32_at(c.data, c.header + count * 4 + i * 4)? != u32::MAX {
+                            styled_strings.insert(i as u32, ());
+                        }
+                    }
+                }
                 TABLE_PACKAGE => packages.push(package(c.data, c.header)?),
                 _ => {}
             }
         }
         Ok(Table {
             strings: strings.ok_or_else(|| bad("table without strings"))?,
+            styled_strings,
             packages,
         })
     }
 
     /// `ApkAssets.definesOverlayable`.
+    pub fn has_styled_text(&self, index: u32) -> bool {
+        self.styled_strings.contains_key(&index)
+    }
+
     pub fn defines_overlayable(&self) -> bool {
         self.packages.iter().any(|p| !p.overlayables.is_empty())
     }
@@ -933,6 +949,10 @@ impl Resources<'_> {
         }
     }
 
+    pub fn has_styled_text(&self, table: usize, index: u32) -> Option<bool> {
+        self.table(table).map(|table| table.has_styled_text(index))
+    }
+
     /// The string of a resolved `TYPE_STRING` value from a table.
     pub fn string(&self, table: usize, i: u32) -> Option<&str> {
         self.table(table)?.string(i)
@@ -946,6 +966,7 @@ mod tests {
     fn table(config: Config, value: u32, flags: u32) -> Table {
         Table {
             strings: Strings::parse(&[0; 28]).unwrap(),
+            styled_strings: HashMap::new(),
             packages: vec![Package {
                 id: 0x7f,
                 types: [(

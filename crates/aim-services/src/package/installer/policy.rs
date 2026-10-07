@@ -23,7 +23,10 @@ pub struct DevicePolicy {
     /// Native app-ops' current delegated shell identity.
     pub adopted_shell_uids: std::collections::BTreeSet<u32>,
     pub verifier_uid: Option<u32>,
-    pub disable_verification_for_uid: Option<u32>,
+}
+#[derive(Clone, Debug, Default)]
+pub struct ServicePolicy {
+    pub disable_verification_for_uid: Option<i32>,
     pub bypass_next_staged_installer_check: bool,
     pub bypass_next_allowed_apex_update_check: bool,
 }
@@ -88,36 +91,10 @@ pub fn check_package(q: &Query<'_>, package: Option<&str>) -> Result<(), Excepti
     }
 }
 pub fn can_query(q: &Query<'_>, package: Option<&str>) -> Result<bool, Exception> {
-    if q.calling_uid == 0 || package.is_none() {
-        return Ok(true);
-    }
-    let name = package.unwrap();
-    let user = apps_filter::user_id(q.calling_uid);
-    if let Some(target) = q.state.packages.get(name)
-        && crate::package::info::user_state(target, user).installed
-    {
-        return q
-            .filtered(Some(target), q.calling_uid, user)
-            .map(|filtered| !filtered)
-            .map_err(unknown);
-    }
-    let names = q
-        .packages_for_uid(q.calling_uid)
+    q.internal_can_query(q.calling_uid, package)
         .map_err(unknown)?
-        .unwrap_or_default();
-    Ok(names
-        .iter()
-        .flatten()
-        .filter_map(|name| q.state.packages.get(name))
-        .filter_map(|state| state.pkg.as_deref())
-        .any(|code| {
-            code.queries_packages.iter().any(|package| package == name)
-                || code
-                    .requested_permissions
-                    .iter()
-                    .any(|permission| permission == "android.permission.QUERY_ALL_PACKAGES")
-        }))
 }
+
 fn valid_name(value: &str) -> bool {
     if value.is_empty() || value == "." || value == ".." || value.encode_utf16().count() > 255 {
         return false;
@@ -139,7 +116,8 @@ fn valid_name(value: &str) -> bool {
 /// Icon resizing, data loaders and archiving still need their concrete owners.
 pub fn normalize(
     q: &Query<'_>,
-    device: &mut DevicePolicy,
+    device: &DevicePolicy,
+    service: &mut ServicePolicy,
     config: &SystemConfig,
     mut params: SessionParams,
     mut installer: Option<String>,
@@ -240,8 +218,8 @@ pub fn normalize(
     } else {
         params.install_flags &= !0x100000;
     }
-    if let Some(allowed) = device.disable_verification_for_uid.take() {
-        if allowed == uid {
+    if let Some(allowed) = service.disable_verification_for_uid.take() {
+        if allowed == uid as i32 {
             params.install_flags |= 0x80000;
         } else {
             params.install_flags &= !0x80000;
@@ -288,7 +266,7 @@ pub fn normalize(
                 "A multi-session can't be set as APEX.",
             ));
         }
-        if special || device.bypass_next_allowed_apex_update_check {
+        if special || service.bypass_next_allowed_apex_update_check {
             params.install_flags |= 0x800000;
         } else {
             params.install_flags &= !0x800000;
@@ -327,7 +305,7 @@ pub fn normalize(
     }
     if (params.staged || apex)
         && !special
-        && !device.bypass_next_staged_installer_check
+        && !service.bypass_next_staged_installer_check
         && !requested
             .as_ref()
             .is_some_and(|name| config.staged_installers.contains(name))
@@ -336,8 +314,8 @@ pub fn normalize(
             "Installer not allowed to commit staged/APEX install",
         ));
     }
-    device.bypass_next_staged_installer_check = false;
-    device.bypass_next_allowed_apex_update_check = false;
+    service.bypass_next_staged_installer_check = false;
+    service.bypass_next_allowed_apex_update_check = false;
     if !params.multi_package {
         let grant = permission(q, "android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS")?;
         if params.install_flags & 0x100 != 0 && !grant {
@@ -425,4 +403,81 @@ fn rollback(q: &Query<'_>, params: &SessionParams, field: &str) -> Result<(), Ex
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::{
+        apps_filter::{AppsFilter, Config},
+        model::{PackageState, SharedUser, State, User},
+        pkg::AndroidPackage,
+    };
+    use std::sync::Arc;
+    #[test]
+    fn callback_visibility_uses_shared_uid_declarations_and_denies_unknown_uid() {
+        let code = |name: &str, queries: Vec<String>| {
+            Arc::new(AndroidPackage {
+                package_name: name.into(),
+                uid: 10101,
+                target_sdk_version: 35,
+                queries_packages: queries,
+                ..Default::default()
+            })
+        };
+        let state = State {
+            shared_users: [(
+                "shared".into(),
+                SharedUser {
+                    name: "shared".into(),
+                    app_id: 10101,
+                    packages: vec!["hidden".into(), "visible".into()],
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            packages: [
+                (
+                    "hidden".into(),
+                    PackageState {
+                        name: "hidden".into(),
+                        app_id: 10101,
+                        shared_user: Some("shared".into()),
+                        pkg: Some(code("hidden", Vec::new())),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "visible".into(),
+                    PackageState {
+                        name: "visible".into(),
+                        app_id: 10101,
+                        shared_user: Some("shared".into()),
+                        pkg: Some(code("visible", vec!["future.target".into()])),
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into(),
+            users: [(
+                0,
+                User {
+                    id: 0,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let filter = AppsFilter::new(&state, &Config::default()).unwrap();
+        let query = |uid| Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: uid,
+        };
+        assert!(can_query(&query(10101), Some("future.target")).unwrap());
+        assert!(!can_query(&query(10101), Some("private.target")).unwrap());
+        assert!(!can_query(&query(10102), Some("future.target")).unwrap());
+        assert!(can_query(&query(0), Some("private.target")).unwrap());
+    }
 }

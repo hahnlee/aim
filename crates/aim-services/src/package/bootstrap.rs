@@ -119,6 +119,32 @@ fn read_current_package_version(
     Ok(current)
 }
 
+fn read_installer_user_policy(
+    bytes: &[u8],
+    user: i32,
+) -> aim_binder_host::parcel::Result<Option<super::installer::policy::UserPolicy>> {
+    use aim_binder_host::parcel::{BAD_VALUE, Reader};
+    let mut reader = Reader::new(bytes, &[]);
+    if reader.read_i32()? != user {
+        return Err(BAD_VALUE);
+    }
+    let boolean = |r: &mut Reader<'_>| match r.read_i32()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(BAD_VALUE),
+    };
+    let exists = boolean(&mut reader)?;
+    let policy = super::installer::policy::UserPolicy {
+        disallow_install_apps: boolean(&mut reader)?,
+        disallow_debugging_features: boolean(&mut reader)?,
+        organization_managed: boolean(&mut reader)?,
+    };
+    if reader.remaining() != 0 {
+        return Err(BAD_VALUE);
+    }
+    Ok(exists.then_some(policy))
+}
+
 impl Bridge {
     /// System packages and a boot classpath containing test.base require no
     /// PlatformCompat query, as in android-16.0.0_r1 AndroidTestBaseUpdater.
@@ -210,6 +236,47 @@ impl Bridge {
             return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
         }
         ApexInventory::read_original_record(&bytes).map_err(OwnerError::Transport)
+    }
+
+    pub fn installer_user_policy(
+        &self,
+        user: i32,
+    ) -> Result<Option<super::installer::policy::UserPolicy>, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::GetInstallerUserPolicy { user_id: user }.write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::GET_INSTALLER_USER_POLICY, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let bytes = bridge::read_get_installer_user_policy_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?
+            .ok_or(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE))?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        read_installer_user_policy(&bytes, user).map_err(OwnerError::Transport)
+    }
+
+    pub fn restore_installer_context(&self, path: &str) -> Result<(), OwnerError> {
+        let mut data = Parcel::new();
+        bridge::RestoreInstallerContext {
+            path: Some(path.into()),
+        }
+        .write(&mut data);
+        let reply = self
+            .owner
+            .transact(bridge::RESTORE_INSTALLER_CONTEXT, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        bridge::read_restore_installer_context_reply(&mut reader)
+            .map_err(OwnerError::Transport)?
+            .map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        Ok(())
     }
 
     pub fn current_package_version(&self) -> Result<super::settings::Version, OwnerError> {
@@ -433,6 +500,35 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn installer_policy_record_rejects_foreign_user_nonboolean_and_tail() {
+        let mut parcel = aim_binder_host::parcel::Parcel::new();
+        parcel.write_i32(10);
+        for value in [1, 1, 0, 1] {
+            parcel.write_i32(value);
+        }
+        let policy = super::read_installer_user_policy(parcel.data(), 10)
+            .unwrap()
+            .unwrap();
+        assert!(policy.disallow_install_apps && policy.organization_managed);
+        assert!(!policy.disallow_debugging_features);
+        assert!(super::read_installer_user_policy(parcel.data(), 0).is_err());
+        for size in 0..parcel.data().len() {
+            assert!(super::read_installer_user_policy(&parcel.data()[..size], 10).is_err());
+        }
+        parcel.set_i32_at(4, 0);
+        assert!(
+            super::read_installer_user_policy(parcel.data(), 10)
+                .unwrap()
+                .is_none()
+        );
+        parcel.set_i32_at(8, 2);
+        assert!(super::read_installer_user_policy(parcel.data(), 10).is_err());
+        parcel.set_i32_at(8, 1);
+        parcel.write_i32(0);
+        assert!(super::read_installer_user_policy(parcel.data(), 10).is_err());
+    }
+
     use super::*;
     #[test]
     fn current_version_frame_retains_nulls_and_rejects_truncation_or_trailing_data() {

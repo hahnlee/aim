@@ -230,9 +230,36 @@ public final class PackageSnapshots {
 
         public synchronized long getVersion() { checkClosed(); return data.version; }
 
+        private String resolvePackageName(String name, int callingUid) {
+            try { return endpoint().resolveInternalPackageName(name,
+                    android.content.pm.PackageManager.VERSION_CODE_HIGHEST, callingUid); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
         public synchronized PackageStateInternal getPackageStateInternal(String name) {
+            return getPackageStateInternal(name, android.os.Binder.getCallingUid());
+        }
+
+        public synchronized PackageStateInternal getPackageStateInternal(String name, int callingUid) {
+            String resolved = resolvePackageName(name, callingUid);
+            return (PackageStateInternal) data.packages.get(resolved);
+        }
+
+        public synchronized PackageStateInternal getPackageStateFiltered(String name, int callingUid, int userId) {
+            String resolved;
+            try { resolved = endpoint().getPackageStateFilteredName(name, callingUid, userId); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            return resolved == null ? null : (PackageStateInternal) data.packages.get(resolved);
+        }
+
+        public synchronized int getUidTargetSdkVersion(int uid) {
+            try { return endpoint().getUidTargetSdkVersion(uid); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized PackageStateInternal getDisabledSystemPackage(String name) {
             checkClosed();
-            return (PackageStateInternal) data.packages.get(name);
+            return (PackageStateInternal) data.disabled.get(name);
         }
 
         public synchronized int getPackageUidInternal(String name, long flags, int userId) {
@@ -252,13 +279,8 @@ public final class PackageSnapshots {
         }
 
         public synchronized com.android.server.pm.pkg.AndroidPackage getPackage(String name) {
-            String resolved;
-            try {
-                resolved = endpoint().resolveInternalPackageName(name,
-                        android.content.pm.PackageManager.VERSION_CODE_HIGHEST,
-                        android.os.Binder.getCallingUid());
-            } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
-            PackageStateInternal state = getPackageStateInternal(resolved);
+            String resolved = resolvePackageName(name, android.os.Binder.getCallingUid());
+            PackageState state = data.packages.get(resolved);
             return state == null ? null : state.getAndroidPackage();
         }
 
@@ -315,6 +337,39 @@ public final class PackageSnapshots {
                 return endpoint().getPackageInfo(name, flags, userId, filterCallingUid,
                         android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid());
             } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized android.content.pm.ApplicationInfo getApplicationInfoInternal(String name,
+                long flags, int filterCallingUid, int userId) {
+            return getApplicationInfo(name, flags, filterCallingUid, userId);
+        }
+
+        public synchronized android.content.pm.PackageInfo getPackageInfoInternal(String name,
+                long versionCode, long flags, int filterCallingUid, int userId) {
+            try { return endpoint().getPackageInfoInternal(name, versionCode, flags, userId,
+                    filterCallingUid, android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized boolean isSameApp(String name, int comparisonUid, int userId) {
+            return isSameApp(name, 0, comparisonUid, userId);
+        }
+
+        public synchronized boolean isSameApp(String name, long flags, int comparisonUid, int userId) {
+            try { return endpoint().isSameApp(name, flags, comparisonUid, userId,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized boolean filterAppAccess(int uid, int callingUid) {
+            try { return endpoint().filterUidAccess(uid, callingUid); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+        }
+
+        public synchronized boolean canQueryPackage(int queryUid, String name) {
+            try { return endpoint().canQueryPackage(queryUid, name,
+                    android.os.Binder.getCallingUid(), android.os.Binder.getCallingPid()); }
+            catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
         }
 
         public synchronized boolean filterAppAccess(String name, int callingUid, int userId, boolean filterUninstalled) {

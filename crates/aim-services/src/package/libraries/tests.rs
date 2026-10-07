@@ -660,3 +660,19 @@ fn raw_nullable_metadata_does_not_replace_a_missing_file_owner() {
         Ok(vec![Some("/system/framework/owner.jar".into())])
     );
 }
+
+#[test]
+fn array_map_collision_order_survives_versions_replacement_and_reinsertion() {
+    assert_eq!(crate::package::info::java_hash("Aa"),crate::package::info::java_hash("BB"));
+    let mut registry=Registry::default();
+    for (name,version) in [("BB",2),("Aa",1),("BB",1)] {
+        registry.insert(SharedLibrary{name:Some(name.into()),version,..Default::default()});
+    }
+    let entries=|registry:&Registry|registry.entries().map(|l|(l.name.clone().unwrap(),l.version)).collect::<Vec<_>>();
+    assert_eq!(entries(&registry),vec![("BB".into(),1),("BB".into(),2),("Aa".into(),1)]);
+    registry.insert(SharedLibrary{name:Some("BB".into()),version:1,path:Some("replacement".into()),..Default::default()});
+    assert_eq!(entries(&registry)[0],("BB".into(),1));
+    registry.remove("BB",1);registry.remove("BB",2);
+    registry.insert(SharedLibrary{name:Some("BB".into()),version:0,..Default::default()});
+    assert_eq!(entries(&registry),vec![("Aa".into(),1),("BB".into(),0)]);
+}

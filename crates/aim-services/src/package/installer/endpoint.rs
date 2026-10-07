@@ -17,6 +17,13 @@ use std::sync::Arc;
 /// Owner callbacks perform real user/permission/app-ops normalization, install
 /// storage preparation, persistent scheduling and callback capability lifetime.
 /// Implementations must never forward these operations to original PMS.
+pub enum ServiceSetting {
+    Unlimited(Option<String>),
+    Throttle(i64),
+    Staged(bool),
+    Apex(bool),
+    Verification(i32),
+}
 pub trait Owners: Send + Sync {
     fn normalize(
         &self,
@@ -36,6 +43,15 @@ pub trait Owners: Send + Sync {
     fn can_read_paths(&self, uid: u32) -> Result<bool, Exception>;
     fn resolved_path(&self, id: i32) -> Result<Option<String>, Exception>;
     fn is_verifier(&self, uid: u32) -> Result<bool, Exception>;
+    fn update_label(&self, uid: u32, id: i32, label: Option<String>) -> Result<(), Exception>;
+    fn register_callback(
+        &self,
+        uid: u32,
+        callback: Option<Binder>,
+        user: i32,
+    ) -> Result<(), Exception>;
+    fn unregister_callback(&self, callback: Option<Binder>) -> Result<(), Exception>;
+    fn set_service_policy(&self, uid: u32, setting: ServiceSetting) -> Result<(), Exception>;
     fn abandon_stage(&self, ids: &[i32]) -> Result<(), Exception>;
 }
 pub struct Endpoint {
@@ -74,6 +90,10 @@ impl Service for Endpoint {
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         enum Action {
             Create(aidl::CreateSession<SessionParams>),
+            Label(i32, Option<String>),
+            Register(Option<Binder>, i32),
+            Unregister(Option<Binder>),
+            Policy(ServiceSetting),
             Open(i32),
             Info(i32),
             All(i32),
@@ -82,6 +102,32 @@ impl Service for Endpoint {
             Abandon(i32),
         }
         let action = match call.code {
+            aidl::UPDATE_SESSION_APP_LABEL => {
+                let args = aidl::UpdateSessionAppLabel::read(&mut call.data)?;
+                Action::Label(args.session_id, args.app_label)
+            }
+            aidl::SET_ALLOW_UNLIMITED_SILENT_UPDATES => Action::Policy(ServiceSetting::Unlimited(
+                aidl::SetAllowUnlimitedSilentUpdates::read(&mut call.data)?.installer_package_name,
+            )),
+            aidl::SET_SILENT_UPDATES_THROTTLE_TIME => Action::Policy(ServiceSetting::Throttle(
+                aidl::SetSilentUpdatesThrottleTime::read(&mut call.data)?.throttle_time_in_seconds,
+            )),
+            aidl::REGISTER_CALLBACK => {
+                let args = aidl::RegisterCallback::read(&mut call.data)?;
+                Action::Register(args.callback, args.user_id)
+            }
+            aidl::UNREGISTER_CALLBACK => {
+                Action::Unregister(aidl::UnregisterCallback::read(&mut call.data)?.callback)
+            }
+            aidl::BYPASS_NEXT_STAGED_INSTALLER_CHECK => Action::Policy(ServiceSetting::Staged(
+                aidl::BypassNextStagedInstallerCheck::read(&mut call.data)?.value,
+            )),
+            aidl::BYPASS_NEXT_ALLOWED_APEX_UPDATE_CHECK => Action::Policy(ServiceSetting::Apex(
+                aidl::BypassNextAllowedApexUpdateCheck::read(&mut call.data)?.value,
+            )),
+            aidl::DISABLE_VERIFICATION_FOR_UID => Action::Policy(ServiceSetting::Verification(
+                aidl::DisableVerificationForUid::read(&mut call.data)?.uid,
+            )),
             aidl::CREATE_SESSION => Action::Create(aidl::CreateSession::read(&mut call.data)?),
             aidl::OPEN_SESSION => Action::Open(aidl::OpenSession::read(&mut call.data)?.session_id),
             aidl::GET_SESSION_INFO => {
@@ -121,6 +167,22 @@ impl Service for Endpoint {
         let mut reply = Parcel::new();
         let result = (|| -> Result<(), Exception> {
             match action {
+                Action::Label(id, label) => {
+                    self.owners.update_label(uid, id, label)?;
+                    aidl::write_update_session_app_label_reply(&mut reply);
+                }
+                Action::Register(callback, user) => {
+                    self.owners.register_callback(uid, callback, user)?;
+                    aidl::write_register_callback_reply(&mut reply);
+                }
+                Action::Unregister(callback) => {
+                    self.owners.unregister_callback(callback)?;
+                    aidl::write_unregister_callback_reply(&mut reply);
+                }
+                Action::Policy(setting) => {
+                    self.owners.set_service_policy(uid, setting)?;
+                    reply.write_no_exception();
+                }
                 Action::Create(a) => {
                     let params = a
                         .params
@@ -309,6 +371,18 @@ mod tests {
         }
         fn is_verifier(&self, _: u32) -> Result<bool, Exception> {
             panic!("unexpected verifier")
+        }
+        fn update_label(&self, _: u32, _: i32, _: Option<String>) -> Result<(), Exception> {
+            panic!("unexpected label update")
+        }
+        fn register_callback(&self, _: u32, _: Option<Binder>, _: i32) -> Result<(), Exception> {
+            panic!("unexpected callback registration")
+        }
+        fn unregister_callback(&self, _: Option<Binder>) -> Result<(), Exception> {
+            panic!("unexpected unregister")
+        }
+        fn set_service_policy(&self, _: u32, _: ServiceSetting) -> Result<(), Exception> {
+            panic!("unexpected service policy")
         }
         fn abandon_stage(&self, _: &[i32]) -> Result<(), Exception> {
             panic!("unexpected abandon")

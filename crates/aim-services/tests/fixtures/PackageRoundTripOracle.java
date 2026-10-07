@@ -288,14 +288,72 @@ public final class PackageRoundTripOracle {
         } finally {parcel.recycle();}
     }
 
+    private static void verifyModuleInfoParcels(java.io.File directory) throws Exception {
+        for (int i=0;i<3;i++) {
+            byte[] bytes=java.nio.file.Files.readAllBytes(new java.io.File(directory,"module-info-"+i+".native-wire").toPath());
+            var parcel=android.os.Parcel.obtain();
+            var output=android.os.Parcel.obtain();
+            try {
+                parcel.unmarshall(bytes,0,bytes.length);parcel.setDataPosition(0);
+                var module=android.content.pm.ModuleInfo.CREATOR.createFromParcel(parcel);
+                if(!"모듈".contentEquals(module.getName()) || !"module.package".equals(module.getPackageName()) || !module.isHidden()) throw new AssertionError("native ModuleInfo fields differ");
+                if(parcel.dataAvail()!=0) throw new AssertionError("native ModuleInfo trailing bytes");
+                module.writeToParcel(output,0);
+                if(!java.util.Arrays.equals(bytes,output.marshall())) throw new AssertionError("ModuleInfo null/empty/list wire differs: "+i);
+            } finally {parcel.recycle();output.recycle();}
+        }
+        var output=android.os.Parcel.obtain();
+        try {
+            var module=new android.content.pm.ModuleInfo().setName("original module").setPackageName("original.package").setHidden(false).setApexModuleName("original.apex").setApkInApexPackageNames(java.util.List.of("one","two"));
+            module.writeToParcel(output,0);
+            java.nio.file.Files.write(new java.io.File(directory,"module-info.original-wire").toPath(),output.marshall());
+        } finally {output.recycle();}
+    }
+
+    private static void verifyRealModuleResourceValues(java.io.File directory) throws Exception {
+        var context=android.app.ActivityThread.systemMain().getSystemUiContext();
+        var configuration=new android.content.res.Configuration();configuration.setToDefaults();configuration.seq=1;configuration.setLocale(java.util.Locale.forLanguageTag("en-US"));
+        android.app.ResourcesManager.getInstance().applyConfigurationToResources(configuration,null);
+        String provider=context.getResources().getString(context.getResources().getIdentifier("config_defaultModuleMetadataProvider","string","android"));
+        if(provider.isEmpty()) throw new AssertionError("pinned image has no module metadata provider");
+        var pm=android.content.pm.IPackageManager.Stub.asInterface(android.os.ServiceManager.getService("package"));
+        var pi=pm.getPackageInfo(provider,0x80,0);
+        if(pi==null || pi.applicationInfo==null || pi.applicationInfo.metaData==null) throw new AssertionError("module provider package metadata unavailable");
+        var resources=context.createPackageContextAsUser(provider,0,android.os.UserHandle.of(0)).getResources();
+        java.util.Map<String,android.content.pm.ModuleInfo> modules=new android.util.ArrayMap<>();
+        try(var parser=resources.getXml(pi.applicationInfo.metaData.getInt("android.content.pm.MODULE_METADATA"))) {
+            boolean root=false;
+            for(int event=parser.next();event!=1;event=parser.next()) {
+                if(event!=2) continue;
+                if(!root) {if(!"module-metadata".equals(parser.getName())) throw new AssertionError("module metadata root differs");root=true;continue;}
+                if(!"module".equals(parser.getName())) throw new AssertionError("unexpected actual module metadata child");
+                String name=parser.getAttributeValue(null,"packageName");
+                var original=pm.getModuleInfo(name,0);
+                if(original==null) throw new AssertionError("original metadata owner has no XML module: "+name);
+                var module=new android.content.pm.ModuleInfo(original);
+                module.setName(resources.getText(Integer.parseInt(parser.getAttributeValue(null,"name").substring(1))));
+                module.setPackageName(name);module.setHidden(Boolean.parseBoolean(parser.getAttributeValue(null,"isHidden")));
+                modules.put(name,module);
+            }
+        }
+        var output=android.os.Parcel.obtain();
+        try {
+            output.writeString(provider);output.writeInt(modules.size());
+            for(var module:modules.values()) module.writeToParcel(output,0);
+            java.nio.file.Files.write(new java.io.File(directory,"module-resources.original-wire").toPath(),output.marshall());
+        } finally {output.recycle();}
+    }
+
     private static void verify(String[] args) throws Exception {
         verifyParcelableException(new java.io.File(args[0]));
+        verifyModuleInfoParcels(new java.io.File(args[0]));
         verifyOriginalDomainIds();
         DomainCollectorOracle.verify(new java.io.File(args[0]));
         verifyOriginalScanUsers(new java.io.File(args[0]));
         verifyOriginalApexInventory(new java.io.File(args[0]));
         com.android.server.pm.StaticLibraryIdentityOracle.verify(new java.io.File(args[0]));
         ApexParseOracle.verify(new java.io.File(args[0]));
+        verifyRealModuleResourceValues(new java.io.File(args[0]));
         PackageCacheValidationOracle.verify(new java.io.File(args[0]));
         verifyScopedRuntime(new java.io.File(args[0]));
         verifyOriginalUserScopes(new java.io.File(args[0]));
@@ -306,6 +364,10 @@ public final class PackageRoundTripOracle {
             if (android.content.pm.FallbackCategoryProvider.getFallbackCategory(fields[0]) != Integer.parseInt(fields[1])) throw new AssertionError("original fallback resource value differs: " + fields[0]);
         }
         verifyLibraryOwners(new java.io.File(args[0], "library-owners.parcel"));
+        java.util.Map<String,Object> collisions=new android.util.ArrayMap<>();collisions.put("BB",new Object());collisions.put("Aa",new Object());
+        String nativeOrder=new String(java.nio.file.Files.readAllBytes(new java.io.File(args[0],"library-collision-order.native-order").toPath()),java.nio.charset.StandardCharsets.UTF_8);
+        if(!String.join("\n",collisions.keySet()).equals(nativeOrder)) throw new AssertionError("native Registry lost original ArrayMap collision insertion order");
+
         LegacyPermissionOracle.verify(new java.io.File(args[0]));
         var files = new java.io.File(args[0]).listFiles((dir, name) -> name.endsWith(".native"));
         if (files == null) throw new java.io.IOException("missing parcel inputs");
@@ -1852,6 +1914,12 @@ public final class PackageRoundTripOracle {
                 public String getInstallerPackageName(String n, int u, int caller, int pid) { throw new AssertionError("unused installer query"); }
                 public int getPackageUidInternal(String n, long f, int u) { throw new AssertionError("unused internal UID query"); }
                 public String resolveInternalPackageName(String n, long v, int caller) { throw new AssertionError("unused normalization query"); }
+                public boolean isSameApp(String n, long flags, int comparison, int u, int caller, int pid) { throw new AssertionError("unused same-app query"); }
+                public boolean filterUidAccess(int target, int caller) { throw new AssertionError("unused UID filter query"); }
+                public boolean canQueryPackage(int query, String target, int caller, int pid) { throw new AssertionError("unused can-query query"); }
+                public android.content.pm.PackageInfo getPackageInfoInternal(String n, long version, long flags, int u, int filter, int caller, int pid) { throw new AssertionError("unused internal metadata query"); }
+                public String getPackageStateFilteredName(String n,int caller,int user) { throw new AssertionError("unused filtered state query"); }
+                public int getUidTargetSdkVersion(int uid) { throw new AssertionError("unused UID target SDK query"); }
                 public void close() {}
             };
         }

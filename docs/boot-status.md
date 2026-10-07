@@ -48,22 +48,24 @@ Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
 PackageManager still runs original. On the M4 C branch, the native Binder
-endpoint has 70 IPackageManager method dispatches (154 remaining), backed by
+endpoint has 77 IPackageManager method dispatches (147 remaining), backed by
 captured settings, permissions and finalized library registry. Native-interface
-audio playback capture reads actual visible ApplicationInfo flags (10 of 14 native
-methods). Shared/declared library consumers, paths, APEX directories, protected
+audio playback capture reads actual visible ApplicationInfo flags; the module
+metadata provider getter reads its configured owner (11 of 14 native methods). Shared/declared library consumers, paths, APEX directories, protected
 broadcasts, initial non-stopped packages, sandbox name, user stopped/suspended/
 quarantined state, harmful warnings and app metadata source are exposed. Activity
 filter enumeration uses registered filters with current MIME groups in manifest
 order. Permission-controller selection is explicit at the complete policy gate;
-unselected captures reject that getter. Library equal-hash ordering remains #992;
-module-provider resource loading remains #993. App metadata missing-package errors
+unselected captures reject that getter. Library equal-hash ordering follows the registry owner insertion order (#992).
+Module-provider XML and selected-language scalar resources are decoded from the
+accepted provider APK; overlays, isolated splits and styled labels remain #993. App metadata missing-package errors
 now preserve the original ParcelableException cause and envelope. Generic opaque
 exception payloads reject Binder/FD objects until a capability owner exists;
 class/message bytes are forwarded without native class lookup. Three binder-host
 envelope/capability refusal tests pass. Actual original
 Parcel reading and reverse write/decode/rewrite pass in the full package oracle
-(62.95s). That comparison exposed a common reply helper that rebuilt exceptions
+(63.88s, no skips), including actual provider XML/text/APEX module values and
+ArrayMap equal-hash insertion order. That comparison exposed a common reply helper that rebuilt exceptions
 from only code/message; it now retains the complete exception.
 SystemConfig UID permission assignments use actual bionic/partition UID names and
 exact UID values; they do not grant root unconditionally. Missing external owners remain
@@ -71,13 +73,22 @@ explicitly unsupported (#987). Splash-theme, minimum-aspect and update-available
 setters use an installed disk owner, validate the exact generation, prepare a
 complete replacement, persist, publish committed changes and invalidate the
 original package-info cache outside the publication lock. Old captures remain
-immutable. Scalar request decisions now run after acquiring the installed disk
+immutable. Harmful-warning and installer-owned category-hint setters use the same durable
+publication owner; warning text consumes original spans before persisting its
+string, and category no-ops keep the current generation. Shell-debugging policy
+remains an explicit external-owner dependency (#987). Scalar request decisions now run after acquiring the installed disk
 owner, against the latest generation. Concurrent splash/aspect setters both
 persist and publish, with two version updates and cache invalidations (#989). Enabled/stopped/MIME
 decisions and persistence exist, but their required effects are not connected
 (#988). Installer/session state and pinned metadata codecs exist with explicit
-policy/storage/callback owner contracts; they are not published until those owners
-and durable install/commit recovery exist (#986). FD-bearing installer records
+policy/storage/callback owner contracts. A retained bootstrap can install a native
+installer Binder with real session storage, five oneway callbacks and per-call
+original UM/DPM policy reads. It handles 15 of 26 top-level methods and 12 of 34
+session methods; default publication and durable install/commit recovery remain
+#986. The original policy record oracle passes in 19.29s without skips using
+fixture UM/DPM owners. This does not prove live SystemServer policy or SELinux
+restorecon. The complete derived-image build passes (72.1s); the original
+first-system-scan test passes all six restart cases (169.40s, no skips). FD-bearing installer records
 reject before allocation until file capabilities are owned. Actual original ART
 comparison passes five SessionParams/SessionInfo cases (20.47s), including nullable
 fields, maps, three URI classes, DataLoader, inline Bitmap and populated Gainmap.
@@ -93,7 +104,11 @@ queries keep actual caller UID (permissions) separate from filter UID (visibilit
 Unused scan leases release their query capture without creating a child endpoint;
 claimed endpoints release their graph on close. Java Data/Store/scope reference
 counts keep an old computer alive until the last owning scope closes. This is a
-typed adapter, not the full original Computer/PackageManagerInternal facade.
+typed adapter with 19 private Binder methods, not the full original
+Computer/PackageManagerInternal facade. Names normalize through the captured
+rename table and visible library owner; UID target SDK uses actual retained/shared
+UID owners. The integrated service units pass 617 tests (six input-dependent tests
+excluded); the explicit retained native scan passes in 2.27s without skips.
 Its public UID/name/instant/SDK/installer calls and explicit uninstall filtering
 are implemented separately from internal UID lookup (no public user/flag checks)
 and original caller-based name normalization. Java internal read helpers use

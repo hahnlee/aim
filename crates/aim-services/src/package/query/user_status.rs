@@ -92,7 +92,7 @@ impl Query<'_> {
             _ => Err(NotModelled("a method not modelled")),
         }
     }
-    fn full_cross_user(&self, user: i32, check_shell: bool) -> Thrown<()> {
+    pub(crate) fn full_cross_user(&self, user: i32, check_shell: bool) -> Thrown<()> {
         if user < 0 {
             return Ok(Err(Exception::illegal_argument(format!(
                 "Invalid userId {user}"

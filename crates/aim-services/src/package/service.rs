@@ -95,22 +95,42 @@ impl PackageQueries {
         call: &mut Call<'_>,
         capture: Option<&Arc<super::scan_snapshot::query_state::Capture>>,
         query: &Query<'_>,
-    ) -> Option<Result<Parcel,QueryError>> {
-        let request=super::write::mutation::Request::read(call.code,call.sender_euid,&mut call.data)?;
+    ) -> Option<Result<Parcel, QueryError>> {
+        let request =
+            super::write::mutation::Request::read(call.code, call.sender_euid, &mut call.data)?;
         Some((|| {
-            let request=request.map_err(QueryError::Transport)?;
+            let request = request.map_err(QueryError::Transport)?;
             let result = if capture.is_some() {
-                let system = self.system.as_ref().and_then(|system|system.upgrade()).ok_or_else(||
-                    QueryError::NotModelled(NotModelled("native mutation owner unavailable")))?;
-                system.commit_package_mutation(&request,&self.resolver,call.sender_euid as i32,call.sender_pid)?
+                let system = self
+                    .system
+                    .as_ref()
+                    .and_then(|system| system.upgrade())
+                    .ok_or_else(|| {
+                        QueryError::NotModelled(NotModelled("native mutation owner unavailable"))
+                    })?;
+                system.commit_package_mutation(
+                    &request,
+                    &self.resolver,
+                    call.sender_euid as i32,
+                    call.sender_pid,
+                )?
             } else {
-                match request.decide(query,call.sender_pid).map_err(QueryError::NotModelled)? {
+                match request
+                    .decide(query, call.sender_pid)
+                    .map_err(QueryError::NotModelled)?
+                {
                     Err(exception) => Err(exception),
-                    Ok(_) => Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"native mutation capture unavailable")),
+                    Ok(_) => Err(Exception::new(
+                        aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        "native mutation capture unavailable",
+                    )),
                 }
             };
-            let mut reply=Parcel::new();
-            match result {Ok(())=>reply.write_no_exception(),Err(error)=>reply.write_exception(&error)}
+            let mut reply = Parcel::new();
+            match result {
+                Ok(()) => reply.write_no_exception(),
+                Err(error) => reply.write_exception(&error),
+            }
             Ok(reply)
         })())
     }
@@ -250,6 +270,37 @@ impl Service for PackageQueries {
                 filter: &resolution.apps_filter,
                 calling_uid: uid,
             };
+            if !self.native && call.code == pm::GET_PACKAGE_INSTALLER {
+                pm::GetPackageInstaller::read(&mut call.data).map_err(QueryError::Transport)?;
+                if call.data.remaining() != 0 {
+                    return Err(QueryError::Transport(aim_binder_host::parcel::BAD_VALUE));
+                }
+                let mut reply = Parcel::new();
+                let result = (|| {
+                    let system = self
+                        .system
+                        .as_ref()
+                        .and_then(|system| system.upgrade())
+                        .ok_or_else(|| {
+                            Exception::new(
+                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                                "installer system owner unavailable",
+                            )
+                        })?;
+                    if capture.is_none() {
+                        return Err(Exception::new(
+                            aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                            "installer native capture unavailable",
+                        ));
+                    }
+                    system.package_installer()
+                })();
+                match result {
+                    Ok(binder) => pm::write_get_package_installer_reply(&mut reply, Some(binder)),
+                    Err(error) => reply.write_exception(&error),
+                }
+                return Ok(reply);
+            }
             if !self.native
                 && matches!(
                     call.code,
@@ -258,8 +309,19 @@ impl Service for PackageQueries {
             {
                 return self.runtime_version(call, capture.as_ref(), &query);
             }
-            if !self.native && matches!(call.code,pm::SET_SPLASH_SCREEN_THEME|pm::SET_USER_MIN_ASPECT_RATIO|pm::SET_UPDATE_AVAILABLE) {
-                if let Some(answer)=self.mutation(call,capture.as_ref(),&query) {return answer;}
+            if !self.native
+                && matches!(
+                    call.code,
+                    pm::SET_SPLASH_SCREEN_THEME
+                        | pm::SET_USER_MIN_ASPECT_RATIO
+                        | pm::SET_UPDATE_AVAILABLE
+                        | pm::SET_HARMFUL_APP_WARNING
+                        | pm::SET_APPLICATION_CATEGORY_HINT
+                )
+            {
+                if let Some(answer) = self.mutation(call, capture.as_ref(), &query) {
+                    return answer;
+                }
             }
             query
                 .answer(self.descriptor(), call.code, &mut call.data)

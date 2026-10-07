@@ -4,6 +4,7 @@ package android.content.pm;
 
 public class PackageItemInfo {
     public String name;
+    public android.os.Bundle metaData;
     public int icon;
     public CharSequence nonLocalizedLabel;
     public String packageName;

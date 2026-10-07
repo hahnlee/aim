@@ -151,6 +151,8 @@ struct Owner {
     test_base_reply: AtomicUsize,
     query_reply: AtomicUsize,
     invalidations: AtomicUsize,
+    label_reply: AtomicUsize,
+    label_calls: Mutex<Vec<String>>,
     permission_reply: AtomicUsize,
     permission_calls: Mutex<Vec<(String, Option<(i32, i32)>)>>,
     gid_reply: AtomicUsize,
@@ -186,9 +188,39 @@ impl Service for Owner {
                     reply.write_i32(99);
                 }
             }
+            bootstrap::GET_INSTALLER_USER_POLICY => {
+                let user = call.data.read_i32()?;
+                assert_eq!(call.data.remaining(), 0);
+                let mut policy = Parcel::new();
+                policy.write_i32(user);
+                policy.write_i32(i32::from(user == 0));
+                policy.write_i32(i32::from(self.users_reply.load(Ordering::SeqCst) == 1));
+                policy.write_i32(0);
+                policy.write_i32(1);
+                aim_service_aidl::write_byte_array(&mut reply, Some(policy.data()));
+                return Ok(reply);
+            }
+            bootstrap::RESTORE_INSTALLER_CONTEXT => {
+                let path = call.data.read_string16()?.unwrap();
+                assert_eq!(call.data.remaining(), 0);
+                self.label_calls.lock().unwrap().push(path);
+                match self.label_reply.load(Ordering::SeqCst) {
+                    1 => {
+                        let mut reply = Parcel::new();
+                        reply.write_exception(&Exception::new(-5, "restorecon failed"));
+                        return Ok(reply);
+                    }
+                    2 => reply.write_i32(99),
+                    _ => {}
+                }
+                return Ok(reply);
+            }
             bootstrap::GET_CURRENT_PACKAGE_VERSION => {
-                let mut current = Parcel::new(); current.write_i32(36); current.write_i32(3);
-                current.write_string16(Some("fixture-build")); current.write_string16(Some("fixture-partitions"));
+                let mut current = Parcel::new();
+                current.write_i32(36);
+                current.write_i32(3);
+                current.write_string16(Some("fixture-build"));
+                current.write_string16(Some("fixture-partitions"));
                 aim_service_aidl::write_byte_array(&mut reply, Some(current.data()));
                 return Ok(reply);
             }
@@ -897,45 +929,119 @@ fn signing_override_transport_uses_captured_debug_policy() {
 fn signing_override_transport_reaches_live_apk_collection() {
     exercise_bootstrap(true, true);
 }
-type ScanOracle<'a> = dyn Fn(&Arc<System>, &Arc<crate::package::bootstrap::Bridge>, &SystemConfig, &Arc<Mutex<crate::package::owner::Store>>) + 'a;
-fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>, mut replace: Option<&mut dyn FnMut()>) {
-    use crate::package::{owner::recovery::{Event, ReadError}, settings::Settings};
-    let root = std::env::temp_dir().join(format!("aim-settings-entry-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+type ScanOracle<'a> = dyn Fn(
+        &Arc<System>,
+        &Arc<crate::package::bootstrap::Bridge>,
+        &SystemConfig,
+        &Arc<Mutex<crate::package::owner::Store>>,
+    ) + 'a;
+fn verify_settings_boot_entry(
+    system: &Arc<System>,
+    bridge: &Arc<crate::package::bootstrap::Bridge>,
+    mut replace: Option<&mut dyn FnMut()>,
+) {
+    use crate::package::{
+        owner::recovery::{Event, ReadError},
+        settings::Settings,
+    };
+    let root = std::env::temp_dir().join(format!(
+        "aim-settings-entry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     struct Data(std::path::PathBuf);
-    impl Drop for Data { fn drop(&mut self) { std::fs::remove_dir_all(&self.0).unwrap(); } }
+    impl Drop for Data {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
     std::fs::create_dir_all(root.join("system")).unwrap();
     let _data = Data(root.clone());
     let path = root.join("system/packages.xml");
     let bytes = b"<packages><version sdkVersion='36' databaseVersion='3'/><extension value='keep'/></packages>";
     std::fs::write(&path, bytes).unwrap();
     let mut settings = Settings::default();
-    let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
+    let (store, report) = system
+        .recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| {
+            state.read_document(bytes, |_, _, _| Ok(false))
+        })
+        .unwrap();
     assert!(!report.first_boot);
     assert_eq!(store.state().settings.versions[0].sdk_version, 36);
-    let mut restored_scan = crate::package::scan::SigningScan::new(&SystemConfig::default(),&store.state().settings,36).unwrap();
+    let mut restored_scan = crate::package::scan::SigningScan::new(
+        &SystemConfig::default(),
+        &store.state().settings,
+        36,
+    )
+    .unwrap();
     let before_runtime = restored_scan.clone();
-    assert!(system.restore_package_runtime_permissions(bridge,&store,&mut restored_scan,&SystemConfig::default()).is_err());
-    assert_eq!(restored_scan,before_runtime);
-    let runtime_store = crate::package::owner::Store::open(&root,&[0]).unwrap().unwrap();
-    let runtime_metadata = system.restore_package_runtime_permissions(bridge,&runtime_store,&mut restored_scan,&SystemConfig::default()).unwrap();
-    assert_eq!(runtime_metadata.pending_write_requests(),[0]);
-    assert!(restored_scan.legacy_restoration_metadata().unwrap().is_some());
+    assert!(
+        system
+            .restore_package_runtime_permissions(
+                bridge,
+                &store,
+                &mut restored_scan,
+                &SystemConfig::default()
+            )
+            .is_err()
+    );
+    assert_eq!(restored_scan, before_runtime);
+    let runtime_store = crate::package::owner::Store::open(&root, &[0])
+        .unwrap()
+        .unwrap();
+    let runtime_metadata = system
+        .restore_package_runtime_permissions(
+            bridge,
+            &runtime_store,
+            &mut restored_scan,
+            &SystemConfig::default(),
+        )
+        .unwrap();
+    assert_eq!(runtime_metadata.pending_write_requests(), [0]);
+    assert!(
+        restored_scan
+            .legacy_restoration_metadata()
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     let mut phases = Vec::new();
-    let (_, report) = system.recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
-        match stage {
-            crate::package::owner::recovery::ReadStage::File(bytes) => { phases.push("read"); state.read_document(bytes, |_,_,_| Ok(false)) }
-            crate::package::owner::recovery::ReadStage::Complete => { phases.push("complete"); assert_eq!(state.versions.len(), 2); Ok(None) }
-        }
-    }).unwrap();
-    assert!(!report.first_boot); assert_eq!(phases, ["read", "complete"]);
-    let error = system.recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
-        match stage {
-            crate::package::owner::recovery::ReadStage::File(bytes) => state.read_document(bytes, |_,_,_| Ok(false)),
-            crate::package::owner::recovery::ReadStage::Complete => Err(ReadError::Owner("frontend binding owner unavailable".into())),
-        }
-    }).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "frontend binding owner unavailable"));
+    let (_, report) = system
+        .recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
+            match stage {
+                crate::package::owner::recovery::ReadStage::File(bytes) => {
+                    phases.push("read");
+                    state.read_document(bytes, |_, _, _| Ok(false))
+                }
+                crate::package::owner::recovery::ReadStage::Complete => {
+                    phases.push("complete");
+                    assert_eq!(state.versions.len(), 2);
+                    Ok(None)
+                }
+            }
+        })
+        .unwrap();
+    assert!(!report.first_boot);
+    assert_eq!(phases, ["read", "complete"]);
+    let error = system
+        .recover_package_settings_frontend(bridge, &root, &[], &mut settings, |stage, state| {
+            match stage {
+                crate::package::owner::recovery::ReadStage::File(bytes) => {
+                    state.read_document(bytes, |_, _, _| Ok(false))
+                }
+                crate::package::owner::recovery::ReadStage::Complete => Err(ReadError::Owner(
+                    "frontend binding owner unavailable".into(),
+                )),
+            }
+        })
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error.events.last(), Some(Event::CompletionFailed(message)) if message == "frontend binding owner unavailable")
+    );
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     // Use the production record dispatcher with the same retained bridge.
     let mut ids = crate::package::owner::app_ids::AppIds::default();
@@ -943,7 +1049,17 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     let mut owners = MissingGlobal;
     let package = b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><proper-signing-keyset identifier='2'/><";
     std::fs::write(&path, package).unwrap();
-    let (_, report) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut owners).unwrap();
+    let (_, report) = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut owners,
+        )
+        .unwrap();
     assert!(matches!(report.events.last(), Some(Event::Absent)));
     assert!(!report.first_boot);
     assert_eq!(settings.packages[0].name, "p");
@@ -955,98 +1071,288 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     // Missing global owner is not a corrupt-file retry and preserves pending inputs.
     struct MissingGlobal;
     impl crate::package::settings::ReadOwners for MissingGlobal {
-        fn factory_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &crate::package::owner::app_ids::AppIds) -> std::result::Result<(), ReadError> { Err(ReadError::Owner("factory unavailable".into())) }
-        fn start_attempt(&mut self, _: &Settings, _: &[crate::package::settings::Package]) -> std::result::Result<(), ReadError> { Ok(()) }
-        fn package_registered(&mut self, _: &crate::package::settings::Package, _: bool) -> std::result::Result<(), ReadError> { Ok(()) }
-        fn shared_registered(&mut self, _: &crate::package::settings::SharedUser, _: bool) -> std::result::Result<(), ReadError> { Ok(()) }
-        fn package_child(&mut self, _: &mut crate::package::settings::Package, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &crate::package::owner::app_ids::AppIds) -> std::result::Result<bool, ReadError> { Ok(false) }
-        fn shared_child(&mut self, _: &mut crate::package::settings::SharedUser, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
-        fn public_key(&mut self, _: &[u8]) -> std::result::Result<Option<Vec<u8>>, ReadError> { panic!("unexpected key") }
-        fn global_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element) -> std::result::Result<bool, ReadError> { Ok(false) }
+        fn factory_record(
+            &mut self,
+            _: &mut Settings,
+            _: &mut aim_android_xml::pull::Reader<'_>,
+            _: &aim_android_xml::Element,
+            _: &crate::package::owner::app_ids::AppIds,
+        ) -> std::result::Result<(), ReadError> {
+            Err(ReadError::Owner("factory unavailable".into()))
+        }
+        fn start_attempt(
+            &mut self,
+            _: &Settings,
+            _: &[crate::package::settings::Package],
+        ) -> std::result::Result<(), ReadError> {
+            Ok(())
+        }
+        fn package_registered(
+            &mut self,
+            _: &crate::package::settings::Package,
+            _: bool,
+        ) -> std::result::Result<(), ReadError> {
+            Ok(())
+        }
+        fn shared_registered(
+            &mut self,
+            _: &crate::package::settings::SharedUser,
+            _: bool,
+        ) -> std::result::Result<(), ReadError> {
+            Ok(())
+        }
+        fn package_child(
+            &mut self,
+            _: &mut crate::package::settings::Package,
+            _: &mut aim_android_xml::pull::Reader<'_>,
+            _: &aim_android_xml::Element,
+            _: &crate::package::owner::app_ids::AppIds,
+        ) -> std::result::Result<bool, ReadError> {
+            Ok(false)
+        }
+        fn shared_child(
+            &mut self,
+            _: &mut crate::package::settings::SharedUser,
+            _: &mut aim_android_xml::pull::Reader<'_>,
+            _: &aim_android_xml::Element,
+        ) -> std::result::Result<bool, ReadError> {
+            Ok(false)
+        }
+        fn public_key(&mut self, _: &[u8]) -> std::result::Result<Option<Vec<u8>>, ReadError> {
+            panic!("unexpected key")
+        }
+        fn global_record(
+            &mut self,
+            _: &mut Settings,
+            _: &mut aim_android_xml::pull::Reader<'_>,
+            _: &aim_android_xml::Element,
+        ) -> std::result::Result<bool, ReadError> {
+            Ok(false)
+        }
     }
     let retained = std::fs::read(&path).unwrap();
-    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::OwnerFailed { .. })));
+    let error = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.events.last(),
+        Some(Event::OwnerFailed { .. })
+    ));
     assert_eq!(attempt.pending[0].name, "pending");
     assert_eq!(std::fs::read(&path).unwrap(), retained);
     std::fs::write(&path, b"<packages><package name='legacy' codePath='/legacy' userId='10003' domainSetId='00000000-0000-0000-0000-000000000003'><perms/></package></packages>").unwrap();
     let retained = std::fs::read(&path).unwrap();
-    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::OwnerFailed { message, .. }) if message == "settings child owner unavailable: perms"));
+    let error = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error.events.last(), Some(Event::OwnerFailed { message, .. }) if message == "settings child owner unavailable: perms")
+    );
     assert!(ids.get(10003).is_some());
     assert!(attempt.pending.is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), retained);
     std::fs::write(&path, b"<packages><package name='fatal' codePath='/fatal' userId='10004' it='1' domainSetId='00000000-0000-0000-0000-000000000004'><proper-signing-keyset identifier='8'/></package><keyset-settings version='1'><keysets><key-id identifier='9'/></keysets></keyset-settings></packages>").unwrap();
     let retained = std::fs::read(&path).unwrap();
-    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::FatalInput { .. })));
+    let error = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.events.last(),
+        Some(Event::FatalInput { .. })
+    ));
     assert_eq!(attempt.key_set_refs.get(&8), Some(&1));
     assert!(attempt.first_install_times.contains_key("fatal"));
     assert_eq!(std::fs::read(&path).unwrap(), retained);
     std::fs::remove_file(&path).unwrap();
-    let (_, report) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).unwrap();
+    let (_, report) = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .unwrap();
     assert!(report.first_boot);
     assert!(attempt.key_set_refs.is_empty());
     assert!(attempt.first_install_times.is_empty());
     assert!(ids.get(10004).is_some());
     let domains = b"<packages><domain-verifications-legacy><user-states packageName='legacy'><user-state userId='0' state='2'/></user-states></domain-verifications-legacy><domain-verifications><active><package-state packageName='p' id='1-2-3-4-5'><state><domain name='example.test' state='1'/></state></package-state></active></domain-verifications><domain-verifications><restored><package-state packageName='restore' id='2-3-4-5-6' signature='saved'/></restored></domain-verifications></packages>";
     std::fs::write(&path, domains).unwrap();
-    let (store, _) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).unwrap();
+    let (store, _) = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .unwrap();
     let saved_domains = settings.domain_verification.clone();
-    assert_eq!(saved_domains.active[0].id, "00000001-0002-0003-0004-000000000005");
+    assert_eq!(
+        saved_domains.active[0].id,
+        "00000001-0002-0003-0004-000000000005"
+    );
     assert_eq!(saved_domains.restored[0].name, "restore");
-    assert_eq!(saved_domains.legacy, [(Some("legacy".into()), vec![(0, 2)])]);
+    assert_eq!(
+        saved_domains.legacy,
+        [(Some("legacy".into()), vec![(0, 2)])]
+    );
     assert_eq!(store.state().settings.domain_verification, saved_domains);
     assert_eq!(std::fs::read(&path).unwrap(), domains);
     // One invalid UUID aborts the detached container; earlier maps survive retry.
     std::fs::write(&path, b"<packages><domain-verifications><active><package-state packageName='new' id='3-4-5-6-7'/><package-state packageName='bad' id='bad'/></active></domain-verifications></packages>").unwrap();
-    let (_, report) = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).unwrap();
+    let (_, report) = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .unwrap();
     assert!(matches!(report.events.last(), Some(Event::Absent)));
     assert_eq!(settings.domain_verification, saved_domains);
     assert!(!path.exists());
     std::fs::write(&path, b"<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><proper-signing-keyset identifier='2'/></package><keyset-settings version='1'><keysets><keyset identifier='2'><key-id identifier='9'/></keyset></keysets></keyset-settings></packages>").unwrap();
     let retained = std::fs::read(&path).unwrap();
-    let error = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::FatalInput { message, .. }) if message == "keyset public-key owner is absent: 9"));
-    assert_eq!(settings.key_sets.reference_counts.as_ref().unwrap().get(&2), Some(&1));
+    let error = system
+        .recover_owned_package_settings(
+            bridge,
+            &root,
+            &[],
+            &mut settings,
+            &mut ids,
+            &mut attempt,
+            &mut MissingGlobal,
+        )
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error.events.last(), Some(Event::FatalInput { message, .. }) if message == "keyset public-key owner is absent: 9")
+    );
+    assert_eq!(
+        settings.key_sets.reference_counts.as_ref().unwrap().get(&2),
+        Some(&1)
+    );
     assert_eq!(std::fs::read(&path).unwrap(), retained);
     let mut seeded = Settings::default();
     let mut seeded_ids = crate::package::owner::app_ids::AppIds::default();
-    let rejected = system.initialize_package_shared_users(bridge, &SystemConfig::default(), &mut seeded, &mut seeded_ids, &mut MissingGlobal).unwrap();
+    let rejected = system
+        .initialize_package_shared_users(
+            bridge,
+            &SystemConfig::default(),
+            &mut seeded,
+            &mut seeded_ids,
+            &mut MissingGlobal,
+        )
+        .unwrap();
     assert!(rejected.is_empty());
     assert_eq!(seeded.shared_users.len(), 9);
-    assert!(matches!(seeded_ids.get(1000), Some(crate::package::owner::app_ids::Owner::SharedUser(name)) if name == "android.uid.system"));
-    assert!(system.initialize_package_shared_users(bridge, &SystemConfig::default(), &mut seeded, &mut seeded_ids, &mut MissingGlobal).is_err());
+    assert!(
+        matches!(seeded_ids.get(1000), Some(crate::package::owner::app_ids::Owner::SharedUser(name)) if name == "android.uid.system")
+    );
+    assert!(
+        system
+            .initialize_package_shared_users(
+                bridge,
+                &SystemConfig::default(),
+                &mut seeded,
+                &mut seeded_ids,
+                &mut MissingGlobal
+            )
+            .is_err()
+    );
     // Restore the original fixture for the identity/replacement checks below.
     std::fs::write(&path, bytes).unwrap();
-    let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {
-        state.find_or_create_version(None).database_version = 8;
-        Err(ReadError::Owner("native settings owner unavailable".into()))
-    }).err().unwrap();
-    assert!(matches!(error.events.last(), Some(Event::OwnerFailed { .. })));
+    let error = system
+        .recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {
+            state.find_or_create_version(None).database_version = 8;
+            Err(ReadError::Owner("native settings owner unavailable".into()))
+        })
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.events.last(),
+        Some(Event::OwnerFailed { .. })
+    ));
     assert_eq!(settings.versions[0].database_version, 8);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     if let Some(replace) = &mut replace {
-        let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| {
-            let document = state.read_document(bytes, |_,_,_| Ok(false))?;
-            replace();
-            Ok(document)
-        }).err().unwrap();
-        assert!(matches!(error.events.last(), Some(Event::OwnerFailed { .. })));
+        let error = system
+            .recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| {
+                let document = state.read_document(bytes, |_, _, _| Ok(false))?;
+                replace();
+                Ok(document)
+            })
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error.events.last(),
+            Some(Event::OwnerFailed { .. })
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let backup = root.join("system/packages-backup.xml");
         std::fs::write(&backup, bytes).unwrap();
-        let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, |_,_| panic!("stale bridge read settings")).err().unwrap();
+        let stale = system
+            .recover_package_settings(bridge, &root, &[], &mut settings, |_, _| {
+                panic!("stale bridge read settings")
+            })
+            .err()
+            .unwrap();
         assert!(stale.events.is_empty());
         attempt.key_set_refs.insert(77, 1);
-        let stale = system.recover_owned_package_settings(bridge, &root, &[], &mut settings, &mut ids, &mut attempt, &mut MissingGlobal).err().unwrap();
+        let stale = system
+            .recover_owned_package_settings(
+                bridge,
+                &root,
+                &[],
+                &mut settings,
+                &mut ids,
+                &mut attempt,
+                &mut MissingGlobal,
+            )
+            .err()
+            .unwrap();
         assert!(stale.events.is_empty());
         assert_eq!(attempt.key_set_refs.get(&77), Some(&1));
 
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(std::fs::read(&backup).unwrap(), bytes);
     }
-
 }
 
 fn exercise_bootstrap(run_scan: bool, debuggable: bool) {
@@ -1169,6 +1475,8 @@ fn exercise_bootstrap_on(
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
         invalidations: AtomicUsize::new(0),
+        label_reply: AtomicUsize::new(0),
+        label_calls: Mutex::new(Vec::new()),
         permission_reply: AtomicUsize::new(0),
         permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
@@ -1192,6 +1500,8 @@ fn exercise_bootstrap_on(
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
         invalidations: AtomicUsize::new(0),
+        label_reply: AtomicUsize::new(0),
+        label_calls: Mutex::new(Vec::new()),
         permission_reply: AtomicUsize::new(0),
         permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
@@ -1250,15 +1560,55 @@ fn exercise_bootstrap_on(
         .unwrap()
         .path
         .push_str("/foreign");
+    use crate::package::installer::policy::DevicePolicy;
+    let base = Arc::new(|_: u32, _: i32| {
+        Ok(DevicePolicy {
+            debuggable: false,
+            apex_supported: true,
+            rollback_lifetime: false,
+            users: BTreeMap::new(),
+            adopted_shell_uids: Default::default(),
+            verifier_uid: None,
+        })
+    });
+    let policy_source = system.package_installer_policy_source(&old, base).unwrap();
+    let initial = policy_source(1000, 0).unwrap();
+    assert!(!initial.users[&0].disallow_install_apps);
+    assert!(initial.users[&0].organization_managed);
+    owner.users_reply.store(1, Ordering::SeqCst);
+    assert!(policy_source(1000, 0).unwrap().users[&0].disallow_install_apps);
+    assert!(!policy_source(1000, 99).unwrap().users.contains_key(&99));
+    owner.users_reply.store(0, Ordering::SeqCst);
+    let labeler = system.package_installer_labeler(&old).unwrap();
+    let guest = "/data/app/vmdl42.tmp";
+    labeler(std::path::Path::new("unused-label-host-path"), guest).unwrap();
+    assert_eq!(
+        owner.label_calls.lock().unwrap().last().map(String::as_str),
+        Some(guest)
+    );
+    for mode in [1, 2] {
+        owner.label_reply.store(mode, Ordering::SeqCst);
+        let error = labeler(std::path::Path::new("unused-label-host-path"), guest).unwrap_err();
+        assert!(!error.committed);
+        assert!(error.message.contains("installer label owner"));
+    }
+    owner.label_reply.store(0, Ordering::SeqCst);
     let reads = owner.query_calls.lock().unwrap().len();
     assert!(old.resolve_query_context(published.owner(), bad).is_err());
     assert_eq!(owner.query_calls.lock().unwrap().len(), reads);
     let resolved = old
         .resolve_query_context(published.owner(), context.clone())
         .unwrap();
-    let capture = crate::package::scan_snapshot::query_state::Capture::new(published.clone(), resolved.clone()).unwrap();
+    let capture = crate::package::scan_snapshot::query_state::Capture::new(
+        published.clone(),
+        resolved.clone(),
+    )
+    .unwrap();
     let rows = crate::package::list::metadata_from_capture(&capture).unwrap();
-    assert!(rows.is_empty(), "unloaded settings must not produce list rows");
+    assert!(
+        rows.is_empty(),
+        "unloaded settings must not produce list rows"
+    );
 
     assert_eq!(
         resolved.packages[&("fixture".into(), false)].users[&0].gids,
@@ -1578,8 +1928,11 @@ fn exercise_bootstrap_on(
     owner.apex_reply.store(2, Ordering::SeqCst);
     assert!(old.resolve_boot(&config, &|_| None).is_err());
     owner.apex_reply.store(0, Ordering::SeqCst);
+    let installer_fixture = verify_installer_binding(&system, &native, &first, &old);
     if run_scan {
-        verify_boot_scan(&system, &native, &first, &foreign, &old, &owner, &config, oracle);
+        verify_boot_scan(
+            &system, &native, &first, &foreign, &old, &owner, &config, oracle,
+        );
     }
     let mut parsed = crate::package::pkg::AndroidPackage {
         feature_flag_state: Some(Vec::new()),
@@ -1802,6 +2155,8 @@ fn exercise_bootstrap_on(
         test_base_reply: AtomicUsize::new(0),
         query_reply: AtomicUsize::new(0),
         invalidations: AtomicUsize::new(0),
+        label_reply: AtomicUsize::new(0),
+        label_calls: Mutex::new(Vec::new()),
         permission_reply: AtomicUsize::new(0),
         permission_calls: Mutex::new(vec![]),
         gid_reply: AtomicUsize::new(0),
@@ -1820,12 +2175,31 @@ fn exercise_bootstrap_on(
     let prior_domains = system.capture_package_domains().ok();
     let prior_domain_state = prior_domains.as_ref().map(|d| d.owner().persisted());
     owner.reject.store(false, Ordering::SeqCst);
-    verify_settings_boot_entry(&system, &old, Some(&mut || attach(&second, Some(replacement)).unwrap()));
+    verify_settings_boot_entry(
+        &system,
+        &old,
+        Some(&mut || attach(&second, Some(replacement)).unwrap()),
+    );
     assert!(system.capture_package_domains().is_err());
     assert!(domain_names(&second).is_err_and(|e| e.code == -5));
     assert_eq!(
         prior_domains.as_ref().map(|d| d.owner().persisted()),
         prior_domain_state
+    );
+    until(|| installer_fixture.worker.is_finished());
+    assert!(
+        crate::package::installer::endpoint::Owners::normalize(
+            installer_fixture.owner.as_ref(),
+            1000,
+            crate::package::installer::codec::SessionParams {
+                mode: 1,
+                ..Default::default()
+            },
+            None,
+            None,
+            0
+        )
+        .is_err()
     );
     let current = system.package_bootstrap().unwrap();
     assert!(Arc::ptr_eq(
@@ -2736,129 +3110,435 @@ fn verify_boot_scan(
     let list_data = data.0.join("native-list");
     let mut list_store = crate::package::owner::Store::create(&list_data, &[0, 10]).unwrap();
     list_store.commit_scan_settings(query.scan()).unwrap();
-    assert!(!system.commit_package_list_from_scan(&foreign, &mut list_store, &query, &[0, 10]).unwrap_err().committed);
+    assert!(
+        !system
+            .commit_package_list_from_scan(&foreign, &mut list_store, &query, &[0, 10])
+            .unwrap_err()
+            .committed
+    );
     assert!(!list_data.join("system/packages.list").exists());
     owner.gid_reply.store(1, Ordering::SeqCst);
-    assert!(!system.commit_package_list_from_scan(bridge, &mut list_store, &query, &[0, 10]).unwrap_err().committed);
+    assert!(
+        !system
+            .commit_package_list_from_scan(bridge, &mut list_store, &query, &[0, 10])
+            .unwrap_err()
+            .committed
+    );
     assert!(!list_data.join("system/packages.list").exists());
     owner.gid_reply.store(0, Ordering::SeqCst);
-    system.commit_package_list_from_scan(bridge, &mut list_store, &query, &[0, 10]).unwrap();
-    assert!(list_store.state().list.iter().all(|row| row.gids == [3003, 3003, 3003, 3003]));
-    let reopened = crate::package::owner::Store::open(&list_data, &[0, 10]).unwrap().unwrap();
+    system
+        .commit_package_list_from_scan(bridge, &mut list_store, &query, &[0, 10])
+        .unwrap();
+    assert!(
+        list_store
+            .state()
+            .list
+            .iter()
+            .all(|row| row.gids == [3003, 3003, 3003, 3003])
+    );
+    let reopened = crate::package::owner::Store::open(&list_data, &[0, 10])
+        .unwrap()
+        .unwrap();
     assert_eq!(reopened.state().list, list_store.state().list);
     let mut runtime_metadata = crate::package::owner::runtime_metadata::State::default();
-    system.set_runtime_permission_controller_version(bridge,&mut runtime_metadata,12).unwrap();
-    runtime_metadata.set_version(0,7);
+    system
+        .set_runtime_permission_controller_version(bridge, &mut runtime_metadata, 12)
+        .unwrap();
+    runtime_metadata.set_version(0, 7);
     runtime_metadata.update_fingerprint(0).unwrap();
-    assert_eq!(runtime_metadata.fingerprint(0),Some("fixture-partitions?pc_version=12"));
+    assert_eq!(
+        runtime_metadata.fingerprint(0),
+        Some("fixture-partitions?pc_version=12")
+    );
     list_store.claim_runtime_permissions(0).unwrap();
-    let runtime_file = list_data.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml");
-    let runtime_inode = aim_storage::guest_inode::GuestInode { uid:Some(1000),gid:Some(1000),mode:Some(0o600) };
-    assert!(!system.commit_runtime_permissions_from_scan(&foreign,&mut list_store,&query,0,&runtime_metadata,runtime_inode).unwrap_err().committed);
-    for mode in [1,2,3] {
-        owner.legacy_reply.store(mode,Ordering::SeqCst);
-        assert!(!system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,&runtime_metadata,runtime_inode).unwrap_err().committed);
+    let runtime_file =
+        list_data.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml");
+    let runtime_inode = aim_storage::guest_inode::GuestInode {
+        uid: Some(1000),
+        gid: Some(1000),
+        mode: Some(0o600),
+    };
+    assert!(
+        !system
+            .commit_runtime_permissions_from_scan(
+                &foreign,
+                &mut list_store,
+                &query,
+                0,
+                &runtime_metadata,
+                runtime_inode
+            )
+            .unwrap_err()
+            .committed
+    );
+    for mode in [1, 2, 3] {
+        owner.legacy_reply.store(mode, Ordering::SeqCst);
+        assert!(
+            !system
+                .commit_runtime_permissions_from_scan(
+                    bridge,
+                    &mut list_store,
+                    &query,
+                    0,
+                    &runtime_metadata,
+                    runtime_inode
+                )
+                .unwrap_err()
+                .committed
+        );
         assert!(!runtime_file.exists());
     }
-    owner.legacy_reply.store(4,Ordering::SeqCst);
-    let live = bridge.runtime_permissions(&query,0,7,Some("current".into())).unwrap();
+    owner.legacy_reply.store(4, Ordering::SeqCst);
+    let live = bridge
+        .runtime_permissions(&query, 0, 7, Some("current".into()))
+        .unwrap();
     assert!(!live.shared_users.is_empty());
-    assert!(live.shared_users.iter().all(|(_,p)|p[0].granted));
-    assert!(live.packages.iter().all(|(name,_)|query.state().packages[name.as_ref().unwrap()].shared_user.is_none()));
-    system.commit_runtime_permissions_from_scan(bridge,&mut list_store,&query,0,&runtime_metadata,runtime_inode).unwrap();
-    let saved = list_store.state().users[0].1.runtime_permissions.as_ref().unwrap();
-    assert_eq!(saved.version,7); assert_eq!(saved.fingerprint.as_deref(),Some("fixture-partitions?pc_version=12"));
-    assert!(saved.shared_users.iter().all(|(_,p)|!p[0].granted && p[0].flags == 1 << 16));
-    let reopened = crate::package::owner::Store::open(&list_data,&[0,10]).unwrap().unwrap();
-    assert_eq!(reopened.state().users[0].1.runtime_permissions.as_ref(),Some(saved));
+    assert!(live.shared_users.iter().all(|(_, p)| p[0].granted));
+    assert!(live.packages.iter().all(|(name, _)| {
+        query.state().packages[name.as_ref().unwrap()]
+            .shared_user
+            .is_none()
+    }));
+    system
+        .commit_runtime_permissions_from_scan(
+            bridge,
+            &mut list_store,
+            &query,
+            0,
+            &runtime_metadata,
+            runtime_inode,
+        )
+        .unwrap();
+    let saved = list_store.state().users[0]
+        .1
+        .runtime_permissions
+        .as_ref()
+        .unwrap();
+    assert_eq!(saved.version, 7);
+    assert_eq!(
+        saved.fingerprint.as_deref(),
+        Some("fixture-partitions?pc_version=12")
+    );
+    assert!(
+        saved
+            .shared_users
+            .iter()
+            .all(|(_, p)| !p[0].granted && p[0].flags == 1 << 16)
+    );
+    let reopened = crate::package::owner::Store::open(&list_data, &[0, 10])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reopened.state().users[0].1.runtime_permissions.as_ref(),
+        Some(saved)
+    );
     // A failed later user must not erase either that request or earlier commits.
-    runtime_metadata.set_version(0,8); runtime_metadata.set_version(10,9);
+    runtime_metadata.set_version(0, 8);
+    runtime_metadata.set_version(10, 9);
     list_store.claim_runtime_permissions(10).unwrap();
-    let inodes = BTreeMap::from([(0,runtime_inode)]);
-    let error = system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap_err();
-    assert_eq!(error.user,10); assert_eq!(error.completed,[0]); assert!(!error.error.committed);
-    assert_eq!(runtime_metadata.pending_write_requests(),[10]);
-    assert_eq!(list_store.state().users[0].1.runtime_permissions.as_ref().unwrap().version,8);
-    owner.legacy_reply.store(1,Ordering::SeqCst);
-    let inodes = BTreeMap::from([(0,runtime_inode),(10,runtime_inode)]);
-    assert!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap_err().completed.is_empty());
-    assert_eq!(runtime_metadata.pending_write_requests(),[10]);
-    owner.legacy_reply.store(4,Ordering::SeqCst);
-    assert_eq!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap(),[10]);
+    let inodes = BTreeMap::from([(0, runtime_inode)]);
+    let error = system
+        .flush_runtime_permission_requests(
+            bridge,
+            &mut list_store,
+            &query,
+            &mut runtime_metadata,
+            &inodes,
+        )
+        .unwrap_err();
+    assert_eq!(error.user, 10);
+    assert_eq!(error.completed, [0]);
+    assert!(!error.error.committed);
+    assert_eq!(runtime_metadata.pending_write_requests(), [10]);
+    assert_eq!(
+        list_store.state().users[0]
+            .1
+            .runtime_permissions
+            .as_ref()
+            .unwrap()
+            .version,
+        8
+    );
+    owner.legacy_reply.store(1, Ordering::SeqCst);
+    let inodes = BTreeMap::from([(0, runtime_inode), (10, runtime_inode)]);
+    assert!(
+        system
+            .flush_runtime_permission_requests(
+                bridge,
+                &mut list_store,
+                &query,
+                &mut runtime_metadata,
+                &inodes
+            )
+            .unwrap_err()
+            .completed
+            .is_empty()
+    );
+    assert_eq!(runtime_metadata.pending_write_requests(), [10]);
+    owner.legacy_reply.store(4, Ordering::SeqCst);
+    assert_eq!(
+        system
+            .flush_runtime_permission_requests(
+                bridge,
+                &mut list_store,
+                &query,
+                &mut runtime_metadata,
+                &inodes
+            )
+            .unwrap(),
+        [10]
+    );
     assert!(runtime_metadata.pending_write_requests().is_empty());
-    assert_eq!(list_store.state().users[1].1.runtime_permissions.as_ref().unwrap().version,9);
-    assert!(system.flush_runtime_permission_requests(bridge,&mut list_store,&query,&mut runtime_metadata,&inodes).unwrap().is_empty());
-    owner.legacy_reply.store(0,Ordering::SeqCst);
+    assert_eq!(
+        list_store.state().users[1]
+            .1
+            .runtime_permissions
+            .as_ref()
+            .unwrap()
+            .version,
+        9
+    );
+    assert!(
+        system
+            .flush_runtime_permission_requests(
+                bridge,
+                &mut list_store,
+                &query,
+                &mut runtime_metadata,
+                &inodes
+            )
+            .unwrap()
+            .is_empty()
+    );
+    owner.legacy_reply.store(0, Ordering::SeqCst);
     {
         use aim_service_aidl::android_content_pm_ipackagemanager as pm;
-        let endpoint=find(client,"query_package");
-        let get=|user| { let mut data=Parcel::new();pm::GetRuntimePermissionsVersion {user_id:user}.write(&mut data);
-            let reply=endpoint.transact(pm::GET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
-            pm::read_get_runtime_permissions_version_reply(&mut reply.reader()).unwrap() };
-        assert!(get(0).is_err_and(|error|error.code == -5));
-        let installed=Arc::new(Mutex::new(runtime_metadata.clone()));
-        assert!(system.install_runtime_permission_metadata(&foreign,installed.clone()).is_err());
-        system.install_runtime_permission_metadata(bridge,installed.clone()).unwrap();
-        assert!(system.install_runtime_permission_metadata(bridge,installed.clone()).is_err());
-        let held=installed.lock().unwrap();
-        let baseline=Arc::strong_count(&installed);
-        let reader_system=system.clone();let reader_capture=query.clone();
-        let reader=std::thread::spawn(move||reader_system.with_runtime_permission_metadata(&reader_capture,|metadata|metadata.version(0)));
-        let deadline=Instant::now()+Duration::from_secs(2);
-        while Arc::strong_count(&installed)==baseline && Instant::now()<deadline { std::thread::yield_now(); }
-        let waiting_owner=Arc::strong_count(&installed)>baseline;
-        let (tx,rx)=std::sync::mpsc::channel();let capture_system=system.clone();
-        let checker=std::thread::spawn(move||tx.send(capture_system.capture_package_queries().is_ok()).unwrap());
-        let bootstrap_free=rx.recv_timeout(Duration::from_secs(2));
+        let endpoint = find(client, "query_package");
+        let get = |user| {
+            let mut data = Parcel::new();
+            pm::GetRuntimePermissionsVersion { user_id: user }.write(&mut data);
+            let reply = endpoint
+                .transact(pm::GET_RUNTIME_PERMISSIONS_VERSION, &data, false)
+                .unwrap();
+            pm::read_get_runtime_permissions_version_reply(&mut reply.reader()).unwrap()
+        };
+        assert!(get(0).is_err_and(|error| error.code == -5));
+        let installed = Arc::new(Mutex::new(runtime_metadata.clone()));
+        assert!(
+            system
+                .install_runtime_permission_metadata(&foreign, installed.clone())
+                .is_err()
+        );
+        system
+            .install_runtime_permission_metadata(bridge, installed.clone())
+            .unwrap();
+        assert!(
+            system
+                .install_runtime_permission_metadata(bridge, installed.clone())
+                .is_err()
+        );
+        let held = installed.lock().unwrap();
+        let baseline = Arc::strong_count(&installed);
+        let reader_system = system.clone();
+        let reader_capture = query.clone();
+        let reader = std::thread::spawn(move || {
+            reader_system
+                .with_runtime_permission_metadata(&reader_capture, |metadata| metadata.version(0))
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&installed) == baseline && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let waiting_owner = Arc::strong_count(&installed) > baseline;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let capture_system = system.clone();
+        let checker = std::thread::spawn(move || {
+            tx.send(capture_system.capture_package_queries().is_ok())
+                .unwrap()
+        });
+        let bootstrap_free = rx.recv_timeout(Duration::from_secs(2));
         drop(held);
-        assert_eq!(reader.join().unwrap().unwrap(),8);
+        assert_eq!(reader.join().unwrap().unwrap(), 8);
         checker.join().unwrap();
-        assert!(waiting_owner,"metadata reader never retained the owner before waiting");
-        assert_eq!(bootstrap_free.unwrap(),true,"blocked metadata reader retained the bootstrap lock");
-        assert!(system.with_runtime_permission_metadata(&old_query,|metadata|metadata.version(0)).is_err());
-        assert_eq!(get(0).unwrap(),8);assert_eq!(get(99).unwrap(),0);
-        assert!(get(-1).is_err_and(|error|error.code == -3));
-        let before_request=Instant::now();
-        let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:13,user_id:0}.write(&mut data);
-        let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
-        pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().unwrap();
-        assert_eq!(get(0).unwrap(),13);assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
-        assert!(system.process_due_runtime_permission_requests(bridge,&mut list_store,&query,&inodes,before_request).unwrap().is_empty());
-        assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
-        let due=installed.lock().unwrap().next_write_deadline().unwrap();
-        owner.legacy_reply.store(1,Ordering::SeqCst);
-        assert!(system.process_due_runtime_permission_requests(bridge,&mut list_store,&query,&inodes,due).is_err());
-        assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
-        owner.legacy_reply.store(4,Ordering::SeqCst);
-        assert!(system.flush_installed_runtime_permission_requests(&foreign,&mut list_store,&query,&inodes).is_err());
-        assert_eq!(installed.lock().unwrap().pending_write_requests(),[0]);
-        assert_eq!(system.process_due_runtime_permission_requests(bridge,&mut list_store,&query,&inodes,due).unwrap(),[0]);
-        assert!(installed.lock().unwrap().pending_write_requests().is_empty());
-        assert_eq!(list_store.state().users[0].1.runtime_permissions.as_ref().unwrap().version,13);
-        owner.legacy_reply.store(0,Ordering::SeqCst);
-        let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:-1,user_id:0}.write(&mut data);
-        let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
-        assert!(pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().is_err_and(|error|error.code == -3));
-        let mut data=Parcel::new();pm::GetRuntimePermissionsVersion {user_id:0}.write(&mut data);data.write_i32(99);
-        assert_eq!(endpoint.transact(pm::GET_RUNTIME_PERMISSIONS_VERSION,&data,false).err().unwrap(),aim_binder_host::parcel::BAD_VALUE);
-        let worker_store=Arc::new(Mutex::new(list_store));
-        owner.legacy_reply.store(4,Ordering::SeqCst);
-        let worker=system.start_runtime_permission_worker(bridge,worker_store.clone(),inodes.clone()).unwrap();
-        let mut data=Parcel::new();pm::SetRuntimePermissionsVersion {version:14,user_id:0}.write(&mut data);
-        let reply=endpoint.transact(pm::SET_RUNTIME_PERMISSIONS_VERSION,&data,false).unwrap();
-        pm::read_set_runtime_permissions_version_reply(&mut reply.reader()).unwrap().unwrap();
-        let deadline=Instant::now()+Duration::from_secs(5);
+        assert!(
+            waiting_owner,
+            "metadata reader never retained the owner before waiting"
+        );
+        assert_eq!(
+            bootstrap_free.unwrap(),
+            true,
+            "blocked metadata reader retained the bootstrap lock"
+        );
+        assert!(
+            system
+                .with_runtime_permission_metadata(&old_query, |metadata| metadata.version(0))
+                .is_err()
+        );
+        assert_eq!(get(0).unwrap(), 8);
+        assert_eq!(get(99).unwrap(), 0);
+        assert!(get(-1).is_err_and(|error| error.code == -3));
+        let before_request = Instant::now();
+        let mut data = Parcel::new();
+        pm::SetRuntimePermissionsVersion {
+            version: 13,
+            user_id: 0,
+        }
+        .write(&mut data);
+        let reply = endpoint
+            .transact(pm::SET_RUNTIME_PERMISSIONS_VERSION, &data, false)
+            .unwrap();
+        pm::read_set_runtime_permissions_version_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
+        assert_eq!(get(0).unwrap(), 13);
+        assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
+        assert!(
+            system
+                .process_due_runtime_permission_requests(
+                    bridge,
+                    &mut list_store,
+                    &query,
+                    &inodes,
+                    before_request
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
+        let due = installed.lock().unwrap().next_write_deadline().unwrap();
+        owner.legacy_reply.store(1, Ordering::SeqCst);
+        assert!(
+            system
+                .process_due_runtime_permission_requests(
+                    bridge,
+                    &mut list_store,
+                    &query,
+                    &inodes,
+                    due
+                )
+                .is_err()
+        );
+        assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
+        owner.legacy_reply.store(4, Ordering::SeqCst);
+        assert!(
+            system
+                .flush_installed_runtime_permission_requests(
+                    &foreign,
+                    &mut list_store,
+                    &query,
+                    &inodes
+                )
+                .is_err()
+        );
+        assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
+        assert_eq!(
+            system
+                .process_due_runtime_permission_requests(
+                    bridge,
+                    &mut list_store,
+                    &query,
+                    &inodes,
+                    due
+                )
+                .unwrap(),
+            [0]
+        );
+        assert!(
+            installed
+                .lock()
+                .unwrap()
+                .pending_write_requests()
+                .is_empty()
+        );
+        assert_eq!(
+            list_store.state().users[0]
+                .1
+                .runtime_permissions
+                .as_ref()
+                .unwrap()
+                .version,
+            13
+        );
+        owner.legacy_reply.store(0, Ordering::SeqCst);
+        let mut data = Parcel::new();
+        pm::SetRuntimePermissionsVersion {
+            version: -1,
+            user_id: 0,
+        }
+        .write(&mut data);
+        let reply = endpoint
+            .transact(pm::SET_RUNTIME_PERMISSIONS_VERSION, &data, false)
+            .unwrap();
+        assert!(
+            pm::read_set_runtime_permissions_version_reply(&mut reply.reader())
+                .unwrap()
+                .is_err_and(|error| error.code == -3)
+        );
+        let mut data = Parcel::new();
+        pm::GetRuntimePermissionsVersion { user_id: 0 }.write(&mut data);
+        data.write_i32(99);
+        assert_eq!(
+            endpoint
+                .transact(pm::GET_RUNTIME_PERMISSIONS_VERSION, &data, false)
+                .err()
+                .unwrap(),
+            aim_binder_host::parcel::BAD_VALUE
+        );
+        let worker_store = Arc::new(Mutex::new(list_store));
+        owner.legacy_reply.store(4, Ordering::SeqCst);
+        let worker = system
+            .start_runtime_permission_worker(bridge, worker_store.clone(), inodes.clone())
+            .unwrap();
+        let mut data = Parcel::new();
+        pm::SetRuntimePermissionsVersion {
+            version: 14,
+            user_id: 0,
+        }
+        .write(&mut data);
+        let reply = endpoint
+            .transact(pm::SET_RUNTIME_PERMISSIONS_VERSION, &data, false)
+            .unwrap();
+        pm::read_set_runtime_permissions_version_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if worker_store.lock().unwrap().state().users[0].1.runtime_permissions.as_ref().unwrap().version==14 {break;}
-            assert!(Instant::now()<deadline,"automatic runtime worker did not persist Binder mutation");
+            if worker_store.lock().unwrap().state().users[0]
+                .1
+                .runtime_permissions
+                .as_ref()
+                .unwrap()
+                .version
+                == 14
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "automatic runtime worker did not persist Binder mutation"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(worker.take_error().is_none());assert!(installed.lock().unwrap().pending_write_requests().is_empty());
+        assert!(worker.take_error().is_none());
+        assert!(
+            installed
+                .lock()
+                .unwrap()
+                .pending_write_requests()
+                .is_empty()
+        );
         assert!(system.stop_runtime_permission_worker(&foreign).is_err());
         system.stop_runtime_permission_worker(bridge).unwrap();
-        let deadline=Instant::now()+Duration::from_secs(2);
-        while !worker.is_finished() {assert!(Instant::now()<deadline,"bootstrap stop failed to stop worker");std::thread::yield_now();}
-        drop(worker);owner.legacy_reply.store(0,Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !worker.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "bootstrap stop failed to stop worker"
+            );
+            std::thread::yield_now();
+        }
+        drop(worker);
+        owner.legacy_reply.store(0, Ordering::SeqCst);
     }
     let retained_domains = system.capture_package_domains().unwrap();
     assert!(Arc::ptr_eq(query.domains().unwrap(), &retained_domains));
@@ -2975,11 +3655,21 @@ fn verify_boot_scan(
                     .is_err()
             );
         }
-        register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
+        register(
+            native,
+            "activity",
+            native.add_service(Arc::new(DomainPermissions)),
+        );
         for host in [Some("missing.example"), None] {
             let mut data = Parcel::new();
-            api::GetOwnersForDomain { domain: host.map(String::from), user_id: 0 }.write(&mut data);
-            let reply = endpoint.transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).unwrap();
+            api::GetOwnersForDomain {
+                domain: host.map(String::from),
+                user_id: 0,
+            }
+            .write(&mut data);
+            let reply = endpoint
+                .transact(api::GET_OWNERS_FOR_DOMAIN, &data, false)
+                .unwrap();
             let mut reader = reply.reader();
             if host.is_none() {
                 assert_eq!(reader.read_exception().unwrap().unwrap_err().code, -4);
@@ -2989,30 +3679,69 @@ fn verify_boot_scan(
             }
             assert_eq!(reader.remaining(), 0);
             data.write_i32(99);
-            assert!(endpoint.transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).is_err());
+            assert!(
+                endpoint
+                    .transact(api::GET_OWNERS_FOR_DOMAIN, &data, false)
+                    .is_err()
+            );
         }
-        for who in [client, foreign_client] { for name in [Some("android"), Some("missing"), None] {
-            let mut data = Parcel::new();
-            api::GetUriRelativeFilterGroups {package_name: name.map(String::from), domains: None}.write(&mut data);
-            let reply = find(who, "query_domains").transact(api::GET_URI_RELATIVE_FILTER_GROUPS, &data, false).unwrap();
-            let mut reader = reply.reader();
-            if name == Some("android") { assert_eq!(reader.read_exception().unwrap().unwrap_err().code, -4); }
-            else { reader.read_exception().unwrap().unwrap(); assert_eq!(reader.read_i32().unwrap(), 1); assert_eq!(reader.read_i32().unwrap(), 0); }
-            assert_eq!(reader.remaining(), 0);
-            data.write_i32(99);
-            assert!(find(who, "query_domains").transact(api::GET_URI_RELATIVE_FILTER_GROUPS, &data, false).is_err());
-        }}
+        for who in [client, foreign_client] {
+            for name in [Some("android"), Some("missing"), None] {
+                let mut data = Parcel::new();
+                api::GetUriRelativeFilterGroups {
+                    package_name: name.map(String::from),
+                    domains: None,
+                }
+                .write(&mut data);
+                let reply = find(who, "query_domains")
+                    .transact(api::GET_URI_RELATIVE_FILTER_GROUPS, &data, false)
+                    .unwrap();
+                let mut reader = reply.reader();
+                if name == Some("android") {
+                    assert_eq!(reader.read_exception().unwrap().unwrap_err().code, -4);
+                } else {
+                    reader.read_exception().unwrap().unwrap();
+                    assert_eq!(reader.read_i32().unwrap(), 1);
+                    assert_eq!(reader.read_i32().unwrap(), 0);
+                }
+                assert_eq!(reader.remaining(), 0);
+                data.write_i32(99);
+                assert!(
+                    find(who, "query_domains")
+                        .transact(api::GET_URI_RELATIVE_FILTER_GROUPS, &data, false)
+                        .is_err()
+                );
+            }
+        }
         let before = system.capture_package_queries().unwrap();
         let mut data = Parcel::new();
-        api::SetDomainVerificationLinkHandlingAllowed {package_name: Some("android".into()), allowed: false, user_id: 0}.write(&mut data);
-        let reply = endpoint.transact(api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED, &data, false).unwrap();
+        api::SetDomainVerificationLinkHandlingAllowed {
+            package_name: Some("android".into()),
+            allowed: false,
+            user_id: 0,
+        }
+        .write(&mut data);
+        let reply = endpoint
+            .transact(
+                api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED,
+                &data,
+                false,
+            )
+            .unwrap();
         let error = reply.reader().read_exception().unwrap().unwrap_err();
         assert_eq!(error.code, -5);
         assert!(error.message.contains("persistence owner is unavailable"));
-        assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
+        assert!(Arc::ptr_eq(
+            &before,
+            &system.capture_package_queries().unwrap()
+        ));
         let mut unsupported = Parcel::new();
         unsupported.write_interface_token(api::DESCRIPTOR);
-        assert!(endpoint.transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &unsupported, false).is_err());
+        assert!(
+            endpoint
+                .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &unsupported, false)
+                .is_err()
+        );
     }
     {
         use aim_service_aidl::android_app_iactivitymanager as am;
@@ -3087,9 +3816,18 @@ fn verify_boot_scan(
             use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
             for host in [Some("h0.example"), None] {
                 let mut data = Parcel::new();
-                api::GetOwnersForDomain { domain: host.map(String::from), user_id: 0 }.write(&mut data);
-                let reply = find(foreign_client, "query_domains").transact(api::GET_OWNERS_FOR_DOMAIN, &data, false).unwrap();
-                assert_eq!(reply.reader().read_exception().unwrap().unwrap_err().code, if host.is_none() { -4 } else { -1 });
+                api::GetOwnersForDomain {
+                    domain: host.map(String::from),
+                    user_id: 0,
+                }
+                .write(&mut data);
+                let reply = find(foreign_client, "query_domains")
+                    .transact(api::GET_OWNERS_FOR_DOMAIN, &data, false)
+                    .unwrap();
+                assert_eq!(
+                    reply.reader().read_exception().unwrap().unwrap_err().code,
+                    if host.is_none() { -4 } else { -1 }
+                );
             }
         }
         struct Replacement(Option<i32>);
@@ -3447,103 +4185,335 @@ fn verify_boot_scan(
         let disk_state = persistence.state().settings.domain_verification.clone();
         let invalidations = owner.invalidations.load(Ordering::SeqCst);
         let mut runtime = before.domains().unwrap().owner().clone();
-        runtime.set_link_handling_internal(Some("android"), false, 0, &[]).unwrap();
+        runtime
+            .set_link_handling_internal(Some("android"), false, 0, &[])
+            .unwrap();
         let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(1);
         group.add(0, 0, "/runtime-only");
-        runtime.set_uri_groups("android", &[("runtime.example".into(), Some(vec![group]))]).unwrap();
-        let replacement = before.prepare_runtime_domain_update(runtime.clone()).unwrap();
-        let stale = before.prepare_runtime_domain_update(runtime.clone()).unwrap();
-        let current = system.publish_runtime_package_domains(bridge, replacement).unwrap().unwrap();
+        runtime
+            .set_uri_groups("android", &[("runtime.example".into(), Some(vec![group]))])
+            .unwrap();
+        let replacement = before
+            .prepare_runtime_domain_update(runtime.clone())
+            .unwrap();
+        let stale = before
+            .prepare_runtime_domain_update(runtime.clone())
+            .unwrap();
+        let current = system
+            .publish_runtime_package_domains(bridge, replacement)
+            .unwrap()
+            .unwrap();
         assert_eq!(current.scan().version(), before.scan().version() + 1);
-        assert_eq!(current.scan().owner().settings.domain_verification, before.scan().owner().settings.domain_verification);
-        assert!(!current.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
-        assert!(before.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
-        assert_eq!(current.domains().unwrap().owner().uri_groups("android", &["runtime.example".into()])[0].1[0].filters[0].filter.as_deref(), Some("/runtime-only"));
+        assert_eq!(
+            current.scan().owner().settings.domain_verification,
+            before.scan().owner().settings.domain_verification
+        );
+        assert!(
+            !current.state().packages["android"].users[&0]
+                .domain_selection
+                .as_ref()
+                .unwrap()
+                .0
+        );
+        assert!(
+            before.state().packages["android"].users[&0]
+                .domain_selection
+                .as_ref()
+                .unwrap()
+                .0
+        );
+        assert_eq!(
+            current
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("android", &["runtime.example".into()])[0]
+                .1[0]
+                .filters[0]
+                .filter
+                .as_deref(),
+            Some("/runtime-only")
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(persistence.state().settings.domain_verification, disk_state);
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
-        assert!(system.publish_runtime_package_domains(bridge, stale).unwrap().is_none());
-        assert!(Arc::ptr_eq(&current, &system.capture_package_queries().unwrap()));
+        assert!(
+            system
+                .publish_runtime_package_domains(bridge, stale)
+                .unwrap()
+                .is_none()
+        );
+        assert!(Arc::ptr_eq(
+            &current,
+            &system.capture_package_queries().unwrap()
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
-        let mut incoming = current.domains().unwrap().owner().package("android").unwrap().clone();
+        let mut incoming = current
+            .domains()
+            .unwrap()
+            .owner()
+            .package("android")
+            .unwrap()
+            .clone();
         incoming.id = "00000000-0000-0000-0000-000000000099".into();
-        incoming.users = vec![crate::package::domain_verification::User { id:0, allow_link_handling:true, enabled_hosts:vec!["read.example".into()] }];
+        incoming.users = vec![crate::package::domain_verification::User {
+            id: 0,
+            allow_link_handling: true,
+            enabled_hosts: vec!["read.example".into()],
+        }];
         let make_read = || crate::package::domain_verification::ReadResult {
-            state: crate::package::domain_verification::State {active:vec![incoming.clone()],..Default::default()}, diagnostics:vec![],
+            state: crate::package::domain_verification::State {
+                active: vec![incoming.clone()],
+                ..Default::default()
+            },
+            diagnostics: vec![],
         };
         let (read_update, diagnostics) = current.prepare_domain_settings_read(make_read()).unwrap();
         let (stale_read, _) = current.prepare_domain_settings_read(make_read()).unwrap();
         assert!(diagnostics.is_empty());
-        let read_capture = system.publish_runtime_package_domains(bridge, read_update).unwrap().unwrap();
+        let read_capture = system
+            .publish_runtime_package_domains(bridge, read_update)
+            .unwrap()
+            .unwrap();
         assert_eq!(read_capture.scan().version(), current.scan().version() + 1);
-        assert!(!current.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
-        assert!(read_capture.state().packages["android"].users[&0].domain_selection.as_ref().unwrap().0);
-        assert_eq!(read_capture.domains().unwrap().owner().package("android").unwrap().id, current.domains().unwrap().owner().package("android").unwrap().id);
+        assert!(
+            !current.state().packages["android"].users[&0]
+                .domain_selection
+                .as_ref()
+                .unwrap()
+                .0
+        );
+        assert!(
+            read_capture.state().packages["android"].users[&0]
+                .domain_selection
+                .as_ref()
+                .unwrap()
+                .0
+        );
+        assert_eq!(
+            read_capture
+                .domains()
+                .unwrap()
+                .owner()
+                .package("android")
+                .unwrap()
+                .id,
+            current
+                .domains()
+                .unwrap()
+                .owner()
+                .package("android")
+                .unwrap()
+                .id
+        );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(persistence.state().settings.domain_verification, disk_state);
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
-        assert!(system.publish_runtime_package_domains(bridge, stale_read).unwrap().is_none());
+        assert!(
+            system
+                .publish_runtime_package_domains(bridge, stale_read)
+                .unwrap()
+                .is_none()
+        );
         let current = read_capture;
         runtime = current.domains().unwrap().owner().clone();
-        runtime.set_link_handling_internal(Some("android"), true, 0, &[]).unwrap();
-        let committed = system.commit_package_domains(bridge, current.prepare_domain_update(runtime).unwrap(), &mut persistence).unwrap();
+        runtime
+            .set_link_handling_internal(Some("android"), true, 0, &[])
+            .unwrap();
+        let committed = system
+            .commit_package_domains(
+                bridge,
+                current.prepare_domain_update(runtime).unwrap(),
+                &mut persistence,
+            )
+            .unwrap();
         assert_eq!(committed.scan().version(), current.scan().version() + 1);
-        assert_eq!(persistence.state().settings.domain_verification, committed.domains().unwrap().owner().persisted());
+        assert_eq!(
+            persistence.state().settings.domain_verification,
+            committed.domains().unwrap().owner().persisted()
+        );
         let disk = aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap();
         let mut saved = crate::package::domain_verification::State::default();
-        saved.read(disk.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
-        assert_eq!(saved.active.iter().find(|p| p.name == "android").unwrap().uri_relative_filter_groups[0].1[0].filters[0].filter.as_deref(), Some("/runtime-only"));
-        assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations + 1);
+        saved
+            .read(
+                disk.children()
+                    .find(|e| e.name == "domain-verifications")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            saved
+                .active
+                .iter()
+                .find(|p| p.name == "android")
+                .unwrap()
+                .uri_relative_filter_groups[0]
+                .1[0]
+                .filters[0]
+                .filter
+                .as_deref(),
+            Some("/runtime-only")
+        );
+        assert_eq!(
+            owner.invalidations.load(Ordering::SeqCst),
+            invalidations + 1
+        );
     }
     let persistence = Arc::new(Mutex::new(persistence));
-    register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
-    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(system, persistence.clone());
+    register(
+        native,
+        "activity",
+        native.add_service(Arc::new(DomainPermissions)),
+    );
+    let domains = crate::package::domain_verification::service::DomainQueries::with_persistence(
+        system,
+        persistence.clone(),
+    );
     register(native, "query_domains", native.add_service(domains));
     {
         use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
         let invoke = |client: &Arc<LocalProcess>, name: Option<&str>, allowed, user, trailing| {
             let mut request = Parcel::new();
-            api::SetDomainVerificationLinkHandlingAllowed {package_name: name.map(String::from), allowed, user_id: user}.write(&mut request);
-            if trailing { request.write_i32(99); }
-            find(client, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED, &request, false)
+            api::SetDomainVerificationLinkHandlingAllowed {
+                package_name: name.map(String::from),
+                allowed,
+                user_id: user,
+            }
+            .write(&mut request);
+            if trailing {
+                request.write_i32(99);
+            }
+            find(client, "query_domains").transact(
+                api::SET_DOMAIN_VERIFICATION_LINK_HANDLING_ALLOWED,
+                &request,
+                false,
+            )
         };
         for allowed in [false, false, true] {
             let before = system.capture_package_queries().unwrap();
             let invalidations = owner.invalidations.load(Ordering::SeqCst);
             let reply = invoke(client, Some("android"), allowed, 0, false).unwrap();
             let mut reader = reply.reader();
-            api::read_set_domain_verification_link_handling_allowed_reply(&mut reader).unwrap().unwrap();
+            api::read_set_domain_verification_link_handling_allowed_reply(&mut reader)
+                .unwrap()
+                .unwrap();
             assert_eq!(reader.remaining(), 0);
             let current = system.capture_package_queries().unwrap();
             assert_eq!(current.scan().version(), before.scan().version() + 1);
-            assert_eq!(current.domains().unwrap().owner().package("android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, allowed);
-            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, current.domains().unwrap().owner().persisted());
-            assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations + 1);
+            assert_eq!(
+                current
+                    .domains()
+                    .unwrap()
+                    .owner()
+                    .package("android")
+                    .unwrap()
+                    .users
+                    .iter()
+                    .find(|u| u.id == 0)
+                    .unwrap()
+                    .allow_link_handling,
+                allowed
+            );
+            assert_eq!(
+                persistence
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .settings
+                    .domain_verification,
+                current.domains().unwrap().owner().persisted()
+            );
+            assert_eq!(
+                owner.invalidations.load(Ordering::SeqCst),
+                invalidations + 1
+            );
             let disk = aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap();
             let mut state = crate::package::domain_verification::State::default();
-            state.read(disk.children().find(|e| e.name == "domain-verifications").unwrap()).unwrap();
-            assert_eq!(state.active.iter().find(|p| p.name == "android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, allowed);
+            state
+                .read(
+                    disk.children()
+                        .find(|e| e.name == "domain-verifications")
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                state
+                    .active
+                    .iter()
+                    .find(|p| p.name == "android")
+                    .unwrap()
+                    .users
+                    .iter()
+                    .find(|u| u.id == 0)
+                    .unwrap()
+                    .allow_link_handling,
+                allowed
+            );
         }
         for granted in [true, false] {
             let before = system.capture_package_queries().unwrap();
             let racing = Arc::new(ReauthorizingDomainPermissions {
-                system: Arc::downgrade(system), bridge: bridge.clone(), persistence: persistence.clone(),
-                calls: AtomicUsize::new(0), granted,
+                system: Arc::downgrade(system),
+                bridge: bridge.clone(),
+                persistence: persistence.clone(),
+                calls: AtomicUsize::new(0),
+                granted,
             });
             register(native, "activity", native.add_service(racing.clone()));
             let reply = invoke(client, Some("android"), false, 0, false).unwrap();
             let result = reply.reader().read_exception().unwrap();
-            if granted { result.unwrap(); } else { assert_eq!(result.unwrap_err().code, -1); }
+            if granted {
+                result.unwrap();
+            } else {
+                assert_eq!(result.unwrap_err().code, -1);
+            }
             assert_eq!(racing.calls.load(Ordering::SeqCst), 2);
             let current = system.capture_package_queries().unwrap();
-            assert_eq!(current.scan().version(), before.scan().version() + if granted { 2 } else { 1 });
-            assert_eq!(current.domains().unwrap().owner().package("android").unwrap().users.iter().find(|u| u.id == 0).unwrap().allow_link_handling, !granted);
-            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, current.domains().unwrap().owner().persisted());
+            assert_eq!(
+                current.scan().version(),
+                before.scan().version() + if granted { 2 } else { 1 }
+            );
+            assert_eq!(
+                current
+                    .domains()
+                    .unwrap()
+                    .owner()
+                    .package("android")
+                    .unwrap()
+                    .users
+                    .iter()
+                    .find(|u| u.id == 0)
+                    .unwrap()
+                    .allow_link_handling,
+                !granted
+            );
+            assert_eq!(
+                persistence
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .settings
+                    .domain_verification,
+                current.domains().unwrap().owner().persisted()
+            );
         }
-        register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
+        register(
+            native,
+            "activity",
+            native.add_service(Arc::new(DomainPermissions)),
+        );
         {
-            let id = system.capture_package_queries().unwrap().domains().unwrap().owner().package("android").unwrap().id.clone();
+            let id = system
+                .capture_package_queries()
+                .unwrap()
+                .domains()
+                .unwrap()
+                .owner()
+                .package("android")
+                .unwrap()
+                .id
+                .clone();
             let before = system.capture_package_queries().unwrap();
             let bytes = std::fs::read(&path).unwrap();
             let invalidations = owner.invalidations.load(Ordering::SeqCst);
@@ -3552,169 +4522,512 @@ fn verify_boot_scan(
                 (client, Some(id.as_str()), Some(vec![]), 0, -3),
                 (client, Some(id.as_str()), Some(vec![]), 1, -3),
                 (client, Some(id.as_str()), None, 0, -4),
-                (client, Some("00000000-0000-0000-0000-000000000000"), Some(vec![]), 1, 1),
-                (client, Some(id.as_str()), Some(vec![Some("unknown.example")]), 1, 2),
+                (
+                    client,
+                    Some("00000000-0000-0000-0000-000000000000"),
+                    Some(vec![]),
+                    1,
+                    1,
+                ),
+                (
+                    client,
+                    Some(id.as_str()),
+                    Some(vec![Some("unknown.example")]),
+                    1,
+                    2,
+                ),
                 (client, Some(id.as_str()), Some(vec![None]), 1, 2),
                 (foreign_client, Some(id.as_str()), Some(vec![]), 1, -1),
             ] {
-                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR);
+                let mut request = Parcel::new();
+                request.write_interface_token(api::DESCRIPTOR);
                 request.write_string16(identifier);
-                request.write_i32(if names.is_some() {1} else {0});
-                if let Some(names) = names { request.write_bool(false); request.write_i32(names.len() as i32); for name in names { request.write_string16(name); } }
+                request.write_i32(if names.is_some() { 1 } else { 0 });
+                if let Some(names) = names {
+                    request.write_bool(false);
+                    request.write_i32(names.len() as i32);
+                    for name in names {
+                        request.write_string16(name);
+                    }
+                }
                 request.write_i32(state);
-                let reply = find(who, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_STATUS, &request, false).unwrap();
-                let result = api::read_set_domain_verification_status_reply(&mut reply.reader()).unwrap();
-                if expected >= 0 { assert_eq!(result.unwrap(), expected); } else { assert_eq!(result.unwrap_err().code, expected); }
+                let reply = find(who, "query_domains")
+                    .transact(api::SET_DOMAIN_VERIFICATION_STATUS, &request, false)
+                    .unwrap();
+                let result =
+                    api::read_set_domain_verification_status_reply(&mut reply.reader()).unwrap();
+                if expected >= 0 {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    assert_eq!(result.unwrap_err().code, expected);
+                }
                 request.write_i32(99);
-                assert!(find(who, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_STATUS, &request, false).is_err());
+                assert!(
+                    find(who, "query_domains")
+                        .transact(api::SET_DOMAIN_VERIFICATION_STATUS, &request, false)
+                        .is_err()
+                );
             }
-            assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
+            assert!(Arc::ptr_eq(
+                &before,
+                &system.capture_package_queries().unwrap()
+            ));
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
         }
         {
             use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
             let current = system.capture_package_queries().unwrap();
-            let id = current.domains().unwrap().owner().package("android").unwrap().id.clone();
+            let id = current
+                .domains()
+                .unwrap()
+                .owner()
+                .package("android")
+                .unwrap()
+                .id
+                .clone();
             let bytes = std::fs::read(&path).unwrap();
             let invalidations = owner.invalidations.load(Ordering::SeqCst);
             for (who, id, names, user, expected) in [
                 (client, Some("bad"), Some(vec![]), 0, -3),
                 (client, Some(id.as_str()), None, 0, -4),
                 (client, Some(id.as_str()), Some(vec![]), 0, -3),
-                (client, Some(id.as_str()), Some(vec![Some("unknown.example")]), 0, 2),
+                (
+                    client,
+                    Some(id.as_str()),
+                    Some(vec![Some("unknown.example")]),
+                    0,
+                    2,
+                ),
                 (client, Some(id.as_str()), Some(vec![None]), 0, 2),
                 (client, Some(id.as_str()), Some(vec![]), 99, -1),
                 (foreign_client, Some(id.as_str()), Some(vec![]), 0, -1),
-                (client, Some("00000000-0000-0000-0000-000000000000"), Some(vec![]), 0, 1),
+                (
+                    client,
+                    Some("00000000-0000-0000-0000-000000000000"),
+                    Some(vec![]),
+                    0,
+                    1,
+                ),
             ] {
-                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(id);
-                request.write_i32(if names.is_some() {1} else {0});
-                if let Some(names) = names {request.write_bool(false); request.write_i32(names.len() as i32); for name in names {request.write_string16(name);} }
-                request.write_bool(true); request.write_i32(user);
-                let reply = find(who, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_USER_SELECTION, &request, false).unwrap();
-                let result = api::read_set_domain_verification_user_selection_reply(&mut reply.reader()).unwrap();
-                if expected >= 0 {assert_eq!(result.unwrap(), expected);} else {assert_eq!(result.unwrap_err().code, expected);}
-                request.write_i32(99); assert!(find(who, "query_domains").transact(api::SET_DOMAIN_VERIFICATION_USER_SELECTION, &request, false).is_err());
+                let mut request = Parcel::new();
+                request.write_interface_token(api::DESCRIPTOR);
+                request.write_string16(id);
+                request.write_i32(if names.is_some() { 1 } else { 0 });
+                if let Some(names) = names {
+                    request.write_bool(false);
+                    request.write_i32(names.len() as i32);
+                    for name in names {
+                        request.write_string16(name);
+                    }
+                }
+                request.write_bool(true);
+                request.write_i32(user);
+                let reply = find(who, "query_domains")
+                    .transact(api::SET_DOMAIN_VERIFICATION_USER_SELECTION, &request, false)
+                    .unwrap();
+                let result =
+                    api::read_set_domain_verification_user_selection_reply(&mut reply.reader())
+                        .unwrap();
+                if expected >= 0 {
+                    assert_eq!(result.unwrap(), expected);
+                } else {
+                    assert_eq!(result.unwrap_err().code, expected);
+                }
+                request.write_i32(99);
+                assert!(
+                    find(who, "query_domains")
+                        .transact(api::SET_DOMAIN_VERIFICATION_USER_SELECTION, &request, false)
+                        .is_err()
+                );
             }
-            assert!(Arc::ptr_eq(&current, &system.capture_package_queries().unwrap()));
+            assert!(Arc::ptr_eq(
+                &current,
+                &system.capture_package_queries().unwrap()
+            ));
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
         }
         {
             use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as api;
-            let current = system.capture_package_queries().unwrap(); let bytes = std::fs::read(&path).unwrap();
-            let saved = persistence.lock().unwrap().state().settings.domain_verification.clone(); let invalidations = owner.invalidations.load(Ordering::SeqCst);
-            let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(99); group.add_nullable(0, 0, None);
-            let bundle = crate::package::domain_verification::parcels::UriGroups::prepare(&[(Some("runtime.example".into()), vec![group])]).unwrap();
-            let mut request = Parcel::new(); api::SetUriRelativeFilterGroups {package_name: Some("android".into()), domain_to_groups_bundle: Some(bundle)}.write(&mut request);
-            let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
-            api::read_set_uri_relative_filter_groups_reply(&mut reply.reader()).unwrap().unwrap();
-            let updated = system.capture_package_queries().unwrap(); assert_eq!(updated.scan().version(), current.scan().version() + 1);
-            assert!(std::ptr::eq(updated.domains().unwrap().classes().unwrap(), current.domains().unwrap().classes().unwrap()));
-            assert_eq!(updated.domains().unwrap().owner().uri_groups("android", &["runtime.example".into()])[0].1[0].filters[0].filter, None);
-            assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
-            assert_eq!(updated.scan().owner().settings.domain_verification, current.scan().owner().settings.domain_verification);
+            let current = system.capture_package_queries().unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let saved = persistence
+                .lock()
+                .unwrap()
+                .state()
+                .settings
+                .domain_verification
+                .clone();
+            let invalidations = owner.invalidations.load(Ordering::SeqCst);
+            let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(99);
+            group.add_nullable(0, 0, None);
+            let bundle = crate::package::domain_verification::parcels::UriGroups::prepare(&[(
+                Some("runtime.example".into()),
+                vec![group],
+            )])
+            .unwrap();
+            let mut request = Parcel::new();
+            api::SetUriRelativeFilterGroups {
+                package_name: Some("android".into()),
+                domain_to_groups_bundle: Some(bundle),
+            }
+            .write(&mut request);
+            let reply = find(client, "query_domains")
+                .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false)
+                .unwrap();
+            api::read_set_uri_relative_filter_groups_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap();
+            let updated = system.capture_package_queries().unwrap();
+            assert_eq!(updated.scan().version(), current.scan().version() + 1);
+            assert!(std::ptr::eq(
+                updated.domains().unwrap().classes().unwrap(),
+                current.domains().unwrap().classes().unwrap()
+            ));
+            assert_eq!(
+                updated
+                    .domains()
+                    .unwrap()
+                    .owner()
+                    .uri_groups("android", &["runtime.example".into()])[0]
+                    .1[0]
+                    .filters[0]
+                    .filter,
+                None
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                persistence
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .settings
+                    .domain_verification,
+                saved
+            );
+            assert_eq!(
+                updated.scan().owner().settings.domain_verification,
+                current.scan().owner().settings.domain_verification
+            );
             assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
-            let denied = find(foreign_client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
-            assert_eq!(denied.reader().read_exception().unwrap().unwrap_err().code, -1);
-            request.write_i32(99); assert!(find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).is_err());
+            let denied = find(foreign_client, "query_domains")
+                .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false)
+                .unwrap();
+            assert_eq!(
+                denied.reader().read_exception().unwrap().unwrap_err().code,
+                -1
+            );
+            request.write_i32(99);
+            assert!(
+                find(client, "query_domains")
+                    .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false)
+                    .is_err()
+            );
             // Null list removes the runtime key without asking the disk writer.
-            let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(Some("android")); request.write_i32(1);
-            let mut value = Parcel::new(); value.write_i32(1); value.write_string16(Some("runtime.example")); value.write_i32(-1);
-            request.write_i32(value.data().len() as i32); request.write_i32(crate::bundle::MAGIC); request.write_raw(value.data(), &[]); request.write_bool(false);
-            let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap(); reply.reader().read_exception().unwrap().unwrap();
-            assert!(system.capture_package_queries().unwrap().domains().unwrap().owner().uri_groups("android", &["runtime.example".into()]).is_empty());
-            assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
+            let mut request = Parcel::new();
+            request.write_interface_token(api::DESCRIPTOR);
+            request.write_string16(Some("android"));
+            request.write_i32(1);
+            let mut value = Parcel::new();
+            value.write_i32(1);
+            value.write_string16(Some("runtime.example"));
+            value.write_i32(-1);
+            request.write_i32(value.data().len() as i32);
+            request.write_i32(crate::bundle::MAGIC);
+            request.write_raw(value.data(), &[]);
+            request.write_bool(false);
+            let reply = find(client, "query_domains")
+                .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false)
+                .unwrap();
+            reply.reader().read_exception().unwrap().unwrap();
+            assert!(
+                system
+                    .capture_package_queries()
+                    .unwrap()
+                    .domains()
+                    .unwrap()
+                    .owner()
+                    .uri_groups("android", &["runtime.example".into()])
+                    .is_empty()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
             for name in [None, Some("missing")] {
-                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(name); request.write_i32(1); request.write_i32(0);
-                find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap().reader().read_exception().unwrap().unwrap();
+                let mut request = Parcel::new();
+                request.write_interface_token(api::DESCRIPTOR);
+                request.write_string16(name);
+                request.write_i32(1);
+                request.write_i32(0);
+                find(client, "query_domains")
+                    .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false)
+                    .unwrap()
+                    .reader()
+                    .read_exception()
+                    .unwrap()
+                    .unwrap();
             }
         }
         {
-            use aim_service_aidl::{WriteParcelable, android_content_pm_verify_domain_idomainverificationmanager as api};
+            use aim_service_aidl::{
+                WriteParcelable, android_content_pm_verify_domain_idomainverificationmanager as api,
+            };
             let current = system.capture_package_queries().unwrap();
             let bytes = std::fs::read(&path).unwrap();
-            let saved = persistence.lock().unwrap().state().settings.domain_verification.clone();
+            let saved = persistence
+                .lock()
+                .unwrap()
+                .state()
+                .settings
+                .domain_verification
+                .clone();
             let invalidations = owner.invalidations.load(Ordering::SeqCst);
-            let mut body = Parcel::new(); body.write_i32(3);
+            let mut body = Parcel::new();
+            body.write_i32(3);
             // Reverse insertion order; ArrayMap visits the signed Java hashes.
-            for (key, good) in [("late.example", true), ("runtime.example", false), ("partial.example", true)] {
-                body.write_string16(Some(key)); body.write_i32(11);
-                let mut list = Parcel::new(); list.write_i32(1);
+            for (key, good) in [
+                ("late.example", true),
+                ("runtime.example", false),
+                ("partial.example", true),
+            ] {
+                body.write_string16(Some(key));
+                body.write_i32(11);
+                let mut list = Parcel::new();
+                list.write_i32(1);
                 if good {
                     list.write_i32(4);
-                    let mut value = Parcel::new(); value.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
-                    crate::package::domain_verification::uri_parcel::Group {action: 1, filters: Some(vec![])}.write_to(&mut value);
-                    list.write_i32(value.data().len() as i32); list.write_raw(value.data(), &[]);
-                } else {list.write_i32(-1);}
-                body.write_i32(list.data().len() as i32); body.write_raw(list.data(), &[]);
+                    let mut value = Parcel::new();
+                    value.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
+                    crate::package::domain_verification::uri_parcel::Group {
+                        action: 1,
+                        filters: Some(vec![]),
+                    }
+                    .write_to(&mut value);
+                    list.write_i32(value.data().len() as i32);
+                    list.write_raw(value.data(), &[]);
+                } else {
+                    list.write_i32(-1);
+                }
+                body.write_i32(list.data().len() as i32);
+                body.write_raw(list.data(), &[]);
             }
-            let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(Some("android")); request.write_i32(1);
-            request.write_i32(body.data().len() as i32); request.write_i32(crate::bundle::MAGIC); request.write_raw(body.data(), &[]); request.write_bool(false);
-            let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false).unwrap();
-            assert_eq!(reply.reader().read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_NULL_POINTER);
+            let mut request = Parcel::new();
+            request.write_interface_token(api::DESCRIPTOR);
+            request.write_string16(Some("android"));
+            request.write_i32(1);
+            request.write_i32(body.data().len() as i32);
+            request.write_i32(crate::bundle::MAGIC);
+            request.write_raw(body.data(), &[]);
+            request.write_bool(false);
+            let reply = find(client, "query_domains")
+                .transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false)
+                .unwrap();
+            assert_eq!(
+                reply.reader().read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_NULL_POINTER
+            );
             let updated = system.capture_package_queries().unwrap();
             assert_eq!(updated.scan().version(), current.scan().version() + 1);
-            let hosts = ["partial.example".into(), "runtime.example".into(), "late.example".into()];
-            assert!(current.domains().unwrap().owner().uri_groups("android", &hosts).is_empty());
-            let groups = updated.domains().unwrap().owner().uri_groups("android", &hosts);
-            assert_eq!(groups.len(), 1); assert_eq!(groups[0].0, "partial.example"); assert_eq!(groups[0].1[0].action, 1);
+            let hosts = [
+                "partial.example".into(),
+                "runtime.example".into(),
+                "late.example".into(),
+            ];
+            assert!(
+                current
+                    .domains()
+                    .unwrap()
+                    .owner()
+                    .uri_groups("android", &hosts)
+                    .is_empty()
+            );
+            let groups = updated
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("android", &hosts);
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].0, "partial.example");
+            assert_eq!(groups[0].1[0].action, 1);
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
-            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
-            assert_eq!(updated.scan().owner().settings.domain_verification, current.scan().owner().settings.domain_verification);
+            assert_eq!(
+                persistence
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .settings
+                    .domain_verification,
+                saved
+            );
+            assert_eq!(
+                updated.scan().owner().settings.domain_verification,
+                current.scan().owner().settings.domain_verification
+            );
             assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
         }
         {
             let base = system.capture_package_queries().unwrap();
             let mut live_owner = base.domains().unwrap().owner().clone();
             let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(0);
-            group.add_nullable(0, 0, None); group.add(0, 0, "");
-            live_owner.set_uri_groups("android", &[("nullable.example".into(), Some(vec![group]))]).unwrap();
-            let expected_runtime = live_owner.persisted(); let expected_disk = live_owner.xml_projection();
+            group.add_nullable(0, 0, None);
+            group.add(0, 0, "");
+            live_owner
+                .set_uri_groups("android", &[("nullable.example".into(), Some(vec![group]))])
+                .unwrap();
+            let expected_runtime = live_owner.persisted();
+            let expected_disk = live_owner.xml_projection();
             let update = base.prepare_domain_update(live_owner).unwrap();
-            let updated = system.commit_package_domains(&bridge, update, &mut persistence.lock().unwrap()).unwrap();
-            assert_eq!(updated.domains().unwrap().owner().persisted(), expected_runtime);
-            assert_eq!(updated.scan().owner().settings.domain_verification, expected_disk);
-            assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, expected_disk);
-            let disk = crate::package::settings::Settings::parse(&aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap()).unwrap().domain_verification;
+            let updated = system
+                .commit_package_domains(&bridge, update, &mut persistence.lock().unwrap())
+                .unwrap();
+            assert_eq!(
+                updated.domains().unwrap().owner().persisted(),
+                expected_runtime
+            );
+            assert_eq!(
+                updated.scan().owner().settings.domain_verification,
+                expected_disk
+            );
+            assert_eq!(
+                persistence
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .settings
+                    .domain_verification,
+                expected_disk
+            );
+            let disk = crate::package::settings::Settings::parse(
+                &aim_android_xml::read(&std::fs::read(&path).unwrap()).unwrap(),
+            )
+            .unwrap()
+            .domain_verification;
             assert_eq!(disk, expected_disk);
-            assert!(base.domains().unwrap().owner().uri_groups("android", &["nullable.example".into()]).is_empty());
-            let groups = updated.domains().unwrap().owner().uri_groups("android", &["nullable.example".into()]);
-            assert_eq!(groups[0].1[0].filters.len(), 2); assert_eq!(groups[0].1[0].filters[0].filter, None);
+            assert!(
+                base.domains()
+                    .unwrap()
+                    .owner()
+                    .uri_groups("android", &["nullable.example".into()])
+                    .is_empty()
+            );
+            let groups = updated
+                .domains()
+                .unwrap()
+                .owner()
+                .uri_groups("android", &["nullable.example".into()]);
+            assert_eq!(groups[0].1[0].filters.len(), 2);
+            assert_eq!(groups[0].1[0].filters[0].filter, None);
             // A second write must compare with the read-back XML base, not live null metadata.
             let mut next_owner = updated.domains().unwrap().owner().clone();
-            next_owner.set_link_handling_internal(Some("android"), false, 0, &[0]).unwrap();
+            next_owner
+                .set_link_handling_internal(Some("android"), false, 0, &[0])
+                .unwrap();
             let next = updated.prepare_domain_update(next_owner).unwrap();
-            system.commit_package_domains(&bridge, next, &mut persistence.lock().unwrap()).unwrap();
+            system
+                .commit_package_domains(&bridge, next, &mut persistence.lock().unwrap())
+                .unwrap();
         }
         {
-            use aim_service_aidl::{WriteParcelable, android_content_pm_verify_domain_idomainverificationmanager as api};
+            use aim_service_aidl::{
+                WriteParcelable, android_content_pm_verify_domain_idomainverificationmanager as api,
+            };
             for (key, action) in [(None, 1), (Some(""), 2)] {
                 let before = system.capture_package_queries().unwrap();
-                let bytes = std::fs::read(&path).unwrap(); let saved = persistence.lock().unwrap().state().settings.domain_verification.clone(); let invalidations = owner.invalidations.load(Ordering::SeqCst);
-                let mut body = Parcel::new(); body.write_i32(3);
+                let bytes = std::fs::read(&path).unwrap();
+                let saved = persistence
+                    .lock()
+                    .unwrap()
+                    .state()
+                    .settings
+                    .domain_verification
+                    .clone();
+                let invalidations = owner.invalidations.load(Ordering::SeqCst);
+                let mut body = Parcel::new();
+                body.write_i32(3);
                 for host in [Some("late.example"), key, Some("a.example")] {
                     body.write_string16(host);
-                    if host == key {body.write_i32(0); body.write_string16(Some("wrong type"));}
-                    else {
-                        body.write_i32(11); let mut list = Parcel::new(); list.write_i32(1); list.write_i32(4);
-                        let mut value = Parcel::new(); value.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
-                        crate::package::domain_verification::uri_parcel::Group {action, filters: Some(vec![])}.write_to(&mut value);
-                        list.write_i32(value.data().len() as i32); list.write_raw(value.data(), &[]);
-                        body.write_i32(list.data().len() as i32); body.write_raw(list.data(), &[]);
+                    if host == key {
+                        body.write_i32(0);
+                        body.write_string16(Some("wrong type"));
+                    } else {
+                        body.write_i32(11);
+                        let mut list = Parcel::new();
+                        list.write_i32(1);
+                        list.write_i32(4);
+                        let mut value = Parcel::new();
+                        value.write_string16(Some("android.content.UriRelativeFilterGroupParcel"));
+                        crate::package::domain_verification::uri_parcel::Group {
+                            action,
+                            filters: Some(vec![]),
+                        }
+                        .write_to(&mut value);
+                        list.write_i32(value.data().len() as i32);
+                        list.write_raw(value.data(), &[]);
+                        body.write_i32(list.data().len() as i32);
+                        body.write_raw(list.data(), &[]);
                     }
                 }
-                let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR); request.write_string16(Some("android")); request.write_i32(1);
-                request.write_i32(body.data().len() as i32); request.write_i32(crate::bundle::MAGIC); request.write_raw(body.data(), &[]); request.write_bool(false);
-                let reply = find(client, "query_domains").transact(api::SET_URI_RELATIVE_FILTER_GROUPS, &request, false);
-                if key.is_none() {assert_eq!(reply.unwrap().reader().read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_NULL_POINTER);}
-                else {assert_eq!(reply.err(), Some(UNKNOWN_TRANSACTION));}
-                let after = system.capture_package_queries().unwrap(); assert_eq!(after.scan().version(), before.scan().version() + 1);
-                assert_eq!(after.domains().unwrap().owner().uri_groups("android", &["a.example".into()])[0].1[0].action, action);
-                assert!(after.domains().unwrap().owner().uri_groups("android", &["late.example".into()]).is_empty());
-                assert_eq!(std::fs::read(&path).unwrap(), bytes); assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved);
-                assert_eq!(after.scan().owner().settings.domain_verification, before.scan().owner().settings.domain_verification);
+                let mut request = Parcel::new();
+                request.write_interface_token(api::DESCRIPTOR);
+                request.write_string16(Some("android"));
+                request.write_i32(1);
+                request.write_i32(body.data().len() as i32);
+                request.write_i32(crate::bundle::MAGIC);
+                request.write_raw(body.data(), &[]);
+                request.write_bool(false);
+                let reply = find(client, "query_domains").transact(
+                    api::SET_URI_RELATIVE_FILTER_GROUPS,
+                    &request,
+                    false,
+                );
+                if key.is_none() {
+                    assert_eq!(
+                        reply
+                            .unwrap()
+                            .reader()
+                            .read_exception()
+                            .unwrap()
+                            .unwrap_err()
+                            .code,
+                        aim_binder_host::parcel::EX_NULL_POINTER
+                    );
+                } else {
+                    assert_eq!(reply.err(), Some(UNKNOWN_TRANSACTION));
+                }
+                let after = system.capture_package_queries().unwrap();
+                assert_eq!(after.scan().version(), before.scan().version() + 1);
+                assert_eq!(
+                    after
+                        .domains()
+                        .unwrap()
+                        .owner()
+                        .uri_groups("android", &["a.example".into()])[0]
+                        .1[0]
+                        .action,
+                    action
+                );
+                assert!(
+                    after
+                        .domains()
+                        .unwrap()
+                        .owner()
+                        .uri_groups("android", &["late.example".into()])
+                        .is_empty()
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(
+                    persistence
+                        .lock()
+                        .unwrap()
+                        .state()
+                        .settings
+                        .domain_verification,
+                    saved
+                );
+                assert_eq!(
+                    after.scan().owner().settings.domain_verification,
+                    before.scan().owner().settings.domain_verification
+                );
                 assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
             }
         }
@@ -3769,154 +5082,600 @@ fn verify_boot_scan(
         let error = reply.reader().read_exception().unwrap().unwrap_err();
         assert_eq!(error.code, -5);
         assert!(error.message.contains("committed=false"));
-        assert!(Arc::ptr_eq(&before, &system.capture_package_queries().unwrap()));
-        assert_eq!(std::fs::read(&path).unwrap(), b"<packages external='writer'/>");
+        assert!(Arc::ptr_eq(
+            &before,
+            &system.capture_package_queries().unwrap()
+        ));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"<packages external='writer'/>"
+        );
         assert_eq!(owner.invalidations.load(Ordering::SeqCst), invalidations);
         std::fs::write(&path, bytes).unwrap();
     }
     if let Some(oracle) = oracle {
-        register(native, "activity", native.add_service(Arc::new(DomainPermissions)));
+        register(
+            native,
+            "activity",
+            native.add_service(Arc::new(DomainPermissions)),
+        );
         oracle(system, bridge, config, &persistence);
     }
     {
         use aim_service_aidl::android_content_pm_ipackagemanager as pm;
-        let current=system.capture_package_queries().unwrap();
-        let mutation_data=data.0.join("native-mutations");
-        let mut initial=crate::package::settings::Settings::default();
-        let (mut disk,_)=crate::package::owner::recovery::Plan::inspect(&mutation_data).unwrap()
-            .recover_boot(&[0,10],&mut initial,&bridge.current_package_version().unwrap(),|_,_|panic!("missing first-boot settings must not read")).unwrap();
+        let current = system.capture_package_queries().unwrap();
+        let mutation_data = data.0.join("native-mutations");
+        let mut initial = crate::package::settings::Settings::default();
+        let (mut disk, _) = crate::package::owner::recovery::Plan::inspect(&mutation_data)
+            .unwrap()
+            .recover_boot(
+                &[0, 10],
+                &mut initial,
+                &bridge.current_package_version().unwrap(),
+                |_, _| panic!("missing first-boot settings must not read"),
+            )
+            .unwrap();
         disk.commit_scan_settings(query.scan()).unwrap();
-        disk.commit_domains(&current.domains().unwrap().owner().persisted()).unwrap();
-        for user in [0,10] {
+        disk.commit_domains(&current.domains().unwrap().owner().persisted())
+            .unwrap();
+        for user in [0, 10] {
             disk.claim_unread_restrictions(user).unwrap();
-            disk.commit_initial_scan_restrictions(current.scan().owner(),user,false,aim_android_xml::Element {name:"package-restrictions".into(),attrs:Vec::new(),content:Vec::new()}).unwrap();
+            disk.commit_initial_scan_restrictions(
+                current.scan().owner(),
+                user,
+                false,
+                aim_android_xml::Element {
+                    name: "package-restrictions".into(),
+                    attrs: Vec::new(),
+                    content: Vec::new(),
+                },
+            )
+            .unwrap();
         }
-        let disk=Arc::new(Mutex::new(disk));
-        assert!(system.install_package_persistence(&foreign,&current,disk.clone()).is_err());
-        system.install_package_persistence(bridge,&current,disk.clone()).unwrap();
-        assert!(system.install_package_persistence(bridge,&current,disk.clone()).is_err());
-        let invalidations=owner.invalidations.load(Ordering::SeqCst);
-        use aim_service_aidl::{dev_aim_server_ipackagescansnapshot as scan_api,dev_aim_server_ipackagecomputer as computer_api};
-        let references=Arc::strong_count(&current);
-        let unused=capture_scan(client).unwrap();
-        assert_eq!(Arc::strong_count(&current),references+1);
-        let mut unused_close=Parcel::new();scan_api::Close {}.write(&mut unused_close);
-        unused.transact(scan_api::CLOSE,&unused_close,false).unwrap().reader().read_exception().unwrap().unwrap();
-        assert_eq!(Arc::strong_count(&current),references);
-        let scan_lease=capture_scan(client).unwrap();
-        let mut computer_args=Parcel::new();scan_api::GetComputer {}.write(&mut computer_args);
-        let computer_reply=scan_lease.transact(scan_api::GET_COMPUTER,&computer_args,false).unwrap();
-        let Some(Binder::Handle(handle))=scan_api::read_get_computer_reply(&mut computer_reply.reader()).unwrap().unwrap() else {panic!("remote computer expected")};
-        let computer=client.strong(handle);
-        let mut close_scan=Parcel::new();scan_api::Close {}.write(&mut close_scan);
-        scan_lease.transact(scan_api::CLOSE,&close_scan,false).unwrap().reader().read_exception().unwrap().unwrap();
-        let computer_version=|| {let mut args=Parcel::new();computer_api::GetVersion {}.write(&mut args);let reply=computer.transact(computer_api::GET_VERSION,&args,false).unwrap();computer_api::read_get_version_reply(&mut reply.reader()).unwrap()};
-        assert_eq!(computer_version().unwrap(),current.scan().version() as i64);
-        register(client,"held_computer",computer.binder());
-        let mut version_request=Parcel::new();computer_api::GetVersion {}.write(&mut version_request);
-        let denied=find(foreign_client,"held_computer").transact(computer_api::GET_VERSION,&version_request,false).unwrap();
-        assert_eq!(denied.reader().read_exception().unwrap().unwrap_err().code,-1);
-        let mut metadata=Parcel::new();computer_api::GetApplicationInfo {package_name:Some("android".into()),flags:0,user_id:0,filter_calling_uid:1000,calling_uid:1000,calling_pid:94002}.write(&mut metadata);
-        let value=computer.transact(computer_api::GET_APPLICATION_INFO,&metadata,false).unwrap();
-        let value=crate::package::reply::decode(pm::DESCRIPTOR,pm::GET_APPLICATION_INFO,&mut value.reader()).unwrap().unwrap();
-        let mut public_args=Parcel::new();pm::GetApplicationInfo {package_name:Some("android".into()),flags:0,user_id:0}.write(&mut public_args);
-        let public_reply=find(client,"query_package").transact(pm::GET_APPLICATION_INFO,&public_args,false).unwrap();
-        let expected=crate::package::reply::decode(pm::DESCRIPTOR,pm::GET_APPLICATION_INFO,&mut public_reply.reader()).unwrap().unwrap();
-        assert_ne!(value,crate::shadow::Value::Null);
-        assert_eq!(value,expected);
-        let mut args=Parcel::new();computer_api::GetPackageUid {package_name:Some("android".into()),flags:0,user_id:0,calling_uid:1000,calling_pid:94002}.write(&mut args);
-        let reply=computer.transact(computer_api::GET_PACKAGE_UID,&args,false).unwrap();assert_eq!(computer_api::read_get_package_uid_reply(&mut reply.reader()).unwrap().unwrap(),1000);
-        let mut args=Parcel::new();computer_api::GetPackagesForUid {uid:1000,calling_uid:1000,calling_pid:94002}.write(&mut args);
-        let reply=computer.transact(computer_api::GET_PACKAGES_FOR_UID,&args,false).unwrap();assert!(computer_api::read_get_packages_for_uid_reply(&mut reply.reader()).unwrap().unwrap().unwrap().contains(&Some("android".into())));
-        let mut args=Parcel::new();computer_api::GetNameForUid {uid:1000,calling_uid:1000,calling_pid:94002}.write(&mut args);
-        let reply=computer.transact(computer_api::GET_NAME_FOR_UID,&args,false).unwrap();assert!(computer_api::read_get_name_for_uid_reply(&mut reply.reader()).unwrap().unwrap().is_some());
-        let mut args=Parcel::new();computer_api::IsInstantApp {package_name:Some("android".into()),user_id:0,calling_uid:1000,calling_pid:94002}.write(&mut args);
-        let reply=computer.transact(computer_api::IS_INSTANT_APP,&args,false).unwrap();assert!(!computer_api::read_is_instant_app_reply(&mut reply.reader()).unwrap().unwrap());
-        let mut args=Parcel::new();computer_api::GetTargetSdkVersion {package_name:Some("android".into()),calling_uid:1000,calling_pid:94002}.write(&mut args);
-        let reply=computer.transact(computer_api::GET_TARGET_SDK_VERSION,&args,false).unwrap();assert_eq!(computer_api::read_get_target_sdk_version_reply(&mut reply.reader()).unwrap().unwrap(),current.state().packages["android"].pkg.as_ref().unwrap().target_sdk_version);
-        let mut args=Parcel::new();computer_api::GetInstallerPackageName {package_name:Some("android".into()),user_id:0,calling_uid:1000,calling_pid:94002}.write(&mut args);
-        let reply=computer.transact(computer_api::GET_INSTALLER_PACKAGE_NAME,&args,false).unwrap();computer_api::read_get_installer_package_name_reply(&mut reply.reader()).unwrap().unwrap();
-        for filter_uninstalled in [false,true] {
-            let mut args=Parcel::new();computer_api::FilterAppAccess {package_name:None,calling_uid:1000,user_id:0,filter_uninstalled}.write(&mut args);
-            let reply=computer.transact(computer_api::FILTER_APP_ACCESS,&args,false).unwrap();assert_eq!(computer_api::read_filter_app_access_reply(&mut reply.reader()).unwrap().unwrap(),filter_uninstalled);
+        let disk = Arc::new(Mutex::new(disk));
+        assert!(
+            system
+                .install_package_persistence(&foreign, &current, disk.clone())
+                .is_err()
+        );
+        system
+            .install_package_persistence(bridge, &current, disk.clone())
+            .unwrap();
+        assert!(
+            system
+                .install_package_persistence(bridge, &current, disk.clone())
+                .is_err()
+        );
+        let invalidations = owner.invalidations.load(Ordering::SeqCst);
+        use aim_service_aidl::{
+            dev_aim_server_ipackagecomputer as computer_api,
+            dev_aim_server_ipackagescansnapshot as scan_api,
+        };
+        let references = Arc::strong_count(&current);
+        let unused = capture_scan(client).unwrap();
+        assert_eq!(Arc::strong_count(&current), references + 1);
+        let mut unused_close = Parcel::new();
+        scan_api::Close {}.write(&mut unused_close);
+        unused
+            .transact(scan_api::CLOSE, &unused_close, false)
+            .unwrap()
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        assert_eq!(Arc::strong_count(&current), references);
+        let scan_lease = capture_scan(client).unwrap();
+        let mut computer_args = Parcel::new();
+        scan_api::GetComputer {}.write(&mut computer_args);
+        let computer_reply = scan_lease
+            .transact(scan_api::GET_COMPUTER, &computer_args, false)
+            .unwrap();
+        let Some(Binder::Handle(handle)) =
+            scan_api::read_get_computer_reply(&mut computer_reply.reader())
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("remote computer expected")
+        };
+        let computer = client.strong(handle);
+        let mut close_scan = Parcel::new();
+        scan_api::Close {}.write(&mut close_scan);
+        scan_lease
+            .transact(scan_api::CLOSE, &close_scan, false)
+            .unwrap()
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        let computer_version = || {
+            let mut args = Parcel::new();
+            computer_api::GetVersion {}.write(&mut args);
+            let reply = computer
+                .transact(computer_api::GET_VERSION, &args, false)
+                .unwrap();
+            computer_api::read_get_version_reply(&mut reply.reader()).unwrap()
+        };
+        assert_eq!(computer_version().unwrap(), current.scan().version() as i64);
+        register(client, "held_computer", computer.binder());
+        let mut version_request = Parcel::new();
+        computer_api::GetVersion {}.write(&mut version_request);
+        let denied = find(foreign_client, "held_computer")
+            .transact(computer_api::GET_VERSION, &version_request, false)
+            .unwrap();
+        assert_eq!(
+            denied.reader().read_exception().unwrap().unwrap_err().code,
+            -1
+        );
+        let mut metadata = Parcel::new();
+        computer_api::GetApplicationInfo {
+            package_name: Some("android".into()),
+            flags: 0,
+            user_id: 0,
+            filter_calling_uid: 1000,
+            calling_uid: 1000,
+            calling_pid: 94002,
         }
-        let mut internal_uid=Parcel::new();computer_api::GetPackageUidInternal {package_name:Some("android".into()),flags:0,user_id:42}.write(&mut internal_uid);
-        let reply=computer.transact(computer_api::GET_PACKAGE_UID_INTERNAL,&internal_uid,false).unwrap();assert_eq!(computer_api::read_get_package_uid_internal_reply(&mut reply.reader()).unwrap().unwrap(),4201000);
-        let mut internal_name=Parcel::new();computer_api::ResolveInternalPackageName {package_name:Some("android".into()),version_code:-1,calling_uid:1000}.write(&mut internal_name);
-        let reply=computer.transact(computer_api::RESOLVE_INTERNAL_PACKAGE_NAME,&internal_name,false).unwrap();assert_eq!(computer_api::read_resolve_internal_package_name_reply(&mut reply.reader()).unwrap().unwrap(),Some("android".into()));
-        let mut version_args=Parcel::new();
+        .write(&mut metadata);
+        let value = computer
+            .transact(computer_api::GET_APPLICATION_INFO, &metadata, false)
+            .unwrap();
+        let value = crate::package::reply::decode(
+            pm::DESCRIPTOR,
+            pm::GET_APPLICATION_INFO,
+            &mut value.reader(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut public_args = Parcel::new();
+        pm::GetApplicationInfo {
+            package_name: Some("android".into()),
+            flags: 0,
+            user_id: 0,
+        }
+        .write(&mut public_args);
+        let public_reply = find(client, "query_package")
+            .transact(pm::GET_APPLICATION_INFO, &public_args, false)
+            .unwrap();
+        let expected = crate::package::reply::decode(
+            pm::DESCRIPTOR,
+            pm::GET_APPLICATION_INFO,
+            &mut public_reply.reader(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(value, crate::shadow::Value::Null);
+        assert_eq!(value, expected);
+        let mut args = Parcel::new();
+        computer_api::GetPackageUid {
+            package_name: Some("android".into()),
+            flags: 0,
+            user_id: 0,
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut args);
+        let reply = computer
+            .transact(computer_api::GET_PACKAGE_UID, &args, false)
+            .unwrap();
+        assert_eq!(
+            computer_api::read_get_package_uid_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            1000
+        );
+        let mut args = Parcel::new();
+        computer_api::GetPackagesForUid {
+            uid: 1000,
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut args);
+        let reply = computer
+            .transact(computer_api::GET_PACKAGES_FOR_UID, &args, false)
+            .unwrap();
+        assert!(
+            computer_api::read_get_packages_for_uid_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .contains(&Some("android".into()))
+        );
+        let mut args = Parcel::new();
+        computer_api::GetNameForUid {
+            uid: 1000,
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut args);
+        let reply = computer
+            .transact(computer_api::GET_NAME_FOR_UID, &args, false)
+            .unwrap();
+        assert!(
+            computer_api::read_get_name_for_uid_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+        let mut args = Parcel::new();
+        computer_api::IsInstantApp {
+            package_name: Some("android".into()),
+            user_id: 0,
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut args);
+        let reply = computer
+            .transact(computer_api::IS_INSTANT_APP, &args, false)
+            .unwrap();
+        assert!(
+            !computer_api::read_is_instant_app_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        let mut args = Parcel::new();
+        computer_api::GetTargetSdkVersion {
+            package_name: Some("android".into()),
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut args);
+        let reply = computer
+            .transact(computer_api::GET_TARGET_SDK_VERSION, &args, false)
+            .unwrap();
+        assert_eq!(
+            computer_api::read_get_target_sdk_version_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            current.state().packages["android"]
+                .pkg
+                .as_ref()
+                .unwrap()
+                .target_sdk_version
+        );
+        let mut args = Parcel::new();
+        computer_api::GetInstallerPackageName {
+            package_name: Some("android".into()),
+            user_id: 0,
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut args);
+        let reply = computer
+            .transact(computer_api::GET_INSTALLER_PACKAGE_NAME, &args, false)
+            .unwrap();
+        computer_api::read_get_installer_package_name_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap();
+        for filter_uninstalled in [false, true] {
+            let mut args = Parcel::new();
+            computer_api::FilterAppAccess {
+                package_name: None,
+                calling_uid: 1000,
+                user_id: 0,
+                filter_uninstalled,
+            }
+            .write(&mut args);
+            let reply = computer
+                .transact(computer_api::FILTER_APP_ACCESS, &args, false)
+                .unwrap();
+            assert_eq!(
+                computer_api::read_filter_app_access_reply(&mut reply.reader())
+                    .unwrap()
+                    .unwrap(),
+                filter_uninstalled
+            );
+        }
+        let mut internal_uid = Parcel::new();
+        computer_api::GetPackageUidInternal {
+            package_name: Some("android".into()),
+            flags: 0,
+            user_id: 42,
+        }
+        .write(&mut internal_uid);
+        let reply = computer
+            .transact(computer_api::GET_PACKAGE_UID_INTERNAL, &internal_uid, false)
+            .unwrap();
+        assert_eq!(
+            computer_api::read_get_package_uid_internal_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            4201000
+        );
+        let mut internal_name = Parcel::new();
+        computer_api::ResolveInternalPackageName {
+            package_name: Some("android".into()),
+            version_code: -1,
+            calling_uid: 1000,
+        }
+        .write(&mut internal_name);
+        let reply = computer
+            .transact(
+                computer_api::RESOLVE_INTERNAL_PACKAGE_NAME,
+                &internal_name,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            computer_api::read_resolve_internal_package_name_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap(),
+            Some("android".into())
+        );
+        let mut identity = Parcel::new();
+        computer_api::IsSameApp {
+            package_name: Some("android".into()),
+            flags: 0,
+            comparison_uid: 1000,
+            user_id: 0,
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut identity);
+        let reply = computer
+            .transact(computer_api::IS_SAME_APP, &identity, false)
+            .unwrap();
+        assert!(
+            computer_api::read_is_same_app_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        let mut uid_access = Parcel::new();
+        computer_api::FilterUidAccess {
+            target_uid: 20100,
+            calling_uid: 10100,
+        }
+        .write(&mut uid_access);
+        let reply = computer
+            .transact(computer_api::FILTER_UID_ACCESS, &uid_access, false)
+            .unwrap();
+        assert!(
+            computer_api::read_filter_uid_access_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        let mut query_access = Parcel::new();
+        computer_api::CanQueryPackage {
+            query_uid: 1000,
+            target_package_name: Some("android".into()),
+            calling_uid: 1000,
+            calling_pid: 94002,
+        }
+        .write(&mut query_access);
+        let reply = computer
+            .transact(computer_api::CAN_QUERY_PACKAGE, &query_access, false)
+            .unwrap();
+        assert!(
+            computer_api::read_can_query_package_reply(&mut reply.reader())
+                .unwrap()
+                .unwrap()
+        );
+        let mut version_args = Parcel::new();
         host::GetPackageStateVersionPage {}.write(&mut version_args);
-        let version_reply=find(client,"host").transact(host::GET_PACKAGE_STATE_VERSION_PAGE,&version_args,false).unwrap();
-        let mut reader=version_reply.reader();reader.read_exception().unwrap().unwrap();
-        assert_eq!(reader.read_i32().unwrap(),1);assert_eq!(reader.read_i32().unwrap(),0);
-        let fd=aim_binder_host::server::file_fd(&client.file(reader.read_fd().unwrap()).unwrap()).unwrap();
-        assert_eq!(reader.remaining(),0);
+        let version_reply = find(client, "host")
+            .transact(host::GET_PACKAGE_STATE_VERSION_PAGE, &version_args, false)
+            .unwrap();
+        let mut reader = version_reply.reader();
+        reader.read_exception().unwrap().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        assert_eq!(reader.read_i32().unwrap(), 0);
+        let fd = aim_binder_host::server::file_fd(&client.file(reader.read_fd().unwrap()).unwrap())
+            .unwrap();
+        assert_eq!(reader.remaining(), 0);
         use std::os::fd::AsRawFd;
         struct VersionMapping(*mut libc::c_void);
-        impl Drop for VersionMapping {fn drop(&mut self) {unsafe {libc::munmap(self.0,4096);}}}
-        let mapped=VersionMapping(unsafe {libc::mmap(std::ptr::null_mut(),4096,libc::PROT_READ,libc::MAP_SHARED,fd.as_raw_fd(),0)});
-        assert_ne!(mapped.0,libc::MAP_FAILED);
-        let read_version=||u64::from_le(unsafe {&*mapped.0.cast::<std::sync::atomic::AtomicU64>()}.load(Ordering::Acquire));
-        assert_eq!(read_version(),current.scan().version());
-        let endpoint=find(client,"query_package");
-        let mut args=Parcel::new();
-        pm::SetSplashScreenTheme {package_name:Some("android".into()),theme_name:Some("native-theme".into()),user_id:0}.write(&mut args);
-        let reply=endpoint.transact(pm::SET_SPLASH_SCREEN_THEME,&args,false).unwrap();
+        impl Drop for VersionMapping {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::munmap(self.0, 4096);
+                }
+            }
+        }
+        let mapped = VersionMapping(unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        });
+        assert_ne!(mapped.0, libc::MAP_FAILED);
+        let read_version = || {
+            u64::from_le(
+                unsafe { &*mapped.0.cast::<std::sync::atomic::AtomicU64>() }
+                    .load(Ordering::Acquire),
+            )
+        };
+        assert_eq!(read_version(), current.scan().version());
+        let endpoint = find(client, "query_package");
+        let mut args = Parcel::new();
+        pm::SetSplashScreenTheme {
+            package_name: Some("android".into()),
+            theme_name: Some("native-theme".into()),
+            user_id: 0,
+        }
+        .write(&mut args);
+        let reply = endpoint
+            .transact(pm::SET_SPLASH_SCREEN_THEME, &args, false)
+            .unwrap();
         reply.reader().read_exception().unwrap().unwrap();
-        let published=system.capture_package_queries().unwrap();
-        assert_eq!(published.scan().version(),current.scan().version()+1);
-        assert_eq!(read_version(),published.scan().version());
-        assert_eq!(published.state().packages["android"].users[&0].splash_screen_theme.as_deref(),Some("native-theme"));
-        assert_ne!(current.state().packages["android"].users[&0].splash_screen_theme.as_deref(),Some("native-theme"));
-        let reopened=crate::package::owner::Store::open(&mutation_data,&[0,10]).unwrap().unwrap();
-        assert_eq!(reopened.state().users[0].1.restrictions.packages.iter().find(|(name,_)|name=="android").unwrap().1.splash_screen_theme.as_deref(),Some("native-theme"));
-        assert_eq!(owner.invalidations.load(Ordering::SeqCst),invalidations+1);
+        let published = system.capture_package_queries().unwrap();
+        assert_eq!(published.scan().version(), current.scan().version() + 1);
+        assert_eq!(read_version(), published.scan().version());
+        assert_eq!(
+            published.state().packages["android"].users[&0]
+                .splash_screen_theme
+                .as_deref(),
+            Some("native-theme")
+        );
+        assert_ne!(
+            current.state().packages["android"].users[&0]
+                .splash_screen_theme
+                .as_deref(),
+            Some("native-theme")
+        );
+        let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.state().users[0]
+                .1
+                .restrictions
+                .packages
+                .iter()
+                .find(|(name, _)| name == "android")
+                .unwrap()
+                .1
+                .splash_screen_theme
+                .as_deref(),
+            Some("native-theme")
+        );
+        assert_eq!(
+            owner.invalidations.load(Ordering::SeqCst),
+            invalidations + 1
+        );
         assert!(system.package_persistence_owner(&current).is_err());
         // Hold the serialization owner until both Binder requests have captured it.
         // Both must decide from the latest generation after acquiring this lock.
         let references = Arc::strong_count(&disk);
         let held = disk.lock().unwrap();
         let mut writers = Vec::new();
-        for aspect in [false,true] {
-            let endpoint = find(client,"query_package");
+        for aspect in [false, true] {
+            let endpoint = find(client, "query_package");
             writers.push(std::thread::spawn(move || {
                 let mut args = Parcel::new();
                 let code = if aspect {
-                    pm::SetUserMinAspectRatio {package_name:Some("android".into()),aspect_ratio:4,user_id:0}.write(&mut args);
+                    pm::SetUserMinAspectRatio {
+                        package_name: Some("android".into()),
+                        aspect_ratio: 4,
+                        user_id: 0,
+                    }
+                    .write(&mut args);
                     pm::SET_USER_MIN_ASPECT_RATIO
                 } else {
-                    pm::SetSplashScreenTheme {package_name:Some("android".into()),theme_name:Some("parallel-zero".into()),user_id:0}.write(&mut args);
+                    pm::SetSplashScreenTheme {
+                        package_name: Some("android".into()),
+                        theme_name: Some("parallel-zero".into()),
+                        user_id: 0,
+                    }
+                    .write(&mut args);
                     pm::SET_SPLASH_SCREEN_THEME
                 };
-                let reply = endpoint.transact(code,&args,false).unwrap();
+                let reply = endpoint.transact(code, &args, false).unwrap();
                 reply.reader().read_exception().unwrap().unwrap();
             }));
         }
-        let deadline = Instant::now()+Duration::from_secs(2);
-        while Arc::strong_count(&disk)<references+2 {
-            assert!(Instant::now()<deadline,"parallel mutations did not reach disk serialization owner");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&disk) < references + 2 {
+            assert!(
+                Instant::now() < deadline,
+                "parallel mutations did not reach disk serialization owner"
+            );
             std::thread::yield_now();
         }
         drop(held);
-        for writer in writers { writer.join().unwrap(); }
+        for writer in writers {
+            writer.join().unwrap();
+        }
         let concurrent = system.capture_package_queries().unwrap();
-        assert_eq!(concurrent.scan().version(),published.scan().version()+2);
-        assert_eq!(read_version(),concurrent.scan().version());
-        assert_eq!(concurrent.state().packages["android"].users[&0].splash_screen_theme.as_deref(),Some("parallel-zero"));
-        assert_eq!(concurrent.state().packages["android"].users[&0].min_aspect_ratio,4);
-        let reopened = crate::package::owner::Store::open(&mutation_data,&[0,10]).unwrap().unwrap();
-        let persisted = &reopened.state().users.iter().find(|(id,_)|*id==0).unwrap().1.restrictions.packages.iter().find(|(name,_)|name=="android").unwrap().1;
-        assert_eq!(persisted.splash_screen_theme.as_deref(),Some("parallel-zero"));
-        assert_eq!(persisted.min_aspect_ratio,4);
-        assert_eq!(owner.invalidations.load(Ordering::SeqCst),invalidations+3);
-        assert_eq!(computer_version().unwrap(),current.scan().version() as i64);
-        let mut close=Parcel::new();computer_api::Close {}.write(&mut close);
-        computer.transact(computer_api::CLOSE,&close,false).unwrap().reader().read_exception().unwrap().unwrap();
-        assert!(computer_version().is_err_and(|error|error.code == -5));
-        let before=system.capture_package_queries().unwrap();
+        assert_eq!(concurrent.scan().version(), published.scan().version() + 2);
+        assert_eq!(read_version(), concurrent.scan().version());
+        assert_eq!(
+            concurrent.state().packages["android"].users[&0]
+                .splash_screen_theme
+                .as_deref(),
+            Some("parallel-zero")
+        );
+        assert_eq!(
+            concurrent.state().packages["android"].users[&0].min_aspect_ratio,
+            4
+        );
+        let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10])
+            .unwrap()
+            .unwrap();
+        let persisted = &reopened
+            .state()
+            .users
+            .iter()
+            .find(|(id, _)| *id == 0)
+            .unwrap()
+            .1
+            .restrictions
+            .packages
+            .iter()
+            .find(|(name, _)| name == "android")
+            .unwrap()
+            .1;
+        assert_eq!(
+            persisted.splash_screen_theme.as_deref(),
+            Some("parallel-zero")
+        );
+        assert_eq!(persisted.min_aspect_ratio, 4);
+        assert_eq!(
+            owner.invalidations.load(Ordering::SeqCst),
+            invalidations + 3
+        );
+        let mut warning = Parcel::new();
+        warning.write_interface_token(pm::DESCRIPTOR);
+        warning.write_string16(Some("android"));
+        warning.write_i32(1);
+        crate::clip::write_char_sequence(&mut warning, Some(" ⚠<&😀 "));
+        warning.write_i32(0);
+        endpoint
+            .transact(pm::SET_HARMFUL_APP_WARNING, &warning, false)
+            .unwrap()
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        let warned = system.capture_package_queries().unwrap();
+        assert_eq!(warned.scan().version(), concurrent.scan().version() + 1);
+        assert_eq!(read_version(), warned.scan().version());
+        assert_eq!(
+            warned.state().packages["android"].users[&0]
+                .harmful_app_warning
+                .as_deref(),
+            Some(" ⚠<&😀 ")
+        );
+        assert!(
+            concurrent.state().packages["android"].users[&0]
+                .harmful_app_warning
+                .is_none()
+        );
+        let reopened = crate::package::owner::Store::open(&mutation_data, &[0, 10])
+            .unwrap()
+            .unwrap();
+        let stored = reopened.state().users[0]
+            .1
+            .restrictions
+            .packages
+            .iter()
+            .find(|(name, _)| name == "android")
+            .unwrap();
+        assert_eq!(stored.1.harmful_app_warning.as_deref(), Some(" ⚠<&😀 "));
+        assert_eq!(computer_version().unwrap(), current.scan().version() as i64);
+        let mut close = Parcel::new();
+        computer_api::Close {}.write(&mut close);
+        computer
+            .transact(computer_api::CLOSE, &close, false)
+            .unwrap()
+            .reader()
+            .read_exception()
+            .unwrap()
+            .unwrap();
+        assert!(computer_version().is_err_and(|error| error.code == -5));
+        let before = system.capture_package_queries().unwrap();
         args.write_i32(1);
-        assert!(endpoint.transact(pm::SET_SPLASH_SCREEN_THEME,&args,false).is_err());
-        assert!(Arc::ptr_eq(&before,&system.capture_package_queries().unwrap()));
+        assert!(
+            endpoint
+                .transact(pm::SET_SPLASH_SCREEN_THEME, &args, false)
+                .is_err()
+        );
+        assert!(Arc::ptr_eq(
+            &before,
+            &system.capture_package_queries().unwrap()
+        ));
     }
     drop(data);
 }
@@ -3993,3 +5752,273 @@ fn sdk_data_host_rejects_foreign_callers_bad_tokens_tails_and_missing_owner() {
 
 #[path = "domain_transport_test.rs"]
 mod domain_transport_test;
+
+struct InstallerBindingFixture {
+    worker: crate::package::installer::callbacks::CallbackWorker,
+    owner: Arc<crate::package::installer::native::NativeOwners>,
+    data: std::path::PathBuf,
+}
+impl Drop for InstallerBindingFixture {
+    fn drop(&mut self) {
+        self.owner.shutdown_callbacks();
+        std::fs::remove_dir_all(&self.data).unwrap();
+    }
+}
+fn verify_installer_binding(
+    system: &Arc<System>,
+    native: &Arc<LocalProcess>,
+    client: &Arc<LocalProcess>,
+    bridge: &Arc<crate::package::bootstrap::Bridge>,
+) -> InstallerBindingFixture {
+    use crate::package::installer::{
+        codec::{SessionInfo, SessionParams},
+        native::{NativeOwners, PolicySource},
+        policy::DevicePolicy,
+        storage::Store,
+    };
+    use aim_service_aidl::{
+        android_content_pm_ipackageinstaller as api,
+        android_content_pm_ipackageinstallercallback as cb,
+        android_content_pm_ipackagemanager as pm,
+    };
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let data = std::env::temp_dir().join(format!(
+        "aim-system-installer-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    for name in ["system", "app", "app-staging"] {
+        std::fs::create_dir_all(data.join(name)).unwrap();
+    }
+    let inode = aim_storage::guest_inode::GuestInode {
+        uid: Some(1000),
+        gid: Some(1000),
+        mode: Some(0o600),
+    };
+    let disk = Store::open(
+        data.clone(),
+        inode,
+        aim_storage::guest_inode::GuestInode {
+            mode: Some(0o775),
+            ..inode
+        },
+        Arc::new(|path, guest| {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            let label = if guest.starts_with("/data/app/") {
+                b"u:object_r:apk_tmp_file:s0\0".as_slice()
+            } else {
+                b"u:object_r:system_data_file:s0\0".as_slice()
+            };
+            if unsafe {
+                libc::setxattr(
+                    path.as_ptr(),
+                    c"dev.aim.xattr.security.selinux".as_ptr(),
+                    label.as_ptr().cast(),
+                    label.len(),
+                    0,
+                    libc::XATTR_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err(crate::package::installer::storage::Error {
+                    committed: false,
+                    message: std::io::Error::last_os_error().to_string(),
+                });
+            }
+            Ok(())
+        }),
+    )
+    .unwrap();
+    let weak = Arc::downgrade(system);
+    let retained = bridge.clone();
+    let source = Arc::new(move || {
+        let system = weak
+            .upgrade()
+            .ok_or_else(|| Exception::new(-5, "installer system stopped"))?;
+        system.check_package_bootstrap(&retained)?;
+        let state = system.capture_package_queries()?.state().clone();
+        system.check_package_bootstrap(&retained)?;
+        Ok(state)
+    });
+    let base: PolicySource = Arc::new(|_, _| {
+        Ok(DevicePolicy {
+            debuggable: false,
+            apex_supported: false,
+            rollback_lifetime: true,
+            users: Default::default(),
+            adopted_shell_uids: Default::default(),
+            verifier_uid: None,
+        })
+    });
+    let policy = system
+        .package_installer_policy_source(bridge, base)
+        .unwrap();
+    let weak = Arc::downgrade(native);
+    let owner = NativeOwners::open(
+        Arc::new(crate::package::installer::Sessions::default()),
+        source,
+        policy,
+        SystemConfig::default(),
+        disk,
+        Arc::new(move |node| {
+            Ok(weak
+                .upgrade()
+                .ok_or_else(|| Exception::new(-5, "installer Binder stopped"))?
+                .add_service(node))
+        }),
+        Arc::new(|_| {}),
+        native.clone(),
+    )
+    .unwrap();
+    let capture = system.capture_package_queries().unwrap();
+    let worker = system
+        .install_package_installer(bridge, &capture, owner.clone())
+        .unwrap();
+    let endpoint = find(client, "query_package");
+    let mut request = Parcel::new();
+    pm::GetPackageInstaller {}.write(&mut request);
+    let reply = endpoint
+        .transact(pm::GET_PACKAGE_INSTALLER, &request, false)
+        .unwrap();
+    let binder = pm::read_get_package_installer_reply(&mut reply.reader())
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Binder::Handle(handle) = binder else {
+        panic!("installer not transferred")
+    };
+    let installer = client.strong(handle);
+    let reply = endpoint
+        .transact(pm::GET_PACKAGE_INSTALLER, &request, false)
+        .unwrap();
+    assert_eq!(
+        pm::read_get_package_installer_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap(),
+        Some(binder)
+    );
+    struct Callback(Arc<Mutex<Vec<u32>>>);
+    impl Service for Callback {
+        fn descriptor(&self) -> &str {
+            cb::DESCRIPTOR
+        }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            assert!(call.is_oneway());
+            assert_eq!(call.sender_euid, 1000);
+            let mut reply = Parcel::new();
+            match call.code {
+                cb::ON_SESSION_CREATED => {
+                    cb::OnSessionCreated::read(&mut call.data)?;
+                }
+                cb::ON_SESSION_ACTIVE_CHANGED => {
+                    cb::OnSessionActiveChanged::read(&mut call.data)?;
+                }
+                cb::ON_SESSION_FINISHED => {
+                    cb::OnSessionFinished::read(&mut call.data)?;
+                }
+                _ => return Err(UNKNOWN_TRANSACTION),
+            }
+            assert_eq!(call.data.remaining(), 0);
+            self.0.lock().unwrap().push(call.code);
+            reply.write_no_exception();
+            Ok(reply)
+        }
+    }
+    let callbacks = Arc::new(Mutex::new(Vec::new()));
+    let callback = client.add_service(Arc::new(Callback(callbacks.clone())));
+    let mut request = Parcel::new();
+    api::RegisterCallback {
+        callback: Some(callback),
+        user_id: 0,
+    }
+    .write(&mut request);
+    installer
+        .transact(api::REGISTER_CALLBACK, &request, false)
+        .unwrap()
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    let mut request = Parcel::new();
+    api::CreateSession {
+        params: Some(SessionParams {
+            mode: 1,
+            size_bytes: -1,
+            originating_uid: -1,
+            required_installed_version_code: -1,
+            unarchive_id: -1,
+            auto_install_dependencies_enabled: true,
+            ..Default::default()
+        }),
+        installer_package_name: None,
+        installer_attribution_tag: None,
+        user_id: 0,
+    }
+    .write(&mut request);
+    let reply = installer
+        .transact(api::CREATE_SESSION, &request, false)
+        .unwrap();
+    let id = api::read_create_session_reply(&mut reply.reader())
+        .unwrap()
+        .unwrap();
+    assert!(data.join("system/install_sessions.xml").is_file());
+    let mut request = Parcel::new();
+    api::OpenSession { session_id: id }.write(&mut request);
+    let reply = installer
+        .transact(api::OPEN_SESSION, &request, false)
+        .unwrap();
+    assert!(
+        api::read_open_session_reply(&mut reply.reader())
+            .unwrap()
+            .unwrap()
+            .is_some()
+    );
+    assert!(data.join(format!("app/vmdl{id}.tmp")).is_dir());
+    let mut request = Parcel::new();
+    api::GetSessionInfo { session_id: id }.write(&mut request);
+    let reply = installer
+        .transact(api::GET_SESSION_INFO, &request, false)
+        .unwrap();
+    let info = api::read_get_session_info_reply::<SessionInfo>(&mut reply.reader())
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(info.session_id, id);
+    assert!(info.active);
+    assert_eq!(info.installer_uid, 1000);
+    let mut request = Parcel::new();
+    api::GetAllSessions { user_id: 0 }.write(&mut request);
+    let reply = installer
+        .transact(api::GET_ALL_SESSIONS, &request, false)
+        .unwrap();
+    let mut reader = reply.reader();
+    reader.read_exception().unwrap().unwrap();
+    assert_eq!(reader.read_i32().unwrap(), 1);
+    assert_eq!(reader.read_i32().unwrap(), 1);
+    let mut request = Parcel::new();
+    api::AbandonSession { session_id: id }.write(&mut request);
+    installer
+        .transact(api::ABANDON_SESSION, &request, false)
+        .unwrap()
+        .reader()
+        .read_exception()
+        .unwrap()
+        .unwrap();
+    assert!(!data.join(format!("app/vmdl{id}.tmp")).exists());
+    until(|| callbacks.lock().unwrap().contains(&cb::ON_SESSION_FINISHED));
+    assert_eq!(
+        *callbacks.lock().unwrap(),
+        [
+            cb::ON_SESSION_CREATED,
+            cb::ON_SESSION_ACTIVE_CHANGED,
+            cb::ON_SESSION_FINISHED
+        ]
+    );
+    assert!(owner.take_errors().is_empty());
+    InstallerBindingFixture {
+        worker,
+        owner,
+        data,
+    }
+}

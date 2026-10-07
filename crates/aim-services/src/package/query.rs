@@ -562,6 +562,10 @@ impl Query<'_> {
                 } else {Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER,"null packageNames")))};
                 thrown(value,|p,v|native::write_is_audio_playback_capture_allowed_reply(p,&Some(v)))
             }
+            native::GET_MODULE_METADATA_PACKAGE_NAME=> {
+                args(native::GetModuleMetadataPackageName::read(r))?;
+                thrown(self.module_metadata_package(),|p,value|native::write_get_module_metadata_package_name_reply(p,&value))
+            },
             native::GET_NAMES_FOR_UIDS => {
                 let a = args(native::GetNamesForUids::read(r))?;
                 let names = self.names_for_uids(a.uids.as_deref())?.map(|names| {
@@ -1440,7 +1444,7 @@ impl Query<'_> {
     }
 
     /// `getPackageUid`.
-    fn package_uid(&self, name: &str, flags: i64, user: i32) -> Thrown<i32> {
+    pub(crate) fn package_uid(&self, name: &str, flags: i64, user: i32) -> Thrown<i32> {
         if self.user(user).is_none() {
             return Ok(Ok(-1));
         }
@@ -1889,3 +1893,4 @@ mod tests;
 
 mod extra;
 mod user_status;
+mod internal_visibility;

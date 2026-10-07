@@ -184,9 +184,13 @@ impl Context {
     ) -> Result<Self, String> {
         self.native_domains = None;
         self.system.system_permissions = Some(config.system_permissions.clone());
-        let mut initial:Vec<_>=config.initial_non_stopped_system_packages.iter().cloned().collect();
-        initial.sort_by_key(|name|crate::package::info::java_hash(name));
-        self.system.initial_non_stopped_system_packages=Some(initial);
+        let mut initial: Vec<_> = config
+            .initial_non_stopped_system_packages
+            .iter()
+            .cloned()
+            .collect();
+        initial.sort_by_key(|name| crate::package::info::java_hash(name));
+        self.system.initial_non_stopped_system_packages = Some(initial);
         let expected: BTreeSet<_> = owner
             .settings
             .packages
@@ -363,24 +367,51 @@ impl Capture {
     pub(crate) fn prepare_package_update(
         self: &Arc<Self>,
         owner: crate::package::scan::SigningScan,
-    ) -> Result<PackageUpdate,String> {
-        let version=self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store=super::Store::new_replica_at_version(owner,self.scan.usage().clone(),version)
-            .map_err(|error|format!("package mutation scan: {error:?}"))?;
-        let mut context=(*self.context).clone();
-        context.scan_version=version;
-        let capture=Self::new(store.capture(),context)?;
-        Ok(PackageUpdate {store,capture})
+    ) -> Result<PackageUpdate, String> {
+        let version = self
+            .scan
+            .version()
+            .checked_add(1)
+            .ok_or("package version exhausted")?;
+        let store = super::Store::new_replica_at_version(owner, self.scan.usage().clone(), version)
+            .map_err(|error| format!("package mutation scan: {error:?}"))?;
+        let mut context = (*self.context).clone();
+        context.scan_version = version;
+        let capture = Self::new(store.capture(), context)?;
+        Ok(PackageUpdate { store, capture })
     }
 
     /// The full native boot owner calls this after resolution policy is ready.
     /// Partial query captures remain usable without publishing a guessed selection.
-    pub fn select_permission_controller(self:&Arc<Self>) -> Result<Arc<Self>,String> {
-        if self.state.system.permission_controller_package.is_some() { return Ok(self.clone()); }
-        let package=select_permission_controller(&self.state)?.ok_or("there must be exactly one permissions manager")?;
-        let mut context=(*self.context).clone();
-        context.system.permission_controller_package=Some(Some(package));
-        Self::new(self.scan.clone(),context)
+    pub fn select_permission_controller(self: &Arc<Self>) -> Result<Arc<Self>, String> {
+        if self.state.system.permission_controller_package.is_some() {
+            return Ok(self.clone());
+        }
+        let package = select_permission_controller(&self.state)?
+            .ok_or("there must be exactly one permissions manager")?;
+        let mut context = (*self.context).clone();
+        context.system.permission_controller_package = Some(Some(package));
+        Self::new(self.scan.clone(), context)
+    }
+
+    /// systemReady binds real provider resource metadata to this generation.
+    pub fn load_module_metadata(
+        self: &Arc<Self>,
+        platform: &crate::package::parse::Platform,
+        config: crate::package::parse::resources::Config,
+        files: &dyn Fn(&str) -> Result<std::path::PathBuf, String>,
+        apex: &crate::package::module_metadata::ApexLinks,
+    ) -> Result<Arc<Self>, String> {
+        let owner = crate::package::module_metadata::Owner::load(
+            &self.state,
+            platform,
+            config,
+            files,
+            apex,
+        )?;
+        let mut context = (*self.context).clone();
+        context.system.module_metadata = Some(Arc::new(owner));
+        Self::new(self.scan.clone(), context)
     }
 
     pub fn new(scan: Arc<Snapshot>, mut context: Context) -> Result<Arc<Self>, String> {
@@ -534,12 +565,14 @@ impl Capture {
             shared_users,
             uid_owners: Some(uid_owners),
             renamed_packages: Some(owner.settings.renamed_packages.clone()),
-            shared_libraries: Some({
-                let mut libraries:Vec<_>=scan.owner().libraries.entries().cloned().collect();
-                libraries.sort_by_key(|l|(l.name.as_deref().map_or(0,crate::package::info::java_hash),l.version));
-                libraries
-            }),
-            protected_broadcasts: Some(scan.owner().loaded_packages().values().flat_map(|p|p.package.protected_broadcasts.iter().cloned()).collect()),
+            shared_libraries: Some(scan.owner().libraries.entries().cloned().collect()),
+            protected_broadcasts: Some(
+                scan.owner()
+                    .loaded_packages()
+                    .values()
+                    .flat_map(|p| p.package.protected_broadcasts.iter().cloned())
+                    .collect(),
+            ),
             // These records are original-feed import inputs, not query owners.
             shared_process_inputs: BTreeMap::new(),
             user_scopes: BTreeMap::new(),
@@ -840,16 +873,50 @@ fn user(
 }
 
 /// PMS selects this owner once from finalized native activity registration.
-fn select_permission_controller(state:&model::State) -> Result<Option<String>,String> {
-    let state=Arc::new(state.clone());
-    let resolution=crate::package::resolve::Resolution::new(state.clone(),&crate::package::apps_filter::Config {force_system_packages_queryable:state.system.force_system_packages_queryable,force_queryable_packages:state.system.force_queryable_packages.clone()}).map_err(|e|format!("permission-controller resolver: {e:?}"))?;
-    let intent=crate::package::intent::Intent {action:Some("android.intent.action.MANAGE_PERMISSIONS".into()),categories:Some(vec!["android.intent.category.DEFAULT".into()]),..Default::default()};
-    let matches=resolution.query_intent_activities(&intent,None,crate::package::info::flags::MATCH_SYSTEM_ONLY|crate::package::info::flags::MATCH_DIRECT_BOOT_AWARE|crate::package::info::flags::MATCH_DIRECT_BOOT_UNAWARE,0,1000).map_err(|e|format!("permission-controller activity query: {e:?}"))?;
-    if matches.is_empty() { return Ok(None); }
-    if matches.len()!=1 { return Err("there must be exactly one permissions manager".into()); }
-    let crate::package::component_resolver::Info::Activity(info)=&matches[0].info else { return Err("permissions manager is not an activity".into()); };
-    if info.info.application_info.private_flags & (1<<3)==0 { return Err("the permissions manager must be a privileged app".into()); }
-    info.info.item.package_name.clone().map(Some).ok_or_else(||"permissions manager has no package name".into())
+fn select_permission_controller(state: &model::State) -> Result<Option<String>, String> {
+    let state = Arc::new(state.clone());
+    let resolution = crate::package::resolve::Resolution::new(
+        state.clone(),
+        &crate::package::apps_filter::Config {
+            force_system_packages_queryable: state.system.force_system_packages_queryable,
+            force_queryable_packages: state.system.force_queryable_packages.clone(),
+        },
+    )
+    .map_err(|e| format!("permission-controller resolver: {e:?}"))?;
+    let intent = crate::package::intent::Intent {
+        action: Some("android.intent.action.MANAGE_PERMISSIONS".into()),
+        categories: Some(vec!["android.intent.category.DEFAULT".into()]),
+        ..Default::default()
+    };
+    let matches = resolution
+        .query_intent_activities(
+            &intent,
+            None,
+            crate::package::info::flags::MATCH_SYSTEM_ONLY
+                | crate::package::info::flags::MATCH_DIRECT_BOOT_AWARE
+                | crate::package::info::flags::MATCH_DIRECT_BOOT_UNAWARE,
+            0,
+            1000,
+        )
+        .map_err(|e| format!("permission-controller activity query: {e:?}"))?;
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() != 1 {
+        return Err("there must be exactly one permissions manager".into());
+    }
+    let crate::package::component_resolver::Info::Activity(info) = &matches[0].info else {
+        return Err("permissions manager is not an activity".into());
+    };
+    if info.info.application_info.private_flags & (1 << 3) == 0 {
+        return Err("the permissions manager must be a privileged app".into());
+    }
+    info.info
+        .item
+        .package_name
+        .clone()
+        .map(Some)
+        .ok_or_else(|| "permissions manager has no package name".into())
 }
 
 #[cfg(test)]
@@ -857,18 +924,74 @@ mod controller_tests {
     use super::*;
     #[test]
     fn permission_controller_selection_requires_one_privileged_system_activity() {
-        use crate::package::{pkg::{AndroidPackage,Activity,Component,MainComponent,booleans},intent_filter::{IntentFilter,ParsedIntentInfo}};
-        let mut filter=IntentFilter::default();
+        use crate::package::{
+            intent_filter::{IntentFilter, ParsedIntentInfo},
+            pkg::{Activity, AndroidPackage, Component, MainComponent, booleans},
+        };
+        let mut filter = IntentFilter::default();
         filter.add_action("android.intent.action.MANAGE_PERMISSIONS");
         filter.add_category("android.intent.category.DEFAULT");
-        let activity=Activity {main:MainComponent {component:Component {name:"p.Manage".into(),package_name:"p".into(),intents:vec![ParsedIntentInfo {filter,has_default:true,..Default::default()}],..Default::default()},enabled:true,exported:true,direct_boot_aware:true,..Default::default()},..Default::default()};
-        let package=model::PackageState {name:"p".into(),app_id:10100,is:model::StateFlags{system:true,privileged:true,..Default::default()},pkg:Some(Arc::new(AndroidPackage {package_name:"p".into(),uid:10100,booleans:booleans::SYSTEM|booleans::PRIVILEGED|booleans::ENABLED,activities:vec![activity],..Default::default()})),users:[(0,model::PackageUserState::default())].into(),..Default::default()};
-        let mut state=model::State {packages:[("p".into(),package)].into(),users:[(0,model::User{id:0,..Default::default()})].into(),..Default::default()};
-        assert_eq!(select_permission_controller(&state).unwrap().as_deref(),Some("p"));
-        let package=state.packages.get_mut("p").unwrap();
+        let activity = Activity {
+            main: MainComponent {
+                component: Component {
+                    name: "p.Manage".into(),
+                    package_name: "p".into(),
+                    intents: vec![ParsedIntentInfo {
+                        filter,
+                        has_default: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                enabled: true,
+                exported: true,
+                direct_boot_aware: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let package = model::PackageState {
+            name: "p".into(),
+            app_id: 10100,
+            is: model::StateFlags {
+                system: true,
+                privileged: true,
+                ..Default::default()
+            },
+            pkg: Some(Arc::new(AndroidPackage {
+                package_name: "p".into(),
+                uid: 10100,
+                booleans: booleans::SYSTEM | booleans::PRIVILEGED | booleans::ENABLED,
+                activities: vec![activity],
+                ..Default::default()
+            })),
+            users: [(0, model::PackageUserState::default())].into(),
+            ..Default::default()
+        };
+        let mut state = model::State {
+            packages: [("p".into(), package)].into(),
+            users: [(
+                0,
+                model::User {
+                    id: 0,
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            select_permission_controller(&state).unwrap().as_deref(),
+            Some("p")
+        );
+        let package = state.packages.get_mut("p").unwrap();
         Arc::make_mut(package.pkg.as_mut().unwrap()).booleans &= !booleans::PRIVILEGED;
-        assert!(select_permission_controller(&state).unwrap_err().contains("privileged"));
+        assert!(
+            select_permission_controller(&state)
+                .unwrap_err()
+                .contains("privileged")
+        );
         state.packages.clear();
-        assert_eq!(select_permission_controller(&state).unwrap(),None);
+        assert_eq!(select_permission_controller(&state).unwrap(), None);
     }
 }

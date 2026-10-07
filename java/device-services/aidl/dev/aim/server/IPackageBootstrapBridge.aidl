@@ -41,4 +41,8 @@ interface IPackageBootstrapBridge {
     boolean isDomainSetUuidStrictValidationEnabled();
     /** Current original Settings.VersionInfo.forceCurrent values, parcel-encoded. */
     byte[] getCurrentPackageVersion();
+    /** Original libselinux restores the native installer's created file/stage label. */
+    void restoreInstallerContext(String path);
+    /** Current original user/DPM owners: user ID, exists, install/debug restrictions, managed. */
+    byte[] getInstallerUserPolicy(int userId);
 }

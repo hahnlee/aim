@@ -4,7 +4,7 @@ use crate::package::{query::Query, resolve::Resolver};
 use aim_binder_host::{
     local::{Call, Reply, Service},
     parcel::{
-        BAD_VALUE, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION, Exception, Parcel,
+        Exception, Parcel, BAD_VALUE, EX_ILLEGAL_STATE, EX_UNSUPPORTED_OPERATION,
         UNKNOWN_TRANSACTION,
     },
 };
@@ -53,6 +53,12 @@ impl Service for Computer {
             Installer(api::GetInstallerPackageName),
             InternalUid(api::GetPackageUidInternal),
             InternalName(api::ResolveInternalPackageName),
+            Same(api::IsSameApp),
+            UidAccess(api::FilterUidAccess),
+            CanQuery(api::CanQueryPackage),
+            VersionedInfo(api::GetPackageInfoInternal),
+            FilteredState(api::GetPackageStateFilteredName),
+            UidTargetSdk(api::GetUidTargetSdkVersion),
         }
         let action = match call.code {
             api::GET_VERSION => {
@@ -113,8 +119,26 @@ impl Service for Computer {
             api::GET_INSTALLER_PACKAGE_NAME => {
                 Action::Installer(api::GetInstallerPackageName::read(&mut call.data)?)
             }
-            api::GET_PACKAGE_UID_INTERNAL=>Action::InternalUid(api::GetPackageUidInternal::read(&mut call.data)?),
-            api::RESOLVE_INTERNAL_PACKAGE_NAME=>Action::InternalName(api::ResolveInternalPackageName::read(&mut call.data)?),
+            api::GET_PACKAGE_UID_INTERNAL => {
+                Action::InternalUid(api::GetPackageUidInternal::read(&mut call.data)?)
+            }
+            api::RESOLVE_INTERNAL_PACKAGE_NAME => {
+                Action::InternalName(api::ResolveInternalPackageName::read(&mut call.data)?)
+            }
+            api::IS_SAME_APP => Action::Same(api::IsSameApp::read(&mut call.data)?),
+            api::FILTER_UID_ACCESS => {
+                Action::UidAccess(api::FilterUidAccess::read(&mut call.data)?)
+            }
+            api::CAN_QUERY_PACKAGE => Action::CanQuery(api::CanQueryPackage::read(&mut call.data)?),
+            api::GET_PACKAGE_INFO_INTERNAL => {
+                Action::VersionedInfo(api::GetPackageInfoInternal::read(&mut call.data)?)
+            }
+            api::GET_PACKAGE_STATE_FILTERED_NAME => {
+                Action::FilteredState(api::GetPackageStateFilteredName::read(&mut call.data)?)
+            }
+            api::GET_UID_TARGET_SDK_VERSION => {
+                Action::UidTargetSdk(api::GetUidTargetSdkVersion::read(&mut call.data)?)
+            }
             _ => return Err(UNKNOWN_TRANSACTION),
         };
         if call.data.remaining() != 0 {
@@ -147,8 +171,14 @@ impl Service for Computer {
             Action::Filter(a) => a.calling_uid,
             Action::Forward(_, _, uid) => *uid,
             Action::Installer(a) => a.calling_uid,
-            Action::InternalUid(_)=>1000,
-            Action::InternalName(a)=>a.calling_uid,
+            Action::InternalUid(_) => 1000,
+            Action::InternalName(a) => a.calling_uid,
+            Action::Same(a) => a.calling_uid,
+            Action::UidAccess(a) => a.calling_uid,
+            Action::CanQuery(a) => a.calling_uid,
+            Action::VersionedInfo(a) => a.calling_uid,
+            Action::FilteredState(a) => a.calling_uid,
+            Action::UidTargetSdk(_) => crate::SYSTEM_UID as i32,
             _ => unreachable!(),
         };
         if uid < 0 {
@@ -216,10 +246,69 @@ impl Service for Computer {
                 Ok(Err(error)) => reply.write_exception(&error),
                 Err(error) => unsupported(&mut reply, error),
             },
-            Action::InternalUid(a)=>match query.package_uid_internal(a.package_name.as_deref().unwrap_or_default(),a.flags,a.user_id,1000) {
-                Ok(value)=>api::write_get_package_uid_internal_reply(&mut reply,value),Err(error)=>unsupported(&mut reply,error),
+            Action::InternalUid(a) => match query.package_uid_internal(
+                a.package_name.as_deref().unwrap_or_default(),
+                a.flags,
+                a.user_id,
+                1000,
+            ) {
+                Ok(value) => api::write_get_package_uid_internal_reply(&mut reply, value),
+                Err(error) => unsupported(&mut reply, error),
             },
-            Action::InternalName(a)=>api::write_resolve_internal_package_name_reply(&mut reply,&a.package_name.map(|name|query.resolve_internal_package_name(&name,a.version_code))),
+            Action::InternalName(a) => match a
+                .package_name
+                .as_deref()
+                .map(|name| query.internal_resolve_name(name, a.version_code))
+                .transpose()
+            {
+                Ok(value) => api::write_resolve_internal_package_name_reply(&mut reply, &value),
+                Err(error) => unsupported(&mut reply, error),
+            },
+            Action::Same(a) => match query.internal_same_app(
+                a.package_name.as_deref(),
+                a.flags,
+                a.comparison_uid,
+                a.user_id,
+            ) {
+                Ok(Ok(value)) => api::write_is_same_app_reply(&mut reply, value),
+                Ok(Err(error)) => reply.write_exception(&error),
+                Err(error) => unsupported(&mut reply, error),
+            },
+            Action::UidAccess(a) => match query.internal_filter_uid(a.target_uid, a.calling_uid) {
+                Ok(value) => api::write_filter_uid_access_reply(&mut reply, value),
+                Err(error) => unsupported(&mut reply, error),
+            },
+            Action::CanQuery(a) => {
+                match query.internal_can_query(a.query_uid, a.target_package_name.as_deref()) {
+                    Ok(Ok(value)) => api::write_can_query_package_reply(&mut reply, value),
+                    Ok(Err(error)) => reply.write_exception(&error),
+                    Err(error) => unsupported(&mut reply, error),
+                }
+            }
+            Action::VersionedInfo(a) => match query.package_info_internal(
+                a.package_name.as_deref().unwrap_or_default(),
+                a.version_code,
+                a.flags,
+                a.user_id,
+                a.filter_calling_uid,
+            ) {
+                Ok(Ok(value)) => {
+                    api::write_get_package_info_internal_reply(&mut reply, value.as_ref())
+                }
+                Ok(Err(error)) => reply.write_exception(&error),
+                Err(error) => unsupported(&mut reply, error),
+            },
+            Action::FilteredState(a) => match query.internal_filtered_package_name(
+                a.package_name.as_deref().unwrap_or_default(),
+                a.user_id,
+            ) {
+                Ok(value) => api::write_get_package_state_filtered_name_reply(&mut reply, &value),
+                Err(error) => unsupported(&mut reply, error),
+            },
+            Action::UidTargetSdk(a) => match query.internal_uid_target_sdk(a.uid) {
+                Ok(value) => api::write_get_uid_target_sdk_version_reply(&mut reply, value),
+                Err(error) => unsupported(&mut reply, error),
+            },
             _ => unreachable!(),
         }
         Ok(reply)

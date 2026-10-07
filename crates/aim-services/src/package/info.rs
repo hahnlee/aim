@@ -2017,7 +2017,7 @@ pub fn generate_provider_info(
 }
 
 /// `PackageInfoUtils.generateInstrumentationInfo`.
-fn generate_instrumentation_info(
+pub(in crate::package) fn generate_instrumentation_info(
     t: &Target<'_>,
     i: &pkg::Instrumentation,
     flags: i64,

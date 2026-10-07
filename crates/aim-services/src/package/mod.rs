@@ -22,6 +22,7 @@ pub mod list;
 pub mod libraries;
 mod library_parcel;
 pub mod model;
+pub mod module_metadata;
 pub mod owner;
 pub mod parse;
 pub mod pkg;
