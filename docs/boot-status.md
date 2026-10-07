@@ -48,7 +48,7 @@ Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
 PackageManager still runs original. On the M4 C branch, the native Binder
-endpoint has 77 IPackageManager method dispatches (147 remaining), backed by
+endpoint has 78 IPackageManager method dispatches (146 remaining), backed by
 captured settings, permissions and finalized library registry. Native-interface
 audio playback capture reads actual visible ApplicationInfo flags; the module
 metadata provider getter reads its configured owner (11 of 14 native methods). Shared/declared library consumers, paths, APEX directories, protected
@@ -75,7 +75,9 @@ complete replacement, persist, publish committed changes and invalidate the
 original package-info cache outside the publication lock. Old captures remain
 immutable. Harmful-warning and installer-owned category-hint setters use the same durable
 publication owner; warning text consumes original spans before persisting its
-string, and category no-ops keep the current generation. Shell-debugging policy
+string, and category no-ops keep the current generation. Update ownership can
+be relinquished by its actual owner, system or shell; a removed owner is a no-op
+and original root has no exemption. Durable settings preserve installer fields. Shell-debugging policy
 remains an explicit external-owner dependency (#987). Scalar request decisions now run after acquiring the installed disk
 owner, against the latest generation. Concurrent splash/aspect setters both
 persist and publish, with two version updates and cache invalidations (#989). Enabled/stopped/MIME

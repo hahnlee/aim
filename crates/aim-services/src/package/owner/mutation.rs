@@ -17,7 +17,10 @@ impl Store {
                     enabled,
                 );
             }
-            Change::UpdateAvailable(_) | Change::MimeGroup { .. } | Change::CategoryHint(_) => {
+            Change::UpdateAvailable(_)
+            | Change::MimeGroup { .. }
+            | Change::CategoryHint(_)
+            | Change::RelinquishUpdateOwner => {
                 let mut root = self.settings_document.clone();
                 let entry = root
                     .content
@@ -33,6 +36,7 @@ impl Store {
                     })
                     .ok_or_else(|| WriteError::before("mutation package absent"))?;
                 match &plan.change {
+                    Change::RelinquishUpdateOwner => attribute(entry, "updateOwner", None),
                     Change::CategoryHint(category) => attribute(
                         entry,
                         "categoryHint",
@@ -206,6 +210,29 @@ mod tests {
                 .splash_screen_theme,
             None
         );
+    }
+    #[test]
+    fn relinquished_update_owner_preserves_installer_and_category_on_reopen() {
+        let data = Data::new();
+        data.settings();
+        std::fs::write(data.0.join("system/packages.xml"), b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' categoryHint='4' installer='store.app' installerUid='10101' updateOwner='owner.app'/></packages>").unwrap();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        store
+            .commit_mutation(&Plan {
+                package: "example.app".into(),
+                user: None,
+                change: Change::RelinquishUpdateOwner,
+            })
+            .unwrap();
+        let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+        let package = &reopened.state().settings.packages[0];
+        assert!(package.install_source.update_owner.is_none());
+        assert_eq!(
+            package.install_source.installer.as_deref(),
+            Some("store.app")
+        );
+        assert_eq!(package.install_source.installer_uid, 10101);
+        assert_eq!(package.category_hint, 4);
     }
     #[test]
     fn category_override_is_durable_and_undefined_removes_only_hint() {

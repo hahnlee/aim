@@ -23,6 +23,9 @@ pub enum Request {
         user: i32,
         theme: Option<String>,
     },
+    RelinquishUpdateOwner {
+        package: Option<String>,
+    },
     CategoryHint {
         package: Option<String>,
         category: i32,
@@ -61,6 +64,7 @@ pub enum Change {
     SplashTheme(Option<String>),
     HarmfulWarning(Option<String>),
     CategoryHint(i32),
+    RelinquishUpdateOwner,
     MinAspectRatio(i32),
     MimeGroup {
         group: Option<String>,
@@ -115,6 +119,9 @@ impl Request {
                         theme: a.theme_name,
                     }
                 }
+                pm::RELINQUISH_UPDATE_OWNERSHIP => Self::RelinquishUpdateOwner {
+                    package: pm::RelinquishUpdateOwnership::read(r)?.target_package,
+                },
                 pm::SET_APPLICATION_CATEGORY_HINT => {
                     let a = pm::SetApplicationCategoryHint::read(r)?;
                     Self::CategoryHint {
@@ -183,6 +190,7 @@ impl Request {
                 | pm::SET_SPLASH_SCREEN_THEME
                 | pm::SET_HARMFUL_APP_WARNING
                 | pm::SET_APPLICATION_CATEGORY_HINT
+                | pm::RELINQUISH_UPDATE_OWNERSHIP
                 | pm::SET_USER_MIN_ASPECT_RATIO
                 | pm::SET_MIME_GROUP
                 | pm::SET_UPDATE_AVAILABLE
@@ -200,6 +208,42 @@ impl Request {
     pub fn decide(&self, q: &Query<'_>, pid: i32) -> Result<Result<Plan, Exception>, NotModelled> {
         if let Self::Invalid(error) = self {
             return Ok(Err(error.clone()));
+        }
+        if let Self::RelinquishUpdateOwner { package } = self {
+            let name = q.internal_resolve_name(package.as_deref().unwrap_or_default(), -1)?;
+            let state = q.state.packages.get(&name);
+            let user = apps_filter::user_id(q.calling_uid);
+            if state.is_none_or(|state| !info::user_state(state, user).installed)
+                || q.filtered_including_uninstalled(state, user)?
+            {
+                return Ok(Err(Exception::illegal_argument(format!(
+                    "Unknown target package: {}",
+                    package.as_deref().unwrap_or("null")
+                ))));
+            }
+            let state = state.unwrap();
+            let owner = match state.install_source.update_owner.as_deref() {
+                Some(owner) => q.state.packages.get(&q.internal_resolve_name(owner, -1)?),
+                None => None,
+            };
+            let change = if let Some(owner) = owner {
+                let caller = apps_filter::app_id(q.calling_uid);
+                if !matches!(caller, apps_filter::SYSTEM_UID | apps_filter::SHELL_UID)
+                    && caller != owner.app_id
+                {
+                    return Ok(Err(Exception::security(
+                        "Caller is not the current update owner.",
+                    )));
+                }
+                Change::RelinquishUpdateOwner
+            } else {
+                Change::None
+            };
+            return Ok(Ok(Plan {
+                package: name,
+                user: None,
+                change,
+            }));
         }
         if let Self::CategoryHint {
             package,
@@ -283,7 +327,10 @@ impl Request {
             }));
         }
         let (package, user) = match self {
-            Self::Invalid(_) | Self::HarmfulWarning { .. } | Self::CategoryHint { .. } => {
+            Self::Invalid(_)
+            | Self::HarmfulWarning { .. }
+            | Self::CategoryHint { .. }
+            | Self::RelinquishUpdateOwner { .. } => {
                 unreachable!()
             }
             Self::Enabled(s) => (&s.package, Some(s.user)),
@@ -474,6 +521,7 @@ impl Plan {
             }
             Change::UpdateAvailable(value) => ps.is.update_available = *value,
             Change::CategoryHint(value) => ps.category_override = *value,
+            Change::RelinquishUpdateOwner => ps.install_source.update_owner = None,
             change => {
                 let user = self.user.expect("user mutation");
                 let current = ps.users.entry(user).or_default();
@@ -523,6 +571,16 @@ impl Plan {
                     .find(|(name, _)| name == group)
                     .ok_or("mutation MIME group absent")?;
                 *current = types.iter().cloned().map(Some).collect();
+                Ok(())
+            }
+            Change::RelinquishUpdateOwner => {
+                scan.settings
+                    .packages
+                    .iter_mut()
+                    .find(|package| package.name == self.package)
+                    .ok_or("mutation package absent")?
+                    .install_source
+                    .update_owner = None;
                 Ok(())
             }
             Change::CategoryHint(value) => {
@@ -583,6 +641,7 @@ impl Plan {
 pub fn reply(code: u32) -> aim_binder_host::parcel::Parcel {
     let mut reply = aim_binder_host::parcel::Parcel::new();
     match code {
+        pm::RELINQUISH_UPDATE_OWNERSHIP => pm::write_relinquish_update_ownership_reply(&mut reply),
         pm::SET_COMPONENT_ENABLED_SETTING | pm::SET_APPLICATION_ENABLED_SETTING => {
             return enabled::reply(code);
         }
@@ -635,6 +694,50 @@ mod tests {
             .into(),
             ..Default::default()
         }
+    }
+    #[test]
+    fn relinquish_uses_owner_app_id_and_missing_owner_is_noop() {
+        let mut state = state();
+        state.renamed_packages = Some(Vec::new());
+        let ps = state.packages.get_mut("fixture").unwrap();
+        ps.pkg = Some(std::sync::Arc::new(crate::package::pkg::AndroidPackage {
+            package_name: "fixture".into(),
+            uid: 10100,
+            ..Default::default()
+        }));
+        ps.install_source.update_owner = Some("fixture".into());
+        let decide = |state: &model::State, uid| {
+            let filter = AppsFilter::new(state, &Config::default()).unwrap();
+            Request::RelinquishUpdateOwner {
+                package: Some("fixture".into()),
+            }
+            .decide(
+                &Query {
+                    state,
+                    filter: &filter,
+                    calling_uid: uid,
+                },
+                1,
+            )
+            .unwrap()
+        };
+        for uid in [10100, 1000, 2000] {
+            assert_eq!(
+                decide(&state, uid).unwrap().change,
+                Change::RelinquishUpdateOwner
+            );
+        }
+        assert_eq!(
+            decide(&state, 0).unwrap_err().code,
+            aim_binder_host::parcel::EX_SECURITY
+        ); // original root has no exemption
+        state
+            .packages
+            .get_mut("fixture")
+            .unwrap()
+            .install_source
+            .update_owner = Some("removed.owner".into());
+        assert_eq!(decide(&state, 0).unwrap().change, Change::None);
     }
     #[test]
     fn category_hint_requires_recorded_installer_and_keeps_noop_generation() {

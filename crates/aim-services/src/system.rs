@@ -1599,6 +1599,7 @@ impl System {
                 | Change::SplashTheme(_)
                 | Change::HarmfulWarning(_)
                 | Change::CategoryHint(_)
+                | Change::RelinquishUpdateOwner
                 | Change::MinAspectRatio(_)
                 | Change::UpdateAvailable(_)
         ) {

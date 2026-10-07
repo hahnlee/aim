@@ -317,6 +317,7 @@ impl Service for PackageQueries {
                         | pm::SET_UPDATE_AVAILABLE
                         | pm::SET_HARMFUL_APP_WARNING
                         | pm::SET_APPLICATION_CATEGORY_HINT
+                        | pm::RELINQUISH_UPDATE_OWNERSHIP
                 )
             {
                 if let Some(answer) = self.mutation(call, capture.as_ref(), &query) {
