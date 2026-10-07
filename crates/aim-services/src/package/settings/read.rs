@@ -48,20 +48,14 @@ impl Settings {
         self.read_document(bytes, |settings, reader, start| {
             match start.name.as_str() {
                 "package" => {
-                    let existing = start
-                        .string("name")
-                        .is_some_and(|name| settings.packages.iter().any(|p| p.name == name));
                     settings.read_package_with_ids(
                         reader,
                         start,
                         ids,
                         attempt,
-                        |package, reader, child, ids| {
+                        |package, reader, child, ids, created| {
                             let Some(child) = child else {
-                                owners.package_registered(
-                                    package,
-                                    package.shared_user || !existing,
-                                )?;
+                                owners.package_registered(package, created)?;
                                 return Ok(true);
                             };
                             let handled = owners.package_child(package, reader, child, ids)?;

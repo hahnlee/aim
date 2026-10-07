@@ -141,6 +141,21 @@ pub fn export(directory: &Path) {
             )
             .unwrap();
         }
+        if settings.packages.iter().any(|p| p.name == "q") {
+            let body = "<packages><package name='q' codePath='/changed' userId='10002' domainSetId='00000000-0000-0000-0000-000000000003'><perms><item name='after'/></perms></package></packages>";
+            for (mode, xml) in ["<packages><package name='q' codePath='/changed' userId='10002' domainSetId='00000000-0000-0000-0000-000000000003'/></packages>".into(), body.to_owned(), body.replace("</package></packages>", "<unknown><"), body.to_owned()].into_iter().enumerate() {
+                let bytes = if mode == 1 { aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap()).unwrap() } else { xml.into_bytes() };
+                fs::write(directory.join(format!("install-binding-{index}.reread-{mode}")), &bytes).unwrap();
+                let mut owners = InstallRead { users: &[10,0], packages: &mut packages, shared_users: &mut groups, remaining: &mut Remaining };
+                let read = settings.read_owned_document(&bytes, &mut ids, &mut attempt, true, &mut owners);
+                if matches!(read, Err(ReadError::File(_))) { settings.read_owned_document(b"<packages/>", &mut ids, &mut attempt, true, &mut owners).unwrap(); } else { read.unwrap(); }
+                let package = settings.packages.iter().find(|p| p.name == "q").unwrap();
+                assert!(package.shared_user); assert_eq!(package.shared_app_id(), Some(10002));
+                assert!(attempt.pending.is_empty());
+                fs::write(directory.join(format!("install-binding-{index}.reread-{mode}.shared")), format!("{}|{}", package.shared_user, package.install_permissions_fixed)).unwrap();
+                fs::write(directory.join(format!("install-binding-{index}.reread-{mode}.permissions")), groups["g"].project(10002, &[10,0]).unwrap().bytes()).unwrap();
+            }
+        }
     }
 }
 

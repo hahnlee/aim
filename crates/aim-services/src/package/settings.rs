@@ -722,7 +722,7 @@ impl Settings {
             &Element,
         ) -> Result<bool, ReadError>,
     ) -> Result<PackageReadOutcome, ReadError> {
-        self.read_package_with_ids(reader, start, ids, attempt, |package, reader, child, _| {
+        self.read_package_with_ids(reader, start, ids, attempt, |package, reader, child, _, _| {
             match child {
                 Some(child) => read_owner(package, reader, child),
                 None => Ok(false),
@@ -743,12 +743,14 @@ impl Settings {
             &mut aim_android_xml::pull::Reader<'_>,
             Option<&Element>,
             &super::owner::app_ids::AppIds,
+            bool,
         ) -> Result<bool, ReadError>,
     ) -> Result<PackageReadOutcome, ReadError> {
         let Some(mut incoming) = package_header(start)? else {
             signatures::skip(reader)?;
             return Ok(PackageReadOutcome::InvalidHeader);
         };
+        let created = incoming.shared_user || !self.packages.iter().any(|p| p.name == incoming.name);
         let first_install_time = incoming.legacy_first_install_time;
         incoming.legacy_first_install_time = 0;
         let (target, outcome) = if incoming.shared_user {
@@ -783,6 +785,7 @@ impl Settings {
             incoming.old_paths = existing.old_paths.clone();
             incoming.leaving_shared_user = existing.leaving_shared_user;
             incoming.shared_user_app_id = existing.shared_user_app_id;
+            incoming.shared_user = existing.shared_user;
             incoming.transient = existing.transient.clone();
             incoming.install_permissions_fixed = existing.install_permissions_fixed;
             let progress = incoming.loading_progress;
@@ -803,13 +806,13 @@ impl Settings {
             let index = self.packages.len() - 1;
             (&mut self.packages[index], PackageReadOutcome::Active(index))
         };
-        read_owner(target, reader, None, ids)?;
+        read_owner(target, reader, None, ids, created)?;
         target.set_page_size_compat(defaulted(start.int("pageSizeCompat"), 0))?;
         target.read_children(
             reader,
             &mut attempt.signatures,
             &mut attempt.key_set_refs,
-            |package, reader, child| read_owner(package, reader, Some(child), ids),
+            |package, reader, child| read_owner(package, reader, Some(child), ids, created),
         )?;
         if first_install_time != 0 {
             attempt

@@ -102,6 +102,22 @@ public final class LegacyRestoreOracle {
                 String expected=new String(Files.readAllBytes(new File(directory,"install-binding-"+index+".bound-fixed-"+name).toPath()),java.nio.charset.StandardCharsets.UTF_8);
                 if(!marker.equals(expected)) throw new AssertionError("original pending fixed identity differs "+index+":"+name);
             }
+            var retained=settings.getPackagesLocked().get("q");
+            if(retained!=null) {
+                for(int mode=0;mode<4;mode++) {
+                    Files.write(new File(system,"packages.xml").toPath(),Files.readAllBytes(new File(directory,"install-binding-"+index+".reread-"+mode).toPath()));
+                    Files.write(new File(system,"packages.xml.reservecopy").toPath(),"<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    settings.readSettingsLPw(null,users,new android.util.ArrayMap<>());
+                    var pkgAfter=settings.getPackagesLocked().get("q");
+                    if(pkgAfter!=retained) throw new AssertionError("original retained package was replaced");
+                    String actual=pkgAfter.hasSharedUser()+"|"+pkgAfter.isInstallPermissionsFixed();
+                    String expected=new String(Files.readAllBytes(new File(directory,"install-binding-"+index+".reread-"+mode+".shared").toPath()),java.nio.charset.StandardCharsets.UTF_8);
+                    if(!actual.equals(expected)) throw new AssertionError("retained shared relationship differs "+index+":"+mode);
+                    byte[] permissions=PackageLegacyPermissions.capture(10002,new int[]{10,0},settings.getSettingLPr(10002).getLegacyPermissionState());
+                    if(!java.util.Arrays.equals(permissions,Files.readAllBytes(new File(directory,"install-binding-"+index+".reread-"+mode+".permissions").toPath()))) throw new AssertionError("retained UID permission destination differs "+index+":"+mode);
+                }
+            }
+
 
         }
     }
