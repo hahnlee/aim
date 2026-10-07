@@ -92,6 +92,7 @@ pub struct Store {
     data: PathBuf,
     state: State,
     restrictions: BTreeMap<u32, Element>,
+    unread_restrictions: BTreeSet<u32>,
     settings_document: Element,
     settings_present: bool,
     first_write_files: Vec<OwnedFile>,
@@ -134,15 +135,18 @@ impl Store {
         settings_document: Element,
         settings_present: bool,
     ) -> Result<Self, String> {
+        Self::from_state_mode(data, users, state, settings_document, settings_present, true)
+    }
+
+    fn from_state_mode(data: &Path, users: &[u32], state: State, settings_document: Element, settings_present: bool, restore_restrictions: bool) -> Result<Self, String> {
         let mut restrictions = BTreeMap::new();
         for &user in users {
             let dir = data.join("system/users").join(user.to_string());
-            let document = resilient(
+            let document = if restore_restrictions { resilient(
                 &dir.join("package-restrictions.xml"),
                 &dir.join("package-restrictions-backup.xml"),
                 |root| Ok(root.clone()),
-            )?
-            .unwrap_or_else(|| element("package-restrictions"));
+            )? } else { None }.unwrap_or_else(|| element("package-restrictions"));
             restrictions.insert(user, document);
         }
         let list_document = super::journaled(&data.join("system/packages.list"))?;
@@ -165,6 +169,7 @@ impl Store {
             data: data.to_owned(),
             state,
             restrictions,
+            unread_restrictions: if restore_restrictions { BTreeSet::new() } else { users.iter().copied().collect() },
             settings_document,
             settings_present,
             first_write_files: Vec::new(),
@@ -185,6 +190,9 @@ impl Store {
         user: u32,
         package: Option<&str>,
     ) -> Result<bool, WriteError> {
+        if self.unread_restrictions.contains(&user) {
+            return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
+        }
         let original = self
             .restrictions
             .get(&user)
@@ -345,6 +353,9 @@ impl Store {
         package: &str,
         user: u32,
     ) -> Result<bool, WriteError> {
+        if self.unread_restrictions.contains(&user) {
+            return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
+        }
         if self
             .state
             .settings
@@ -589,6 +600,9 @@ impl Store {
         user: u32,
         enabled: &Enabled,
     ) -> Result<(), WriteError> {
+        if self.unread_restrictions.contains(&user) {
+            return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
+        }
         if !(0..=4).contains(&enabled.enabled)
             || !enabled
                 .enabled_components

@@ -453,17 +453,18 @@ impl Plan {
             }
         }
         let state =
-            State::read_related(&self.data, users, settings.clone()).map_err(|message| Error {
+            State::read_related_mode(&self.data, users, settings.clone(), !report.first_boot).map_err(|message| Error {
                 events: report.events.clone(),
                 message,
             })?;
         let present = document.is_some();
-        let mut store = Store::from_state(
+        let mut store = Store::from_state_mode(
             &self.data,
             users,
             state,
             document.unwrap_or_else(|| element("packages")),
             present,
+            !report.first_boot,
         )
         .map_err(|message| Error {
             events: report.events.clone(),

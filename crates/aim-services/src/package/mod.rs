@@ -106,6 +106,15 @@ impl State {
     }
 
     fn read_related(data: &Path, users: &[u32], settings: Settings) -> Result<State, String> {
+        Self::read_related_mode(data, users, settings, true)
+    }
+
+    fn read_related_mode(
+        data: &Path,
+        users: &[u32],
+        settings: Settings,
+        restore_package_users: bool,
+    ) -> Result<State, String> {
         let system = data.join("system");
         let list = journaled(&system.join("packages.list"))?
             .map(|text| list::parse(&text))
@@ -117,7 +126,12 @@ impl State {
         )?;
         let users = users
             .iter()
-            .map(|&user| Ok((user, read_user(data, user, &settings)?)))
+            .map(|&user| {
+                Ok((
+                    user,
+                    read_user(data, user, &settings, restore_package_users)?,
+                ))
+            })
             .collect::<Result<_, String>>()?;
         Ok(State {
             settings,
@@ -128,13 +142,22 @@ impl State {
     }
 }
 
-fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String> {
+fn read_user(
+    data: &Path,
+    user: u32,
+    settings: &Settings,
+    restore_package_users: bool,
+) -> Result<User, String> {
     let dir = data.join("system/users").join(user.to_string());
-    let file = resilient(
-        &dir.join("package-restrictions.xml"),
-        &dir.join("package-restrictions-backup.xml"),
-        Restrictions::parse,
-    )?;
+    let file = if restore_package_users {
+        resilient(
+            &dir.join("package-restrictions.xml"),
+            &dir.join("package-restrictions-backup.xml"),
+            Restrictions::parse,
+        )?
+    } else {
+        None
+    };
     // A package the settings do not know is dropped, one the file does not
     // know has the default state; a first install time the file lacks is
     // the settings' legacy one.
@@ -151,8 +174,10 @@ fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String
             let mut state = states.remove(&p.name).unwrap_or_else(|| {
                 if legacy_times {
                     UserState::default()
-                } else {
+                } else if restore_package_users {
                     UserState::initialized()
+                } else {
+                    UserState::default()
                 }
             });
             if legacy_times && state.first_install_time == 0 {
@@ -168,13 +193,16 @@ fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String
     Ok(User {
         restrictions,
         access: atomic(&permissions.join("access.abx"), AccessUser::parse)?,
-        runtime_permissions: atomic(
-            &permissions.join("runtime-permissions.xml"),
-            RuntimePermissions::parse,
-        )?,
+        runtime_permissions: if restore_package_users {
+            atomic(
+                &permissions.join("runtime-permissions.xml"),
+                RuntimePermissions::parse,
+            )?
+        } else {
+            None
+        },
     })
 }
-
 /// `path`'s bytes; `None` when it does not exist.
 fn bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {

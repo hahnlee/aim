@@ -44,6 +44,7 @@ public final class ScanSettingsWriteOracle {
         verifyLegacyDomainEvents(cache.getParentFile());
         verifyModernDomainEvents(cache.getParentFile());
         verifyBootVersionEvents(cache.getParentFile());
+        verifyFalseUserContinuation(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -104,6 +105,20 @@ public final class ScanSettingsWriteOracle {
                 rows.add(v.sdkVersion==current.sdkVersion && v.databaseVersion==current.databaseVersion && java.util.Objects.equals(v.buildFingerprint,current.buildFingerprint) && java.util.Objects.equals(v.fingerprint,current.fingerprint) ? "current" : v.sdkVersion+","+v.databaseVersion+","+v.buildFingerprint+","+v.fingerprint);
             }
             java.nio.file.Files.write(new java.io.File(directory,"boot-version-output-"+index).toPath(),String.join("|",rows).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyFalseUserContinuation(java.io.File directory) throws Exception {
+        for(int mode=0;mode<2;mode++) {
+            var data=new java.io.File(directory,"false-user-continuation-original-"+mode);var system=new java.io.File(data,"system");system.mkdirs();
+            var userDir=new java.io.File(system,"users/0");userDir.mkdirs();
+            byte[] bad="malformed per-user input".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            var restrictions=new java.io.File(userDir,"package-restrictions.xml");java.nio.file.Files.write(restrictions.toPath(),bad);
+            var runtime=new java.io.File(data,"misc_de/0/com.android.permission");runtime.mkdirs();var runtimeFile=new java.io.File(runtime,"runtime-permissions.xml");java.nio.file.Files.write(runtimeFile.toPath(),bad);
+            if(mode==1)java.nio.file.Files.write(new java.io.File(system,"packages.xml").toPath()," ".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());var user=new android.content.pm.UserInfo();user.id=0;
+            if(settings.readLPw(null,java.util.List.of(user)))throw new AssertionError("original initial false continuation changed");
+            if(!java.util.Arrays.equals(bad,java.nio.file.Files.readAllBytes(restrictions.toPath())) || !java.util.Arrays.equals(bad,java.nio.file.Files.readAllBytes(runtimeFile.toPath())))throw new AssertionError("original false continuation consumed user files");
+            var internal=settings.findOrCreateVersion(null);if(internal.sdkVersion!=36 || internal.databaseVersion!=3)throw new AssertionError("original false continuation missed finally versions");
         }
     }
     private static void verifyModernDomainEvents(java.io.File directory) throws Exception {

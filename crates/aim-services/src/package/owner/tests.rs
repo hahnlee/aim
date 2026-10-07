@@ -80,6 +80,41 @@ fn boot_frontend_completion_precedes_related_files_and_preserves_input_on_failur
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }
 
+#[test]
+fn false_boot_continuation_skips_package_user_files_but_retry_continues_them() {
+    use crate::package::settings::{Settings, Version};
+    let data = Data::new(); let restrictions = data.settings();
+    let path = data.0.join("system/packages.xml");
+    fs::write(&restrictions, b"malformed package user file").unwrap();
+    let runtime = data.0.join("misc_de/0").join(crate::package::PERMISSION_DIR);
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(runtime.join("runtime-permissions.xml"), b"malformed runtime user file").unwrap();
+    let current = Version { sdk_version: 36, database_version: 3, ..Default::default() };
+    for input in [None, Some(b" ".as_slice())] {
+        let mut state = Settings::default();
+        if let Some(bytes) = input { fs::write(&path, bytes).unwrap(); } else { fs::remove_file(&path).ok(); }
+        let (mut store, report) = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut state, &current, |stage, state| match stage {
+            recovery::ReadStage::File(bytes) => state.read_document(bytes, |_,_,_| Ok(false)),
+            recovery::ReadStage::Complete => panic!("false continuation finalized"),
+        }).unwrap();
+        assert!(report.first_boot); assert_eq!(state.versions.len(), 2);
+        assert!(store.state().users[0].1.runtime_permissions.is_none());
+        assert!(store.state().users[0].1.restrictions.packages.is_empty());
+        let error = store.clear_package_preferred_activities(0, None).unwrap_err();
+        assert!(!error.committed); assert!(error.message.contains("not restored"));
+        assert_eq!(fs::read(&restrictions).unwrap(), b"malformed package user file");
+    }
+    fs::write(&path, b"<packages><version sdkVersion='33' databaseVersion='bad'/></packages>").unwrap();
+    let mut state = Settings::default(); let mut completed = false;
+    let error = recovery::Plan::inspect(&data.0).unwrap().recover_boot_frontend(&[0], &mut state, &current, |stage, state| match stage {
+        recovery::ReadStage::File(bytes) => state.read_document(bytes, |_,_,_| Ok(false)),
+        recovery::ReadStage::Complete => { completed = true; Ok(None) }
+    }).err().unwrap();
+    assert!(completed); assert!(!path.exists());
+    assert!(error.message.contains("XML") || error.message.contains("start") || error.message.contains("root"), "{}", error.message);
+    assert_eq!(fs::read(&restrictions).unwrap(), b"malformed package user file");
+}
+
 pub(super) struct Data(pub(super) PathBuf);
 
 impl Data {
