@@ -20,6 +20,7 @@ mod common {
     pub mod legacy_domain_events;
     pub mod modern_domain_events;
     pub mod domain_read_merge;
+    pub mod boot_version_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
 }
@@ -626,6 +627,7 @@ fn native_package_parcels_match_original_read_write() {
         (state, status)
     }).collect();
     eprintln!("original modern domain event cases: {}", modern_domain_inputs.len());
+    let boot_version_expected = common::boot_version_events::export(&directory);
     let defaults_inputs = common::settings_defaults::inputs();
     let mut defaults_expected = Vec::new();
     for (index, input) in defaults_inputs.iter().enumerate() {
@@ -4343,6 +4345,9 @@ fn native_package_parcels_match_original_read_write() {
         let mut state = aim_services::package::domain_verification::State::default(); state.read(&root).unwrap(); common::modern_domain_events::normalize(&mut state);
         assert_eq!(fs::read_to_string(directory.join(format!("modern-domain-event-status-{index}"))).unwrap(), expected.1, "original modern domain status {index}");
         assert_eq!(state, expected.0, "original modern domain event {index}");
+    }
+    for (index, expected) in boot_version_expected.iter().enumerate() {
+        assert_eq!(fs::read_to_string(directory.join(format!("boot-version-output-{index}"))).unwrap(), *expected, "original boot VersionInfo {index}");
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {

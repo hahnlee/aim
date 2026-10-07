@@ -900,12 +900,13 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     let path = root.join("system/packages.xml");
     let bytes = b"<packages><version sdkVersion='36' databaseVersion='3'/><extension value='keep'/></packages>";
     std::fs::write(&path, bytes).unwrap();
+    let current_version = crate::package::settings::Version {sdk_version:36,database_version:3,build_fingerprint:Some("fixture-build".into()),fingerprint:Some("fixture-partitions".into()),..Default::default()};
     let mut settings = Settings::default();
-    let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
+    let (store, report) = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
     assert!(!report.first_boot);
     assert_eq!(store.state().settings.versions[0].sdk_version, 36);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |_, state| {
+    let error = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |_, state| {
         state.find_or_create_version(None).database_version = 8;
         Err(ReadError::Owner("native settings owner unavailable".into()))
     }).err().unwrap();
@@ -913,7 +914,7 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
     assert_eq!(settings.versions[0].database_version, 8);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     if let Some(replace) = &mut replace {
-        let error = system.recover_package_settings(bridge, &root, &[], &mut settings, |bytes, state| {
+        let error = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |bytes, state| {
             let document = state.read_document(bytes, |_,_,_| Ok(false))?;
             replace();
             Ok(document)
@@ -922,7 +923,7 @@ fn verify_settings_boot_entry(system: &Arc<System>, bridge: &Arc<crate::package:
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         let backup = root.join("system/packages-backup.xml");
         std::fs::write(&backup, bytes).unwrap();
-        let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, |_,_| panic!("stale bridge read settings")).err().unwrap();
+        let stale = system.recover_package_settings(bridge, &root, &[], &mut settings, &current_version, |_,_| panic!("stale bridge read settings")).err().unwrap();
         assert!(stale.events.is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert_eq!(std::fs::read(&backup).unwrap(), bytes);

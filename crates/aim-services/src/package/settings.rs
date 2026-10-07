@@ -867,6 +867,25 @@ impl Settings {
         Self::parse_with_config(root, &Default::default())
     }
 
+    /// Settings.VersionInfo.forceCurrent on openRead absence, including recursive
+    /// failRead retry. Preserve each volume's identity while copying build values.
+    pub fn force_current_boot_versions(&mut self, current: &Version) {
+        for uuid in [None, Some("primary_physical".into())] {
+            let version = self.find_or_create_version(uuid.clone());
+            *version = Version { volume_uuid: uuid, ..current.clone() };
+        }
+    }
+
+    /// Settings.readLPw finally creates only missing core volume owners, even
+    /// after no-start-tag or an uncaught input/owner error.
+    pub fn ensure_boot_versions(&mut self, current: &Version) {
+        for uuid in [None, Some("primary_physical".into())] {
+            if !self.versions.iter().any(|version| version.volume_uuid == uuid) {
+                self.versions.push(Version { volume_uuid: uuid, ..current.clone() });
+            }
+        }
+    }
+
     /// Settings.findOrCreateVersion retains one owner per volume.
     pub fn find_or_create_version(&mut self, uuid: Option<String>) -> &mut Version {
         let index = self

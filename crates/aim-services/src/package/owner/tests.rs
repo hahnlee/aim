@@ -2302,3 +2302,26 @@ fn uncaught_keyset_input_failure_preserves_the_selected_file() {
     assert!(!error.events.iter().any(|event| matches!(event, Event::Removed(_))));
     assert_eq!(fs::read(path).unwrap(), bytes);
 }
+
+#[test]
+fn boot_versions_distinguish_absence_no_start_and_uncaught_failure() {
+    use crate::package::settings::{Settings, Version};
+    let current = Version {sdk_version:36,database_version:3,build_fingerprint:Some("build".into()),fingerprint:Some("partitions".into()),..Default::default()};
+    for input in [None, Some(b" ".as_slice()), Some(b"<packages/>".as_slice())] {
+        let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap();
+        if let Some(input) = input { fs::write(data.0.join("system/packages.xml"), input).unwrap(); }
+        let mut settings = Settings::default(); settings.find_or_create_version(None).sdk_version = 30;
+        let (store, report) = recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[], &mut settings, &current, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).unwrap();
+        assert_eq!(settings.versions[0].sdk_version, if input.is_none() {36} else {30});
+        assert_eq!(settings.versions[1].volume_uuid.as_deref(), Some("primary_physical"));
+        assert_eq!(settings.versions[1].sdk_version,36);
+        assert_eq!(store.state().settings, settings);
+        assert_eq!(report.first_boot, input.is_none() || input == Some(b" ".as_slice()));
+    }
+    let data = Data::new(); fs::create_dir_all(data.0.join("system")).unwrap();
+    let bytes = b"<packages><verifier/></packages>"; fs::write(data.0.join("system/packages.xml"), bytes).unwrap();
+    let mut settings = Settings::default();
+    assert!(recovery::Plan::inspect(&data.0).unwrap().recover_boot(&[], &mut settings, &current, |bytes, state| state.read_document(bytes, |_,_,_| Ok(false))).is_err());
+    assert_eq!(settings.versions.len(),2); assert_eq!(settings.versions[0].sdk_version,36);
+    assert_eq!(fs::read(data.0.join("system/packages.xml")).unwrap(),bytes);
+}

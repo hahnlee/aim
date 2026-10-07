@@ -222,10 +222,34 @@ impl Plan {
     /// Native frontends classify unavailable owners separately from corrupt
     /// input. Earlier parser/owner mutations remain observable on either error.
     pub fn recover_with_owner(
+        self,
+        users: &[u32],
+        settings: &mut Settings,
+        parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
+    ) -> Result<(Store, Report), Error> {
+        self.recover_inner(users, settings, parse, None)
+    }
+
+    /// Native Settings boot lifecycle with values supplied by the pinned build
+    /// owner. Version initialization precedes related user state restoration.
+    pub fn recover_boot(
+        self,
+        users: &[u32],
+        settings: &mut Settings,
+        current: &crate::package::settings::Version,
+        parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
+    ) -> Result<(Store, Report), Error> {
+        let result = self.recover_inner(users, settings, parse, Some(current));
+        settings.ensure_boot_versions(current);
+        result
+    }
+
+    fn recover_inner(
         mut self,
         users: &[u32],
         settings: &mut Settings,
         mut parse: impl FnMut(&[u8], &mut Settings) -> Result<Option<Element>, ReadError>,
+        current: Option<&crate::package::settings::Version>,
     ) -> Result<(Store, Report), Error> {
         let mut events = Vec::new();
         let mut failed = false;
@@ -265,6 +289,12 @@ impl Plan {
             }
             let Some(index) = selected else {
                 events.push(Event::Absent);
+                if let Some(current) = current {
+                    settings.force_current_boot_versions(current);
+                }
+                if let Some(current) = current {
+                    settings.ensure_boot_versions(current);
+                }
                 return self.finish(
                     users,
                     settings,
@@ -285,6 +315,9 @@ impl Plan {
             }
             match parse(&self.inputs[index].as_ref().unwrap().file.payload, settings) {
                 Ok(Some(document)) => {
+                    if let Some(current) = current {
+                        settings.ensure_boot_versions(current);
+                    }
                     return self.finish(
                         users,
                         settings,
@@ -297,6 +330,9 @@ impl Plan {
                 }
                 Ok(None) => {
                     events.push(Event::NoStartTag(source));
+                    if let Some(current) = current {
+                        settings.ensure_boot_versions(current);
+                    }
                     return self.finish(
                         users,
                         settings,

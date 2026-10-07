@@ -1055,11 +1055,28 @@ unchanged, and a stale prepared read is rejected. A later actual domain commit
 still uses the current generation. Parser-to-bootstrap orchestration, full
 identity/order/state-matrix coverage, all owners and original-name activation
 remain #957/#914/#798; this API does not activate original-name native services.
-17 XML tests and 529 service units pass (5 service tests excluded, 0.49s).
-Explicit retained-owner native scan with original framework-res passes (1.14s).
-The prior full original ART oracle passed without skips (62.27s) and was not rerun
-for this capture/publication-only change. Image/template previously passed
-(6 rebuilt/36 fresh, 72.5s); runtime rebuild passes (3 rebuilt/39 fresh, 16.5s). Compile-only persistence/state-map API declarations
+Native boot Settings recovery now takes explicit current VersionInfo values.
+openRead absence force-updates internal and primary-physical versions, including
+recursive failRead retry after earlier partial version mutations. Other successful
+reads/no-start-tag retain existing version owners and add only missing core
+volumes before related user state restoration. The outer finally path also
+initializes missing versions after uncaught input/native owner errors. Generic
+file-only recovery keeps its separate semantics. System.recover_package_settings
+now requires current build-version input and uses this boot lifecycle while
+retaining its bootstrap identity guards. Units cover absence/no-start/success,
+Store/settings coherence and selected-file preservation after fatal verifier input.
+Actual original Settings.readLPw agrees on eight lifecycle cases: absent/empty/
+valid data, saved internal/external versions, failed-read retry with absent or
+empty reserve, and fatal input. Fingerprints are normalized to equality with the
+original forceCurrent values; the oracle checks the pinned SDK/database versions.
+Current build-owner delivery, complete user/permission/group/global state and
+SystemServer orchestration remain #914/#912/#798; this does not prove native PMS
+construction/default activation or full current-fingerprint delivery.
+17 XML tests and 530 service units pass (5 service tests excluded, 0.49s).
+Full original ART oracle passes without skips (62.02s), retaining previous domain/
+verifier/package/shared/keyset/read-and-retirement/permission comparisons. Explicit
+retained-owner framework-res scan passes (1.19s). Image/template build passes
+(9 rebuilt/33 fresh, 72.7s). Compile-only persistence/state-map API declarations
 were checked against the pinned image after making the unused constructor private,
 as supported by the existing image-link verifier for shrunk static-only classes.
 The prior retained-owner framework-res scan passed (1.45s) and was not rerun.

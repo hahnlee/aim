@@ -26,6 +26,7 @@ public final class Settings {
     final com.android.server.pm.permission.LegacyPermissionSettings mPermissions = null;
     KeySetManagerService getKeySetManagerService() { throw new RuntimeException("stub"); }
     public static class VersionInfo {
+        public void forceCurrent() { throw new RuntimeException("stub"); }
         int sdkVersion;
         int databaseVersion;
         String buildFingerprint;

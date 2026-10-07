@@ -1088,6 +1088,7 @@ impl System {
         data: &std::path::Path,
         users: &[u32],
         settings: &mut crate::package::settings::Settings,
+        current_version: &crate::package::settings::Version,
         mut read: impl FnMut(
             &[u8],
             &mut crate::package::settings::Settings,
@@ -1111,13 +1112,17 @@ impl System {
             events: Vec::new(),
             message,
         })?;
-        let recovered =
-            Plan::inspect(data)?.recover_with_owner(users, settings, |bytes, settings| {
+        let recovered = Plan::inspect(data)?.recover_boot(
+            users,
+            settings,
+            current_version,
+            |bytes, settings| {
                 check().map_err(ReadError::Owner)?;
                 let document = read(bytes, settings)?;
                 check().map_err(ReadError::Owner)?;
                 Ok(document)
-            })?;
+            },
+        )?;
         check().map_err(|message| Error {
             events: recovered.1.events.clone(),
             message,

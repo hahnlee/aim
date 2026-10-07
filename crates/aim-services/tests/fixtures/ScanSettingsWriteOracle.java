@@ -43,6 +43,7 @@ public final class ScanSettingsWriteOracle {
         verifyVerifierEvents(cache.getParentFile());
         verifyLegacyDomainEvents(cache.getParentFile());
         verifyModernDomainEvents(cache.getParentFile());
+        verifyBootVersionEvents(cache.getParentFile());
         var in = android.os.Parcel.obtain();
         PackageSetting setting;
         try {
@@ -73,6 +74,27 @@ public final class ScanSettingsWriteOracle {
                 sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
             }
             xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyBootVersionEvents(java.io.File directory) throws Exception {
+        for (int index=0; index<8; index++) {
+            var data=new java.io.File(directory,"boot-version-original-"+index); var system=new java.io.File(data,"system"); system.mkdirs();
+            var input=new java.io.File(directory,"boot-version-input-"+index);
+            if(input.exists()) java.nio.file.Files.write(new java.io.File(system,"packages.xml").toPath(),java.nio.file.Files.readAllBytes(input.toPath()));
+            var reserve=new java.io.File(directory,"boot-version-reserve-"+index);
+            if(reserve.exists()) java.nio.file.Files.write(new java.io.File(system,"packages.xml.reservecopy").toPath(),java.nio.file.Files.readAllBytes(reserve.toPath()));
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());
+            var current=new Settings.VersionInfo(); current.forceCurrent();
+            if(current.sdkVersion!=36 || current.databaseVersion!=3) throw new AssertionError("pinned current VersionInfo differs");
+            var internal=settings.findOrCreateVersion(null); internal.sdkVersion=30; internal.databaseVersion=1; internal.buildFingerprint="old"; internal.fingerprint="old-partitions";
+            var rows=new java.util.ArrayList<String>();
+            try { rows.add(Boolean.toString(!settings.readLPw(null,java.util.List.of()))); }
+            catch(NullPointerException failure){ rows.add("fatal"); }
+            for(String uuid:new String[]{null,"primary_physical"}) {
+                var v=settings.findOrCreateVersion(uuid);
+                rows.add(v.sdkVersion==current.sdkVersion && v.databaseVersion==current.databaseVersion && java.util.Objects.equals(v.buildFingerprint,current.buildFingerprint) && java.util.Objects.equals(v.fingerprint,current.fingerprint) ? "current" : v.sdkVersion+","+v.databaseVersion+","+v.buildFingerprint+","+v.fingerprint);
+            }
+            java.nio.file.Files.write(new java.io.File(directory,"boot-version-output-"+index).toPath(),String.join("|",rows).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
     }
     private static void verifyModernDomainEvents(java.io.File directory) throws Exception {
