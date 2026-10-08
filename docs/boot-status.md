@@ -557,7 +557,12 @@ or changed to make the diagnostic pass. PackageManagerHost observes unknown get-
 Native shell now calls the original UserManager.getMaxSupportedUsers through
 its authenticated typed leaf and prints the exact original prefix. Actual Binder
 CLI output/exception/tail tests and complete private Java original linkage/stub
-code checks pass; matched image deployment remains pending and C111 is unchanged. The
+code checks pass; matched image deployment remains pending and C111 is unchanged.
+C111 also exposes retained updated-system-app state after factory restore rejects
+an APK inside APEX (#1171). Native restore now resolves the actual original APEX
+inventory before parsing, retaining its partition, application privilege and
+PARSE_APK_IN_APEX policy. Location/parser and sequential update-to-factory owner
+regressions both pass; actual affected CTS replay remains pending. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,

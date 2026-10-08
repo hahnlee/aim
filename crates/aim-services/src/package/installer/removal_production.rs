@@ -163,16 +163,18 @@ impl Factory {
             .scanned_user_states(&active.name)
             .cloned()
             .ok_or_else(|| fail("System update user owner absent"))?;
-        let parsed = self
-            .image
-            .apks
-            .parsed_path(
-                &factory.code_path,
-                crate::package::parse::PARSE_IS_SYSTEM_DIR,
-            )
+        let apexes = if factory.code_path.starts_with("/apex/") {
+            self.bridge.apex_inventory()
+                .map_err(|error| fail(format!("Factory APEX inventory: {error:?}")))?
+                .scan_apexes()
+        } else {
+            Vec::new()
+        };
+        let location = system_location(&factory.code_path, &apexes)?;
+        let parsed = self.image.apks
+            .parsed_path(&factory.code_path, location.parse_flags())
             .map_err(fail)?;
         let signing = self.image.apks.signing_details(&parsed).map_err(fail)?;
-        let location = system_location(&factory.code_path)?;
         let code = scan::Code {
             location,
             parsed,
@@ -432,8 +434,25 @@ fn publication_error(error: crate::package::scan::live_install::PublicationFailu
         }
     }
 }
-fn system_location(path: &str) -> Result<crate::package::scan::Location, Exception> {
+fn system_location(path: &str, apexes: &[crate::package::scan::Apex]) -> Result<crate::package::scan::Location, Exception> {
     use crate::package::scan::{Kind, Location, Partition};
+    if path.starts_with("/apex/") {
+        let apex = apexes.iter().filter(|apex| {
+            path.strip_prefix(&apex.mount_path).is_some_and(|rest| rest.starts_with('/'))
+        }).max_by_key(|apex| apex.mount_path.len())
+            .ok_or_else(|| fail("Factory APEX code has no original active origin"))?;
+        if apex.partition == Partition::Data {
+            return Err(fail("Factory APEX has no preinstalled partition"));
+        }
+        let relative = &path[apex.mount_path.len() + 1..];
+        let kind = if relative.starts_with("priv-app/") { Kind::PrivApp }
+            else if relative.starts_with("app/") { Kind::App }
+            else { return Err(fail("Factory APEX code is outside its application directories")); };
+        if relative.split('/').any(|component| component.is_empty() || matches!(component, "." | "..")) {
+            return Err(fail("Factory APEX code path is not canonical"));
+        }
+        return Ok(Location { path: path.into(), partition: apex.partition, kind, apex: Some(apex.clone()) });
+    }
     let (partition, prefix) = if path.starts_with("/system_ext/") {
         (Partition::SystemExt, "/system_ext/")
     } else if path.starts_with("/product/") {
@@ -493,5 +512,32 @@ impl Drop for PreparedData {
                 eprintln!("Factory app-data rollback for {name}/{user}: {error:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::{parse, scan::{Apex, Kind, Partition}};
+    #[test]
+    fn factory_restore_uses_original_apex_origin_and_parse_policy() {
+        let apex = Apex { module_name: Some("vendor.module".into()), mount_path: "/apex/vendor.module".into(), partition: Partition::Product, factory: true, active_changed: false };
+        let path = "/apex/vendor.module/priv-app/Factory/base.apk";
+        let location = system_location(path, &[apex.clone()]).unwrap();
+        assert_eq!(location.partition, Partition::Product);
+        assert_eq!(location.kind, Kind::PrivApp);
+        assert_eq!(location.apex.as_ref(), Some(&apex));
+        assert_eq!(location.parse_flags(), parse::PARSE_IS_SYSTEM_DIR | parse::PARSE_APK_IN_APEX);
+        assert!(location.privileged());
+        let app = system_location("/apex/vendor.module/app/Factory/base.apk", &[apex.clone()]).unwrap();
+        assert_eq!(app.kind, Kind::App); assert!(!app.privileged());
+        for path in ["/apex/vendor.module-other/priv-app/F", "/apex/vendor.module/priv-app/../F", "/apex/vendor.module/bin/F", "/apex/unknown/priv-app/F"] {
+            assert!(system_location(path, &[apex.clone()]).is_err(), "{path}");
+        }
+        let mut data = apex; data.partition = Partition::Data;
+        assert!(system_location("/apex/vendor.module/app/F", &[data]).is_err());
+        let ordinary = system_location("/system_ext/priv-app/F/base.apk", &[]).unwrap();
+        assert_eq!(ordinary.partition, Partition::SystemExt); assert_eq!(ordinary.apex, None);
+        assert_eq!(ordinary.parse_flags(), parse::PARSE_IS_SYSTEM_DIR);
     }
 }

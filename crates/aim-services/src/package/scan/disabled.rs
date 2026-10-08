@@ -990,6 +990,34 @@ mod tests {
         }
     }
     #[test]
+    fn update_then_factory_enable_preserves_user_state_and_clears_only_update_flag() {
+        use crate::package::{pkg::{AndroidPackage, booleans}, settings::{Package, Settings}, sign::SigningDetails};
+        let factory = Package { name: "factory".into(), code_path: "/apex/vendor.module/priv-app/Factory".into(), app_id: 10001, flags: 1, version_code: 1, ..Default::default() };
+        let mut owner = SigningScan::new(&Default::default(), &Settings { packages: vec![factory.clone()], ..Default::default() }, 36).unwrap();
+        let signing = SigningDetails { unknown: false, current_flags: Vec::new(), signatures: vec![vec![3]], scheme_version: 3, public_keys: Some(Vec::new()), past_signing_certificates: None };
+        let parsed = AndroidPackage { package_name: factory.name.clone(), uid: factory.app_id, booleans: booleans::SYSTEM | booleans::ENABLED, feature_flag_state: Some(Vec::new()), signing_details: Some(signing.parcel_details().unwrap()), ..Default::default() };
+        owner.loaded.insert(factory.name.clone(), std::sync::Arc::new(super::super::LoadedPackage::new(parsed.clone(), signing).unwrap()));
+        let users = BTreeMap::from([(0, UserState { enabled: 3, first_install_time: 123, ..Default::default() })]);
+        owner.scanned_users.insert(factory.name.clone(), users.clone());
+        assert!(owner.disable_system_package(&factory.name).unwrap());
+        let active = &mut owner.settings.packages[0];
+        active.code_path = "/data/app/factory-update".into(); active.version_code = 2;
+        let mut update_parsed = parsed.clone();
+        super::super::enrich::application(active, &mut update_parsed, false, true);
+        assert_ne!(active.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
+        assert!(!owner.settings.disabled_system_packages[0].transient.updated_system_app);
+        let ids = owner.identities.clone();
+        let mut restored = owner.enable_system_setting(&factory.name, [7; 16]).unwrap();
+        assert!(!restored.transient.updated_system_app);
+        super::super::enrich::application(&mut restored, &mut parsed.clone(), false, false);
+        assert_eq!(restored.flags & crate::package::info::FLAG_UPDATED_SYSTEM_APP, 0);
+        assert_ne!(restored.flags & crate::package::info::FLAG_SYSTEM, 0);
+        assert_eq!(restored.app_id, factory.app_id); assert_eq!(restored.version_code, factory.version_code);
+        assert_eq!(owner.identities, ids); assert_eq!(owner.scanned_users[&factory.name], users);
+        assert!(owner.settings.disabled_system_packages.is_empty());
+    }
+
+    #[test]
     fn original_scope_aliases_bind_complete_owned_values_and_reject_foreign_inputs() {
         use crate::package::settings::{Package, Settings};
         let active = Package {
