@@ -546,7 +546,14 @@ real Tradefed reboots; SHA0f6827de97f9eb7c4c51ce432046ca0a52ad79af3d64ba9b2c1f3f
 Setting also completes with official XML2/0, done=true,
 SHA5c278472e8b4437ca2273afb0b55f041199b0b564ca894d7f43c92089f90cfd1.
 Its second body has a device-unavailable detection warning, so only observed
-reboots are claimed. PackageManagerHost follows; current full66 is3/66 complete. Its restricted permission tests reveal missing native runtime permission dump
+reboots are claimed. C111 PackageManagerHost now retains complete official XML:
+134 bodies end99 pass/33 fail/2 assumptions, SHA
+92c48ae689967dfaabdea2603fea5746b5d65ce312a0ca1a7e92d85645f7d65e.
+All33 failed cases pass in the original exact-case baseline; both assumptions
+match original outcomes. Source wrapper edits during its Bash wait invalidate
+the invocation lifetime and produce exit127 (#1178), so this is retained body
+evidence, not clean acceptance. The cohort stops normally after this module;
+owned guest/display/runner and image/data leases are absent. Its restricted permission tests reveal missing native runtime permission dump
 rows before mutation assertions (#1061). Native dump now reads the existing
 original permission owner for live granted/denied/flags, revalidates native
 UID/code/shared-user/user-inventory/install identity, and emits the pinned
