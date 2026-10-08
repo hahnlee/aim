@@ -1007,6 +1007,9 @@ public final class DisplacedSnapshotOracle {
             computer = new CapturedComputer(getVersion(), java.util.Objects.requireNonNull(read("uid-registry")), lines("read-query-codes"), identities);
             return computer;
         }
+        public long getMetadataVersion() { return getVersion(); }
+        public int getUsageRecordsLength() { throw new AssertionError("unused bulk usage delta owner"); }
+        public byte[] getUsageRecordsChunk(int offset, int length) { throw new AssertionError("unused bulk usage delta owner"); }
         @Override public long getVersion() {
             if (failVersion) throw new IllegalStateException("fixture version failure");
             return versionOverride == null ? Long.parseLong(lines("version")[0]) : versionOverride;

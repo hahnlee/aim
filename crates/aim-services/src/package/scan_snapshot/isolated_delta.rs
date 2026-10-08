@@ -54,17 +54,9 @@ impl Capture {
         owner: Option<i32>,
     ) -> Result<PackageUpdate, String> {
         let projected = self.with_isolated_owner_delta(isolated, owner)?;
-        let version = self
-            .scan
-            .version()
-            .checked_add(1)
-            .ok_or("isolated owner version exhausted")?;
-        let store = super::super::Store::new_replica_at_version(
-            self.scan.owner().clone(),
-            self.scan.usage().clone(),
-            version,
-        )
-        .map_err(|error| format!("isolated owner replica: {error:?}"))?;
+        let store = super::super::Store::prepare_unchanged_metadata_store(&self.scan)
+            .map_err(|error| format!("isolated owner replica: {error:?}"))?;
+        let version = store.capture().version();
         let mut context = (*projected.context).clone();
         context.scan_version = version;
         let mut state = (*projected.state).clone();

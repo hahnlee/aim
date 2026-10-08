@@ -357,10 +357,19 @@ fn start_native_services(
 /// synchronous call the nanoseconds until the reply, until a target
 /// thread took it and until the sender took the reply (`-` for none); the
 /// target's free and looper threads when it was sent; and the sending
-/// thread and the target thread that took it (0 for none).
+/// thread and the target thread that took it (0 for none). The sibling
+/// `<file>.pending.tsv` samples outstanding calls and their thread/parent
+/// graph every 250 ms; snapshot headers contain pending/returning counts.
 fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut pending_path = file.as_os_str().to_os_string();
+    pending_path.push(".pending.tsv");
+    let pending_path = PathBuf::from(pending_path);
+    let mut pending = std::fs::File::create(&pending_path)
+        .map_err(|error| format!("{}: {error}", pending_path.display()))?;
+    writeln!(pending, "# at_us\tid\trequest_id\tphase\tage_ns\tdevice\tfrom_pid\tfrom_euid\tfrom_tid\tto_pid\tto_tid\tdescriptor\tcode\tdelivered_ns\treplied_ns\twaiting\tloopers\tfrom_parent\tto_parent\tfrom_stack\tto_stack\tfrom_queued\tto_queued")
+        .map_err(|error| format!("{}: {error}", pending_path.display()))?;
     let driver = server.driver().clone();
     driver.start_trace();
     let nanos = |d: Option<Duration>| d.map_or("-".to_string(), |d| d.as_nanos().to_string());
@@ -368,7 +377,7 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
         .name("binder-trace".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_secs(1));
+                std::thread::sleep(Duration::from_millis(250));
                 let mut text = String::new();
                 for r in driver.take_trace() {
                     text.push_str(&format!(
@@ -390,7 +399,26 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
                         r.to_tid,
                     ));
                 }
-                if out.write_all(text.as_bytes()).is_err() {
+                let snapshot = driver.pending_trace();
+                let returning = snapshot.records.iter().filter(|record| record.returning).count();
+                let mut graph = format!("# snapshot\t{}\t{}\t{}\n", snapshot.at.as_micros(), snapshot.records.len() - returning, returning);
+                let id = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
+                for record in snapshot.records {
+                    let r = record.record;
+                    let descriptor = r.descriptor.replace(['\t', '\r', '\n'], " ");
+                    graph.push_str(&format!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                        snapshot.at.as_micros(), record.id, r.transaction_id,
+                        if record.returning { "returning" } else { "pending" },
+                        record.age.as_nanos(), r.device, r.from_pid, r.from_euid,
+                        r.from_tid, r.to_pid, r.to_tid, descriptor, r.code,
+                        nanos(r.delivered), nanos(r.latency), r.waiting, r.loopers,
+                        id(r.from_parent), id(r.to_parent), id(record.from_stack),
+                        id(record.to_stack), record.from_queued, record.to_queued,
+                    ));
+                }
+                if let Err(error) = out.write_all(text.as_bytes()).and_then(|()| pending.write_all(graph.as_bytes())) {
+                    eprintln!("binder trace: writing completed or pending records failed: {error}");
                     return;
                 }
             }

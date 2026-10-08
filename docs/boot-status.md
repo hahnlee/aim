@@ -365,7 +365,17 @@ changed active usage and rebinding shared/UID members; detached original setting
 and previous snapshots retain isolated usage values. Eleven targeted Rust cases,
 full device-services compilation and 790 aggregate native tests pass (nine
 ignored in that aggregate, including the separate host reproduction and crash
-child helper). Actual latest metadata/usage ART and app replay remain pending. Original PMS on a cloned native
+child helper). Actual original ART query/usage gate passes 1/0/0 in 68.56s: the real mapped
+version page and internal usage producer preserve latest/previous usage, detached
+settings and transient-state isolation. Latest complete oracle ABI compilation
+also passes. C88 quiet Chrome cold launch reaches 2612ms and web launch returns
+1915ms, but another ANR occurs, so the app gate remains incomplete. Isolated UID
+query-only capture now retains unchanged validated metadata while updating the
+query version (eleven owner regressions pass). Existing binder-trace can now
+record non-destructive pending/returning nested transactions every 250ms
+(#1134, actual nested byte-protocol regression passes). C89 host build passes;
+its live trace/app verification is pending. Package-add concurrency fixture still
+has no genuine publication seam and remains not run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 Original 66-module CTS campaign is running with provenance-checked resume;

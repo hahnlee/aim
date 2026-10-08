@@ -1953,11 +1953,33 @@ public final class PackageRoundTripOracle {
         PageOwner(String name, byte[] bytes, byte[] usage, byte[] seinfo, byte[] signing) { this.name = name; this.bytes = bytes; this.usage = usage; this.seinfo = seinfo; this.signing = signing; }
         @Override
         public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
+        public long getMetadataVersion() { return version; }
+        private byte[] usageRecords() throws android.os.RemoteException {
+            var header = android.os.Parcel.obtain();
+            try {
+                var names = getPackageNames(false);
+                header.writeLong(version); header.writeLong(version); header.writeInt(names.length);
+                var output = new java.io.ByteArrayOutputStream();
+                output.writeBytes(header.marshall());
+                for (String candidate : names) {
+                    byte[] record = getUsage(candidate);
+                    if (record == null) throw new AssertionError("missing controlled usage record");
+                    output.writeBytes(record);
+                }
+                return output.toByteArray();
+            } finally { header.recycle(); }
+        }
+        public int getUsageRecordsLength() throws android.os.RemoteException { return usageRecords().length; }
+        public byte[] getUsageRecordsChunk(int offset, int length) throws android.os.RemoteException {
+            byte[] record = usageRecords();
+            if (offset < 0 || length <= 0 || offset > record.length - length) throw new IllegalArgumentException("invalid usage records range");
+            return java.util.Arrays.copyOfRange(record, offset, offset + length);
+        }
         @Override
         public dev.aim.server.IPackageComputer getComputer() {
             long captured = version;
             return new dev.aim.server.IPackageComputer.Stub() {
-                public long getVersion() { return captured; }
+        public long getVersion() { return captured; }
                 public android.content.pm.ApplicationInfo getApplicationInfo(String n, long f, int u, int filter, int caller, int pid) { throw new AssertionError("unused application query"); }
                 public android.content.pm.PackageInfo getPackageInfo(String n, long f, int u, int filter, int caller, int pid) { throw new AssertionError("unused package query"); }
                 public boolean filterAppAccess(String n, int caller, int user, boolean filterUninstalled) { throw new AssertionError("unused visibility query"); }

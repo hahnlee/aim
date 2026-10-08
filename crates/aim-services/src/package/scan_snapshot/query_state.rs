@@ -1502,11 +1502,7 @@ impl Capture {
 }
 impl Capture {
     pub(crate) fn prepare_isolated_owner_update(self:&Arc<Self>,isolated:i32,owner:Option<i32>)->Result<PackageUpdate,String>{
-        let version=self.scan.version().checked_add(1).ok_or("isolated owner version exhausted")?;
-        let store=super::Store::new_replica_at_version(self.scan.owner().clone(),self.scan.usage().clone(),version).map_err(|error|format!("isolated owner replica: {error:?}"))?;
-        let mut context=(*self.context).clone();context.scan_version=version;
-        match owner {Some(owner)=>{if let Some((_,old))=context.system.isolated_owners.iter_mut().find(|(uid,_)|*uid==isolated){*old=owner;}else{context.system.isolated_owners.push((isolated,owner));context.system.isolated_owners.sort_by_key(|(uid,_)|*uid);}},None=>context.system.isolated_owners.retain(|(uid,_)|*uid!=isolated)}
-        let capture=Self::new(store.capture(),context)?;Ok(PackageUpdate{store,capture})
+        self.prepare_isolated_owner_delta(isolated, owner)
     }
 }
 

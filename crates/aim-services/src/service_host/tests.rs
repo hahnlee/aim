@@ -6567,3 +6567,6 @@ fn verify_installer_binding(
 
 #[path = "keyset_transport_test.rs"]
 mod keyset_transport_test;
+
+#[path = "pure_query_transport_test.rs"]
+mod pure_query_transport_test;

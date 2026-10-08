@@ -121,6 +121,12 @@ impl Store {
         Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision})), replica:true })
     }
 
+    /// A typed query-context delta may advance its Computer lease while the
+    /// exact immutable package/usage owner remains unchanged.
+    pub(crate) fn prepare_unchanged_metadata_store(base: &Arc<Snapshot>) -> Result<Self, Error> {
+        Self::prepare_usage_store(base, base.usage().clone())
+    }
+
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
         Self::create(owner, usage, false, 1)
     }

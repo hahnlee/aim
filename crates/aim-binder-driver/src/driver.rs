@@ -90,6 +90,32 @@ impl Driver {
         records
     }
 
+    /// Non-destructive, atomic view of traced calls still waiting on a reply.
+    /// Empty when tracing is disabled; no parcel contents are copied.
+    pub fn pending_trace(&self) -> crate::PendingTraceSnapshot {
+        let st = self.lock();
+        let mut snapshot = st.trace.as_ref().map(|trace| trace.snapshot()).unwrap_or_default();
+        for pending in &mut snapshot.records {
+            if !pending.returning && let Some(txn) = st.txns.get(&pending.id) {
+                pending.record.from_parent = txn.from_parent;
+                pending.record.to_parent = txn.to_parent;
+            }
+            for proc in st.procs.values() {
+                if st.contexts[proc.context].name != pending.record.device { continue; }
+                if proc.creds.pid == pending.record.from_pid {
+                    pending.from_stack = proc.threads.get(&pending.record.from_tid).and_then(|thread| thread.transaction_stack);
+                    pending.from_queued = proc.todo.len() + proc.threads.get(&pending.record.from_tid).map_or(0, |thread| thread.todo.len());
+                }
+                if proc.creds.pid == pending.record.to_pid {
+                    pending.to_stack = proc.threads.get(&pending.record.to_tid).and_then(|thread| thread.transaction_stack);
+                    pending.to_queued = proc.todo.len() + proc.threads.get(&pending.record.to_tid).map_or(0, |thread| thread.todo.len());
+                }
+            }
+        }
+        self.unlock(st);
+        snapshot
+    }
+
     /// Copy every transaction to the node `proc`'s `handle` refers to, and
     /// its reply, into `sink`; then the transactions to the nodes those
     /// replies hand out (`crate::shadow`). Returns the node, the copies'

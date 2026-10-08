@@ -39,7 +39,7 @@ interface IPackageScanSnapshot {
     byte[] getRuntimeStateChunk(String packageName, boolean disabled, int offset, int length);
     /** Query lease independent of this scan lease, against exactly the same version. */
     IPackageComputer getComputer();
-    /** Metadata identity changes on every mutation except a sealed usage-only delta. */
+    /** Metadata identity is retained only for sealed usage or isolated-query-only deltas. */
     long getMetadataVersion();
     int getUsageRecordsLength();
     byte[] getUsageRecordsChunk(int offset, int length);

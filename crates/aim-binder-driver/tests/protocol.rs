@@ -801,3 +801,52 @@ fn poll_and_process_work_notifications() {
     assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     assert!(driver.poll(q.handle, Q_PID).unwrap());
 }
+
+#[test]
+fn pending_trace_nested_graph_is_atomic_and_non_destructive() {
+    let driver = Driver::new();
+    assert!(driver.pending_trace().records.is_empty());
+    driver.start_trace();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10_001, 4);
+    p.flush(P_PID, Commands::new().transaction(0, 1, TF_ACCEPT_FDS, &with_binder(NODE_PTR, NODE_COOKIE)));
+    let outer_request = q.transact(Q_PID, &Commands::new());
+    let (outer, _) = find_transaction(&outer_request);
+    let outer_id = driver.pending_trace().records[0].id;
+    q.flush(Q_PID, Commands::new().transaction(object_of(&outer, 0).handle(), 99, TF_ACCEPT_FDS, &Parcel::new()));
+    let nested_request = p.transact(P_PID, &Commands::new());
+    let (nested, _) = find_transaction(&nested_request);
+    let first = driver.pending_trace();
+    assert_eq!(first.records.len(), 2);
+    let inner = first.records.iter().find(|record| record.record.code == 99).unwrap();
+    assert!(!inner.returning);
+    assert_eq!(inner.record.from_parent, Some(outer_id));
+    assert_eq!(inner.record.to_parent, Some(outer_id));
+    assert_eq!((inner.record.from_pid, inner.record.to_pid), (Q_PID, P_PID));
+    assert_eq!((inner.record.from_tid, inner.record.to_tid), (Q_PID, P_PID));
+    assert_eq!((inner.from_stack, inner.to_stack), (Some(inner.id), Some(inner.id)));
+    assert!(inner.record.delivered.is_some());
+    let inner_id = inner.id;
+    let repeated = driver.pending_trace();
+    assert_eq!(repeated.records.len(), 2);
+    assert!(repeated.records.iter().find(|r| r.id == inner_id).unwrap().age >= inner.age);
+    assert!(driver.take_trace().is_empty());
+    p.flush(P_PID, Commands::new().reply(0, &Parcel::new()));
+    let replying = driver.pending_trace();
+    let inner = replying.records.iter().find(|r| r.record.transaction_id == inner_id).unwrap();
+    assert!(inner.returning);
+    assert!(inner.record.latency.is_some());
+    assert_eq!(inner.record.to_parent, Some(outer_id));
+    let nested_reply = q.transact(Q_PID, &Commands::new());
+    assert!(names(&nested_reply).contains(&"BR_REPLY"));
+    q.flush(Q_PID, Commands::new().reply(0, &Parcel::new()));
+    let outer_reply = p.transact(P_PID, &Commands::new());
+    assert!(names(&outer_reply).contains(&"BR_REPLY"));
+    assert!(driver.pending_trace().records.is_empty());
+    let done = driver.take_trace();
+    assert_eq!(done.len(), 2);
+    assert!(done.iter().all(|r| r.returned.is_some()));
+    assert!(driver.take_trace().is_empty());
+    p.flush(P_PID, Commands::new().free_buffer(nested.buffer).free_buffer(find_reply(&outer_reply).buffer));
+    q.flush(Q_PID, Commands::new().free_buffer(outer.buffer).free_buffer(find_reply(&nested_reply).buffer));
+}

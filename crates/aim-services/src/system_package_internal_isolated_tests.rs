@@ -142,6 +142,30 @@ fn isolated_callback_preserves_durable_install_during_query_lag() {
     let coherent = fixture.system.capture_package_queries().unwrap();
     assert!(Arc::ptr_eq(coherent.scan(), &snapshots.capture()));
     assert_eq!(coherent.scan().version(), installed.version() + 1);
+    assert_eq!(coherent.scan().metadata_revision(), installed.metadata_revision());
+    assert_eq!(coherent.scan().usage(), installed.usage());
+    assert_eq!(coherent.scan().owner(), installed.owner());
+    let registry = crate::package::scan_snapshot::uid_owner_registry(coherent.scan()).unwrap();
+    let mut registry = aim_binder_host::parcel::Reader::new(&registry, &[]);
+    assert_eq!(registry.read_i64().unwrap(), coherent.scan().version() as i64);
+    let count=registry.read_i32().unwrap();assert!(count>0);
+    let mut found=false;
+    for _ in 0..count {
+        let id=registry.read_i32().unwrap();let kind=registry.read_i32().unwrap();
+        let name=registry.read_string16().unwrap().unwrap();
+        let retained=if kind==3 {Some(aim_service_aidl::read_byte_array(&mut registry).unwrap().unwrap())}else{None};
+        if id==10100 {
+            assert_eq!(name,"p");assert!(kind==1||kind==3);found=true;
+            if let Some(bytes)=retained {
+                let mut record=aim_binder_host::parcel::Reader::new(&bytes,&[]);
+                let metadata=aim_service_aidl::read_byte_array(&mut record).unwrap().unwrap();
+                let mut metadata=aim_binder_host::parcel::Reader::new(&metadata,&[]);
+                assert_eq!(metadata.read_i64().unwrap(),coherent.scan().version() as i64);
+            }
+        }
+    }
+    assert!(found);
+    assert_eq!(registry.remaining(), 0);
     assert_eq!(
         coherent.scan().owner().settings.packages[0],
         installed_setting

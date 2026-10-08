@@ -352,7 +352,7 @@ impl State {
             self.enqueue_thread_work(target_proc, target_tid, Work::Transaction(id));
             self.procs.get_mut(&target_proc).unwrap().outstanding_txns += 1;
             if let Some(trace) = &mut self.trace {
-                trace.replied(in_reply_to, id);
+                trace.replied(in_reply_to, id, self.txns[&in_reply_to].to_parent);
             }
             if let Some((parcel, own)) = reply_copy {
                 self.shadow
@@ -408,6 +408,7 @@ impl State {
             from_pid: from.creds.pid,
             from_euid: from.creds.euid,
             from_tid: tid,
+            from_parent: from.threads.get(&tid).and_then(|thread| thread.transaction_stack),
             to_pid: to.creds.pid,
             descriptor: crate::trace::descriptor(&head),
             code: tr.code,
