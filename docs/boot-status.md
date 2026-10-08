@@ -353,8 +353,8 @@ The actual original ART domain transport replay passes 1/0/0 in 213.27s,
 including the 4,000-entry original Binder oracle, and keyset transport passes
 1/0/0 in 125.27s. The root-only crash child helper is not an independent gate.
 All seven meaningful originally excluded library gates have now been explicitly
-executed successfully. New pure query and concurrent cache fixtures still need
-actual ART wiring; their compilation does not establish runtime conformance.
+executed successfully. Actual ART pure-query and mapped-page usage-isolation gates now pass; the
+package-add concurrency fixture still has no genuine publication seam and is not run.
 C87 native ParsingHost campaign records 11/0 with module complete; the current
 original campaign records Parsing 11/0, Preferred 2/0 and PackageSetting 2/0.
 Both stop normally between modules before the next image revision. Chrome
@@ -373,8 +373,8 @@ also passes. C88 quiet Chrome cold launch reaches 2612ms and web launch returns
 query-only capture now retains unchanged validated metadata while updating the
 query version (eleven owner regressions pass). Existing binder-trace can now
 record non-destructive pending/returning nested transactions every 250ms
-(#1134, actual nested byte-protocol regression passes). C89 host build passes;
-its live trace/app verification is pending. Package-add concurrency fixture still
+(#1134, actual nested byte-protocol regression passes). C89 host build and actual live Binder trace capture complete; Chrome remains
+unverified because the captured runtime reaches ANR. Package-add concurrency fixture still
 has no genuine publication seam and remains not run.
 C89 trace captures 4,086,703 completed calls over 259.63s; 96.638% are
 ScanSnapshot/Computer metadata/lookup calls. The Chrome bindServiceInstance
@@ -399,13 +399,19 @@ registerReceiverWithFeature during the five-second FocusEvent window. C94 real n
 original public IPM on disposable Calculator: stopped/component changes, old/new
 state and code isolation, and expired comparison fallback complete with exit0.
 Calculator is nonshared, so the conditional changed-shared-UID branch remains
-unverified. Contemporary AMS holder proof and the full CTS/app/template gates
-remain pending. Original PMS on a cloned native
+unverified. C94 quiet cold launches take 1.34–1.56s but still reach FocusEvent ANR. C95
+uses the same native image with pending/completed Binder tracing: its 8.69s
+registerReceiver call begins after the first timeout and therefore does not
+establish the cause of that timeout. Contemporary pre-timeout owner proof and
+the full CTS/app/template gates remain pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
-Original 66-module CTS campaign is running with provenance-checked resume;
-ParsingHost first replay completes 11/0, but the interrupted parent did not
-record it and the campaign correctly reruns it rather than importing XML.
+The historical original campaigns each record Parsing 11/0, Preferred 2/0
+and PackageSetting 2/0, but their image receipts differ from the current image.
+A fresh final original 66-module campaign now runs against frozen inputs with
+new disposable data, preserved binary/image/template SHA provenance and
+first-boot evidence. Its first boot completes in 52.645s; no module outcome
+is claimed until the official XML and campaign receipt complete.
 C14 passed shared and nonshared APEX permission UID handling.
 The absent projection requires matching parsed APEX name/path and uid -1;
 ordinary missing owners still fail, and the focused regression passes.
