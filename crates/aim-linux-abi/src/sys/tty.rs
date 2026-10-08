@@ -502,7 +502,7 @@ mod tests {
         std::fs::remove_dir(&journal).unwrap();
         std::fs::rename(saved,journal).unwrap();
         assert_eq!(failed,-(crate::errno::EISDIR as i64));
-        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        assert!(crate::vfs::remove_mount("/dev"));
         std::fs::remove_dir_all(device).unwrap();
     }
 
@@ -526,7 +526,7 @@ mod tests {
             assert_eq!(open(), -(crate::errno::ENOENT as i64));
             std::fs::create_dir(device.join("pts")).unwrap();
             for imported in [false, true] {
-                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts).unwrap(); }
+                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts); }
                 let fd = open(); assert!(fd >= 0, "PTY slave open after import={imported}: {fd}");
                 let mut size: libc::winsize = std::mem::zeroed();
                 assert_eq!(libc::ioctl(fd as i32, libc::TIOCGWINSZ, &mut size), 0);
@@ -534,10 +534,10 @@ mod tests {
             }
             libc::close(master);
         }
-        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        assert!(crate::vfs::remove_mount("/dev"));
         // The same-process import adds a second owned entry; the real exec
         // starts with only map entries, then imports its one inherited mount.
-        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        assert!(crate::vfs::remove_mount("/dev"));
         std::fs::remove_dir_all(device).unwrap();
     }
 
