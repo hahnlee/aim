@@ -1087,3 +1087,39 @@ fn activity_options_prepend_specifics_remove_caller_and_drop_filters() {
         None, &intent, Some("image/png"), 0, 0, 1000).unwrap();
     assert!(results.iter().all(|entry| entry.component() != ("b.gallery", "b.gallery.Open")));
 }
+
+#[test]
+fn implicit_access_rebound_resolution_keeps_static_policy_and_old_visibility() {
+    let mut initial=(*state()).clone();initial.system.isolated_owners.push((99001,10004));
+    let before=Arc::new(initial);let resolver=Resolver::default();let old=resolver.resolution(&before).unwrap();
+    let target=&before.packages["b.gallery"];
+    assert!(old.apps_filter.should_filter(&before,10004,target,0));
+    let send=Intent{action:Some(SEND.into()),..Default::default()};
+    assert!(old.query_intent_services(&send,None,0,0,10004).unwrap().is_empty());
+    let mut after=(*before).clone();after.generation=before.generation+1;
+    assert!(after.system.implicit_access.grant(10004,10002,true));
+    let after=Arc::new(after);
+    let rebound=resolver.implicit_access_view(&before,after.clone()).unwrap();
+    let next=rebound.resolution(&after).unwrap();
+    let fresh=Resolver::default().resolution(&after).unwrap();
+    assert!(!next.apps_filter.should_filter(&after,10004,&after.packages["b.gallery"],0));
+    assert!(old.apps_filter.should_filter(&before,10004,target,0));
+    assert!(Arc::ptr_eq(&resolver.resolution(&before).unwrap(),&old));
+    assert!(Arc::ptr_eq(&rebound.resolution(&after).unwrap(),&next));
+    assert_eq!(before.packages,after.packages);
+    for caller in [10004,10001,10005,1000,20004] {
+        for flags in [0,0x80,0x200,0x0004_0000] {
+            let actual=next.query_intent_services(&send,None,flags,0,caller).unwrap();
+            let expected=fresh.query_intent_services(&send,None,flags,0,caller).unwrap();
+            assert_eq!(actual,expected,"static component/caller flag parity must match fresh resolution");
+        }
+    }
+    assert_eq!(names(&next.query_intent_services(&send,None,0,0,10004).unwrap()),["b.gallery.Sync"]);
+    assert!(next.apps_filter.should_filter(&after,20004,&after.packages["b.gallery"],0),"client grant must not grant SDK sandbox visibility");
+    assert!(next.apps_filter.should_filter(&after,110004,&after.packages["b.gallery"],1),"user-0 grant must not grant user-1 visibility");
+    assert_eq!(next.resolve_content_provider("b.media2",0,0,10004).unwrap(),fresh.resolve_content_provider("b.media2",0,0,10004).unwrap());
+    assert_eq!(
+        apps_filter::should_filter_application(&after,&next.apps_filter,Some(&after.packages["b.gallery"]),99001,0,false,true).unwrap(),
+        apps_filter::should_filter_application(&after,&fresh.apps_filter,Some(&after.packages["b.gallery"]),99001,0,false,true).unwrap(),
+        "isolated caller alias remains bound to actual owner policy");
+}

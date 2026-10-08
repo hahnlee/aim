@@ -598,3 +598,24 @@ fn service_host_lease_pairs_query_scan_across_durable_canonical_publication() {
     let (paired,query)=fixture.system.capture_package_scan_and_queries().unwrap();
     assert!(Arc::ptr_eq(&paired,&new));assert!(query.is_none());
 }
+
+#[test]
+fn implicit_access_fast_capture_matches_complete_fresh_capture_without_metadata_change() {
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let before=publish(&fixture,&bridge);
+    let old_resolution=before.resolution().unwrap();
+    let mut grants=before.state().system.implicit_access.clone();assert!(grants.grant(10100,10101,true));
+    let update=before.prepare_visibility_update(grants.clone()).unwrap();let next=&update.capture;
+    let fresh=crate::package::scan_snapshot::query_state::Capture::new(next.scan().clone(),(**next.context()).clone()).unwrap();
+    assert_eq!(next.scan().version(),before.scan().version()+1);
+    assert_eq!(next.scan().metadata_revision(),before.scan().metadata_revision());
+    assert_eq!(next.scan().owner(),before.scan().owner());assert_eq!(next.scan().usage(),before.scan().usage());
+    assert_eq!(next.state(),fresh.state());
+    assert_eq!(next.state().packages,before.state().packages);
+    assert_eq!(next.state().uid_owners,before.state().uid_owners);
+    assert_eq!(next.state().users,before.state().users);
+    assert_eq!(next.state().system.implicit_access,grants);
+    assert_ne!(before.state().system.implicit_access,grants);
+    assert!(Arc::ptr_eq(&before.resolution().unwrap(),&old_resolution));
+    assert!(Arc::ptr_eq(&next.resolution().unwrap().state,next.state()));
+    assert!(Arc::ptr_eq(&fresh.resolution().unwrap().state,fresh.state()));
+}

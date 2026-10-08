@@ -433,7 +433,18 @@ new installed capture and monotonic publication. The shared-UID oracle also
 exits0 with member_rebound_verified and restores original user settings. A separate actual FUSE path-walk
 LOOKUP reference leak is corrected (#1139); ten real protocol regressions pass,
 with C97 runtime integration complete. A fresh frozen native 66-module campaign
-is being started in separate disposable data alongside the original campaign. Latest whole native library verification
+starts in separate disposable data alongside the original campaign. The first
+fresh native Parsing attempt records 7/4, including an early invocation before
+boot completion and real subsequent failures after SystemServer watchdog/keyset
+divergence. It stops at the module boundary with XML/logs/dumps preserved; it
+is not acceptance evidence. Fresh-template native CPU samples show repeated
+grantImplicitAccess AppsFilter construction inside the bootstrap mutex while
+AMS holds its monitor. Typed visibility-only capture now retains validated
+metadata and its static resolver relations; focused verification and fresh
+runtime replay are pending. The keyset mismatch comes from native installation
+persisting canonical metadata before publishing queries while the metadata
+actor uses the previous query owner; publication serialization is being fixed
+at that producer (#1132), retaining strict pool/role checks. Latest whole native library verification
 passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.

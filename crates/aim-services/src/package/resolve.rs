@@ -91,6 +91,7 @@ const PRIVATE_FLAG_INSTANT: i32 = 1 << 7;
 const USER_SYSTEM: i32 = 0;
 
 /// Resolution over one version of the state.
+#[derive(Clone)]
 pub struct Resolution {
     pub state: Arc<State>,
     pub components: ComponentResolver,
@@ -1416,6 +1417,15 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// Only the dynamic implicit-access owner changed; package relations,
+    /// components, preferences and domains remain the same validated inputs.
+    pub(crate) fn implicit_access_view(&self, before: &Arc<State>, state: Arc<State>)
+        -> std::result::Result<Self, MimeGroupError> {
+        let mut resolution = (*self.resolution(before)?).clone();
+        resolution.state = state;
+        Ok(Self { latest: Mutex::new(Some(Arc::new(resolution))), reported: Mutex::new(HashSet::new()) })
+    }
+
     /// The resolution of `state`, built once per state.
     pub fn resolution(
         &self,

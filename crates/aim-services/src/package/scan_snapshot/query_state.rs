@@ -1439,24 +1439,31 @@ mod controller_tests {
 }
 
 impl Capture {
+    fn visibility_view(self: &Arc<Self>, scan: Arc<Snapshot>,
+            grants: crate::package::apps_filter::ImplicitAccess) -> Result<Arc<Self>, String> {
+        let mut context = (*self.context).clone();
+        context.scan_version = scan.version();
+        context.system.implicit_access = grants.clone();
+        let mut state = (*self.state).clone();
+        state.generation = scan.version();
+        state.system.implicit_access = grants;
+        let state = Arc::new(state);
+        let resolver = self.resolver.implicit_access_view(&self.state, state.clone())
+            .map_err(|error| format!("implicit-access resolution: {error:?}"))?;
+        Ok(Arc::new(Self { scan, state, domains: self.domains.clone(), context: Arc::new(context),
+            frozen: self.frozen.clone(), resolver }))
+    }
+
     pub(crate) fn with_visibility_view(self: &Arc<Self>, grants: crate::package::apps_filter::ImplicitAccess)
         -> Result<Arc<Self>, String> {
-        let mut context = (*self.context).clone();
-        context.system.implicit_access = grants;
-        let mut capture = Self::new(self.scan.clone(), context)?;
-        Arc::get_mut(&mut capture).unwrap().frozen = self.frozen.clone();
-        Ok(capture)
+        self.visibility_view(self.scan.clone(), grants)
     }
 
     pub(crate) fn prepare_visibility_update(self: &Arc<Self>, grants: crate::package::apps_filter::ImplicitAccess)
         -> Result<PackageUpdate, String> {
-        let version = self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_after(&self.scan, self.scan.owner().clone(), self.scan.usage().clone(), version)
+        let store = super::Store::prepare_unchanged_metadata_store(&self.scan)
             .map_err(|error| format!("visibility mutation replica: {error:?}"))?;
-        let mut context = (*self.context).clone();
-        context.scan_version = version;
-        context.system.implicit_access = grants;
-        let capture = Self::new(store.capture(), context)?;
+        let capture = self.visibility_view(store.capture(), grants)?;
         Ok(PackageUpdate { store, capture })
     }
 }
