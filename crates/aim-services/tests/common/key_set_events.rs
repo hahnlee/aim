@@ -55,7 +55,7 @@ pub fn read(bytes: &[u8]) -> (Settings, &'static str) {
     let mut state = Settings::default();
     let mut ids = AppIds::default();
     let mut attempt = PackageReadAttempt::default();
-    let result = state.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut ProjectionOwners);
+    let result = state.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut ProjectionOwners::default());
     let status = if matches!(result, Err(ReadError::FatalInput(_))) {
         "fatal"
     } else {
@@ -115,8 +115,12 @@ pub fn retire(state: &mut Settings) {
     key_sets::clear_package(state, "p").unwrap();
 }
 
-struct ProjectionOwners;
+#[derive(Default)]
+struct ProjectionOwners { headers: aim_services::package::settings::native_read::NativeRead }
 impl ReadOwners for ProjectionOwners {
+    fn package_header(&mut self, package: &Package, start: &aim_android_xml::Element) -> Result<(), ReadError> {
+        self.headers.package_header(package, start)
+    }
     fn factory_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &AppIds) -> Result<(), ReadError> { panic!("factory outside projection") }
 
     fn start_attempt(&mut self, _: &Settings, _: &[Package]) -> Result<(), ReadError> { Ok(()) }

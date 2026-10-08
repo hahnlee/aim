@@ -62,7 +62,7 @@ pub fn export(directory: &Path) {
             packages: &mut packages,
             factories: &mut factories,
             shared_users: &mut groups,
-            remaining: &mut Remaining,
+            remaining: &mut Remaining::default(),
         };
         let read = settings.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut owners);
         let retried = matches!(read, Err(ReadError::File(_)));
@@ -114,7 +114,7 @@ pub fn export(directory: &Path) {
             packages: &mut packages,
             factories: &mut factories,
             shared_users: &mut groups,
-            remaining: &mut Remaining,
+            remaining: &mut Remaining::default(),
         };
         let selected: &[u8] = if retried {
             if index == retry_index {
@@ -149,7 +149,7 @@ pub fn export(directory: &Path) {
             for (mode, xml) in ["<packages><package name='q' codePath='/changed' userId='10002' domainSetId='00000000-0000-0000-0000-000000000003'/></packages>".into(), body.to_owned(), body.replace("</package></packages>", "<unknown><"), body.to_owned()].into_iter().enumerate() {
                 let bytes = if mode == 1 { aim_android_xml::abx::write(&aim_android_xml::read(xml.as_bytes()).unwrap()).unwrap() } else { xml.into_bytes() };
                 fs::write(directory.join(format!("install-binding-{index}.reread-{mode}")), &bytes).unwrap();
-                let mut owners = InstallRead { users: &[10,0], packages: &mut packages, factories: &mut factories, shared_users: &mut groups, remaining: &mut Remaining };
+                let mut owners = InstallRead { users: &[10,0], packages: &mut packages, factories: &mut factories, shared_users: &mut groups, remaining: &mut Remaining::default() };
                 let read = settings.read_owned_document(&bytes, &mut ids, &mut attempt, true, &mut owners);
                 if matches!(read, Err(ReadError::File(_))) { settings.read_owned_document(b"<packages/>", &mut ids, &mut attempt, true, &mut owners).unwrap(); } else { read.unwrap(); }
                 let package = settings.packages.iter().find(|p| p.name == "q").unwrap();
@@ -162,8 +162,10 @@ pub fn export(directory: &Path) {
     }
 }
 
-pub(crate) struct Remaining;
+#[derive(Default)]
+pub(crate) struct Remaining { headers: aim_services::package::settings::native_read::NativeRead }
 impl ReadOwners for Remaining {
+    fn package_header(&mut self, package: &Package, start: &Element) -> Result<(), ReadError> { self.headers.package_header(package, start) }
     fn factory_record(
         &mut self,
         _: &mut Settings,

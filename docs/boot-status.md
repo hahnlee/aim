@@ -318,7 +318,12 @@ carry exact captured generations and native receipts; unchanged queued removed
 records are accepted only until acknowledged absence, with foreign/altered states
 still rejected (eight owner regressions pass). The current native service suite
 passes 787 tests, zero failures, eight ignored; coherent original image and
-updated oracle compilation pass. Actual C83/ART replay is pending.
+updated oracle compilation pass. The full original-ART parcel integration passes
+one test, zero failures, zero ignored in 231.46 seconds after genuine reader header
+owners are connected in its fixtures. It exercises original modern domain events,
+Settings defaults, incremental signatures/permissions, keysets, nullable URI rules,
+UUID modes, TimSort and user selections. C83 ParsingHost reaches eight successful
+test completions without the earlier snapshot/DVS fatal; final XML is pending.
 C14 passed shared and nonshared APEX permission UID handling.
 The absent projection requires matching parsed APEX name/path and uid -1;
 ordinary missing owners still fail, and the focused regression passes.

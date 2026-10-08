@@ -42,7 +42,7 @@ pub fn export(directory: &Path) {
             packages: &mut packages,
             factories: &mut factories,
             shared_users: &mut groups,
-            remaining: &mut super::install_read_events::Remaining,
+            remaining: &mut super::install_read_events::Remaining::default(),
         };
         let read = state.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut owners);
         if matches!(read, Err(ReadError::File(_))) {

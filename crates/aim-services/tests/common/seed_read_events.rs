@@ -39,7 +39,7 @@ pub fn export(directory: &Path) {
             packages: &mut packages,
             factories: &mut factories,
             shared_users: &mut groups,
-            remaining: &mut super::install_read_events::Remaining,
+            remaining: &mut super::install_read_events::Remaining::default(),
         };
         settings
             .initialize_shared_bootstrap(&boot, &mut ids, &mut owners)
