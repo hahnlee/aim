@@ -4,13 +4,19 @@
 # and aapt2 and the Mac's adb, connected to the guest's adbd on the Mac's
 # loopback (`--androidboot aim.adb.port=PORT`).
 #
-# Usage: tools/cts-tradefed.sh DATA PORT [cts-tradefed run option]...
+# Usage: tools/cts-tradefed.sh [--linux-run PATH] DATA PORT [cts-tradefed run option]...
 #   DATA  the boot's data directory (guest-init's --data)
 #   PORT  its adbd's port; this run's adb server listens on PORT + 1
 # e.g. tools/cts-tradefed.sh target/aim/boot/data 5611 -m CtsPackageSettingHostTestCases
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+shell_args=()
+if [[ "${1:-}" == "--linux-run" ]]; then
+  [[ $# -ge 2 && -x "$2" ]] || { echo '--linux-run requires an executable path' >&2; exit 2; }
+  shell_args=(--linux-run "$2")
+  shift 2
+fi
 [[ $# -ge 2 ]] || { sed -n '7,10p' "$0" >&2; exit 2; }
 data="$1"
 port="$2"
@@ -62,7 +68,7 @@ trap 'exit 1' HUP INT TERM ALRM
 # allowed ("Always allow from this computer"): adbd checks adb_keys before
 # it asks, and the lightweight shell has no dialog to ask with.
 key="$(cat "$HOME/.android/adbkey.pub")"
-"$root/tools/guest-shell.sh" "$data" "grep -qxF '$key' /data/misc/adb/adb_keys 2>/dev/null ||
+"$root/tools/guest-shell.sh" ${shell_args[@]+"${shell_args[@]}"} "$data" "grep -qxF '$key' /data/misc/adb/adb_keys 2>/dev/null ||
   { echo '$key' >> /data/misc/adb/adb_keys; };
   chown system:shell /data/misc/adb/adb_keys && chmod 0640 /data/misc/adb/adb_keys"
 

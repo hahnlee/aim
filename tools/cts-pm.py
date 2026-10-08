@@ -115,10 +115,16 @@ def campaign_provenance(args):
     receipt = args.image / '.overlay-receipt'
     if not receipt.is_file():
         raise ValueError('campaign requires the actual derived image overlay receipt')
-    return {'label': args.label, 'release': '16_r1', 'image': str(args.image.resolve()),
+    provenance = {'label': args.label, 'release': '16_r1', 'image': str(args.image.resolve()),
             'data': str(args.data.resolve()), 'port': args.port, 'cts_args': args.cts_args,
             'manifest_sha256': digest(MANIFEST), 'modules': [m['name'] for m in modules()],
             'image_receipt_sha256': digest(receipt)}
+    if args.linux_run is not None:
+        executable = args.linux_run.resolve(strict=True)
+        if not os.access(executable, os.X_OK):
+            raise ValueError('--linux-run requires an executable path')
+        provenance.update(linux_run=str(executable), linux_run_sha256=digest(executable))
+    return provenance
 
 
 def validate_result(result, module, args):
@@ -140,6 +146,9 @@ def validate_result(result, module, args):
 
 def resume_state(args, provenance):
     state = json.loads((args.output / 'campaign.json').read_text())
+    for key in ('linux_run', 'linux_run_sha256'):
+        if state.get(key) != provenance.get(key):
+            raise ValueError(f'resume provenance differs: {key}')
     for key, value in provenance.items():
         old = state.get(key)
         if key in ('image', 'data') and old is not None:
@@ -213,7 +222,8 @@ def run(args):
         stem += f'-attempt{attempt}'
         before = {str(p) for p in (HARNESS / 'results').glob('*') if p.is_dir()}
         log = args.output / (stem + '.log')
-        command = [str(ROOT / 'tools/cts-tradefed.sh'), str(args.data), str(args.port), '-m', module, *args.cts_args]
+        shell_args = ['--linux-run', provenance['linux_run']] if args.linux_run is not None else []
+        command = [str(ROOT / 'tools/cts-tradefed.sh'), *shell_args, str(args.data), str(args.port), '-m', module, *args.cts_args]
         row = {'module': module, 'log': str(log), 'status': 'not-run-complete'}
         history = list(prior.get('attempts', [])) if prior else []
         if prior:
@@ -306,6 +316,7 @@ def main():
     runner = sub.add_parser('run'); runner.add_argument('data', type=Path); runner.add_argument('port', type=int)
     runner.add_argument('--label', choices=['original', 'native'], required=True); runner.add_argument('--image', type=Path, required=True)
     runner.add_argument('--output', type=Path, required=True); runner.add_argument('--timeout', type=int, default=10800)
+    runner.add_argument('--linux-run', type=Path, help='explicit immutable runtime executable for guest shell authorization')
     runner.add_argument('--resume', action='store_true')
     runner.add_argument('--stop-after', type=int, help='stop after N completed invocations in this run')
     runner.add_argument('--cts-args', nargs=argparse.REMAINDER, default=[])
