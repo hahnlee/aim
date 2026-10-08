@@ -408,8 +408,13 @@ original Chrome finds 715/1934 main-thread samples in procfs maps, including
 one inverse namespace view and resolves each visible host alias once (#1135),
 retaining direct/canonical prefix precedence and observing mount/symlink changes
 on new reads; all six VFS regressions pass and the C linux-run build succeeds.
-C96 boots the same native image with this lower-layer change; actual app results
-and the full CTS/app/template gates remain pending. Original PMS on a cloned native
+C96 boots the same native image with this lower-layer change. Its new pre-timeout
+sample shows procfs maps below 2% of main samples versus about 37% before.
+Two early cold attempts still ANR; a later quiet cold launch completes in 1810ms,
+stays alive without observed ANR, opens the web URL in 449ms and actually renders
+the page (capture checked after dismissing the original Chrome notification prompt).
+This establishes the quiet app flow, not early-boot or complete app acceptance;
+remaining FUSE/path work and the full CTS/app/template gates are still pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0
