@@ -698,7 +698,12 @@ incarnation. Nine focused checks plus a real short-read temporary cleanup
 regression pass; five actual writer/enable/alias/fork/crash/SCM lease checks pass.
 This core does not expose ENABLE ioctl success. Guest FD/Binder carriers, mmap
 page verification, native writer admission, signature policy and private descriptor
-lifetimes must be connected before activation or CTS acceptance. Native init now
+lifetimes must be connected before activation or CTS acceptance. Shared private
+descriptor wrappers now enter owner serialization before allocation and close the
+actual FD before releasing its hidden role; registered carrier extraction cannot
+detach that role. One genuine isolated lifecycle test and five lease regressions
+pass without skips. ABI startup registration and complete descriptor publication/
+pinning remain required; callbacks alone do not protect raw syscall races. Native init now
 records a versioned locator for persistent inode proofs outside mapped /data; a
 real disposable-layout test verifies runtime reset preserves the store, custom
 runtime layout resolves it correctly, and foreign symlinks are rejected.
