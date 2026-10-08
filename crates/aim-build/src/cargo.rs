@@ -214,11 +214,14 @@ impl Workspace {
                     .filter(|t| t.kind.iter().any(|k| k == "bin"))
                 {
                     let artifact = self.host_bin(&target.name);
-                    let deps = if self.needs_generated_sources(id) {
+                    let mut deps = if self.needs_generated_sources(id) {
                         vec![Dep::order_only("aidl-gen")]
                     } else {
                         Vec::new()
                     };
+                    if target.name == "guest-init" {
+                        deps.push(Dep::order_only("host/aim-lock-holder"));
+                    }
                     nodes.push(Node {
                         name: format!("host/{}", target.name),
                         deps,

@@ -282,6 +282,7 @@ fn template_inputs(config: &IsolatedTemplate) -> Result<serde_json::Value, Strin
         "host_runtime": fs::canonicalize(&config.host_runtime).map_err(|error| error.to_string())?,
         "guest_init_sha256": hash(&config.host_runtime.join("guest-init"))?,
         "linux_run_sha256": hash(&config.host_runtime.join("linux-run"))?,
+        "posix_lock_holder_sha256": hash(&config.host_runtime.join("aim-lock-holder"))?,
         "display_sha256": hash(&config.display)?, "empty_sha256": hash(&config.empty)?,
     }))
 }
@@ -304,6 +305,7 @@ pub fn run_isolated_template(ctx: &Ctx, config: &IsolatedTemplate) -> Result<(),
         &config.display,
         &config.host_runtime.join("guest-init"),
         &config.host_runtime.join("linux-run"),
+        &config.host_runtime.join("aim-lock-holder"),
     ] {
         if !input.is_file() {
             return Err(format!(
