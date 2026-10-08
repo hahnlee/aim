@@ -565,6 +565,17 @@ impl Layout {
         for name in DATA_DIRS {
             fs::create_dir_all(self.data.join(name))?;
         }
+        // Kernel inode proofs live on the persistent volume outside mapped /data.
+        let verity = self.data.join("fs-verity");
+        fs::create_dir_all(&verity)?;
+        if fs::symlink_metadata(&verity)?.file_type().is_symlink() {
+            return Err(io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        let verity = fs::canonicalize(verity)?;
+        use std::os::unix::ffi::OsStrExt;
+        let mut locator = b"AIMVRTROOT01\0".to_vec();
+        locator.extend_from_slice(verity.as_os_str().as_bytes());
+        fs::write(self.runtime.join("fs-verity-root"), locator)?;
         // The mount point of /data/user/0, a symlink to /data/data in
         // earlier layouts (#221).
         let user0 = self.data.join("data/user/0");
@@ -627,6 +638,30 @@ mod tests {
 
     fn map() -> PathMap {
         Layout::new("/img".into(), "/w".into(), Some("/r".into())).path_map()
+    }
+
+    #[test]
+    fn verity_locator_is_persistent_private_and_rejects_foreign_symlink() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let dir = std::env::temp_dir().join(format!("aim-verity-layout-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("custom-runtime")));
+        layout.prepare().unwrap();
+        let store = fs::canonicalize(layout.data.join("fs-verity")).unwrap();
+        fs::write(store.join("retained-proof"), b"proof").unwrap();
+        let locator = fs::read(layout.runtime.join("fs-verity-root")).unwrap();
+        assert_eq!(&locator[..13], b"AIMVRTROOT01\0");
+        assert_eq!(&locator[13..], store.as_os_str().as_bytes());
+        assert_ne!(layout.path_map().lookup("/data/fs-verity").0, store);
+        layout.prepare().unwrap();
+        assert_eq!(fs::read(store.join("retained-proof")).unwrap(), b"proof");
+        assert_eq!(fs::read(layout.runtime.join("fs-verity-root")).unwrap(), locator);
+        fs::remove_dir_all(&store).unwrap();
+        let foreign = dir.join("foreign"); fs::create_dir(&foreign).unwrap();
+        symlink(&foreign, layout.data.join("fs-verity")).unwrap();
+        assert_eq!(layout.prepare_data().err().unwrap().raw_os_error(), Some(libc::ELOOP));
+        assert!(fs::read_dir(foreign).unwrap().next().is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

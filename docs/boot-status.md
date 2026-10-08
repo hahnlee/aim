@@ -698,7 +698,10 @@ incarnation. Nine focused checks plus a real short-read temporary cleanup
 regression pass; five actual writer/enable/alias/fork/crash/SCM lease checks pass.
 This core does not expose ENABLE ioctl success. Guest FD/Binder carriers, mmap
 page verification, native writer admission, signature policy and private descriptor
-lifetimes must be connected before activation or CTS acceptance.
+lifetimes must be connected before activation or CTS acceptance. Native init now
+records a versioned locator for persistent inode proofs outside mapped /data; a
+real disposable-layout test verifies runtime reset preserves the store, custom
+runtime layout resolves it correctly, and foreign symlinks are rejected.
 The original staged-install baseline also cannot execute its Linux x86_64
 deapexer helpers on Darwin (#1166). A nonboot build node now produces pinned
 original AOSP deapexer/protobuf with real Darwin arm64 debugfs and fsck.erofs,
