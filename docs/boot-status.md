@@ -506,9 +506,21 @@ and actual SystemServer credentials. SetupCgroups now applies the configured
 mode/UID/GID to the same mounted root before children, as original
 MountV2CgroupController does. A real inode regression verifies root identity,
 root-before-child ordering, the configured1000:1000/0775 and an alternate tuple.
-No stat, DAC or capability guard is relaxed. Corrected isolated app, reboot and
-full CTS replays remain pending. Diagnostic processes are normally stopped and
-temporary failure logging is removed.
+No stat, DAC or capability guard is relaxed. C109 actually confirms root1000:1000/0775, keeps the original WebView isolated
+process alive, completes relro1/1 and DOM verification, and renders inspected
+HTML/SVG. The unchanged immutable runtime pair then completes two real guest
+reboots (SystemServer42633→43583→45430); both return boot_completed1 and the
+original native service names, with no interpreter EPERM or process-group fatal.
+WebView DOM verification passes again after the first reboot. After the second,
+Calculator cold launch1663ms renders its actual UI; Chrome cold launch2624ms
+reaches first-run, continues without an account, and renders example.com with its
+sandboxed process alive and no observed ANR during this bounded replay. The
+browser reports offline network validation, so no general network pass is claimed.
+This does not establish the fresh-first-boot Chrome gate. Debug boots and helpers
+are reaped; diagnostic logging is removed. A new fresh native full66 campaign
+uses this exact immutable host pair, explicit --linux-run through Tradefed,
+pre-spawn hashes and actual readiness before invocation. Full CTS remains
+incomplete; the old cohorts' failures and missing tests are retained.
 Inherited capability refresh now pins
 each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
