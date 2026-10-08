@@ -20,3 +20,5 @@ pub mod process_namespace;
 pub mod mount_namespace;
 
 pub mod socket_inode;
+
+pub mod inode_lease;
