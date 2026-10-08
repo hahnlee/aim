@@ -64,7 +64,7 @@ non-cargo stages are declared in code:
 
 | Node | Upstream | Inputs (declared) | Outputs |
 | --- | --- | --- | --- |
-| `host/<bin>` | `aidl-gen` when it compiles generated sources (aim-services) | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | cargo's `target/release/<bin>` |
+| `host/<bin>` | `aidl-gen` when it compiles generated sources (aim-services) | manifests, build scripts, `Cargo.lock`, cargo config; found: dep-info | atomically published `target/release/<bin>` |
 | `image` | `host/android-image-extract`, `host/linux-translate` (order only) | `image/original.lock` | `_build/android16-image.dmg`, attached |
 | `aidl-gen` | `image` (order only) | `hal/sources.lock`, `daemons/sources.lock`, `crates/aim-services/sources.lock`, `image/original.lock`, `tools/lib/*.py`, AIDL crate manifests | `target/aim/gen/{hal,daemon,service}-aidl` |
 | `hal/<package>`, `daemon/<package>` | `image`; `aidl-gen` when a dependency's sources are generated or fetched | as `host/*` | `target/aim/{hal,daemons}/...` |
@@ -145,6 +145,14 @@ cargo nodes of one kind share one cargo invocation (`host`, `hal`, `daemon`:
 the daemons build AOSP's binder crate with its `system` feature, the HALs
 without it, so they cannot share an invocation).
 
+Host batches compile in `target/aim-host-build/release`, separate from the public
+`target/release` commands. After Cargo succeeds, each executable is copied to a
+new sibling inode and atomically renamed into its public path. Running processes
+retain their old executable vnode; later Cargo compilation never writes that
+vnode or shares a hardlink with it (#1146). The public command paths and embedded
+signatures are preserved. This is executable publication, not an atomic boot
+cohort upgrade; ordinary direct `cargo build --release` is outside this publisher.
+
 ### Rebuild times
 
 A branch that changes one host crate costs its cargo build and nothing
@@ -162,7 +170,7 @@ The host crates build incrementally (`[profile.release]` in
 `Cargo.toml`), with release's usual 16 codegen units: in a worktree,
 all host binaries after a one-line change to `aim-linux-abi` took 4.1 s
 instead of 6.8 s, and after one to `aim-services` 0.9-4.1 s instead of
-5.2-9.2 s. The incremental state costs about 600 MB in `target/release`.
+5.2-9.2 s. The incremental state costs about 600 MB in the host Cargo output directory.
 
 ## One Cargo workspace
 

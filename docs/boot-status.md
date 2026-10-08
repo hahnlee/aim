@@ -506,7 +506,12 @@ but unavailable TCP timer epoch/probe metrics return a real unsupported error;
 An identical-signed-bytes executable control runs original sh successfully from
 a new vnode while the frozen original executable path dies before main. This
 narrows #1146 to executable publication/vnode generation behavior; it does not
-prove a permission workaround or a resolved reboot. Originals and frozen CTS
+prove a permission workaround or a resolved reboot. The host build graph now
+compiles to a private Cargo directory and publishes detached executable inodes
+by atomic rename at the existing public CLI paths. Four focused checks pass,
+including actual signed Mach-O verification/execution and retention of an old
+open generation. This fixes publication lifetime ownership, not a proven Darwin
+denial mechanism or a complete boot-cohort upgrade (#1146). Originals and frozen CTS
 binary bytes remain unchanged; controls are cleaned after verification. Latest whole native library verification
 passes 802/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
