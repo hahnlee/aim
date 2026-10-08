@@ -452,16 +452,19 @@ original callbacks run after release (#1142). Real SPKI/durable publication,
 already-held permit, foreign permit rejection and callback release regression
 passes; strict pool/role checks remain. Latest full native suite passes 799/0,
 eleven ignored, and the C host build passes. A new fresh native cohort verifies
-boot_completed and both package services before invoking CTS; Parsing is running
-without the previous watchdog/keyset crash observed so far (not yet a complete
-module result). C98 separately passes a newly authored ordinary WebView consumer:
+boot_completed and both package services before invoking CTS; Parsing completes with official XML 11/0; PreferredActivity is running,
+including a real reboot, without the previous watchdog/keyset crash observed
+so far. The full 66-module result is still incomplete. C98 separately passes a newly authored ordinary WebView consumer:
 the original com.google.android.webview 133.0.6943.137/694313732 provider completes
 relro 1/1, starts its renderer, returns the exact JavaScript DOM marker and renders
 local HTML/SVG in an inspected capture. Reproducible probe source is in
 tools/webview-probe; originals remain unchanged. Settings storage/default-app and
 Chromium app-info screens render, but the permissions screen crashes in instant-app
-visibility policy and Wellbeing hits a same-user cross-user guard; these are real
-remaining PM policy gaps, not passes. The frozen original CTS baseline also finds
+visibility policy and Wellbeing hits a same-user cross-user guard. Source now
+uses the pinned instant-view permissions/HOME/AppPrediction policy (#987) and
+the original SUSPEND_APPS plus other-user-only FULL cross-user rule (#1145);
+two instant-policy regressions and the user-permission matrix pass. Actual UI
+replays await deployment, so those flows are not counted as passes. The frozen original CTS baseline also finds
 actual cross-app file access (#1143) and missing procfs network tables (#1144);
 those lower owners are being corrected separately with original results preserved. Latest whole native library verification
 passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native

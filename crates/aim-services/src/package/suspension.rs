@@ -111,10 +111,24 @@ impl Distraction {
     }
 }
 
+fn enforce_unsuspendable_permissions(query: &Query<'_>, user: i32) -> Result<(), Exception> {
+    let uid = query.calling_uid;
+    if !matches!(uid, 0 | 1000) && !query.uid_has_permission(uid, "android.permission.SUSPEND_APPS").map_err(unmodelled)? {
+        return Err(Exception::security("SUSPEND_APPS"));
+    }
+    // PMS's method directly compares UserHandle.getUserId(callingUid), then
+    // requires FULL for another user. Computer's general cross-user helper
+    // also allows the weaker permission and has a distinct same-user switch.
+    if apps_filter::user_id(uid) != user && !matches!(uid, 0 | 1000)
+        && !query.uid_has_permission(uid, "android.permission.INTERACT_ACROSS_USERS_FULL").map_err(unmodelled)? {
+        return Err(Exception::security(format!("Calling uid {uid} cannot query getUnsuspendablePackagesForUser for user {user}")));
+    }
+    Ok(())
+}
+
 pub fn unsuspendable(query: &Query<'_>, owner: &effects::Owner, packages: &[Option<String>], user: i32) -> Result<Vec<Option<String>>, Exception> {
     let uid = query.calling_uid;
-    if !matches!(uid, 0 | 1000) && !query.uid_has_permission(uid, "android.permission.SUSPEND_APPS").map_err(unmodelled)? { return Err(Exception::security("SUSPEND_APPS")); }
-    if let Err(error) = query.enforce_cross_user(user, true, false, "getUnsuspendablePackagesForUser").map_err(unmodelled)? { return Err(error); }
+    enforce_unsuspendable_permissions(query, user)?;
     if !owner.suspension_allowed(user, uid)? { return Ok(packages.to_vec()); }
     let allowed = owner.can_suspend(packages, user, uid)?;
     let mut rejected = Vec::new();
@@ -127,4 +141,33 @@ pub fn unsuspendable(query: &Query<'_>, owner: &effects::Owner, packages: &[Opti
     }
     rejected.sort_by_key(|name| name.as_deref().map(info::java_hash).unwrap_or(0));
     Ok(rejected)
+}
+
+#[cfg(test)]
+mod unsuspendable_permission_tests {
+    use super::*;
+    use crate::package::{apps_filter::{AppsFilter,Config},model::{State,PackageState,PackageUserState}};
+    use aim_binder_host::parcel::EX_SECURITY;
+    fn check(uid:i32,user:i32,grants:&[&str])->Result<(),Exception>{
+        let caller_user=apps_filter::user_id(uid);
+        let package=PackageState{name:"permission.fixture".into(),app_id:apps_filter::app_id(uid),users:[(caller_user,PackageUserState{
+            granted_permissions:grants.iter().map(|grant|(*grant).to_owned()).collect(),..Default::default()})].into(),..Default::default()};
+        let state=State{packages:[(package.name.clone(),package)].into(),..Default::default()};
+        let filter=AppsFilter::new(&state,&Config::default()).unwrap();
+        enforce_unsuspendable_permissions(&Query{state:&state,filter:&filter,calling_uid:uid},user)
+    }
+    #[test]
+    fn own_user_needs_suspend_permission_and_other_user_requires_full(){
+        const SUSPEND:&str="android.permission.SUSPEND_APPS";
+        const PARTIAL:&str="android.permission.INTERACT_ACROSS_USERS";
+        const FULL:&str="android.permission.INTERACT_ACROSS_USERS_FULL";
+        check(10151,0,&[SUSPEND]).unwrap();
+        check(1010151,10,&[SUSPEND]).unwrap();
+        assert_eq!(check(10151,0,&[]).unwrap_err().code,EX_SECURITY);
+        assert_eq!(check(10151,10,&[SUSPEND]).unwrap_err().code,EX_SECURITY);
+        assert_eq!(check(10151,10,&[SUSPEND,PARTIAL]).unwrap_err().code,EX_SECURITY);
+        check(10151,10,&[SUSPEND,FULL]).unwrap();
+        assert_eq!(check(10151,10,&[FULL]).unwrap_err().message,"SUSPEND_APPS");
+        check(0,10,&[]).unwrap();check(1000,10,&[]).unwrap();
+    }
 }

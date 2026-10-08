@@ -563,6 +563,64 @@ mod tests {
         })
     }
     #[test]
+    fn instant_visibility_requires_permission_and_home_or_prediction_identity() {
+        use crate::package::preferred::{self, registry::{Actions, ActionError, Captured, Handle, Identity, IdentityProvider, Registry}};
+        struct Identities;
+        impl IdentityProvider for Identities {
+            fn allocate(&self, _: preferred::records::Record<'_>) -> Result<Identity, String> { panic!("no preferred records") }
+        }
+        struct Home;
+        impl Actions for Home {
+            fn default_home(&self, user: i32) -> Result<Option<String>, ActionError> { Ok((user == 0).then(|| "factory".into())) }
+            fn context_permission(&self, _: i32, _: &str) -> Result<bool, ActionError> { panic!("unexpected permission mutation") }
+            fn commit_after_selection(&self, _: i32, _: &preferred::Mutation, _: i32) -> Result<bool, ActionError> { panic!("unexpected mutation") }
+            fn commit_mutation(&self, _: i32, _: u64, _: &preferred::Mutation, _: i32) -> Result<bool, ActionError> { panic!("unexpected mutation") }
+            fn cross_access(&self, _: i32, _: i32, _: i32, _: bool) -> Result<i32, ActionError> { panic!("unexpected cross access") }
+            fn cross_accessible(&self, _: i32, _: i32, _: i32) -> Result<bool, ActionError> { panic!("unexpected cross access") }
+            fn enforce_shell_restriction(&self, _: i32, _: i32) -> Result<(), ActionError> { panic!("unexpected shell restriction") }
+            fn reconcile_home(&self, _: i32, _: i32) -> Result<bool, ActionError> { panic!("unexpected reconcile") }
+            fn commit_home_selection(&self, _: i32, _: u64, _: &preferred::Selection) -> Result<(), ActionError> { panic!("unexpected selection mutation") }
+            fn default_browser(&self, _: i32) -> Result<Option<String>, ActionError> { panic!("unexpected browser") }
+            fn restore_browser(&self, _: i32, _: &str, _: bool) -> Result<(), ActionError> { panic!("unexpected browser restore") }
+            fn default_preferences(&self, _: i32) -> Result<Vec<preferred::PreferredActivity>, ActionError> { panic!("unexpected defaults") }
+        }
+        let mut state = (*state()).clone();
+        state.system.system_permissions = Some(BTreeMap::new());
+        let factory = state.packages.get_mut("factory").unwrap();
+        factory.users.insert(10, PackageUserState::default());
+        for user in factory.users.values_mut() { user.granted_permissions.push("android.permission.VIEW_INSTANT_APPS".into()); }
+        let pkg = Arc::make_mut(factory.pkg.as_mut().unwrap());
+        let mut filter = crate::package::intent_filter::IntentFilter::default();
+        filter.add_action("android.intent.action.MAIN"); filter.add_category("android.intent.category.HOME"); filter.add_category("android.intent.category.DEFAULT");
+        let mut activity = crate::package::pkg::Activity::default();
+        activity.main.component.package_name = "factory".into(); activity.main.component.name = "factory.Home".into();
+        activity.main.component.intents.push(crate::package::intent_filter::ParsedIntentInfo { filter, has_default: true, ..Default::default() });
+        activity.main.enabled = true; activity.main.exported = true; pkg.activities.push(activity);
+        let registry = Registry::new(Arc::new(Identities));
+        registry.insert_user(0, preferred::Preferred::default()).unwrap(); registry.insert_user(10, preferred::Preferred::default()).unwrap();
+        let captured: Captured = registry.capture().unwrap();
+        state.system.preferred_owner = Some(Arc::new(Handle::new(Arc::new(captured), Arc::new(|_, _, _| panic!("unexpected commit")), Arc::new(Home))));
+        state.system.roles = Some(Arc::new(Owner { frozen: [(Role::AppPrediction, None)].into(), live: BTreeMap::new(), known: None, browsers: BTreeMap::new(), browser_source: None }));
+        let query_filter = AppsFilter::new(&state, &FilterConfig::default()).unwrap();
+        let query = Query { state: &state, filter: &query_filter, calling_uid: 10100 };
+        assert!(query.internal_can_view_instant(10100, 0).unwrap());
+        assert!(!query.internal_can_view_instant(10199, 0).unwrap());
+        drop(query);
+        state.users.clear();
+        state.users.insert(10, User { id: 10, unlocking_or_unlocked: true, ..Default::default() });
+        state.packages.get_mut("factory").unwrap().users.get_mut(&10).unwrap()
+            .granted_permissions.push("android.permission.INTERACT_ACROSS_USERS_FULL".into());
+        state.packages.get_mut("factory").unwrap().pkg.as_mut().map(Arc::make_mut).unwrap().activities.clear();
+        state.system.roles = Some(Arc::new(Owner { frozen: [(Role::AppPrediction, Some("factory".into()))].into(), live: BTreeMap::new(), known: None, browsers: BTreeMap::new(), browser_source: None }));
+        let query_filter = AppsFilter::new(&state, &FilterConfig::default()).unwrap();
+        let query = Query { state: &state, filter: &query_filter, calling_uid: 1010100 };
+        assert!(query.internal_can_view_instant(1010100, 10).unwrap());
+        assert!(!query.internal_can_view_instant(1010199, 10).unwrap());
+        let unprivileged = Query { calling_uid: 1010199, ..query };
+        assert!(!unprivileged.internal_can_view_instant(1010100, 10).unwrap());
+    }
+
+    #[test]
     fn configured_packages_use_factory_owner_and_cleared_identity() {
         let state = state();
         let filter = AppsFilter::new(&state, &FilterConfig::default()).unwrap();

@@ -1123,3 +1123,28 @@ fn implicit_access_rebound_resolution_keeps_static_policy_and_old_visibility() {
         apps_filter::should_filter_application(&after,&fresh.apps_filter,Some(&after.packages["b.gallery"]),99001,0,false,true).unwrap(),
         "isolated caller alias remains bound to actual owner policy");
 }
+
+#[test]
+fn resolve_instant_match_uses_caller_permission_and_requested_user() {
+    let mut owned = (*state()).clone();
+    owned.users.insert(10, User { id: 10, unlocking_or_unlocked: false, ..Default::default() });
+    for package in owned.packages.values_mut() {
+        package.users.insert(10, PackageUserState::default());
+    }
+    owned.packages.get_mut("d.caller").unwrap().users.get_mut(&0).unwrap()
+        .granted_permissions.push("android.permission.ACCESS_INSTANT_APPS".into());
+    let resolution = Resolution::new(Arc::new(owned), &Default::default()).unwrap();
+    let match_flags = MATCH_INSTANT | MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY;
+    for (caller, user, want, allowed) in [
+        (10004, 0, false, true), (1010004, 10, false, false),
+        (10002, 0, false, false), (10002, 0, true, true),
+        (1000, 0, false, true), (1000, 10, false, true),
+    ] {
+        let actual = resolution.update_flags_for_resolve(match_flags, user, caller, want, false, false).unwrap();
+        assert_eq!(actual & MATCH_INSTANT != 0, allowed, "caller={caller} user={user} want={want}");
+        assert_eq!(actual & (MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY), 0);
+        assert_eq!(actual & MATCH_DIRECT_BOOT_AWARE != 0, true);
+        assert_eq!(actual & MATCH_DIRECT_BOOT_UNAWARE != 0, user == 0);
+    }
+    assert_eq!(resolution.update_flags_for_resolve(0, 0, 10004, false, false, false).unwrap() & MATCH_INSTANT, 0);
+}

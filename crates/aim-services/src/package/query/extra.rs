@@ -2432,8 +2432,17 @@ impl Query<'_> {
     pub(crate) fn internal_can_view_instant(&self, filter_uid: i32, user: i32) -> Result<bool, NotModelled> {
         if filter_uid < 10000 || self.uid_has_permission(self.calling_uid, "android.permission.ACCESS_INSTANT_APPS")? { return Ok(true); }
         if self.uid_has_permission(self.calling_uid, "android.permission.VIEW_INSTANT_APPS")? {
-            let _ = user;
-            return Err(NotModelled("native default-home and app-prediction instant visibility owner"));
+            if let Some(home) = super::preferred::default_home_for_instant(self, user)? {
+                if apps_filter::is_caller_same_app(self.state, Some(&home.package), filter_uid)? {
+                    return Ok(true);
+                }
+            }
+            let roles = self.state.system.roles.as_ref()
+                .ok_or(NotModelled("native app-prediction instant visibility owner unavailable"))?;
+            let prediction = roles.package(super::super::roles::Role::AppPrediction, self)
+                .map_err(|_| NotModelled("native app-prediction instant visibility owner failed"))?;
+            return prediction.as_deref().map(|name| apps_filter::is_caller_same_app(self.state, Some(name), filter_uid))
+                .transpose().map(|same| same.unwrap_or(false));
         }
         Ok(false)
     }
@@ -2459,18 +2468,7 @@ impl Query<'_> {
     }
 
     fn can_view_instant_apps(&self) -> Result<bool, NotModelled> {
-        if self.calling_uid < 10000
-            || self
-                .uid_has_permission(self.calling_uid, "android.permission.ACCESS_INSTANT_APPS")?
-        {
-            return Ok(true);
-        }
-        if self.uid_has_permission(self.calling_uid, "android.permission.VIEW_INSTANT_APPS")? {
-            return Err(NotModelled(
-                "the default launcher and app prediction service",
-            ));
-        }
-        Ok(false)
+        self.internal_can_view_instant(self.calling_uid, user_id(self.calling_uid))
     }
 
     fn translate_names(

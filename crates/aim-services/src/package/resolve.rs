@@ -208,13 +208,9 @@ impl Resolution {
             flags |= MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_INSTANT;
         } else {
             let want_match_instant = flags & MATCH_INSTANT != 0;
-            if !want_instant_apps
-                && want_match_instant
-                && calling_uid >= apps_filter::FIRST_APPLICATION_UID
-            {
-                return Err(NotModelled("whether the caller may see instant apps").into());
-            }
-            let allow_match_instant = want_instant_apps || want_match_instant;
+            let allow_match_instant = want_instant_apps
+                || (want_match_instant
+                    && self.query(calling_uid).internal_can_view_instant(calling_uid, user)?);
             flags &= !(MATCH_VISIBLE_TO_INSTANT_APP_ONLY | MATCH_EXPLICITLY_VISIBLE_ONLY);
             if !allow_match_instant {
                 flags &= !MATCH_INSTANT;
