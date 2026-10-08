@@ -90,6 +90,13 @@ impl State {
         self.request_write(user);
         Ok(())
     }
+    /// Settings.writeAllRuntimePermissionsLPr queues every actual UM user;
+    /// version/fingerprint setters are independent later mutations.
+    pub(crate) fn request_all_user_writes(&mut self, users: &[i32]) -> Result<(), String> {
+        if users.iter().any(|user|*user < 0) { return Err("negative runtime persistence user".into()); }
+        for &user in users { self.request_write(user); }
+        Ok(())
+    }
     fn request_write(&mut self, user: i32) {
         self.writes.insert(user);
         let delay = Duration::from_millis(700 + u64::from(unsafe { libc::arc4random_uniform(600) }));
@@ -218,6 +225,37 @@ impl std::error::Error for FlushError {
 mod tests {
     use super::*;
     use crate::package::owner::legacy_permissions::UserMetadata;
+
+    #[test]
+    fn constructor_all_user_request_persists_real_grants_without_version_mutation() {
+        use crate::package::{owner::{Store,tests::Data},permissions::{RuntimePermissions,RuntimePermission}};
+        let data=Data::new();data.settings();
+        let mut disk=Store::open(&data.0,&[0,10]).unwrap().unwrap();
+        disk.claim_runtime_permission_inventory(&[0,10]).unwrap();
+        let probe=data.0.join("creator-proof");std::fs::write(&probe,b"creator").unwrap();
+        aim_storage::guest_inode::record(&probe,aim_storage::guest_inode::GuestInode{uid:Some(2100),gid:Some(2200),mode:Some(0o640)}).unwrap();
+        let inode=aim_storage::guest_inode::read(&probe).unwrap().unwrap();
+        let mut state=State::default();
+        state.request_all_user_writes(&[0,10]).unwrap();
+        assert_eq!(state.pending_write_requests(),[0,10]);
+        assert!(state.due_write_requests(Instant::now()).is_empty());
+        let before=state.clone();assert!(state.request_all_user_writes(&[20,-1]).is_err());assert_eq!(state,before);
+        let completed=state.flush_due_with(Instant::now()+Duration::from_secs(3),|user,metadata|{
+            let live=RuntimePermissions{version:metadata.version(user),fingerprint:metadata.fingerprint(user).map(str::to_owned),
+                packages:vec![(Some("example.app".into()),vec![RuntimePermission{name:Some("android.permission.READ_MEDIA_IMAGES".into()),granted:true,flags:0x20}])],shared_users:vec![]};
+            disk.commit_runtime_permissions(user as u32,&live,inode)?;Ok(user as u32)
+        }).unwrap();
+        assert_eq!(completed,[0,10]);assert!(state.pending_write_requests().is_empty());
+        for user in [0,10] {
+            let path=data.0.join(format!("misc_de/{user}/apexdata/com.android.permission/runtime-permissions.xml"));
+            let bytes=std::fs::read(&path).unwrap();assert!(bytes.starts_with(b"<?xml"));
+            assert_eq!(bytes,std::fs::read(crate::package::sibling(&path,".reservecopy")).unwrap());
+            let parsed=RuntimePermissions::parse(&aim_android_xml::read(&bytes).unwrap()).unwrap();
+            assert_eq!((parsed.version,parsed.fingerprint),(0,None));
+            assert_eq!((parsed.packages[0].1[0].granted,parsed.packages[0].1[0].flags),(true,0x20));
+            assert_eq!(aim_storage::guest_inode::read(&path).unwrap().unwrap(),inode);
+        }
+    }
 
     #[test]
     fn store_runtime_restore_carries_versions_and_rewrites_without_partial_scan_changes() {

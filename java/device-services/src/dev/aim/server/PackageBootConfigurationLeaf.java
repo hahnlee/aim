@@ -6,6 +6,16 @@ import android.os.Binder;
 final class PackageBootConfigurationLeaf extends IPackageBootConfigurationLeaf.Stub {
     private final Context context;
     private final boolean factoryTest;
+    private com.android.server.pm.UserManagerService userOwner;
+    private com.android.server.pm.UserManagerInternal internalUserOwner;
+    private synchronized void retainUserOwners() {
+        var current = com.android.server.pm.NativeUserManagerBridge.currentUserManagerOwner();
+        var internal = com.android.server.LocalServices.getService(com.android.server.pm.UserManagerInternal.class);
+        if (internal == null) throw new IllegalStateException("Original UM persistence owner absent");
+        if (userOwner == null) { userOwner = current; internalUserOwner = internal; }
+        else if (userOwner != current || internalUserOwner != internal)
+            throw new IllegalStateException("Original UM persistence owner replaced");
+    }
     PackageBootConfigurationLeaf(Context context, boolean factoryTest) {
         this.context = context; this.factoryTest = factoryTest;
     }
@@ -14,7 +24,7 @@ final class PackageBootConfigurationLeaf extends IPackageBootConfigurationLeaf.S
     }
     @Override public int getDensity() { enforce(); return context.getResources().getDisplayMetrics().densityDpi; }
     @Override public int[] getUserIds() {
-        enforce();
+        enforce(); retainUserOwners();
         var users = com.android.server.LocalServices.getService(com.android.server.pm.UserManagerInternal.class);
         if (users == null) throw new IllegalStateException("Original UM boot inventory owner absent");
         // PackageManagerService constructor2195: exclude partial, retain dying
@@ -29,7 +39,18 @@ final class PackageBootConfigurationLeaf extends IPackageBootConfigurationLeaf.S
         }
         if (users != com.android.server.LocalServices.getService(com.android.server.pm.UserManagerInternal.class))
             throw new IllegalStateException("Original UM boot inventory owner replaced");
+        retainUserOwners();
         return ids;
+    }
+    @Override public int[] getPackageListActiveUserIds() {
+        enforce(); retainUserOwners();
+        int[] ids = com.android.server.pm.NativeUserManagerBridge.getPackageListActiveUserIds();
+        retainUserOwners(); return ids;
+    }
+    @Override public int[] getRuntimePermissionUserIds() {
+        enforce(); retainUserOwners();
+        int[] ids = java.util.Objects.requireNonNull(internalUserOwner.getUserIds(), "runtime users unavailable").clone();
+        retainUserOwners(); return ids;
     }
     @Override public boolean isFactoryTest() { enforce(); return factoryTest; }
     @Override public boolean isDependencyInstallerEnabled() { enforce(); return com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags.sdkDependencyInstaller(); }

@@ -96,6 +96,27 @@ public final class NativeUserManagerBridge {
         try { return service.getUsers(false); }
         finally { android.os.Binder.restoreCallingIdentity(token); }
     }
+    public static UserManagerService currentUserManagerOwner() {
+        return Objects.requireNonNull(users, "native user owner unavailable");
+    }
+    /** Settings.writePackageListLPrInternal: exclude partial, dying and pre-created. */
+    public static int[] getPackageListActiveUserIds() {
+        UserManagerService service = users;
+        if (service == null) throw new IllegalStateException("native user owner unavailable");
+        long token = android.os.Binder.clearCallingIdentity();
+        try {
+            var records = Objects.requireNonNull(service.getUsers(true, true, true), "active users unavailable");
+            int[] ids = new int[records.size()];
+            java.util.HashSet<Integer> seen = new java.util.HashSet<>();
+            for (int index = 0; index < ids.length; index++) {
+                var record = Objects.requireNonNull(records.get(index), "active user absent");
+                if (record.id < 0 || !seen.add(record.id)) throw new IllegalStateException("invalid active user inventory");
+                ids[index] = record.id;
+            }
+            if (service != users) throw new IllegalStateException("native user owner replaced");
+            return ids;
+        } finally { android.os.Binder.restoreCallingIdentity(token); }
+    }
     public static android.content.pm.UserInfo getProfileParent(int userId) {
         UserManagerService service = users;
         if (service == null) throw new IllegalStateException("native user owner unavailable");

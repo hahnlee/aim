@@ -596,7 +596,15 @@ shared generated SHA remains unchanged. This is contract preparation only; the
 new Java leaf still needs a coherent image build before runtime deployment. The private complete Java service DEX and
 stub DEX now pass the original boot/systemserver linkage checker and generated
 own-AIDL transaction-code verifier through the read-only check-service-java CLI.
-No image or graph build occurred; this is contract proof, not runtime deployment.
+No image or graph build occurred; this is contract proof, not runtime deployment. The final constructor contract is now registered in
+Source: generated codes9/10/11 agree with the complete private Java DEX and
+original linkage. Actual package rows/GIDs are prepared before taking the disk
+lock, original active/runtime user inventories are retained and revalidated,
+then packages.list is committed and every actual runtime user is queued before
+the worker starts. Real list ownership/persistence and permission main/reserve
+write regressions pass; coherent Source compilation also passes. The Java leaf
+and host caller require a matched image rebuild, so the current C111 cohort
+continues using its frozen prior contract and is not deployment evidence.
 Inherited capability refresh now pins each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
 grant a class to a reused number (#1152). The concurrent replacement regression

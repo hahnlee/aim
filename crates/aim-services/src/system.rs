@@ -31,6 +31,8 @@ mod existing;
 mod events;
 #[path = "system_package_public_services.rs"]
 mod package_public_services;
+#[path = "system_package_boot_persistence.rs"]
+mod package_boot_persistence;
 #[path = "system_package_runtime_creation.rs"]
 mod package_runtime_creation;
 #[cfg(test)]
@@ -1758,6 +1760,21 @@ impl System {
                 message: format!("package list bootstrap owner: {error:?}"),
             })?;
         store.validate_committed_scan(capture.scan().owner())?;
+        let entries=self.prepare_package_list_from_scan(bridge,capture,active_users)?;
+        store.commit_package_list(&entries)?;
+        self.check_package_bootstrap(bridge)
+            .map_err(|error| WriteError {
+                committed: true,
+                message: format!("package list bootstrap owner after commit: {error:?}"),
+            })
+    }
+
+    pub(crate) fn prepare_package_list_from_scan(
+        &self, bridge: &Arc<crate::package::bootstrap::Bridge>,
+        capture: &crate::package::scan_snapshot::query_state::Capture, active_users: &[i32],
+    ) -> std::result::Result<Vec<crate::package::list::Entry>, crate::package::owner::WriteError> {
+        use crate::package::owner::WriteError;
+        self.check_package_bootstrap(bridge).map_err(|error|WriteError{committed:false,message:format!("package list bootstrap owner: {error:?}")})?;
         let mut entries =
             crate::package::list::metadata_from_capture(capture).map_err(|message| WriteError {
                 committed: false,
@@ -1776,12 +1793,7 @@ impl System {
                 committed: false,
                 message: format!("package list bootstrap owner before commit: {error:?}"),
             })?;
-        store.commit_package_list(&entries)?;
-        self.check_package_bootstrap(bridge)
-            .map_err(|error| WriteError {
-                committed: true,
-                message: format!("package list bootstrap owner after commit: {error:?}"),
-            })
+        Ok(entries)
     }
 
     /// Caller retains the joining guard outside bootstrap publication locks.

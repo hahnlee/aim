@@ -9,4 +9,6 @@ interface IPackageBootConfigurationLeaf {
     byte[] getLiveProperties(in String[] keys);
     String getParserCacheDirectory();
     int[] getUserIds();
+    int[] getPackageListActiveUserIds();
+    int[] getRuntimePermissionUserIds();
 }

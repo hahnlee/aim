@@ -139,6 +139,25 @@ pub fn install(system: &Arc<System>, bridge: &Arc<Bridge>, prepared: Prepared, i
     disk.lock().unwrap().claim_runtime_permission_inventory(&inputs.users)
         .map_err(|error|illegal(format!("Runtime permission file handoff: {}",error.message)))?;
     system.check_package_bootstrap(bridge)?;
+    // Settings.writeLPr writes daemon metadata and queues every runtime user.
+    // No permission/user Binder callback runs while the disk mutex is held.
+    let users = system.native_boot_persistence_users(bridge)?;
+    let configured_users = inputs.users.iter().map(|user|*user as i32).collect::<std::collections::BTreeSet<_>>();
+    if users.all.iter().copied().collect::<std::collections::BTreeSet<_>>() != configured_users {
+        return Err(illegal("Boot runtime persistence user handoff changed"));
+    }
+    let entries = system.prepare_package_list_from_scan(bridge, &capture, &users.active)
+        .map_err(|error|illegal(format!("Boot package-list rows committed={}: {}",error.committed,error.message)))?;
+    {
+        let _install = system.package_install_guard();
+        users.revalidate(system, bridge)?;
+        let mut store = disk.lock().unwrap();
+        store.validate_committed_scan(capture.scan().owner())
+            .and_then(|()|store.commit_package_list(&entries))
+            .map_err(|error|illegal(format!("Boot packages.list committed={}: {}",error.committed,error.message)))?;
+        system.check_package_bootstrap(bridge).map_err(|error|illegal(format!("Boot packages.list committed=true: {}",error.message)))?;
+    }
+    runtime.request_all_user_writes(&users.all).map_err(illegal)?;
     system.install_package_persistence(bridge, &capture, disk.clone())?;
     let runtime_metadata = Arc::new(Mutex::new(runtime));
     system.install_runtime_permission_metadata(bridge, runtime_metadata.clone())?;
