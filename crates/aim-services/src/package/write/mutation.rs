@@ -61,6 +61,9 @@ pub enum Change {
         first_launch_installer: Option<String>,
         was_stopped: bool,
     },
+    Suspensions(Option<Vec<crate::package::restrictions::Suspension>>),
+    Distraction(i32),
+    Hidden(bool),
     SplashTheme(Option<String>),
     HarmfulWarning(Option<String>),
     CategoryHint(i32),
@@ -207,6 +210,19 @@ impl Request {
     }
     pub fn decide(&self, q: &Query<'_>, pid: i32) -> Result<Result<Plan, Exception>, NotModelled> {
         self.decide_with_shell(q, pid, None)
+    }
+    pub fn decide_with_enabled_policy(&self, q: &Query<'_>, pid: i32, restricted: Option<bool>, policy: enabled::Policy)
+        -> Result<Result<Plan, Exception>, NotModelled> {
+        if let Self::Enabled(setting) = self {
+            return Ok(enabled::decide_with_policy(q, setting, pid, &|ps, user| Enabled::of(ps, user), Some(policy))?.map(|value| {
+                let change = match value {
+                    Some(value) if q.state.packages.get(&setting.package).is_some_and(|ps| value != Enabled::of(ps, setting.user)) => Change::Enabled(value),
+                    _ => Change::None,
+                };
+                Plan { package: setting.package.clone(), user: Some(setting.user), change }
+            }));
+        }
+        self.decide_with_shell(q, pid, restricted)
     }
     pub(crate) fn decide_with_shell(
         &self,
@@ -373,7 +389,8 @@ impl Request {
                         q.calling_uid
                     ))));
                 }
-                if let Err(e) = q.enforce_cross_user(*user, true, true, "stop package")? {
+                let cross_user = if q.calling_uid == 2000 { q.full_cross_user_with_shell(*user, true, restricted)? } else { q.enforce_cross_user(*user, true, true, "stop package")? };
+                if let Err(e) = cross_user {
                     return Ok(Err(e));
                 }
                 if let Some(ps) = q.state.packages.get(package) {
@@ -550,6 +567,9 @@ impl Plan {
                         current.stopped = *stopped;
                         current.not_launched = *not_launched;
                     }
+                    Change::Suspensions(values) => current.suspensions = values.clone(),
+                    Change::Distraction(value) => current.distraction_flags = *value,
+                    Change::Hidden(hidden) => current.hidden = *hidden,
                     Change::SplashTheme(theme) => current.splash_screen_theme = theme.clone(),
                     Change::HarmfulWarning(warning) => {
                         current.harmful_app_warning = warning.clone()
@@ -633,6 +653,9 @@ impl Plan {
                         current.stopped = *stopped;
                         current.not_launched = *not_launched;
                     }
+                    Change::Suspensions(values) => current.suspensions = values.clone(),
+                    Change::Distraction(value) => current.distraction_flags = *value,
+                    Change::Hidden(hidden) => current.hidden = *hidden,
                     Change::SplashTheme(theme) => current.splash_screen_theme = theme.clone(),
                     Change::HarmfulWarning(warning) => {
                         current.harmful_app_warning = warning.clone()

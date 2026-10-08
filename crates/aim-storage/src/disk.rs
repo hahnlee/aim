@@ -216,27 +216,52 @@ pub fn attach(image: &Path, how: Attach) -> Result<String, String> {
         .ok_or_else(|| format!("{}: attached without a device", image.display()))
 }
 
-/// Detaches the image of `device`. A volume in use is retried for
-/// `patience` (the Mac's security agent scans freshly written files for a
-/// while), then unmounted by force.
+/// Detaches the image of `device`. Busy volumes are retried for `patience`.
+/// A dissenter is an owner, not permission to force its volume away (#1094).
 pub fn detach(device: &str, patience: Duration) -> Result<(), String> {
+    detach_with(device, patience, || {
+        run(Command::new("diskutil").args(["eject", device])).map(|_| ())
+    })
+}
+
+fn detach_with(device: &str, patience: Duration, mut eject: impl FnMut() -> Result<(), String>) -> Result<(), String> {
     let deadline = Instant::now() + patience;
     loop {
-        match run(Command::new("diskutil").args(["eject", device])) {
-            Ok(_) => return Ok(()),
-            Err(e) if Instant::now() < deadline => {
-                if !e.contains("could not be unmounted") && !e.contains("dissented") {
-                    return Err(e);
+        match eject() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if e.contains("dissented") || !e.contains("could not be unmounted") || Instant::now() >= deadline {
+                    return Err(format!("refusing to force detach {device}: {e}"));
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            Err(e) => {
-                eprintln!("aim-storage: {e}; unmounting by force");
-                run(Command::new("diskutil").args(["unmountDisk", "force", device]))?;
-                run(Command::new("diskutil").args(["eject", device]))?;
-                return Ok(());
-            }
         }
+    }
+}
+
+#[cfg(test)]
+mod detach_tests {
+    use super::*;
+    #[test]
+    fn a_live_dissenter_is_never_force_unmounted() {
+        let mut calls = 0;
+        let result = detach_with("fixture-device", Duration::from_secs(120), || {
+            calls += 1;
+            Err("Unmount was dissented by PID 42 (linux-run); parent guest-init".into())
+        });
+        assert_eq!(calls, 1);
+        let error = result.unwrap_err();
+        assert!(error.contains("refusing to force detach"));
+        assert!(error.contains("PID 42"));
+    }
+    #[test]
+    fn unrelated_eject_error_is_not_retried_or_forced() {
+        let mut calls = 0;
+        assert!(detach_with("fixture-device", Duration::from_secs(20), || {
+            calls += 1;
+            Err("permission denied".into())
+        }).is_err());
+        assert_eq!(calls, 1);
     }
 }
 

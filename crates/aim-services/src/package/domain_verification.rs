@@ -5,6 +5,8 @@
 //! id and user restriction state.
 
 pub mod collector;
+pub mod agent;
+pub mod backup;
 mod legacy_read;
 mod read;
 pub use read::ReadResult;
@@ -12,6 +14,7 @@ pub use legacy_read::SectionError;
 pub mod domain_set;
 pub mod enforcer;
 pub mod owner;
+pub mod original_bridge;
 pub mod names;
 pub mod parcels;
 pub mod service;

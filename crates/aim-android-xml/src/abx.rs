@@ -179,12 +179,17 @@ pub fn read_optional(bytes: &[u8]) -> Result<Option<Element>, String> {
 /// writes it: a document whose values keep their types is written back
 /// in the pinned ArtFastDataOutput string encoding.
 pub fn write(root: &Element) -> Result<Vec<u8>, String> {
+    write_sequence(std::slice::from_ref(root))
+}
+
+/// Android TypedXmlSerializer also emits independent sibling root sections.
+pub fn write_sequence(roots:&[Element])->Result<Vec<u8>,String> {
     let mut w = Writer {
         out: MAGIC.to_vec(),
         interned: HashMap::new(),
     };
     w.out.push(START_DOCUMENT | TYPE_NULL);
-    w.element(root)?;
+    for root in roots {w.element(root)?;}
     w.out.push(END_DOCUMENT | TYPE_NULL);
     Ok(w.out)
 }

@@ -5,6 +5,7 @@ package android.graphics.drawable;
 import android.graphics.Bitmap;
 
 public class BitmapDrawable extends Drawable {
+    public BitmapDrawable(android.content.res.Resources resources,Bitmap bitmap) { throw new RuntimeException("stub"); }
     BitmapDrawable() { throw new RuntimeException("stub"); }
     public final Bitmap getBitmap() { throw new RuntimeException("stub"); }
     @Override

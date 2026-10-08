@@ -133,6 +133,17 @@ impl Store {
         root: Element,
         write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
     ) -> Result<(), WriteError> {
+        let names=self.state.settings.packages.iter().map(|package|package.name.clone()).collect();
+        self.commit_initial_restrictions_inventory_using(user,root,&names,write)
+    }
+
+    /// The caller supplies an already validated scan inventory. Settings XML
+    /// omits APEX records, while original writePackageRestrictions writes all
+    /// mPackages members, so those two inventories must remain distinct.
+    pub(super) fn commit_initial_restrictions_inventory_using(
+        &mut self,user:u32,root:Element,inventory:&std::collections::BTreeSet<String>,
+        write:impl FnOnce(&mut File,&[u8])->io::Result<()>,
+    )->Result<(),WriteError>{
         if root.name != "package-restrictions" {
             return Err(WriteError::before("invalid initial restriction root"));
         }
@@ -145,15 +156,8 @@ impl Store {
         if names.len() != parsed.packages.len() {
             return Err(WriteError::before("duplicate initial restriction package"));
         }
-        if parsed.packages.len() != self.state.settings.packages.len()
-            || parsed
-                .packages
-                .iter()
-                .any(|(name, _)| !self.state.settings.packages.iter().any(|p| p.name == *name))
-        {
-            return Err(WriteError::before(
-                "initial restriction inventory differs from settings",
-            ));
+        if names.len()!=inventory.len() || names.iter().any(|name|!inventory.contains(name.as_str())) {
+            return Err(WriteError::before("initial restriction inventory differs from settings"));
         }
         let bytes = abx::write(&root).map_err(WriteError::before)?;
         let claim = self

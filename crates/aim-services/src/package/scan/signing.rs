@@ -56,6 +56,7 @@ pub struct SigningScan {
     pub(super) strict_signature_packages: BTreeSet<String>,
     first_api_level: i32,
     parsed: Vec<(String, i32, SigningDetails, bool)>,
+    pub(super) permission_admissions:Vec<super::permission_admissions::Admission>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +92,10 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    pub fn disabled_user_aliases(&self, package: &str) -> Result<Vec<i32>, String> {
+        self.disabled_users.get(package).map(|owner| owner.aliases())
+            .ok_or_else(|| format!("disabled user alias owner absent: {package}"))
+    }
     pub(in crate::package) fn capture_ready(&self) -> bool {
         self.pending_metadata.is_empty()
     }
@@ -300,7 +305,16 @@ impl SigningScan {
                 filter,
                 ..Default::default()
             });
-        self.package_registry.register(self.loaded[name].clone()).unwrap();
+        self.package_registry
+            .register(self.loaded[name].clone())
+            .unwrap();
+        let view = self
+            .package_registry
+            .package_view(name, &self.loaded[name].package)
+            .unwrap();
+        Arc::make_mut(self.loaded.get_mut(name).unwrap()).set_runtime_package(view);
+        self.package_registry
+            .rebind(name, self.loaded[name].clone());
     }
 
     /// Native-parsed active code, admitted only after every scan metadata gate.
@@ -309,7 +323,7 @@ impl SigningScan {
         &self.loaded
     }
 
-    pub fn package_registry(&self)->Result<&crate::package::registry::Registry,String> {
+    pub fn package_registry(&self) -> Result<&crate::package::registry::Registry, String> {
         self.package_registry.validate(&self.loaded)?;
         Ok(&self.package_registry)
     }
@@ -326,6 +340,19 @@ impl SigningScan {
     /// Apply the captured per-user state supplied by its commit owner.
     /// Store publication still requires the captured base. Disabled settings
     /// share only the users that the original setting aliases.
+    /// Settings.removeUserLPw visits active PackageSettings only. Disabled
+    /// factory copies retain their user object, losing the active alias marker.
+    pub fn remove_package_user_state(&mut self, user: i32) -> Result<(), String> {
+        if user < 0 { return Err("removed package user id is negative".into()); }
+        let names: Vec<_> = self.scanned_users.keys().cloned().collect();
+        for name in names {
+            let mut users = self.scanned_users[&name].clone();
+            users.remove(&user);
+            self.update_disabled_user_aliases(&name, &users);
+        }
+        Ok(())
+    }
+
     pub fn set_user_state(
         &mut self,
         name: &str,
@@ -859,6 +886,7 @@ impl SigningScan {
                 .clone(),
             first_api_level,
             parsed: Vec::new(),
+            permission_admissions:Vec::new(),
         })
     }
 
@@ -1404,6 +1432,33 @@ impl SigningScan {
         admit_member: bool,
         apex_parse_flags: Option<i32>,
     ) -> Result<SigningOutcome, SigningError> {
+        self.reconcile_inner(
+            record,
+            signature_check,
+            disabled,
+            admit_member,
+            apex_parse_flags,
+            false,
+        )
+    }
+
+    pub(super) fn reconcile_live_authorized(
+        &mut self,
+        record: &Record,
+        disabled: Option<&Record>,
+    ) -> Result<SigningOutcome, SigningError> {
+        self.reconcile_inner(record, None, disabled, true, Some(0), true)
+    }
+
+    fn reconcile_inner(
+        &mut self,
+        record: &Record,
+        signature_check: Option<&crate::package::settings::Package>,
+        disabled: Option<&Record>,
+        admit_member: bool,
+        apex_parse_flags: Option<i32>,
+        live_authorized: bool,
+    ) -> Result<SigningOutcome, SigningError> {
         let fail = |phase, message| Error {
             package: record.settings.name.clone(),
             path: record.settings.code_path.clone(),
@@ -1487,15 +1542,19 @@ impl SigningScan {
             ),
             None => None,
         };
-        let normal = authorize::with_disabled(
-            signature_check.unwrap_or(previous),
-            &record.signing,
-            &self.settings,
-            self.settings
-                .disabled_system_packages
-                .iter()
-                .find(|p| p.name == previous.name),
-        );
+        let normal = if live_authorized {
+            Ok(())
+        } else {
+            authorize::with_disabled(
+                signature_check.unwrap_or(previous),
+                &record.signing,
+                &self.settings,
+                self.settings
+                    .disabled_system_packages
+                    .iter()
+                    .find(|p| p.name == previous.name),
+            )
+        };
         let mut mismatch = None;
         match normal {
             Ok(()) => {
@@ -1756,6 +1815,62 @@ mod tests {
                 .users,
             users
         );
+    }
+
+    #[test]
+    fn persistent_projection_uses_real_writer_for_runtime_and_validated_apex() {
+        use super::*;
+        use std::sync::Arc;
+        use crate::package::{owner,settings::{Package,Settings},pkg::{AndroidPackage,booleans2}};
+        let directory=std::env::temp_dir().join(format!("aim-settings-projection-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        struct Cleanup(std::path::PathBuf);impl Drop for Cleanup{fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+        std::fs::create_dir_all(directory.join("system/users/0")).unwrap();let _cleanup=Cleanup(directory.clone());
+        let mut disk=owner::Store::create(&directory,&[0]).unwrap();
+        let keep=Package{name:"keep".into(),app_id:10100,code_path:"/data/app/keep".into(),last_update_time:123,
+            domain_set_id:Some("00000000-0000-0000-0000-000000000001".into()),..Default::default()};
+        let drop=Package{name:"drop".into(),app_id:10101,code_path:"/data/app/drop".into(),domain_set_id:Some("00000000-0000-0000-0000-000000000002".into()),..Default::default()};
+        let mut settings=Settings{packages:vec![keep.clone(),drop],..Default::default()};
+        let mut native=SigningScan::new(&Default::default(),&settings,36).unwrap();
+        native.settings.packages[0].transient.apex_module_name=Some("container.owner".into());
+        native.settings.packages[0].shared_user_app_id=Some(1001); // Historical, no current shared membership.
+        let apex=Package{name:"container".into(),app_id:-1,code_path:"/system/apex/container.apex".into(),..Default::default()};
+        let parsed=AndroidPackage{package_name:apex.name.clone(),path:Some(apex.code_path.clone()),uid:-1,booleans2:booleans2::APEX,feature_flag_state:Some(vec![]),..Default::default()};
+        native.settings.packages.push(apex.clone());native.apex_origins.insert(apex.name.clone(),ScanOrigin::SystemDirectory);
+        native.loaded.insert(apex.name.clone(),Arc::new(super::super::LoadedPackage::new(parsed,SigningDetails::unknown()).unwrap()));
+        native.settings.key_sets.versioned=true;
+        settings=native.settings.clone();
+        let projection=disk.persistent_scan_settings(&native).unwrap();
+        assert!(!projection.packages.iter().any(|p|p.name==apex.name));
+        let projected=projection.packages.iter().find(|p|p.name==keep.name).unwrap();
+        assert_eq!(projected.last_update_time,123);assert_eq!(projected.transient,Default::default());assert_eq!(projected.shared_user_app_id,None);
+        assert!(projection.shared_users.iter().all(|group|group.flags==0));
+        // Commit the real writer output, then use the projection during strict
+        // removal. Persistent mutations to a different package remain errors.
+        let snapshot=crate::package::scan_snapshot::Store::new(SigningScan::new(&Default::default(),&Settings{packages:settings.packages.iter().filter(|p|p.name!=apex.name).cloned().collect(),..settings.clone()},36).unwrap(),owner::usage::Usage::new(["keep","drop"])).unwrap().capture();
+        disk.commit_scan_settings(&snapshot).unwrap();
+        // Reboot readers and component-state writers see the same persistent
+        // owner despite native map order/runtime/APEX metadata.
+        disk.validate_committed_scan(&native).unwrap();
+        let mut reordered=native.clone();reordered.settings.packages.reverse();reordered.settings.shared_users.reverse();
+        disk.validate_committed_scan(&reordered).unwrap();
+        let mut corrupt_code=native.clone();corrupt_code.settings.packages.iter_mut().find(|p|p.name=="keep").unwrap().code_path="/data/app/changed-code".into();
+        assert!(disk.validate_committed_scan(&corrupt_code).is_err());
+        let mut corrupt_signer=native.clone();corrupt_signer.settings.packages.iter_mut().find(|p|p.name=="keep").unwrap().signatures=Some(crate::package::settings::Signatures{scheme_version:2,signatures:vec![vec![2]],..Default::default()});
+        assert!(disk.validate_committed_scan(&corrupt_signer).is_err());
+        native.settings.packages.retain(|p|p.name!="drop");
+        let desired=disk.persistent_scan_settings(&native).unwrap();
+        let mut timestamp=desired.clone();timestamp.packages.iter_mut().find(|p|p.name=="keep").unwrap().last_update_time=124;
+        let mut source=desired.clone();source.packages.iter_mut().find(|p|p.name=="keep").unwrap().install_source.installer=Some("changed.installer".into());
+        let mut signer=desired.clone();signer.packages.iter_mut().find(|p|p.name=="keep").unwrap().signatures=Some(crate::package::settings::Signatures{scheme_version:2,signatures:vec![vec![1]],..Default::default()});
+        let before=std::fs::read(directory.join("system/packages.xml")).unwrap();
+        for wrong in [timestamp,source,signer] {
+            assert!(!disk.commit_removed_package_setting(&wrong,"drop").unwrap_err().committed);
+            assert_eq!(std::fs::read(directory.join("system/packages.xml")).unwrap(),before);
+        }
+        disk.commit_removed_package_setting(&desired,"drop").unwrap();
+        assert_eq!(owner::canonical_persistent_settings(disk.state().settings.clone()),desired);
+        native.apex_origins.remove(&apex.name);
+        assert!(disk.persistent_scan_settings(&native).unwrap_err().message.contains("APEX"));
     }
 
     #[test]

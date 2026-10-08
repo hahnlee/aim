@@ -6,27 +6,27 @@ use std::{
     time::{Duration, Instant},
 };
 mod common {
-    pub mod zip;
-    pub mod java;
-    pub mod runtime;
-    pub mod seinfo;
-    pub mod settings_defaults;
-    pub mod settings_owner_defaults;
-    pub mod signature_events;
-    pub mod package_child_events;
-    pub mod shared_read_events;
-    pub mod install_read_events;
-    pub mod factory_read_events;
-    pub mod seed_read_events;
-    pub mod initial_restrictions;
-    pub mod key_set_events;
-    pub mod verifier_events;
-    pub mod legacy_domain_events;
-    pub mod modern_domain_events;
-    pub mod domain_read_merge;
     pub mod boot_version_events;
     pub mod domain_collector;
     pub mod domain_enforcer;
+    pub mod domain_read_merge;
+    pub mod factory_read_events;
+    pub mod initial_restrictions;
+    pub mod install_read_events;
+    pub mod java;
+    pub mod key_set_events;
+    pub mod legacy_domain_events;
+    pub mod modern_domain_events;
+    pub mod package_child_events;
+    pub mod runtime;
+    pub mod seed_read_events;
+    pub mod seinfo;
+    pub mod settings_defaults;
+    pub mod settings_owner_defaults;
+    pub mod shared_read_events;
+    pub mod signature_events;
+    pub mod verifier_events;
+    pub mod zip;
 }
 use common::java::sources;
 use common::runtime::{Boot, Data, run};
@@ -78,7 +78,10 @@ fn native_package_parcels_match_original_read_write() {
                 .join("tests/api/sdk/PackageLocal.java"),
         )
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java"))
-        .args(sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/com/android/permission/persistence"))));
+        .args(sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/api/com/android/permission/persistence"),
+        )));
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
@@ -102,13 +105,34 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageCacheValidationOracle.java"),
         )
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainCollectorOracle.java"))
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainApprovalFixture.java"))
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainOwnerSortOracle.java"))
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainUuidOracle.java"))
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/UriDtoOracle.java"))
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/DomainEnforcerOracle.java"))
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/NativeAshmemOracle.java"))
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/DomainCollectorOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/DomainApprovalFixture.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/DomainOwnerSortOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/DomainUuidOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/UriDtoOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/DomainEnforcerOracle.java"),
+        )
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/NativeAshmemOracle.java"),
+        )
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/CapturedSharedUserOracle.java"),
@@ -135,7 +159,10 @@ fn native_package_parcels_match_original_read_write() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/LegacyRestoreOracle.java"),
         )
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/RuntimePersistenceOracle.java"))
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/RuntimePersistenceOracle.java"),
+        )
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
@@ -215,7 +242,9 @@ fn native_package_parcels_match_original_read_write() {
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
         )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageUidOwners.java"))
+        .arg(
+            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageUidOwners.java"),
+        )
         .arg(
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageStateReplica.java"),
@@ -249,6 +278,7 @@ fn native_package_parcels_match_original_read_write() {
             aim_paths::root()
                 .join("java/device-services/src/dev/aim/server/PackageUserScopeFeed.java"),
         )
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/NativePackageCapabilities.java"))
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         )
@@ -266,6 +296,7 @@ fn native_package_parcels_match_original_read_write() {
         )
         .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SdkDataOracle.java"))
         .arg(common::java::bootstrap_aidl(&data.0))
+        .arg(common::java::resolver_identity_aidl(&data.0))
         .arg(common::java::snapshot_aidl(&data.0))
         .arg(common::java::computer_aidl(&data.0)));
     let mut pending = vec![classes.clone()];
@@ -332,33 +363,95 @@ fn native_package_parcels_match_original_read_write() {
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
     write_library_owner_fixture(&directory);
+    write_suspension_extras_fixture(&directory);
     {
-        use aim_services::package::system_config::{SystemConfig,Library};
-        let mut config=SystemConfig::default();
-        config.library_order=vec!["BB".into(),"Aa".into()];
-        config.libraries=["BB","Aa"].map(|name|(name.into(),Library{name:name.into(),filename:format!("/system/framework/{name}.jar"),dependencies:vec![],on_bootclasspath_since:None,on_bootclasspath_before:None,can_be_safely_ignored:false,native:false})).into();
-        let registry=aim_services::package::libraries::Registry::new(&config);
-        fs::write(directory.join("library-collision-order.native-order"),registry.entries().map(|l|l.name.as_deref().unwrap()).collect::<Vec<_>>().join("\n")).unwrap();
+        use aim_services::package::system_config::{Library, SystemConfig};
+        let mut config = SystemConfig::default();
+        config.library_order = vec!["BB".into(), "Aa".into()];
+        config.libraries = ["BB", "Aa"]
+            .map(|name| {
+                (
+                    name.into(),
+                    Library {
+                        name: name.into(),
+                        filename: format!("/system/framework/{name}.jar"),
+                        dependencies: vec![],
+                        on_bootclasspath_since: None,
+                        on_bootclasspath_before: None,
+                        can_be_safely_ignored: false,
+                        native: false,
+                    },
+                )
+            })
+            .into();
+        let registry = aim_services::package::libraries::Registry::new(&config);
+        fs::write(
+            directory.join("library-collision-order.native-order"),
+            registry
+                .entries()
+                .map(|l| l.name.as_deref().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
     }
 
     {
-        use aim_binder_host::parcel::{Parcel,Reader};
+        use aim_binder_host::parcel::{Parcel, Reader};
         use aim_service_aidl::android_content_pm_ipackagemanager as pm;
-        let state=aim_services::package::model::State::default();
-        let filter=aim_services::package::apps_filter::AppsFilter::new(&state,&Default::default()).unwrap();
-        let query=aim_services::package::query::Query {state:&state,filter:&filter,calling_uid:1000};
-        let mut args=Parcel::new();
-        pm::GetAppMetadataSource {package_name:Some("missing.metadata".into()),user_id:0}.write(&mut args);
-        let reply=query.answer(pm::DESCRIPTOR,pm::GET_APP_METADATA_SOURCE,&mut Reader::new(args.data(),args.objects())).unwrap();
-        fs::write(directory.join("native-metadata-missing-exception.parcel"),reply.data()).unwrap();
+        let state = aim_services::package::model::State::default();
+        let filter =
+            aim_services::package::apps_filter::AppsFilter::new(&state, &Default::default())
+                .unwrap();
+        let query = aim_services::package::query::Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: 1000,
+        };
+        let mut args = Parcel::new();
+        pm::GetAppMetadataSource {
+            package_name: Some("missing.metadata".into()),
+            user_id: 0,
+        }
+        .write(&mut args);
+        let reply = query
+            .answer(
+                pm::DESCRIPTOR,
+                pm::GET_APP_METADATA_SOURCE,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        fs::write(
+            directory.join("native-metadata-missing-exception.parcel"),
+            reply.data(),
+        )
+        .unwrap();
     }
 
     {
         use aim_service_aidl::WriteParcelable;
-        for (index,apks) in [None,Some(vec![]),Some(vec![Some("one".into()),Some("two".into())])].into_iter().enumerate() {
-            let info=aim_services::package::module_metadata::ModuleInfo{name:Some("모듈".into()),package:Some("module.package".into()),hidden:true,apex:Some("module.apex".into()),apks};
-            let mut parcel=aim_binder_host::parcel::Parcel::new();info.write_to(&mut parcel);
-            fs::write(directory.join(format!("module-info-{index}.native-wire")),parcel.data()).unwrap();
+        for (index, apks) in [
+            None,
+            Some(vec![]),
+            Some(vec![Some("one".into()), Some("two".into())]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let info = aim_services::package::module_metadata::ModuleInfo {
+                name: Some("모듈".into()),
+                package: Some("module.package".into()),
+                hidden: true,
+                apex: Some("module.apex".into()),
+                apks,
+            };
+            let mut parcel = aim_binder_host::parcel::Parcel::new();
+            info.write_to(&mut parcel);
+            fs::write(
+                directory.join(format!("module-info-{index}.native-wire")),
+                parcel.data(),
+            )
+            .unwrap();
         }
     }
     let framework =
@@ -626,66 +719,155 @@ fn native_package_parcels_match_original_read_write() {
         version_expected.push(output.join("|"));
     }
     let package_child_inputs = common::package_child_events::inputs();
-    let package_child_expected: Vec<_> = package_child_inputs.iter().enumerate().map(|(index, bytes)| {
-        fs::write(directory.join(format!("package-child-input-{index}")), bytes).unwrap();
-        common::package_child_events::trace(&common::package_child_events::read(bytes))
-    }).collect();
-    eprintln!("original incremental package child cases: {}", package_child_inputs.len());
+    let package_child_expected: Vec<_> = package_child_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(
+                directory.join(format!("package-child-input-{index}")),
+                bytes,
+            )
+            .unwrap();
+            common::package_child_events::trace(&common::package_child_events::read(bytes))
+        })
+        .collect();
+    eprintln!(
+        "original incremental package child cases: {}",
+        package_child_inputs.len()
+    );
     let shared_read_inputs = common::shared_read_events::inputs();
-    let shared_read_expected: Vec<_> = shared_read_inputs.iter().enumerate().map(|(index, bytes)| {
-        fs::write(directory.join(format!("shared-read-input-{index}")), bytes).unwrap();
-        common::shared_read_events::trace(&common::shared_read_events::read(bytes))
-    }).collect();
-    eprintln!("original shared UID read-order cases: {}", shared_read_inputs.len());
+    let shared_read_expected: Vec<_> = shared_read_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(directory.join(format!("shared-read-input-{index}")), bytes).unwrap();
+            common::shared_read_events::trace(&common::shared_read_events::read(bytes))
+        })
+        .collect();
+    eprintln!(
+        "original shared UID read-order cases: {}",
+        shared_read_inputs.len()
+    );
     let key_set_event_inputs = common::key_set_events::inputs();
-    let key_set_event_expected: Vec<_> = key_set_event_inputs.iter().enumerate().map(|(index, bytes)| {
-        fs::write(directory.join(format!("keyset-event-input-{index}")), bytes).unwrap();
-        let (mut state, status) = common::key_set_events::read(bytes);
-        let before = common::key_set_events::trace(&state, status);
-        common::key_set_events::retire(&mut state);
-        (before, common::key_set_events::trace(&state, status))
-    }).collect();
-    eprintln!("original incremental keyset cases: {}", key_set_event_inputs.len());
+    let key_set_event_expected: Vec<_> = key_set_event_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(directory.join(format!("keyset-event-input-{index}")), bytes).unwrap();
+            let (mut state, status) = common::key_set_events::read(bytes);
+            let before = common::key_set_events::trace(&state, status);
+            common::key_set_events::retire(&mut state);
+            (before, common::key_set_events::trace(&state, status))
+        })
+        .collect();
+    eprintln!(
+        "original incremental keyset cases: {}",
+        key_set_event_inputs.len()
+    );
     let verifier_event_inputs = common::verifier_events::inputs();
-    let verifier_event_expected: Vec<_> = verifier_event_inputs.iter().enumerate().map(|(index, bytes)| {
-        fs::write(directory.join(format!("verifier-event-input-{index}")), bytes).unwrap();
-        common::verifier_events::read(bytes)
-    }).collect();
-    eprintln!("original verifier recovery cases: {}", verifier_event_inputs.len());
+    let verifier_event_expected: Vec<_> = verifier_event_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(
+                directory.join(format!("verifier-event-input-{index}")),
+                bytes,
+            )
+            .unwrap();
+            common::verifier_events::read(bytes)
+        })
+        .collect();
+    eprintln!(
+        "original verifier recovery cases: {}",
+        verifier_event_inputs.len()
+    );
     let legacy_domain_inputs = common::legacy_domain_events::inputs();
-    let legacy_domain_expected: Vec<_> = legacy_domain_inputs.iter().enumerate().map(|(index, bytes)| {
-        fs::write(directory.join(format!("legacy-domain-event-input-{index}")), bytes).unwrap();
-        common::legacy_domain_events::projection(&common::legacy_domain_events::read(bytes))
-    }).collect();
-    eprintln!("original legacy domain event cases: {}", legacy_domain_inputs.len());
+    let legacy_domain_expected: Vec<_> = legacy_domain_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(
+                directory.join(format!("legacy-domain-event-input-{index}")),
+                bytes,
+            )
+            .unwrap();
+            common::legacy_domain_events::projection(&common::legacy_domain_events::read(bytes))
+        })
+        .collect();
+    eprintln!(
+        "original legacy domain event cases: {}",
+        legacy_domain_inputs.len()
+    );
     let modern_domain_inputs = common::modern_domain_events::inputs();
-    let modern_domain_expected: Vec<_> = modern_domain_inputs.iter().enumerate().map(|(index, bytes)| {
-        fs::write(directory.join(format!("modern-domain-event-input-{index}")), bytes).unwrap();
-        let (mut state, status) = common::modern_domain_events::read(bytes); common::modern_domain_events::normalize(&mut state);
-        (state, status)
-    }).collect();
-    eprintln!("original modern domain event cases: {}", modern_domain_inputs.len());
+    let modern_domain_expected: Vec<_> = modern_domain_inputs
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            fs::write(
+                directory.join(format!("modern-domain-event-input-{index}")),
+                bytes,
+            )
+            .unwrap();
+            let (mut state, status) = common::modern_domain_events::read(bytes);
+            common::modern_domain_events::normalize(&mut state);
+            (state, status)
+        })
+        .collect();
+    eprintln!(
+        "original modern domain event cases: {}",
+        modern_domain_inputs.len()
+    );
     common::install_read_events::export(&directory);
     common::factory_read_events::export(&directory);
     common::seed_read_events::export(&directory);
     common::initial_restrictions::export(&directory);
     let runtime = aim_services::package::permissions::RuntimePermissions {
-        version: 7, fingerprint: Some("finger<&\"\t\n\r".into()),
-        packages: vec![(Some("p".into()), vec![
-            aim_services::package::permissions::RuntimePermission { name: Some("ordinary".into()), granted: true, flags: 17 },
-            aim_services::package::permissions::RuntimePermission { name: Some("one-time".into()), granted: true, flags: 1<<16 },
-        ])], shared_users: vec![(Some("group".into()), vec![])],
+        version: 7,
+        fingerprint: Some("finger<&\"\t\n\r".into()),
+        packages: vec![(
+            Some("p".into()),
+            vec![
+                aim_services::package::permissions::RuntimePermission {
+                    name: Some("ordinary".into()),
+                    granted: true,
+                    flags: 17,
+                },
+                aim_services::package::permissions::RuntimePermission {
+                    name: Some("one-time".into()),
+                    granted: true,
+                    flags: 1 << 16,
+                },
+            ],
+        )],
+        shared_users: vec![(Some("group".into()), vec![])],
     };
     let runtime_data = directory.join("runtime-native-store");
-    let mut runtime_store = aim_services::package::owner::Store::create(&runtime_data, &[42]).unwrap();
+    let mut runtime_store =
+        aim_services::package::owner::Store::create(&runtime_data, &[42]).unwrap();
     runtime_store.claim_runtime_permissions(42).unwrap();
-    runtime_store.commit_runtime_permissions(42, &runtime, aim_storage::guest_inode::GuestInode {
-        uid: Some(1000), gid: Some(1000), mode: Some(0o600),
-    }).unwrap();
-    let runtime_path = runtime_data.join("misc_de/42/apexdata/com.android.permission/runtime-permissions.xml");
+    runtime_store
+        .commit_runtime_permissions(
+            42,
+            &runtime,
+            aim_storage::guest_inode::GuestInode {
+                uid: Some(1000),
+                gid: Some(1000),
+                mode: Some(0o600),
+            },
+        )
+        .unwrap();
+    let runtime_path =
+        runtime_data.join("misc_de/42/apexdata/com.android.permission/runtime-permissions.xml");
     let runtime_bytes = fs::read(&runtime_path).unwrap();
-    assert_eq!(runtime_bytes, fs::read(runtime_path.with_file_name("runtime-permissions.xml.reservecopy")).unwrap());
-    fs::write(directory.join("native-runtime-permissions.xml"), runtime_bytes).unwrap();
+    assert_eq!(
+        runtime_bytes,
+        fs::read(runtime_path.with_file_name("runtime-permissions.xml.reservecopy")).unwrap()
+    );
+    fs::write(
+        directory.join("native-runtime-permissions.xml"),
+        runtime_bytes,
+    )
+    .unwrap();
     fs::write(directory.join("nullable-runtime-owners.xml"), b"<runtime-permissions><package><permission name='old' granted='true' flags='1'/></package><package name=''/><package><permission name='last' granted='false' flags='2'/></package><shared-user/><shared-user name=''/></runtime-permissions>").unwrap();
     fs::write(directory.join("nullable-runtime-permission.xml"), b"<runtime-permissions><package name='p'><permission granted='true' flags='1'/></package></runtime-permissions>").unwrap();
     fs::write(directory.join("duplicate-runtime-permissions.xml"), b"<runtime-permissions><package name='BB'><permission name='old' granted='true' flags='1'/></package><package name='Aa'/><package name='z'/><package name='BB'><permission name='last' granted='false' flags='2'/></package><shared-user name='group'><permission name='old' granted='true' flags='1'/></shared-user><shared-user name='group'/></runtime-permissions>").unwrap();
@@ -828,7 +1010,10 @@ fn native_package_parcels_match_original_read_write() {
         [None, None, Some(b"ABX\0\x10\x11".to_vec())],
         [Some(b"broken".to_vec()), None, None],
     ];
-    let mut recovery_cases = recovery_inputs.into_iter().map(|inputs| (inputs, [0u8; 3])).collect::<Vec<_>>();
+    let mut recovery_cases = recovery_inputs
+        .into_iter()
+        .map(|inputs| (inputs, [0u8; 3]))
+        .collect::<Vec<_>>();
     recovery_cases.extend([
         ([Some(b"<packages/>".to_vec()), None, None], [0, 1, 1]),
         ([Some(b"<packages/>".to_vec()), None, None], [0, 0, 1]),
@@ -836,7 +1021,14 @@ fn native_package_parcels_match_original_read_write() {
         ([None, Some(b"<packages/>".to_vec()), None], [2, 0, 1]),
     ]);
     let readonly_recovery = recovery_cases.len();
-    recovery_cases.push(([Some(b"<packages/>".to_vec()), Some(b"<packages/>".to_vec()), Some(b"<packages/>".to_vec())], [0, 0, 0]));
+    recovery_cases.push((
+        [
+            Some(b"<packages/>".to_vec()),
+            Some(b"<packages/>".to_vec()),
+            Some(b"<packages/>".to_vec()),
+        ],
+        [0, 0, 0],
+    ));
     let mut recovery_expected = Vec::new();
     for (index, (inputs, directories)) in recovery_cases.iter().enumerate() {
         let native = directory.join(format!("recovery-native-{index}"));
@@ -846,12 +1038,26 @@ fn native_package_parcels_match_original_read_write() {
             "packages-backup.xml",
             "packages.xml.reservecopy",
         ];
-        let mut properties = if index == readonly_recovery {"readonly=true\n".to_string()} else {String::new()};
+        let mut properties = if index == readonly_recovery {
+            "readonly=true\n".to_string()
+        } else {
+            String::new()
+        };
         for (slot, input) in inputs.iter().enumerate() {
             if directories[slot] != 0 {
-                properties.push_str(&format!("{slot}={}\n", if directories[slot] == 1 {"directory"} else {"nonempty-directory"}));
-                let path = native.join("system").join(names[slot]); fs::create_dir(&path).unwrap();
-                if directories[slot] == 2 {fs::write(path.join("keep"), b"owned fixture").unwrap();}
+                properties.push_str(&format!(
+                    "{slot}={}\n",
+                    if directories[slot] == 1 {
+                        "directory"
+                    } else {
+                        "nonempty-directory"
+                    }
+                ));
+                let path = native.join("system").join(names[slot]);
+                fs::create_dir(&path).unwrap();
+                if directories[slot] == 2 {
+                    fs::write(path.join("keep"), b"owned fixture").unwrap();
+                }
                 continue;
             }
             properties.push_str(&format!(
@@ -871,8 +1077,12 @@ fn native_package_parcels_match_original_read_write() {
         )
         .unwrap();
         let plan = aim_services::package::owner::recovery::Plan::inspect(&native).unwrap();
-        if index == readonly_recovery {use std::os::unix::fs::PermissionsExt; fs::set_permissions(native.join("system"), fs::Permissions::from_mode(0o555)).unwrap();}
-        let (_, report) = plan.recover(&[0], &mut Default::default(), |bytes, state| {
+        if index == readonly_recovery {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(native.join("system"), fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let (_, report) = plan
+            .recover(&[0], &mut Default::default(), |bytes, state| {
                 let root = aim_android_xml::read_next_optional(bytes)?;
                 if let Some(root) = &root {
                     *state = aim_services::package::settings::Settings::parse(root)?;
@@ -902,16 +1112,27 @@ fn native_package_parcels_match_original_read_write() {
             .iter()
             .map(|name| {
                 let path = native.join("system").join(name);
-                if path.is_dir() {return if path.read_dir().unwrap().next().is_some() {"nonempty-directory"} else {"directory"}.to_string();}
+                if path.is_dir() {
+                    return if path.read_dir().unwrap().next().is_some() {
+                        "nonempty-directory"
+                    } else {
+                        "directory"
+                    }
+                    .to_string();
+                }
                 match fs::read(path) {
-                Ok(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
-                Err(error) => panic!("recovery output: {error}"),
-            }})
+                    Ok(bytes) => bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".into(),
+                    Err(error) => panic!("recovery output: {error}"),
+                }
+            })
             .collect::<Vec<_>>()
             .join(";");
         recovery_expected.push(format!("{}|{events}|{remains}", report.first_boot));
-        if index == readonly_recovery {use std::os::unix::fs::PermissionsExt; fs::set_permissions(native.join("system"), fs::Permissions::from_mode(0o755)).unwrap();}
+        if index == readonly_recovery {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(native.join("system"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
     let reindexed_data = directory.join("reindexed-settings-writer");
     fs::create_dir_all(reindexed_data.join("system")).unwrap();
@@ -1692,10 +1913,13 @@ fn native_package_parcels_match_original_read_write() {
             if case >= 4 {
                 migration.read_legacy_runtime(&root, 10).unwrap();
             } else {
-                let bytes = fs::read(directory.join(format!("legacy-migration-{index}.xml"))).unwrap();
+                let bytes =
+                    fs::read(directory.join(format!("legacy-migration-{index}.xml"))).unwrap();
                 let mut reader = aim_android_xml::pull::Reader::new(&bytes).unwrap();
                 reader.next().unwrap();
-                migration.read_install_events(&mut reader, &[10, 0]).unwrap();
+                migration
+                    .read_install_events(&mut reader, &[10, 0])
+                    .unwrap();
             }
             migration
                 .read_runtime(
@@ -1801,45 +2025,79 @@ fn native_package_parcels_match_original_read_write() {
         String::from_utf8_lossy(&original.stderr)
     );
     {
-        use aim_binder_host::parcel::{Parcel,Reader,EX_PARCELABLE};
-        let bytes=fs::read(directory.join("original-metadata-missing-exception.parcel")).unwrap();
-        let mut reader=Reader::new(&bytes,&[]);
-        let exception=reader.read_exception().unwrap().unwrap_err();
-        assert_eq!(exception.code,EX_PARCELABLE);
-        assert_eq!(reader.remaining(),0);
-        let payload=exception.parcelable.as_ref().unwrap();
-        let mut cause=Reader::new(payload.bytes(),&[]);
-        assert_eq!(cause.read_string16().unwrap().as_deref(),Some("android.os.ParcelableException"));
-        assert_eq!(cause.read_string16().unwrap().as_deref(),Some("android.content.pm.PackageManager$NameNotFoundException"));
-        assert_eq!(cause.read_string16().unwrap().as_deref(),Some("missing.metadata"));
-        assert_eq!(cause.remaining(),0);
-        let mut rewritten=Parcel::new();rewritten.write_exception(&exception);
-        assert_eq!(rewritten.data(),bytes.as_slice());
+        use aim_binder_host::parcel::{EX_PARCELABLE, Parcel, Reader};
+        let bytes = fs::read(directory.join("original-metadata-missing-exception.parcel")).unwrap();
+        let mut reader = Reader::new(&bytes, &[]);
+        let exception = reader.read_exception().unwrap().unwrap_err();
+        assert_eq!(exception.code, EX_PARCELABLE);
+        assert_eq!(reader.remaining(), 0);
+        let payload = exception.parcelable.as_ref().unwrap();
+        let mut cause = Reader::new(payload.bytes(), &[]);
+        assert_eq!(
+            cause.read_string16().unwrap().as_deref(),
+            Some("android.os.ParcelableException")
+        );
+        assert_eq!(
+            cause.read_string16().unwrap().as_deref(),
+            Some("android.content.pm.PackageManager$NameNotFoundException")
+        );
+        assert_eq!(
+            cause.read_string16().unwrap().as_deref(),
+            Some("missing.metadata")
+        );
+        assert_eq!(cause.remaining(), 0);
+        let mut rewritten = Parcel::new();
+        rewritten.write_exception(&exception);
+        assert_eq!(rewritten.data(), bytes.as_slice());
     }
     {
-        use aim_service_aidl::{ReadParcelable,WriteParcelable};
-        let bytes=fs::read(directory.join("module-info.original-wire")).unwrap();
-        let mut reader=aim_binder_host::parcel::Reader::new(&bytes,&[]);
-        let info=aim_services::package::module_metadata::ModuleInfo::read_from(&mut reader).unwrap();
-        assert_eq!(reader.remaining(),0);
-        assert_eq!(info.name.as_deref(),Some("original module"));
-        assert_eq!(info.apex.as_deref(),Some("original.apex"));
-        assert_eq!(info.apks,Some(vec![Some("one".into()),Some("two".into())]));
-        let mut rewritten=aim_binder_host::parcel::Parcel::new();info.write_to(&mut rewritten);
-        assert_eq!(rewritten.data(),bytes);
+        use aim_service_aidl::{ReadParcelable, WriteParcelable};
+        let bytes = fs::read(directory.join("module-info.original-wire")).unwrap();
+        let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+        let info =
+            aim_services::package::module_metadata::ModuleInfo::read_from(&mut reader).unwrap();
+        assert_eq!(reader.remaining(), 0);
+        assert_eq!(info.name.as_deref(), Some("original module"));
+        assert_eq!(info.apex.as_deref(), Some("original.apex"));
+        assert_eq!(
+            info.apks,
+            Some(vec![Some("one".into()), Some("two".into())])
+        );
+        let mut rewritten = aim_binder_host::parcel::Parcel::new();
+        info.write_to(&mut rewritten);
+        assert_eq!(rewritten.data(), bytes);
     }
-    verify_native_module_resources(&directory,&files);
+    verify_native_module_resources(&directory, &files);
+    verify_page_size_compat(&directory);
     let original_runtime = aim_services::package::permissions::RuntimePermissions::parse(
-        &aim_android_xml::read(&fs::read(directory.join("original-runtime-permissions.xml")).unwrap()).unwrap()
-    ).unwrap();
+        &aim_android_xml::read(
+            &fs::read(directory.join("original-runtime-permissions.xml")).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let native_runtime = aim_services::package::permissions::RuntimePermissions::parse(
-        &aim_android_xml::read(&fs::read(directory.join("native-runtime-permissions.xml")).unwrap()).unwrap()
-    ).unwrap();
+        &aim_android_xml::read(
+            &fs::read(directory.join("native-runtime-permissions.xml")).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(original_runtime, native_runtime);
-    let read_runtime = |name| aim_services::package::permissions::RuntimePermissions::parse(
-        &aim_android_xml::read(&fs::read(directory.join(name)).unwrap()).unwrap()).unwrap();
-    assert_eq!(read_runtime("original-duplicate-runtime-permissions.xml"), read_runtime("duplicate-runtime-permissions.xml"));
-    eprintln!("Original nullable factory write status: {}", fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap());
+    let read_runtime = |name| {
+        aim_services::package::permissions::RuntimePermissions::parse(
+            &aim_android_xml::read(&fs::read(directory.join(name)).unwrap()).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read_runtime("original-duplicate-runtime-permissions.xml"),
+        read_runtime("duplicate-runtime-permissions.xml")
+    );
+    eprintln!(
+        "Original nullable factory write status: {}",
+        fs::read_to_string(directory.join("nullable-factory-original.write-status")).unwrap()
+    );
     assert_eq!(
         String::from_utf8(original.stdout).unwrap(),
         format!("PARCELS {}\n", expected.len())
@@ -2291,7 +2549,8 @@ fn native_package_parcels_match_original_read_write() {
     let sandbox_filter = aim_services::package::apps_filter::AppsFilter::new(
         &sandbox_state,
         &aim_services::package::apps_filter::Config::default(),
-    ).unwrap();
+    )
+    .unwrap();
     let selected_name = selected.unwrap();
     let selected_setting = state
         .settings
@@ -4420,47 +4679,114 @@ fn native_package_parcels_match_original_read_write() {
         );
     }
     for (index, expected) in package_child_expected.iter().enumerate() {
-        assert_eq!(fs::read_to_string(directory.join(format!("package-child-output-{index}"))).unwrap(), *expected,
-            "original incremental package child {index}: {:?}", String::from_utf8_lossy(&package_child_inputs[index]));
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("package-child-output-{index}"))).unwrap(),
+            *expected,
+            "original incremental package child {index}: {:?}",
+            String::from_utf8_lossy(&package_child_inputs[index])
+        );
     }
     for (index, expected) in shared_read_expected.iter().enumerate() {
-        assert_eq!(fs::read_to_string(directory.join(format!("shared-read-output-{index}"))).unwrap(), *expected,
-            "original shared UID read order {index}: {:?}", String::from_utf8_lossy(&shared_read_inputs[index]));
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("shared-read-output-{index}"))).unwrap(),
+            *expected,
+            "original shared UID read order {index}: {:?}",
+            String::from_utf8_lossy(&shared_read_inputs[index])
+        );
     }
     for (index, expected) in key_set_event_expected.iter().enumerate() {
         for (phase, expected) in [("read", &expected.0), ("retired", &expected.1)] {
-            let actual = fs::read_to_string(directory.join(format!("keyset-event-{phase}-output-{index}"))).unwrap();
+            let actual =
+                fs::read_to_string(directory.join(format!("keyset-event-{phase}-output-{index}")))
+                    .unwrap();
             let fields = actual.split('|').collect::<Vec<_>>();
-            let root = aim_android_xml::read_next(&fs::read(directory.join(format!("keyset-event-{phase}-pool-{index}"))).unwrap()).unwrap();
-            let keysets = aim_services::package::settings::Settings::parse(&root).unwrap().key_sets;
-            let mut sets = keysets.key_sets.iter().map(|(id, keys)| format!("{id}:{}", keys.iter().map(ToString::to_string).collect::<Vec<_>>().join(","))).collect::<Vec<_>>(); sets.sort();
-            let projected = format!("{}|{}|{}|{},{}|{}", fields[0], fields[1], fields[2], keysets.last_issued_key_id, keysets.last_issued_key_set_id, sets.join(";"));
-            assert_eq!(projected, *expected, "original incremental keyset {index} {phase}");
+            let root = aim_android_xml::read_next(
+                &fs::read(directory.join(format!("keyset-event-{phase}-pool-{index}"))).unwrap(),
+            )
+            .unwrap();
+            let keysets = aim_services::package::settings::Settings::parse(&root)
+                .unwrap()
+                .key_sets;
+            let mut sets = keysets
+                .key_sets
+                .iter()
+                .map(|(id, keys)| {
+                    format!(
+                        "{id}:{}",
+                        keys.iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .collect::<Vec<_>>();
+            sets.sort();
+            let projected = format!(
+                "{}|{}|{}|{},{}|{}",
+                fields[0],
+                fields[1],
+                fields[2],
+                keysets.last_issued_key_id,
+                keysets.last_issued_key_set_id,
+                sets.join(";")
+            );
+            assert_eq!(
+                projected, *expected,
+                "original incremental keyset {index} {phase}"
+            );
         }
     }
     for (index, expected) in verifier_event_expected.iter().enumerate() {
-        assert_eq!(fs::read_to_string(directory.join(format!("verifier-event-output-{index}"))).unwrap(), *expected, "original verifier read/retry {index}");
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("verifier-event-output-{index}"))).unwrap(),
+            *expected,
+            "original verifier read/retry {index}"
+        );
     }
     for (index, expected) in legacy_domain_expected.iter().enumerate() {
-        let root = aim_android_xml::read_next(&fs::read(directory.join(format!("legacy-domain-event-output-{index}"))).unwrap()).unwrap();
-        let mut state = aim_services::package::domain_verification::State::default(); state.read_legacy(&root).unwrap();
-        assert_eq!(common::legacy_domain_events::projection(&state), *expected, "original legacy domain event {index}");
+        let root = aim_android_xml::read_next(
+            &fs::read(directory.join(format!("legacy-domain-event-output-{index}"))).unwrap(),
+        )
+        .unwrap();
+        let mut state = aim_services::package::domain_verification::State::default();
+        state.read_legacy(&root).unwrap();
+        assert_eq!(
+            common::legacy_domain_events::projection(&state),
+            *expected,
+            "original legacy domain event {index}"
+        );
     }
     for (index, expected) in modern_domain_expected.iter().enumerate() {
-        let root = aim_android_xml::read_next(&fs::read(directory.join(format!("modern-domain-event-output-{index}"))).unwrap()).unwrap();
-        let mut state = aim_services::package::domain_verification::State::default(); state.read(&root).unwrap(); common::modern_domain_events::normalize(&mut state);
-        assert_eq!(fs::read_to_string(directory.join(format!("modern-domain-event-status-{index}"))).unwrap(), expected.1, "original modern domain status {index}");
+        let root = aim_android_xml::read_next(
+            &fs::read(directory.join(format!("modern-domain-event-output-{index}"))).unwrap(),
+        )
+        .unwrap();
+        let mut state = aim_services::package::domain_verification::State::default();
+        state.read(&root).unwrap();
+        common::modern_domain_events::normalize(&mut state);
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("modern-domain-event-status-{index}")))
+                .unwrap(),
+            expected.1,
+            "original modern domain status {index}"
+        );
         assert_eq!(state, expected.0, "original modern domain event {index}");
     }
     {
         let bytes = fs::read(directory.join("current-package-version.original")).unwrap();
         let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
-        assert_eq!(reader.read_i32().unwrap(),36); assert_eq!(reader.read_i32().unwrap(),3);
-        assert!(reader.read_string16().unwrap().is_some()); assert!(reader.read_string16().unwrap().is_some());
-        assert_eq!(reader.remaining(),0);
+        assert_eq!(reader.read_i32().unwrap(), 36);
+        assert_eq!(reader.read_i32().unwrap(), 3);
+        assert!(reader.read_string16().unwrap().is_some());
+        assert!(reader.read_string16().unwrap().is_some());
+        assert_eq!(reader.remaining(), 0);
     }
     for (index, expected) in boot_version_expected.iter().enumerate() {
-        assert_eq!(fs::read_to_string(directory.join(format!("boot-version-output-{index}"))).unwrap(), *expected, "original boot VersionInfo {index}");
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("boot-version-output-{index}"))).unwrap(),
+            *expected,
+            "original boot VersionInfo {index}"
+        );
     }
     let mut pull_mismatches = Vec::new();
     for (index, expected) in pull_expected.iter().enumerate() {
@@ -5788,7 +6114,9 @@ fn read_version_events(
     bytes: &[u8],
     settings: &mut aim_services::package::settings::Settings,
 ) -> Result<Option<aim_android_xml::Element>, String> {
-    settings.read_document(bytes, |_,_,_| Ok(false)).map_err(|error| error.to_string())
+    settings
+        .read_document(bytes, |_, _, _| Ok(false))
+        .map_err(|error| error.to_string())
 }
 
 fn export_retained_snapshot(
@@ -5881,40 +6209,296 @@ fn export_retained_snapshot(
     }
 }
 
-
-fn verify_native_module_resources(directory:&std::path::Path,cache_files:&[std::path::PathBuf]) {
+fn verify_native_module_resources(directory: &std::path::Path, cache_files: &[std::path::PathBuf]) {
     use aim_service_aidl::ReadParcelable;
-    use aim_services::package::{module_metadata::{ModuleInfo,Owner,ApexLinks},bootstrap::ApexInventory,scan::ApexScanResult,model,parse::{Platform,resources::Config},pkg::AndroidPackage};
-    let bytes=fs::read(directory.join("module-resources.original-wire")).unwrap();
-    let mut reader=aim_binder_host::parcel::Reader::new(&bytes,&[]);
-    let provider=reader.read_string16().unwrap().unwrap();
-    let count=reader.read_i32().unwrap();
-    assert!(count>0,"actual module metadata has no records");
-    let expected=(0..count).map(|_|ModuleInfo::read_from(&mut reader).unwrap()).collect::<Vec<_>>();
-    assert_eq!(reader.remaining(),0);
-    let inventory=ApexInventory::read_original_record(&fs::read(directory.join("apex-inventory-parse.original")).unwrap()).unwrap();
-    let results=inventory.packages.iter().flatten().enumerate().map(|(index,info)|ApexScanResult {info:info.clone(),package:AndroidPackage::read_cache_entry(&fs::read(directory.join(format!("apex-parse-{index}.original"))).unwrap()).unwrap(),signing:aim_services::package::sign::SigningDetails::unknown()}).collect::<Vec<_>>();
-    let cached=cache_files.iter().map(|file|AndroidPackage::read_cache_entry(&fs::read(file).unwrap()).unwrap()).collect::<Vec<_>>();
-    let mut registrations=Vec::new();
-    let mut seen_modules=std::collections::BTreeSet::new();
+    use aim_services::package::{
+        bootstrap::ApexInventory,
+        model,
+        module_metadata::{ApexLinks, ModuleInfo, Owner},
+        parse::{Platform, resources::Config},
+        pkg::AndroidPackage,
+        scan::ApexScanResult,
+    };
+    let bytes = fs::read(directory.join("module-resources.original-wire")).unwrap();
+    let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+    let provider = reader.read_string16().unwrap().unwrap();
+    let count = reader.read_i32().unwrap();
+    assert!(count > 0, "actual module metadata has no records");
+    let expected = (0..count)
+        .map(|_| ModuleInfo::read_from(&mut reader).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(reader.remaining(), 0);
+    let inventory = ApexInventory::read_original_record(
+        &fs::read(directory.join("apex-inventory-parse.original")).unwrap(),
+    )
+    .unwrap();
+    let results = inventory
+        .packages
+        .iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, info)| ApexScanResult {
+            info: info.clone(),
+            package: AndroidPackage::read_cache_entry(
+                &fs::read(directory.join(format!("apex-parse-{index}.original"))).unwrap(),
+            )
+            .unwrap(),
+            signing: aim_services::package::sign::SigningDetails::unknown(),
+        })
+        .collect::<Vec<_>>();
+    let cached = cache_files
+        .iter()
+        .map(|file| AndroidPackage::read_cache_entry(&fs::read(file).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    let mut registrations = Vec::new();
+    let mut seen_modules = std::collections::BTreeSet::new();
     for module in &expected {
-        if !seen_modules.insert(module.apex.clone()) {continue;}
+        if !seen_modules.insert(module.apex.clone()) {
+            continue;
+        }
         for name in module.apks.iter().flatten().flatten() {
-            let package=cached.iter().find(|package|&package.package_name==name && package.base_apk_path.as_ref().is_some_and(|path|inventory.active.iter().any(|a|a.module_name==module.apex && path.starts_with(&format!("{}/",a.mount_path))))).unwrap_or_else(||panic!("APK-in-APEX registration cache unavailable: {name}"));
+            let package = cached
+                .iter()
+                .find(|package| {
+                    &package.package_name == name
+                        && package.base_apk_path.as_ref().is_some_and(|path| {
+                            inventory.active.iter().any(|a| {
+                                a.module_name == module.apex
+                                    && path.starts_with(&format!("{}/", a.mount_path))
+                            })
+                        })
+                })
+                .unwrap_or_else(|| panic!("APK-in-APEX registration cache unavailable: {name}"));
             registrations.push(package.clone());
         }
     }
-    let links=ApexLinks::from_scan(&results,&inventory,&registrations).unwrap();
-    let root=aim_paths::derived_image();
-    let platform=Platform::load(&root,Default::default()).unwrap();
-    let source=cached.iter().find(|package|package.package_name==provider).expect("module metadata provider parser cache absent");
-    let guest=source.path.as_ref().unwrap();
-    let parsed=aim_services::package::parse::parse(&root.join(guest.trim_start_matches('/')),guest,1<<4,&platform).unwrap();
-    let mut code=AndroidPackage::read_cache_entry(&parsed.to_cache_entry().bytes).unwrap();
-    code.uid=19031;
-    let state=model::State {packages:[(provider.clone(),model::PackageState {name:provider.clone(),app_id:19031,pkg:Some(std::sync::Arc::new(code)),users:[(0,model::PackageUserState::default())].into(),..Default::default()})].into(),users:[(0,model::User{id:0,..Default::default()})].into(),..Default::default()};
-    let owner=Owner::load(&state,&platform,Config {language:*b"en",country:*b"US",sdk_version:platform.sdk as u16,..Default::default()},&|path|Ok(root.join(path.trim_start_matches('/'))),&links).unwrap();
-    assert!(owner.loaded(),"module resources were not loaded: {:?}",owner.diagnostic());
-    assert_eq!(owner.provider(),Some(provider.as_str()));
-    assert_eq!(owner.modules(),expected.as_slice(),"native XML/configured text/APEX projection differs from original resource values");
+    let links = ApexLinks::from_scan(&results, &inventory, &registrations).unwrap();
+    let root = aim_paths::derived_image();
+    let platform = Platform::load(&root, Default::default()).unwrap();
+    let source = cached
+        .iter()
+        .find(|package| package.package_name == provider)
+        .expect("module metadata provider parser cache absent");
+    let guest = source.path.as_ref().unwrap();
+    let parsed = aim_services::package::parse::parse(
+        &root.join(guest.trim_start_matches('/')),
+        guest,
+        1 << 4,
+        &platform,
+    )
+    .unwrap();
+    let mut code = AndroidPackage::read_cache_entry(&parsed.to_cache_entry().bytes).unwrap();
+    code.uid = 19031;
+    let state = model::State {
+        packages: [(
+            provider.clone(),
+            model::PackageState {
+                name: provider.clone(),
+                app_id: 19031,
+                pkg: Some(std::sync::Arc::new(code)),
+                users: [(0, model::PackageUserState::default())].into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        users: [(
+            0,
+            model::User {
+                id: 0,
+                ..Default::default()
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let owner = Owner::load(
+        &state,
+        &platform,
+        Config {
+            language: *b"en",
+            country: *b"US",
+            sdk_version: platform.sdk as u16,
+            ..Default::default()
+        },
+        &|path| Ok(root.join(path.trim_start_matches('/'))),
+        &links,
+    )
+    .unwrap();
+    assert!(
+        owner.loaded(),
+        "module resources were not loaded: {:?}",
+        owner.diagnostic()
+    );
+    assert_eq!(owner.provider(), Some(provider.as_str()));
+    assert_eq!(
+        owner.modules(),
+        expected.as_slice(),
+        "native XML/configured text/APEX projection differs from original resource values"
+    );
+}
+
+fn write_suspension_extras_fixture(directory: &std::path::Path) {
+    use aim_binder_host::parcel::{Parcel, Reader};
+    use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+    use aim_services::package::{apps_filter, model, pkg, query, restrictions};
+    let document = aim_android_xml::read(
+        br#"<package-restrictions><pkg name='fixture'>
+        <suspend-params suspending-package='BB'><app-extras>
+            <int name='BB' value='1'/><string name='Aa'>first</string>
+        </app-extras></suspend-params>
+        <suspend-params suspending-package='Aa'><app-extras>
+            <int name='BB' value='3'/><string name='Aa'>last</string>
+            <int-array name='array' num='2'><item value='7'/><item value='9'/></int-array>
+            <pbundle_as_map name='nested'><string name='text'>nested</string></pbundle_as_map>
+        </app-extras></suspend-params>
+    </pkg></package-restrictions>"#,
+    )
+    .unwrap();
+    let restrictions = restrictions::Restrictions::parse(&document).unwrap();
+    let saved = &restrictions.packages[0].1;
+    let rows = saved.resolved_suspensions(0, false);
+    let mut state = model::State::default();
+    state.users.insert(
+        0,
+        model::User {
+            id: 0,
+            unlocking_or_unlocked: true,
+            ..Default::default()
+        },
+    );
+    state.packages.insert(
+        "fixture".into(),
+        model::PackageState {
+            name: "fixture".into(),
+            app_id: 10100,
+            pkg: Some(std::sync::Arc::new(pkg::AndroidPackage {
+                package_name: "fixture".into(),
+                uid: 10100,
+                booleans: pkg::booleans::ENABLED,
+                ..Default::default()
+            })),
+            users: [(
+                0,
+                model::PackageUserState {
+                    suspended_by: rows.iter().map(|(_, row)| row.package.clone()).collect(),
+                    suspensions: Some(
+                        rows.iter()
+                            .map(|(user, row)| restrictions::Suspension {
+                                package: row.package.clone(),
+                                user: restrictions::SuspendingUser::Resolved(*user),
+                                params: row.params.clone(),
+                            })
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        },
+    );
+    let filter = apps_filter::AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = query::Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    let mut args = Parcel::new();
+    pm::GetSuspendedPackageAppExtras {
+        package_name: Some("fixture".into()),
+        user_id: 0,
+    }
+    .write(&mut args);
+    let reply = query
+        .answer(
+            pm::DESCRIPTOR,
+            pm::GET_SUSPENDED_PACKAGE_APP_EXTRAS,
+            &mut Reader::new(args.data(), args.objects()),
+        )
+        .unwrap();
+    fs::write(
+        directory.join("suspension-extras.native-reply"),
+        reply.data(),
+    )
+    .unwrap();
+    for uid in [0, 1000, 10101] {
+        let query = query::Query {
+            state: &state,
+            filter: &filter,
+            calling_uid: uid,
+        };
+        let reply = query
+            .answer(
+                pm::DESCRIPTOR,
+                pm::GET_SUSPENDED_PACKAGE_APP_EXTRAS,
+                &mut Reader::new(args.data(), args.objects()),
+            )
+            .unwrap();
+        fs::write(
+            directory.join(format!("suspension-extras-denied-{uid}.native-reply")),
+            reply.data(),
+        )
+        .unwrap();
+    }
+    state
+        .packages
+        .get_mut("fixture")
+        .unwrap()
+        .users
+        .get_mut(&0)
+        .unwrap()
+        .suspended_by
+        .clear();
+    let filter = apps_filter::AppsFilter::new(&state, &Default::default()).unwrap();
+    let query = query::Query {
+        state: &state,
+        filter: &filter,
+        calling_uid: 10100,
+    };
+    let reply = query
+        .answer(
+            pm::DESCRIPTOR,
+            pm::GET_SUSPENDED_PACKAGE_APP_EXTRAS,
+            &mut Reader::new(args.data(), args.objects()),
+        )
+        .unwrap();
+    fs::write(
+        directory.join("suspension-extras-null.native-reply"),
+        reply.data(),
+    )
+    .unwrap();
+}
+
+fn verify_page_size_compat(directory: &std::path::Path) {
+    use aim_services::package::{
+        page_size_compat::{Owner, enabled},
+        parse::{Platform, resources::Config},
+    };
+    let platform = Platform::load(&aim_paths::derived_image(), Default::default()).unwrap();
+    let owner = Owner::load(
+        &platform,
+        Config {
+            language: *b"en",
+            country: *b"US",
+            sdk_version: platform.sdk as u16,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bytes = fs::read(directory.join("page-size-compat.original-wire")).unwrap();
+    let mut reader = aim_binder_host::parcel::Reader::new(&bytes, &[]);
+    assert_eq!(reader.read_i32().unwrap(), 128);
+    for flags in 0..128 {
+        assert_eq!(
+            reader.read_bool().unwrap(),
+            enabled(flags),
+            "original page-size enabled flags {flags}"
+        );
+        assert_eq!(
+            reader.read_string16().unwrap(),
+            owner.warning(flags),
+            "original page-size warning flags {flags}"
+        );
+    }
+    assert_eq!(reader.remaining(), 0);
 }

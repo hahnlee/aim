@@ -8,6 +8,11 @@ public final class Configuration {
 
     public int uiMode;
     public int densityDpi;
+    public int mcc; public int mnc; public int orientation; public int touchscreen;
+    public int keyboard; public int navigation; public int keyboardHidden; public int hardKeyboardHidden;
+    public int screenLayout; public int smallestScreenWidthDp; public int screenWidthDp; public int screenHeightDp; public int colorMode;
+    public android.os.LocaleList getLocales() { throw new RuntimeException("stub"); }
+    public int getGrammaticalGender() { throw new RuntimeException("stub"); }
     public int seq;
     public final android.app.WindowConfiguration windowConfiguration = null;
 

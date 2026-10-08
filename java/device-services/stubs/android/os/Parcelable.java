@@ -7,6 +7,10 @@ public interface Parcelable {
     void writeToParcel(Parcel dest, int flags);
     int describeContents();
 
+    interface ClassLoaderCreator<T> extends Creator<T> {
+        T createFromParcel(Parcel in, ClassLoader loader);
+    }
+
     interface Creator<T> {
         T createFromParcel(Parcel in);
         T[] newArray(int size);

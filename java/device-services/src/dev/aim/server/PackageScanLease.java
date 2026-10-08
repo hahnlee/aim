@@ -37,7 +37,7 @@ public final class PackageScanLease implements AutoCloseable {
     private boolean closed;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
-        this.endpoint = Objects.requireNonNull(endpoint);
+        this.endpoint = NativePackageCapabilities.attach(endpoint);
         try {
             version = endpoint.getVersion();
             if (version <= 0) throw new IllegalStateException("invalid native snapshot version");
@@ -407,6 +407,7 @@ public final class PackageScanLease implements AutoCloseable {
         validateSharedGroups(disabled, shared, true);
         IPackageComputer computer = endpoint.getComputer();
         if (computer == null) throw new IOException("missing native package query capture");
+        NativePackageCapabilities.attach(computer);
         try {
             if (computer.getVersion() != version) throw new IOException("native query capture version differs");
             var uidOwners = PackageUidOwners.capture(computer, version, packages, shared, crossUserSuspensions);

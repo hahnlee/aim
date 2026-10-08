@@ -70,4 +70,5 @@ public interface PackageState {
     boolean isUpdateAvailable();
     boolean isUpdatedSystemApp();
     boolean isVendor();
+
 }

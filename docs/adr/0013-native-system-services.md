@@ -2,6 +2,18 @@
 
 Status: accepted 2026-09-29 (migration tracked in #153)
 
+M4 D1 source: `NativePackageManagerService` provides the typed static entry
+points and native/local owner coordinator. Its ten redirect rows remain in
+`image/m4-package-switch/system-server-redirects.inactive`; no original image
+or active redirect changes are made. Activation requires the real native
+boot-session backend, the original UM/ART constructor dependencies and the C
+CTS/app gates. `NativePackageBootstrap` now supplies the concrete Java factory
+assembly over that typed native session; its source has not been activated or
+verified.
+The two unredirected PMS-bearing SystemServer calls retain the image's disabled
+OTA-dexopt and non-headless guards. This is the existing symbolic-redirect
+exception, not an additional runtime interception mechanism.
+
 ## Context
 
 ADR 0012 runs the pinned Android userspace unmodified on a Linux syscall
@@ -358,7 +370,7 @@ The migration's state and conformance results are in
 ### M4: PackageManager, the design (2026-10-02)
 
 - PackageManager's largest surface is not binder: inside system_server,
-  `PackageManagerInternal` (148 methods) is used by 111 files in 54
+  `PackageManagerInternal` (134 abstract methods in the original DEX) is used by 111 files in 54
   subsystems, with `Computer` snapshots and `PackageManagerLocal` (ART
   Service, the permission state); SystemServer calls
   `PackageManagerService.main` in bootstrap and uses the result at eleven

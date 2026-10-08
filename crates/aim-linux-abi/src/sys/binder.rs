@@ -20,6 +20,15 @@ use crate::errno::{EINTR, EINVAL, ENODEV, ENOMEM, EPERM};
 static NAME: OnceLock<String> = OnceLock::new();
 static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
+/// Classification is granted by the native owner's explicit registry.
+pub fn file_class(fd: i32) -> Result<u32, i32> {
+    let client = CLIENT.lock().unwrap();
+    match client.as_ref() {
+        Some(client) => client.file_class(fd),
+        None => Ok(0),
+    }
+}
+
 /// The files whose pages the daemon's process shares (`sharedfile`); none
 /// without a daemon.
 pub fn shared_files() -> Vec<aim_binder_host::wire::SharedFile> {
@@ -42,6 +51,8 @@ pub fn init(name: &str) -> Result<(), String> {
         Client::connect(name).ok_or_else(|| format!("binder host '{name}' is not running"))?;
     *CLIENT.lock().unwrap() = Some(client);
     let _ = NAME.set(name.to_string());
+    super::fdtab::refresh_capabilities()
+        .map_err(|e| format!("binder capability registry: errno {e}"))?;
     Ok(())
 }
 
@@ -86,9 +97,22 @@ impl UserMemory for Guest {
         // A received SEQPACKET or datagram socket (an InputChannel) or
         // memfd keeps its Linux semantics.
         super::fdtab::on_close(fd);
-        super::fdtab::adopt(fd);
+        super::fdtab::adopt_untyped(fd);
     }
 
+    fn installed_typed(&mut self, fd: i32, class: u32) {
+        self.installed(fd);
+        if class == aim_binder_host::proxy_file::CLASS {
+            super::fdtab::insert(fd, Kind::ProxyFile);
+        }
+    }
+    fn file_class(&mut self, fd: i32) -> u32 {
+        if super::proxy_file::is_proxy(fd) {
+            aim_binder_host::proxy_file::CLASS
+        } else {
+            0
+        }
+    }
     fn closed(&mut self, fd: i32) {
         super::fdtab::on_close(fd);
     }

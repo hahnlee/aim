@@ -130,6 +130,21 @@ fn identities(owner: &SigningScan) -> BTreeMap<(String, bool), Identity> {
 }
 
 impl SigningScan {
+    pub(super) fn rebind_retired_code_runtime(&mut self, name: &str) -> Result<(), String> {
+        let current = identities(self);
+        if let Some(assigned) = &mut self.replica_runtime {
+            let key = (name.to_owned(), false);
+            let before = assigned.identities.get(&key).ok_or("retired code runtime identity unavailable")?;
+            let after = current.get(&key).ok_or("retired setting runtime identity unavailable")?;
+            if before.app_id != after.app_id || before.path != after.path || before.version != after.version
+                || before.shared != after.shared || after.code.is_some() {
+                return Err("retired setting runtime identity differs".into());
+            }
+            assigned.identities.insert(key, after.clone());
+        }
+        Ok(())
+    }
+
     pub(super) fn remove_setting_runtime(&mut self, name: &str) {
         if let Some(assigned) = &mut self.replica_runtime {
             let key = (name.into(), false);
@@ -280,6 +295,47 @@ impl SigningScan {
 
     /// Capture the owning operation's complete current runtime inventory. No
     /// active fields are substituted for a factory setting with the same name.
+    /// notifyPackageUse updates active PackageStateUnserialized usage and its
+    /// package usage owner together. Disabled factory records retain their own
+    /// historical state and must not inherit an active package's new timestamp.
+    pub(in crate::package) fn update_replica_usage(&mut self, before: &Usage, after: &Usage) -> Result<(), String> {
+        self.validate_replica_runtime(Some(before))?;
+        let assigned = self.replica_runtime.as_ref().ok_or("replica runtime is not captured")?;
+        let active = self.settings.packages.iter().map(|setting|setting.name.as_str()).collect::<std::collections::BTreeSet<_>>();
+        if active != after.names().collect() || active != before.names().collect() {
+            return Err("runtime usage immutable package inventory differs".into());
+        }
+        let mut updates = Vec::with_capacity(active.len());
+        for name in active {
+            let key = (name.to_owned(), false);
+            if !assigned.values.contains_key(&key) { return Err(format!("active runtime usage owner absent: {name}")); }
+            let times = *after.times(name).ok_or_else(||format!("active usage owner absent: {name}"))?;
+            updates.push((key, times));
+        }
+        let assigned = self.replica_runtime.as_mut().unwrap();
+        for (key, times) in updates { assigned.values.get_mut(&key).unwrap().usage = times; }
+        Ok(())
+    }
+
+    pub(in crate::package) fn has_replica_runtime(&self) -> bool {
+        self.replica_runtime.is_some()
+    }
+
+    pub(in crate::package) fn rebase_removal_usage(&mut self, usage: &Usage) -> Result<(), String> {
+        self.validate_replica_runtime(None)?;
+        let Some(assigned) = &self.replica_runtime else { return Ok(()); };
+        let mut values = assigned.values.clone();
+        for setting in &self.settings.packages {
+            let state = values.get_mut(&(setting.name.clone(), false))
+                .ok_or_else(|| format!("removal active runtime unavailable: {}",setting.name))?;
+            state.usage = *usage.times(&setting.name)
+                .ok_or_else(|| format!("removal active usage unavailable: {}",setting.name))?;
+        }
+        // Factory values retain their original historical usage. Only active
+        // code/settings survivors receive actual latest canonical times.
+        self.capture_replica_runtime(values)
+    }
+
     pub fn capture_replica_runtime(
         &mut self,
         values: BTreeMap<(String, bool), ReplicaRuntime>,
@@ -311,6 +367,10 @@ impl SigningScan {
         if !self.capture_ready() || identities(self) != assigned.identities {
             return Err("replica runtime setting/code identity differs".into());
         }
+        // Validate each complete dependency graph once. Scoped lookups below
+        // remain under this immutable borrow and cannot invalidate those checks.
+        if self.seinfo.is_some() { self.validate_seinfo()?; }
+        if self.library_dependencies.is_some() { self.validate_library_dependencies()?; }
         for ((name, factory), value) in &assigned.values {
             if *factory {
                 continue;
@@ -323,7 +383,7 @@ impl SigningScan {
             if self.loaded.contains_key(name) {
                 if self.seinfo.is_some() {
                     let labels = self
-                        .seinfo_state(name)?
+                        .validated_seinfo_state(name)?
                         .ok_or("missing replica seInfo owner")?;
                     if labels.base != value.seinfo || labels.override_label != value.override_seinfo
                     {
@@ -332,7 +392,7 @@ impl SigningScan {
                 }
                 if self.library_dependencies.is_some() {
                     let (files, infos) = self
-                        .library_dependencies(name)?
+                        .validated_library_dependencies(name)?
                         .ok_or("missing replica library owner")?;
                     if files != value.library_files || infos != value.libraries {
                         return Err(format!("replica runtime libraries differ: {name}"));
@@ -343,6 +403,12 @@ impl SigningScan {
         Ok(())
     }
 
+    /// Only an immutable scan Snapshot, validated at creation/publication,
+    /// may call this accessor. Mutable SigningScan callers use replica_runtime.
+    pub(in crate::package) fn snapshot_replica_runtime(&self,name:&str,factory:bool)->Result<Option<&ReplicaRuntime>,String>{
+        let assigned=self.replica_runtime.as_ref().ok_or("replica runtime is not captured")?;
+        Ok(assigned.values.get(&(name.into(),factory)))
+    }
     pub fn replica_runtime(
         &self,
         name: &str,
@@ -405,6 +471,41 @@ mod tests {
                 )
             })
             .collect()
+    }
+    #[test]
+    fn usage_publication_updates_active_runtime_and_retains_factory_and_old_capture() {
+        let mut scan = owner(); scan.capture_replica_runtime(values()).unwrap();
+        let store = Store::new(scan, Usage::new(["p"])).unwrap();
+        let base = store.capture();
+        let factory = runtime_record::captured(&base, "p", true).unwrap().unwrap();
+        let factory_state = base.replica_runtime("p", true).unwrap().unwrap().clone();
+        let active = runtime_record::captured(&base, "p", false).unwrap().unwrap();
+        let mut usage = base.usage().clone(); usage.notify("p", 2, 1234);
+        let mut next = base.owner().clone(); next.update_replica_usage(base.usage(), &usage).unwrap();
+        let published = store.publish(&base, next, usage).unwrap();
+        assert_eq!(published.replica_runtime("p", false).unwrap().unwrap().usage[2], 1234);
+        assert_eq!(published.usage().times("p").unwrap()[2], 1234);
+        assert_eq!(runtime_record::captured(&base, "p", false).unwrap().unwrap(), active);
+        assert_eq!(published.replica_runtime("p", true).unwrap().unwrap(), &factory_state);
+        assert_eq!(runtime_record::captured(&base, "p", true).unwrap().unwrap(), factory);
+        let mut candidate = published.owner().clone(); let original = candidate.clone();
+        assert!(candidate.update_replica_usage(published.usage(), &Usage::new(["foreign"])).is_err());
+        assert_eq!(candidate, original);
+    }
+    #[test]
+    fn immutable_runtime_accessor_keeps_validation_at_publication_and_retains_old_records(){
+        let mut source=owner();source.capture_replica_runtime(values()).unwrap();
+        let store=Store::new(source,Usage::new(["p"])).unwrap();let base=store.capture();
+        let expected=runtime_record::captured(&base,"p",true).unwrap().unwrap();
+        let mut invalid=base.owner().clone();invalid.settings.packages[0].version_code+=1;
+        assert!(invalid.replica_runtime("p",false).is_err());
+        assert!(matches!(store.publish(&base,invalid,base.usage().clone()),Err(Error::Invalid(_))));
+        assert!(std::sync::Arc::ptr_eq(&base,&store.capture()));
+        let mut next=base.owner().clone();let mut runtime=values();runtime.get_mut(&("p".into(),true)).unwrap().usage[0]=71;
+        next.capture_replica_runtime(runtime).unwrap();let published=store.publish(&base,next,base.usage().clone()).unwrap();
+        for _ in 0..8{assert_eq!(runtime_record::captured(&base,"p",true).unwrap().unwrap(),expected);}
+        assert_ne!(runtime_record::captured(&published,"p",true).unwrap().unwrap(),expected);
+        assert!(runtime_record::captured(&base,"foreign",true).unwrap().is_none());
     }
     #[test]
     fn original_runtime_retention_checks_its_source_before_full_recompletion() {

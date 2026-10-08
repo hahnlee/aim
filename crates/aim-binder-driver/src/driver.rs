@@ -560,3 +560,55 @@ impl State {
         }
     }
 }
+
+impl Driver {
+    /// Native system-service nested forwarding. No identity is supplied by
+    /// the caller: credentials come from the live incoming driver transaction.
+    /// `inbound_buffer` is captured by LocalProcess's authenticated dispatch.
+    pub fn forward_inbound_transaction(
+        &self,
+        proc: ProcHandle,
+        tid: Tid,
+        inbound_buffer: u64,
+        tr: &TransactionData,
+        guest: &mut dyn GuestProcess,
+    ) -> Result<(), Errno> {
+        if tr.flags & TF_ONE_WAY != 0 {
+            return Err(errno::EINVAL);
+        }
+        let mut st = self.lock();
+        let validate = (|| {
+            let native = st.procs.get(&proc.0).ok_or(errno::ESRCH)?;
+            if native.creds.euid != 1000 {
+                return Err(errno::EPERM);
+            }
+            let thread = native.threads.get(&tid).ok_or(errno::EPERM)?;
+            let id = thread.transaction_stack.ok_or(errno::EPERM)?;
+            let inbound = st.txns.get(&id).ok_or(errno::EPERM)?;
+            if inbound.to_proc != Some(proc.0)
+                || inbound.to_thread != Some(tid)
+                || inbound.is_oneway()
+            {
+                return Err(errno::EPERM);
+            }
+            let offset = inbound.buffer.ok_or(errno::EPERM)?;
+            let alloc = native.alloc.as_ref().ok_or(errno::EPERM)?;
+            if alloc.vm_start.checked_add(offset as u64) != Some(inbound_buffer) {
+                return Err(errno::EPERM);
+            }
+            Ok(inbound.sender_credentials.clone())
+        })();
+        let sender = match validate {
+            Ok(sender) => sender,
+            Err(error) => {
+                self.unlock(st);
+                return Err(error);
+            }
+        };
+        st.thread(proc.0, tid).unwrap().forwarded_sender = Some(sender);
+        st.transaction(proc.0, tid, tr, false, 0, guest);
+        st.thread(proc.0, tid).unwrap().forwarded_sender = None;
+        self.unlock(st);
+        Ok(())
+    }
+}

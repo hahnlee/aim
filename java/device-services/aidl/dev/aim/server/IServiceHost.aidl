@@ -1,6 +1,7 @@
 package dev.aim.server;
 
 import android.os.ParcelFileDescriptor;
+import android.os.IBinder;
 import dev.aim.server.IBridge;
 import dev.aim.server.IPackageScanSnapshot;
 import dev.aim.server.IPackageBootstrapBridge;
@@ -10,6 +11,7 @@ import dev.aim.server.INotificationPermissionCallback;
  * The native service host (crates/aim-services), registered with
  * servicemanager as `aim.service_host`.
  */
+import dev.aim.server.IPackageBootSession;
 interface IServiceHost {
     /** system_server's bridge, once its system services are ready. */
     oneway void attachBridge(IBridge bridge);
@@ -26,6 +28,7 @@ interface IServiceHost {
     void attachPackageBootstrapBridge(IPackageBootstrapBridge bridge);
     /** Lease on the current complete native package graph; unavailable before publication. */
     IPackageScanSnapshot capturePackageScan();
+    IBinder getPackageInternalHost();
     /** SDK data filesystem owner; serialized with the native package install lock. */
     void reconcilePackageSdkData(String volumeUuid, String packageName, in List<String> subDirNames,
             int userId, int appId, int previousAppId, String seInfo, int flags);
@@ -34,4 +37,6 @@ interface IServiceHost {
     long clearPackageSigningOverrides();
     /** Read-only shared page: little-endian state version at aligned offset zero. */
     ParcelFileDescriptor getPackageStateVersionPage();
+    /** Native C constructor; its session precedes original UM creation. */
+    IPackageBootSession beginPackageManagerBoot(boolean factoryTest);
 }

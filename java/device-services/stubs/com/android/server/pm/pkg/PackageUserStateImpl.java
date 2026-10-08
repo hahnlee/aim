@@ -39,4 +39,7 @@ public class PackageUserStateImpl extends com.android.server.utils.WatchableImpl
     public com.android.server.utils.WatchedArraySet<String> getDisabledComponentsNoCopy() { throw new RuntimeException("stub"); }
     public PackageUserStateImpl setArchiveState(ArchiveState value) { throw new RuntimeException("stub"); }
     public ArchiveState getArchiveState() { throw new RuntimeException("stub"); }
+ public PackageUserStateImpl(com.android.server.utils.Watchable owner, PackageUserStateImpl original){throw new RuntimeException("stub");}
+ public void resetOverrideComponentLabelIcon(){throw new RuntimeException("stub");}
+ public com.android.server.utils.WatchedArrayMap<android.content.ComponentName,android.util.Pair<String,Integer>> mComponentLabelIconOverrideMap;
 }

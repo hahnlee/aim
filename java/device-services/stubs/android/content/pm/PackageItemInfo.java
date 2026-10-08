@@ -3,6 +3,9 @@
 package android.content.pm;
 
 public class PackageItemInfo {
+    public int labelRes;
+
+    public int showUserIcon;
     public String name;
     public android.os.Bundle metaData;
     public int icon;

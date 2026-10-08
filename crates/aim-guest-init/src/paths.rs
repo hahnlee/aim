@@ -105,6 +105,8 @@ pub struct Resolved {
 pub struct PathMap {
     image: PathBuf,
     entries: Vec<MapEntry>,
+    bind_sources:std::collections::BTreeMap<String,String>,
+    propagation:std::collections::BTreeMap<String,String>,
 }
 
 impl PathMap {
@@ -118,19 +120,30 @@ impl PathMap {
         Self {
             image: image.into(),
             entries,
+            bind_sources:Default::default(),
+            propagation:Default::default(),
         }
     }
 
+    pub fn bind_source(&mut self,target:&str,source:&str){self.bind_sources.insert(target.into(),source.into());}
+    pub fn propagation(&mut self,target:&str,kind:&str,recursive:bool){
+        if recursive{let prefix=format!("{}/",target.trim_end_matches('/'));self.propagation.retain(|root,_|root!=target&&!(target=="/"||root.starts_with(&prefix)));}
+        self.propagation.insert(target.into(),kind.into());
+    }
     pub fn image(&self) -> &Path {
         &self.image
     }
 
     /// Add `entry`, replacing one at the same guest path.
     pub fn add(&mut self, entry: MapEntry) {
+        self.bind_sources.remove(&entry.guest);
         self.entries.retain(|e| e.guest != entry.guest);
         let mut entries = std::mem::take(&mut self.entries);
         entries.push(entry);
+        let bind_sources=std::mem::take(&mut self.bind_sources);
+        let propagation=std::mem::take(&mut self.propagation);
         *self = Self::new(std::mem::take(&mut self.image), entries);
+        self.bind_sources=bind_sources;self.propagation=propagation;
     }
 
     pub fn entries(&self) -> &[MapEntry] {
@@ -277,7 +290,9 @@ impl PathMap {
                 entry.guest,
                 entry.host.display()
             ));
+            if let Some(source)=self.bind_sources.get(&entry.guest){out.push_str(&format!("bind-source\t{}\t{}\n",entry.guest,source));}
         }
+        for(target,kind)in &self.propagation{out.push_str(&format!("propagation\t{target}\t{kind}\n"));}
         out
     }
 
@@ -285,11 +300,14 @@ impl PathMap {
     pub fn parse_file_text(text: &str) -> Result<Self, String> {
         let mut image = None;
         let mut entries = Vec::new();
+        let mut binds=std::collections::BTreeMap::new();let mut propagation=std::collections::BTreeMap::new();
         for (number, line) in text.lines().enumerate() {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let fields: Vec<&str> = line.split('\t').collect();
+            if let ["bind-source",guest,source]=fields.as_slice(){binds.insert((*guest).into(),(*source).into());continue;}
+            if let ["propagation",guest,kind]=fields.as_slice(){if !matches!(*kind,"shared"|"slave"|"private"){return Err("invalid mount propagation".into());}propagation.insert((*guest).into(),(*kind).into());continue;}
             let [kind, guest, host] = fields[..] else {
                 return Err(format!(
                     "line {}: expected 3 tab-separated fields",
@@ -312,7 +330,7 @@ impl PathMap {
             }
         }
         let image = image.ok_or("missing root line")?;
-        Ok(Self::new(image, entries))
+        let mut map=Self::new(image,entries);map.bind_sources=binds;map.propagation=propagation;Ok(map)
     }
 }
 

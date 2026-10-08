@@ -934,7 +934,9 @@ fn forward(hsig: i32, extra: i32) {
 /// every signal whose Linux default is not "ignore" (a forwarded signal the
 /// guest blocks must stay pending instead of taking the host default).
 /// Handlers run on each thread's host alternate stack and never restart
-/// host syscalls, so a blocked thread notices the guest signal.
+/// host syscalls, so a blocked thread notices the guest signal. Default-ignored
+/// signals still need forwarding: a guest blocked SIGCHLD is synchronously
+/// consumed by sigtimedwait/signalfd before its default disposition applies.
 pub fn install_host_handlers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -944,7 +946,6 @@ pub fn install_host_handlers() {
             if h != 0
                 && sig != SIGKILL
                 && sig != SIGSTOP
-                && !matches!(default_action(sig), Default::Ignore)
             {
                 forward(h, 0);
             }
@@ -962,8 +963,6 @@ fn mirror_on_host(sig: i32, act: &KSigaction) {
     }
     if act.handler == SIG_IGN {
         host_action(h, libc::SIG_IGN, 0);
-    } else if act.handler == SIG_DFL && matches!(default_action(sig), Default::Ignore) {
-        host_action(h, libc::SIG_DFL, 0);
     } else {
         let mut extra = 0;
         if sig == 17 {

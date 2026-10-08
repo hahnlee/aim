@@ -19,15 +19,15 @@ Usage: daemon_aidl.py AIDL SRC OUT MANIFESTS ENTRY...
   - includes: comma-separated roots (relative to SRC) of imported types
     that are not compiled into the crate (such as PersistableBundle).
 
-The Rust backend has no raw `FileDescriptor`. In an unstable interface such
-a parameter or result is compiled as `ParcelFileDescriptor`, which keeps
-every transaction code but not those methods' wire format: a daemon must
-refuse them, and must not call such a callback (IVold's AppFuse calls and
-IVoldMountCallback.onVolumeChecking).
+The Rust backend has no raw `FileDescriptor`. Unstable raw FD declarations
+use an import-only Rust type surrogate whose codec preserves original raw
+FD wire objects and native libbinder_ndk ownership. Explicit
+`ParcelFileDescriptor` declarations retain their original distinct codec.
 """
 
 import glob
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -37,6 +37,23 @@ import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vendor_hal_aidl import glue, sync  # noqa: E402
+
+RAW_FD_PACKAGE = "dev.aim.binder"
+RAW_FD_TYPE = "AimRawFileDescriptor"
+RAW_FD_DECLARATION = (f"package {RAW_FD_PACKAGE};\n"
+                      f'parcelable {RAW_FD_TYPE} rust_type "crate::RawFileDescriptor";\n')
+
+
+def stage_raw_fds(text):
+    """Distinguish original raw FD type tokens from explicit PFD declarations."""
+    if not re.search(r"(?<![\w.])FileDescriptor\b", text):
+        return text, False
+    text = re.sub(r"([(,]\s*(?:@\w+(?:\([^)]*\))?\s*)*)FileDescriptor\b",
+                  rf"\1in {RAW_FD_TYPE}", text)
+    text = re.sub(r"(?<![\w.])FileDescriptor\b", RAW_FD_TYPE, text)
+    text = re.sub(r"(\bpackage\s+[\w.]+\s*;)",
+                  rf"\1\nimport {RAW_FD_PACKAGE}.{RAW_FD_TYPE};", text, count=1)
+    return text, True
 
 
 def fail(message):
@@ -73,6 +90,7 @@ def generate(aidl, src, out, manifests, entry):
     stage = f"{out}/.src-{crate}"
     shutil.rmtree(stage, ignore_errors=True)
     staged = []
+    raw_fd_files = []
     for spec in files.split(","):
         root, pattern = spec.split("::")
         matches = sorted(glob.glob(f"{src}/{root}/{pattern}", recursive=True))
@@ -83,10 +101,16 @@ def generate(aidl, src, out, manifests, entry):
             os.makedirs(os.path.dirname(f"{stage}/{rel}"), exist_ok=True)
             text = open(path).read()
             if stability == "unstable":
-                text = re.sub(r"([(,]\s*)FileDescriptor\b", r"\1in ParcelFileDescriptor", text)
-                text = re.sub(r"(?<![\w.])FileDescriptor\b", "ParcelFileDescriptor", text)
+                text, raw = stage_raw_fds(text)
+                if raw:
+                    raw_fd_files.append(rel)
             open(f"{stage}/{rel}", "w").write(text)
             staged.append(rel)
+    if raw_fd_files:
+        declaration = os.path.join(stage, *RAW_FD_PACKAGE.split("."), f"{RAW_FD_TYPE}.aidl")
+        os.makedirs(os.path.dirname(declaration), exist_ok=True)
+        with open(declaration, "w") as file:
+            file.write(RAW_FD_DECLARATION)
     args = ["aidl", "--lang=rust"]
     if stability == "stable":
         api = f"{src}/{files.split('::')[0]}"
@@ -108,6 +132,15 @@ def generate(aidl, src, out, manifests, entry):
     with open(f"{new}/lib.rs", "w") as f:
         f.write(glue(crate, version, sorted(staged), []).replace(
             "vendor_hal_aidl.py", "daemon_aidl.py"))
+        if raw_fd_files:
+            f.write('\nmod raw_file_descriptor;\npub use raw_file_descriptor::RawFileDescriptor;\n')
+    if raw_fd_files:
+        shutil.copyfile(os.path.join(os.path.dirname(__file__), "raw_file_descriptor.rs"),
+                        f"{new}/raw_file_descriptor.rs")
+        with open(f"{new}/raw_file_descriptors.json", "w") as file:
+            json.dump({"version": 1, "wire_type": "FileDescriptor", "rust_type": "RawFileDescriptor",
+                       "sources": sorted(raw_fd_files)}, file, sort_keys=True, indent=2)
+            file.write("\n")
     sync(new, f"{out}/{crate}")
     shutil.rmtree(new)
     shutil.rmtree(stage)

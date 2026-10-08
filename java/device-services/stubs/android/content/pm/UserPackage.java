@@ -5,4 +5,5 @@ public final class UserPackage {
     public final String packageName;
     private UserPackage(int userId, String packageName) { throw new RuntimeException("stub"); }
     public static UserPackage of(int userId, String packageName) { throw new RuntimeException("stub"); }
+    public static void removeFromCache(int userId,String packageName){throw new RuntimeException("stub");}
 }

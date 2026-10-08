@@ -11,6 +11,76 @@ pub struct RemovedSetting {
 }
 
 impl SigningScan {
+    /// A retained factory remains verified, but active declarations must be
+    /// withdrawn before its normal system-path scan can re-admit the code.
+    pub fn withdraw_for_live_factory(&mut self,name:&str)->Result<(),String> {
+        let setting=self.settings.packages.iter().find(|package|package.name==name).cloned().ok_or("factory restoration active setting absent")?;
+        if !self.settings.disabled_system_packages.iter().any(|package|package.name==name) {return Err("factory restoration disabled setting absent".into());}
+        let code=self.loaded.get(name).cloned().ok_or("factory restoration active code absent")?;
+        let record=super::Record{settings:setting.clone(),parsed:code.package.clone(),signing:code.collected_signing.clone(),
+            identity:super::Identity{manifest_name:code.package.package_name.clone(),internal_name:name.into(),real_name:setting.real_name.clone()},
+            origin:crate::package::owner::shared_users::ScanOrigin::Data};
+        self.withdraw_scanned_package(&record);
+        Ok(())
+    }
+    /// KEEP_DATA retires executable declarations while retaining the setting,
+    /// UID/signers and exact user state for a later reinstall or unarchival.
+    pub fn prepare_live_code_retirement(&self, name: &str) -> Result<Self, String> {
+        let mut next = self.clone();
+        let saved = next.settings.packages.iter().find(|package| package.name == name)
+            .cloned().ok_or("code retirement setting unavailable")?;
+        if saved.flags & crate::package::settings::FLAG_SYSTEM != 0 {
+            return Err("system code retirement requires factory restoration".into());
+        }
+        let users = next.scanned_users.get(name).cloned().ok_or("code retirement user owner unavailable")?;
+        if users.values().any(|state| state.installed) {
+            return Err("code retirement has installed users".into());
+        }
+        if let Some(code) = next.loaded.get(name).cloned() {
+            let record = super::Record {
+                settings: saved.clone(), parsed: code.package.clone(), signing: code.collected_signing.clone(),
+                identity: super::Identity { manifest_name: code.package.package_name.clone(), internal_name: name.into(), real_name: saved.real_name.clone() },
+                origin: crate::package::owner::shared_users::ScanOrigin::Data,
+            };
+            next.withdraw_scanned_package(&record);
+        }
+        next.scanned_users.insert(name.into(), users.clone());
+        next.update_disabled_user_aliases(name, &users);
+        next.retain_seinfo_after_code_removal()?;
+        next.complete_retained_library_dependencies()?;
+        if next.has_shared_processes() { next.rebuild_shared_processes_from_native_members()?; }
+        next.rebind_retired_code_runtime(name)?;
+        Ok(next)
+    }
+    /// A live removal withdraws declarations before releasing its setting/UID.
+    /// The installation owner has already completed data/permission/filter
+    /// cleanup. Updated-system restoration is a separate scan admission.
+    pub fn prepare_live_package_removal(&self, name: &str) -> Result<Self, String> {
+        let mut next = self.clone();
+        let saved = next.settings.packages.iter().find(|package| package.name == name)
+            .cloned().ok_or("live removal package setting unavailable")?;
+        if saved.flags & crate::package::settings::FLAG_SYSTEM != 0 {
+            return Err("system removal requires a factory restoration admission".into());
+        }
+        if let Some(users) = next.scanned_users.get(name) {
+            if users.values().any(|user| user.installed) {
+                return Err("live setting removal still has installed users".into());
+            }
+        }
+        if let Some(code) = next.loaded.get(name).cloned() {
+            let record = super::Record {
+                settings: saved.clone(), parsed: code.package.clone(), signing: code.collected_signing.clone(),
+                identity: super::Identity { manifest_name: code.package.package_name.clone(), internal_name: name.into(), real_name: saved.real_name.clone() },
+                origin: crate::package::owner::shared_users::ScanOrigin::Data,
+            };
+            next.withdraw_scanned_package(&record);
+        }
+        next.remove_package_setting(name).map_err(|error| format!("live setting retirement: {error:?}"))?;
+        next.retain_seinfo_after_code_removal()?;
+        next.complete_retained_library_dependencies()?;
+        if next.has_shared_processes() { next.rebuild_shared_processes_from_native_members()?; }
+        Ok(next)
+    }
     /// Remove the real-name key only after permission uninstall and any shared
     /// UID conversion, as RemovePackageHelper does. Values naming the deleted
     /// package under other keys are not removed by Settings here.

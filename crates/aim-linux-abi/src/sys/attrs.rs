@@ -474,20 +474,43 @@ pub fn absent(host: &CStr) -> bool {
 
 /// The guest created `host`: it belongs to the guest's identity, as on
 /// Linux (only under a path map).
-pub fn created(host: Host, guest: impl FnOnce() -> String) {
+pub fn created(host: Host, guest: impl FnOnce() -> String) -> Result<(), crate::errno::Errno> {
     if !recording() {
-        return;
+        return Ok(());
     }
-    let (uid, gid) = ids(FS);
+    let guest = guest();
+    let (uid, mut gid) = ids(FS);
+    let parent_name = guest.rsplit_once('/').map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+        .ok_or(crate::errno::EINVAL)?;
+    let parent = vfs::resolve(vfs::LINUX_AT_FDCWD, parent_name.as_bytes(), true)?;
+    let mut parent_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(parent.host.as_ptr(), &mut parent_stat) } < 0 {
+        return Err(crate::errno::last());
+    }
+    apply(Host::Path(&parent.host), || parent.guest.clone(), &mut parent_stat);
+    let mut mode = None;
+    if parent_stat.st_mode & libc::S_ISGID != 0 {
+        gid = parent_stat.st_gid;
+        let mut child: libc::stat = unsafe { std::mem::zeroed() };
+        let result = unsafe { match host {
+            Host::Fd(fd) => libc::fstat(fd, &mut child),
+            Host::Path(path) | Host::Image(path) => libc::lstat(path.as_ptr(), &mut child),
+        } };
+        if result < 0 { return Err(crate::errno::last()); }
+        if child.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            mode = Some((child.st_mode as u32 & 0o7777) | libc::S_ISGID as u32);
+        }
+    }
     record(
         host,
-        guest,
+        || guest,
         Attr {
             uid: Some(uid),
             gid: Some(gid),
-            mode: None,
+            mode,
         },
     );
+    Ok(())
 }
 
 /// Linux permission check of `mode` bits (R 4, W 2, X 1) for the guest

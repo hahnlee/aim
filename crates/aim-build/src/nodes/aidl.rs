@@ -29,6 +29,7 @@ pub fn node() -> Node {
         repo("daemons/sources.lock"),
         repo("tools/lib/vendor_hal_aidl.py"),
         repo("tools/lib/daemon_aidl.py"),
+        repo("tools/lib/raw_file_descriptor.rs"),
         repo(service_aidl::LOCK),
         // The generated codes are checked against the image's stubs.
         repo("image/original.lock"),
@@ -45,7 +46,7 @@ pub fn node() -> Node {
         inputs,
         outputs: vec![hal_out(), daemon_out(), service_aidl::out()],
         tools: vec![Tool::Aidl, Tool::Python],
-        recipe: 4,
+        recipe: 5,
         action: Action::AidlGen,
         boot: true,
     }

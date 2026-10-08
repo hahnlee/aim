@@ -10,6 +10,7 @@ use crate::package::{
     settings::{FLAG_SYSTEM, PRIVATE_FLAG_PRIVILEGED},
 };
 use std::{collections::BTreeMap, sync::Arc};
+crate::install_mutator_seinfo_apply!();
 
 #[derive(Clone, Debug, PartialEq)]
 struct Input {
@@ -229,6 +230,20 @@ impl SigningScan {
         self.validate_seinfo()
     }
 
+    pub(in crate::package) fn retain_seinfo_after_code_removal(&mut self) -> Result<(), String> {
+        let current = inputs(self)?;
+        if let Some(assigned) = &mut self.seinfo {
+            for (name, input) in &current {
+                if assigned.inputs.get(name).is_none_or(|previous| !same_setting(previous, input)) {
+                    return Err(format!("remaining removal seInfo identity differs: {name}"));
+                }
+            }
+            assigned.inputs.retain(|name, _| current.contains_key(name));
+            assigned.labels.retain(|name, _| current.contains_key(name));
+        }
+        Ok(())
+    }
+
     pub(in crate::package) fn validate_seinfo(&self) -> Result<(), String> {
         if let Some(assignments) = &self.seinfo {
             let current = inputs(self)?;
@@ -253,6 +268,12 @@ impl SigningScan {
 
     pub fn seinfo_state(&self, name: &str) -> Result<Option<&SeInfoState>, String> {
         self.validate_seinfo()?;
+        self.validated_seinfo_state(name)
+    }
+
+    /// Internal batch accessor: caller has validated the complete seInfo owner
+    /// and holds an immutable borrow for the entire batch.
+    pub(in crate::package) fn validated_seinfo_state(&self, name: &str) -> Result<Option<&SeInfoState>, String> {
         let assignments = self
             .seinfo
             .as_ref()

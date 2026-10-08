@@ -168,7 +168,7 @@ pub(super) fn legacy_domain_states(user: &User) -> HashMap<String, i32> {
 
 impl Resolution {
     /// `approvalLevelForDomainInternal`, not including negative levels.
-    fn approval_level(&self, ps: &PackageState, host: &str, user: i32) -> Result<i32> {
+    pub(super) fn approval_level(&self, ps: &PackageState, host: &str, user: i32) -> Result<i32> {
         let Some(us) = ps.users.get(&user) else {
             return Ok(APPROVAL_LEVEL_NONE);
         };

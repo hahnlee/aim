@@ -1008,6 +1008,7 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         canonical_source: None,
     };
     let completion = || ScanMetadataCompletion {
+            scan_as_instant_app:false,
         seinfo: common::seinfo::scan(),
         abi_policy: &abi_policy,
         native_environment: &environment,

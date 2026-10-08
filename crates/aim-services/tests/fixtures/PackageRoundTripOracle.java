@@ -344,8 +344,63 @@ public final class PackageRoundTripOracle {
         } finally {output.recycle();}
     }
 
+    private static void verifySuspensionExtras(java.io.File directory) throws Exception {
+        byte[] bytes=java.nio.file.Files.readAllBytes(new java.io.File(directory,"suspension-extras.native-reply").toPath());
+        var input=android.os.Parcel.obtain();var output=android.os.Parcel.obtain();
+        try {
+            input.unmarshall(bytes,0,bytes.length);input.setDataPosition(0);input.readException();
+            var extras=input.readTypedObject(android.os.Bundle.CREATOR);
+            if(extras==null || extras.getInt("BB")!=3 || !"last".equals(extras.getString("Aa"))
+                    || !java.util.Arrays.equals((int[])extras.get("array"),new int[]{7,9})) throw new AssertionError("native merged suspension extras differ");
+            var nested=(android.os.PersistableBundle)extras.get("nested");
+            if(nested==null || !"nested".equals(nested.getString("text")) || input.dataAvail()!=0) throw new AssertionError("native nested suspension extras differ");
+            var keys=new java.util.ArrayList<String>(extras.keySet());
+            if(keys.indexOf("BB")>=keys.indexOf("Aa")) throw new AssertionError("native suspension collision order differs");
+            output.writeNoException();output.writeTypedObject(extras,0);
+            java.nio.file.Files.write(new java.io.File(directory,"suspension-extras.original-reply").toPath(),output.marshall());
+            if(!java.util.Arrays.equals(bytes,output.marshall())) throw new AssertionError("original suspension Bundle roundtrip differs");
+        } finally {input.recycle();output.recycle();}
+        bytes=java.nio.file.Files.readAllBytes(new java.io.File(directory,"suspension-extras-null.native-reply").toPath());
+        input=android.os.Parcel.obtain();
+        try {
+            input.unmarshall(bytes,0,bytes.length);input.setDataPosition(0);input.readException();
+            if(input.readTypedObject(android.os.Bundle.CREATOR)!=null || input.dataAvail()!=0) throw new AssertionError("native unsuspended extras must be null");
+        } finally {input.recycle();}
+        for(int uid:new int[]{0,1000,10101}) {
+            bytes=java.nio.file.Files.readAllBytes(new java.io.File(directory,"suspension-extras-denied-"+uid+".native-reply").toPath());
+            input=android.os.Parcel.obtain();
+            try {
+                input.unmarshall(bytes,0,bytes.length);input.setDataPosition(0);
+                try {input.readException();throw new AssertionError("native suspension extras accepted foreign uid "+uid);}
+                catch(SecurityException expected) {
+                    if(!expected.getMessage().equals("Calling package fixture does not belong to calling uid "+uid) || input.dataAvail()!=0) throw new AssertionError("native suspension ownership exception differs");
+                }
+            } finally {input.recycle();}
+        }
+    }
+
+    private static void verifyPageSizeCompat(java.io.File directory) throws Exception {
+        if(android.os.Looper.myLooper()==null) android.os.Looper.prepareMainLooper();
+        var context=android.app.ActivityThread.systemMain().getSystemUiContext();
+        var configuration=new android.content.res.Configuration();configuration.setToDefaults();configuration.seq=1;configuration.setLocale(java.util.Locale.forLanguageTag("en-US"));
+        android.app.ResourcesManager.getInstance().applyConfigurationToResources(configuration,null);
+        var output=android.os.Parcel.obtain();
+        try {
+            output.writeInt(128);
+            for(int flags=0;flags<128;flags++) {
+                var setting=new com.android.server.pm.PackageSetting("page.fixture",null,new java.io.File("/data/app/page.fixture"),0,0,new java.util.UUID(1,2));
+                setting.setPageSizeAppCompatFlags(flags);
+                output.writeBoolean(setting.isPageSizeAppCompatEnabled());
+                output.writeString(setting.getPageSizeCompatWarningMessage(context));
+            }
+            java.nio.file.Files.write(new java.io.File(directory,"page-size-compat.original-wire").toPath(),output.marshall());
+        } finally {output.recycle();}
+    }
+
     private static void verify(String[] args) throws Exception {
         verifyParcelableException(new java.io.File(args[0]));
+        verifySuspensionExtras(new java.io.File(args[0]));
+        verifyPageSizeCompat(new java.io.File(args[0]));
         verifyModuleInfoParcels(new java.io.File(args[0]));
         verifyOriginalDomainIds();
         DomainCollectorOracle.verify(new java.io.File(args[0]));
@@ -1920,6 +1975,61 @@ public final class PackageRoundTripOracle {
                 public android.content.pm.PackageInfo getPackageInfoInternal(String n, long version, long flags, int u, int filter, int caller, int pid) { throw new AssertionError("unused internal metadata query"); }
                 public String getPackageStateFilteredName(String n,int caller,int user) { throw new AssertionError("unused filtered state query"); }
                 public int getUidTargetSdkVersion(int uid) { throw new AssertionError("unused UID target SDK query"); }
+
+        public boolean getBlockUninstall(int user, String name) { throw new AssertionError("unused uninstall block fixture"); }
+        public android.content.pm.SharedLibraryInfo[] getSharedLibraryRegistry() { throw new AssertionError("unused shared library registry fixture"); }
+        public boolean shouldFilterApplication(int kind, String owner, String name, int appId, int filter, int user, boolean uninstalled, int caller, int pid) { throw new AssertionError("unused visibility candidate fixture"); }
+        public android.content.pm.ProcessInfo[] getProcessesForUid(int uid, int caller, int pid) { throw new AssertionError("unused process owner fixture"); }
+        public int getPackageUidWithCaller(String name, long flags, int user, int filter, int caller, int pid) { throw new AssertionError("unused explicit UID fixture"); }
+        public boolean isCallerSameApp(String name, int uid, boolean isolated, int caller, int pid) { throw new AssertionError("unused caller identity fixture"); }
+        public String getInstantAppPackageName(int uid, int caller, int pid) { throw new AssertionError("unused instant UID fixture"); }
+        public int getComponentEnabledSetting(android.content.ComponentName component, int filter, int user, boolean internal, int caller, int pid) { throw new AssertionError("unused component state fixture"); }
+        public boolean isInstantAppInternal(String name, int user, int filter, int caller, int pid) { throw new AssertionError("unused instant package fixture"); }
+        public boolean canViewInstantApps(int filter, int user, int caller, int pid) { throw new AssertionError("unused instant visibility fixture"); }
+        public int checkUidSignaturesForAllUsers(int uid1, int uid2, int caller, int pid) { throw new AssertionError("unused all-user signing fixture"); }
+        public void enforceCrossUserPermission(int filter, int user, boolean full, boolean shell, String message, int caller, int pid) { throw new AssertionError("unused cross-user fixture"); }
+        public android.content.pm.ApplicationInfo[] getPersistentApplications(boolean safeMode, int flags, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getPersistentApplications"); }
+        public int getPackageStartability(boolean safeMode, String packageName, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getPackageStartability"); }
+        public int getPackageUidWithCaller(String packageName, long flags, int userId, int filterCallingUid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getPackageUidWithCaller"); }
+        public boolean isCallerSameApp(String packageName, int uid, boolean resolveIsolatedUid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: isCallerSameApp"); }
+        public String getInstantAppPackageName(int uid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getInstantAppPackageName"); }
+        public int getComponentEnabledSetting(android.content.ComponentName component, int filterCallingUid, int userId, boolean internal, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getComponentEnabledSetting"); }
+        public android.content.pm.ParceledListSlice getInstalledApplications(long flags, int userId, int filterCallingUid, boolean forceAllowCrossUser, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getInstalledApplications"); }
+        public boolean isInstantAppInternal(String packageName, int userId, int filterCallingUid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: isInstantAppInternal"); }
+        public boolean canViewInstantApps(int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: canViewInstantApps"); }
+        public int checkUidSignaturesForAllUsers(int uid1, int uid2, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: checkUidSignaturesForAllUsers"); }
+        public void enforceCrossUserPermission(int filterCallingUid, int userId, boolean requireFullPermission, boolean checkShell, String message, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: enforceCrossUserPermission"); }
+        public boolean getBlockUninstall(int userId, String packageName) { throw new AssertionError("unused explicit native fixture: getBlockUninstall"); }
+        public android.content.pm.SharedLibraryInfo[] getSharedLibraryRegistry() { throw new AssertionError("unused explicit native fixture: getSharedLibraryRegistry"); }
+        public boolean shouldFilterApplication(int ownerKind, String ownerName, String packageName, int appId, int filterCallingUid, int userId, boolean filterUninstalled, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: shouldFilterApplication"); }
+        public android.content.pm.ProcessInfo[] getProcessesForUid(int uid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getProcessesForUid"); }
+        public int getPackageLookupUid(int uid, boolean knownIsolatedComputeApp, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getPackageLookupUid"); }
+        public String getSetupWizardPackageName() { throw new AssertionError("unused explicit native fixture: getSetupWizardPackageName"); }
+        public android.content.pm.VersionedPackage[] getSharedLibraryUsers(String name, long version, int libraryType, long flags, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getSharedLibraryUsers"); }
+        public boolean[] getSharedLibraryUsersOptional(String name, long version, int libraryType, long flags, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getSharedLibraryUsersOptional"); }
+        public int[] getVisibilityAllowList(String packageName, int userId, boolean checkOnly) { throw new AssertionError("unused explicit native fixture: getVisibilityAllowList"); }
+        public android.content.pm.ActivityInfo getActivityInfoInternal(android.content.ComponentName component, long flags, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getActivityInfoInternal"); }
+        public boolean canAccessComponent(int filterCallingUid, android.content.ComponentName component, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: canAccessComponent"); }
+        public android.content.pm.ProviderInfo resolveContentProvider(String authority, long flags, int userId, int filterCallingUid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: resolveContentProvider"); }
+        public android.content.ComponentName getInstantAppInstallerComponent() { throw new AssertionError("unused explicit native fixture: getInstantAppInstallerComponent"); }
+        public String[] getFrozenPackageNames() { throw new AssertionError("unused explicit native fixture: getFrozenPackageNames"); }
+        public int[] getFrozenPackageCounts() { throw new AssertionError("unused explicit native fixture: getFrozenPackageCounts"); }
+        public byte[] getInstantAppInstallerInfoRecord() { throw new AssertionError("unused explicit native fixture: getInstantAppInstallerInfoRecord"); }
+        public boolean activitySupportsIntentAsUser(android.content.ComponentName resolveComponent, android.content.ComponentName component, android.content.Intent intent, String resolvedType, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: activitySupportsIntentAsUser"); }
+        public boolean hasCrossUserPermission(int filterCallingUid, int userId, boolean requireFullPermission, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: hasCrossUserPermission"); }
+        public byte[] getPlatformSigningDetailsRecord() { throw new AssertionError("unused explicit native fixture: getPlatformSigningDetailsRecord"); }
+        public String[] getKnownPackageNames(int kind, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getKnownPackageNames"); }
+        public boolean isUpgradingFromLowerThan(int sdkVersion) { throw new AssertionError("unused explicit native fixture: isUpgradingFromLowerThan"); }
+        public String[] getApksInApex(String packageName) { throw new AssertionError("unused explicit native fixture: getApksInApex"); }
+        public android.content.ComponentName getResolverComponent() { throw new AssertionError("unused explicit native fixture: getResolverComponent"); }
+        public byte[] queryIntentActivitiesInternalRecord(android.content.Intent intent, String resolvedType, long flags, long privateResolveFlags, int filterCallingUid, int filterCallingPid, int userId, boolean resolveForStart, boolean allowDynamicSplits, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: queryIntentActivitiesInternalRecord"); }
+        public byte[] queryIntentServicesInternalRecord(android.content.Intent intent, String resolvedType, long flags, int userId, int filterCallingUid, int filterCallingPid, boolean includeInstantApps, boolean resolveForStart, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: queryIntentServicesInternalRecord"); }
+        public byte[] resolveIntentInternalRecord(android.content.Intent intent, String resolvedType, long flags, long privateResolveFlags, int userId, boolean resolveForStart, int filterCallingUid, int filterCallingPid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: resolveIntentInternalRecord"); }
+        public byte[] resolveServiceInternalRecord(android.content.Intent intent, String resolvedType, long flags, int userId, int filterCallingUid, int filterCallingPid, boolean resolveForStart, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: resolveServiceInternalRecord"); }
+        public byte[] queryIntentReceiversInternalRecord(android.content.Intent intent, String resolvedType, long flags, int userId, int filterCallingUid, int filterCallingPid, boolean forSend, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: queryIntentReceiversInternalRecord"); }
+        public boolean isPermissionUpgradeNeeded(int userId) { throw new AssertionError("unused explicit native fixture: isPermissionUpgradeNeeded"); }
+        public boolean hasInstantApplicationMetadata(String packageName, int userId) { throw new AssertionError("unused explicit native fixture: hasInstantApplicationMetadata"); }
+                public android.os.IBinder getPackageManagerQueryBinder(int uid, int pid) { throw new AssertionError("unused readonly query binder fixture"); }
                 // This controlled DTO-copy owner declares no UID slots; native UID selection is tested separately.
                 private byte[] uidRegistry() {var p=android.os.Parcel.obtain();try {p.writeLong(captured);p.writeInt(0);return p.marshall();}finally {p.recycle();}}
                 public int getUidOwnerRegistryLength() {return uidRegistry().length;}

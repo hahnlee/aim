@@ -40,7 +40,9 @@ public final class PackageLocal implements PackageManagerLocal {
         void clear();
     }
 
-    private final PackageSnapshots.Store snapshots;
+    private volatile PackageSnapshots.Store snapshots;
+    private PackageSnapshots.Data initial;
+    private boolean closed;
     private final SdkDataOwner sdkData;
     private final SigningOwner signing;
 
@@ -51,6 +53,17 @@ public final class PackageLocal implements PackageManagerLocal {
         snapshots.getVersion(); // A facade cannot expose an uninitialized replica.
     }
 
+    public PackageLocal(PackageSnapshots.Data initial,SdkDataOwner sdkData,SigningOwner signing) {
+        this.initial=Objects.requireNonNull(initial);this.sdkData=Objects.requireNonNull(sdkData);this.signing=Objects.requireNonNull(signing);
+    }
+    public synchronized void bindFull(PackageSnapshots.Store full) {
+        if(closed||snapshots!=null||initial==null)throw new IllegalStateException("Initial Local epoch already completed or closed");
+        Objects.requireNonNull(full).getVersion();snapshots=full;
+        PackageSnapshots.Data old=initial;initial=null;old.close();
+    }
+    public synchronized void closeEpoch(){if(closed)return;closed=true;if(initial!=null){initial.close();initial=null;}snapshots=null;}
+    private synchronized PackageSnapshots.Store full(){if(closed||snapshots==null)throw new IllegalStateException("Full package Local not yet bound or closed");return snapshots;}
+
     @Override
     public void reconcileSdkData(String volumeUuid, String packageName, List<String> subDirNames,
             int userId, int appId, int previousAppId, String seInfo, int flags) throws IOException {
@@ -58,7 +71,10 @@ public final class PackageLocal implements PackageManagerLocal {
     }
 
     @Override
-    public UnfilteredSnapshot withUnfilteredSnapshot() { return snapshots.unfiltered(); }
+    public synchronized UnfilteredSnapshot withUnfilteredSnapshot() {
+        if(closed)throw new IllegalStateException("Package Local epoch closed");
+        return snapshots!=null?snapshots.unfiltered():PackageSnapshots.unfiltered(Objects.requireNonNull(initial));
+    }
 
     @Override
     public FilteredSnapshot withFilteredSnapshot() {
@@ -67,12 +83,12 @@ public final class PackageLocal implements PackageManagerLocal {
 
     @Override
     public FilteredSnapshot withFilteredSnapshot(int callingUid, UserHandle user) {
-        return snapshots.filtered(callingUid, user, null);
+        synchronized(this){if(closed)throw new IllegalStateException("Package Local epoch closed");return snapshots!=null?snapshots.filtered(callingUid,user,null):PackageSnapshots.filtered(Objects.requireNonNull(initial),callingUid,user,null);}
     }
 
     /** ART's precommit scope; its original static helper requires a C redirect (#836). */
     public FilteredSnapshot withFilteredSnapshot(PackageState uncommitted) {
-        return snapshots.filtered(Binder.getCallingUid(), Binder.getCallingUserHandle(), uncommitted);
+        return full().filtered(Binder.getCallingUid(), Binder.getCallingUserHandle(), uncommitted);
     }
 
     // Original PackageManagerLocalImpl's test APIs, android-16.0.0_r1.

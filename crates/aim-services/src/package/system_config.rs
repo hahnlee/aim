@@ -67,6 +67,9 @@ pub struct SystemConfig {
     pub modules_installer: Option<String>,
     /// Fatal installer declaration error; native creation must reject this policy.
     pub installer_policy_error: Option<String>,
+    /// Original overlay-config-signature value; empty remains replaceable.
+    pub overlay_config_signature_package: Option<String>,
+    pub overlay_signature_error: Option<String>,
     /// Initial system packages explicitly exempted from stopped state.
     pub initial_non_stopped_system_packages: BTreeSet<String>,
     /// Preinstalled packages requiring fresh factory signatures during boot.
@@ -93,6 +96,13 @@ pub struct RejectedOemUid {
 
 impl SystemConfig {
     /// `readAllPermissions` of the image whose root is `root`.
+    /// SystemConfig.getOverlayConfigSignaturePackage, including fatal duplicate
+    /// declaration semantics of readPermissionsFromXml.
+    pub fn overlay_config_signature_package(&self) -> Result<Option<&str>, String> {
+        if let Some(error) = &self.overlay_signature_error { return Err(error.clone()); }
+        Ok(self.overlay_config_signature_package.as_deref().filter(|name| !name.is_empty()))
+    }
+
     pub fn read(root: &Path, prop: &dyn Fn(&str) -> Option<String>) -> SystemConfig {
         let mut c = SystemConfig::default();
         let low_ram = prop("ro.config.low_ram").as_deref() == Some("true");
@@ -252,6 +262,19 @@ impl SystemConfig {
                     if e.string("isModulesInstaller").is_some_and(|value|value == "true") {
                         if self.modules_installer.is_some() {self.installer_policy_error=Some("Multiple modules installers".into());}
                         else {self.modules_installer=package;}
+                    }
+                }
+                "overlay-config-signature" if flags == ALLOW_ALL => {
+                    if let Some(package) = e.string("package") {
+                        if self.overlay_config_signature_package.as_ref().is_some_and(|value| !value.is_empty()) {
+                            if self.overlay_signature_error.is_none() {
+                                self.overlay_signature_error = Some(format!(
+                                    "Reference signature package defined as both {} and {}",
+                                    self.overlay_config_signature_package.as_deref().unwrap(), package));
+                            }
+                        } else {
+                            self.overlay_config_signature_package = Some(package.into_owned());
+                        }
                     }
                 }
                 "update-ownership" => {
@@ -632,6 +655,39 @@ mod tests {
         );
         for csv in [b"\n".as_slice(), b"\r", b"\r\n", b"package,1\n\n"] {
             assert!(fallback_categories(Some(csv), &|_| None).is_err());
+        }
+    }
+
+    #[test]
+    fn overlay_signature_requires_allow_all_and_preserves_empty_getter_semantics() {
+        let declarations = aim_android_xml::read(br#"<permissions>
+            <overlay-config-signature/>
+            <overlay-config-signature package=""/>
+            <overlay-config-signature package="reference"/>
+        </permissions>"#).unwrap();
+        let mut denied = SystemConfig::default();
+        denied.read_root(&declarations, ALLOW_APP_CONFIGS, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
+        assert_eq!(denied.overlay_config_signature_package().unwrap(), None);
+        let mut accepted = SystemConfig::default();
+        accepted.read_root(&declarations, ALLOW_ALL, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
+        assert_eq!(accepted.overlay_config_signature_package().unwrap(), Some("reference"));
+        let empty = aim_android_xml::read(br#"<permissions><overlay-config-signature package=""/></permissions>"#).unwrap();
+        let mut config = SystemConfig::default();
+        config.read_root(&empty, ALLOW_ALL, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
+        assert_eq!(config.overlay_config_signature_package, Some(String::new()));
+        assert_eq!(config.overlay_config_signature_package().unwrap(), None);
+    }
+
+    #[test]
+    fn overlay_signature_duplicate_is_fatal_including_the_same_package() {
+        for second in ["reference", "other", ""] {
+            let declarations = aim_android_xml::read(format!(
+                "<permissions><overlay-config-signature package=\"reference\"/><overlay-config-signature package=\"{second}\"/></permissions>"
+            ).as_bytes()).unwrap();
+            let mut config = SystemConfig::default();
+            config.read_root(&declarations, ALLOW_ALL, false, Path::new(""), &|_| None, Path::new("permissions.xml"));
+            assert_eq!(config.overlay_config_signature_package().unwrap_err(),
+                format!("Reference signature package defined as both reference and {second}"));
         }
     }
 

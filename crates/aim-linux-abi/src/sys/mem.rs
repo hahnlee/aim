@@ -216,8 +216,26 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         a[4] as i32,
         a[5],
     );
+    if flags & MAP_ANONYMOUS == 0 && super::proxy_file::is_proxy(fd) {
+        return -(crate::errno::ENODEV as i64);
+    }
     if len == 0 || off & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
+    }
+    if flags & MAP_ANONYMOUS == 0 && let Some(file) = super::fuse_client::get(fd) {
+        let shared = matches!(flags & MAP_TYPE, MAP_SHARED | MAP_SHARED_VALIDATE);
+        let cache = match super::fuse_cache::prepare(file, fd, shared, prot & PROT_WRITE != 0) {
+            Ok(cache) => cache,
+            Err(error) => return -(error as i64),
+        };
+        let result = mmap([addr, len, prot, flags, cache.fd() as u64, off]);
+        if result >= 0 {
+            if let Err(error)=super::fuse_cache::note(cache,result as u64,page_up(len),off,shared){
+                window::unmap(result as u64,page_up(len));
+                return -(error as i64);
+            }
+        }
+        return result;
     }
     if flags & MAP_ANONYMOUS == 0
         && fd >= 0
@@ -262,6 +280,9 @@ pub fn mmap(a: [u64; 6]) -> i64 {
     let placing = placed.then(arena::placing);
     let kind = flags & MAP_TYPE;
     let anon = flags & MAP_ANONYMOUS != 0;
+    if fixed && let Err(error) = super::fuse_cache::flush_range(addr, len) {
+        return -(error as i64);
+    }
     let mut hflags = if fixed { libc::MAP_FIXED } else { 0 };
     if flags & MAP_NORESERVE != 0 {
         hflags |= libc::MAP_NORESERVE;
@@ -425,6 +446,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         }
     }
     copies::forget(base, base + len);
+    super::fuse_cache::forget(base, len);
     if noted {
         note_file_copy(base, len, fd, off);
     }
@@ -434,6 +456,13 @@ pub fn mmap(a: [u64; 6]) -> i64 {
 /// execve in place: the old image's memory goes, the whole guest range,
 /// with what is recorded about it; the heap window is reserved again.
 pub fn exec_reset() {
+    if let Err(error)=super::fuse_cache::shutdown_writeback(){
+        eprintln!("FUSE writeback before exec failed: {error}");
+    }
+    if let Err(error) = super::fuse_cache::flush_range(arena::LO, arena::HI - arena::LO) {
+        eprintln!("FUSE mapped writeback on exec failed: {error}");
+    }
+    super::fuse_cache::forget(arena::LO, arena::HI - arena::LO);
     // SAFETY: nothing of the old image is used from here on.
     unsafe { mach_vm_deallocate(task(), arena::LO, arena::HI - arena::LO) };
     window::init();
@@ -481,7 +510,12 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         return 0;
     }
     copies::forget(addr, addr + len);
-    window::unmap(addr, len)
+    if let Err(error) = super::fuse_cache::flush_range(addr, len) {
+        return -(error as i64);
+    }
+    let result = window::unmap(addr, len);
+    if result == 0 { super::fuse_cache::forget(addr, len); }
+    result
 }
 
 /// Run the munmaps deferred by [`munmap`]; called on the host stack when the
@@ -490,6 +524,10 @@ pub fn run_deferred_unmaps() -> usize {
     DEFERRED_UNMAPS.with(|d| {
         let v = std::mem::take(&mut *d.borrow_mut());
         for &(addr, len) in &v {
+            if let Err(error) = super::fuse_cache::flush_range(addr, len) {
+                eprintln!("FUSE deferred unmap writeback failed: {error}");
+            }
+            super::fuse_cache::forget(addr, len);
             // SAFETY: the guest asked for this unmap; its thread is exiting.
             unsafe { libc::munmap(addr as *mut _, len as usize) };
         }
@@ -853,6 +891,26 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
 
 pub fn mremap(a: [u64; 6]) -> i64 {
     let (old, old_len, new_len, flags, new_addr) = (a[0], page_up(a[1]), page_up(a[2]), a[3], a[4]);
+    let owner = match super::fuse_cache::remap_owner(old, old_len) {
+        Ok(owner) => owner,
+        Err(error) => return -(error as i64),
+    };
+    if owner.is_some() {
+        if old_len > new_len && let Err(error) = super::fuse_cache::flush_range(old + new_len, old_len - new_len) {
+            return -(error as i64);
+        }
+        if flags & MREMAP_FIXED != 0 && let Err(error) = super::fuse_cache::flush_range(new_addr, new_len) {
+            return -(error as i64);
+        }
+    }
+    let result = mremap_inner(a);
+    if result >= 0 && let Some(owner) = owner {
+        super::fuse_cache::remapped(owner, old, old_len, result as u64, new_len, flags & MREMAP_DONTUNMAP != 0);
+    }
+    result
+}
+fn mremap_inner(a: [u64; 6]) -> i64 {
+    let (old, old_len, new_len, flags, new_addr) = (a[0], page_up(a[1]), page_up(a[2]), a[3], a[4]);
     if old & (PAGE - 1) != 0
         || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) != 0
         || (flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 && flags & MREMAP_MAYMOVE == 0)
@@ -974,7 +1032,17 @@ pub fn msync(a: [u64; 6]) -> i64 {
         h |= libc::MS_INVALIDATE;
     }
     // SAFETY: guest range.
-    errno::check(unsafe { libc::msync(addr as *mut _, page_up(len) as usize, h) } as i64)
+    let result = errno::check(unsafe { libc::msync(addr as *mut _, page_up(len) as usize, h) } as i64);
+    if result < 0 { return result; }
+    let flushed=if flags&MS_SYNC!=0{
+        super::fuse_cache::flush_range(addr,page_up(len))
+    }else{
+        super::fuse_cache::schedule_range(addr,page_up(len))
+    };
+    match flushed {
+        Ok(()) => 0,
+        Err(error) => -(error as i64),
+    }
 }
 
 pub fn mlock(nr: u64, a: [u64; 6]) -> i64 {

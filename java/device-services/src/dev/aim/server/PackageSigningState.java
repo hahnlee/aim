@@ -51,8 +51,27 @@ public final class PackageSigningState implements Parcelable {
         return sharedGroup == null ? null : Signing.details(sharedSigning);
     }
 
+    static SigningDetails copyDetails(SigningDetails details) {
+        if (details == SigningDetails.UNKNOWN) return details;
+        var keys = details.getPublicKeys() == null ? null : new android.util.ArraySet<java.security.PublicKey>();
+        if (keys != null) keys.addAll(details.getPublicKeys());
+        return new SigningDetails(copySignatures(details.getSignatures()),
+                details.getSignatureSchemeVersion(), keys, copySignatures(details.getPastSigningCertificates()));
+    }
+
+    private static Signature[] copySignatures(Signature[] values) {
+        if (values == null) return null;
+        var result = new Signature[values.length];
+        for (int i = 0; i < values.length; i++) {
+            result[i] = new Signature(values[i]);
+            result[i].setFlags(values[i].getFlags());
+        }
+        return result;
+    }
+
     static final class Signing {
         private final int scheme;
+        private SigningDetails validated;
         private final byte[][] current;
         private final int[] currentCapabilities;
         private final byte[][] past;
@@ -98,12 +117,17 @@ public final class PackageSigningState implements Parcelable {
 
         static SigningDetails details(Signing signing) {
             if (signing == null) return SigningDetails.UNKNOWN;
-            try {
-                // The original constructor derives the complete public-key set.
-                return new SigningDetails(signatures(signing.current, signing.currentCapabilities), signing.scheme,
-                        signatures(signing.past, signing.capabilities));
-            } catch (java.security.cert.CertificateException failure) {
-                throw new IllegalArgumentException("invalid saved signing certificates", failure);
+            synchronized (signing) {
+                if (signing.validated == null) {
+                    try {
+                        // Validate the immutable certificate owner once with the original constructor.
+                        signing.validated = new SigningDetails(signatures(signing.current, signing.currentCapabilities),
+                                signing.scheme, signatures(signing.past, signing.capabilities));
+                    } catch (java.security.cert.CertificateException failure) {
+                        throw new IllegalArgumentException("invalid saved signing certificates", failure);
+                    }
+                }
+                return copyDetails(signing.validated);
             }
         }
 

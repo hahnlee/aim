@@ -136,3 +136,59 @@ mod tests {
         assert_eq!(Bundle::default().parcel().unwrap().data(), &[0, 0, 0, 0]);
     }
 }
+
+impl aim_service_aidl::ReadParcelable for Bundle {
+    fn read_from(reader: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        read_bundle(reader, 0)
+    }
+}
+fn read_bundle(reader: &mut aim_binder_host::parcel::Reader<'_>, depth: usize) -> aim_binder_host::parcel::Result<Bundle> {
+    use aim_binder_host::parcel::BAD_VALUE;
+
+    let bytes = reader.read_i32()?;
+    if bytes == 0 { return Ok(Bundle::default()); }
+    if bytes < 0 || !matches!(reader.read_i32()?, crate::bundle::MAGIC | crate::bundle::MAGIC_NATIVE) { return Err(BAD_VALUE); }
+    let end = reader.position().checked_add(bytes as usize).ok_or(BAD_VALUE)?;
+    if bytes as usize > reader.remaining() { return Err(BAD_VALUE); }
+    let count = reader.read_i32()?;
+    if count < 0 || count as usize > bytes as usize / 8 { return Err(BAD_VALUE); }
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let key = reader.read_string16()?;
+        let value = read_value(reader, depth + 1)?;
+        if reader.position() > end { return Err(BAD_VALUE); }
+        if let Some((_, previous)) = entries.iter_mut().find(|(name, _)| *name == key) { *previous = value; }
+        else { entries.push((key, value)); }
+    }
+    if reader.position() != end { return Err(BAD_VALUE); }
+    reader.read_bool()?; // BaseBundle's hasIntent footer; no intent graph is accepted.
+    entries.sort_by_key(|(key, _)| hash(key.as_deref()));
+    Ok(Bundle { entries })
+}
+fn read_value(reader: &mut aim_binder_host::parcel::Reader<'_>, depth: usize) -> aim_binder_host::parcel::Result<Value> {
+    use aim_binder_host::parcel::BAD_VALUE;
+    let kind = reader.read_i32()?;
+    Ok(match kind {
+        -1 => Value::Null,
+        0 => reader.read_string16()?.map(Value::String).unwrap_or(Value::Null),
+        1 => Value::Int(reader.read_i32()?),
+        6 => Value::Long(reader.read_i64()?),
+        8 => Value::Double(super::Double::new(f64::from_bits(reader.read_i64()? as u64))),
+        9 => Value::Bool(reader.read_bool()?),
+        25 => Value::Bundle(read_bundle(reader, depth)?),
+        14 | 18 | 19 | 23 | 28 => {
+            let count = reader.read_i32()?;
+            if count == -1 { return Ok(Value::Null); }
+            if count < 0 || count as usize > reader.remaining() / 4 { return Err(BAD_VALUE); }
+            match kind {
+                14 => Value::Strings((0..count).map(|_| reader.read_string16()).collect::<Result<_, _>>()?),
+                18 => Value::Ints((0..count).map(|_| reader.read_i32()).collect::<Result<_, _>>()?),
+                19 => Value::Longs((0..count).map(|_| reader.read_i64()).collect::<Result<_, _>>()?),
+                23 => Value::Bools((0..count).map(|_| reader.read_bool()).collect::<Result<_, _>>()?),
+                28 => Value::Doubles((0..count).map(|_| reader.read_i64().map(|bits| super::Double::new(f64::from_bits(bits as u64)))).collect::<Result<_, _>>()?),
+                _ => unreachable!(),
+            }
+        }
+        _ => return Err(BAD_VALUE),
+    })
+}

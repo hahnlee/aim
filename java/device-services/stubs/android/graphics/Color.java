@@ -4,4 +4,6 @@ package android.graphics;
 
 public class Color {
     public static final int TRANSPARENT = 0;
+ public static int argb(float alpha,float red,float green,float blue){throw new RuntimeException("stub");}
+ public static final int BLACK=0xff000000;
 }

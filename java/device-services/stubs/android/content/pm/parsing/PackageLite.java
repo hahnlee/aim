@@ -1,0 +1,1 @@
+package android.content.pm.parsing;public class PackageLite{public PackageLite(String path,String base,ApkLite apk,String[] names,boolean[] features,String[] uses,String[] config,String[] paths,int[] revisions,int target,java.util.Set<String>[] required,java.util.Set<String>[] types){throw new RuntimeException("stub");}}

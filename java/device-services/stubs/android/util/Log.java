@@ -4,5 +4,6 @@ package android.util;
 
 public final class Log {
     private Log() { throw new RuntimeException("stub"); }
+    public static int e(String tag, String msg, Throwable tr) { throw new RuntimeException("stub"); }
     public static int w(String tag, String msg) { throw new RuntimeException("stub"); }
 }

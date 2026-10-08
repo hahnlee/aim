@@ -23,6 +23,28 @@ pub struct ServiceHost {
 }
 
 impl ServiceHost {
+    fn begin_package_manager_boot(&self, call: &mut Call<'_>) -> Reply {
+        let args = host::BeginPackageManagerBoot::read(&mut call.data)?;
+        if call.data.remaining() != 0 { return Err(aim_binder_host::parcel::BAD_VALUE); }
+        let result = self.system.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native package system unavailable"))
+            .and_then(|system| system.begin_package_manager_boot(args.factory_test));
+        let mut reply = Parcel::new();
+        match result { Ok(binder) => host::write_begin_package_manager_boot_reply(&mut reply, Some(binder)),
+            Err(error) => reply.write_exception(&error) }
+        Ok(reply)
+    }
+    fn package_internal_host(&self, call: &mut Call<'_>) -> Reply {
+        host::GetPackageInternalHost::read(&mut call.data)?;
+        if call.data.remaining() != 0 { return Err(aim_binder_host::parcel::BAD_VALUE); }
+        let mut reply = Parcel::new();
+        let result = self.system.upgrade().ok_or_else(|| Exception::new(EX_ILLEGAL_STATE, "native system unavailable"))
+            .and_then(|system| system.package_internal_host());
+        match result {
+            Ok(binder) => host::write_get_package_internal_host_reply(&mut reply, Some(binder)),
+            Err(error) => reply.write_exception(&error),
+        }
+        Ok(reply)
+    }
     pub fn new(process: Arc<LocalProcess>, system: &Arc<System>) -> Self {
         Self {
             process,
@@ -256,6 +278,8 @@ impl Service for ServiceHost {
             && call.code != host::REMOVE_PACKAGE_SIGNING_OVERRIDE
             && call.code != host::CLEAR_PACKAGE_SIGNING_OVERRIDES
             && call.code != host::GET_PACKAGE_STATE_VERSION_PAGE
+            && call.code != host::GET_PACKAGE_INTERNAL_HOST
+            && call.code != host::BEGIN_PACKAGE_MANAGER_BOOT
         {
             return Err(UNKNOWN_TRANSACTION);
         }
@@ -269,6 +293,8 @@ impl Service for ServiceHost {
                 || call.code == host::REMOVE_PACKAGE_SIGNING_OVERRIDE
                 || call.code == host::CLEAR_PACKAGE_SIGNING_OVERRIDES
                 || call.code == host::GET_PACKAGE_STATE_VERSION_PAGE
+                || call.code == host::GET_PACKAGE_INTERNAL_HOST
+                || call.code == host::BEGIN_PACKAGE_MANAGER_BOOT
             {
                 let mut reply = Parcel::new();
                 reply.write_exception(&Exception::security(
@@ -291,6 +317,10 @@ impl Service for ServiceHost {
             self.mutate_package_signing(call)
         } else if call.code == host::RECONCILE_PACKAGE_SDK_DATA {
             self.reconcile_package_sdk_data(call)
+        } else if call.code == host::BEGIN_PACKAGE_MANAGER_BOOT {
+            self.begin_package_manager_boot(call)
+        } else if call.code == host::GET_PACKAGE_INTERNAL_HOST {
+            self.package_internal_host(call)
         } else if call.code == host::GET_PACKAGE_STATE_VERSION_PAGE {
             self.package_state_version_page(call)
         } else if call.code == host::CAPTURE_PACKAGE_SCAN {

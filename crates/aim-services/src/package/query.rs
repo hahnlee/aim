@@ -375,8 +375,6 @@ fn args<T>(read: ParcelResult<T>) -> Result<T, NotModelled> {
     read.map_err(|_| NotModelled("a call that does not read"))
 }
 
-
-
 fn reply(write: impl FnOnce(&mut Parcel)) -> Parcel {
     let mut p = Parcel::new();
     write(&mut p);
@@ -390,7 +388,11 @@ type Thrown<T> = Result<Result<T, Exception>, NotModelled>;
 fn thrown<T>(r: Thrown<T>, write: impl FnOnce(&mut Parcel, T)) -> Answered {
     Ok(match r? {
         Ok(v) => reply(|p| write(p, v)),
-        Err(e) => {let mut reply=Parcel::new();reply.write_exception(&e);reply},
+        Err(e) => {
+            let mut reply = Parcel::new();
+            reply.write_exception(&e);
+            reply
+        }
     })
 }
 
@@ -408,7 +410,20 @@ impl Query<'_> {
 
     fn package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
-            pm::IS_PACKAGE_SUSPENDED_FOR_USER|pm::IS_PACKAGE_QUARANTINED_FOR_USER|pm::IS_PACKAGE_STOPPED_FOR_USER|pm::GET_HARMFUL_APP_WARNING=>self.user_status(code,r),
+            pm::GET_PREFERRED_ACTIVITIES => {
+                let owner = self.state.system.preferred_owner.as_deref()
+                    .ok_or(NotModelled("native preferred owner unavailable"))?;
+                preferred::list(self, r, owner)
+            }
+            pm::GET_PREFERRED_ACTIVITY_BACKUP => {
+                let owner = self.state.system.preferred_owner.as_deref()
+                    .ok_or(NotModelled("native preferred owner unavailable"))?;
+                preferred::backup(self.calling_uid, r, owner)
+            }
+            pm::IS_PACKAGE_SUSPENDED_FOR_USER
+            | pm::IS_PACKAGE_QUARANTINED_FOR_USER
+            | pm::IS_PACKAGE_STOPPED_FOR_USER
+            | pm::GET_HARMFUL_APP_WARNING => self.user_status(code, r),
             pm::GET_PACKAGE_INFO => {
                 let a = args(pm::GetPackageInfo::read(r))?;
                 let name = a.package_name.unwrap_or_default();
@@ -546,26 +561,41 @@ impl Query<'_> {
     fn native(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         let caller_user = user_id(self.calling_uid);
         match code {
-            native::IS_AUDIO_PLAYBACK_CAPTURE_ALLOWED=> {
-                let a=args(native::IsAudioPlaybackCaptureAllowed::read(r))?;
-                let value=if let Some(names)=a.package_names {
+            native::IS_AUDIO_PLAYBACK_CAPTURE_ALLOWED => {
+                let a = args(native::IsAudioPlaybackCaptureAllowed::read(r))?;
+                let value = if let Some(names) = a.package_names {
                     (|| {
-                        let mut values=vec![false;names.len()];
-                        for (index,name) in names.iter().enumerate().rev() {
-                            let info=match self.application_info(name.as_deref().unwrap_or_default(),0,caller_user)? {
-                                Ok(info)=>info,Err(error)=>return Ok(Err(error)),
+                        let mut values = vec![false; names.len()];
+                        for (index, name) in names.iter().enumerate().rev() {
+                            let info = match self.application_info(
+                                name.as_deref().unwrap_or_default(),
+                                0,
+                                caller_user,
+                            )? {
+                                Ok(info) => info,
+                                Err(error) => return Ok(Err(error)),
                             };
-                            values[index]=info.is_some_and(|info|info.private_flags & (1<<27)!=0);
+                            values[index] =
+                                info.is_some_and(|info| info.private_flags & (1 << 27) != 0);
                         }
                         Ok(Ok(values))
                     })()
-                } else {Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER,"null packageNames")))};
-                thrown(value,|p,v|native::write_is_audio_playback_capture_allowed_reply(p,&Some(v)))
+                } else {
+                    Ok(Err(Exception::new(
+                        aim_binder_host::parcel::EX_NULL_POINTER,
+                        "null packageNames",
+                    )))
+                };
+                thrown(value, |p, v| {
+                    native::write_is_audio_playback_capture_allowed_reply(p, &Some(v))
+                })
             }
-            native::GET_MODULE_METADATA_PACKAGE_NAME=> {
+            native::GET_MODULE_METADATA_PACKAGE_NAME => {
                 args(native::GetModuleMetadataPackageName::read(r))?;
-                thrown(self.module_metadata_package(),|p,value|native::write_get_module_metadata_package_name_reply(p,&value))
-            },
+                thrown(self.module_metadata_package(), |p, value| {
+                    native::write_get_module_metadata_package_name_reply(p, &value)
+                })
+            }
             native::GET_NAMES_FOR_UIDS => {
                 let a = args(native::GetNamesForUids::read(r))?;
                 let names = self.names_for_uids(a.uids.as_deref())?.map(|names| {
@@ -666,19 +696,23 @@ impl Query<'_> {
 
     /// `ComputerEngine.updateFlags`: the direct boot match flags of a
     /// caller that set none.
-    pub fn update_flags(&self, mut flags: i64, user: i32) -> i64 {
+    pub fn update_flags(&self, mut flags: i64, user: i32) -> Result<i64, NotModelled> {
         if flags & (MATCH_DIRECT_BOOT_UNAWARE | MATCH_DIRECT_BOOT_AWARE) == 0 {
-            if self.user(user).is_some_and(|u| u.unlocking_or_unlocked) {
+            let unlocked = match &self.state.platform.settings_owner {
+                Some(owner) => owner.unlocked(user).map_err(|_|NotModelled("live UserManager unlock state read failed"))?,
+                None => self.user(user).is_some_and(|u|u.unlocking_or_unlocked),
+            };
+            if unlocked {
                 flags |= MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE;
             } else {
                 flags |= MATCH_DIRECT_BOOT_AWARE;
             }
         }
-        flags
+        Ok(flags)
     }
 
     /// `updateFlagsForComponent`.
-    pub fn update_flags_for_component(&self, flags: i64, user: i32) -> i64 {
+    pub fn update_flags_for_component(&self, flags: i64, user: i32) -> Result<i64, NotModelled> {
         self.update_flags(flags, user)
     }
 
@@ -700,7 +734,7 @@ impl Query<'_> {
         {
             flags |= MATCH_ANY_USER;
         }
-        Ok(Ok(self.update_flags(flags, user)))
+        Ok(Ok(self.update_flags(flags, user)?))
     }
 
     fn aconfig(&self, name: &str) -> bool {
@@ -739,7 +773,9 @@ impl Query<'_> {
                 .iter()
                 .filter_map(|n| self.state.packages.get(n))
                 .any(granted)),
-            None => self.check_uid_permission(uid,Some(permission)).map(|result|result==0),
+            None => self
+                .check_uid_permission(uid, Some(permission))
+                .map(|result| result == 0),
         }
     }
 
@@ -784,6 +820,23 @@ impl Query<'_> {
         )))
     }
 
+    pub(crate) fn internal_enforce_cross_user(&self, filter_uid: i32, user: i32,
+        require_full: bool, check_shell: bool, message: &str) -> Thrown<()> {
+        if user < 0 { return Ok(Err(Exception::illegal_argument(format!("Invalid userId {user}")))); }
+        if check_shell && filter_uid == 2000 {
+            let owner = self.state.system.user_policy.as_ref().ok_or(NotModelled("original UserManagerInternal shell debugging restriction owner"))?;
+            let restricted = match owner.shell_debugging_restricted(user) { Ok(restricted) => restricted, Err(exception) => return Ok(Err(exception)) };
+            if restricted { return Ok(Err(Exception::security(format!("Shell does not have permission to access user {user}")))); }
+        }
+        if user == user_id(filter_uid) || matches!(filter_uid, 0 | SYSTEM_UID) { return Ok(Ok(())); }
+        if self.uid_has_permission(filter_uid, INTERACT_ACROSS_USERS_FULL)?
+            || !require_full && self.uid_has_permission(filter_uid, INTERACT_ACROSS_USERS)? { return Ok(Ok(())); }
+        let permission = if require_full { INTERACT_ACROSS_USERS_FULL.into() } else {
+            format!("{INTERACT_ACROSS_USERS_FULL} or {INTERACT_ACROSS_USERS}") };
+        let prefix = if message.is_empty() { String::new() } else { format!("{message}: ") };
+        Ok(Err(Exception::security(format!("{prefix}UID {filter_uid} requires {permission} to access user {user}."))))
+    }
+
     /// `shouldFilterApplication(ps, callingUid, userId)`.
     pub(crate) fn filtered(
         &self,
@@ -791,7 +844,50 @@ impl Query<'_> {
         uid: i32,
         user: i32,
     ) -> Result<bool, NotModelled> {
-        should_filter_application(self.state, self.filter, ps, uid, user, false, true)
+        let result = apps_filter::should_filter_application_with_permission(self.state, self.filter, ps,
+            uid, self.calling_uid, user, false, true)?;
+        if let Some(logging) = &self.state.system.visibility_logging { logging.decision(uid, ps.map(|package| package.name.as_str()), result); }
+        Ok(result)
+    }
+
+    pub(crate) fn filtered_component(&self, ps: Option<&PackageState>, component: &ComponentName,
+        kind: i32, mut filter_uid: i32, user: i32) -> Result<bool, NotModelled> {
+        if apps_filter::is_isolated(filter_uid) {
+            filter_uid = self.state.system.isolated_owners.iter().find(|(isolated, _)| *isolated == filter_uid)
+                .map(|(_, owner)| *owner).ok_or(NotModelled("isolated component caller owner"))?;
+        }
+        let Some(package) = ps else {
+            return apps_filter::should_filter_application_with_permission(self.state, self.filter, ps,
+                filter_uid, self.calling_uid, user, true, true);
+        };
+        let caller_instant = apps_filter::instant_app_package_name(self.state, filter_uid)?;
+        let target = user_state(package, user);
+        if !target.installed && !package.is.hidden_until_installed && !is_system_or_root_or_shell(filter_uid) { return Ok(true); }
+        if apps_filter::is_caller_same_app(self.state, Some(&package.name), filter_uid)? { return Ok(false); }
+        if caller_instant.is_some() {
+            if target.instant_app { return Ok(true); }
+            let registry = self.state.package_registry.as_ref().ok_or(NotModelled("component instrumentation registration owner"))?;
+            if registry.instruments().iter().any(|instrumentation| instrumentation.package == component.package
+                && instrumentation.value.component.name == component.class
+                && caller_instant == instrumentation.value.target_package.as_deref()) { return Ok(false); }
+            let pkg = package.pkg.as_deref().ok_or(NotModelled("instant component parsed package unavailable"))?;
+            let activity = |receivers: bool| {
+                let components = if receivers { &pkg.receivers } else { &pkg.activities };
+                components.iter().rev().find(|entry| entry.main.component.name == component.class)
+                    .is_some_and(|entry| { let flags = entry.main.component.flags;
+                        flags & 0x0010_0000 != 0 && (flags & 0x0020_0000 != 0) == receivers })
+            };
+            let service = || pkg.services.iter().rev().find(|entry| entry.main.component.name == component.class)
+                .is_some_and(|entry| entry.main.component.flags & 0x0010_0000 != 0);
+            let provider = || registry.providers().iter().find(|entry| entry.package == component.package
+                    && entry.value.main.component.name == component.class)
+                .is_some_and(|entry| entry.value.main.component.flags & 0x0010_0000 != 0);
+            let visible = match kind { 1 => activity(false), 2 => activity(true), 3 => service(), 4 => provider(),
+                _ => activity(false) || activity(true) || service() || provider() };
+            return Ok(!visible);
+        }
+        if target.instant_app { return Ok(!self.internal_can_view_instant(filter_uid, user)?); }
+        self.filtered(Some(package), filter_uid, user)
     }
 
     /// `shouldFilterApplicationIncludingUninstalled`.
@@ -823,7 +919,7 @@ impl Query<'_> {
 
     /// `shouldFilterApplication` (and `...IncludingUninstalled`) of a
     /// shared user: filtered when every package of it is.
-    fn shared_filtered(
+    pub(crate) fn shared_filtered(
         &self,
         shared: &crate::package::model::SharedUser,
         user: i32,
@@ -1005,11 +1101,16 @@ impl Query<'_> {
         flags: i64,
         user: i32,
     ) -> Thrown<Option<PackageInfo>> {
-        self.package_info_internal(name,version_code,flags,user,self.calling_uid)
+        self.package_info_internal(name, version_code, flags, user, self.calling_uid)
     }
 
     pub(crate) fn package_info_internal(
-        &self,name:&str,version_code:i64,flags:i64,user:i32,filter_uid:i32,
+        &self,
+        name: &str,
+        version_code: i64,
+        flags: i64,
+        user: i32,
+        filter_uid: i32,
     ) -> Thrown<Option<PackageInfo>> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
@@ -1023,14 +1124,20 @@ impl Query<'_> {
         }
         let name = self.resolve_internal_package_name(name, version_code);
         let uid = filter_uid;
-        let visibility=Query {state:self.state,filter:self.filter,calling_uid:filter_uid};
+        let visibility = Query {
+            state: self.state,
+            filter: self.filter,
+            calling_uid: filter_uid,
+        };
         let factory_only = flags & MATCH_FACTORY_ONLY != 0;
         let apex = flags & MATCH_APEX != 0;
         if factory_only && let Some(ps) = self.state.disabled_system_packages.get(&name) {
             if !apex && ps.pkg.as_deref().is_some_and(|p| p.is2(APEX)) {
                 return Ok(Ok(None));
             }
-            if visibility.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
+            if visibility.filter_shared_lib(ps, user, flags)?
+                || self.filtered(Some(ps), uid, user)?
+            {
                 return Ok(Ok(None));
             }
             return Ok(Ok(self.generate_package_info(ps, flags, user)?));
@@ -1042,7 +1149,9 @@ impl Query<'_> {
             if !apex && p.is2(APEX) {
                 return Ok(Ok(None));
             }
-            if visibility.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
+            if visibility.filter_shared_lib(ps, user, flags)?
+                || self.filtered(Some(ps), uid, user)?
+            {
                 return Ok(Ok(None));
             }
             return Ok(Ok(self.generate_package_info(ps, flags, user)?));
@@ -1051,7 +1160,9 @@ impl Query<'_> {
             && flags & (MATCH_KNOWN_PACKAGES | MATCH_ARCHIVED_PACKAGES) != 0
             && let Some(ps) = self.state.packages.get(&name)
         {
-            if visibility.filter_shared_lib(ps, user, flags)? || self.filtered(Some(ps), uid, user)? {
+            if visibility.filter_shared_lib(ps, user, flags)?
+                || self.filtered(Some(ps), uid, user)?
+            {
                 return Ok(Ok(None));
             }
             return Ok(Ok(self.generate_package_info(ps, flags, user)?));
@@ -1119,11 +1230,15 @@ impl Query<'_> {
         flags: i64,
         user: i32,
     ) -> Thrown<Option<ApplicationInfo>> {
-        self.application_info_internal(name,flags,user,self.calling_uid)
+        self.application_info_internal(name, flags, user, self.calling_uid)
     }
 
     pub(crate) fn application_info_internal(
-        &self,name:&str,flags:i64,user:i32,filter_uid:i32,
+        &self,
+        name: &str,
+        flags: i64,
+        user: i32,
+        filter_uid: i32,
     ) -> Thrown<Option<ApplicationInfo>> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
@@ -1136,7 +1251,11 @@ impl Query<'_> {
             return Ok(Err(e));
         }
         let name = self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST);
-        let visibility=Query {state:self.state,filter:self.filter,calling_uid:filter_uid};
+        let visibility = Query {
+            state: self.state,
+            filter: self.filter,
+            calling_uid: filter_uid,
+        };
         if let Some((ps, p)) = self.package_of(&name) {
             if flags & MATCH_APEX == 0 && p.is2(APEX) {
                 return Ok(Ok(None));
@@ -1156,7 +1275,9 @@ impl Query<'_> {
             return Ok(Ok(ai));
         }
         if name == "android" || name == "system" {
-            return Err(NotModelled("the android application without its package"));
+            return self.state.platform.android_application.as_ref()
+                .map(|application| Ok(Some((**application).clone())))
+                .ok_or(NotModelled("accepted platform application owner unavailable"));
         }
         if flags & (MATCH_KNOWN_PACKAGES | MATCH_ARCHIVED_PACKAGES) != 0
             && self.state.packages.contains_key(&name)
@@ -1282,8 +1403,14 @@ impl Query<'_> {
 
     /// `getComponentEnabledSetting`.
     fn component_enabled_setting(&self, c: Option<&ComponentName>, user: i32) -> Thrown<i32> {
-        if let Err(e) = self.enforce_cross_user(user, false, false, "getComponentEnabled")? {
-            return Ok(Err(e));
+        self.internal_component_enabled(c, self.calling_uid, user, false)
+    }
+    pub(crate) fn internal_component_enabled(&self, c: Option<&ComponentName>, filter_uid: i32,
+        user: i32, internal: bool) -> Thrown<i32> {
+        if !internal {
+            if let Err(e) = self.enforce_cross_user(user, false, false, "getComponentEnabled")? {
+                return Ok(Err(e));
+            }
         }
         let Some(c) = c else {
             return Ok(Ok(COMPONENT_ENABLED_STATE_DEFAULT));
@@ -1298,7 +1425,7 @@ impl Query<'_> {
             ))))
         };
         let ps = self.state.packages.get(&c.package);
-        if self.filtered_including_uninstalled(ps, user)? {
+        if self.filtered_component(ps, c, 0, filter_uid, user)? {
             return unknown();
         }
         let Some(ps) = ps else {
@@ -1325,7 +1452,7 @@ impl Query<'_> {
 
     /// `getSystemAvailableFeatures`: SystemConfig's features in their
     /// `ArrayMap`'s order, then the GL ES version.
-    fn system_available_features(&self) -> ListSlice<super::pkg::FeatureInfo> {
+    pub(crate) fn system_available_features(&self) -> ListSlice<super::pkg::FeatureInfo> {
         let features = array_order(self.state.system.features.clone(), |(n, _)| n);
         let mut items: Vec<super::pkg::FeatureInfo> = features
             .into_iter()
@@ -1361,17 +1488,45 @@ impl Query<'_> {
         {
             return Err(NotModelled("a cross-profile packages-for-uid call"));
         }
-        Ok(Ok(self.packages_for_uid(uid)?))
+        let caller_is_instant=apps_filter::instant_app_package_name(self.state,self.calling_uid)?.is_some();
+        let target=match self.uid_query_target(uid,true)?{Ok(target)=>target,Err(error)=>return Ok(Err(error))};
+        Ok(Ok(self.packages_for_uid_body(target,user,caller_is_instant)?))
+    }
+
+    /// ComputerEngine maps SDK sandboxes to the selected sandbox package,
+    /// and only registered hotword/inference isolated compute UIDs to owners.
+    fn uid_query_target(&self,mut uid:i32,require_owner:bool)->Thrown<i32> {
+        if apps_filter::is_sdk_sandbox(uid) {
+            let selected=self.state.system.sdk_sandbox_package.as_ref()
+                .ok_or(NotModelled("actual SDK sandbox package owner unavailable"))?;
+            let Some(package)=selected.as_ref().and_then(|name|self.state.packages.get(name)).and_then(|package|package.pkg.as_ref())else {
+                return Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER,"SDK sandbox package is null")));
+            };
+            uid=package.uid;
+        }
+        if apps_filter::is_isolated(uid) {
+            let policy=self.state.system.resolution_policy.as_ref()
+                .ok_or(NotModelled("actual isolated compute classification owner unavailable"))?;
+            let known=match policy.known_isolated_compute(uid){Ok(known)=>known,Err(error)=>return Ok(Err(error))};
+            if known {
+                match self.state.system.isolated_owners.iter().find(|(isolated,_)|*isolated==uid) {
+                    Some((_,owner))=>uid=*owner,
+                    None if require_owner=>return Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                        format!("No owner UID found for isolated UID {uid}")))),
+                    None=>{eprintln!("Expected isolated uid {uid} to have an owner");}, // Original name getters catch and log this owner error.
+                }
+            }
+        }
+        Ok(Ok(uid))
     }
 
     /// `getPackagesForUidInternal`.
-    pub fn packages_for_uid(&self, uid: i32) -> Result<Option<Vec<Option<String>>>, NotModelled> {
-        if apps_filter::is_sdk_sandbox(uid) || apps_filter::is_isolated(uid) {
-            return Err(NotModelled("a sandbox or isolated uid's packages"));
-        }
-        let caller_is_instant =
-            apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some();
-        let user = user_id(uid);
+    pub fn packages_for_uid(&self,uid:i32)->Result<Option<Vec<Option<String>>>,NotModelled> {
+        let caller_is_instant=apps_filter::instant_app_package_name(self.state,self.calling_uid)?.is_some();
+        let target=self.uid_query_target(uid,true)?.map_err(|_|NotModelled("UID package lookup owner failed"))?;
+        self.packages_for_uid_body(target,user_id(uid),caller_is_instant)
+    }
+    fn packages_for_uid_body(&self,uid:i32,user:i32,caller_is_instant:bool)->Result<Option<Vec<Option<String>>>,NotModelled> {
         Ok(match setting(self.state, app_id(uid)) {
             Some(Setting::Shared(su)) => {
                 if caller_is_instant {
@@ -1399,9 +1554,7 @@ impl Query<'_> {
         if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() {
             return Ok(None);
         }
-        if apps_filter::is_sdk_sandbox(uid) || apps_filter::is_isolated(uid) {
-            return Err(NotModelled("a sandbox or isolated uid's name"));
-        }
+        let uid=self.uid_query_target(uid,false)?.map_err(|_|NotModelled("UID name lookup owner failed"))?;
         let user = user_id(self.calling_uid);
         Ok(match setting(self.state, app_id(uid)) {
             Some(Setting::Shared(su)) => (!self.shared_filtered(su, user, true)?)
@@ -1427,9 +1580,7 @@ impl Query<'_> {
         let user = user_id(self.calling_uid);
         let mut names = vec![None; uids.len()];
         for (i, &uid) in uids.iter().enumerate().rev() {
-            if apps_filter::is_sdk_sandbox(uid) || apps_filter::is_isolated(uid) {
-                return Err(NotModelled("a sandbox or isolated uid's name"));
-            }
+            let uid=self.uid_query_target(uid,false)?.map_err(|_|NotModelled("UID name lookup owner failed"))?;
             names[i] = match setting(self.state, app_id(uid)) {
                 Some(Setting::Shared(su)) => {
                     (!self.shared_filtered(su, user, true)?).then(|| format!("shared:{}", su.name))
@@ -1455,12 +1606,27 @@ impl Query<'_> {
         if let Err(e) = self.enforce_cross_user(user, false, false, "getPackageUid")? {
             return Ok(Err(e));
         }
-        Ok(Ok(self.package_uid_internal(name,flags,user,self.calling_uid)?))
+        Ok(Ok(self.package_uid_internal(
+            name,
+            flags,
+            user,
+            self.calling_uid,
+        )?))
     }
 
-    pub(crate) fn package_uid_internal(&self,name:&str,flags:i64,user:i32,filter_uid:i32)->Result<i32,NotModelled> {
+    pub(crate) fn package_uid_internal(
+        &self,
+        name: &str,
+        flags: i64,
+        user: i32,
+        filter_uid: i32,
+    ) -> Result<i32, NotModelled> {
         let uid = filter_uid;
-        let visibility=Query {state:self.state,filter:self.filter,calling_uid:filter_uid};
+        let visibility = Query {
+            state: self.state,
+            filter: self.filter,
+            calling_uid: filter_uid,
+        };
         if let Some((ps, p)) = self.package_of(name)
             && (flags & MATCH_SYSTEM_ONLY == 0 || ps.is.system)
         {
@@ -1494,7 +1660,7 @@ impl Query<'_> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
-        let flags = self.update_flags_for_component(flags, user) | MATCH_QUARANTINED_COMPONENTS;
+        let flags = self.update_flags_for_component(flags, user)? | MATCH_QUARANTINED_COMPONENTS;
         if let Err(e) = self.enforce_cross_user(user, false, true, "get activity info")? {
             return Ok(Err(e));
         }
@@ -1507,7 +1673,7 @@ impl Query<'_> {
             if !info::is_enabled_and_matches(ps, &a.main, flags, user) {
                 return Ok(Ok(None));
             }
-            if self.filtered(Some(ps), filter_uid, user)? {
+            if self.filtered_component(Some(ps), c, 1, filter_uid, user)? {
                 return Ok(Ok(None));
             }
             let state = user_state(ps, user);
@@ -1530,7 +1696,7 @@ impl Query<'_> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
-        let flags = self.update_flags_for_component(flags, user);
+        let flags = self.update_flags_for_component(flags, user)?;
         if let Err(e) = self.enforce_cross_user(user, false, false, "get receiver info")? {
             return Ok(Err(e));
         }
@@ -1545,7 +1711,7 @@ impl Query<'_> {
             return Ok(Ok(None));
         };
         if !info::is_enabled_and_matches(ps, &a.main, flags, user)
-            || self.filtered(Some(ps), self.calling_uid, user)?
+            || self.filtered_component(Some(ps), c, 2, self.calling_uid, user)?
         {
             return Ok(Ok(None));
         }
@@ -1566,7 +1732,7 @@ impl Query<'_> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
-        let flags = self.update_flags_for_component(flags, user);
+        let flags = self.update_flags_for_component(flags, user)?;
         if let Err(e) = self.enforce_cross_user(user, false, true, "get service info")? {
             return Ok(Err(e));
         }
@@ -1577,7 +1743,7 @@ impl Query<'_> {
             return Ok(Ok(None));
         };
         if !info::is_enabled_and_matches(ps, &s.main, flags, user)
-            || self.filtered(Some(ps), self.calling_uid, user)?
+            || self.filtered_component(Some(ps), c, 3, self.calling_uid, user)?
         {
             return Ok(Ok(None));
         }
@@ -1596,18 +1762,32 @@ impl Query<'_> {
         if self.user(user).is_none() {
             return Ok(Ok(None));
         }
-        let flags = self.update_flags_for_component(flags, user);
+        let flags = self.update_flags_for_component(flags, user)?;
         if let Err(e) = self.enforce_cross_user(user, false, false, "get provider info")? {
             return Ok(Err(e));
         }
         let Some((ps, p)) = self.package_of(&c.package) else {
             return Ok(Ok(None));
         };
-        let registered=self.state.package_registry.as_ref().map(|r|r.providers().into_iter().find(|row|row.package==ps.name && row.value.main.component.name==c.class).map(|row|&row.value));
-        let pr=match registered {Some(pr)=>pr,None=>p.providers.iter().rev().find(|pr|pr.main.component.name==c.class)};
-        let Some(pr)=pr else {return Ok(Ok(None));};
+        let registered = self.state.package_registry.as_ref().map(|r| {
+            r.providers()
+                .into_iter()
+                .find(|row| row.package == ps.name && row.value.main.component.name == c.class)
+                .map(|row| &row.value)
+        });
+        let pr = match registered {
+            Some(pr) => pr,
+            None => p
+                .providers
+                .iter()
+                .rev()
+                .find(|pr| pr.main.component.name == c.class),
+        };
+        let Some(pr) = pr else {
+            return Ok(Ok(None));
+        };
         if !info::is_enabled_and_matches(ps, &pr.main, flags, user)
-            || self.filtered(Some(ps), self.calling_uid, user)?
+            || self.filtered_component(Some(ps), c, 4, self.calling_uid, user)?
         {
             return Ok(Ok(None));
         }
@@ -1625,12 +1805,15 @@ impl Query<'_> {
     }
 
     /// The package states in `Settings.mPackages`' order.
-    fn packages_in_order(&self) -> Vec<&PackageState> {
+    pub(crate) fn packages_in_order(&self) -> Vec<&PackageState> {
+        if let Some(order) = &self.state.system.settings_package_order {
+            return order.iter().filter_map(|name| self.state.packages.get(name)).collect();
+        }
         array_order(self.state.packages.values().collect(), |ps| &ps.name)
     }
 
     /// `getInstalledPackages`.
-    fn installed_packages(&self, flags: i64, user: i32) -> Thrown<Vec<PackageInfo>> {
+    pub(crate) fn installed_packages(&self, flags: i64, user: i32) -> Thrown<Vec<PackageInfo>> {
         if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some()
             || self.user(user).is_none()
         {
@@ -1692,7 +1875,11 @@ impl Query<'_> {
 
     /// `getInstalledApplications`.
     fn installed_applications(&self, flags: i64, user: i32) -> Thrown<Vec<ApplicationInfo>> {
-        if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some()
+        self.internal_installed_applications(flags, user, self.calling_uid, false)
+    }
+    pub(crate) fn internal_installed_applications(&self, flags: i64, user: i32, filter_uid: i32,
+        force_allow_cross_user: bool) -> Thrown<Vec<ApplicationInfo>> {
+        if apps_filter::instant_app_package_name(self.state, filter_uid)?.is_some()
             || self.user(user).is_none()
         {
             return Ok(Ok(Vec::new()));
@@ -1704,10 +1891,10 @@ impl Query<'_> {
         let uninstalled = flags & MATCH_KNOWN_PACKAGES != 0;
         let apex = flags & MATCH_APEX != 0;
         let archived_only = !uninstalled && flags & MATCH_ARCHIVED_PACKAGES != 0;
-        if let Err(e) =
-            self.enforce_cross_user(user, false, false, "get installed application info")?
-        {
-            return Ok(Err(e));
+        if !force_allow_cross_user {
+            if let Err(e) = self.enforce_cross_user(user, false, false, "get installed application info")? {
+                return Ok(Err(e));
+            }
         }
         let mut list = Vec::new();
         for ps in self.packages_in_order() {
@@ -1728,8 +1915,10 @@ impl Query<'_> {
             if !apex && p.is2(APEX) {
                 continue;
             }
-            if self.filter_shared_lib(ps, user, flags)?
-                || self.filtered(Some(ps), self.calling_uid, user)?
+            let shared_library_filter_uid = if uninstalled || archived_only { filter_uid } else { self.calling_uid };
+            let library_query = Query { calling_uid: shared_library_filter_uid, state: self.state, filter: self.filter };
+            if library_query.filter_shared_lib(ps, user, flags)?
+                || self.filtered(Some(ps), filter_uid, user)?
             {
                 continue;
             }
@@ -1888,5 +2077,9 @@ fn compare_signature_arrays(s1: Option<&[Vec<u8>]>, s2: Option<&[Vec<u8>]>) -> i
 mod tests;
 
 mod extra;
-mod user_status;
 mod internal_visibility;
+mod user_status;
+
+pub mod preferred;
+pub mod checksums;
+pub mod removal;

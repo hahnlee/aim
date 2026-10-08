@@ -258,6 +258,7 @@ fn remove(t: Target, name: u64) -> i64 {
 
 /// setxattr (5), lsetxattr (6), fsetxattr (7).
 pub fn setxattr(nr: u64, a: [u64; 6]) -> i64 {
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         7 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 5, true) {
@@ -270,6 +271,7 @@ pub fn setxattr(nr: u64, a: [u64; 6]) -> i64 {
 
 /// getxattr (8), lgetxattr (9), fgetxattr (10).
 pub fn getxattr(nr: u64, a: [u64; 6]) -> i64 {
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         10 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 8, false) {
@@ -282,6 +284,7 @@ pub fn getxattr(nr: u64, a: [u64; 6]) -> i64 {
 
 /// listxattr (11), llistxattr (12), flistxattr (13).
 pub fn listxattr(nr: u64, a: [u64; 6]) -> i64 {
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         13 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 11, false) {
@@ -294,6 +297,7 @@ pub fn listxattr(nr: u64, a: [u64; 6]) -> i64 {
 
 /// removexattr (14), lremovexattr (15), fremovexattr (16).
 pub fn removexattr(nr: u64, a: [u64; 6]) -> i64 {
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         16 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 14, true) {

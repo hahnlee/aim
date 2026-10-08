@@ -36,6 +36,8 @@ public final class PackageStateReplica implements PackageStateInternal {
         this.hiddenApiPolicy = hiddenApiPolicy;
     }
 
+    public PackageSetting detachedSetting() { return factory.get(); }
+
     private PackageStateInternal fresh() { return (PackageStateInternal) factory.get(); }
 
     @Override public AndroidPackage getAndroidPackage() { return state.getAndroidPackage(); }
@@ -158,6 +160,7 @@ public final class PackageStateReplica implements PackageStateInternal {
 
     @Override public boolean isOem() { return state.isOem(); }
 
+
     @Override public boolean isPageSizeAppCompatEnabled() { return state.isPageSizeAppCompatEnabled(); }
 
     @Override public boolean isPendingRestore() { return state.isPendingRestore(); }
@@ -188,7 +191,7 @@ public final class PackageStateReplica implements PackageStateInternal {
 
     @Override public UUID getDomainSetId() { return state.getDomainSetId(); }
 
-    @Override public SigningDetails getSigningDetails() { return fresh().getSigningDetails(); }
+    @Override public SigningDetails getSigningDetails() { return PackageSigningState.copyDetails(state.getSigningDetails()); }
 
     @Override public InstallSource getInstallSource() { return fresh().getInstallSource(); }
 

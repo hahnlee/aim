@@ -50,8 +50,8 @@ const TRIM_BATCH_DIVISOR: u64 = 24;
 const PATIENCE: Duration = Duration::from_secs(20);
 /// How long a synced volume is waited for at stop. The security agent
 /// keeps a boot's freshly written files open longer than a stop should
-/// wait (still scanning after 21 s); once the volume is synced, the forced
-/// unmount after this only closes its reads.
+/// wait (still scanning after 21 s); a remaining dissenter keeps the image
+/// attached and is reported rather than forced away.
 const SYNCED_PATIENCE: Duration = Duration::from_secs(2);
 
 /// The size the data image `image` may reach: that of the host volume

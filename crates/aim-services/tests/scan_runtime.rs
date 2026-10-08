@@ -414,6 +414,7 @@ fn saved_scan_libraries_match_original_pms() {
                 &config,
                 &apks,
                 ScanMetadataCompletion {
+            scan_as_instant_app:false,
                     seinfo: common::seinfo::scan(),
                     abi_policy: &abi_policy,
                     native_environment: &environment,

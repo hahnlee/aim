@@ -12,30 +12,33 @@ use std::{
 impl Store {
     /// Pin main, legacy backup, temporary and reserve inputs without substituting
     /// saved grants for the caller's current permission producer.
-    pub fn claim_runtime_permissions(&mut self, user: u32) -> Result<(), WriteError> {
-        if !self.state.users.iter().any(|(id, _)| *id == user)
-            || self.runtime_claims.contains_key(&user)
-        {
-            return Err(WriteError::before(
-                "runtime permission user is unknown or already claimed",
-            ));
+    pub fn claim_runtime_permissions(&mut self,user:u32)->Result<(),WriteError>{
+        if !self.state.users.iter().any(|(id,_)|*id==user)||self.runtime_claims.contains_key(&user){
+            return Err(WriteError::before("runtime permission user is unknown or already claimed"));
         }
-        let dir = self
-            .data
-            .join("misc_de")
-            .join(user.to_string())
-            .join(crate::package::PERMISSION_DIR);
+        let claim=self.inspect_runtime_permission_claim(user)?;
+        self.runtime_claims.insert(user,claim);Ok(())
+    }
+    /// Constructor handoff, before metadata installation or any timer starts.
+    /// The caller retains the exclusive stopped-Settings-writer lease. The
+    /// original PermissionService keeps access.abx; these are the legacy
+    /// Settings runtime-permissions.xml files and their AtomicFile companions.
+    pub fn claim_runtime_permission_inventory(&mut self,users:&[u32])->Result<(),WriteError>{
+        let expected:std::collections::BTreeSet<_>=self.state.users.iter().map(|(id,_)|*id).collect();
+        let requested:std::collections::BTreeSet<_>=users.iter().copied().collect();
+        if requested!=expected||requested.len()!=users.len()||!self.runtime_claims.is_empty(){
+            return Err(WriteError::before("runtime permission handoff inventory differs or is already claimed"));
+        }
+        let mut claims=std::collections::BTreeMap::new();
+        for user in users{claims.insert(*user,self.inspect_runtime_permission_claim(*user)?);}
+        self.runtime_claims=claims;Ok(())
+    }
+    fn inspect_runtime_permission_claim(&self,user:u32)->Result<Claim<4>,WriteError>{
+        let dir=self.data.join("misc_de").join(user.to_string()).join(crate::package::PERMISSION_DIR);
         fs::create_dir_all(&dir).map_err(WriteError::before)?;
-        let main = dir.join("runtime-permissions.xml");
-        let claim = Claim::inspect([
-            main.clone(),
-            crate::package::sibling(&main, ".bak"),
-            crate::package::sibling(&main, ".new"),
-            crate::package::sibling(&main, ".reservecopy"),
-        ])
-        .map_err(WriteError::before)?;
-        self.runtime_claims.insert(user, claim);
-        Ok(())
+        let main=dir.join("runtime-permissions.xml");
+        Claim::inspect([main.clone(),crate::package::sibling(&main,".bak"),crate::package::sibling(&main,".new"),crate::package::sibling(&main,".reservecopy")])
+            .map_err(WriteError::before)
     }
 
     /// The caller supplies current version/fingerprint/grants and the guest
@@ -170,6 +173,30 @@ impl Store {
 mod tests {
     use super::super::tests::Data;
     use super::*;
+
+    #[test]
+    fn runtime_handoff_claims_all_users_before_write_without_reseeding_inputs(){
+        let data=Data::new();data.settings();
+        let mut store=Store::open(&data.0,&[0,10]).unwrap().unwrap();
+        let path=data.0.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let previous=RuntimePermissions{version:4,fingerprint:Some("previous-owner".into()),..Default::default()}.serialize().unwrap();
+        fs::write(&path,&previous).unwrap();
+        let desired=RuntimePermissions{version:7,fingerprint:Some("current-owner".into()),..Default::default()};
+        let error=store.commit_runtime_permissions(0,&desired,inode()).unwrap_err();
+        assert!(!error.committed);assert!(error.message.contains("not claimed"));
+        assert!(store.claim_runtime_permission_inventory(&[0]).is_err());
+        assert_eq!(fs::read(&path).unwrap(),previous);
+        store.claim_runtime_permission_inventory(&[0,10]).unwrap();
+        assert_eq!(fs::read(&path).unwrap(),previous,"handoff must observe original inputs without reseeding");
+        assert!(store.claim_runtime_permission_inventory(&[0,10]).is_err(),"second handoff must not silently re-claim inputs");
+        for user in [0,10]{store.commit_runtime_permissions(user,&desired,inode()).unwrap();}
+        let outside=RuntimePermissions{version:99,..Default::default()}.serialize().unwrap();fs::write(&path,&outside).unwrap();
+        let error=store.commit_runtime_permissions(0,&desired,inode()).unwrap_err();assert!(!error.committed);
+        assert_eq!(fs::read(&path).unwrap(),outside,"external writes remain an ownership error");
+        store.register_package_user(11).unwrap();
+        store.commit_runtime_permissions(11,&desired,inode()).unwrap();
+    }
 
     fn inode() -> GuestInode {
         GuestInode {

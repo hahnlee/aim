@@ -122,6 +122,12 @@ pub struct BootOptions {
 }
 
 impl BootOptions {
+    pub fn merge_androidboot(&mut self, entries: Vec<(String, String)>) {
+        for (name, value) in entries {
+            self.androidboot.retain(|(existing, _)| existing != &name);
+            self.androidboot.push((name, value));
+        }
+    }
     pub fn new(image: PathBuf, data: PathBuf, mode: RunMode) -> Self {
         Self {
             image,
@@ -304,6 +310,7 @@ pub struct Boot {
     pub report: BootReport,
     /// The previous boot's runtime directory, removed while this one runs.
     _sweep: Sweep,
+    _image_lease: Option<aim_storage::system::ImageLease>,
     /// `/data`, `/metadata` and `/cache`: in run mode the data directory's
     /// case-sensitive image, attached at it for the boot (docs/storage.md).
     /// Declared last, so it is detached after the rest is dropped.
@@ -322,6 +329,8 @@ const LIGHTWEIGHT_SHELL: &str = "ro.vendor.aim.lightweight_shell";
 /// servicemanager once it is ready.
 fn start_native_services(
     image: &ImageRoot,
+    data: &std::path::Path,
+    properties: &std::path::Path,
     server: &Arc<Server>,
 ) -> Result<Option<Arc<NativeServices>>, String> {
     let Ok(list) = image.read(NATIVE_SERVICES) else {
@@ -332,9 +341,14 @@ fn start_native_services(
         .into_iter()
         .map(|s| s.name)
         .collect();
-    NativeServices::new(server.driver(), &names)
-        .map(|s| Some(Arc::new(s)))
-        .map_err(|e| format!("native services: {e}"))
+    let services = NativeServices::new(server.driver(), &names).map_err(|e| format!("native services: {e}"))?;
+    if names.iter().any(|name| name == "package") {
+        services.configure_package_image(image.root(), data, &[])
+            .map_err(|error| format!("native package image: {error}"))?;
+        services.configure_package_property_area(properties)
+            .map_err(|error| format!("native package properties: {error}"))?;
+    }
+    Ok(Some(Arc::new(services)))
 }
 
 /// Trace every binder transaction into `file`, one tab-separated line
@@ -456,6 +470,7 @@ impl Boot {
             format!("boot started at {:.3} (Unix time)", wall.as_secs_f64()),
         )];
         let mut mark = |what: &str| timeline.push((epoch.elapsed(), what.to_string()));
+        let image_lease = aim_storage::system::ImageLease::read_root(&options.image)?;
         let image = ImageRoot::new(&options.image);
         if !image.exists("/system/etc/init/hw/init.rc") {
             return Err(format!(
@@ -589,7 +604,7 @@ impl Boot {
             if let Some(file) = &options.binder_trace {
                 trace_binder(server, file)?;
             }
-            native_services = start_native_services(&image, server)?;
+            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server)?;
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
                 let files = map.clone();
@@ -711,6 +726,7 @@ impl Boot {
             status_bar: false,
             data: data_mount,
             _sweep: sweep,
+            _image_lease: image_lease,
             report,
         })
     }
@@ -1168,5 +1184,20 @@ impl Boot {
 
     pub fn property(&self, name: &str) -> Option<String> {
         self.props.borrow().property(name)
+    }
+}
+
+#[cfg(test)]
+mod androidboot_options_tests {
+    use super::*;
+    #[test]
+    fn explicit_debug_port_preserves_device_hardware_and_hardware_override_is_unique() {
+        let mut options = BootOptions::new(PathBuf::new(), PathBuf::new(), RunMode::DryRun);
+        options.merge_androidboot(vec![("aim.adb.port".into(), "5627".into())]);
+        assert!(options.androidboot.contains(&("hardware".into(), "aim".into())));
+        assert!(options.androidboot.contains(&("aim.adb.port".into(), "5627".into())));
+        options.merge_androidboot(vec![("hardware".into(), "test-device".into())]);
+        assert_eq!(options.androidboot.iter().filter(|(name, _)| name == "hardware").count(), 1);
+        assert!(options.androidboot.contains(&("hardware".into(), "test-device".into())));
     }
 }

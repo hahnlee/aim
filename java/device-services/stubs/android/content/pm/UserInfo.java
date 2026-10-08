@@ -3,7 +3,11 @@
 package android.content.pm;
 
 public class UserInfo {
+    public boolean isManagedProfile() { throw new RuntimeException("stub"); }
     public int id;
+    public int flags;
+    public int profileGroupId;
+    public boolean isCloneProfile() { throw new RuntimeException("stub"); }
     public boolean preCreated;
     public UserInfo() { throw new RuntimeException("stub"); }
 }

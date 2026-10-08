@@ -78,6 +78,8 @@ public class PackageSetting extends SettingBase {
     public int getAppId() { throw new RuntimeException("stub"); }
     public int getCategoryOverride() { throw new RuntimeException("stub"); }
     public int getPageSizeAppCompatFlags() { throw new RuntimeException("stub"); }
+    public boolean isPageSizeAppCompatEnabled() { throw new RuntimeException("stub"); }
+    public String getPageSizeCompatWarningMessage(android.content.Context context) { throw new RuntimeException("stub"); }
     public PackageSetting setPageSizeAppCompatFlags(int flags) { throw new RuntimeException("stub"); }
     public float getLoadingProgress() { throw new RuntimeException("stub"); }
     public boolean isLoading() { throw new RuntimeException("stub"); }
@@ -95,4 +97,6 @@ public class PackageSetting extends SettingBase {
     public PackageSetting addOldPath(java.io.File value) { throw new RuntimeException("stub"); }
     public PackageSetting removeOldPath(java.io.File value) { throw new RuntimeException("stub"); }
     public java.util.LinkedHashSet<java.io.File> getOldPaths() { throw new RuntimeException("stub"); }
+    public int[] getNotInstalledUserIds(){throw new RuntimeException("stub");}
+ public com.android.internal.pm.parsing.pkg.AndroidPackageInternal getPkg(){throw new RuntimeException("stub");}
 }

@@ -61,6 +61,7 @@ impl Hierarchy {
 
 /// A class's supertypes and declared members.
 struct Class {
+    access: u32,
     superclass: Option<String>,
     interfaces: Vec<String>,
     fields: HashSet<(String, String)>,
@@ -71,6 +72,7 @@ impl Class {
     fn read(dex: &Dex<'_>, def: &ClassDef) -> Result<Self, String> {
         let (fields, methods) = dex.members(def)?;
         Ok(Class {
+            access: def.access,
             superclass: def.superclass.clone(),
             interfaces: dex.interfaces(def)?,
             fields: fields
@@ -260,6 +262,11 @@ impl ClassPath {
                 out.push(format!("no class {name}"));
                 continue;
             };
+            // Interface invocation has a different ART contract from a class
+            // invocation even when the member descriptors are identical.
+            if class.access & 0x4200 != stub.access & 0x4200 {
+                out.push(format!("{name} class/interface/enum kind differs from the image"));
+            }
             if class.superclass != stub.superclass {
                 out.push(format!(
                     "{name} extends {:?}, not {:?}",
@@ -314,6 +321,7 @@ mod tests {
     #[test]
     fn constructors_resolve_only_on_the_requested_class() {
         let class = |parent: Option<&str>, methods: &[(&str, &str)]| Class {
+            access: 1,
             superclass: parent.map(str::to_owned),
             interfaces: Vec::new(),
             fields: HashSet::new(),

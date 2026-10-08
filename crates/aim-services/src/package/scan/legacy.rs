@@ -2,6 +2,7 @@
 use super::SigningScan;
 use crate::package::owner::legacy_permissions::{Migration, State, validate};
 use std::collections::BTreeMap;
+mod install;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Assignments {
@@ -10,9 +11,25 @@ pub(super) struct Assignments {
     shared_users: BTreeMap<String, (i32, Migration)>,
     restoration: Option<crate::package::owner::legacy_permissions::Metadata>,
     install_fixed: Option<BTreeMap<(String, bool), bool>>,
+    pub(super) installed_receipt: std::collections::BTreeSet<i32>,
 }
 
 impl SigningScan {
+    pub fn installed_permission_receipt_uids(&self)->Result<&std::collections::BTreeSet<i32>,String>{
+        self.validate_legacy_permissions()?;
+        Ok(&self.legacy_permissions.as_ref().ok_or("legacy permission owner unavailable")?.installed_receipt)
+    }
+    /// UserManager supplies its real current inventory. This changes the
+    /// projection scope only; it never grants, revokes or fabricates permission
+    /// state. Removed-user migration entries remain as original Settings does.
+    pub fn set_legacy_user_inventory(&mut self, users: &[i32]) -> Result<(), String> {
+        validate(0, users).map_err(|error| format!("legacy user inventory: {error:?}"))?;
+        self.validate_legacy_permissions()?;
+        let owners = self.legacy_permissions.as_mut().ok_or("legacy permission owner unavailable")?;
+        owners.users = users.to_vec();
+        Ok(())
+    }
+
     /// The restoration/import owner supplies every active/factory SettingBase
     /// and every shared user, plus the complete resolved user inventory. Missing
     /// owners reject before replacing the prior assignment; no live state is inferred.
@@ -58,6 +75,7 @@ impl SigningScan {
             shared_users: groups,
             restoration: None,
             install_fixed: None,
+            installed_receipt: Default::default(),
         });
         Ok(())
     }
@@ -277,6 +295,10 @@ impl SigningScan {
         factory: bool,
     ) -> Result<Option<bool>, String> {
         self.validate_legacy_permissions()?;
+        self.validated_install_permissions_fixed(name, factory)
+    }
+    /// Snapshot/batch reader after complete legacy graph validation.
+    pub(in crate::package) fn validated_install_permissions_fixed(&self, name: &str, factory: bool) -> Result<Option<bool>, String> {
         Ok(self
             .legacy_permissions
             .as_ref()
@@ -305,6 +327,10 @@ impl SigningScan {
 
     pub fn legacy_permissions(&self, name: &str, factory: bool) -> Result<Option<State>, String> {
         self.validate_legacy_permissions()?;
+        self.validated_legacy_permissions(name, factory)
+    }
+    /// Snapshot/batch reader after complete legacy graph validation.
+    pub(in crate::package) fn validated_legacy_permissions(&self, name: &str, factory: bool) -> Result<Option<State>, String> {
         let owners = self
             .legacy_permissions
             .as_ref()
@@ -335,14 +361,28 @@ impl SigningScan {
             })
             .transpose()
     }
-    /// Read the original migration files against the exact saved Settings
-    /// input. All reads and assignments finish on a candidate before commit.
+    /// Read original migration files against saved Settings before fresh code
+    /// scanning. Native constructors and replacements relink the captured graph;
+    /// post-scan identities must never replace this restoration input.
+    /// All reads and assignments finish on a candidate before commit.
     pub fn restore_legacy_permissions_from_data(
         &mut self,
         data: &std::path::Path,
         state: &crate::package::State,
         config: &crate::package::system_config::SystemConfig,
     ) -> Result<(), String> {
+        self.restore_saved_permission_owners(data,state,config,None)
+    }
+    pub(crate) fn restore_owned_legacy_permissions_from_data(
+        &mut self,data:&std::path::Path,state:&crate::package::State,
+        config:&crate::package::system_config::SystemConfig,document:&aim_android_xml::Element,
+    )->Result<(),String>{
+        self.restore_saved_permission_owners(data,state,config,Some(document))
+    }
+    fn restore_saved_permission_owners(
+        &mut self,data:&std::path::Path,state:&crate::package::State,
+        config:&crate::package::system_config::SystemConfig,document:Option<&aim_android_xml::Element>,
+    )->Result<(),String>{
         let identities = |settings: &crate::package::settings::Settings| {
             settings
                 .packages
@@ -359,8 +399,10 @@ impl SigningScan {
         if identities(&self.settings) != identities(&state.settings) {
             return Err("legacy restoration setting identities differ".into());
         }
-        let restored =
-            crate::package::owner::legacy_permissions::restore::read(data, state, config)?;
+        let restored=match document{
+            Some(document)=>crate::package::owner::legacy_permissions::restore::read_owned(data,state,config,document)?,
+            None=>crate::package::owner::legacy_permissions::restore::read(data,state,config)?,
+        };
         let mut candidate = self.clone();
         candidate.capture_legacy_permissions(
             &restored.users,
@@ -675,4 +717,26 @@ mod tests {
             29
         );
     }
+    #[test]
+    fn genuine_install_receipt_records_only_affected_uids_and_preserves_other_migration() {
+        let settings=crate::package::settings::Settings{
+            packages:vec![crate::package::settings::Package{name:"target".into(),app_id:10100,..Default::default()},
+                crate::package::settings::Package{name:"unrelated".into(),app_id:10101,..Default::default()}],..Default::default()};
+        let mut owner=SigningScan::new(&Default::default(),&settings,36).unwrap();
+        let mut saved=Migration::default();saved.put(0,crate::package::owner::legacy_permissions::Permission{name:Some("permission.unrelated".into()),runtime:true,granted:false,flags:8}).unwrap();
+        let groups=owner.identities.shared_users.keys().map(|name|(name.clone(),Migration::default())).collect();
+        owner.capture_legacy_permissions(&[0],[(("target".into(),false),Migration::default()),(("unrelated".into(),false),saved)].into(),groups).unwrap();
+        let before=owner.legacy_permissions("unrelated",false).unwrap().unwrap();
+        let mut receipt=Migration::default();receipt.put(0,crate::package::owner::legacy_permissions::Permission{name:Some("permission.target".into()),runtime:true,granted:true,flags:17}).unwrap();
+        let receipt=receipt.project(10100,&[0]).unwrap();
+        owner.apply_installed_permission_states(&[0],[(10100,receipt.clone())].into()).unwrap();
+        assert_eq!(owner.installed_permission_receipt_uids().unwrap(),&[10100].into());
+        assert_eq!(owner.legacy_permissions("target",false).unwrap().unwrap(),receipt);
+        assert_eq!(owner.legacy_permissions("unrelated",false).unwrap().unwrap(),before);
+        let mut live=Migration::default();live.put(0,crate::package::owner::legacy_permissions::Permission{name:Some("permission.unrelated".into()),runtime:true,granted:true,flags:9}).unwrap();
+        assert_ne!(before.bytes(),live.project(10101,&[0]).unwrap().bytes());
+        assert!(!owner.installed_permission_receipt_uids().unwrap().contains(&10101));
+        let prior=owner.clone();assert!(owner.apply_installed_permission_states(&[0],[(10999,live.project(10999,&[0]).unwrap())].into()).is_err());assert_eq!(owner,prior);
+    }
+
 }

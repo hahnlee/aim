@@ -16,7 +16,6 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     let legacy = if snapshot.owner().has_legacy_permissions() {
         Some(
             snapshot
-                .owner()
                 .legacy_permissions(name, factory)?
                 .ok_or("missing legacy setting owner")?,
         )
@@ -28,7 +27,7 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
         s,
         factory,
         legacy.as_ref(),
-        snapshot.owner().install_permissions_fixed(name, factory)?,
+        snapshot.install_permissions_fixed(name, factory)?,
     )
     .map(Some)
 }

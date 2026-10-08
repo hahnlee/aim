@@ -87,6 +87,7 @@ struct Input {
 pub struct Plan {
     data: PathBuf,
     inputs: [Option<Input>; 3],
+    native_readers: Option<crate::package::settings::native_read::SharedReaders>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +97,9 @@ pub struct Report {
 }
 
 impl Plan {
+    pub fn with_native_readers(mut self,readers:crate::package::settings::native_read::SharedReaders)->Self{
+        self.native_readers=Some(readers);self
+    }
     pub fn inspect(data: &std::path::Path) -> Result<Self, Error> {
         let paths = settings_paths(data);
         let mut inputs = [None, None, None];
@@ -149,6 +153,7 @@ impl Plan {
         Ok(Self {
             data: data.into(),
             inputs,
+            native_readers: None,
         })
     }
 
@@ -453,7 +458,10 @@ impl Plan {
             }
         }
         let state =
-            State::read_related_mode(&self.data, users, settings.clone(), !report.first_boot).map_err(|message| Error {
+            if let Some(readers)=&self.native_readers {
+                let readers=readers.0.lock().map_err(|_|Error{events:report.events.clone(),message:"native Settings owner poisoned".into()})?;
+                State::read_related_seeded(&self.data,users,settings.clone(),!report.first_boot,&readers.remaining)
+            }else{State::read_related_mode(&self.data, users, settings.clone(), !report.first_boot)}.map_err(|message| Error {
                 events: report.events.clone(),
                 message,
             })?;
@@ -470,6 +478,10 @@ impl Plan {
             events: report.events.clone(),
             message,
         })?;
+        if let Some(readers)=&self.native_readers {
+            let readers=readers.0.lock().map_err(|_|Error{events:report.events.clone(),message:"native Settings owner poisoned".into()})?;
+            store.seed_native_readers(&readers.remaining).map_err(|message|Error{events:report.events.clone(),message})?;
+        }
         self.check().map_err(|message| Error {
             events: report.events.clone(),
             message,

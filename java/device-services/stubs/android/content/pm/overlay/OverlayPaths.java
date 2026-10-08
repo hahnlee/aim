@@ -5,6 +5,7 @@ package android.content.pm.overlay;
 import java.util.List;
 
 public class OverlayPaths {
+    public boolean isEmpty() { throw new RuntimeException("stub"); }
     public static class Builder {
         public Builder() { throw new RuntimeException("stub"); }
         public Builder(OverlayPaths base) { throw new RuntimeException("stub"); }

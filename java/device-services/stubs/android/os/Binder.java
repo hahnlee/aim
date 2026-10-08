@@ -3,6 +3,7 @@
 package android.os;
 
 public class Binder implements IBinder {
+    public static IBinder allowBlocking(IBinder binder) { throw new RuntimeException("stub"); }
     public Binder() { throw new RuntimeException("stub"); }
     public static final UserHandle getCallingUserHandle() { throw new RuntimeException("stub"); }
     public static final int getCallingPid() { throw new RuntimeException("stub"); }
@@ -13,5 +14,7 @@ public class Binder implements IBinder {
     public IInterface queryLocalInterface(String descriptor) { throw new RuntimeException("stub"); }
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { throw new RuntimeException("stub"); }
     public void linkToDeath(DeathRecipient recipient, int flags) { throw new RuntimeException("stub"); }
+    public String getInterfaceDescriptor() { throw new RuntimeException("stub"); }
+    public boolean unlinkToDeath(DeathRecipient recipient, int flags) { throw new RuntimeException("stub"); }
     public final boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException { throw new RuntimeException("stub"); }
 }

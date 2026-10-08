@@ -64,6 +64,10 @@ impl<T: ReadOwners> ReadOwners for InstallRead<'_, T> {
         self.remaining.package_registered(package, created)
     }
 
+    fn package_header(&mut self, package: &Package, start: &Element) -> Result<(), ReadError> {
+        self.remaining.package_header(package, start)
+    }
+
     fn shared_registered(&mut self, group: &SharedUser, created: bool) -> Result<(), ReadError> {
         register(&mut *self.shared_users, &group.name, created)?;
         self.remaining.shared_registered(group, created)

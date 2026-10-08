@@ -182,6 +182,7 @@ pub fn save(w: &mut Writer) {
     attrs::fork_save(w);
     selinuxfs::fork_save(w);
     wait::fork_save(w);
+    w.str(&crate::vfs::own_mounts_text());
     fdtab::fork_save(w);
     ptrace::fork_save(w);
     sync_file::fork_save(w);
@@ -208,6 +209,7 @@ pub fn restore(r: &mut Reader) -> bool {
     attrs::fork_restore(r);
     selinuxfs::fork_restore(r);
     wait::fork_restore(r);
+    crate::vfs::load_own_mounts(&r.str());
     fdtab::fork_restore(r);
     ptrace::fork_restore(r);
     sync_file::fork_restore(r);

@@ -150,6 +150,49 @@ mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
     #[test]
+    fn running_worker_uses_new_users_actual_creation_metadata_and_wakes_after_handoff(){
+        use crate::package::{owner::{Store,tests::Data,WriteError},permissions::RuntimePermissions};
+        use aim_storage::guest_inode::{self,GuestInode};
+        use std::{fs,os::unix::fs::{OpenOptionsExt,MetadataExt}};
+        let data=Data::new();data.settings();
+        let mut disk=Store::open(&data.0,&[0]).unwrap().unwrap();disk.claim_runtime_permission_inventory(&[0]).unwrap();disk.register_package_user(10).unwrap();
+        let disk=Arc::new(Mutex::new(disk));let metadata=Arc::new(Mutex::new(State::default()));
+        let initial:[(u32,GuestInode);1]=[(0,GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o660)})];
+        metadata.lock().unwrap().bind_creation_metadata(&initial.into()).unwrap();
+        let source=metadata.clone();let output=disk.clone();let (tx,rx)=mpsc::channel();
+        let worker=Worker::start(&metadata,move|now|{
+            let result=source.lock().unwrap().flush_due_with(now,|user,current|{
+                let inode=current.creation_inode(user as u32).ok_or_else(||WriteError{committed:false,message:"actual new-user creation metadata is absent".into()})?;
+                let desired=RuntimePermissions{version:current.version(user),fingerprint:current.fingerprint(user).map(str::to_owned),..Default::default()};
+                output.lock().unwrap().commit_runtime_permissions(user as u32,&desired,inode)?;Ok(user as u32)
+            });
+            tx.send(result.as_ref().map(Clone::clone).map_err(|error|error.error.message.clone())).unwrap();result
+        }).unwrap();
+        metadata.lock().unwrap().set_version(10,7);
+        assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap_err().contains("creation metadata is absent"));
+        assert_eq!(metadata.lock().unwrap().pending_write_requests(),vec![10]);
+        // Observe a real creator's file/stat and its recorded guest inode. Its
+        // metadata differs from user0's constructor input, so copying that
+        // frozen input cannot satisfy the write or the final inode assertion.
+        let parent=data.0.join("misc_de/10/apexdata/com.android.permission");let probe=parent.join("original-creator-probe");
+        let file=fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&probe).unwrap();let stat=file.metadata().unwrap();
+        let observed=GuestInode{uid:Some(stat.uid()),gid:Some(stat.gid()),mode:Some(stat.mode()&0o7777)};
+        guest_inode::record(&probe,observed).unwrap();let observed=guest_inode::read(&probe).unwrap().unwrap();drop(file);fs::remove_file(probe).unwrap();
+        assert_ne!(observed,initial[0].1);
+        metadata.lock().unwrap().publish_user_creation_inode(10,observed).unwrap();
+        // Handoff's wakeup must retry the same worker; no explicit retry(),
+        // manual pump, replacement worker or constructor-map rewrite is used.
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap(),vec![10]);
+        metadata.lock().unwrap().bind_creation_metadata(&initial.into()).unwrap();
+        assert_eq!(metadata.lock().unwrap().creation_inode(10),Some(observed));
+        assert!(metadata.lock().unwrap().publish_user_creation_inode(10,observed).is_err());
+        let path=parent.join("runtime-permissions.xml");assert_eq!(guest_inode::read(&path).unwrap(),Some(observed));
+        assert_eq!(disk.lock().unwrap().state().users.iter().find(|(id,_)|*id==10).unwrap().1.runtime_permissions.as_ref().unwrap().version,7);
+        assert!(metadata.lock().unwrap().pending_write_requests().is_empty());
+        metadata.lock().unwrap().remove_user(10);assert!(metadata.lock().unwrap().creation_inode(10).is_none());drop(worker);
+    }
+
+    #[test]
     fn bootstrap_stop_wakes_idle_worker_without_joining_under_owner_lock() {
         let metadata = Arc::new(Mutex::new(State::default()));
         let worker = Worker::start(&metadata, |_| panic!("idle worker must not write")).unwrap();

@@ -1194,9 +1194,14 @@ fn processes(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Proce
 
 /// `readParcelable` of `SigningDetails`: `None` for `UNKNOWN` (or null).
 fn signing_details(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<SigningDetails>> {
-    if s.string16(r)?.is_none() || r.read_bool()? {
+    if s.string16(r)?.is_none() {
         return Ok(None);
     }
+    read_signing_details_payload(r, s)
+}
+
+pub(crate) fn read_signing_details_payload(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<SigningDetails>> {
+    if r.read_bool()? { return Ok(None); }
     Ok(Some(SigningDetails {
         signatures: typed_array(r, |r| byte_array(r)?.ok_or(BAD_VALUE))?,
         scheme_version: r.read_i32()?,

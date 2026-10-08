@@ -3,4 +3,5 @@
 package android.content.pm;
 
 public interface IPackageInstaller extends android.os.IInterface {
+ abstract class Stub extends android.os.Binder implements IPackageInstaller {public android.os.IBinder asBinder(){throw new RuntimeException("stub");}}
 }

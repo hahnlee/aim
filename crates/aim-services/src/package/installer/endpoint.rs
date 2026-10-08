@@ -24,7 +24,72 @@ pub enum ServiceSetting {
     Apex(bool),
     Verification(i32),
 }
+pub enum ArchiveAction {
+    Archive {
+        package: String,
+        caller: String,
+        flags: i32,
+        receiver: super::preapproval::IntentSender,
+        user: i32,
+    },
+    Unarchive {
+        package: String,
+        caller: String,
+        receiver: super::preapproval::IntentSender,
+        user: i32,
+        show_confirmation: bool,
+    },
+    Install {
+        package: super::archiver::ArchivedPackage,
+        params: SessionParams,
+        receiver: super::preapproval::IntentSender,
+        installer: String,
+        user: i32,
+    },
+    Report {
+        id: i32,
+        status: i32,
+        required: i64,
+        action: Option<super::preapproval::IntentSender>,
+        user: i32,
+    },
+}
+pub enum ConstraintReceiver {
+    Callback(Binder),
+    Intent(super::preapproval::IntentSender),
+}
+pub struct RemoteCallback(pub Option<Binder>);
+impl aim_service_aidl::ReadParcelable for RemoteCallback {
+    fn read_from(
+        reader: &mut aim_binder_host::parcel::Reader<'_>,
+    ) -> aim_binder_host::parcel::Result<Self> {
+        Ok(Self(reader.read_binder()?))
+    }
+}
 pub trait Owners: Send + Sync {
+    fn uninstall(
+        &self,
+        request: super::removal::Request,
+        receiver: Option<super::preapproval::IntentSender>,
+    ) -> Result<(), Exception>;
+    fn archive(&self, uid: u32, pid: i32, action: ArchiveAction) -> Result<(), Exception>;
+    fn update_icon(&self, uid: u32, id: i32, body: super::codec::Object) -> Result<(), Exception>;
+    fn install_constraints(
+        &self,
+        uid: u32,
+        installer: Option<String>,
+        names: Option<Vec<Option<String>>>,
+        constraints: Option<super::constraints::Constraints>,
+        receiver: ConstraintReceiver,
+        timeout: i64,
+    ) -> Result<(), Exception>;
+    fn install_existing(
+        &self,
+        uid: u32,
+        pid: i32,
+        request: super::existing::Request,
+    ) -> Result<(), Exception>;
+    fn permissions_result(&self, uid: u32, id: i32, accepted: bool) -> Result<(), Exception>;
     fn normalize(
         &self,
         uid: u32,
@@ -33,6 +98,7 @@ pub trait Owners: Send + Sync {
         tag: Option<String>,
         user: i32,
     ) -> Result<(Record, bool), Exception>;
+    fn staged_status(&self,_id:i32)->Result<Option<super::staged_owner::Status>,Exception>{Err(Exception::new(EX_UNSUPPORTED_OPERATION,"staged owner unavailable"))}
     fn session_created(&self, id: i32, user: u32) -> Result<(), Exception>;
     fn prepare_stage(&self, session: &Session, record: &Record) -> Result<(), Exception>;
     fn session_operations(&self) -> Option<Arc<dyn super::SessionOperations>>;
@@ -71,6 +137,12 @@ impl Endpoint {
             return Ok(None);
         }
         let mut info = record.info(session, icon, uid);
+        if session.parameters.staged {
+            if let Some(status)=self.owners.staged_status(session.id)?{
+                info.session_ready=status.ready;info.session_applied=status.applied;info.session_failed=status.failed;
+                info.session_error_code=status.error_code;info.session_error_message=status.error_message;
+            }
+        }
         if uid != session.installer_uid
             && !self
                 .owners
@@ -90,6 +162,25 @@ impl Service for Endpoint {
     }
     fn transact(&self, call: &mut Call<'_>) -> Reply {
         enum Action {
+            Archive(ArchiveAction),
+            Uninstall(
+                super::removal::VersionedPackage,
+                Option<String>,
+                i32,
+                Option<super::preapproval::IntentSender>,
+                i32,
+                bool,
+            ),
+            Icon(i32, super::codec::Object),
+            Constraints(
+                Option<String>,
+                Option<Vec<Option<String>>>,
+                Option<super::constraints::Constraints>,
+                ConstraintReceiver,
+                i64,
+            ),
+            Existing(super::existing::Request),
+            Permissions(i32, bool),
             Create(aidl::CreateSession<SessionParams>),
             Label(i32, Option<String>),
             Register(Option<Binder>, i32),
@@ -103,6 +194,149 @@ impl Service for Endpoint {
             Abandon(i32),
         }
         let action = match call.code {
+            aidl::UNINSTALL => {
+                let args = aidl::Uninstall::<
+                    super::removal::VersionedPackage,
+                    super::preapproval::IntentSender,
+                >::read(&mut call.data)?;
+                Action::Uninstall(
+                    args.versioned_package.ok_or(BAD_VALUE)?,
+                    args.caller_package_name,
+                    args.flags,
+                    args.status_receiver,
+                    args.user_id,
+                    false,
+                )
+            }
+            aidl::UNINSTALL_EXISTING_PACKAGE => {
+                let args = aidl::UninstallExistingPackage::<
+                    super::removal::VersionedPackage,
+                    super::preapproval::IntentSender,
+                >::read(&mut call.data)?;
+                Action::Uninstall(
+                    args.versioned_package.ok_or(BAD_VALUE)?,
+                    args.caller_package_name,
+                    0,
+                    args.status_receiver,
+                    args.user_id,
+                    true,
+                )
+            }
+            aidl::REQUEST_ARCHIVE => {
+                let args = aidl::RequestArchive::<
+                    super::preapproval::IntentSender,
+                    super::removal::UserHandle,
+                >::read(&mut call.data)?;
+                Action::Archive(ArchiveAction::Archive {
+                    package: args.package_name.ok_or(BAD_VALUE)?,
+                    caller: args.caller_package_name.ok_or(BAD_VALUE)?,
+                    flags: args.flags,
+                    receiver: args.status_receiver.ok_or(BAD_VALUE)?,
+                    user: args.user_handle.ok_or(BAD_VALUE)?.0,
+                })
+            }
+            aidl::REQUEST_UNARCHIVE => {
+                let args = aidl::RequestUnarchive::<
+                    super::preapproval::IntentSender,
+                    super::removal::UserHandle,
+                >::read(&mut call.data)?;
+                Action::Archive(ArchiveAction::Unarchive {
+                    package: args.package_name.ok_or(BAD_VALUE)?,
+                    caller: args.caller_package_name.ok_or(BAD_VALUE)?,
+                    receiver: args.status_receiver.ok_or(BAD_VALUE)?,
+                    user: args.user_handle.ok_or(BAD_VALUE)?.0,
+                    show_confirmation: false,
+                })
+            }
+            aidl::INSTALL_PACKAGE_ARCHIVED => {
+                let args = aidl::InstallPackageArchived::<
+                    super::archiver::ArchivedPackage,
+                    SessionParams,
+                    super::preapproval::IntentSender,
+                    super::removal::UserHandle,
+                >::read(&mut call.data)?;
+                Action::Archive(ArchiveAction::Install {
+                    package: args.archived_package_parcel.ok_or(BAD_VALUE)?,
+                    params: args.params.ok_or(BAD_VALUE)?,
+                    receiver: args.status_receiver.ok_or(BAD_VALUE)?,
+                    installer: args.installer_package_name.ok_or(BAD_VALUE)?,
+                    user: args.user_handle.ok_or(BAD_VALUE)?.0,
+                })
+            }
+            aidl::REPORT_UNARCHIVAL_STATUS => {
+                let args = aidl::ReportUnarchivalStatus::<
+                    super::preapproval::IntentSender,
+                    super::removal::UserHandle,
+                >::read(&mut call.data)?;
+                Action::Archive(ArchiveAction::Report {
+                    id: args.unarchive_id,
+                    status: args.status,
+                    required: args.required_storage_bytes,
+                    action: args.user_action_intent,
+                    user: args.user_handle.ok_or(BAD_VALUE)?.0,
+                })
+            }
+            aidl::UPDATE_SESSION_APP_ICON => {
+                call.data.enforce_interface(aidl::DESCRIPTOR)?;
+                let id = call.data.read_i32()?;
+                let start = call.data.position();
+                call.data.skip(call.data.remaining())?;
+                let (bytes, objects) = call.data.since(start);
+                Action::Icon(
+                    id,
+                    super::codec::Object {
+                        bytes: bytes.to_vec(),
+                        objects,
+                    },
+                )
+            }
+            aidl::CHECK_INSTALL_CONSTRAINTS => {
+                let args = aidl::CheckInstallConstraints::<
+                    super::constraints::Constraints,
+                    RemoteCallback,
+                >::read(&mut call.data)?;
+                let callback = args
+                    .callback
+                    .and_then(|callback| callback.0)
+                    .ok_or(BAD_VALUE)?;
+                Action::Constraints(
+                    args.installer_package_name,
+                    args.package_names,
+                    args.constraints,
+                    ConstraintReceiver::Callback(callback),
+                    0,
+                )
+            }
+            aidl::WAIT_FOR_INSTALL_CONSTRAINTS => {
+                let args = aidl::WaitForInstallConstraints::<
+                    super::constraints::Constraints,
+                    super::preapproval::IntentSender,
+                >::read(&mut call.data)?;
+                Action::Constraints(
+                    args.installer_package_name,
+                    args.package_names,
+                    args.constraints,
+                    ConstraintReceiver::Intent(args.callback.ok_or(BAD_VALUE)?),
+                    args.timeout,
+                )
+            }
+            aidl::INSTALL_EXISTING_PACKAGE => {
+                let args = aidl::InstallExistingPackage::<super::existing::IntentSender>::read(
+                    &mut call.data,
+                )?;
+                Action::Existing(super::existing::Request {
+                    package: args.package_name,
+                    user: args.user_id,
+                    flags: args.install_flags,
+                    reason: args.install_reason,
+                    allowlisted_permissions: args.white_listed_permissions,
+                    receiver: args.status_receiver,
+                })
+            }
+            aidl::SET_PERMISSIONS_RESULT => {
+                let args = aidl::SetPermissionsResult::read(&mut call.data)?;
+                Action::Permissions(args.session_id, args.accepted)
+            }
             aidl::UPDATE_SESSION_APP_LABEL => {
                 let args = aidl::UpdateSessionAppLabel::read(&mut call.data)?;
                 Action::Label(args.session_id, args.app_label)
@@ -168,6 +402,50 @@ impl Service for Endpoint {
         let mut reply = Parcel::new();
         let result = (|| -> Result<(), Exception> {
             match action {
+                Action::Archive(action) => {
+                    self.owners.archive(uid, call.sender_pid as i32, action)?;
+                    reply.write_no_exception();
+                }
+                Action::Uninstall(package, caller, flags, receiver, user, existing_only) => {
+                    self.owners.uninstall(
+                        super::removal::Request {
+                            package: package.name,
+                            version: package.version,
+                            caller_package: caller,
+                            uid,
+                            pid: call.sender_pid as i32,
+                            user,
+                            flags,
+                            existing_only,
+                        },
+                        receiver,
+                    )?;
+                    reply.write_no_exception();
+                }
+                Action::Icon(id, body) => {
+                    self.owners.update_icon(uid, id, body)?;
+                    reply.write_no_exception();
+                }
+                Action::Constraints(installer, names, constraints, receiver, timeout) => {
+                    self.owners.install_constraints(
+                        uid,
+                        installer,
+                        names,
+                        constraints,
+                        receiver,
+                        timeout,
+                    )?;
+                    reply.write_no_exception();
+                }
+                Action::Existing(request) => {
+                    self.owners
+                        .install_existing(uid, call.sender_pid as i32, request)?;
+                    reply.write_no_exception();
+                }
+                Action::Permissions(id, accepted) => {
+                    self.owners.permissions_result(uid, id, accepted)?;
+                    reply.write_no_exception();
+                }
                 Action::Label(id, label) => {
                     self.owners.update_label(uid, id, label)?;
                     aidl::write_update_session_app_label_reply(&mut reply);
@@ -188,11 +466,12 @@ impl Service for Endpoint {
                     let params = a
                         .params
                         .ok_or_else(|| Exception::new(EX_NULL_POINTER, "null SessionParams"))?;
+                    // No capability in SessionParams has been retained by this
+                    // endpoint. Refuse every such input before normalization can
+                    // invoke policy or allocate a session, including Bitmap FDs.
                     if params.has_capabilities() {
-                        return Err(Exception::new(
-                            EX_UNSUPPORTED_OPERATION,
-                            "Native install parcel file capability owner is unavailable",
-                        ));
+                        return Err(Exception::new(EX_UNSUPPORTED_OPERATION,
+                            "Native install parcel file capability owner is unavailable"));
                     }
                     let (record, permission) = self.owners.normalize(
                         uid,
@@ -334,6 +613,46 @@ mod tests {
     use aim_binder_host::parcel::Reader;
     struct UnreachableOwners;
     impl Owners for UnreachableOwners {
+        fn uninstall(
+            &self,
+            _: super::super::removal::Request,
+            _: Option<super::super::preapproval::IntentSender>,
+        ) -> Result<(), Exception> {
+            panic!("Unexpected uninstall")
+        }
+        fn archive(&self, _: u32, _: i32, _: ArchiveAction) -> Result<(), Exception> {
+            panic!("Unexpected archive")
+        }
+        fn update_icon(
+            &self,
+            _: u32,
+            _: i32,
+            _: super::super::codec::Object,
+        ) -> Result<(), Exception> {
+            panic!("Unexpected icon")
+        }
+        fn install_constraints(
+            &self,
+            _: u32,
+            _: Option<String>,
+            _: Option<Vec<Option<String>>>,
+            _: Option<super::super::constraints::Constraints>,
+            _: ConstraintReceiver,
+            _: i64,
+        ) -> Result<(), Exception> {
+            panic!("Unexpected constraints")
+        }
+        fn install_existing(
+            &self,
+            _: u32,
+            _: i32,
+            _: super::super::existing::Request,
+        ) -> Result<(), Exception> {
+            panic!("Unexpected existing install")
+        }
+        fn permissions_result(&self, _: u32, _: i32, _: bool) -> Result<(), Exception> {
+            panic!("Unexpected permissions result")
+        }
         fn normalize(
             &self,
             _: u32,

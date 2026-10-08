@@ -20,6 +20,8 @@ public class ContextWrapper extends Context {
     public int checkPermission(String permission, int pid, int uid) { throw new RuntimeException("stub"); }
     @Override
     public void enforcePermission(String permission, int pid, int uid, String message) { throw new RuntimeException("stub"); }
+    @Override
+    public void startActivityAsUser(Intent intent, android.os.UserHandle user) { throw new RuntimeException("stub"); }
     public String getBasePackageName() { throw new RuntimeException("stub"); }
     @Override
     public void sendBroadcastAsUser(Intent intent, android.os.UserHandle user) { throw new RuntimeException("stub"); }

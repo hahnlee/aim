@@ -25,9 +25,13 @@ struct PropertyGroup {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Registry {
     sources: BTreeMap<String, Arc<LoadedPackage>>,
+    committed_packages: Vec<String>,
+    package_order: Vec<String>,
     instruments: Vec<RegisteredInstrumentation>,
     providers: Vec<RegisteredProvider>,
+    declaration_providers: BTreeMap<String, Vec<Provider>>,
     authority_objects: Vec<RegisteredProvider>,
+    base_authority_objects: std::collections::BTreeSet<usize>,
     authorities: Vec<(String, usize)>,
     properties: Vec<PropertyGroup>,
 }
@@ -37,6 +41,10 @@ fn hash(package: &str, class: &str) -> i32 {
 impl Registry {
     pub fn validate(&self, loaded: &BTreeMap<String, Arc<LoadedPackage>>) -> Result<(), String> {
         if self.sources.len() != loaded.len()
+            || self.package_order.len() != self.sources.len()
+            || self.package_order.iter().collect::<std::collections::BTreeSet<_>>().len()
+                != self.sources.len()
+            || self.package_order.iter().any(|name| !self.sources.contains_key(name))
             || self.sources.iter().any(|(name, code)| {
                 !loaded
                     .get(name)
@@ -47,6 +55,46 @@ impl Registry {
         }
         Ok(())
     }
+    pub fn package_view(
+        &self,
+        name: &str,
+        raw: &super::pkg::AndroidPackage,
+    ) -> Result<super::pkg::AndroidPackage, String> {
+        let providers = self
+            .declaration_providers
+            .get(name)
+            .ok_or("registered declaration provider view is unavailable")?;
+        if providers.len() != raw.providers.len() {
+            return Err("registered provider declaration inventory differs".into());
+        }
+        let mut view = raw.clone();
+        view.providers = providers.clone();
+        Ok(view)
+    }
+    /// PMS mPackages ArrayMap order: signed hash, stable insertion for collisions.
+    pub fn ordered_package_names(&self) -> Vec<&str> {
+        let mut names = self.package_order.iter().map(String::as_str).collect::<Vec<_>>();
+        names.sort_by_key(|name| super::info::java_hash(name));
+        names
+    }
+    pub(in crate::package) fn rebind(&mut self, name: &str, code: Arc<LoadedPackage>) {
+        self.sources.insert(name.into(), code);
+    }
+
+    pub fn committed_packages(&self) -> &[String] { &self.committed_packages }
+
+    /// ComponentResolver.getActivity: registration existence, independent of
+    /// user visibility, enabled state and whether an activity declares filters.
+    pub(crate) fn contains_activity(&self, component: &super::intent::ComponentName) -> bool {
+        self.committed_packages.contains(&component.package)
+            && self.sources.get(&component.package).is_some_and(|code| {
+                code.runtime_package().activities.iter().any(|activity| {
+                    activity.main.component.name == component.class
+                })
+            })
+    }
+
+
     pub fn instruments(&self) -> Vec<&RegisteredInstrumentation> {
         let mut entries = self.instruments.iter().collect::<Vec<_>>();
         entries.sort_by_key(|i| hash(&i.package, &i.value.component.name));
@@ -56,6 +104,11 @@ impl Registry {
         let mut entries = self.providers.iter().collect::<Vec<_>>();
         entries.sort_by_key(|p| hash(&p.package, &p.value.main.component.name));
         entries
+    }
+    pub fn ordered_authorities(&self) -> Vec<(&str, &RegisteredProvider)> {
+        let mut authorities = self.authorities.iter().map(|(name, id)| (name.as_str(), &self.authority_objects[*id])).collect::<Vec<_>>();
+        authorities.sort_by_key(|(name, _)| super::info::java_hash(name));
+        authorities
     }
     pub fn authority(&self, name: &str) -> Option<&RegisteredProvider> {
         self.authorities
@@ -147,7 +200,16 @@ impl Registry {
                 return Err("registered property owner is incomplete".into());
             }
         }
+        // InstallPackageHelper commits with mPackages.put: replacement retains
+        // its ArrayMap slot. An explicit removal followed by admission moves it.
+        let position = self.package_order.iter().position(|name| name == &package.package_name);
         self.remove(&package.package_name);
+        self.committed_packages.push(package.package_name.clone());
+        if let Some(position) = position {
+            self.package_order.insert(position, package.package_name.clone());
+        } else {
+            self.package_order.push(package.package_name.clone());
+        }
         self.sources
             .insert(package.package_name.clone(), code.clone());
         for instrument in &package.instrumentations {
@@ -165,9 +227,12 @@ impl Registry {
                 self.instruments.push(row);
             }
         }
+        let mut bases = Vec::new();
         for provider in &package.providers {
-            self.add_provider(&package.package_name, provider);
+            bases.push(self.add_provider(&package.package_name, provider));
         }
+        self.declaration_providers
+            .insert(package.package_name.clone(), bases);
         self.add_properties(5, &package.properties);
         for c in &package.activities {
             self.add_properties(1, &c.main.component.properties);
@@ -186,10 +251,16 @@ impl Registry {
     }
     pub fn remove(&mut self, package: &str) {
         self.sources.remove(package);
+        self.package_order.retain(|name| name != package);
+        self.declaration_providers.remove(package);
         self.instruments.retain(|p| p.package != package);
         self.providers.retain(|p| p.package != package);
-        self.authorities
-            .retain(|(_, id)| self.authority_objects[*id].package != package);
+        // ComponentResolver removes only entries whose object is the declared
+        // provider itself. Syncable authority copies survive package removal.
+        self.authorities.retain(|(_, id)| {
+            !self.base_authority_objects.contains(id)
+                || self.authority_objects[*id].package != package
+        });
         for group in &mut self.properties {
             group.packages.retain(|(name, _)| name != package);
         }
@@ -211,6 +282,8 @@ impl Registry {
         for (_, id) in &mut self.authorities {
             *id = ids[id];
         }
+        self.base_authority_objects = self.base_authority_objects.iter()
+            .filter_map(|old| ids.get(old).copied()).collect();
         self.authority_objects = retained;
     }
     fn add_properties(&mut self, kind: i32, properties: &Option<Vec<(String, Property)>>) {
@@ -244,7 +317,7 @@ impl Registry {
             group.packages[j].1.push(property.clone());
         }
     }
-    fn add_provider(&mut self, package: &str, source: &Provider) {
+    fn add_provider(&mut self, package: &str, source: &Provider) -> Provider {
         let mut provider = source.clone();
         provider.main.component.package_name = package.into();
         let mut names = provider
@@ -258,6 +331,7 @@ impl Registry {
         let names = names.into_iter().map(str::to_owned).collect::<Vec<_>>();
         provider.authority = None;
         let base = self.authority_objects.len();
+        self.base_authority_objects.insert(base);
         self.authority_objects.push(RegisteredProvider {
             package: package.into(),
             value: provider,
@@ -288,6 +362,7 @@ impl Registry {
         } else {
             self.providers.push(row);
         }
+        self.authority_objects[base].value.clone()
     }
 }
 
@@ -328,6 +403,29 @@ mod tests {
         }
     }
     #[test]
+    fn activity_definition_includes_registered_activities_without_filters() {
+        let component = super::super::intent::ComponentName { package: "p".into(), class: "p.Main".into() };
+        let mut registry = Registry::default();
+        registry.register(code(AndroidPackage {
+            package_name: "p".into(),
+            activities: vec![super::super::pkg::Activity {
+                main: MainComponent { component: Component {
+                    name: component.class.clone(), package_name: component.package.clone(),
+                    ..Default::default()
+                }, ..Default::default() },
+                ..Default::default()
+            }],
+            ..Default::default()
+        })).unwrap();
+        assert!(registry.contains_activity(&component));
+        assert!(!registry.contains_activity(&super::super::intent::ComponentName {
+            package: "p".into(), class: "p.Removed".into(),
+        }));
+        registry.remove("p");
+        assert!(!registry.contains_activity(&component));
+    }
+
+    #[test]
     fn registration_collision_order_and_removal_reinsertion_are_owned() {
         let mut registry = Registry::default();
         let first = code(AndroidPackage {
@@ -352,6 +450,7 @@ mod tests {
         });
         registry.register(first.clone()).unwrap();
         registry.register(second.clone()).unwrap();
+        assert_eq!(registry.ordered_package_names(), ["BB", "Aa"]);
         assert_eq!(
             registry
                 .property_packages("property", 5)
@@ -374,6 +473,8 @@ mod tests {
         let frozen = registry.clone();
         registry.remove("BB");
         registry.register(first.clone()).unwrap();
+        assert_eq!(registry.ordered_package_names(), ["Aa", "BB"]);
+        assert_eq!(frozen.ordered_package_names(), ["BB", "Aa"]);
         assert_eq!(
             registry
                 .property_packages("property", 5)
@@ -396,6 +497,30 @@ mod tests {
                 .validate(&[("BB".into(), other), ("Aa".into(), second)].into())
                 .is_err()
         );
+    }
+    #[test]
+    fn package_arraymap_replacement_retains_slot_but_removal_moves_it() {
+        let first = code(AndroidPackage { package_name: "BB".into(), ..Default::default() });
+        let second = code(AndroidPackage { package_name: "Aa".into(), ..Default::default() });
+        let negative = code(AndroidPackage { package_name: "negative-package-hash".into(), ..Default::default() });
+        let mut registry = Registry::default();
+        registry.register(first.clone()).unwrap();
+        registry.register(second.clone()).unwrap();
+        assert_eq!(registry.ordered_package_names(), ["BB", "Aa"]);
+        registry.register(first.clone()).unwrap();
+        assert_eq!(registry.ordered_package_names(), ["BB", "Aa"]);
+        registry.rebind("BB", first.clone());
+        assert_eq!(registry.ordered_package_names(), ["BB", "Aa"]);
+        registry.register(negative.clone()).unwrap();
+        let expected = if super::super::info::java_hash("negative-package-hash") < super::super::info::java_hash("BB") {
+            vec!["negative-package-hash", "BB", "Aa"]
+        } else { vec!["BB", "Aa", "negative-package-hash"] };
+        assert_eq!(registry.ordered_package_names(), expected);
+        registry.remove("BB");
+        registry.register(first.clone()).unwrap();
+        let names = registry.ordered_package_names();
+        assert!(names.iter().position(|name| *name == "Aa") < names.iter().position(|name| *name == "BB"));
+        registry.validate(&[("BB".into(), first), ("Aa".into(), second), ("negative-package-hash".into(), negative)].into()).unwrap();
     }
     #[test]
     fn syncable_provider_registration_retains_base_and_alias_copy_objects() {
@@ -444,9 +569,67 @@ mod tests {
                 .value
                 .authority
                 .as_deref(),
-            Some("one;two;three")
+            Some("two;three")
         );
         assert!(!registry.authority("three").unwrap().value.syncable);
+        registry.remove("sync");
+        assert!(registry.authority("one").is_none());
+        assert_eq!(registry.authority("two").unwrap().value.authority.as_deref(), Some("two;three"));
+        registry.register(code(AndroidPackage { package_name: "replacement".into(),
+            providers: vec![provider("replacement", "Next", "two;six", true)], ..Default::default() })).unwrap();
+        assert_eq!(registry.providers().into_iter().find(|provider| provider.package == "replacement").unwrap().value.authority, None);
+        assert_eq!(registry.authority("two").unwrap().package, "sync");
+        assert_eq!(registry.authority("six").unwrap().package, "replacement");
+    }
+    #[test]
+    fn runtime_provider_declarations_preserve_raw_code_and_exclude_alias_copies() {
+        let mut registry = Registry::default();
+        registry
+            .register(code(AndroidPackage {
+                package_name: "first".into(),
+                providers: vec![provider("first", "First", "one", false)],
+                ..Default::default()
+            }))
+            .unwrap();
+        let mut loaded = code(AndroidPackage {
+            package_name: "sync".into(),
+            feature_flag_state: Some(vec![]),
+            providers: vec![
+                provider("sync", "Sync", "one;two;three", true),
+                provider("sync", "Second", "four;five", false),
+            ],
+            ..Default::default()
+        });
+        registry.register(loaded.clone()).unwrap();
+        let view = registry.package_view("sync", &loaded.package).unwrap();
+        Arc::make_mut(&mut loaded).set_runtime_package(view);
+        registry.rebind("sync", loaded.clone());
+        assert_eq!(
+            loaded.package.providers[0].authority.as_deref(),
+            Some("one;two;three")
+        );
+        assert_eq!(loaded.runtime_package().providers.len(), 2);
+        assert_eq!(loaded.runtime_package().providers[0].authority, None);
+        assert!(loaded.runtime_package().providers[0].syncable);
+        assert_eq!(
+            loaded.runtime_package().providers[1].authority.as_deref(),
+            Some("four;five")
+        );
+        assert_eq!(
+            registry
+                .authority("two")
+                .unwrap()
+                .value
+                .authority
+                .as_deref(),
+            Some("two;three")
+        );
+        assert!(!registry.authority("two").unwrap().value.syncable);
+        let facade = loaded.facade_entry().unwrap();
+        let decoded = AndroidPackage::read_cache_entry(&facade.cache.bytes).unwrap();
+        assert_eq!(decoded.providers, loaded.runtime_package().providers);
+        assert_ne!(decoded.providers, loaded.package.providers);
+        registry.validate(&registry.sources.clone()).unwrap();
     }
     #[test]
     fn property_component_precedence_and_last_component_declaration_match_owner() {
@@ -485,3 +668,7 @@ mod tests {
         assert_eq!(registry.property_packages("property", 1)[0].1.len(), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "registry_original_test.rs"]
+mod original_test;

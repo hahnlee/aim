@@ -3,6 +3,8 @@
 package android.content.res;
 
 public class Resources {
+    public Resources(AssetManager assets,android.util.DisplayMetrics metrics,Configuration configuration){throw new RuntimeException("stub");}
+
     public Resources(ClassLoader classLoader) { throw new RuntimeException("stub"); }
     public static Resources getSystem() { throw new RuntimeException("stub"); }
     public CharSequence getText(int id) { throw new RuntimeException("stub"); }
@@ -19,5 +21,10 @@ public class Resources {
 
     public final class Theme {
         private Theme() { throw new RuntimeException("stub"); }
+    }
+ public android.graphics.drawable.Drawable getDrawable(int id,Theme theme)throws NotFoundException{throw new RuntimeException("stub");}
+    public static class NotFoundException extends RuntimeException {
+        public NotFoundException() { throw new RuntimeException("stub"); }
+        public NotFoundException(String message) { super(message); throw new RuntimeException("stub"); }
     }
 }

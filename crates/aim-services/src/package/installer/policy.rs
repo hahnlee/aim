@@ -113,7 +113,7 @@ fn valid_name(value: &str) -> bool {
     true
 }
 /// Normalization changes flags before mode/storage validation, as the original does.
-/// Icon resizing, data loaders and archiving still need their concrete owners.
+/// Icon resizing, incremental installation and archiving require their concrete owners.
 pub fn normalize(
     q: &Query<'_>,
     device: &DevicePolicy,
@@ -134,10 +134,6 @@ pub fn normalize(
                 "You need USE_INSTALLER_V2 permission to use a data loader",
             ));
         }
-        return Err(Exception::new(
-            EX_UNSUPPORTED_OPERATION,
-            "Native data-loader install owner unavailable",
-        ));
     }
     params.install_flags &= !(1 << 29);
     cross_user(q, device, user, true, "createSession")?;
@@ -332,12 +328,6 @@ pub fn normalize(
                 "You need INSTALL_GRANT_RUNTIME_PERMISSIONS permission to grant runtime permissions",
             ));
         }
-        if params.app_icon.is_some() {
-            return Err(Exception::new(
-                EX_UNSUPPORTED_OPERATION,
-                "Native installer icon resize/persistence owner unavailable",
-            ));
-        }
         if !matches!(params.mode, 1 | 2) {
             return Err(Exception::illegal_argument(format!(
                 "Invalid install mode: {}",
@@ -376,6 +366,28 @@ pub fn normalize(
     } else {
         None
     };
+    if let Some(loader) = &params.data_loader_params {
+        let loader = super::codec::DataLoader::from_object(loader)
+            .map_err(|_| Exception::new(EX_ILLEGAL_STATE, "Invalid data loader parcel"))?;
+        if apex {
+            return Err(Exception::illegal_argument(
+                "DataLoader installation of APEX modules is not allowed.",
+            ));
+        }
+        if loader.package.as_deref() == Some("android")
+            && !permission(q, "android.permission.USE_SYSTEM_DATA_LOADERS")?
+        {
+            return Err(Exception::security(
+                "You need com.android.permission.USE_SYSTEM_DATA_LOADERS permission to use system data loaders",
+            ));
+        }
+        if loader.kind == 2 {
+            return Err(Exception::new(
+                EX_UNSUPPORTED_OPERATION,
+                "IncrementalManager eligibility and filesystem owner unavailable",
+            ));
+        }
+    }
     Ok((
         Record {
             params,

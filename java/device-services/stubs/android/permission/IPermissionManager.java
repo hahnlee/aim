@@ -1,0 +1,2 @@
+// Compile-only original SDK API; implementation remains in the original image.
+package android.permission; public interface IPermissionManager extends android.os.IInterface {android.content.pm.PermissionGroupInfo getPermissionGroupInfo(String name,int flags)throws android.os.RemoteException;abstract class Stub extends android.os.Binder implements IPermissionManager {public android.os.IBinder asBinder(){throw new RuntimeException("stub");}public static IPermissionManager asInterface(android.os.IBinder node){throw new RuntimeException("stub");}}}

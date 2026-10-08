@@ -233,6 +233,18 @@ impl SigningScan {
     pub(in crate::package) fn has_shared_processes(&self) -> bool {
         self.shared_processes.is_some()
     }
+    /// Production boot derives aggregates from the actual native member owner,
+    /// never a shadow model or a separately imported original PMS feed.
+    pub fn rebuild_shared_processes_from_native_members(&mut self) -> Result<(), String> {
+        let mut orders = BTreeMap::new();
+        for (name, group) in &self.identities.shared_users {
+            orders.insert(name.clone(), group.ordered_process_members()?.iter().rev().cloned().collect());
+        }
+        let assignments = build(self, orders, None)?;
+        self.shared_processes = Some(assignments);
+        Ok(())
+    }
+
     /// PackageFeed keeps SharedUserApi's forward ArraySet order. The original
     /// updateProcesses rebuild visits that same set in reverse (android-16 r1).
     pub fn rebuild_shared_processes_from_original_members(
@@ -513,6 +525,8 @@ mod tests {
             name.into(),
             std::sync::Arc::new(super::super::LoadedPackage {
                 disabled_binding: None,
+                runtime_view: None,
+                projection: Default::default(),
                 package: crate::package::pkg::AndroidPackage {
                     package_name: name.into(),
                     uid: 10100,
@@ -912,6 +926,21 @@ mod tests {
             scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode,
             0
         );
+    }
+    #[test]
+    fn native_process_rebuild_uses_member_slots_not_name_sorting() {
+        let mut scan = scan();
+        load(&mut scan, "a", 1); load(&mut scan, "b", 0);
+        scan.rebuild_shared_processes_from_native_members().unwrap();
+        assert_eq!(scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode, 1);
+        let group = scan.identities.shared_users.get_mut("fixture").unwrap();
+        group.remove_package("a"); group.add_package("a", 0, 0);
+        scan.rebuild_shared_processes_from_native_members().unwrap();
+        assert_eq!(scan.shared_processes("fixture").unwrap().unwrap().records()[0].gwp_asan_mode, 0);
+        let retained = scan.clone();
+        scan.identities.shared_users.get_mut("fixture").unwrap().add_package("foreign", 0, 0);
+        assert!(scan.rebuild_shared_processes_from_native_members().is_err());
+        assert_eq!(scan.shared_processes, retained.shared_processes);
     }
     #[test]
     fn supplied_iteration_controls_modes_and_code_changes_invalidate_capture() {

@@ -1,11 +1,11 @@
 //! Complete native capture exported to the original ART snapshot assembler.
 use super::{
     java,
-    runtime::{run, Boot, Data},
+    runtime::{Boot, Data, run},
 };
 use aim_service_aidl::WriteParcelable;
 use aim_services::package::scan_snapshot::{
-    endpoint, runtime_record, setting_record, shared_record, user_record, Snapshot,
+    Snapshot, endpoint, runtime_record, setting_record, shared_record, user_record,
 };
 use std::{
     fs,
@@ -22,6 +22,17 @@ pub fn export(directory: &Path, snapshot: &std::sync::Arc<Snapshot>) {
     )
     .unwrap();
     fs::write(directory.join("version"), snapshot.version().to_string()).unwrap();
+    use aim_service_aidl::android_content_pm_ipackagemanager as pm;
+    fs::write(
+        directory.join("read-query-codes"),
+        format!(
+            "{}\n{}\n{}\n",
+            pm::GET_ALL_PACKAGES,
+            pm::CHECK_UID_PERMISSION,
+            pm::RESOLVE_CONTENT_PROVIDER_FOR_UID
+        ),
+    )
+    .unwrap();
     for (settings, factory, scope) in [
         (&snapshot.owner().settings.packages, false, "active"),
         (
@@ -132,58 +143,20 @@ pub fn verify(directory: &Path) {
         .args(["--release", "17", "-d"])
         .arg(&stubs)
         .args(java::sources(&repo.join("java/device-services/stubs")))
-        .arg(repo.join("crates/aim-services/tests/api/PackageBootstrapBridge.java"))
         .arg(repo.join("crates/aim-services/tests/api/SELinuxMMAC.java")));
-    let sources = [
-        "dev/aim/server/PackageTransientState.java",
-        "dev/aim/server/PackageLegacyPermissions.java",
-        "dev/aim/server/PackageDomainIds.java",
-        "dev/aim/server/PackageScanUsers.java",
-        "com/android/server/pm/ApexBootFeed.java",
-        "dev/aim/server/PackageObjects.java",
-        "com/android/server/pm/CapturedPackageSetting.java",
-        "dev/aim/server/PackageLibraryState.java",
-        "dev/aim/server/PackageLibraryFeed.java",
-        "dev/aim/server/PackageCode.java",
-        "dev/aim/server/PackageSigningState.java",
-        "dev/aim/server/PackageUserStateData.java",
-        "dev/aim/server/PackageSettingData.java",
-        "dev/aim/server/PackageMimeGroups.java",
-        "com/android/server/pm/CapturedInstallSource.java",
-        "com/android/server/pm/CapturedKeySetData.java",
-        "dev/aim/server/PackageUserStateReplica.java",
-        "dev/aim/server/PackageSeInfoState.java",
-        "dev/aim/server/PackageUsageState.java",
-        "dev/aim/server/PackageScanLease.java",
-        "dev/aim/server/PackageStateReplica.java",
-        "dev/aim/server/SharedUserData.java",
-        "com/android/server/pm/SharedProcessFeed.java",
-        "dev/aim/server/RetainedPackageData.java",
-        "dev/aim/server/SharedUserReplica.java",
-        "dev/aim/server/PackageRuntimeState.java",
-        "dev/aim/server/PackageRuntimeFeed.java",
-        "dev/aim/server/PackageUserScopeFeed.java",
-        "dev/aim/server/PackageSnapshots.java",
-        "dev/aim/server/PackageUidOwners.java",
-        "dev/aim/server/PackageVersionPage.java",
-        "dev/aim/server/PackageLocal.java",
-    ];
+    let production=java::production_classes(&root,&jdk,&stubs);
+    let classpath=std::env::join_paths([stubs.as_path(),production.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
         .arg("-classpath")
-        .arg(&stubs)
-        .args(
-            sources
-                .iter()
-                .map(|name| repo.join("java/device-services/src").join(name)),
-        )
-        .arg(java::bootstrap_aidl(&root))
-        .arg(java::snapshot_aidl(&root))
-        .arg(java::computer_aidl(&root))
+        .arg(&classpath)
         .arg(repo.join("crates/aim-services/tests/fixtures/DisplacedSnapshotOracle.java"))
+        .arg(repo.join("crates/aim-services/tests/fixtures/PackageFacadeOwners.java"))
         .arg(repo.join("crates/aim-services/tests/fixtures/NativeDisplacedReadOracle.java")));
-    let mut pending = vec![classes.clone()];
+    // Current vendor classes must share the fixture ABI; only original Android
+    // APIs remain in the guest image. Compile-only stubs never enter the dex.
+    let mut pending = vec![classes.clone(), production.clone()];
     let mut class_files = Vec::new();
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(dir).unwrap() {
@@ -212,14 +185,10 @@ pub fn verify(directory: &Path) {
         .arg("--output")
         .arg(&dex)
         .args(class_files));
-    java::check_linkage(
-        &dex.join("classes.dex"),
-        &[
-            "/system/framework/services.jar",
-            "/system/framework/aim-services.jar",
-        ],
-    )
-    .unwrap();
+    let system_jars = aim_android_image::classpath::jars(&aim_paths::derived_image(),
+        "systemserverclasspath.pb", aim_android_image::classpath::SYSTEMSERVERCLASSPATH).unwrap();
+    let system_jars = system_jars.iter().map(String::as_str).collect::<Vec<_>>();
+    java::check_linkage(&dex.join("classes.dex"), &system_jars).unwrap();
     let boot_data = Data(std::env::temp_dir().join(format!("aim-dsp-{}", std::process::id())));
     fs::create_dir(&boot_data.0).unwrap();
     let boot_dir = boot_data.0.join("g");
@@ -272,8 +241,9 @@ pub fn verify(directory: &Path) {
         }
     }
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();
+    let runtime_classpath = format!("-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:{}", system_jars.join(":"));
     let output = boot.client(1000).args(["/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/displaced-snapshots/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar",
+        &runtime_classpath,
         "/system/bin", "dev.aim.server.DisplacedSnapshotOracle", "/data/local/tmp/displaced-snapshots"]).output().unwrap();
     assert!(
         output.status.success(),
@@ -399,16 +369,20 @@ pub fn verify(directory: &Path) {
         let restored = aim_services::package::State::read(&reboot.data.join("data"), &[0])
             .unwrap()
             .unwrap();
-        assert!(restored
-            .settings
-            .packages
-            .iter()
-            .any(|p| p.name == "android"));
-        assert!(restored
-            .settings
-            .packages
-            .iter()
-            .any(|p| p.name == "com.google.android.gsf"));
+        assert!(
+            restored
+                .settings
+                .packages
+                .iter()
+                .any(|p| p.name == "android")
+        );
+        assert!(
+            restored
+                .settings
+                .packages
+                .iter()
+                .any(|p| p.name == "com.google.android.gsf")
+        );
         drop(reboot);
     }
 }

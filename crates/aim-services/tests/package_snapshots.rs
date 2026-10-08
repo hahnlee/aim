@@ -55,6 +55,7 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
             aim_paths::root()
                 .join("java/device-services/src/com/android/server/pm/SharedProcessFeed.java"),
         )
+        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/NativePackageCapabilities.java"))
         .arg(
             aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
         ));

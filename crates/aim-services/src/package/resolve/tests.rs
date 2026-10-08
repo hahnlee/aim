@@ -732,35 +732,94 @@ fn mime_owner_failures_do_not_publish_partial_resolvers() {
 fn visibility_construction_retains_uri_matcher_errors_and_the_previous_resolver() {
     let querying = package("querying", 10001, false, |pkg| {
         pkg.queries_intents = vec![Intent {
-            action: Some(VIEW.into()), data: Some(Uri::parse("https://x/path")),
+            action: Some(VIEW.into()),
+            data: Some(Uri::parse("https://x/path")),
             ..Intent::default()
         }];
     });
     let target = package("target", 10002, false, |pkg| {
         let mut intent = filter(VIEW, None, Some("https"), 0);
         intent.filter.add_data_authority("x", None);
-        pkg.activities = vec![Activity {main: main("target", "target.View", vec![intent]), ..Activity::default()}];
+        pkg.activities = vec![Activity {
+            main: main("target", "target.View", vec![intent]),
+            ..Activity::default()
+        }];
     });
-    let valid = Arc::new(State {packages: [("querying".into(), querying), ("target".into(), target)].into_iter().collect(), ..State::default()});
-    let resolver = Resolver::default(); let first = resolver.resolution(&valid).unwrap();
-    for (pattern, kind) in [(None, 0), (None, 1), (None, 3), (Some("*"), 3), (Some("["), 3)] {
+    let valid = Arc::new(State {
+        packages: [("querying".into(), querying), ("target".into(), target)]
+            .into_iter()
+            .collect(),
+        ..State::default()
+    });
+    let resolver = Resolver::default();
+    let first = resolver.resolution(&valid).unwrap();
+    for (pattern, kind) in [
+        (None, 0),
+        (None, 1),
+        (None, 3),
+        (Some("*"), 3),
+        (Some("["), 3),
+    ] {
         let mut invalid = (*valid).clone();
-        let pkg = Arc::make_mut(invalid.packages.get_mut("target").unwrap().pkg.as_mut().unwrap());
+        let pkg = Arc::make_mut(
+            invalid
+                .packages
+                .get_mut("target")
+                .unwrap()
+                .pkg
+                .as_mut()
+                .unwrap(),
+        );
         let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0);
         group.add_nullable(0, kind, pattern);
-        pkg.activities[0].main.component.intents[0].filter.add_uri_relative_filter_group(group);
+        pkg.activities[0].main.component.intents[0]
+            .filter
+            .add_uri_relative_filter_group(group);
         let invalid = Arc::new(invalid);
-        let MimeGroupError::UriMatching(error) = resolver.resolution(&invalid).err().unwrap() else {panic!("lost URI matcher error")};
+        let MimeGroupError::UriMatching(error) = resolver.resolution(&invalid).err().unwrap()
+        else {
+            panic!("lost URI matcher error")
+        };
         let request = Parcel::new();
-        let reply = resolver.query(&invalid, pm::QUERY_INTENT_ACTIVITIES, 1000, &mut aim_binder_host::parcel::Reader::new(request.data(), &[])).unwrap();
+        let reply = resolver
+            .query(
+                &invalid,
+                pm::QUERY_INTENT_ACTIVITIES,
+                1000,
+                &mut aim_binder_host::parcel::Reader::new(request.data(), &[]),
+            )
+            .unwrap();
         if let Some(expected) = error.binder_exception() {
             let reply = reply.unwrap();
-            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
-            assert_eq!(exception.code, expected.code); assert_eq!(exception.message, expected.message);
+            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(exception.code, expected.code);
+            assert_eq!(exception.message, expected.message);
         } else {
-            assert!(matches!(reply, Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
-            let mut call = ShadowCall {service: "package", descriptor: pm::DESCRIPTOR, code: pm::QUERY_INTENT_ACTIVITIES, flags: 0, sender_pid: 123, sender_euid: 1000, seq: 1, sent: std::time::Instant::now(), dropped: 0, data: aim_binder_host::parcel::Reader::new(request.data(), request.objects())};
-            assert!(matches!(resolver.answer(&invalid, &mut call), Some(Answer::Status(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+            assert!(matches!(
+                reply,
+                Err(QueryError::Transport(
+                    aim_binder_host::parcel::UNKNOWN_TRANSACTION
+                ))
+            ));
+            let mut call = ShadowCall {
+                service: "package",
+                descriptor: pm::DESCRIPTOR,
+                code: pm::QUERY_INTENT_ACTIVITIES,
+                flags: 0,
+                sender_pid: 123,
+                sender_euid: 1000,
+                seq: 1,
+                sent: std::time::Instant::now(),
+                dropped: 0,
+                data: aim_binder_host::parcel::Reader::new(request.data(), request.objects()),
+            };
+            assert!(matches!(
+                resolver.answer(&invalid, &mut call),
+                Some(Answer::Status(aim_binder_host::parcel::UNKNOWN_TRANSACTION))
+            ));
         }
         assert!(Arc::ptr_eq(&first, &resolver.resolution(&valid).unwrap()));
     }
@@ -769,41 +828,136 @@ fn visibility_construction_retains_uri_matcher_errors_and_the_previous_resolver(
 #[test]
 fn intent_queries_return_uri_matcher_exceptions_instead_of_not_modelled() {
     use super::super::domain_verification::uri_parcel::Filter;
-    for (pattern, kind) in [(None, 0), (None, 1), (None, 3), (Some("*"), 3), (Some("["), 3)] {
+    for (pattern, kind) in [
+        (None, 0),
+        (None, 1),
+        (None, 3),
+        (Some("*"), 3),
+        (Some("["), 3),
+    ] {
         let target = package("target", 10001, false, |pkg| {
-            let mut intent = filter(VIEW, None, Some("https"), 0); intent.filter.add_data_authority("x", None);
-            let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0); group.add_nullable(0, kind, pattern);
+            let mut intent = filter(VIEW, None, Some("https"), 0);
+            intent.filter.add_data_authority("x", None);
+            let mut group = super::super::intent_filter::UriRelativeFilterGroup::new(0);
+            group.add_nullable(0, kind, pattern);
             intent.filter.add_uri_relative_filter_group(group);
-            let mut component = main("target", "target.View", vec![intent]); component.intent_matching_flags = 2;
-            pkg.activities = vec![Activity {main: component.clone(), ..Activity::default()}];
-            pkg.services = vec![Service {main: component.clone(), ..Service::default()}];
-            pkg.receivers = vec![Activity {main: component.clone(), ..Activity::default()}];
-            pkg.providers = vec![Provider {main: component, ..Provider::default()}];
+            let mut component = main("target", "target.View", vec![intent]);
+            component.intent_matching_flags = 2;
+            pkg.activities = vec![Activity {
+                main: component.clone(),
+                ..Activity::default()
+            }];
+            pkg.services = vec![Service {
+                main: component.clone(),
+                ..Service::default()
+            }];
+            pkg.receivers = vec![Activity {
+                main: component.clone(),
+                ..Activity::default()
+            }];
+            pkg.providers = vec![Provider {
+                main: component,
+                ..Provider::default()
+            }];
         });
-        let caller = package("caller", 10002, false, |pkg| {pkg.queries_packages = vec!["target".into()];});
-        let state = Arc::new(State {packages: [("target".into(), target), ("caller".into(), caller)].into(), users: [(0, User {unlocking_or_unlocked: true, ..User::default()})].into(), ..State::default()});
+        let caller = package("caller", 10002, false, |pkg| {
+            pkg.queries_packages = vec!["target".into()];
+        });
+        let state = Arc::new(State {
+            packages: [("target".into(), target), ("caller".into(), caller)].into(),
+            users: [(
+                0,
+                User {
+                    unlocking_or_unlocked: true,
+                    ..User::default()
+                },
+            )]
+            .into(),
+            ..State::default()
+        });
         let resolver = Resolver::default();
-        let error = Filter {uri_part: 0, pattern_type: kind, filter: pattern.map(str::to_owned)}.match_data(&Uri::parse("https://x/path")).unwrap_err();
+        let error = Filter {
+            uri_part: 0,
+            pattern_type: kind,
+            filter: pattern.map(str::to_owned),
+        }
+        .match_data(&Uri::parse("https://x/path"))
+        .unwrap_err();
         let expected = error.binder_exception();
-        for (code, explicit) in [(pm::QUERY_INTENT_ACTIVITIES, false), (pm::QUERY_INTENT_SERVICES, false), (pm::QUERY_INTENT_RECEIVERS, false), (pm::QUERY_INTENT_CONTENT_PROVIDERS, false), (pm::RESOLVE_INTENT, false), (pm::RESOLVE_SERVICE, false), (pm::QUERY_INTENT_ACTIVITIES, true)] {
-            let mut request = Parcel::new(); request.write_interface_token(pm::DESCRIPTOR); request.write_i32(1);
-            request.write_string8(Some(VIEW)); request.write_i32(1); request.write_string8(Some("https://x/path"));
-            request.write_string8(None); request.write_string8(None); request.write_i32(0); request.write_i32(0);
+        for (code, explicit) in [
+            (pm::QUERY_INTENT_ACTIVITIES, false),
+            (pm::QUERY_INTENT_SERVICES, false),
+            (pm::QUERY_INTENT_RECEIVERS, false),
+            (pm::QUERY_INTENT_CONTENT_PROVIDERS, false),
+            (pm::RESOLVE_INTENT, false),
+            (pm::RESOLVE_SERVICE, false),
+            (pm::QUERY_INTENT_ACTIVITIES, true),
+        ] {
+            let mut request = Parcel::new();
+            request.write_interface_token(pm::DESCRIPTOR);
+            request.write_i32(1);
+            request.write_string8(Some(VIEW));
+            request.write_i32(1);
+            request.write_string8(Some("https://x/path"));
             request.write_string8(None);
-            if explicit {request.write_string16(Some("target")); request.write_string16(Some("target.View"));}
-            else {request.write_string16(None);}
-            for value in [0, 0, 0, 0, -2, -1, 0, 0] {request.write_i32(value);}
-            request.write_string16(None); request.write_i64(MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE); request.write_i32(0);
-            let reply = resolver.query(&state, code, if explicit {10002} else {1000}, &mut aim_binder_host::parcel::Reader::new(request.data(), request.objects())).unwrap();
+            request.write_string8(None);
+            request.write_i32(0);
+            request.write_i32(0);
+            request.write_string8(None);
+            if explicit {
+                request.write_string16(Some("target"));
+                request.write_string16(Some("target.View"));
+            } else {
+                request.write_string16(None);
+            }
+            for value in [0, 0, 0, 0, -2, -1, 0, 0] {
+                request.write_i32(value);
+            }
+            request.write_string16(None);
+            request.write_i64(MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE);
+            request.write_i32(0);
+            let reply = resolver
+                .query(
+                    &state,
+                    code,
+                    if explicit { 10002 } else { 1000 },
+                    &mut aim_binder_host::parcel::Reader::new(request.data(), request.objects()),
+                )
+                .unwrap();
             let Some(expected) = &expected else {
-                assert!(matches!(reply, Err(QueryError::Transport(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
-                let mut call = ShadowCall {service: "package", descriptor: pm::DESCRIPTOR, code, flags: 0, sender_pid: 123, sender_euid: if explicit {10002} else {1000}, seq: 1, sent: std::time::Instant::now(), dropped: 0, data: aim_binder_host::parcel::Reader::new(request.data(), request.objects())};
-                assert!(matches!(resolver.answer(&state, &mut call), Some(Answer::Status(aim_binder_host::parcel::UNKNOWN_TRANSACTION))));
+                assert!(matches!(
+                    reply,
+                    Err(QueryError::Transport(
+                        aim_binder_host::parcel::UNKNOWN_TRANSACTION
+                    ))
+                ));
+                let mut call = ShadowCall {
+                    service: "package",
+                    descriptor: pm::DESCRIPTOR,
+                    code,
+                    flags: 0,
+                    sender_pid: 123,
+                    sender_euid: if explicit { 10002 } else { 1000 },
+                    seq: 1,
+                    sent: std::time::Instant::now(),
+                    dropped: 0,
+                    data: aim_binder_host::parcel::Reader::new(request.data(), request.objects()),
+                };
+                assert!(matches!(
+                    resolver.answer(&state, &mut call),
+                    Some(Answer::Status(aim_binder_host::parcel::UNKNOWN_TRANSACTION))
+                ));
                 continue;
             };
             let reply = reply.unwrap();
-            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects()).read_exception().unwrap().unwrap_err();
-            assert_eq!(exception.code, expected.code, "method={code} pattern={pattern:?} kind={kind}");
+            let exception = aim_binder_host::parcel::Reader::new(reply.data(), reply.objects())
+                .read_exception()
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                exception.code, expected.code,
+                "method={code} pattern={pattern:?} kind={kind}"
+            );
             assert_eq!(exception.message, expected.message);
         }
     }
@@ -811,19 +965,125 @@ fn intent_queries_return_uri_matcher_exceptions_instead_of_not_modelled() {
 
 #[test]
 fn all_intent_filters_keep_manifest_order_and_apply_registered_mime_groups() {
-    let mut state=state();
-    let ps=Arc::make_mut(&mut state).packages.get_mut("a.viewer").unwrap();
-    ps.mime_groups=vec![(Some("images".into()),vec![Some("image/png".into())])];
-    Arc::make_mut(ps.pkg.as_mut().unwrap()).activities[0].main.component.intents[0].filter.mime_groups=Some(vec!["images".into()]);
-    let resolver=Resolver::default();
-    let invoke=|name| {
-        let mut data=Parcel::new();pm::GetAllIntentFilters {package_name:name}.write(&mut data);
-        resolver.query(&state,pm::GET_ALL_INTENT_FILTERS,1000,&mut Reader::new(data.data(),data.objects())).unwrap().unwrap()
+    let mut state = state();
+    let ps = Arc::make_mut(&mut state)
+        .packages
+        .get_mut("a.viewer")
+        .unwrap();
+    ps.mime_groups = vec![(Some("images".into()), vec![Some("image/png".into())])];
+    Arc::make_mut(ps.pkg.as_mut().unwrap()).activities[0]
+        .main
+        .component
+        .intents[0]
+        .filter
+        .mime_groups = Some(vec!["images".into()]);
+    let resolver = Resolver::default();
+    let invoke = |name| {
+        let mut data = Parcel::new();
+        pm::GetAllIntentFilters { package_name: name }.write(&mut data);
+        resolver
+            .query(
+                &state,
+                pm::GET_ALL_INTENT_FILTERS,
+                1000,
+                &mut Reader::new(data.data(), data.objects()),
+            )
+            .unwrap()
+            .unwrap()
     };
-    let reply=invoke(Some("a.viewer".into()));let mut r=Reader::new(reply.data(),reply.objects());r.read_exception().unwrap().unwrap();assert_eq!(r.read_i32().unwrap(),1);assert_eq!(r.read_i32().unwrap(),2);assert_eq!(r.read_string16().unwrap().as_deref(),Some("android.content.IntentFilter"));
-    assert_eq!(r.read_i32().unwrap(),1);let first=IntentFilter::read(&mut r,&mut Plain).unwrap();assert!(first.types.unwrap().contains(&"image/png".into()));
-    assert_eq!(r.read_i32().unwrap(),1);let second=IntentFilter::read(&mut r,&mut Plain).unwrap();assert_eq!(second.schemes,Some(vec!["https".into()]));assert_eq!(r.remaining(),0);
-    for name in [None,Some("".into()),Some("missing".into())] {
-        let reply=invoke(name);let mut r=Reader::new(reply.data(),reply.objects());r.read_exception().unwrap().unwrap();assert_eq!(r.read_i32().unwrap(),1);assert_eq!(r.read_i32().unwrap(),0);assert_eq!(r.remaining(),0);
+    let reply = invoke(Some("a.viewer".into()));
+    let mut r = Reader::new(reply.data(), reply.objects());
+    r.read_exception().unwrap().unwrap();
+    assert_eq!(r.read_i32().unwrap(), 1);
+    assert_eq!(r.read_i32().unwrap(), 2);
+    assert_eq!(
+        r.read_string16().unwrap().as_deref(),
+        Some("android.content.IntentFilter")
+    );
+    assert_eq!(r.read_i32().unwrap(), 1);
+    let first = IntentFilter::read(&mut r, &mut Plain).unwrap();
+    assert!(first.types.unwrap().contains(&"image/png".into()));
+    assert_eq!(r.read_i32().unwrap(), 1);
+    let second = IntentFilter::read(&mut r, &mut Plain).unwrap();
+    assert_eq!(second.schemes, Some(vec!["https".into()]));
+    assert_eq!(r.remaining(), 0);
+    for name in [None, Some("".into()), Some("missing".into())] {
+        let reply = invoke(name);
+        let mut r = Reader::new(reply.data(), reply.objects());
+        r.read_exception().unwrap().unwrap();
+        assert_eq!(r.read_i32().unwrap(), 1);
+        assert_eq!(r.read_i32().unwrap(), 0);
+        assert_eq!(r.remaining(), 0);
     }
+}
+
+#[test]
+fn persistent_preferred_route_rejects_non_system_and_returns_null_for_missing_user() {
+    let resolver = Resolver::default();
+    let state = state();
+    // A null typed Intent is decoded before the owner checks, as generated AIDL does.
+    for (uid, user, security) in [(0, 0, true), (1000, 999, false), (1001000, 999, false)] {
+        let mut args = Parcel::new();
+        args.write_interface_token(pm::DESCRIPTOR);
+        args.write_i32(0);
+        args.write_i32(user);
+        let reply = resolver.query(&state, pm::FIND_PERSISTENT_PREFERRED_ACTIVITY, uid,
+            &mut Reader::new(args.data(), args.objects())).unwrap().unwrap();
+        let mut reader = Reader::new(reply.data(), reply.objects());
+        if security {
+            assert_eq!(reader.read_exception().unwrap().unwrap_err().code,
+                aim_binder_host::parcel::EX_SECURITY);
+        } else {
+            assert!(reader.read_exception().unwrap().is_ok());
+            assert_eq!(reader.read_i32().unwrap(), 0);
+        }
+        assert_eq!(reader.remaining(), 0);
+    }
+}
+
+#[test]
+fn provider_for_uid_requires_permission_and_both_callers_visibility() {
+    let resolver = Resolver::default();
+    let state = state();
+    let request = pm::ResolveContentProviderForUid { authority: Some("b.media".into()),
+        flags: 0, user_id: 0, calling_uid: 10002 };
+    for (uid, security) in [(10001, true), (1000, false)] {
+        let mut args = Parcel::new();
+        request.write(&mut args);
+        let reply = resolver.query(&state, pm::RESOLVE_CONTENT_PROVIDER_FOR_UID, uid,
+            &mut Reader::new(args.data(), args.objects())).unwrap().unwrap();
+        let mut reader = Reader::new(reply.data(), reply.objects());
+        if security {
+            assert_eq!(reader.read_exception().unwrap().unwrap_err().code, aim_binder_host::parcel::EX_SECURITY);
+        } else {
+            assert!(reader.read_exception().unwrap().is_ok());
+            assert_eq!(reader.read_i32().unwrap(), 1);
+        }
+    }
+    let mut args = Parcel::new();
+    pm::ResolveContentProviderForUid { authority: Some("b.media".into()), flags: 0,
+        user_id: 0, calling_uid: 10999 }.write(&mut args);
+    let reply = resolver.query(&state, pm::RESOLVE_CONTENT_PROVIDER_FOR_UID, 1000,
+        &mut Reader::new(args.data(), args.objects())).unwrap().unwrap();
+    let mut reader = Reader::new(reply.data(), reply.objects());
+    assert!(reader.read_exception().unwrap().is_ok());
+    assert_eq!(reader.read_i32().unwrap(), 0);
+    assert_eq!(reader.remaining(), 0);
+}
+
+#[test]
+fn activity_options_prepend_specifics_remove_caller_and_drop_filters() {
+    let resolution = Resolution::new(state(), &Default::default()).unwrap();
+    let intent = Intent { action: Some(VIEW.into()), ..Default::default() };
+    let specific = Intent { component: Some(ComponentName {
+        package: "b.gallery".into(), class: "b.gallery.Open".into() }), ..Default::default() };
+    let results = resolution.query_activity_options(None, Some(&[None, Some(specific.clone())]),
+        None, &intent, Some("image/png"), 0, 0, 1000).unwrap();
+    assert_eq!(results[0].component(), ("b.gallery", "b.gallery.Open"));
+    assert_eq!(results[0].specific_index, 1);
+    assert!(results.iter().all(|entry| entry.filter.is_none()));
+    assert_eq!(results.iter().filter(|entry| entry.component() == ("b.gallery", "b.gallery.Open")).count(), 1);
+    let results = resolution.query_activity_options(specific.component.as_ref(), Some(&[Some(specific.clone())]),
+        None, &intent, Some("image/png"), 0, 0, 1000).unwrap();
+    assert!(results.iter().all(|entry| entry.component() != ("b.gallery", "b.gallery.Open")));
 }

@@ -101,7 +101,8 @@ fn update_timeout(ts: u64, t0: i64) {
 fn host_poll(fds: &mut [libc::pollfd], ms: i32, mask: u64) -> i64 {
     let old = swap_sigmask(mask);
     // SAFETY: a pollfd array we own.
-    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as u32, ms) };
+    let fuse_ready=fds.iter().any(|descriptor|super::fuse_device::readiness(descriptor.fd).is_some_and(|events|events.is_ok_and(|events|events&(descriptor.events|POLLERR|POLLHUP)!=0)));
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as u32, if fuse_ready{0}else{ms}) };
     let err = errno::last();
     restore_sigmask(old);
     if n < 0 { -(err as i64) } else { n as i64 }
@@ -149,6 +150,7 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
             if h.revents & libc::POLLIN != 0 && super::inotify::spuriously_ready(h.fd) {
                 h.revents &= !libc::POLLIN;
             }
+            if let Some(events)=super::fuse_device::readiness(h.fd){h.revents=match events{Ok(events)=>events,Err(_)=>POLLERR};}
             g.revents = from_host(h.revents, g.events);
             if g.revents != 0 {
                 ready += 1;
@@ -209,6 +211,7 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
     if n < 0 {
         return n;
     }
+    for descriptor in &mut host{if let Some(events)=super::fuse_device::readiness(descriptor.fd){descriptor.revents=match events{Ok(events)=>events,Err(_)=>POLLERR};}}
     if host.iter().any(|p| p.revents & POLLNVAL != 0) {
         return -(EBADF as i64);
     }

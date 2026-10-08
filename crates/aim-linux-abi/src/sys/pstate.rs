@@ -55,9 +55,15 @@ pub fn getsid(a: [u64; 6]) -> i64 {
     ns_id(a[0], libc::getsid)
 }
 
+static UMASK:OnceLock<AtomicU32>=OnceLock::new();
+static UMASK_LOCK:std::sync::Mutex<()>=std::sync::Mutex::new(());
+/// Capture inherited Darwin state before any guest thread starts; afterwards
+/// only the guest umask syscall mutates this process state.
+pub fn initialize_umask(){UMASK.get_or_init(||{let previous=unsafe{libc::umask(0)};unsafe{libc::umask(previous);}AtomicU32::new(previous as u32)});}
+pub fn current_umask()->u32{initialize_umask();let _guard=UMASK_LOCK.lock().unwrap();UMASK.get().unwrap().load(Ordering::Acquire)}
 pub fn umask(a: [u64; 6]) -> i64 {
     // SAFETY: trivial; the permission bits agree.
-    unsafe { libc::umask((a[0] & 0o777) as libc::mode_t) as i64 }
+    initialize_umask();let _guard=UMASK_LOCK.lock().unwrap();let value=(a[0]&0o777)as u32;let previous=unsafe{libc::umask(value as libc::mode_t)};UMASK.get().unwrap().store(value,Ordering::Release);previous as i64
 }
 
 const RUSAGE_SELF: i32 = 0;
@@ -312,10 +318,12 @@ static PERSONALITY: AtomicU32 = AtomicU32::new(0);
 
 pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     w.u32(personality_value());
+    w.u32(current_umask());
 }
 
 pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
     set_personality(r.u32());
+    let mask=r.u32();initialize_umask();UMASK.get().unwrap().store(mask,Ordering::Release);unsafe{libc::umask(mask as libc::mode_t);}
 }
 
 pub fn personality_value() -> u32 {

@@ -9,7 +9,8 @@ use crate::package::{
 
 impl Bridge {
     /// Version/fingerprint belong to the persistence owner. Live permission
-    /// states are fetched here, never substituted with saved migration records.
+    /// appId states are fetched here, never substituted with saved migration
+    /// records. UID-less settings retain their scoped SettingBase state instead.
     pub fn runtime_permissions(
         &self,
         capture: &Capture,
@@ -53,7 +54,10 @@ impl Bridge {
             if ps.shared_user.is_some() {
                 continue;
             }
-            let permissions = current(ps.app_id)?;
+            let permissions = setting_permissions(ps.app_id,user,||{
+                capture.scan().owner().validated_legacy_permissions(&ps.name,false)?
+                    .ok_or_else(||format!("missing UID-less SettingBase permission owner: {}",ps.name))
+            },&current)?;
             if !permissions.is_empty() || ps.is.install_permissions_fixed {
                 output.packages.push((Some(ps.name.clone()), permissions));
             }
@@ -66,5 +70,41 @@ impl Bridge {
                 .push((Some(group.name.clone()), current(group.app_id)?));
         }
         Ok(output)
+    }
+}
+
+/// Settings.RuntimePermissionPersistence reads each SettingBase's own legacy
+/// map. Process.INVALID_UID settings (APEX containers and UID-less SDK libraries)
+/// have no live PermissionService appId slot. Their detached constructor/scan
+/// owner remains authoritative; regular/system UIDs always use the live service.
+fn setting_permissions(
+    app_id:i32,user:i32,detached:impl FnOnce()->Result<crate::package::owner::legacy_permissions::State,String>,
+    live:&impl Fn(i32)->Result<Vec<RuntimePermission>,String>,
+)->Result<Vec<RuntimePermission>,String>{
+    if app_id!=-1{return live(app_id);}
+    let state=detached()?;
+    if state.app_id()!=app_id{return Err("UID-less permission SettingBase identity differs".into());}
+    let state=state.user(user).ok_or("UID-less permission user is not captured")?;
+    Ok(state.permissions.iter().map(|permission|RuntimePermission{name:permission.name.clone(),granted:permission.granted,flags:permission.flags}).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::owner::legacy_permissions::Migration;
+    #[test]
+    fn uidless_runtime_projection_uses_scoped_setting_and_keeps_live_uid_boundary(){
+        let detached=Migration::default().project(-1,&[0]).unwrap();
+        let values=setting_permissions(-1,0,||Ok(detached),&|_|panic!("UID-less setting must not query live application permission slot")).unwrap();
+        assert!(values.is_empty());
+        for app_id in [1000,10100]{
+            let values=setting_permissions(app_id,0,||panic!("positive UID must not substitute saved SettingBase state"),&|called|{
+                assert_eq!(called,app_id);Ok(vec![RuntimePermission{name:Some("fixture.live".into()),granted:true,flags:3}])
+            }).unwrap();
+            assert_eq!(values[0].name.as_deref(),Some("fixture.live"));assert_eq!(values[0].flags,3);
+        }
+        assert!(setting_permissions(10100,0,||panic!("live failure must not use saved state"),&|_|Err("live owner failed".into())).is_err());
+        assert!(setting_permissions(-1,10,||Ok(Migration::default().project(-1,&[0]).unwrap()),&|_|panic!("no live UID-less fallback")).is_err());
+        assert!(setting_permissions(-1,0,||Ok(Migration::default().project(10100,&[0]).unwrap()),&|_|panic!("identity mismatch must fail")).is_err());
     }
 }

@@ -8,13 +8,35 @@ use std::sync::{Arc, Mutex};
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
 pub mod callbacks;
+pub mod archiver;
+pub mod archive_queries;
+mod archive_timer;
+pub mod checksums;
+pub mod commit;
 pub mod codec;
+pub mod internal_installs;
 pub mod endpoint;
+pub mod environment;
+pub mod environment_image;
+pub mod environment_producers;
+pub mod existing;
+pub mod file_bridge;
+pub mod hardlink;
 pub mod native;
+pub mod move_pipeline;
+pub mod pipeline;
+pub mod permission_prepare;
+pub mod permission_capture;
+pub mod app_data;
+pub mod preapproval;
+pub mod constraints;
 pub mod policy;
+pub mod removal;
 pub mod service;
 pub mod silent;
 pub mod storage;
+pub mod staged_owner;
+pub mod streaming_owner;
 
 const INSTALL_APEX: i32 = 0x00020000;
 const INSTALL_ENABLE_ROLLBACK: i32 = 0x00040000;
@@ -29,9 +51,24 @@ pub struct Parameters {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct InstallationFile {
+    pub location: i32,
+    pub name: Option<String>,
+    pub length: i64,
+    pub metadata: Option<Vec<u8>>,
+    pub signature: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Session {
     pub id: i32,
     pub installer_uid: u32,
+    pub original_installer_uid: u32,
+    pub committed: bool,
+    pub committed_millis: i64,
+    pub resolved_package:Option<String>,
+    pub validated_target_sdk:Option<i32>,
+    pub checksums: checksums::Pending,
     pub user: u32,
     pub parameters: Parameters,
     pub parent: i32,
@@ -42,6 +79,9 @@ pub struct Session {
     pub destroyed: bool,
     pub client_progress: f32,
     pub reported_progress: f32,
+    pub has_app_metadata: bool,
+    pub pre_verified_domains: Option<Vec<String>>,
+    pub installation_files: Vec<InstallationFile>,
 }
 
 impl Session {
@@ -56,7 +96,7 @@ impl Session {
     fn mutable(&self) -> Result<(), Exception> {
         if !self.prepared {
             Err(state("Session is not prepared"))
-        } else if self.destroyed || self.sealed {
+        } else if self.destroyed || self.sealed || self.committed {
             Err(Exception::security("Session is destroyed or sealed"))
         } else {
             Ok(())
@@ -77,6 +117,7 @@ struct State {
     sessions: BTreeMap<i32, Session>,
     allocated: BTreeSet<i32>,
     records: BTreeMap<i32, Record>,
+    historical: Vec<(Session, Record)>,
 }
 
 #[derive(Default)]
@@ -110,6 +151,11 @@ impl Sessions {
                     Session {
                         id,
                         installer_uid,
+                        original_installer_uid: installer_uid,
+                        committed: false,
+                        committed_millis: 0,
+                        resolved_package:None,validated_target_sdk:None,
+                        checksums: Default::default(),
                         user,
                         parameters,
                         parent: -1,
@@ -120,6 +166,9 @@ impl Sessions {
                         destroyed: false,
                         client_progress: 0.0,
                         reported_progress: 0.0,
+                        has_app_metadata: false,
+                        pre_verified_domains: None,
+                        installation_files: Vec::new(),
                     },
                 );
                 return Ok(id);
@@ -155,6 +204,10 @@ impl Sessions {
         )?;
         self.0.lock().unwrap().records.insert(id, record);
         Ok(id)
+    }
+    pub fn update_icon(&self,id:i32,uid:u32,icon:Option<codec::Object>)->Result<(),Exception>{
+        let mut state=self.0.lock().unwrap();state.sessions.get(&id).ok_or_else(||Exception::security(format!("Caller has no access to session {id}")))?.owner(uid)?;
+        state.records.get_mut(&id).ok_or_else(||self::state("Session parameter owner unavailable"))?.params.app_icon=icon;Ok(())
     }
     pub fn update_label(
         &self,
@@ -234,9 +287,6 @@ impl Sessions {
     /// never publish prepared=true before its stage directory exists.
     pub fn prepared(&self, id: i32) -> Result<(), Exception> {
         self.change(id, |s| {
-            if s.destroyed {
-                return Err(state("Destroyed session"));
-            }
             s.prepared = true;
             Ok(())
         })
@@ -245,7 +295,7 @@ impl Sessions {
     pub fn open(&self, id: i32, uid: u32) -> Result<Option<Event>, Exception> {
         self.change(id, |s| {
             s.owner(uid)?;
-            if !s.prepared || s.destroyed {
+            if !s.prepared {
                 return Err(state("Session is unavailable"));
             }
             s.active_count = s
@@ -264,7 +314,7 @@ impl Sessions {
     /// does not transfer session ownership to the verifier.
     pub fn open_authorized(&self, id: i32) -> Result<Option<Event>, Exception> {
         self.change(id, |session| {
-            if !session.prepared || session.destroyed {
+            if !session.prepared {
                 return Err(state("Session is unavailable"));
             }
             session.active_count = session
@@ -378,6 +428,43 @@ impl Sessions {
 
     /// Marking destruction returns every affected id to the storage and
     /// callback owners; cleanup and onSessionFinished are not implied.
+    pub fn record_historical(&self,id:i32)->Result<(),Exception> {
+        let mut state=self.0.lock().unwrap();
+        let root=state.sessions.get(&id).cloned().ok_or_else(||self::state("Unknown historical session"))?;
+        let ids:Vec<_>=std::iter::once(id).chain(root.children.iter().copied()).collect();
+        for id in ids {
+            if state.historical.iter().any(|(session,_)|session.id==id){continue;}
+            let session=state.sessions.get(&id).cloned().ok_or_else(||self::state("Historical child unavailable"))?;
+            let record=state.records.get(&id).cloned().ok_or_else(||self::state("Historical record unavailable"))?;
+            if state.historical.len()>500 {state.historical.drain(..400);}
+            state.historical.push((session,record));
+        }
+        Ok(())
+    }
+    /// PIS.onSessionFinished removes ordinary root/child sessions from the
+    /// active registry after notification. Allocated IDs and history survive.
+    pub(crate) fn finish_nonstaged(&self, id: i32) -> Result<Vec<i32>, Exception> {
+        let mut state = self.0.lock().unwrap();
+        let root = state.sessions.get(&id).cloned().ok_or_else(|| self::state("Unknown finished session"))?;
+        if root.parent != -1 { return Err(self::state("Finished child requires its root")); }
+        if root.parameters.staged { return Ok(Vec::new()); }
+        let ids = std::iter::once(id).chain(root.children.iter().copied()).collect::<Vec<_>>();
+        let records = ids.iter().map(|id| {
+            let session = state.sessions.get(id).cloned().ok_or_else(|| self::state("Finished child unavailable"))?;
+            let record = state.records.get(id).cloned().ok_or_else(|| self::state("Finished parameter owner unavailable"))?;
+            Ok((session,record))
+        }).collect::<Result<Vec<_>,Exception>>()?;
+        for (session,record) in records {
+            if !state.historical.iter().any(|(old,_)|old.id==session.id) {
+                if state.historical.len()>500 {state.historical.drain(..400);}
+                state.historical.push((session.clone(),record));
+            }
+            state.sessions.remove(&session.id);
+            state.records.remove(&session.id);
+        }
+        Ok(ids)
+    }
+    pub fn historical_records(&self)->Vec<(Session,Record)> {self.0.lock().unwrap().historical.clone()}
     pub fn abandon(&self, id: i32, uid: u32) -> Result<Vec<i32>, Exception> {
         let mut state = self.0.lock().unwrap();
         let session = state
@@ -396,8 +483,19 @@ impl Sessions {
         let ids: Vec<_> = std::iter::once(id)
             .chain(session.children.iter().copied())
             .collect();
-        for id in &ids {
-            state.sessions.get_mut(id).unwrap().destroyed = true;
+        // Resolve all actual history records before changing the graph. A
+        // missing child record must not partially destroy otherwise live nodes.
+        let histories = ids.iter().map(|id| {
+            let mut session = state.sessions.get(id).cloned().ok_or_else(|| self::state("Historical child unavailable"))?;
+            let record = state.records.get(id).cloned().ok_or_else(|| self::state("Historical record unavailable"))?;
+            session.destroyed = true;
+            Ok((session, record))
+        }).collect::<Result<Vec<_>, Exception>>()?;
+        for id in &ids { state.sessions.get_mut(id).unwrap().destroyed = true; }
+        for (session, record) in histories {
+            if state.historical.iter().any(|(existing, _)| existing.id == session.id) { continue; }
+            if state.historical.len() > 500 { state.historical.drain(..400); }
+            state.historical.push((session, record));
         }
         Ok(ids)
     }
@@ -408,6 +506,7 @@ impl Sessions {
         uid: u32,
         destination: String,
         new_uid: u32,
+        open: &dyn Fn(i32) -> bool,
     ) -> Result<(), Exception> {
         let mut state = self.0.lock().unwrap();
         let session = state
@@ -416,6 +515,9 @@ impl Sessions {
             .ok_or_else(|| self::state("Unknown session"))?;
         session.owner(uid)?;
         session.mutable()?;
+        if open(id) {
+            return Err(Exception::security("Files still open"));
+        }
         session.sealed = true;
         session.installer_uid = new_uid;
         let record = state
@@ -430,7 +532,12 @@ impl Sessions {
         record.installer_attribution_tag = None;
         Ok(())
     }
-    pub(crate) fn seal(&self, id: i32, uid: u32) -> Result<Vec<i32>, (Vec<i32>, Exception)> {
+    pub(crate) fn seal(
+        &self,
+        id: i32,
+        uid: u32,
+        open: &dyn Fn(i32) -> bool,
+    ) -> Result<Vec<i32>, (Vec<i32>, Exception)> {
         let mut state = self.0.lock().unwrap();
         let session = state
             .sessions
@@ -448,6 +555,13 @@ impl Sessions {
             .collect();
         let mut sealed = Vec::new();
         for id in ids {
+            if open(id) {
+                state.sessions.get_mut(&id).unwrap().destroyed = true;
+                return Err((
+                    vec![id],
+                    self::state("Package is not valid: Files still open"),
+                ));
+            }
             let session = state.sessions.get_mut(&id).unwrap();
             if !session.prepared || session.destroyed {
                 session.destroyed = true;
@@ -470,6 +584,23 @@ impl Sessions {
             .ok_or_else(|| self::state("Unknown session"))?;
         let record = state
             .records
+            .get(&id)
+            .ok_or_else(|| self::state("Session parameter owner unavailable"))?;
+        action(session, record)
+    }
+    pub(crate) fn with_record_mut<T>(
+        &self,
+        id: i32,
+        action: impl FnOnce(&mut Session, &Record) -> Result<T, Exception>,
+    ) -> Result<T, Exception> {
+        let mut state = self.0.lock().unwrap();
+        let State {
+            sessions, records, ..
+        } = &mut *state;
+        let session = sessions
+            .get_mut(&id)
+            .ok_or_else(|| self::state("Unknown session"))?;
+        let record = records
             .get(&id)
             .ok_or_else(|| self::state("Session parameter owner unavailable"))?;
         action(session, record)
@@ -497,6 +628,67 @@ pub enum Event {
 }
 
 pub trait SessionOperations: Send + Sync {
+    fn commit_session(&self,id:i32,uid:u32,receiver:Option<preapproval::IntentSender>,transferred:bool)->Result<(),Exception>;
+    fn request_preapproval(&self,id:i32,uid:u32,body:codec::Object)->Result<(),Exception>;
+    fn stage_hard_link(&self, id: i32, uid: u32, target: Option<String>) -> Result<(), Exception>;
+    fn set_checksums(
+        &self,
+        id: i32,
+        uid: u32,
+        name: Option<String>,
+        checksums: Option<Vec<Option<checksums::Checksum>>>,
+        signature: Option<Vec<u8>>,
+    ) -> Result<(), Exception>;
+    fn request_checksums(
+        &self,
+        id: i32,
+        uid: u32,
+        name: Option<String>,
+        optional: i32,
+        required: i32,
+        trusted: checksums::TrustedInstallers,
+        listener: Option<aim_binder_host::parcel::Binder>,
+    ) -> Result<(), Exception>;
+    fn fetch_package_names(&self, id: i32, uid: u32) -> Result<Vec<Option<String>>, Exception>;
+    fn add_file(&self, id: i32, uid: u32, file: InstallationFile) -> Result<(), Exception>;
+    fn remove_file(
+        &self,
+        id: i32,
+        uid: u32,
+        location: i32,
+        name: Option<String>,
+    ) -> Result<(), Exception>;
+    fn pre_verified_domains(&self, id: i32, uid: u32) -> Result<Option<Vec<String>>, Exception>;
+    fn set_pre_verified_domains(
+        &self,
+        id: i32,
+        uid: u32,
+        domains: Option<crate::package::domain_verification::domain_set::DomainSet>,
+    ) -> Result<(), Exception>;
+    fn metadata_read(
+        &self,
+        id: i32,
+        uid: u32,
+    ) -> Result<Option<aim_binder_driver::File>, Exception>;
+    fn metadata_write(&self, id: i32, uid: u32) -> Result<aim_binder_driver::File, Exception>;
+    fn metadata_remove(&self, id: i32) -> Result<(), Exception>;
+    fn open_write(
+        &self,
+        id: i32,
+        uid: u32,
+        name: Option<String>,
+        offset: i64,
+        length: i64,
+    ) -> Result<aim_binder_driver::File, Exception>;
+    fn write_file(
+        &self,
+        id: i32,
+        uid: u32,
+        name: Option<String>,
+        offset: i64,
+        length: i64,
+        fd: Option<u32>,
+    ) -> Result<(), Exception>;
     fn names(&self, id: i32, uid: u32) -> Result<Vec<Option<String>>, Exception>;
     fn open_read(
         &self,
@@ -532,13 +724,71 @@ mod tests {
         }
     }
     #[test]
+    fn failed_retained_session_can_reopen_for_abandon_without_becoming_mutable() {
+        let sessions=Sessions::default();
+        let id=sessions.create_record(Record {
+            params:codec::SessionParams {mode:1,..Default::default()},
+            installer_uid:2000,user:0,installer_package:Some("com.android.shell".into()),
+            installer_attribution_tag:None,created_millis:77,initiating_package:Some("com.android.shell".into()),
+            originating_package:None,installer_package_uid:2000,
+        },false).unwrap();
+        sessions.prepared(id).unwrap();
+        sessions.open(id,2000).unwrap();sessions.close(id,2000).unwrap();
+        // The real failed-install owner destroys/records the session before
+        // its shell client reopens it to perform the abandonment cleanup.
+        assert_eq!(sessions.abandon(id,1000).unwrap(),vec![id]);
+        assert!(sessions.open(id,19000).is_err());
+        assert!(matches!(sessions.open(id,2000).unwrap(),Some(Event::Active {active:true,..})));
+        assert!(sessions.snapshot(id).unwrap().mutable().is_err());
+        assert!(sessions.abandon(id,2000).unwrap().is_empty());
+        assert!(matches!(sessions.close(id,2000).unwrap(),Some(Event::Active {active:false,..})));
+        assert!(matches!(sessions.open_authorized(id).unwrap(),Some(Event::Active {active:true,..})));
+        sessions.close(id,2000).unwrap();
+        assert_eq!(sessions.historical_records().len(),1);
+        assert!(sessions.snapshot(id).unwrap().destroyed);
+    }
+    #[test]
+    fn finished_nonstaged_family_retires_active_records_and_keeps_ids_and_history() {
+        let sessions=Sessions::default();
+        let create=|multi_package,staged|sessions.create_record(Record {
+            params:codec::SessionParams{mode:1,multi_package,staged,..Default::default()},
+            installer_uid:2000,user:0,installer_package:Some("fixture.installer".into()),
+            installer_attribution_tag:None,created_millis:77,initiating_package:Some("fixture.installer".into()),
+            originating_package:None,installer_package_uid:2000,
+        },false).unwrap();
+        let parent=create(true,false);let child=create(false,false);let staged=create(false,true);
+        sessions.prepared(parent).unwrap();sessions.add_child(parent,child,2000).unwrap();
+        for id in [parent,child] {sessions.with_record_mut(id,|session,_|{session.prepared=true;session.sealed=true;session.committed=true;Ok(())}).unwrap();}
+        sessions.record_historical(parent).unwrap();
+        let history=sessions.historical_records();
+        assert!(sessions.finish_nonstaged(child).is_err());
+        assert_eq!(sessions.records().len(),3);
+        assert_eq!(sessions.finish_nonstaged(parent).unwrap().into_iter().collect::<BTreeSet<_>>(),BTreeSet::from([parent,child]));
+        assert_eq!(sessions.records().iter().map(|(session,_)|session.id).collect::<Vec<_>>(),vec![staged]);
+        assert!(sessions.snapshot(parent).is_err());assert!(sessions.snapshot(child).is_err());
+        let after=sessions.historical_records();assert_eq!(after.len(),history.len());
+        assert!(after.iter().all(|(session,record)|session.committed&&session.installer_uid==record.installer_uid));
+        assert!(sessions.finish_nonstaged(staged).unwrap().is_empty());assert!(sessions.snapshot(staged).is_ok());
+        let state=sessions.0.lock().unwrap();assert!(state.allocated.contains(&parent)&&state.allocated.contains(&child));
+        // The active session XML writer only receives records(), so neither
+        // retired ordinary root nor its child can be restored as active.
+        assert!(!state.records.contains_key(&parent)&&!state.records.contains_key(&child));
+    }
+    #[test]
     fn graph_is_atomic_and_abandon_reaches_children() {
         let sessions = Sessions::default();
-        let parent = sessions.create(10200, 0, params(true, 0), false).unwrap();
-        let child = sessions.create(10200, 0, params(false, 0), false).unwrap();
-        let apex = sessions
-            .create(10200, 0, params(false, INSTALL_APEX), false)
-            .unwrap();
+        // Abandon records history from full normalized creation data. The
+        // low-level lifecycle create() deliberately supplies no such data.
+        let create = |multi_package, flags| sessions.create_record(Record {
+            params: codec::SessionParams { mode: 1, multi_package, install_flags: flags, ..Default::default() },
+            installer_uid: 10200, user: 0, installer_package: Some("fixture.installer".into()),
+            installer_attribution_tag: None, created_millis: 77,
+            initiating_package: Some("fixture.installer".into()), originating_package: None,
+            installer_package_uid: 10200,
+        }, false).unwrap();
+        let parent = create(true, 0);
+        let child = create(false, 0);
+        let apex = create(false, INSTALL_APEX);
         sessions.prepared(parent).unwrap();
         assert!(sessions.add_child(parent, child, 1000).is_err());
         assert_eq!(sessions.snapshot(child).unwrap().parent, -1);
@@ -549,6 +799,11 @@ mod tests {
         assert!(sessions.abandon(child, 10200).is_err());
         assert_eq!(sessions.abandon(parent, 1000).unwrap(), vec![parent, child]);
         assert!(sessions.snapshot(child).unwrap().destroyed);
+        let history = sessions.historical_records();
+        assert_eq!(history.iter().map(|(session, _)| session.id).collect::<Vec<_>>(), vec![parent, child]);
+        assert!(history.iter().all(|(session, record)| session.destroyed && session.installer_uid == 10200
+            && record.installer_uid == 10200 && record.created_millis == 77
+            && record.installer_package.as_deref() == Some("fixture.installer")));
     }
     #[test]
     fn opening_requires_preparation_and_progress_matches_original_weight() {
@@ -648,7 +903,7 @@ impl Record {
             install_reason: self.params.install_reason,
             install_scenario: self.params.install_scenario,
             size_bytes: self.params.size_bytes,
-            app_package_name: self.params.app_package_name.clone(),
+            app_package_name: session.resolved_package.clone().or_else(||self.params.app_package_name.clone()),
             app_icon: include_icon.then(|| self.params.app_icon.clone()).flatten(),
             app_label: self.params.app_label.clone(),
             install_location: self.params.install_location,
@@ -686,6 +941,7 @@ impl Record {
                 .params
                 .application_enabled_setting_persistent,
             auto_installing_dependencies_enabled: self.params.auto_install_dependencies_enabled,
+            committed: session.committed,
             session_error_code: 0,
             session_error_message: Some(String::new()),
             ..Default::default()
@@ -704,3 +960,5 @@ impl Event {
         }
     }
 }
+
+pub mod install_events;

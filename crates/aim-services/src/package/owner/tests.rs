@@ -2494,3 +2494,52 @@ fn boot_versions_distinguish_absence_no_start_and_uncaught_failure() {
     assert_eq!(settings.versions.len(),2); assert_eq!(settings.versions[0].sdk_version,36);
     assert_eq!(fs::read(data.0.join("system/packages.xml")).unwrap(),bytes);
 }
+
+#[test]
+fn scan_restrictions_use_full_live_inventory_separately_from_settings_projection() {
+    let data=Data::new();data.settings();
+    let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();
+    // APEX settings are reconstructed from the verified APEX inventory and
+    // omitted by writeLPr; writePackageRestrictions still writes their users.
+    let persisted=store.state.settings.packages.iter().map(|package|package.name.clone()).collect::<BTreeSet<_>>();
+    let mut live=persisted.clone();live.insert("fixture.apex".into());
+    store.unread_restrictions.insert(0);store.claim_unread_restrictions(0).unwrap();
+    let document=|names:&BTreeSet<String>|{
+        let mut root=element("package-restrictions");
+        for name in names {let mut node=element("pkg");attribute(&mut node,"name",Some(aim_android_xml::Value::String(name.clone())));root.content.push(aim_android_xml::Node::Element(node));}
+        root
+    };
+    let mut unknown=live.clone();unknown.insert("outside.scan".into());
+    let error=store.commit_initial_restrictions_inventory_using(0,document(&unknown),&live,|file,bytes|file.write_all(bytes)).unwrap_err();
+    assert!(!error.committed);assert!(store.unread_restrictions.contains(&0));
+    assert!(store.commit_initial_restrictions(0,document(&live)).is_err());
+    store.commit_initial_restrictions_inventory_using(0,document(&live),&live,|file,bytes|file.write_all(bytes)).unwrap();
+    assert_eq!(store.state.settings.packages.iter().map(|package|package.name.clone()).collect::<BTreeSet<_>>(),persisted);
+    assert_eq!(store.state.users[0].1.restrictions.packages.iter().map(|(name,_)|name.clone()).collect::<BTreeSet<_>>(),live);
+    let root=aim_android_xml::read(&fs::read(data.0.join("system/users/0/package-restrictions.xml")).unwrap()).unwrap();
+    assert_eq!(Restrictions::parse(&root).unwrap().packages.iter().map(|(name,_)|name.clone()).collect::<BTreeSet<_>>(),live);
+}
+
+#[test]
+fn restored_boot_commit_reconciles_global_scan_and_preserves_user_side_owners() {
+    use crate::package::{scan::{SigningScan,CapturedUsers},owner::usage::Usage,restrictions::UserState};
+    let data=Data::new();let restrictions=data.settings();
+    fs::write(data.0.join("system/packages.xml"),b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' version='1' domainSetId='00000000-0000-0000-0000-000000000001'/></packages>").unwrap();
+    fs::write(&restrictions,b"<package-restrictions><pkg name='example.app' stopped='true'/><default-apps><default-browser packageName='example.browser'/></default-apps><preferred-activities/></package-restrictions>").unwrap();
+    let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();
+    let side_owners=store.restrictions[&0].children().filter(|element|element.name!="pkg").cloned().collect::<Vec<_>>();
+    let mut owner=SigningScan::new(&Default::default(),&store.state.settings,36).unwrap();
+    owner.settings.packages[0].version_code=2;
+    owner.settings.packages[0].last_update_time=777;
+    owner.capture_user_states(BTreeMap::from([(("example.app".into(),false),CapturedUsers{states:BTreeMap::from([(0,UserState{stopped:false,ce_data_inode:99,..Default::default()})]),active_aliases:Default::default()})])).unwrap();
+    let snapshot=crate::package::scan_snapshot::Store::new(owner,Usage::new(["example.app"])).unwrap().capture();
+    assert!(store.validate_committed_scan(snapshot.owner()).is_err());
+    store.commit_completed_boot_scan(&snapshot,false).unwrap();
+    store.validate_committed_scan(snapshot.owner()).unwrap();
+    assert_eq!(store.restrictions[&0].children().filter(|element|element.name!="pkg").cloned().collect::<Vec<_>>(),side_owners);
+    let reopened=Store::open(&data.0,&[0]).unwrap().unwrap();
+    reopened.validate_committed_scan(snapshot.owner()).unwrap();
+    assert_eq!(reopened.state.settings.packages[0].version_code,2);
+    assert_eq!(reopened.state.users[0].1.restrictions.packages.iter().find(|(name,_)|name=="example.app").unwrap().1.ce_data_inode,99);
+    assert!(!reopened.state.users[0].1.restrictions.packages.iter().find(|(name,_)|name=="example.app").unwrap().1.stopped);
+}

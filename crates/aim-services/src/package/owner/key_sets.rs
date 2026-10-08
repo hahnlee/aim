@@ -218,8 +218,8 @@ pub(super) fn replace(
             _ => {}
         }
     }
-    if super::signing::persisted(Settings::parse(&root)?)
-        != super::signing::persisted(desired.clone())
+    if super::canonical_persistent_settings(Settings::parse(&root)?)
+        != super::canonical_persistent_settings(desired.clone())
     {
         return Err("boot removal metadata did not preserve desired settings".into());
     }

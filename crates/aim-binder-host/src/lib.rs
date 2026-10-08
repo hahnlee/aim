@@ -24,5 +24,6 @@ pub mod client;
 pub mod local;
 pub mod mach;
 pub mod parcel;
+pub mod proxy_file;
 pub mod server;
 pub mod wire;

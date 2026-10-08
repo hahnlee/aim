@@ -125,6 +125,7 @@ pub struct Parcel {
     data: Vec<u8>,
     objects: Vec<u64>,
     files: Files,
+    keepers: Keepers,
 }
 
 /// The files of a parcel's fd objects, by the objects' offsets.
@@ -139,7 +140,22 @@ impl std::fmt::Debug for Files {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct Keepers(pub Vec<File>);
+impl std::fmt::Debug for Keepers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ParcelKeepers").field(&self.0.len()).finish()
+    }
+}
+
 impl Parcel {
+    /// Keep a capability alive until Binder has consumed the outgoing parcel.
+    pub fn keep_alive<T: std::any::Any + Send + Sync>(&mut self, capability: std::sync::Arc<T>) {
+        self.keepers.0.push(capability);
+    }
+    pub(crate) fn keepers(&self) -> Keepers {
+        self.keepers.clone()
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -149,6 +165,10 @@ impl Parcel {
     }
 
     /// The offsets of the binder objects in [`Parcel::data`].
+    pub fn reader(&self) -> Reader<'_> {
+        Reader::new(self.data(), self.objects())
+    }
+
     pub fn objects(&self) -> &[u64] {
         &self.objects
     }

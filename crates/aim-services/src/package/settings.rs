@@ -5,10 +5,7 @@
 //! `Settings.readSettingsLPw` reads them (`writeLPr` writes them).
 //!
 //! Legacy `<perms>` restore lives in owner::legacy_permissions.
-//! Not modelled yet: what only older platforms write (per-package
-//! `<enabled-components>`, `<disabled-components>`,
-//! the single-user preferred activities), which
-//! the original reads only to migrate.
+//! Constructor migration records are owned by settings::native_read.
 
 use aim_android_xml::Element;
 
@@ -19,6 +16,7 @@ mod signatures;
 mod key_sets;
 mod verifier;
 mod read;
+pub mod native_read;
 pub use read::ReadOwners;
 pub use super::owner::recovery::ReadError;
 pub use signatures::SignatureReader;

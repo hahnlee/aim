@@ -22,7 +22,7 @@ use crate::mach::{self, Buffer, Msg, Port, Received};
 use crate::wire::{self, Ioctl, IoctlReply, Reader, SharedFile, Writer};
 
 /// A fileport as the driver's opaque `File`.
-struct FilePort(Port);
+struct FilePort(Port, u32);
 
 impl Drop for FilePort {
     fn drop(&mut self) {
@@ -34,7 +34,21 @@ impl Drop for FilePort {
 /// fd. The returned fileport keeps the file alive while it crosses Binder.
 pub fn file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
     use std::os::fd::AsRawFd;
-    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port)) as File)
+    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, 0)) as File)
+}
+
+/// Export a native proxy capability with an explicit versioned Binder class.
+pub fn proxy_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
+    use std::os::fd::AsRawFd;
+    if crate::proxy_file::registered_class(fd.as_raw_fd()) != crate::proxy_file::CLASS {
+        return None;
+    }
+    mach::fd_to_port(fd.as_raw_fd())
+        .map(|port| Arc::new(FilePort(port, crate::proxy_file::CLASS)) as File)
+}
+
+pub fn file_class(file: &File) -> Option<u32> {
+    file.downcast_ref::<FilePort>().map(|file| file.1)
 }
 
 /// A new host fd for a file a guest sent (a fileport), which a binder
@@ -212,7 +226,24 @@ impl Server {
             let Ok(req) = mach::receive(&mut buf, self.set) else {
                 continue;
             };
-            let result = if req.local == self.service && req.id == wire::FILES {
+            let result = if req.local == self.service && req.id == wire::FILE_CLASS {
+                if req.ports.len() != 1 || !req.data.is_empty() {
+                    Err(wire::EPROTO)
+                } else if let Some(fd) = mach::port_to_fd(req.ports[0]) {
+                    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+                    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                    let mut out = Writer::default();
+                    match crate::proxy_file::registered_class_result(fd.as_raw_fd()) {
+                        Ok(class) => {
+                            out.u32(class);
+                            Ok((Vec::new(), out.0))
+                        }
+                        Err(_) => Err(5),
+                    }
+                } else {
+                    Err(errno::EBADF)
+                }
+            } else if req.local == self.service && req.id == wire::FILES {
                 self.shared_files(&req)
             } else if req.local == self.service {
                 self.open(&req)
@@ -483,7 +514,17 @@ impl Worker {
         };
         let io = Ioctl::decode(&req.data)
             .ok()
-            .filter(|io| io.fds.len() == req.ports.len());
+            .filter(|io| io.fds.len() == req.ports.len())
+            .filter(|io| {
+                req.ports.iter().zip(&io.file_classes).all(|(port, class)| {
+                    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+                    mach::port_to_fd(*port).is_some_and(|fd| {
+                        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                        crate::proxy_file::registered_class_result(fd.as_raw_fd())
+                            .is_ok_and(|actual| actual == *class)
+                    })
+                })
+            });
         let (Some(io), Some((file, tid))) = (io, thread) else {
             for p in &req.ports {
                 mach::release_send(*p);
@@ -500,7 +541,10 @@ impl Worker {
                 .fds
                 .iter()
                 .zip(&req.ports)
-                .map(|(fd, p)| (*fd, Arc::new(FilePort(*p)) as File))
+                .enumerate()
+                .map(|(index, (fd, p))| {
+                    (*fd, Arc::new(FilePort(*p, io.file_classes[index])) as File)
+                })
                 .collect(),
             reserved: io.reserved,
             grow: io.grow,
@@ -693,6 +737,9 @@ impl GuestProcess for Gathered {
         }
         let fd = self.reserved.remove(0);
         self.reply.installs.push(fd);
+        self.reply
+            .file_classes
+            .push(file.downcast_ref::<FilePort>().unwrap().1);
         self.installed.push(file);
         Ok(fd)
     }

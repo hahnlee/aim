@@ -516,6 +516,13 @@ fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
     (out.join().unwrap(), err.join().unwrap())
 }
 
+/// Linux retains blocked default-disposition SIGCHLD for synchronous waits,
+/// including fork+exec exit before the wait and an explicit SIG_DFL reset.
+#[test]
+fn default_blocked_sigchld_is_consumed_by_sigtimedwait() {
+    check("default_sigchld_sigtimedwait");
+}
+
 /// The image's mksh forks, pipes and execs itself; its parent waits for
 /// SIGCHLD in `sigsuspend`.
 #[test]

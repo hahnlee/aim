@@ -1,0 +1,7 @@
+# Experimental C only. Never included by the default image/overlay.toml.
+clipboard        com.android.server.clipboard.ClipboardService
+vibrator_manager com.android.server.vibrator.VibratorManagerService$Lifecycle
+location         com.android.server.location.LocationManagerService$Lifecycle
+thermalservice   com.android.server.power.ThermalManagerService
+uimode           com.android.server.UiModeManagerService
+package          com.android.server.pm.PackageManagerService

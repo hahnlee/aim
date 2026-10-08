@@ -295,3 +295,4 @@ mod tests {
         assert!(State::read(&duplicate.bytes(), 10042, &[10, 0]).is_err());
     }
 }
+pub(crate) mod retained_user;

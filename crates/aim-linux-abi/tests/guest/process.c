@@ -1413,6 +1413,42 @@ static void seccomp_filter(void) {
   printf("ok seccomp_filter\n");
 }
 
+// Default-disposition SIGCHLD stays pending while blocked, including when
+// an exec'ed child exits before the parent enters its timed signal wait.
+static void default_sigchld_sigtimedwait(void) {
+  struct sigaction original, reset = {.sa_handler = SIG_DFL};
+  CHECK(sigaction(SIGCHLD, NULL, &original) == 0 && original.sa_handler == SIG_DFL,
+        "initial SIGCHLD disposition");
+  sigset_t set, old;
+  sigemptyset(&set);
+  sigaddset(&set, SIGCHLD);
+  CHECK(sigprocmask(SIG_BLOCK, &set, &old) == 0, "block SIGCHLD");
+  for (int explicit_default = 0; explicit_default < 2; explicit_default++) {
+    if (explicit_default) CHECK(sigaction(SIGCHLD, &reset, NULL) == 0, "reset SIGCHLD");
+    pid_t child = fork();
+    CHECK(child >= 0, "fork SIGCHLD child");
+    if (child == 0) {
+      char* args[] = {"exit", NULL};
+      execv(self_path, args);
+      _exit(99);
+    }
+    // Let exit precede sigtimedwait: retaining a blocked signal matters even
+    // when no thread has entered the wait yet.
+    usleep(100000);
+    siginfo_t info = {0};
+    struct timespec timeout = {.tv_sec = 2};
+    int signal = sigtimedwait(&set, &info, &timeout);
+    int error = errno, status = 0;
+    CHECK(waitpid(child, &status, 0) == child, "reap owned SIGCHLD child");
+    CHECK(signal == SIGCHLD, "default blocked SIGCHLD wait returned %d errno %d", signal, error);
+    CHECK(info.si_signo == SIGCHLD && info.si_pid == child && info.si_code == CLD_EXITED &&
+              info.si_status == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "SIGCHLD identity/status: pid %d code %d status %d", info.si_pid, info.si_code, info.si_status);
+  }
+  CHECK(sigprocmask(SIG_SETMASK, &old, NULL) == 0, "restore signal mask");
+  puts("ok default_sigchld_sigtimedwait");
+}
+
 int main(int argc, char** argv) {
   self_path = "/data/local/tmp/process";
   arg_area = argv[0];
@@ -1450,6 +1486,7 @@ int main(int argc, char** argv) {
     const char* name;
     void (*fn)(void);
   } checks[] = {
+      {"default_sigchld_sigtimedwait", default_sigchld_sigtimedwait},
       {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
       {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},
       {"exec_image", exec_image},   {"exec_argv", exec_argv},

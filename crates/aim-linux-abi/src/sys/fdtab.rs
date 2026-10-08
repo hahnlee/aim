@@ -29,6 +29,7 @@ pub static SLOW: [AtomicU8; SLOW_FDS] = [const { AtomicU8::new(0) }; SLOW_FDS];
 
 #[derive(Clone)]
 pub enum Kind {
+    ProxyFile,
     Event(Arc<event::EventFd>),
     Timer(Arc<event::TimerFd>),
     Sock(Arc<net::Sock>),
@@ -78,6 +79,8 @@ pub fn get(fd: i32) -> Option<Kind> {
 
 /// The guest closed `fd` (or is about to replace it with dup2).
 pub fn on_close(fd: i32) {
+    super::fuse_client::close(fd);
+    if super::fuse_device::is_device(fd){set_slow(fd,false);}
     match get(fd) {
         None => return,
         Some(Kind::Content | Kind::Knob(_)) => super::procfs::recycle(fd),
@@ -90,6 +93,8 @@ pub fn on_close(fd: i32) {
 /// `new` now refers to the same open file as `old`.
 pub fn on_dup(old: i32, new: i32) {
     on_close(new);
+    super::fuse_client::dup(old,new);
+    if super::fuse_device::is_device(old){super::fuse_device::adopt(new);}
     if let Some(k) = get(old) {
         insert(new, k);
     }
@@ -98,6 +103,38 @@ pub fn on_dup(old: i32, new: i32) {
 /// Recognize an fd that arrived from elsewhere (exec, `SCM_RIGHTS`,
 /// binder): a socket or a memfd gets its Linux state.
 pub fn adopt(fd: i32) {
+    if super::fuse_device::adopt(fd){return;}
+    if super::fuse_client::adopt(fd)==Ok(true){return;}
+    if super::binder::file_class(fd) == Ok(aim_binder_host::proxy_file::CLASS) {
+        insert(fd, Kind::ProxyFile);
+        return;
+    }
+    adopt_untyped(fd);
+}
+
+pub(super) fn adopt_received(fd: i32) -> Result<(), i32> {
+    if super::fuse_device::adopt(fd){return Ok(());}
+    if super::fuse_client::adopt(fd)?{return Ok(());}
+    match super::binder::file_class(fd)? {
+        0 => adopt_untyped(fd),
+        aim_binder_host::proxy_file::CLASS => insert(fd, Kind::ProxyFile),
+        _ => return Err(71),
+    }
+    Ok(())
+}
+
+pub(super) fn refresh_capabilities() -> Result<(), i32> {
+    for fd in open_fds() {
+        if super::binder::file_class(fd)? == aim_binder_host::proxy_file::CLASS {
+            insert(fd, Kind::ProxyFile);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn adopt_untyped(fd: i32) {
+    if super::fuse_device::adopt(fd){return;}
+    if super::fuse_client::adopt(fd)==Ok(true){return;}
     net::adopt(fd);
     memfd::adopt(fd);
     random::adopt(fd);
@@ -163,6 +200,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             | Kind::Content
             | Kind::Knob(_)
             | Kind::Random
+            | Kind::ProxyFile
             | Kind::Binder(_) => {
                 return None;
             }
@@ -304,7 +342,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
-            Kind::Memfd(_) | Kind::SyncFile | Kind::Random => std::ptr::null(),
+            Kind::Memfd(_) | Kind::SyncFile | Kind::Random | Kind::ProxyFile => std::ptr::null(),
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
@@ -357,6 +395,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             }
             Kind::SyncFile => w.u32(7),
             Kind::Random => w.u32(8),
+            Kind::ProxyFile => w.u32(9),
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
@@ -380,6 +419,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             5 => Kind::Dir(Arc::new(Mutex::new(super::dir::load(r)))),
             7 => Kind::SyncFile,
             8 => Kind::Random,
+            9 => Kind::ProxyFile,
             _ => Kind::Memfd((r.u64(), r.u64())),
         };
         objects.push(k.clone());
@@ -391,6 +431,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         }
     }
     keep_inherited_hidden(r.seq(|r| r.i32()));
+    for fd in open_fds(){if super::fuse_device::adopt(fd){continue;}if !is_hidden(fd)&&super::fuse::marker(fd)==Some(super::fuse::FILE_MARKER){if let Err(error)=super::fuse_client::adopt(fd){set_slow(fd,true);eprintln!("inherited FUSE descriptor adoption failed: {error}");}}}
 }
 
 /// Fork child: hide the parent's hidden fds that came along, beside this

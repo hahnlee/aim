@@ -184,6 +184,7 @@ impl FsOps {
             host: from.host.clone(),
             kind: MapKind::Writable,
         });
+        self.map.bind_source(&to.guest,&from.guest);
         for entry in below {
             self.map.add(entry);
         }
@@ -585,6 +586,12 @@ impl FsOps {
         options: &[String],
     ) -> FsResult {
         let resolved = self.resolve(target, true)?;
+        if let Some(kind)=options.iter().find(|option|matches!(option.as_str(),"shared"|"slave"|"private")){
+            self.map.propagation(&resolved.guest,kind,options.iter().any(|option|option=="rec"));
+            if self.apply&&let Some(file)=&self.path_map_file{fs::write(file,self.map.to_file_text()).map_err(|error|error.to_string())?;}
+            return Ok(Effect::Applied(format!("mount propagation {} {kind}",resolved.guest)));
+        }
+
         if options.iter().any(|o| o == "bind" || o == "rbind") || device.starts_with('/') {
             let rec = options.iter().any(|o| o == "rec" || o == "rbind");
             if options.iter().any(|o| o == "bind" || o == "rbind")
@@ -678,6 +685,22 @@ mod tests {
         layout
     }
 
+    #[test]
+    fn init_storage_bind_and_slave_keep_explicit_namespace_relations(){
+        let layout=temp_layout("storage-propagation");let mut ops=FsOps::new(layout.path_map(),layout.fs_attrs_file(),true);ops.set_path_map_file(layout.path_map_file());
+        ops.mkdir("/mnt/user",Some(0o755),None,None).unwrap();
+        ops.mkdir("/mnt/user/0",Some(0o755),None,None).unwrap();
+        ops.mount("none","/mnt/user/0","/storage",&["bind".into(),"rec".into()]).unwrap();
+        ops.mount("none","none","/storage",&["slave".into(),"rec".into()]).unwrap();
+        // Later original init binds reorder map entries but retain all prior
+        // namespace relationships and policies.
+        ops.mkdir("/data/user_de",Some(0o755),None,None).unwrap();
+        ops.mkdir("/data_mirror/metadata-test",Some(0o755),None,None).unwrap();
+        ops.mount("none","/data/user_de","/data_mirror/metadata-test",&["bind".into(),"rec".into()]).unwrap();
+        let text=fs::read_to_string(layout.path_map_file()).unwrap();
+        assert!(text.contains("bind-source\t/storage\t/mnt/user/0\n"));assert!(text.contains("propagation\t/storage\tslave\n"));
+        let parsed=crate::paths::PathMap::parse_file_text(&text).unwrap();assert_eq!(parsed.to_file_text(),text);
+    }
     #[test]
     fn init_bind_mounts_become_path_map_entries() {
         let layout = temp_layout("bind");

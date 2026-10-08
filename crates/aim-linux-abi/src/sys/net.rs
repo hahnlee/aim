@@ -868,11 +868,19 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
 pub fn hidden_socket(fd: i32) -> bool {
     matches!(
         fdtab::get(fd),
-        Some(Kind::Event(_) | Kind::Timer(_) | Kind::Evdev(_) | Kind::SyncFile | Kind::Binder(_))
+        Some(
+            Kind::Event(_)
+                | Kind::Timer(_)
+                | Kind::Evdev(_)
+                | Kind::SyncFile
+                | Kind::Binder(_)
+                | Kind::ProxyFile
+        )
     )
 }
 
 fn is_socket(fd: i32) -> Result<(), i64> {
+    if super::fuse_device::is_typed(fd){return Err(-ENOTSOCK);}
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
@@ -954,6 +962,7 @@ pub fn bind(a: [u64; 6]) -> i64 {
 }
 
 pub fn connect(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     let fd = a[0] as i32;
     if let Err(e) = is_socket(fd) {
         return e;
@@ -1094,11 +1103,13 @@ fn datagram_to_port_zero(fd: i32, t: &mut Target) -> bool {
 }
 
 pub fn listen(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     // SAFETY: plain listen.
     errno::check(unsafe { libc::listen(a[0] as i32, a[1] as i32) } as i64)
 }
 
 pub fn accept4(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     let (fd, addr, addrlen, flags) = (a[0] as i32, a[1], a[2], a[3]);
     if flags & !(L_SOCK_NONBLOCK | L_SOCK_CLOEXEC) != 0 {
         return -(EINVAL as i64);
@@ -1217,14 +1228,17 @@ fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
 }
 
 pub fn getsockname(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     name_of(a[0] as i32, false, a[1], a[2])
 }
 
 pub fn getpeername(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     name_of(a[0] as i32, true, a[1], a[2])
 }
 
 pub fn shutdown(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     if a[1] > 2 {
         return -(EINVAL as i64);
     }
@@ -1281,7 +1295,7 @@ fn control_to_guest(
     cloexec: bool,
     out: u64,
     cap: usize,
-) -> (usize, i32) {
+) -> Result<(usize, i32), i64> {
     let mut msgs: Vec<(i32, Vec<u8>)> = Vec::new();
     let mut off = 0usize;
     while off + 12 <= host.len() {
@@ -1292,13 +1306,6 @@ fn control_to_guest(
         }
         if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
             let data = host[off + 12..off + clen].to_vec();
-            for fd in data
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
-            {
-                fdtab::set_flags(fd, false, cloexec);
-                fdtab::adopt(fd);
-            }
             // Darwin can hand back a bare SCM_RIGHTS header (a sender's
             // empty one); Linux never delivers one, and libbase aborts on it.
             if !data.is_empty() {
@@ -1306,6 +1313,24 @@ fn control_to_guest(
             }
         }
         off += (clen + 3) & !3;
+    }
+    let received: Vec<i32> = msgs
+        .iter()
+        .filter(|(ty, _)| *ty == L_SCM_RIGHTS)
+        .flat_map(|(_, data)| {
+            data.chunks_exact(4)
+                .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        })
+        .collect();
+    for &fd in &received {
+        if let Err(error) = fdtab::adopt_received(fd) {
+            for &received_fd in &received {
+                fdtab::on_close(received_fd);
+                unsafe { libc::close(received_fd) };
+            }
+            return Err(-(error as i64));
+        }
+        fdtab::set_flags(fd, false, cloexec);
     }
     if let Some(c) = cred {
         let mut d = c.pid.to_le_bytes().to_vec();
@@ -1340,7 +1365,7 @@ fn control_to_guest(
         unsafe { std::ptr::copy_nonoverlapping(rec.as_ptr(), (out as *mut u8).add(w), rec.len()) };
         w += rec.len();
     }
-    (w, flags)
+    Ok((w, flags))
 }
 
 // ---- send / receive --------------------------------------------------------
@@ -1479,6 +1504,7 @@ fn send(
     ctrl: Option<(u64, usize)>,
     flags: u64,
 ) -> i64 {
+    if super::fuse_device::is_typed(fd){return -ENOTSOCK;}
     if let Some(r) = send_other(fd, iov, name) {
         return r;
     }
@@ -1816,6 +1842,7 @@ fn recv(
     ctrl_cap: usize,
     flags: u64,
 ) -> Result<Received, i64> {
+    if super::fuse_device::is_typed(fd){return Err(-ENOTSOCK);}
     if let Some(r) = recv_other(fd, iov, flags) {
         return r;
     }
@@ -2072,13 +2099,16 @@ fn recvmsg_one(fd: i32, mp: u64, flags: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let (cl, ctrunc) = control_to_guest(
+    let (cl, ctrunc) = match control_to_guest(
         &r.ctrl,
         r.cred,
         flags & L_MSG_CMSG_CLOEXEC != 0,
         m.control,
         m.controllen as usize,
-    );
+    ) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     m.controllen = cl as u64;
     m.flags = linux_msg_flags(r.flags) | ctrunc;
     if m.name != 0 {
@@ -2251,6 +2281,7 @@ fn put_opt(v: &[u8], out: u64, outlen: u64) -> i64 {
 }
 
 pub fn setsockopt(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     let (fd, level, opt, val, len) = (a[0] as i32, a[1], a[2], a[3], a[4] as u32);
     let int = || {
         if len < 4 {
@@ -2665,6 +2696,82 @@ pub fn getsockopt(a: [u64; 6]) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proxy_scm_receipt_reexport_dup_and_revocation_keep_owner_class() {
+        use aim_binder_host::{proxy_file, server::Server};
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::unix::net::UnixStream;
+        let name = format!("dev.aim.test.proxy-registry.{}", std::process::id());
+        let _server = Server::start(&name).unwrap();
+        super::super::binder::init(&name).unwrap();
+        let path = std::env::temp_dir().join(format!("aim-linux-proxy-scm-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let (owner, capability, worker) = proxy_file::open(file).unwrap();
+        let fd = capability.into_raw_fd();
+        super::fdtab::insert(fd, super::Kind::ProxyFile);
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let transfer = |fd: i32| {
+            let mut control = [0u8; 24];
+            control[..8].copy_from_slice(&20u64.to_ne_bytes());
+            control[8..12].copy_from_slice(&1i32.to_ne_bytes());
+            control[12..16].copy_from_slice(&1i32.to_ne_bytes());
+            control[16..20].copy_from_slice(&fd.to_ne_bytes());
+            let mut payload = [b'x'];
+            let iov = libc::iovec {
+                iov_base: payload.as_mut_ptr().cast(),
+                iov_len: 1,
+            };
+            let mut msg = super::LinuxMsghdr {
+                name: 0,
+                namelen: 0,
+                _pad: 0,
+                iov: &iov as *const _ as u64,
+                iovlen: 1,
+                control: control.as_mut_ptr() as u64,
+                controllen: 24,
+                flags: 0,
+                _pad2: 0,
+            };
+            assert_eq!(super::sendmsg_one(sender.as_raw_fd(), &msg, 0), 1);
+            control.fill(0);
+            assert_eq!(
+                super::recvmsg_one(
+                    receiver.as_raw_fd(),
+                    &mut msg as *mut _ as u64,
+                    super::L_MSG_CMSG_CLOEXEC
+                ),
+                1
+            );
+            assert_eq!(msg.flags & super::L_MSG_CTRUNC, 0);
+            let received = i32::from_ne_bytes(control[16..20].try_into().unwrap());
+            assert!(super::super::proxy_file::is_proxy(received));
+            assert!(unsafe { libc::fcntl(received, libc::F_GETFD) } & libc::FD_CLOEXEC != 0);
+            received
+        };
+        let received = transfer(fd);
+        super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]);
+        let exported = transfer(received);
+        let duplicate = super::super::fs::dup([exported as u64, 0, 0, 0, 0, 0]) as i32;
+        assert!(super::super::proxy_file::is_proxy(duplicate));
+        let bytes = b"typed";
+        assert_eq!(
+            super::super::fs::write([received as u64, bytes.as_ptr() as u64, 5, 0, 0, 0]),
+            5
+        );
+        assert_eq!(super::super::proxy_file::seek(duplicate, 0, 1), 5);
+        owner.revoke();
+        assert_eq!(super::super::proxy_file::sync(exported), -1);
+        for fd in [received, exported, duplicate] {
+            super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]);
+        }
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
+    }
     use super::*;
 
     #[test]

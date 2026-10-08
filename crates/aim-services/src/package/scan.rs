@@ -9,6 +9,8 @@ use super::{
 };
 use std::collections::BTreeMap;
 
+mod code_projection;
+pub use code_projection::Projection as CodeProjection;
 mod apex;
 mod apex_image;
 mod apex_register;
@@ -50,14 +52,16 @@ pub use disabled::{
     UpdatedSystemSource,
 };
 pub use updated_boot::{UpdatedSystemBootInputs, UpdatedSystemBootOutcome};
-mod removal;
-mod setting;
-mod signing;
-mod seinfo;
-mod legacy;
-mod libraries;
 mod hidden_api;
+mod legacy;
+pub mod live_install;
+pub mod boot_compressed;
+mod libraries;
+mod removal;
+mod seinfo;
+mod setting;
 mod shared_processes;
+mod signing;
 pub use shared_processes::{OriginalSharedMember, OriginalSharedProcesses};
 mod replica_runtime;
 pub use completion::{CompletedScanMetadata, ScanMetadataCompletion};
@@ -90,6 +94,8 @@ pub struct LoadedPackage {
     pub package: AndroidPackage,
     pub collected_signing: sign::SigningDetails,
     disabled_binding: Option<DisabledCodeBinding>,
+    runtime_view: Option<std::sync::Arc<AndroidPackage>>,
+    projection: code_projection::Cache,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +119,8 @@ impl LoadedPackage {
             package,
             collected_signing,
             disabled_binding: None,
+            runtime_view: None,
+            projection: Default::default(),
         })
     }
 
@@ -154,8 +162,16 @@ impl LoadedPackage {
         Ok(())
     }
 
-    pub fn facade_entry(&self) -> Result<super::pkg::FacadeEntry, String> {
-        self.package.to_facade_entry(&self.collected_signing)
+    pub fn runtime_package(&self) -> &AndroidPackage {
+        self.runtime_view.as_deref().unwrap_or(&self.package)
+    }
+    pub(super) fn set_runtime_package(&mut self, view: AndroidPackage) {
+        self.runtime_view = Some(std::sync::Arc::new(view));
+        self.projection = Default::default();
+    }
+
+    pub fn facade_entry(&self) -> Result<std::sync::Arc<super::pkg::FacadeEntry>, String> {
+        self.code_projection().map(|value|value.facade)
     }
 }
 
@@ -314,7 +330,13 @@ mod tests {
             version_code: 17,
             ..Default::default()
         };
-        let unbound = LoadedPackage::new(pkg, sign::SigningDetails::unknown()).unwrap();
+        let mut unbound = LoadedPackage::new(pkg, sign::SigningDetails::unknown()).unwrap();
+        let mut runtime = unbound.package.clone();
+        runtime.providers = vec![super::super::pkg::Provider {
+            authority: Some("normalized".into()),
+            ..Default::default()
+        }];
+        unbound.set_runtime_package(runtime);
         assert!(unbound.validate_setting(&setting, true).is_err());
         let bound = std::sync::Arc::new(unbound.bind_disabled(&setting));
         bound.validate_setting(&setting, true).unwrap();
@@ -333,6 +355,11 @@ mod tests {
         changed.package.package_name = "foreign".into();
         assert!(changed.validate_setting(&setting, true).is_err());
         assert_eq!(bound.package.package_name, "incoming");
+        assert!(bound.package.providers.is_empty());
+        assert_eq!(
+            bound.runtime_package().providers[0].authority.as_deref(),
+            Some("normalized")
+        );
         bound.validate_setting(&setting, true).unwrap();
     }
 
@@ -354,3 +381,8 @@ mod tests {
         assert!(physical_parse_flags("/mnt/expand/volume/not-app/pkg").is_err());
     }
 }
+
+#[cfg(test)]
+mod factory_retention_tests;
+
+pub mod permission_admissions;

@@ -64,6 +64,8 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
 
   linux-run --sweep-memfds reclaim unused host memfd backing files
 
+  linux-run --fuse-broker PATH (internal) the FUSE kernel connection owner
+
   linux-run --audio-io   (internal) the audio host module's CoreAudio
                          process, started by the module itself
   linux-run [RUNTIME OPTIONS] --fork-child FDS
@@ -102,6 +104,15 @@ fn host_environment() -> Vec<Vec<u8>> {
 }
 
 fn main() {
+    let internal_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if internal_args.first().is_some_and(|arg| arg == "--fuse-broker") {
+        if internal_args.len() != 2 { usage(); }
+        if let Err(error) = aim_linux_abi::sys::fuse::serve_broker(&PathBuf::from(&internal_args[1])) {
+            eprintln!("linux-run: FUSE broker: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args_os().skip(1).collect::<Vec<_>>() == ["--sweep-memfds"] {
         println!(
             "reclaimed {} unused memfd backing files",

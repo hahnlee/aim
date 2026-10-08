@@ -606,6 +606,9 @@ pub fn exit_group(a: [u64; 6]) -> ! {
 }
 
 fn end_process(code: i32) -> ! {
+    if let Err(error) = super::fuse_cache::shutdown_writeback() {
+        crate::diag!("FUSE exit writeback failed: Linux errno {error}");
+    }
     super::tty::drain_on_exit();
     super::ptrace::process_ending(code << 8);
     super::fork::spawn::wait_handovers();

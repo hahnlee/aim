@@ -18,6 +18,7 @@ use super::model::{PackageState, SharedUser, State};
 use super::pkg::{AndroidPackage, booleans};
 use super::uri::Uri;
 
+pub mod logging;
 mod implicit;
 pub use implicit::ImplicitAccess;
 
@@ -308,6 +309,9 @@ fn signatures_match_exactly(a: &PackageState, b: &PackageState) -> bool {
 }
 
 impl AppsFilter {
+    pub fn is_force_queryable(&self, app_id: i32) -> bool {
+        self.force_queryable.contains(&app_id)
+    }
     /// The relations of every package in `state`, as `addPackage` of each
     /// and the recomputation at boot completion leave them.
     pub fn new(state: &State, config: &Config) -> std::result::Result<AppsFilter, super::domain_verification::uri_parcel::MatchError> {
@@ -424,7 +428,7 @@ impl AppsFilter {
         // FeatureConfig's DeviceConfig flag. The original's cache keeps
         // what it computed before the flag changed until something
         // recomputes it; the model follows the flag at once.
-        if state.platform.query_filtering_disabled {
+        if state.platform.settings_owner.as_ref().map_or(state.platform.query_filtering_disabled,|owner|owner.cached_filtering_disabled()) {
             return false;
         }
         let Some(calling) = setting(state, calling_app_id) else {
@@ -518,13 +522,16 @@ pub fn is_caller_same_app(state: &State, package: Option<&str>, uid: i32) -> Res
 /// the caller. With `filter_uninstall`, a package not installed for the
 /// user is hidden too, an archived one unless `filter_archived` is off.
 pub fn should_filter_application(
-    state: &State,
-    filter: &AppsFilter,
-    ps: Option<&PackageState>,
-    mut calling_uid: i32,
-    user: i32,
-    filter_uninstall: bool,
-    filter_archived: bool,
+    state: &State, filter: &AppsFilter, ps: Option<&PackageState>, calling_uid: i32,
+    user: i32, filter_uninstall: bool, filter_archived: bool,
+) -> Result<bool> {
+    should_filter_application_with_permission(state, filter, ps, calling_uid, calling_uid,
+        user, filter_uninstall, filter_archived)
+}
+
+pub fn should_filter_application_with_permission(
+    state: &State, filter: &AppsFilter, ps: Option<&PackageState>, mut calling_uid: i32,
+    permission_uid: i32, user: i32, filter_uninstall: bool, filter_archived: bool,
 ) -> Result<bool> {
     if is_sdk_sandbox(calling_uid) {
         if ps.is_some_and(|target| {
@@ -559,8 +566,16 @@ pub fn should_filter_application(
     if is_caller_same_app(state, Some(&ps.name), calling_uid)? {
         return Ok(false);
     }
-    if caller_is_instant || us.instant_app {
-        return Err(NotModelled("instant apps' visibility"));
+    if caller_is_instant {
+        if us.instant_app { return Ok(true); }
+        return ps.pkg.as_deref().map(|package| package.booleans & booleans::VISIBLE_TO_INSTANT_APPS == 0)
+            .ok_or(NotModelled("instant visibility parsed target package unavailable"));
+    }
+    if us.instant_app {
+        let query = super::query::Query { state, filter, calling_uid: permission_uid };
+        if query.internal_can_view_instant(calling_uid, user)? { return Ok(false); }
+        let access = state.system.instant_access.as_ref().ok_or(NotModelled("native instant access snapshot unavailable"))?;
+        return Ok(!access.granted(user, app_id(calling_uid), ps.app_id));
     }
     Ok(filter.should_filter(state, calling_uid, ps, user))
 }
@@ -1000,7 +1015,7 @@ mod tests {
                     true,
                     true
                 ),
-                Err(NotModelled("instant apps' visibility"))
+                Err(NotModelled("native instant access snapshot unavailable"))
             );
         }
     }

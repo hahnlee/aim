@@ -101,6 +101,7 @@ pub fn run_fork_child(opts: RunOptions) -> String {
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
+    sys::initialize_umask();
     sys::init_heap_window();
     sys::set_trace(opts.trace);
     xrt::init(Some(vfs::root()), opts.cache.clone());
@@ -119,6 +120,7 @@ pub fn run(opts: RunOptions) -> String {
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
+    sys::initialize_umask();
     sys::init_heap_window();
     sys::init_fds();
     sys::set_trace(opts.trace);

@@ -401,6 +401,7 @@ impl SigningScan {
                 code_is_directory: false,
                 canonical_source: None,
             };
+            let scan_as_instant_app=setting.users.get(&0).is_some_and(|user|user.instant_app);
             let completed = staged.finish_scan_metadata(
                 NewPackageOutcome {
                     record,
@@ -409,6 +410,7 @@ impl SigningScan {
                 },
                 apks,
                 ScanMetadataCompletion {
+                    scan_as_instant_app,
                     seinfo: inputs.seinfo,
                     abi_policy: inputs.abi_policy,
                     native_environment: &env,

@@ -300,8 +300,8 @@ through four in-process interfaces, which every subsystem uses:
 
 | Interface | Size | Users outside `pm/` (non-test files) |
 | --- | --- | --- |
-| `PackageManagerInternal` | 148 abstract methods, about 100 used outside `pm/` | 111 files in 54 subsystems |
-| `Computer` (`PackageManagerInternal.snapshot()`, a `PackageDataSnapshot` that `IntentResolver` casts to `Computer`) | 220 methods | `IntentResolver` and its subclasses: ActivityManager's broadcast receiver resolver, `IntentFirewall`, `UriGrantsManagerService` |
+| `PackageManagerInternal` | 134 abstract methods in the original image, about 100 used outside `pm/` | 111 files in 54 subsystems |
+| `Computer` (`PackageManagerInternal.snapshot()`, a `PackageDataSnapshot` that `IntentResolver` casts to `Computer`) | 153 methods in the original image | `IntentResolver` and its subclasses: ActivityManager's broadcast receiver resolver, `IntentFirewall`, `UriGrantsManagerService` |
 | `PackageManagerLocal` (snapshots of `PackageState`, `AndroidPackage`, `SharedUserApi`) | 7 methods, over `PackageState` (78), `PackageStateInternal` (36), `PackageUserState` (41) | ART Service, `AccessCheckingService` and `PermissionService`, `AppOpsService`, `AudioService`, DevicePolicy, `StorageStatsService` |
 | `IPackageManager` and `PackageManager` in system_server's own process | 224 | 55 files through `AppGlobals.getPackageManager()`, about 300 through `Context.getPackageManager()`: today calls on the local stub object |
 
@@ -379,8 +379,10 @@ ways to make it, both weighed:
    the `package_info_cache` nonce, through the bridge, so apps' caches
    drop as they do today.
 
-**What it costs.** The facade's Java is about 550 methods (148, 7, 220
-and some 155 of the `PackageState` family), most of them one line, and
+**What it costs.** The original image requires 134 abstract Internal methods,
+153 Computer methods, 7 Local methods and the `PackageState` family wrappers.
+The exact DEX declarations are retained in `java/device-services/api/package-facade.json`;
+the earlier source estimates of 148/220 are superseded. Most read wrappers are one line, and
 an AIDL of ours between the facade and the host of about 250 methods,
 generated for both sides as `IBridge` is. Every in-process query that
 misses the replica's caches costs a host round trip; how many that is
@@ -1104,13 +1106,18 @@ results per module are the baseline each slice is held to. By kind:
 
 | Slice | Device-side (run today with `am instrument`) | Host-side (Tradefed) |
 | --- | --- | --- |
-| A | CtsContentTestCases (`android.content.pm.cts`), CtsPackageManagerTestCases, CtsAppEnumerationTestCases, CtsDomainVerificationDeviceStandaloneTestCases (#618), CtsSuspendAppsTestCases, CtsShortcutManagerTestCases, CtsInstantAppTests, CtsHibernationTestCases | CtsPackageManagerParsingHostTestCases, CtsPackageManagerPreferredActivityHostTestCases, CtsPackageSettingHostTestCases |
+| A | CtsPackageManagerTestCases, CtsAppEnumerationTestCases, CtsDomainVerificationDeviceStandaloneTestCases (#618), CtsSuspendAppsTestCases, CtsShortcutManagerTestCases, CtsInstantAppTests, CtsHibernationTestCases | CtsPackageManagerParsingHostTestCases, CtsPackageManagerPreferredActivityHostTestCases, CtsPackageSettingHostTestCases |
 | B | CtsPackageInstallTestCases, CtsPackageInstallSessionTestCases, CtsAtomicInstallTestCases, CtsPackageUninstallTestCases, CtsPackageInstallAppOpDefaultTestCases, CtsPackageInstallAppOpDeniedTestCases, CtsAdminPackageInstallerTestCases, CtsSecureFrpInstallTestCases, CtsPackageInstallerTapjackingTestCases, the eight CtsPackageInstallerCUJ* modules | CtsPackageManagerHostTestCases, CtsAppSecurityHostTestCases, CtsInstallHostTestCases, CtsUsesLibraryHostTestCases, CtsClassloaderSplitsHostTestCases, CtsDexMetadataHostTestCases, CtsAppMetadataHostTestCases, CtsInstantAppsHostTestCases |
 | C | all of the above, CtsSuspendAppsPermissionTestCases, CtsDomainVerificationDeviceMultiUserTestCases, CtsRollbackManagerTestCases, CtsPackageWatchdogTestCases, the permission modules of permissions.md, CtsOsTestCases | CtsApexTestCases, CtsStagedInstallHostTestCases, CtsRollbackManagerHostTestCases, CtsOverlayHostTestCases, CtsShortcutHostTestCases, CtsCompilationTestCases, CtsDomainVerificationHostTestCases, CtsIncrementalInstallHostTestCases, CtsInstalledLoadingProgressHostTests, CtsPackageManagerStatsHostTestCases, CtsPackageManagerIncrementalStatsHostTestCases, CtsPackageManagerMultiUserHostTestCases |
 
-Of these 52 modules 22 are host-side, and no host-side module runs
-against this device today (#701): most of PackageManager's install,
-signing and parsing coverage is there, so C needs them.
+The verified relevant C inventory is 23 host-side modules plus 43 device
+modules after expanding the eight CUJ names and the deduplicated permission
+modules, for 66 modules. All 23 host configs use `HostTest` or `JarHostTest`;
+42 device configs use `AndroidJUnitTest` and one uses `GTest`. The former
+52-total/22-host counts were inaccurate (#1063). Android 16 r1 moved
+`android.content.pm.cts` out of `CtsContentTestCases`, so that unrelated module
+is not expanded for this PM gate. All required release inputs are now pinned;
+native C results remain unrun (#701).
 
 **App checks**, each slice: the integration gate; Settings (app info,
 storage, default apps, the app list's permissions); Chrome and WebView
@@ -1185,17 +1192,38 @@ configs install or push are pinned in `upstream/cts.lock`.
 | CtsPackageInstallerCUJ{Installation, InstallationViaIntentForResult, InstallationViaSession, Uninstallation, UpdateOwnerShip, UpdateSelf}TestCases, CtsPackageInstallerTapjackingTestCases | PackageInstaller's user journeys | 55, 27, 20, 14, 28, 16, 2 |
 | CtsShortcutManagerTestCases | `shortcut` and `launcherapps` | about 76 (JUnit 3) |
 
-Not pinned: CtsSecureFrpInstallTestCases (its config pushes
-`TestAppAv1.apk`, which the release does not contain);
-CtsPackageInstallerCUJDeviceAdminTestCases and
-CtsAdminPackageInstallerTestCases (a device owner);
-CtsPackageInstallerCUJMultiUsersTestCases and
-CtsDomainVerificationDeviceMultiUserTestCases (a secondary user);
-CtsRollbackManagerTestCases, CtsPackageWatchdogTestCases and
-CtsHibernationTestCases (services next to PackageManager, for slice C).
+**Input inventory (2026-10-08).** The explicit PM device cohort (the eight
+CUJ modules included) and the deduplicated modules from permissions.md now
+cover 43 modules: 42 `AndroidJUnitTest` configs and the native
+`CtsPermissionManagerNativeTestCases` `GTest` config. Their arm64
+instrumentation APKs, module-local helpers, explicit file dependencies and
+native GTest bitness inputs account for 934 official archive paths (846
+unique cache filenames). Together with the existing inputs for other service
+gates, `upstream/cts.lock` now has 1,065 verified pins. No module has acquired
+a native C pass from this preparation.
+
+Secure FRP's official test APK includes `TestAppAv1.apk` as an install-library
+resource; its standalone FilePusher stanza is commented out. The previous
+"missing helper" input rationale was wrong (#1087); no APK rebuild or
+modification is needed. The device-owner and secondary-user modules now have
+their release inputs, while their device setup and results still need actual
+validation. `CtsContentTestCases` is not expanded for this PM cohort: its
+`android.content.pm.cts` classes moved to `CtsPackageManagerTestCases` in
+Android 16 r1.
+
 The host-side modules of section 5's CTS table (Tradefed `HostTest`
-and `JarHostTest`) need an adb transport and a Tradefed host, which the
-runner below does not have (#701).
+and `JarHostTest`) use the adb/Tradefed runner in [cts.md](cts.md).
+The pinned harness now covers all 23 host modules explicitly listed in
+section 5, with complete module directories and explicit config file
+dependencies: 375 module files, eight harness entries and the shared
+BackupPreparer dependency. All 384 host/shared pins and 1,065 device-input pins
+have verified hashes. Native C69 ParsingHost completes with 11 passes and no
+failures; later PreferredActivity and PackageSetting replays expose owner gaps
+tracked in GitHub and current evidence is recorded in boot-status.md. A complete
+66-module original/native campaign remains unrun (#701); historical single-module
+results do not establish acceptance of a later source/image cohort. The verified
+expanded device/permission inventory resolves the former count discrepancy in
+#1063.
 
 **Run.** On a first boot of a new data directory in window mode, each
 module as its Tradefed config prepares it: the config's commands and

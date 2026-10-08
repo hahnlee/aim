@@ -5,7 +5,9 @@ use crate::package::{settings::PRIVATE_FLAG_PRIVILEGED, sign::SigningDetails};
 use aim_binder_host::parcel::Parcel;
 
 pub fn captured(snapshot: &Snapshot, name: &str) -> Result<Option<Vec<u8>>, String> {
-    captured_owner(snapshot.version(), snapshot.owner(), name)
+    // Store validates detached/member/process ownership before constructing the
+    // immutable Snapshot. Preserve record checks without rescanning all groups.
+    write_validated_owner(snapshot.version(), snapshot.owner(), name)
 }
 
 pub fn captured_owner(
@@ -39,6 +41,16 @@ pub fn captured_owner(
     {
         return Err("shared UID member owner differs".into());
     }
+    write_validated_owner(version, owner, name)
+}
+
+fn write_validated_owner(
+    version: u64,
+    owner: &crate::package::scan::SigningScan,
+    name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(group) = owner.identities.shared_users.get(name) else { return Ok(None); };
+    let members: Vec<_> = group.package_names().collect();
     let signing = group
         .signatures
         .as_ref()

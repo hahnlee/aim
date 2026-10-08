@@ -7,12 +7,8 @@ use aim_android_xml::{Element, Node, Value};
 impl Store {
     /// Require the exact persisted projection of this completed scan.
     pub(crate) fn validate_committed_scan(&self, scan: &SigningScan) -> Result<(), WriteError> {
-        let expected = super::scan_settings::replace(&self.settings_document, scan)
-            .map_err(WriteError::before)?;
-        let expected = crate::package::settings::Settings::parse(&expected)
-            .map_err(WriteError::before)?;
-        if super::signing::persisted(self.state.settings.clone())
-            != super::signing::persisted(expected)
+        let expected = self.persistent_scan_settings(scan)?;
+        if super::canonical_persistent_settings(self.state.settings.clone()) != expected
         {
             return Err(WriteError::before(
                 "committed scan/settings ownership differs",
@@ -59,7 +55,9 @@ impl Store {
         }
         packages.append(&mut sections.content);
         sections.content = packages;
-        let result = self.commit_initial_restrictions(user, sections);
+        let inventory=scan.settings.packages.iter().map(|setting|setting.name.clone()).collect();
+        let result = self.commit_initial_restrictions_inventory_using(user, sections, &inventory,
+            |file,bytes|std::io::Write::write_all(file,bytes));
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
             // Serialization/re-read normalization must not mutate live scan
             // object state (null component sets and runtime overlays included).
@@ -76,7 +74,7 @@ impl Store {
     }
 }
 
-fn initial_package(
+pub(super) fn initial_package(
     name: &str,
     state: &UserState,
     user: i32,

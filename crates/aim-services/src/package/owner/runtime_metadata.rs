@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 mod schedule;
+mod internal;
+mod user;
 pub mod worker;
 
 /// Constructor sparse defaults are version 0, null fingerprint and upgrade=true.
@@ -12,6 +14,7 @@ pub mod worker;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
     versions: BTreeMap<i32, i32>,
+    creation_inodes:BTreeMap<u32,aim_storage::guest_inode::GuestInode>,
     fingerprints: BTreeMap<i32, Option<String>>,
     upgrade_needed: BTreeMap<i32, bool>,
     extended_fingerprint: Option<String>,
@@ -20,7 +23,31 @@ pub struct State {
     wake: Option<worker::Wake>,
 }
 
+fn validate_creation_inode(user:u32,inode:aim_storage::guest_inode::GuestInode)->Result<(),String>{
+    if user>i32::MAX as u32||inode.uid.is_none()||inode.gid.is_none()||inode.mode.is_none_or(|mode|mode&!0o7777!=0){return Err("runtime permission creation metadata is incomplete".into());}Ok(())
+}
+
 impl State {
+    /// Bind observations supplied by the actual original creators. Re-observing
+    /// a constructor entry verifies identity; it never drops later users.
+    pub fn bind_creation_metadata(&mut self,inodes:&BTreeMap<u32,aim_storage::guest_inode::GuestInode>)->Result<(),String>{
+        for (user,inode) in inodes {
+            validate_creation_inode(*user,*inode)?;
+            if self.creation_inodes.get(user).is_some_and(|existing|existing!=inode){return Err("runtime creation owner changed without user handoff".into());}
+        }
+        self.creation_inodes.extend(inodes.iter().map(|(user,inode)|(*user,*inode)));Ok(())
+    }
+    /// Called only after original user app-data creation has completed and the
+    /// native file owner observed this user's actual file/probe metadata.
+    pub fn publish_user_creation_inode(&mut self,user:u32,inode:aim_storage::guest_inode::GuestInode)->Result<(),String>{
+        validate_creation_inode(user,inode)?;
+        if self.creation_inodes.contains_key(&user){return Err("runtime creation owner already handed off".into());}
+        self.creation_inodes.insert(user,inode);
+        if let Some(wake)=&self.wake{wake.notify();}
+        Ok(())
+    }
+    pub fn creation_inode(&self,user:u32)->Option<aim_storage::guest_inode::GuestInode>{self.creation_inodes.get(&user).copied()}
+    pub fn creation_metadata(&self)->BTreeMap<u32,aim_storage::guest_inode::GuestInode>{self.creation_inodes.clone()}
     pub fn restore(&mut self, metadata: &Metadata) {
         for (&user, state) in &metadata.users {
             if let Some(version) = state.version {
@@ -119,6 +146,7 @@ impl State {
         Ok(completed)
     }
     pub fn remove_user(&mut self, user: i32) {
+        if let Ok(id)=u32::try_from(user){self.creation_inodes.remove(&id);}
         self.versions.remove(&user);
         self.fingerprints.remove(&user);
         self.upgrade_needed.remove(&user);
@@ -142,7 +170,7 @@ impl super::Store {
         }
         let mut candidate = scan.clone();
         candidate
-            .restore_legacy_permissions_from_data(&self.data, &self.state, config)
+            .restore_owned_legacy_permissions_from_data(&self.data,&self.state,config,&self.settings_document)
             .map_err(super::WriteError::before)?;
         let restored = candidate
             .legacy_restoration_metadata()
@@ -333,3 +361,10 @@ mod tests {
         assert!(state.upgrade_needed(0));
     }
 }
+
+/// Settings metadata is a live original owner shared by retained Computers.
+pub struct Queries(pub Box<dyn Fn(i32) -> Result<bool, String> + Send + Sync>);
+impl std::fmt::Debug for Queries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("RuntimePermissionQueries") }
+}
+impl PartialEq for Queries { fn eq(&self, other: &Self) -> bool { std::ptr::eq(self, other) } }

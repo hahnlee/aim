@@ -43,10 +43,12 @@ mod poll;
 mod process;
 mod procfs;
 mod procrec;
+mod proxy_file;
 mod pstate;
+pub(crate) use pstate::initialize_umask;
 mod ptimer;
-mod random;
 mod ptrace;
+mod random;
 mod selinuxfs;
 mod sharedfile;
 mod sigframe;
@@ -408,3 +410,15 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         }
     }
 }
+
+pub mod fuse_mount;
+
+pub mod fuse_client;
+
+pub mod fuse;
+
+pub mod fuse_cache;
+
+pub mod fuse_device;
+
+pub mod fuse_sysfs;

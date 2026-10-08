@@ -4,6 +4,7 @@
 //! Apache License 2.0. Dependency resolution is separate from declaration
 //! registration; these records initially have no consumers or edges.
 
+mod live;
 use std::collections::BTreeMap;
 
 use super::apps_filter::NotModelled;

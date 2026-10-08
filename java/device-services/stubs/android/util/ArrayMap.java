@@ -18,4 +18,6 @@ public class ArrayMap<K, V> implements Map<K, V> {
     public java.util.Set<K> keySet() { throw new RuntimeException("stub"); }
     public java.util.Collection<V> values() { throw new RuntimeException("stub"); }
     public java.util.Set<Map.Entry<K, V>> entrySet() { throw new RuntimeException("stub"); }
+ public K keyAt(int index){throw new RuntimeException("stub");}
+ public V valueAt(int index){throw new RuntimeException("stub");}
 }

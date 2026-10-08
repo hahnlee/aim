@@ -193,27 +193,6 @@ pub fn init_user0() -> io::Result<Vec<PathBuf>> {
     prepare_user_storage(None, 0, STORAGE_FLAG_DE)
 }
 
-/// The views of the emulated volume of `user` that VolumeManager and
-/// EmulatedVolume set up with mounts, as symlinks into `/data/media`:
-/// - `/storage/emulated` for processes that see the whole /storage;
-/// - `/mnt/user/<user>/emulated` and friends, which zygote bind-mounts over
-///   /storage for each app (by its mount mode);
-/// - `/mnt/user/<user>/self/primary`, the primary volume of that user.
-pub fn link_emulated(user: u32) -> io::Result<()> {
-    let everybody = user * AID_USER_OFFSET + AID_EVERYBODY;
-    link("/data/media", Path::new("/storage/emulated"))?;
-    for view in ["user", "pass_through", "installer", "androidwritable"] {
-        let dir = PathBuf::from(format!("/mnt/{view}/{user}"));
-        std::fs::create_dir_all(&dir)?;
-        let owner = if user == 0 { AID_SHELL } else { AID_ROOT };
-        prepare_dir(&dir, 0o710, owner, everybody)?;
-        link("/data/media", &dir.join("emulated"))?;
-    }
-    let slf = PathBuf::from(format!("/mnt/user/{user}/self"));
-    prepare_dir(&slf, 0o755, AID_ROOT, AID_ROOT)?;
-    link(&format!("/storage/emulated/{user}"), &slf.join("primary"))
-}
-
 /// The lower (data) path of an app directory named under a volume's
 /// visible path, `/storage/emulated/<user>/Android/...`.
 pub fn lower_path(path: &str) -> Option<PathBuf> {

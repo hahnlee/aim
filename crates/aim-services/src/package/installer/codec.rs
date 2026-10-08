@@ -19,6 +19,13 @@ enum Kind {
     Uri,
     DataLoader,
 }
+/// The actual original presentation owner returns a by-value Bitmap parcel.
+pub fn recovered_bitmap(bytes: &[u8]) -> Result<Option<Object>> {
+    let mut reader = Reader::new(bytes, &[]);
+    let value = object(&mut reader, Kind::Bitmap)?;
+    if reader.remaining() != 0 { return Err(BAD_VALUE) }
+    Ok(value)
+}
 fn object(r: &mut Reader<'_>, kind: Kind) -> Result<Option<Object>> {
     let start = r.position();
     let Some(class) = r.read_string16()? else {
@@ -534,5 +541,67 @@ mod tests {
         let mut truncated =
             Reader::new(&parcel.data()[..parcel.data().len() - 1], parcel.objects());
         assert!(object(&mut truncated, Kind::Bitmap).is_err());
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DataLoader {
+    pub kind: i32,
+    pub package: Option<String>,
+    pub class: Option<String>,
+    pub arguments: Option<String>,
+}
+impl DataLoader {
+    pub fn from_object(object: &Object) -> Result<Self> {
+        let mut reader = Reader::new(&object.bytes, &object.objects);
+        if reader.read_string16()?.as_deref() != Some("android.content.pm.DataLoaderParamsParcel") {
+            return Err(BAD_VALUE);
+        }
+        let start = reader.position();
+        let size = reader.read_i32()?;
+        if size < 4 {
+            return Err(BAD_VALUE);
+        }
+        let end = start.checked_add(size as usize).ok_or(BAD_VALUE)?;
+        if end > object.bytes.len() {
+            return Err(BAD_VALUE);
+        }
+        let mut result = Self {
+            kind: 0,
+            package: Some(String::new()),
+            class: Some(String::new()),
+            arguments: Some(String::new()),
+        };
+        if reader.position() < end {
+            result.kind = reader.read_i32()?;
+        }
+        if reader.position() < end {
+            result.package = reader.read_string16()?;
+        }
+        if reader.position() < end {
+            result.class = reader.read_string16()?;
+        }
+        if reader.position() < end {
+            result.arguments = reader.read_string16()?;
+        }
+        if reader.position() > end {
+            return Err(BAD_VALUE);
+        }
+        Ok(result)
+    }
+    pub fn object(&self) -> Object {
+        let mut payload = Parcel::new();
+        payload.write_i32(self.kind);
+        payload.write_string16(self.package.as_deref());
+        payload.write_string16(self.class.as_deref());
+        payload.write_string16(self.arguments.as_deref());
+        let mut parcel = Parcel::new();
+        parcel.write_string16(Some("android.content.pm.DataLoaderParamsParcel"));
+        parcel.write_i32((payload.data().len() + 4) as i32);
+        parcel.write_raw(payload.data(), &[]);
+        Object {
+            bytes: parcel.data().to_vec(),
+            objects: vec![],
+        }
     }
 }

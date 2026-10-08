@@ -116,6 +116,17 @@ impl State {
         in_reply_to_out: &mut Option<TxnId>,
     ) -> Result<(), Failure> {
         let oneway = !reply && tr.flags & TF_ONE_WAY != 0;
+        let delegated_sender = !reply
+            && self
+                .thread(proc, tid)
+                .is_some_and(|thread| thread.forwarded_sender.is_some());
+        let sender_credentials = if reply {
+            self.procs[&proc].creds.clone()
+        } else {
+            self.thread(proc, tid)
+                .and_then(|thread| thread.forwarded_sender.clone())
+                .unwrap_or_else(|| self.procs[&proc].creds.clone())
+        };
         let mut target_thread: Option<Tid> = None;
         let mut target_node: Option<NodeId> = None;
         let target_proc: ProcId;
@@ -200,7 +211,7 @@ impl State {
         // The sender's security context, for nodes that asked for one.
         let secctx: Option<Vec<u8>> = target_node
             .filter(|n| self.nodes[n].txn_security_ctx)
-            .and_then(|_| self.procs[&proc].creds.security_context.clone())
+            .and_then(|_| sender_credentials.security_context.clone())
             .map(|s| {
                 let mut bytes = s.into_bytes();
                 bytes.push(0);
@@ -215,7 +226,7 @@ impl State {
             return Err(fail(BR_FAILED_REPLY, errno::EINVAL));
         };
 
-        let sender_pid = self.procs[&proc].creds.pid;
+        let sender_pid = sender_credentials.pid;
         let allocation = match self
             .procs
             .get_mut(&target_proc)
@@ -254,7 +265,9 @@ impl State {
                 to_parent: None,
                 code: tr.code,
                 flags: tr.flags,
-                sender_euid: self.procs[&proc].creds.euid,
+                sender_euid: sender_credentials.euid,
+                sender_credentials,
+                delegated_sender,
                 target_node,
                 buffer: Some(buffer_offset),
                 security_ctx: 0,
@@ -306,8 +319,8 @@ impl State {
                     node: 0,
                     root: 0,
                     follows: None,
-                    from_pid: self.procs[&proc].creds.pid,
-                    from_euid: self.procs[&proc].creds.euid,
+                    from_pid: self.txns[&id].sender_credentials.pid,
+                    from_euid: self.txns[&id].sender_credentials.euid,
                     from_tid: tid,
                     to_pid: self.procs[&target_proc].creds.pid,
                     sent: std::time::Instant::now(),

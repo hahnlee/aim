@@ -13,6 +13,7 @@ use crate::package::{
     write::{ApkSigningError, Apks},
 };
 use std::collections::{BTreeMap, BTreeSet};
+crate::install_mutator_disabled_alias_accessor!();
 
 // PrepareFailure(String, Exception) wraps verifier IO/security exceptions.
 const INSTALL_FAILED_INTERNAL_ERROR: i32 = -110;
@@ -24,6 +25,7 @@ pub(super) struct DisabledUserStates {
 }
 
 impl DisabledUserStates {
+    pub(super) fn aliases(&self) -> Vec<i32> { self.aliases.iter().copied().collect() }
     fn copied(users: &BTreeMap<i32, UserState>) -> Self {
         Self {
             users: users.clone(),

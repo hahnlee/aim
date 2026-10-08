@@ -99,12 +99,8 @@ pub fn openat(a: [u64; 6]) -> i64 {
             return -(EINVAL as i64);
         }
         return match vfs::resolve(dirfd, path, flags & O_NOFOLLOW == 0) {
-            Ok(r) => super::tmpfile::open(
-                &r,
-                flags & O_EXCL != 0,
-                open_flags_to_host(flags & !(O_DIRECTORY | O_EXCL)),
-                mode,
-            ),
+            Ok(r) => {if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::tmpfile(route,r.guest,flags as u32,mode as u32).map(|fd|fd as i64).unwrap_or_else(|error|-(error as i64));}
+                super::tmpfile::open(&r,flags&O_EXCL!=0,open_flags_to_host(flags&!(O_DIRECTORY|O_EXCL)),mode)},
             Err(e) => -(e as i64),
         };
     }
@@ -121,6 +117,8 @@ pub fn openat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if r.guest=="/dev/fuse"{return match vfs::runtime_dir(){Some(runtime)=>super::fuse::open_device(runtime,flags as i32).map(|fd|{super::fuse_device::adopt(fd);fd as i64}).unwrap_or_else(|error|-(error as i64)),None=>-(crate::errno::ENODEV as i64)};}
+    if let Some(route)=vfs::fuse_route(&r.guest){return match super::fuse_client::open_fd(route,r.guest.clone(),flags as u32,mode as u32){Ok(fd)=>fd as i64,Err(error)=>-(error as i64)};}
     if let Some(fd) = super::binder::open(&r.guest, flags) {
         return fd;
     }
@@ -163,7 +161,10 @@ pub fn openat(a: [u64; 6]) -> i64 {
         return -(errno::last() as i64);
     }
     if creating {
-        attrs::created(attrs::Host::Fd(fd), || r.guest.clone());
+        if let Err(error) = attrs::created(attrs::Host::Fd(fd), || r.guest.clone()) {
+            unsafe { libc::close(fd); }
+            return -(error as i64);
+        }
     }
     // Or it is replaced by the translated file here.
     crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
@@ -178,9 +179,11 @@ pub fn close(a: [u64; 6]) -> i64 {
     if fdtab::is_hidden(fd) {
         return -(EBADF as i64);
     }
+    let flush=super::fuse_client::get(fd).map(|file|super::fuse_cache::flush_file(&file).and_then(|_|super::fuse_client::flush(&file)));
     fdtab::on_close(fd);
     // SAFETY: closing a guest fd.
-    errno::check(unsafe { libc::close(fd) } as i64)
+    let result=errno::check(unsafe { libc::close(fd) } as i64);
+    match flush{Some(Err(error))if result==0=>-(error as i64),_=>result}
 }
 
 /// The first non-empty buffer of an iovec list.
@@ -192,9 +195,13 @@ fn first(iov: &[libc::iovec]) -> (u64, usize) {
 
 /// read/readv on an fd with Linux state. None: a plain host fd.
 fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+    if let Some(result)=super::fuse_device::rw(fd,iov,false){return Some(result);}
+    if let Some(error)=super::fuse_client::inherited_error(fd){return Some(-(error as i64));}
+    if let Some(result)=super::fuse_client::rw(fd,iov,None,false){return Some(result);}
     let k = fdtab::get(fd)?;
     let (buf, len) = first(iov);
     match k {
+        Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, false)),
         Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
         Kind::Inotify(_) => inotify::read(fd, buf, len),
         Kind::Evdev(_) => super::evdev::read(fd, buf, len),
@@ -221,9 +228,13 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 }
 
 fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+    if let Some(result)=super::fuse_device::rw(fd,iov,true){return Some(result);}
+    if let Some(error)=super::fuse_client::inherited_error(fd){return Some(-(error as i64));}
+    if let Some(result)=super::fuse_client::rw(fd,iov,None,true){return Some(result);}
     let k = fdtab::get(fd)?;
     let (buf, len) = first(iov);
     match k {
+        Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, true)),
         Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
         Kind::Sock(_) => net::write(fd, iov),
         Kind::Evdev(_) => super::evdev::write(fd, buf, len),
@@ -253,7 +264,10 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 
 /// pread/pwrite on an fd with Linux state. None: a plain host fd.
 fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i64> {
+    if super::fuse_device::is_device(fd){return Some(-29);}
+    if let Some(result)=super::fuse_client::rw(fd,&one(buf,len),Some(pos),write){return Some(result);}
     match fdtab::get(fd)? {
+        Kind::ProxyFile => Some(super::proxy_file::rw(fd, &one(buf, len), Some(pos), write)),
         Kind::Memfd(_) => {
             if write && memfd::write_sealed(fd) {
                 return Some(-EPERM);
@@ -404,6 +418,9 @@ pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
     if pos == -1 {
         return if write { writev(a) } else { readv(a) };
     }
+    if super::proxy_file::is_proxy(fd) {
+        return super::proxy_file::rw(fd, v, Some(pos), write);
+    }
     if fdtab::get(fd).is_some_and(|k| !matches!(k, Kind::Content)) {
         let mut total = 0i64;
         for io in v {
@@ -440,6 +457,11 @@ pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
 }
 
 pub fn lseek(a: [u64; 6]) -> i64 {
+    if super::fuse_device::is_device(a[0] as i32){return -29;}
+    if let Some(result)=super::fuse_client::seek(a[0] as i32,a[1] as i64,a[2] as u32){return result;}
+    if super::proxy_file::is_proxy(a[0] as i32) {
+        return super::proxy_file::seek(a[0] as i32, a[1] as i64, a[2] as u32);
+    }
     // SEEK_SET/CUR/END agree; Linux SEEK_DATA/HOLE are 3/4, Darwin 4/3.
     let whence = match a[2] {
         3 => libc::SEEK_DATA,
@@ -523,6 +545,16 @@ fn attrs_host(r: &vfs::Resolved) -> attrs::Host<'_> {
 
 /// Host stat of an fd, with the guest's ownership view.
 fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
+    if let Some(stat)=super::fuse_device::stat(fd){return Ok(stat);}
+    if let Some(file)=super::fuse_client::get(fd){return super::fuse_client::stat(&file.route,Some(file.node),Some(file.fh)).map_err(|error|-(error as i64));}
+    if super::proxy_file::is_proxy(fd) {
+        let size = super::proxy_file::size(fd)?;
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        st.st_mode = libc::S_IFREG | 0o777;
+        st.st_size = size;
+        st.st_blksize = 4096;
+        return Ok(st);
+    }
     // A synthesized /proc or /sys directory reports what its path does
     // (bionic's realpath compares the two).
     if let Some(guest) = dir::synthesized_path(fd)
@@ -593,6 +625,8 @@ pub(super) fn stat_at(dirfd: i32, path: &[u8], flags: u64) -> Result<libc::stat,
         return Ok(st);
     }
     let r = vfs::resolve(dirfd, path, follow).map_err(|e| -(e as i64))?;
+    if r.guest=="/dev/fuse"{let mut st:libc::stat=unsafe{std::mem::zeroed()};st.st_mode=libc::S_IFCHR|0o666;st.st_nlink=1;st.st_rdev=(10<<24)|229;st.st_blksize=4096;return Ok(st);}
+    if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::stat(&route,None,None).map_err(|error|-(error as i64));}
     if let Some(s) = procfs::stat(&r.guest, follow) {
         return s.map_err(|e| -(e as i64));
     }
@@ -755,7 +789,15 @@ fn put_statfs_as(s: &libc::statfs, f_type: u64, out: u64) {
     unsafe { (out as *mut LinuxStatfs).write_unaligned(l) };
 }
 
+fn put_fuse_statfs(route:&vfs::FuseRoute,out:u64)->i64{
+    let bytes=match super::fuse_client::statfs(route){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    if bytes.len()<48{return -(crate::errno::EIO as i64);}
+    let q=|at|u64::from_le_bytes(bytes[at..at+8].try_into().unwrap());let d=|at|u32::from_le_bytes(bytes[at..at+4].try_into().unwrap())as u64;
+    let stat=LinuxStatfs{f_type:0x65735546,f_blocks:q(0),f_bfree:q(8),f_bavail:q(16),f_files:q(24),f_ffree:q(32),f_bsize:d(40),f_namelen:d(44),f_frsize:if bytes.len()>=52{d(48)}else{d(40)},f_flags:u64::from(route.read_only),..Default::default()};
+    unsafe{(out as *mut LinuxStatfs).write_unaligned(stat);}0
+}
 pub fn fstatfs(a: [u64; 6]) -> i64 {
+    if let Some(file)=super::fuse_client::get(a[0] as i32){return put_fuse_statfs(&file.route,a[1]);}
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: local buffer.
     if unsafe { libc::fstatfs(a[0] as i32, &mut s) } < 0 {
@@ -773,6 +815,7 @@ pub fn statfs(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if let Some(route)=vfs::fuse_route(&r.guest){return put_fuse_statfs(&route,a[1]);}
     if let Some(magic) = super::selinuxfs::statfs_magic(&r.guest) {
         let l = LinuxStatfs {
             f_type: magic,
@@ -810,6 +853,7 @@ pub fn readlinkat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if let Some(route)=vfs::fuse_route(&r.guest){return match super::fuse_client::readlink(&route){Ok(bytes)=>{let count=bytes.len().min(a[3] as usize);unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),a[2] as *mut u8,count);}count as i64},Err(error)=>-(error as i64)};}
     let target: Vec<u8> = if let Some(t) = procfs::readlink(r.guest.as_bytes()) {
         match t {
             Ok(t) => t,
@@ -845,6 +889,7 @@ pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
+    if let Some(route)=vfs::fuse_route(&r.guest){return super::fuse_client::access(&route,mode as u32).map(|_|0).unwrap_or_else(|error|-(error as i64));}
     if super::binder::is_device(&r.guest) || super::ashmem::stat(&r.guest).is_some() {
         return 0;
     }
@@ -1097,6 +1142,7 @@ fn dup_from(fd: i32, min: i32, cloexec: bool) -> i64 {
 
 pub fn fcntl(a: [u64; 6]) -> i64 {
     let (fd, cmd, arg) = (a[0] as i32, a[1], a[2]);
+    if super::fuse_client::get(fd).is_some()&&matches!(cmd,F_GETFL|F_SETFL){return super::fuse::description_flags(fd,(cmd==F_SETFL).then_some(arg as u32)).map(|flags|if cmd==F_GETFL{flags as i64}else{0}).unwrap_or_else(|error|-(error as i64));}
     // SAFETY: fcntl with integer arguments.
     unsafe {
         match cmd {
@@ -1154,6 +1200,8 @@ const FIOCLEX: u64 = 0x5451;
 
 pub fn ioctl(a: [u64; 6]) -> i64 {
     let (fd, req, arg) = (a[0] as i32, a[1], a[2]);
+    if super::fuse_device::is_device(fd){if req!=super::fuse::FUSE_DEV_IOC_CLONE{return -(crate::errno::ENOTTY as i64);}let source=unsafe{(arg as *const i32).read_unaligned()};return super::fuse::ioctl_clone(fd,source).map(|_|0).unwrap_or_else(|error|-(error as i64));}
+    if let Some(file)=super::fuse_client::get(fd){return super::fuse_client::ioctl(&file,req as u32,arg).map(|result|result as i64).unwrap_or_else(|error|-(error as i64));}
     if let Some(r) = super::binder::ioctl(fd, req, arg) {
         return r;
     }

@@ -19,4 +19,5 @@ public class SystemConfig {
     public ArraySet<String> getAllowUnthrottledLocation() { throw new RuntimeException("stub"); }
     public ArrayMap<String, ArraySet<String>> getAllowAdasLocationSettings() { throw new RuntimeException("stub"); }
     public ArrayMap<String, ArraySet<String>> getAllowIgnoreLocationSettings() { throw new RuntimeException("stub"); }
+ public android.util.ArrayMap<String,android.content.pm.FeatureInfo> getAvailableFeatures(){throw new RuntimeException("stub");}
 }

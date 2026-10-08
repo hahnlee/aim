@@ -152,3 +152,13 @@ mod tests {
         assert_eq!(DialogInfo::restore(&d.save("dialog-info")), d);
     }
 }
+
+impl aim_service_aidl::ReadParcelable for DialogInfo {
+    fn read_from(reader: &mut aim_binder_host::parcel::Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+        Ok(Self {
+            icon: reader.read_i32()?, title_resource: reader.read_i32()?, title: reader.read_string16()?,
+            message_resource: reader.read_i32()?, message: reader.read_string16()?,
+            button_resource: reader.read_i32()?, button: reader.read_string16()?, button_action: reader.read_i32()?,
+        })
+    }
+}

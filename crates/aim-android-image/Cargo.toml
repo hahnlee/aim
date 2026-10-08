@@ -10,6 +10,10 @@ description = "Derives the system image from the original Android image and a ch
 name = "android-image"
 path = "src/main.rs"
 
+[[bin]]
+name = "android-image-redirect"
+path = "src/bin/redirect.rs"
+
 [dependencies]
 adler2 = "2"
 crc32fast = "1"

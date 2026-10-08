@@ -12,6 +12,9 @@ pub struct Usage {
 }
 
 impl Usage {
+    pub fn remove(&mut self, package: &str) {
+        self.times.remove(package);
+    }
     pub fn new<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             historical: true,
@@ -208,3 +211,4 @@ mod tests {
         assert!(usage.historical_available());
     }
 }
+mod install;

@@ -21,6 +21,12 @@ pub trait UserMemory {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Errno>;
     /// A received file now sits at `fd` (for the caller's fd bookkeeping).
     fn installed(&mut self, _fd: i32) {}
+    fn installed_typed(&mut self, fd: i32, _class: u32) {
+        self.installed(fd);
+    }
+    fn file_class(&mut self, _fd: i32) -> u32 {
+        0
+    }
     /// The driver closed `fd`.
     fn closed(&mut self, _fd: i32) {}
 }
@@ -99,6 +105,39 @@ pub struct Client {
 }
 
 impl Client {
+    /// Ask the native owner's registry about an actual descriptor capability.
+    pub fn file_class(&self, fd: i32) -> Result<u32, Errno> {
+        let mut ty = 0i32;
+        let mut len = std::mem::size_of::<i32>() as u32;
+        // Non-sockets cannot be entries in the explicit endpoint registry.
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut ty as *mut i32).cast(),
+                &mut len,
+            )
+        } < 0
+        {
+            return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSOCK) {
+                Ok(0)
+            } else {
+                Err(errno::EBADF)
+            };
+        }
+        let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let msg = Msg {
+            id: wire::FILE_CLASS,
+            ports: vec![(port, mach::COPY_SEND)],
+            data: Vec::new(),
+        };
+        let result = with_thread(|t| call(t, self.service, &msg));
+        mach::release_send(port);
+        let reply = result??;
+        status(&reply)?.u32()
+    }
+
     pub fn connect(name: &str) -> Option<Self> {
         mach::look_up(name).ok().map(|service| Self { service })
     }
@@ -314,6 +353,7 @@ impl BinderFile {
             reads = bwr.read_size > bwr.read_consumed;
         }
         let fds = std::mem::take(&mut io.fds);
+        io.file_classes.clear();
         let mut ports = Vec::new();
         for fd in fds {
             if ports.len() == mach::MAX_PORTS {
@@ -323,6 +363,7 @@ impl BinderFile {
             // transaction with EBADF.
             if let Some(p) = mach::fd_to_port(fd as i32) {
                 io.fds.push(fd);
+                io.file_classes.push(mem.file_class(fd as i32));
                 ports.push((p, mach::MOVE_SEND));
             }
         }
@@ -355,8 +396,8 @@ impl BinderFile {
             }
             Ok(reply)
         })??;
-        for fd in &reply.installs {
-            mem.installed(*fd as i32);
+        for (index, fd) in reply.installs.iter().enumerate() {
+            mem.installed_typed(*fd as i32, reply.file_classes[index]);
         }
         for (addr, bytes) in &reply.writes {
             mem.write(*addr, bytes)?;

@@ -51,6 +51,9 @@ public final class InstallerUserPolicyOracle {
     public static void main(String[] args) {
         try {
             clear();
+            boolean revocable = android.content.pm.PackageInstaller.ENABLE_REVOCABLE_FD;
+            Files.write(Path.of(args[0], "installer-revocable-fd.original"), new byte[] { (byte)(revocable ? 1 : 0) });
+            System.out.println("original installer ENABLE_REVOCABLE_FD=" + revocable);
             try { InstallerUserPolicy.capture(-1); throw new AssertionError("negative user accepted"); }
             catch (IllegalArgumentException expected) {}
             missing();
@@ -113,6 +116,14 @@ public final class InstallerUserPolicyOracle {
                 LocalServices.addService(DevicePolicyManagerInternal.class, new FixtureDevicePolicy());
             };
             missing();
+            byte[] payload = new byte[17003];
+            for (int i = 0; i < payload.length; i++) payload[i] = (byte)(i * 31 + 7);
+            try (var output = new android.os.FileBridge.FileBridgeOutputStream(android.os.ParcelFileDescriptor.fromFd(0))) {
+                output.write(payload, 0, 73);
+                output.write(payload, 73, payload.length - 73);
+                output.fsync();
+            }
+            System.out.println("original FileBridgeOutputStream write/fsync/close checks passed");
             System.out.println("original installer user-policy record/test-owner checks passed (not live SystemServer)");
             System.exit(0);
         } catch (Throwable failure) {

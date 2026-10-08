@@ -1,7 +1,8 @@
 // Compile-only image API; checked by the device-services build node.
 package com.android.server.pm;
 
-public interface ScanPackageUtils {
+public abstract class ScanPackageUtils {
+    private ScanPackageUtils() { throw new RuntimeException("stub"); }
     public static void collectCertificatesLI(PackageSetting setting,
             com.android.internal.pm.parsing.pkg.ParsedPackage pkg,
             Settings.VersionInfo version, boolean forceCollect, boolean skipVerify,

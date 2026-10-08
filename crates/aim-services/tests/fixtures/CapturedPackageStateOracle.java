@@ -1,6 +1,34 @@
 final class CapturedPackageStateOracle {
     static void verify(dev.aim.server.PackageStateReplica replica, com.android.server.pm.PackageSetting original) {
         var expected = (com.android.server.pm.pkg.PackageStateInternal) original;
+        var firstSigning = replica.getSigningDetails();
+        var expectedSigning = expected.getSigningDetails();
+        if (!java.util.Arrays.equals(firstSigning.getSignatures(), expectedSigning.getSignatures())
+                || !java.util.Objects.equals(firstSigning.getPublicKeys(), expectedSigning.getPublicKeys()))
+            throw new AssertionError("retained saved signer differs");
+        var firstKeys = firstSigning.getPublicKeys();
+        if (firstKeys != null) {
+            firstKeys.clear();
+            if (!java.util.Objects.equals(replica.getSigningDetails().getPublicKeys(), expectedSigning.getPublicKeys()))
+                throw new AssertionError("retained signer public keys are shared");
+        }
+        var firstSignatures = firstSigning.getSignatures();
+        if (firstSignatures != null && firstSignatures.length != 0) {
+            int flags = replica.getSigningDetails().getSignatures()[0].getFlags();
+            firstSignatures[0].setFlags(flags ^ 31);
+            firstSignatures[0] = null;
+            if (replica.getSigningDetails().getSignatures()[0].getFlags() != flags)
+                throw new AssertionError("retained current signer is shared");
+        }
+        var firstPast = firstSigning.getPastSigningCertificates();
+        if (firstPast != null && firstPast.length != 0) {
+            int flags = replica.getSigningDetails().getPastSigningCertificates()[0].getFlags();
+            firstPast[0].setFlags(flags ^ 31);
+            firstPast[0] = null;
+            if (replica.getSigningDetails().getPastSigningCertificates()[0].getFlags() != flags)
+                throw new AssertionError("retained signer lineage is shared");
+        }
+
         if (!java.util.Objects.deepEquals(replica.getLastPackageUsageTime(), expected.getLastPackageUsageTime())) throw new AssertionError("captured getLastPackageUsageTime differs");
         if (!java.util.Objects.deepEquals(replica.getApexModuleName(), expected.getApexModuleName())) throw new AssertionError("captured getApexModuleName differs");
         if (!java.util.Objects.deepEquals(replica.getAppId(), expected.getAppId())) throw new AssertionError("captured getAppId differs");

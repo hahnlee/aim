@@ -3,12 +3,16 @@
 package android.os;
 
 public final class Parcel {
+    public boolean pushAllowFds(boolean allow) { throw new RuntimeException("stub"); }
+    public void restoreAllowFds(boolean previous) { throw new RuntimeException("stub"); }
+    public void writeParcelable(Parcelable value, int flags) { throw new RuntimeException("stub"); }
     private Parcel(long nativePtr) { throw new RuntimeException("stub"); }
     public static Parcel obtain() { throw new RuntimeException("stub"); }
     public static Parcel obtain(IBinder binder) { throw new RuntimeException("stub"); }
     public final void writeFileDescriptor(java.io.FileDescriptor fd) { throw new RuntimeException("stub"); }
     public final byte[] readBlob() { throw new RuntimeException("stub"); }
     public boolean hasFileDescriptors() { throw new RuntimeException("stub"); }
+    public final void setPropagateAllowBlocking() { throw new RuntimeException("stub"); }
     public final void recycle() { throw new RuntimeException("stub"); }
     public final void setDataPosition(int pos) { throw new RuntimeException("stub"); }
     public final void writeInterfaceToken(String interfaceName) { throw new RuntimeException("stub"); }
@@ -29,6 +33,7 @@ public final class Parcel {
     public final java.util.ArrayList<String> createStringArrayList() { throw new RuntimeException("stub"); }
     public final <T> T readParcelable(ClassLoader loader, Class<T> clazz) { throw new RuntimeException("stub"); }
     public final <T> java.util.ArrayList<T> readArrayList(ClassLoader loader, Class<? extends T> clazz) { throw new RuntimeException("stub"); }
+    public final java.util.ArrayList readArrayList(ClassLoader loader) { throw new RuntimeException("stub"); }
     public final <T extends Parcelable> java.util.List<T> readParcelableList(java.util.List<T> list, ClassLoader loader, Class<T> clazz) { throw new RuntimeException("stub"); }
     public final int dataAvail() { throw new RuntimeException("stub"); }
     public final void writeByteArray(byte[] b) { throw new RuntimeException("stub"); }
@@ -56,4 +61,13 @@ public final class Parcel {
     public void writeLongArray(long[] value) { throw new RuntimeException("stub"); }
     public final PersistableBundle readPersistableBundle() { throw new RuntimeException("stub"); }
     public final void writePersistableBundle(PersistableBundle value) { throw new RuntimeException("stub"); }
+    public final <T extends Parcelable> void writeTypedArray(T[] value, int flags) { throw new RuntimeException("stub"); }
+    public final <T> T[] createTypedArray(Parcelable.Creator<T> creator) { throw new RuntimeException("stub"); }
+
+    public final void writeBooleanArray(boolean[] values) { throw new RuntimeException("stub"); }
+    public final boolean[] createBooleanArray() { throw new RuntimeException("stub"); }
+    public final double readDouble() { throw new RuntimeException("stub"); }
+ public void writeBinderArray(IBinder[] value){throw new RuntimeException("stub");}
+ public IBinder[] createBinderArray(){throw new RuntimeException("stub");}
+ public void writeFloat(float value){throw new RuntimeException("stub");}
 }

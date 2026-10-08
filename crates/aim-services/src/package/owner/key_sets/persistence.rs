@@ -2,7 +2,7 @@
 //! KeySetManagerService.writeKeySetManagerServiceLPr, android-16.0.0_r1.
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use super::{Settings, validated_sets};
-use crate::package::owner::{attribute, element, signing::persisted};
+use crate::package::owner::{attribute, element, canonical_persistent_settings as persisted};
 use aim_android_xml::{Element, Node, Value};
 use std::collections::BTreeSet;
 

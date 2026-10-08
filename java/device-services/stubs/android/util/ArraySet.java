@@ -21,4 +21,5 @@ public class ArraySet<E> implements Collection<E>, Set<E> {
     public boolean retainAll(Collection<?> values) { throw new RuntimeException("stub"); }
     public boolean removeAll(Collection<?> values) { throw new RuntimeException("stub"); }
     public void clear() { throw new RuntimeException("stub"); }
+ public E valueAt(int index){throw new RuntimeException("stub");}
 }

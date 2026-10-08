@@ -1065,6 +1065,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
 
 /// The synthesized node at a normalized guest path under /proc or /sys.
 pub fn node(guest: &str) -> Option<Node> {
+    if let Some(node)=super::fuse_sysfs::node(guest){return node.ok();}
     if let Some(rest) = guest.strip_prefix("/proc") {
         let rest = rest.trim_start_matches('/');
         let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
@@ -1424,7 +1425,7 @@ fn shared(fd: i32) -> bool {
 /// A directory fd for a synthesized directory.
 fn dir_fd(guest: &str, list: Vec<Entry>, cloexec: bool) -> i64 {
     let mut list = list;
-    if let Some((host, _)) = recorded(guest)
+    if !guest.starts_with("/sys/fs/fuse") && let Some((host, _)) = recorded(guest)
         && let Ok(rd) = std::fs::read_dir(&host)
     {
         for e in rd.flatten() {
@@ -1496,9 +1497,14 @@ const O_CLOEXEC: u64 = 0o2000000;
 
 /// openat of a guest path under /proc or /sys. None: not ours.
 pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
+    if let Some(result)=super::fuse_sysfs::open(guest,flags){return Some(result);}
     if !is_kernfs(guest) {
         return None;
     }
+    if let Some(node)=super::fuse_sysfs::node(guest){return Some(match node{
+        Ok(Node::Dir(entries))=>dir_fd(guest,entries,flags&O_CLOEXEC!=0),
+        Ok(Node::File(_))=>-(errno::EACCES as i64),Ok(Node::Link(_))=>-(errno::EINVAL as i64),Err(error)=>-(error as i64),
+    });}
     let cloexec = flags & O_CLOEXEC != 0;
     let write = flags & O_ACCMODE != 0;
     if let Some((host, st)) = recorded(guest)
@@ -1680,6 +1686,10 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
         }
         None => (0, 0),
     };
+    if let Some(node)=super::fuse_sysfs::node(&canon){return Some(node.map(|node|{
+        let mut stat:libc::stat=unsafe{std::mem::zeroed()};stat.st_ino=canon.bytes().fold(1469598103934665603u64,|hash,byte|(hash^u64::from(byte)).wrapping_mul(1099511628211));stat.st_blksize=4096;
+        match node{Node::Dir(_)=>{stat.st_mode=libc::S_IFDIR|0o555;stat.st_nlink=2;},_=>{stat.st_mode=libc::S_IFREG|0o200;stat.st_nlink=1;}}stat
+    }));}
     if let Some((_, mut st)) = recorded(guest) {
         (st.st_uid, st.st_gid) = owner;
         return Some(Ok(st));

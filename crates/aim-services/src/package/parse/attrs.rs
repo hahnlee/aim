@@ -395,6 +395,13 @@ impl TypedArray<'_> {
         }
     }
 
+    /// Only DIP/SP units consume density. Pixel and absent values must not
+    /// require a display owner merely because a <layout> tag exists.
+    pub fn dimension_requires_density(&self, name: &str) -> bool {
+        let value = self.value(name);
+        value.kind == TYPE_DIMENSION && matches!(value.data & 0xf, 1 | 2)
+    }
+
     /// `getFraction(index, 1, 1, default)`.
     pub fn fraction(&self, name: &str, default: f32) -> f32 {
         let v = self.value(name);

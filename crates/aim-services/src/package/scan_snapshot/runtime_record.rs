@@ -12,8 +12,7 @@ pub fn captured(snapshot: &Snapshot, name: &str, factory: bool) -> Result<Option
     let Some(setting) = packages.iter().find(|p| p.name == name) else {
         return Ok(None);
     };
-    owner.validate_replica_runtime(Some(snapshot.usage()))?;
-    let state = owner
+    let state = snapshot
         .replica_runtime(name, factory)?
         .ok_or("missing replica runtime owner")?;
     write(

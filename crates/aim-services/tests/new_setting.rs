@@ -2237,6 +2237,7 @@ fn compare_new_settings(original_only: bool) {
         // completion transaction retains all accepted metadata; copied files
         // remain the installation cleanup owner's responsibility.
         let inputs = || ScanMetadataCompletion {
+            scan_as_instant_app:false,
             seinfo: common::seinfo::scan(),
             factory_test: false,
             abi_policy: &abi_policy,
@@ -2466,6 +2467,7 @@ fn compare_new_settings(original_only: bool) {
         ..context
     };
     let inputs = || ScanMetadataCompletion {
+            scan_as_instant_app:false,
         seinfo: common::seinfo::scan(),
         factory_test: false,
         abi_policy: &abi_policy,

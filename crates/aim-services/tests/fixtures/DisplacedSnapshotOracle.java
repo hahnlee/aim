@@ -29,6 +29,26 @@ public final class DisplacedSnapshotOracle {
         public void clearOverrideSigningDetails() { delegate.clearOverrideSigningDetails(); }
     }
     private static final class Permissions implements com.android.server.pm.permission.PermissionManagerServiceInternal {
+        public String getDefaultPermissionGrantFingerprint(int userId) { throw new AssertionError("unused fingerprint owner"); }
+        public void setDefaultPermissionGrantFingerprint(String fingerprint, int userId) { throw new AssertionError("unused fingerprint owner"); }
+        public void onSystemReady() { throw new AssertionError("unused permission lifecycle owner"); }
+        public void onStorageVolumeMounted(String volumeUuid, boolean fingerprintChanged) { throw new AssertionError("unused permission volume owner"); }
+        public void onUserCreated(int userId) { throw new AssertionError("unused permission lifecycle owner"); }
+        public void onUserRemoved(int userId) { throw new AssertionError("unused permission lifecycle owner"); }
+        public void readLegacyPermissionStateTEMP() { throw new AssertionError("unused legacy migration owner"); }
+        public boolean isPermissionsReviewRequired(String name,int user){throw new AssertionError("unused permission review owner");}
+        public int[] getPermissionGids(String name,int user){throw new AssertionError("unused permission GID owner");}
+        public void resetRuntimePermissions(com.android.server.pm.pkg.AndroidPackage pkg,int user){throw new AssertionError("unused permission reset owner");}
+        public void resetRuntimePermissionsForUser(int user){throw new AssertionError("unused permission reset owner");}
+        public void restoreDelayedRuntimePermissions(String name,int user){throw new AssertionError("unused permission restore owner");}
+        public void onPackageInstalled(com.android.server.pm.pkg.AndroidPackage pkg,int previousAppId,com.android.server.pm.permission.PermissionManagerServiceInternal.PackageInstalledParams params,int user){throw new AssertionError("unused permission install owner");}
+        public com.android.server.pm.permission.PermissionManagerServiceInternal.HotwordDetectionServiceProvider getHotwordDetectionServiceProvider(){throw new AssertionError("unused hotword owner");}
+        public void onPackageAdded(com.android.server.pm.pkg.PackageState state,boolean instant,com.android.server.pm.pkg.AndroidPackage oldPkg){throw new AssertionError("unused permission added owner");}
+        public void readLegacyPermissionsTEMP(com.android.server.pm.permission.LegacyPermissionSettings settings) { throw new AssertionError("unused permission definitions import owner"); }
+        public java.util.List<android.content.pm.PermissionInfo> getAllPermissionsWithProtection(int protection) { throw new AssertionError("unused permission protection enumeration owner"); }
+        public void writeLegacyPermissionsTEMP(com.android.server.pm.permission.LegacyPermissionSettings settings){throw new AssertionError("unused permission definitions owner");}
+        public void onPackageRemoved(com.android.server.pm.pkg.AndroidPackage pkg){throw new AssertionError("unused permission removed owner");}
+        public void onPackageUninstalled(String name,int appId,com.android.server.pm.pkg.PackageState state,com.android.server.pm.pkg.AndroidPackage pkg,java.util.List<com.android.server.pm.pkg.AndroidPackage> shared,int user){throw new AssertionError("unused permission uninstall owner");}
         int reads;
         int mode;
         Runnable replace;
@@ -174,6 +194,7 @@ public final class DisplacedSnapshotOracle {
         if (store.refresh() != version || source[0].closes != 1) throw new AssertionError("initial refresh differs");
         verifyLocal(first);
         verifyVersionPage(first);
+        verifyReentrantSnapshotRpc(first, visibility);
         verifyComputerLifetime(first, next, visibility);
         verifyPublishedVersion(first, next, visibility);
         var local = new dev.aim.server.PackageLocal(store, (v, p, d, u, a, old, se, f) -> {
@@ -274,18 +295,82 @@ public final class DisplacedSnapshotOracle {
         }
         permissions.mode = 0;
     }
+    private static void runReentrantLookup(Runnable lookup) {
+        var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var thread = new Thread(() -> { try { lookup.run(); } catch (Throwable error) { failure.set(error); } }, "SnapshotReentrantPermission");
+        thread.start();
+        try { thread.join(3000); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new AssertionError(error); }
+        if (thread.isAlive()) throw new AssertionError("snapshot monitor blocked reentrant permission lookup");
+        if (failure.get() != null) throw new AssertionError("reentrant permission lookup failed", failure.get());
+    }
+
+    private static void verifyReentrantSnapshotRpc(File first, dev.aim.server.PackageSnapshots.Owner visibility) throws Exception {
+        var source = new Owner(first);
+        var hook = new java.util.concurrent.atomic.AtomicReference<Runnable>();
+        var store = new dev.aim.server.PackageSnapshots.Store(() -> {
+            Runnable callback = hook.getAndSet(null);
+            if (callback != null) callback.run();
+            return dev.aim.server.IPackageScanSnapshot.Stub.asInterface(source);
+        }, visibility, true);
+        try {
+            store.refresh();
+            try (var calling = store.computer(); var reentrant = store.computer()) {
+                source.computer.reentrantName = () -> runReentrantLookup(() -> {
+                    if (reentrant.getPackage(ORIGINAL) == null) throw new AssertionError("shared captured package missing");
+                    if (calling.getPackageStates().isEmpty()) throw new AssertionError("same scope captured graph missing");
+                });
+                if (calling.getPackage(ORIGINAL) == null) throw new AssertionError("calling captured package missing");
+            }
+            hook.set(() -> runReentrantLookup(() -> {
+                try (var capture = store.computer()) {
+                    if (capture.getVersion() != source.getVersion()) throw new AssertionError("reentrant store generation changed");
+                }
+            }));
+            store.refresh();
+        } finally { store.close(); }
+    }
+
     private static void verifyComputerLifetime(File first, File next,
             dev.aim.server.PackageSnapshots.Owner visibility) throws Exception {
         Owner[] source = { new Owner(first) };
         var store = new dev.aim.server.PackageSnapshots.Store(
                 () -> dev.aim.server.IPackageScanSnapshot.Stub.asInterface(source[0]), visibility, true);
         long version = store.refresh();
+        var internal = new NativePackageManagerInternal(store, new PackageFacadeOwners.InternalOwner(),
+                scope -> new PackageFacadeOwners.ComputerOwner());
+        com.android.server.pm.snapshot.PackageDataSnapshot originalSnapshot = internal.snapshot();
+        com.android.server.pm.Computer actualComputer = (com.android.server.pm.Computer) originalSnapshot;
+        if (actualComputer.getVersion() != (int) version || actualComputer.getUsed() != 0
+                || actualComputer.use() != actualComputer || actualComputer.use() != actualComputer
+                || actualComputer.getUsed() != 2)
+            throw new AssertionError("actual Computer version/use ABI changed");
+        if (actualComputer.getPersistentApplications(true, 0x12345678).get(0).uid != version
+                || actualComputer.getPackageStartability(true, ORIGINAL, 1010001, 10) != version)
+            throw new AssertionError("actual Computer internal lifecycle query changed identity");
         var retained = source[0].computer;
         var oldStates = store.unfiltered();
         var computer = store.computer();
         try {
+            if (internal.getPackageUid(ORIGINAL, 0x1234567800000001L, 10) != version
+                    || internal.getApplicationInfo(ORIGINAL, 0x1234567800000001L, 1010001, 10).uid != version
+                    || actualComputer.getApplicationInfoInternal(ORIGINAL, 0x1234567800000001L, 1010001, 10).uid != version)
+                throw new AssertionError("actual Internal/Computer bypassed captured native owner");
+            if (!actualComputer.getAllPackages().equals(java.util.List.of(ORIGINAL, Long.toString(version)))
+                    || actualComputer.checkUidPermission("fixture.permission", 10003) != version
+                    || !actualComputer.resolveContentProviderForUid("fixture.authority", 0x1234567800000001L, 10, 10003).authority.equals(Long.toString(version))
+                    || retained.queryBinderCalls != 1)
+                throw new AssertionError("actual Computer read-only original proxy forwarding changed");
             source[0] = new Owner(next);
             store.refresh();
+            if (!actualComputer.getAllPackages().equals(java.util.List.of(ORIGINAL, Long.toString(version)))
+                    || retained.queryBinderCalls != 1)
+                throw new AssertionError("read-only proxy lost retained capture or cache");
+            if (actualComputer.getVersion() != (int) version
+                    || actualComputer.getPackageInfoInternal(ORIGINAL, 42L, 0x1234567800000001L, 1010001, 10).applicationInfo.uid != version
+                    || actualComputer.getPersistentApplications(true, 0x12345678).get(0).uid != version
+                    || actualComputer.getPackageStartability(true, ORIGINAL, 1010001, 10) != version)
+                throw new AssertionError("actual Computer lost retained capture");
             if (retained.closes != 0 || computer.getVersion() != version)
                 throw new AssertionError("publication closed retained query graph");
             if (computer.getApplicationInfo(ORIGINAL, 0x1234567800000001L, 1010001, 10).uid != version
@@ -356,6 +441,31 @@ public final class DisplacedSnapshotOracle {
                 throw new AssertionError("caller changed captured inventory");
             if (computer.getSharedUserApi(-1) != null || !computer.getSharedUserPackages(-1).isEmpty())
                 throw new AssertionError("unknown shared UID returned owner");
+            var available = new java.util.ArrayList<String>();
+            for (var state : capturedStates.values()) {
+                if (state.getAndroidPackage() != null) available.add(state.getPackageName());
+                var volume = actualComputer.getVolumePackages(state.getVolumeUuid());
+                if (!volume.contains(state)) throw new AssertionError("volume omitted captured package state");
+                for (var member : volume) if (!java.util.Objects.equals(state.getVolumeUuid(), member.getVolumeUuid()))
+                    throw new AssertionError("volume returned foreign package state");
+            }
+            if (!java.util.Arrays.equals(actualComputer.getAllAvailablePackageNames(), available.toArray(new String[0]))
+                    || actualComputer.filterOnlySystemPackages(null).length != 0
+                    || actualComputer.filterOnlySystemPackages(new String[] {null, "fixture.missing"}).length != 0
+                    || actualComputer.getPackageOrSharedUser(-1) != null
+                    || actualComputer.getSharedUserPackagesForPackage("fixture.missing", 0).length != 0
+                    || internal.getSharedUserPackagesForPackage("fixture.missing", 0).length != 0)
+                throw new AssertionError("captured owner projection changed empty semantics");
+            if (!internal.getEnabledComponents("fixture.missing", 0).isEmpty()
+                    || !internal.getDisabledComponents("fixture.missing", 0).isEmpty()
+                    || internal.getApplicationEnabledState("fixture.missing", 0) != 0)
+                throw new AssertionError("missing internal package enabled state changed");
+            for (var state : capturedStates.values()) {
+                if (!java.util.Objects.equals(internal.getEnabledComponents(state.getPackageName(), 0), state.getUserStateOrDefault(0).getEnabledComponents())
+                        || !java.util.Objects.equals(internal.getDisabledComponents(state.getPackageName(), 0), state.getUserStateOrDefault(0).getDisabledComponents())
+                        || internal.getApplicationEnabledState(state.getPackageName(), 0) != state.getUserStateOrDefault(0).getEnabledState())
+                    throw new AssertionError("internal component owner changed captured user state");
+            }
             var uidOwners = dev.aim.server.PackageUidOwners.read(retained.uidRegistry, version,
                     capturedStates, oldStates.getSharedUsers(), true);
             for (var entry : uidOwners.entrySet()) {
@@ -373,11 +483,14 @@ public final class DisplacedSnapshotOracle {
                     var state = (com.android.server.pm.pkg.PackageStateInternal) owner;
                     if (state.getPkg() != null) expectedCode.add(state.getPkg());
                     signing = state.getSigningDetails();
-                    try { computer.getSharedUserApi(appId); throw new AssertionError("package UID treated as shared"); }
-                    catch (ClassCastException expected) {}
-                    try { computer.getSharedUserPackages(appId); throw new AssertionError("package UID returned shared members"); }
-                    catch (ClassCastException expected) {}
+                    if (computer.getSharedUserApi(appId) != null || computer.getSharedUser(appId) != null
+                            || !computer.getSharedUserPackages(appId).isEmpty())
+                        throw new AssertionError("package UID treated as a shared owner");
                 }
+                var pair = actualComputer.getPackageOrSharedUser(appId);
+                if (pair == null || (owner instanceof com.android.server.pm.pkg.SharedUserApi
+                        ? pair.first != null || pair.second != owner : pair.first != owner || pair.second != null))
+                    throw new AssertionError("UID owner pair changed registered identity");
                 if (!computer.getPackagesForAppId(appId).equals(expectedCode)
                         || !java.util.Arrays.equals(signingBytes(computer.getSigningDetails(appId)), signingBytes(signing)))
                     throw new AssertionError("registered UID parsed/signing owner changed");
@@ -443,13 +556,30 @@ public final class DisplacedSnapshotOracle {
             }
             if (retained.closes != 0) throw new AssertionError("query close invalidated retained state scope");
             oldStates.close();
+            if (retained.closes != 0) throw new AssertionError("actual Computer lease was not retained");
+            ((com.android.server.pm.NativeComputer) actualComputer).close();
             if (retained.closes != 1) throw new AssertionError("last scope leaked query endpoint");
+            try {
+                android.content.pm.IPackageManager.Stub.asInterface(retained.readOnlyQueries).getAllPackages();
+                throw new AssertionError("revoked raw read-only proxy accepted query");
+            } catch (IllegalStateException expected) {}
+            for (Runnable query : new Runnable[] {
+                    () -> actualComputer.getPersistentApplications(true, 0x12345678),
+                    () -> actualComputer.getPackageStartability(true, ORIGINAL, 1010001, 10),
+                    () -> actualComputer.getAllPackages(),
+                    () -> actualComputer.checkUidPermission("fixture.permission", 10003),
+                    () -> actualComputer.resolveContentProviderForUid("fixture.authority", 0, 0, 10003),
+                    () -> actualComputer.getVolumePackages(null),
+                    () -> actualComputer.getPackageOrSharedUser(-1)}) {
+                try { query.run(); throw new AssertionError("closed actual Computer exposed read transport"); }
+                catch (IllegalStateException expected) {}
+            }
             try { computer.getVersion(); throw new AssertionError("closed computer adapter accepted"); }
             catch (IllegalStateException expected) {}
             try { store.computer(); throw new AssertionError("closed store accepted query scope"); }
             catch (IllegalStateException expected) {}
         } finally {
-            computer.close(); oldStates.close(); store.close();
+            computer.close(); oldStates.close(); ((com.android.server.pm.NativeComputer) actualComputer).close(); store.close();
         }
     }
     private static byte[] signingBytes(android.content.pm.SigningDetails signing) {
@@ -605,9 +735,42 @@ public final class DisplacedSnapshotOracle {
     private static final class CapturedComputer extends dev.aim.server.IPackageComputer.Stub {
         final long version;
         final byte[] uidRegistry;
+        final java.util.Map<String,Integer> activeAppIds;
         int resolutions;
         int closes;
-        CapturedComputer(long version, byte[] uidRegistry) { this.version = version; this.uidRegistry = uidRegistry; }
+        int queryBinderCalls;
+        final int[] queryCodes;
+        final android.os.IBinder readOnlyQueries = new android.os.Binder() {
+            @Override protected boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply, int flags) {
+                open();
+                data.enforceInterface("android.content.pm.IPackageManager");
+                if (code == queryCodes[0]) {
+                    data.enforceNoDataAvail(); reply.writeNoException();
+                    reply.writeStringList(java.util.List.of(ORIGINAL, Long.toString(version))); return true;
+                }
+                if (code == queryCodes[1]) {
+                    if (!"fixture.permission".equals(data.readString()) || data.readInt() != 10003)
+                        throw new AssertionError("read-only permission arguments changed");
+                    data.enforceNoDataAvail(); reply.writeNoException(); reply.writeInt((int) version); return true;
+                }
+                if (code == queryCodes[2]) {
+                    if (!"fixture.authority".equals(data.readString()) || data.readLong() != 0x1234567800000001L
+                            || data.readInt() != 10 || data.readInt() != 10003)
+                        throw new AssertionError("read-only provider identity or flags changed");
+                    data.enforceNoDataAvail(); var provider = new android.content.pm.ProviderInfo();
+                    provider.applicationInfo = new android.content.pm.ApplicationInfo();
+                    provider.authority = Long.toString(version); reply.writeNoException();
+                    reply.writeTypedObject((android.os.Parcelable) (Object) provider, 0); return true;
+                }
+                return false;
+            }
+        };
+        volatile Runnable reentrantName;
+        CapturedComputer(long version, byte[] uidRegistry, String[] codes, java.util.Map<String,Integer> activeAppIds) {
+            this.version = version; this.uidRegistry = uidRegistry;
+            this.activeAppIds = java.util.Map.copyOf(activeAppIds);
+            queryCodes = java.util.Arrays.stream(codes).mapToInt(Integer::parseInt).toArray();
+        }
         void open() { if (closes != 0) throw new IllegalStateException("fixture computer closed"); }
         public long getVersion() { open(); return version; }
         public android.content.pm.ApplicationInfo getApplicationInfo(String n, long flags, int user,
@@ -673,6 +836,9 @@ public final class DisplacedSnapshotOracle {
         }
         public String resolveInternalPackageName(String name, long versionCode, int callerUid) {
             open();
+            Runnable callback = reentrantName;
+            reentrantName = null;
+            if (callback != null) callback.run();
             resolutions++;
             if ("fixture.by-caller".equals(name)) {
                 if (versionCode != android.content.pm.PackageManager.VERSION_CODE_HIGHEST
@@ -722,6 +888,66 @@ public final class DisplacedSnapshotOracle {
             if (uid != 1010001) throw new AssertionError("UID SDK target changed");
             return (int) version;
         }
+        public android.content.pm.ApplicationInfo[] getPersistentApplications(boolean safeMode, int flags, int uid, int pid) {
+            open(); if (!safeMode || flags != 0x12345678 || uid != android.os.Binder.getCallingUid()
+                    || pid != android.os.Binder.getCallingPid()) throw new AssertionError("persistent original identity changed");
+            var info = new android.content.pm.ApplicationInfo(); info.uid = (int) version;
+            return new android.content.pm.ApplicationInfo[] {info};
+        }
+        public int getPackageStartability(boolean safeMode, String name, int filterUid, int user, int uid, int pid) {
+            open(); if (!safeMode || !ORIGINAL.equals(name) || filterUid != 1010001 || user != 10
+                    || uid != android.os.Binder.getCallingUid() || pid != android.os.Binder.getCallingPid())
+                throw new AssertionError("startability original identity changed");
+            return (int) version;
+        }
+
+        public boolean getBlockUninstall(int user, String name) { throw new AssertionError("unused uninstall block fixture"); }
+        public android.content.pm.SharedLibraryInfo[] getSharedLibraryRegistry() { throw new AssertionError("unused shared library registry fixture"); }
+        public boolean shouldFilterApplication(int kind, String owner, String name, int appId, int filter, int user, boolean uninstalled, int caller, int pid) {
+            caller(caller, pid);
+            if (kind != 0 || owner != null || !java.util.Objects.equals(activeAppIds.get(name), appId))
+                throw new AssertionError("visibility candidate escaped retained active SettingBase graph");
+            // This oracle's explicit policy hides the selected target only for
+            // filterUninstalled queries. Preserve both true/false adapter cases.
+            return filterAppAccess(name, filter, user, uninstalled);
+        }
+        public android.content.pm.ProcessInfo[] getProcessesForUid(int uid, int caller, int pid) { throw new AssertionError("unused process owner fixture"); }
+        public int getPackageUidWithCaller(String name, long flags, int user, int filter, int caller, int pid) { throw new AssertionError("unused explicit UID fixture"); }
+        public boolean isCallerSameApp(String name, int uid, boolean isolated, int caller, int pid) { throw new AssertionError("unused caller identity fixture"); }
+        public String getInstantAppPackageName(int uid, int caller, int pid) { throw new AssertionError("unused instant UID fixture"); }
+        public int getComponentEnabledSetting(android.content.ComponentName component, int filter, int user, boolean internal, int caller, int pid) { throw new AssertionError("unused component state fixture"); }
+        public android.content.pm.ParceledListSlice getInstalledApplications(long flags, int user, int filter, boolean crossUser, int caller, int pid) { throw new AssertionError("unused installed application fixture"); }
+        public boolean isInstantAppInternal(String name, int user, int filter, int caller, int pid) { throw new AssertionError("unused instant package fixture"); }
+        public boolean canViewInstantApps(int filter, int user, int caller, int pid) { throw new AssertionError("unused instant visibility fixture"); }
+        public int checkUidSignaturesForAllUsers(int uid1, int uid2, int caller, int pid) { throw new AssertionError("unused all-user signing fixture"); }
+        public void enforceCrossUserPermission(int filter, int user, boolean full, boolean shell, String message, int caller, int pid) { throw new AssertionError("unused cross-user fixture"); }
+        public int getPackageLookupUid(int uid, boolean knownIsolatedComputeApp, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getPackageLookupUid"); }
+        public String getSetupWizardPackageName() { throw new AssertionError("unused explicit native fixture: getSetupWizardPackageName"); }
+        public android.content.pm.VersionedPackage[] getSharedLibraryUsers(String name, long version, int libraryType, long flags, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getSharedLibraryUsers"); }
+        public boolean[] getSharedLibraryUsersOptional(String name, long version, int libraryType, long flags, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getSharedLibraryUsersOptional"); }
+        public int[] getVisibilityAllowList(String packageName, int userId, boolean checkOnly) { throw new AssertionError("unused explicit native fixture: getVisibilityAllowList"); }
+        public android.content.pm.ActivityInfo getActivityInfoInternal(android.content.ComponentName component, long flags, int filterCallingUid, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getActivityInfoInternal"); }
+        public boolean canAccessComponent(int filterCallingUid, android.content.ComponentName component, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: canAccessComponent"); }
+        public android.content.pm.ProviderInfo resolveContentProvider(String authority, long flags, int userId, int filterCallingUid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: resolveContentProvider"); }
+        public android.content.ComponentName getInstantAppInstallerComponent() { throw new AssertionError("unused explicit native fixture: getInstantAppInstallerComponent"); }
+        public String[] getFrozenPackageNames() { throw new AssertionError("unused explicit native fixture: getFrozenPackageNames"); }
+        public int[] getFrozenPackageCounts() { throw new AssertionError("unused explicit native fixture: getFrozenPackageCounts"); }
+        public byte[] getInstantAppInstallerInfoRecord() { throw new AssertionError("unused explicit native fixture: getInstantAppInstallerInfoRecord"); }
+        public boolean activitySupportsIntentAsUser(android.content.ComponentName resolveComponent, android.content.ComponentName component, android.content.Intent intent, String resolvedType, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: activitySupportsIntentAsUser"); }
+        public boolean hasCrossUserPermission(int filterCallingUid, int userId, boolean requireFullPermission, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: hasCrossUserPermission"); }
+        public byte[] getPlatformSigningDetailsRecord() { throw new AssertionError("unused explicit native fixture: getPlatformSigningDetailsRecord"); }
+        public String[] getKnownPackageNames(int kind, int userId, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: getKnownPackageNames"); }
+        public boolean isUpgradingFromLowerThan(int sdkVersion) { throw new AssertionError("unused explicit native fixture: isUpgradingFromLowerThan"); }
+        public String[] getApksInApex(String packageName) { throw new AssertionError("unused explicit native fixture: getApksInApex"); }
+        public android.content.ComponentName getResolverComponent() { throw new AssertionError("unused explicit native fixture: getResolverComponent"); }
+        public byte[] queryIntentActivitiesInternalRecord(android.content.Intent intent, String resolvedType, long flags, long privateResolveFlags, int filterCallingUid, int filterCallingPid, int userId, boolean resolveForStart, boolean allowDynamicSplits, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: queryIntentActivitiesInternalRecord"); }
+        public byte[] queryIntentServicesInternalRecord(android.content.Intent intent, String resolvedType, long flags, int userId, int filterCallingUid, int filterCallingPid, boolean includeInstantApps, boolean resolveForStart, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: queryIntentServicesInternalRecord"); }
+        public byte[] resolveIntentInternalRecord(android.content.Intent intent, String resolvedType, long flags, long privateResolveFlags, int userId, boolean resolveForStart, int filterCallingUid, int filterCallingPid, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: resolveIntentInternalRecord"); }
+        public byte[] resolveServiceInternalRecord(android.content.Intent intent, String resolvedType, long flags, int userId, int filterCallingUid, int filterCallingPid, boolean resolveForStart, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: resolveServiceInternalRecord"); }
+        public byte[] queryIntentReceiversInternalRecord(android.content.Intent intent, String resolvedType, long flags, int userId, int filterCallingUid, int filterCallingPid, boolean forSend, int callingUid, int callingPid) { throw new AssertionError("unused explicit native fixture: queryIntentReceiversInternalRecord"); }
+        public boolean isPermissionUpgradeNeeded(int userId) { throw new AssertionError("unused explicit native fixture: isPermissionUpgradeNeeded"); }
+        public boolean hasInstantApplicationMetadata(String packageName, int userId) { throw new AssertionError("unused explicit native fixture: hasInstantApplicationMetadata"); }
+        public android.os.IBinder getPackageManagerQueryBinder(int uid, int pid) { caller(uid, pid); queryBinderCalls++; return readOnlyQueries; }
         public int getUidOwnerRegistryLength() { open(); return uidRegistry.length; }
         public byte[] getUidOwnerRegistryChunk(int offset, int length) {
             open(); return java.util.Arrays.copyOfRange(uidRegistry, offset, offset + length);
@@ -729,6 +955,21 @@ public final class DisplacedSnapshotOracle {
         public void close() {
             if (++closes != 1) throw new AssertionError("query capture closed twice");
         }
+        @Override public android.os.IBinder[] getPreferredRecordTokens(int userId, int kind) { throw new AssertionError("unexpected captured query: getPreferredRecordTokens"); }
+        @Override public byte[] getDiagnosticRecord(int kind, int dumpType, String packageName, String[] permissionNames,
+            boolean checkIn, byte[] dumpState) { throw new AssertionError("unexpected captured query: getDiagnosticRecord"); }
+        @Override public byte[] getLegacyPermissionDefinitionsRecord() { throw new AssertionError("unexpected captured query: getLegacyPermissionDefinitionsRecord"); }
+        @Override public android.content.pm.ActivityInfo getActivityInfoCrossProfile(android.content.ComponentName component, long flags, int userId, int callingUid, int callingPid) { throw new AssertionError("unexpected captured query: getActivityInfoCrossProfile"); }
+        @Override public byte[] getSyncProvidersRecord(boolean safeMode, int callingUid, int callingPid) { throw new AssertionError("unexpected captured query: getSyncProvidersRecord"); }
+        @Override public byte[] queryRawComponentsRecord(int kind, android.content.Intent intent, String resolvedType, long flags, String packageName, android.content.ComponentName[] subset, int userId, int callingUid, int callingPid) { throw new AssertionError("unexpected captured query: queryRawComponentsRecord"); }
+        @Override public android.content.pm.ProviderInfo queryRawProvider(String authority, long flags, int userId) { throw new AssertionError("unexpected captured query: queryRawProvider"); }
+        @Override public byte[] queryRawProvidersRecord(String processName, String metadataKey, int uid, long flags, int userId) { throw new AssertionError("unexpected captured query: queryRawProvidersRecord"); }
+        @Override public byte[] queryRawSyncProvidersRecord(boolean safeMode, int userId) { throw new AssertionError("unexpected captured query: queryRawSyncProvidersRecord"); }
+        @Override public byte[] dumpRawComponentsRecord(int kind, String packageName, byte[] dumpState) { throw new AssertionError("unexpected captured query: dumpRawComponentsRecord"); }
+        @Override public int[] selectPreferredActivity(android.content.Intent intent, String resolvedType, long flags, android.content.ComponentName[] candidates, int[] matches, boolean always, boolean removeMatches, boolean queryMayBeFiltered, boolean deviceProvisioned, int userId, int callingUid, int callingPid) { throw new AssertionError("unexpected captured query: selectPreferredActivity"); }
+        @Override public int[] getCrossProfileDomainApproval(android.content.Intent intent, String resolvedType, long flags, int sourceUserId, int parentUserId) { throw new AssertionError("unexpected captured query: getCrossProfileDomainApproval"); }
+        @Override public android.content.pm.ActivityInfo getNativeResolverActivity() { throw new AssertionError("unexpected captured query: getNativeResolverActivity"); }
+        @Override public boolean isNativeResolverReplaced() { throw new AssertionError("unexpected captured query: isNativeResolverReplaced"); }
     }
     private static final class Owner extends dev.aim.server.IPackageScanSnapshot.Stub {
         private final File directory;
@@ -751,7 +992,19 @@ public final class DisplacedSnapshotOracle {
         @Override public android.os.IInterface queryLocalInterface(String descriptor) { return null; }
         CapturedComputer computer;
         public dev.aim.server.IPackageComputer getComputer() {
-            computer = new CapturedComputer(getVersion(), java.util.Objects.requireNonNull(read("uid-registry")));
+            var identities = new java.util.HashMap<String,Integer>();
+            for (String name : lines("active-names")) {
+                byte[] bytes = java.util.Objects.requireNonNull(read(scope(name, false) + "setting"));
+                var parcel = android.os.Parcel.obtain();
+                try {
+                    parcel.unmarshall(bytes, 0, bytes.length); parcel.setDataPosition(0);
+                    var setting = dev.aim.server.PackageSettingData.read(parcel);
+                    if (!name.equals(setting.getPackageName()) || setting.getVersion() != getVersion())
+                        throw new AssertionError("visibility inventory version or name mismatch");
+                    identities.put(name, setting.appId);
+                } finally { parcel.recycle(); }
+            }
+            computer = new CapturedComputer(getVersion(), java.util.Objects.requireNonNull(read("uid-registry")), lines("read-query-codes"), identities);
             return computer;
         }
         @Override public long getVersion() {

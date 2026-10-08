@@ -19,7 +19,7 @@ pub struct PackageCode {
     parsed_name: String,
     app_id: i32,
     disabled: bool,
-    entry: FacadeEntry,
+    entry: Arc<FacadeEntry>,
 }
 
 impl PackageCode {
@@ -477,17 +477,37 @@ struct ComputerLease {
 pub struct Endpoint {
     lease: Mutex<Lease>,
     computer: Mutex<Option<ComputerLease>>,
+    raw_metadata: bool,
 }
 
 impl Endpoint {
-    pub(crate) fn with_computer(snapshot:Arc<Snapshot>,capture:Arc<super::query_state::Capture>,process:&Arc<aim_binder_host::local::LocalProcess>)->Self {
-        let endpoint=Self::new(snapshot);
-        *endpoint.computer.lock().unwrap()=Some(ComputerLease {capture,process:Arc::downgrade(process),binder:None});
+    pub(crate) fn with_computer(
+        snapshot: Arc<Snapshot>,
+        capture: Arc<super::query_state::Capture>,
+        process: &Arc<aim_binder_host::local::LocalProcess>,
+    ) -> Self {
+        let endpoint = Self::new(snapshot);
+        *endpoint.computer.lock().unwrap() = Some(ComputerLease {
+            capture,
+            process: Arc::downgrade(process),
+            binder: None,
+        });
         endpoint
+    }
+    /// Actual constructor metadata before the original live permission owner
+    /// initializes. No query Context or Computer capability is fabricated.
+    pub fn raw_metadata(snapshot:Arc<Snapshot>)->Self{
+        let mut endpoint=Self::new(snapshot);endpoint.raw_metadata=true;endpoint
+    }
+    pub fn close_lease(&self){
+        let mut lease=self.lease.lock().unwrap();lease.snapshot.take();
+        self.computer.lock().unwrap().take();
+        lease.code.clear();lease.users.clear();lease.settings.clear();lease.runtimes.clear();lease.libraries.clear();lease.shared_users.clear();
     }
     pub fn new(snapshot: Arc<Snapshot>) -> Self {
         Self {
             computer: Mutex::new(None),
+            raw_metadata: false,
             lease: Mutex::new(Lease {
                 snapshot: Some(snapshot),
                 code: BTreeMap::new(),
@@ -544,6 +564,12 @@ impl Service for Endpoint {
             ));
             return Ok(reply);
         };
+        if self.raw_metadata && call.code==api::GET_COMPUTER {
+            api::GetComputer::read(&mut call.data)?;
+            if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
+            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"live permission query capture is not initialized"));
+            return Ok(reply);
+        }
         match call.code {
             api::GET_HIDDEN_API_ENFORCEMENT_POLICY => {
                 let args = api::GetHiddenApiEnforcementPolicy::read(&mut call.data)?;
@@ -891,17 +917,32 @@ impl Service for Endpoint {
             }
             api::GET_COMPUTER => {
                 api::GetComputer::read(&mut call.data)?;
-                if call.data.remaining()!=0 {return Err(aim_binder_host::parcel::BAD_VALUE);}
-                let mut owner=self.computer.lock().unwrap();
-                if let Some(owner)=owner.as_mut() {
+                if call.data.remaining() != 0 {
+                    return Err(aim_binder_host::parcel::BAD_VALUE);
+                }
+                let mut owner = self.computer.lock().unwrap();
+                if let Some(owner) = owner.as_mut() {
                     if owner.binder.is_none() {
-                        let Some(process)=owner.process.upgrade() else {
-                            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"package query process stopped"));return Ok(reply);
+                        let Some(process) = owner.process.upgrade() else {
+                            reply.write_exception(&Exception::new(
+                                EX_ILLEGAL_STATE,
+                                "package query process stopped",
+                            ));
+                            return Ok(reply);
                         };
-                        owner.binder=Some(process.add_service(Arc::new(super::computer::Computer::new(owner.capture.clone()))));
+                        owner.binder =
+                            Some(process.add_service(Arc::new(super::computer::Computer::new(
+                                owner.capture.clone(),
+                                owner.process.clone(),
+                            ))));
                     }
-                    api::write_get_computer_reply(&mut reply,owner.binder);
-                } else {reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"computed package owner unavailable"));}
+                    api::write_get_computer_reply(&mut reply, owner.binder);
+                } else {
+                    reply.write_exception(&Exception::new(
+                        EX_ILLEGAL_STATE,
+                        "computed package owner unavailable",
+                    ));
+                }
             }
             api::GET_VERSION => {
                 api::GetVersion::read(&mut call.data)?;
@@ -988,3 +1029,4 @@ impl Service for Endpoint {
         Ok(reply)
     }
 }
+mod install;

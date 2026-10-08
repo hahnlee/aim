@@ -150,6 +150,7 @@ fn stream_of(fd: i32) -> Result<Arc<Mutex<DirStream>>, i64> {
 const DIRENT_HEADER: usize = 19;
 
 pub fn getdents64(a: [u64; 6]) -> i64 {
+    if let Some(result)=super::fuse_client::getdents(a[0] as i32,a[1],a[2] as usize){return result;}
     let (fd, buf, count) = (a[0] as i32, a[1], a[2] as usize);
     let d = match stream_of(fd) {
         Ok(d) => d,

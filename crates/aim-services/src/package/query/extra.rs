@@ -1,5 +1,6 @@
 //! Additional snapshot queries from the pinned ComputerEngine and PMS owner.
 use super::*;
+use aim_binder_host::parcel::EX_ILLEGAL_ARGUMENT;
 
 struct VersionedPackage {
     name: Option<String>,
@@ -17,6 +18,331 @@ impl ReadParcelable for VersionedPackage {
 impl Query<'_> {
     pub(super) fn extra_package(&self, code: u32, r: &mut Reader<'_>) -> Answered {
         match code {
+            pm::GET_APP_METADATA_FD => {
+                let a = args(pm::GetAppMetadataFd::read(r))?;
+                thrown(self.app_metadata_fd(a.package_name.as_deref(), a.user_id),
+                    |p, file| pm::write_get_app_metadata_fd_reply(p, file.as_ref()))
+            }
+            pm::GET_LAUNCH_INTENT_SENDER_FOR_PACKAGE => {
+                let a = args(pm::GetLaunchIntentSenderForPackage::read(r))?;
+                thrown(self.launch_sender(a.package_name.as_deref(), a.calling_package.as_deref(), a.feature_id.as_deref(), a.user_id),
+                    |p, sender| pm::write_get_launch_intent_sender_for_package_reply(p, Some(&sender)))
+            }
+            pm::GET_INSTANT_APP_ANDROID_ID => {
+                let a = args(pm::GetInstantAppAndroidId::read(r))?;
+                thrown(self.instant_android_id(a.package_name.as_deref(), a.user_id),
+                    |p, id| pm::write_get_instant_app_android_id_reply(p, &id))
+            }
+            pm::QUERY_SYNC_PROVIDERS => {
+                let a = args(pm::QuerySyncProviders::<SyncProvider>::read(r))?;
+                let result = self.sync_providers(a.out_names, a.out_info)?;
+                Ok(reply(|p| pm::write_query_sync_providers_reply(p, &result)))
+            }
+            pm::GET_PERMISSION_GROUP_INFO => {
+                let a = args(pm::GetPermissionGroupInfo::read(r))?;
+                let owner = self.state.system.permission_groups.as_ref().ok_or(NotModelled("original PermissionManagerService group owner unavailable"))?;
+                thrown(Ok(owner.group(a.name.as_deref(), a.flags)),
+                    |p, group| pm::write_get_permission_group_info_reply(p, group.as_ref()))
+            }
+            pm::GET_WELLBEING_PACKAGE_NAME => {
+                args(pm::GetWellbeingPackageName::read(r))?;
+                let policy = self.state.system.user_policy.as_ref().ok_or(NotModelled("live RoleManager wellbeing owner unavailable"))?;
+                thrown(Ok(policy.role_holders("android.app.role.SYSTEM_WELLBEING", 0).map(|holders| holders.into_iter().next())),
+                    |p, name| pm::write_get_wellbeing_package_name_reply(p, &name))
+            }
+            pm::GET_ARCHIVED_PACKAGE => {
+                let a = args(pm::GetArchivedPackage::read(r))?;
+                thrown(self.archived_package(a.package_name.as_deref(), a.user_id),
+                    |p, package| pm::write_get_archived_package_reply(p, package.as_ref()))
+            }
+            pm::GET_ARCHIVED_APP_ICON => {
+                let a = args(pm::GetArchivedAppIcon::<super::super::archive::UserHandle>::read(r))?;
+                thrown(self.archived_icon(a.package_name.as_deref(), a.user.as_ref().map(|user| user.0), a.calling_package_name.as_deref()),
+                    |p, icon| pm::write_get_archived_app_icon_reply(p, icon.as_ref()))
+            }
+            pm::IS_APP_ARCHIVABLE => {
+                let a = args(pm::IsAppArchivable::<super::super::archive::UserHandle>::read(r))?;
+                thrown(self.archivable(a.package_name.as_deref(), a.user.as_ref().map(|user| user.0)), pm::write_is_app_archivable_reply)
+            }
+            pm::CAN_REQUEST_PACKAGE_INSTALLS => {
+                let a = args(pm::CanRequestPackageInstalls::read(r))?;
+                thrown(self.internal_can_request_installs(a.package_name.as_deref(), self.calling_uid, a.user_id, true),
+                    pm::write_can_request_package_installs_reply)
+            }
+            pm::IS_AUTO_REVOKE_WHITELISTED => {
+                let a = args(pm::IsAutoRevokeWhitelisted::read(r))?;
+                thrown(Ok(self.security_policy()?.auto_revoke(self.calling_uid, a.package_name.as_deref())
+                    .map(|mode| mode == 1)), pm::write_is_auto_revoke_whitelisted_reply)
+            }
+            pm::GET_INSTALL_LOCATION => {
+                args(pm::GetInstallLocation::read(r))?;
+                thrown(Ok(self.security_policy()?.install_location()), pm::write_get_install_location_reply)
+            }
+            pm::IS_PACKAGE_DEVICE_ADMIN_ON_ANY_USER => {
+                let a = args(pm::IsPackageDeviceAdminOnAnyUser::read(r))?;
+                thrown(self.device_admin_any_user(a.package_name.as_deref()), pm::write_is_package_device_admin_on_any_user_reply)
+            }
+            pm::IS_PACKAGE_STATE_PROTECTED => {
+                let a = args(pm::IsPackageStateProtected::read(r))?;
+                thrown(self.package_state_protected(a.package_name.as_deref(), a.user_id), pm::write_is_package_state_protected_reply)
+            }
+            pm::GET_INSTANT_APP_COOKIE => {
+                let a = args(pm::GetInstantAppCookie::read(r))?;
+                thrown(self.instant_cookie(a.package_name.as_deref(), a.user_id),
+                    |p, value| pm::write_get_instant_app_cookie_reply(p, &value))
+            }
+            pm::SET_INSTANT_APP_COOKIE => {
+                let a = args(pm::SetInstantAppCookie::read(r))?;
+                if r.remaining() != 0 { return Err(NotModelled("trailing instant cookie setter arguments")); }
+                thrown(self.set_instant_cookie(a.package_name.as_deref(), a.cookie, a.user_id),
+                    pm::write_set_instant_app_cookie_reply)
+            }
+            pm::GET_INSTANT_APP_ICON => {
+                let a = args(pm::GetInstantAppIcon::read(r))?;
+                thrown(self.instant_icon(a.package_name.as_deref(), a.user_id),
+                    |p, value| pm::write_get_instant_app_icon_reply(p, value.as_ref()))
+            }
+            pm::GET_INSTANT_APPS => {
+                let a = args(pm::GetInstantApps::read(r))?;
+                thrown(self.instant_apps(a.user_id), |p, value| pm::write_get_instant_apps_reply(p,
+                    value.as_ref().map(|items| ListSlice { creator: "android.content.pm.InstantAppInfo".into(), items: items.clone() }).as_ref()))
+            }
+            pm::ENTER_SAFE_MODE => {
+                args(pm::EnterSafeMode::read(r))?;
+                if r.remaining() != 0 { return Err(NotModelled("trailing safe-mode setter arguments")); }
+                let owner = self.lifecycle_owner()?;
+                thrown(Ok(owner.enter_safe_mode(self.calling_uid).map_err(Exception::security)),
+                    |p, ()| pm::write_enter_safe_mode_reply(p))
+            }
+            pm::IS_FIRST_BOOT => {
+                args(pm::IsFirstBoot::read(r))?;
+                let owner = self.lifecycle_owner()?;
+                Ok(reply(|p| pm::write_is_first_boot_reply(p, owner.first_boot())))
+            }
+            pm::IS_DEVICE_UPGRADING => {
+                args(pm::IsDeviceUpgrading::read(r))?;
+                let owner = self.lifecycle_owner()?;
+                Ok(reply(|p| pm::write_is_device_upgrading_reply(p, owner.device_upgrading())))
+            }
+            pm::IS_SAFE_MODE => {
+                args(pm::IsSafeMode::read(r))?;
+                let owner = self.lifecycle_owner()?;
+                Ok(reply(|p| pm::write_is_safe_mode_reply(p, owner.safe_mode())))
+            }
+            pm::GET_PERSISTENT_APPLICATIONS => {
+                let a = args(pm::GetPersistentApplications::read(r))?;
+                let items = self.persistent_applications(a.flags)?;
+                Ok(reply(|p| pm::write_get_persistent_applications_reply(p,
+                    Some(&ListSlice { creator: "android.content.pm.ApplicationInfo".into(), items }))))
+            }
+            pm::CHECK_PACKAGE_STARTABLE => {
+                let a = args(pm::CheckPackageStartable::read(r))?;
+                thrown(self.check_startable(a.package_name.as_deref(), a.user_id),
+                    |p, ()| pm::write_check_package_startable_reply(p))
+            }
+            pm::ACTIVITY_SUPPORTS_INTENT_AS_USER => {
+                let a = args(pm::ActivitySupportsIntentAsUser::<ComponentName, super::super::intent::Intent>::read(r))?;
+                thrown(self.activity_supports_intent(a.class_name.as_ref(), a.intent.as_ref(),
+                    a.resolved_type.as_deref(), a.user_id), pm::write_activity_supports_intent_as_user_reply)
+            }
+            pm::GET_INSTANT_APP_RESOLVER_COMPONENT => {
+                args(pm::GetInstantAppResolverComponent::read(r))?;
+                let owner = self
+                    .state
+                    .system
+                    .instant_components
+                    .as_ref()
+                    .ok_or(NotModelled("instant component owner unavailable"))?;
+                if owner.needs_resolution() && apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_none() {
+                    if let Err(error) = self.enforce_cross_user(0, false, false, "query intent services")? {
+                        return thrown(Ok(Err(error)), |_: &mut Parcel, _: ()| {});
+                    }
+                }
+                let value = owner.resolver(self)?.map(InstantComponent);
+                Ok(reply(|p| {
+                    pm::write_get_instant_app_resolver_component_reply(p, value.as_ref())
+                }))
+            }
+            pm::GET_INSTANT_APP_INSTALLER_COMPONENT => {
+                args(pm::GetInstantAppInstallerComponent::read(r))?;
+                let owner = self
+                    .state
+                    .system
+                    .instant_components
+                    .as_ref()
+                    .ok_or(NotModelled("instant component owner unavailable"))?;
+                let value = owner.installer(self)?.map(InstantComponent);
+                Ok(reply(|p| {
+                    pm::write_get_instant_app_installer_component_reply(p, value.as_ref())
+                }))
+            }
+            pm::GET_INSTANT_APP_RESOLVER_SETTINGS_COMPONENT => {
+                args(pm::GetInstantAppResolverSettingsComponent::read(r))?;
+                let owner = self
+                    .state
+                    .system
+                    .instant_components
+                    .as_ref()
+                    .ok_or(NotModelled("instant component owner unavailable"))?;
+                let value = owner.settings().map(InstantComponent);
+                Ok(reply(|p| {
+                    pm::write_get_instant_app_resolver_settings_component_reply(p, value.as_ref())
+                }))
+            }
+            pm::IS_PAGE_SIZE_COMPAT_ENABLED => {
+                let a = args(pm::IsPageSizeCompatEnabled::read(r))?;
+                thrown(
+                    self.page_size_compat_enabled(a.package_name.as_deref()),
+                    pm::write_is_page_size_compat_enabled_reply,
+                )
+            }
+            pm::GET_PAGE_SIZE_COMPAT_WARNING_MESSAGE => {
+                let a = args(pm::GetPageSizeCompatWarningMessage::read(r))?;
+                thrown(
+                    self.page_size_compat_warning(a.package_name.as_deref()),
+                    |p, v| pm::write_get_page_size_compat_warning_message_reply(p, &v),
+                )
+            }
+            pm::GET_BLOCK_UNINSTALL_FOR_USER => {
+                let a = args(pm::GetBlockUninstallForUser::read(r))?;
+                thrown(
+                    self.block_uninstall(a.package_name.as_deref(), a.user_id),
+                    pm::write_get_block_uninstall_for_user_reply,
+                )
+            }
+            pm::CAN_PACKAGE_QUERY => {
+                let a = args(pm::CanPackageQuery::read(r))?;
+                thrown(
+                    self.can_package_query(
+                        a.source_package_name.as_deref(),
+                        a.target_package_names.as_deref(),
+                        a.user_id,
+                    ),
+                    |p, v| pm::write_can_package_query_reply(p, &Some(v)),
+                )
+            }
+            pm::GET_SUSPENDING_PACKAGE => {
+                let a = args(pm::GetSuspendingPackage::read(r))?;
+                thrown(
+                    self.suspending_package(a.package_name.as_deref(), a.user_id),
+                    |p, v| pm::write_get_suspending_package_reply(p, &v),
+                )
+            }
+            pm::GET_SUSPENDED_PACKAGE_APP_EXTRAS => {
+                let a = args(pm::GetSuspendedPackageAppExtras::read(r))?;
+                thrown(
+                    self.suspended_extras(a.package_name.as_deref(), a.user_id),
+                    |p, v| pm::write_get_suspended_package_app_extras_reply(p, v.as_ref()),
+                )
+            }
+            pm::GET_SHARED_SYSTEM_SHARED_LIBRARY_PACKAGE_NAME => {
+                args(pm::GetSharedSystemSharedLibraryPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::SharedSystemLibrary),
+                    |p, v| pm::write_get_shared_system_shared_library_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_INTENT_VERIFICATION_STATUS => {
+                let a = args(pm::GetIntentVerificationStatus::read(r))?;
+                thrown(
+                    self.legacy_domain_state(a.package_name.as_deref(), a.user_id),
+                    pm::write_get_intent_verification_status_reply,
+                )
+            }
+            pm::GET_KEY_SET_BY_ALIAS => {
+                let a = args(pm::GetKeySetByAlias::read(r))?;
+                thrown(
+                    self.keyset(a.package_name.as_deref(), a.alias.as_deref(), false),
+                    |p, v| pm::write_get_key_set_by_alias_reply(p, v.as_ref()),
+                )
+            }
+            pm::GET_SIGNING_KEY_SET => {
+                let a = args(pm::GetSigningKeySet::read(r))?;
+                thrown(
+                    self.keyset(a.package_name.as_deref(), None, true),
+                    |p, v| pm::write_get_signing_key_set_reply(p, v.as_ref()),
+                )
+            }
+            pm::IS_PACKAGE_SIGNED_BY_KEY_SET => {
+                let a =
+                    args(pm::IsPackageSignedByKeySet::<super::super::keysets::KeySet>::read(r))?;
+                thrown(
+                    self.signed_by_keyset(a.package_name.as_deref(), a.ks.as_ref(), false),
+                    pm::write_is_package_signed_by_key_set_reply,
+                )
+            }
+            pm::IS_PACKAGE_SIGNED_BY_KEY_SET_EXACTLY => {
+                let a = args(pm::IsPackageSignedByKeySetExactly::<
+                    super::super::keysets::KeySet,
+                >::read(r))?;
+                thrown(
+                    self.signed_by_keyset(a.package_name.as_deref(), a.ks.as_ref(), true),
+                    pm::write_is_package_signed_by_key_set_exactly_reply,
+                )
+            }
+            pm::GET_DEFAULT_TEXT_CLASSIFIER_PACKAGE_NAME => {
+                args(pm::GetDefaultTextClassifierPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::DefaultTextClassifier),
+                    |p, v| pm::write_get_default_text_classifier_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_SYSTEM_TEXT_CLASSIFIER_PACKAGE_NAME => {
+                args(pm::GetSystemTextClassifierPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::SystemTextClassifier),
+                    |p, v| pm::write_get_system_text_classifier_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_APP_PREDICTION_SERVICE_PACKAGE_NAME => {
+                args(pm::GetAppPredictionServicePackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::AppPrediction),
+                    |p, v| pm::write_get_app_prediction_service_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_INCIDENT_REPORT_APPROVER_PACKAGE_NAME => {
+                args(pm::GetIncidentReportApproverPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::IncidentApprover),
+                    |p, v| pm::write_get_incident_report_approver_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_ATTENTION_SERVICE_PACKAGE_NAME => {
+                args(pm::GetAttentionServicePackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::Attention),
+                    |p, v| pm::write_get_attention_service_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_ROTATION_RESOLVER_PACKAGE_NAME => {
+                args(pm::GetRotationResolverPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::RotationResolver),
+                    |p, v| pm::write_get_rotation_resolver_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_SYSTEM_CAPTIONS_SERVICE_PACKAGE_NAME => {
+                args(pm::GetSystemCaptionsServicePackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::SystemCaptions),
+                    |p, v| pm::write_get_system_captions_service_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_SETUP_WIZARD_PACKAGE_NAME => {
+                args(pm::GetSetupWizardPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::SetupWizard),
+                    |p, v| pm::write_get_setup_wizard_package_name_reply(p, &v),
+                )
+            }
+            pm::GET_SERVICES_SYSTEM_SHARED_LIBRARY_PACKAGE_NAME => {
+                args(pm::GetServicesSystemSharedLibraryPackageName::read(r))?;
+                thrown(
+                    self.configured_role(super::super::roles::Role::ServicesExtension),
+                    |p, v| pm::write_get_services_system_shared_library_package_name_reply(p, &v),
+                )
+            }
             pm::GET_PROPERTY_AS_USER => {
                 let a = args(pm::GetPropertyAsUser::read(r))?;
                 thrown(
@@ -451,24 +777,526 @@ impl Query<'_> {
             }
             pm::CHECK_UID_SIGNATURES => {
                 let a = args(pm::CheckUidSignatures::read(r))?;
-                let (s1, s2) = (self.uid_signatures(a.uid1)?, self.uid_signatures(a.uid2)?);
-                let value = match (s1, s2) {
-                    (Some(s1), Some(s2)) => check_signatures(
-                        &AndroidPackage {
-                            signing_details: Some(s1),
-                            ..Default::default()
-                        },
-                        &AndroidPackage {
-                            signing_details: Some(s2),
-                            ..Default::default()
-                        },
-                    ),
-                    _ => SIGNATURE_UNKNOWN_PACKAGE,
-                };
-                Ok(reply(|p| pm::write_check_uid_signatures_reply(p, value)))
+                thrown(
+                    self.check_uid_signatures_captured(a.uid1, a.uid2, false),
+                    pm::write_check_uid_signatures_reply,
+                )
             }
             _ => Err(NotModelled("a method not modelled")),
         }
+    }
+
+    fn lifecycle_owner(&self) -> Result<&super::super::lifecycle::Owner, NotModelled> {
+        self.state.system.lifecycle.as_deref().ok_or(NotModelled("native PMS lifecycle owner unavailable"))
+    }
+    pub(super) fn persistent_applications(&self, flags: i32) -> Result<Vec<ApplicationInfo>, NotModelled> {
+        if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() { return Ok(Vec::new()); }
+        self.persistent_applications_captured(self.lifecycle_owner()?.safe_mode(), flags)
+    }
+    pub(crate) fn persistent_applications_captured(&self, safe_mode: bool, flags: i32) -> Result<Vec<ApplicationInfo>, NotModelled> {
+        let user = user_id(self.calling_uid);
+        let entries = if let Some(registry) = &self.state.package_registry {
+            let ordered = registry.ordered_package_names();
+            let expected = self.state.packages.values().filter(|package| package.pkg.is_some()).count();
+            if ordered.len() != expected {
+                return Err(NotModelled("persistent application registration inventory differs"));
+            }
+            ordered.into_iter().map(|name| self.state.packages.get(name)
+                .filter(|package| package.pkg.is_some())
+                .ok_or(NotModelled("persistent application registered package unavailable")))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut entries = self.state.packages.values().filter(|package| package.pkg.is_some()).collect::<Vec<_>>();
+            entries.sort_by_key(|package| info::java_hash(&package.name));
+            if entries.windows(2).any(|pair| info::java_hash(&pair[0].name) == info::java_hash(&pair[1].name)) {
+                return Err(NotModelled("persistent application hash collision registration owner unavailable"));
+            }
+            entries
+        };
+        let mut items = Vec::new();
+        let flags = i64::from(flags);
+        for ps in entries {
+            let Some(package) = ps.pkg.as_deref() else { continue; };
+            let aware = package.booleans & booleans::DIRECT_BOOT_AWARE != 0;
+            if package.booleans & booleans::PERSISTENT == 0 || safe_mode && !ps.is.system
+                || !((flags & MATCH_DIRECT_BOOT_UNAWARE != 0 && !aware)
+                    || (flags & MATCH_DIRECT_BOOT_AWARE != 0 && aware)) { continue; }
+            let state = user_state(ps, user);
+            if let Some(info) = generate_application_info(&self.target(ps, package, &state, user), flags) {
+                items.push(info);
+            }
+        }
+        Ok(items)
+    }
+    pub(super) fn check_startable(&self, name: Option<&str>, user: i32) -> Thrown<()> {
+        if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() {
+            return Ok(Err(Exception::security("Instant applications don't have access to this method")));
+        }
+        if !self.state.users.contains_key(&user) { return Ok(Err(Exception::security("User doesn't exist"))); }
+        if let Err(error) = self.enforce_cross_user(user, false, false, "checkPackageStartable")? { return Ok(Err(error)); }
+        let status = self.package_startability_captured(self.lifecycle_owner()?.safe_mode(), name, self.calling_uid, user)?;
+        let name = name.unwrap_or("null");
+        let message = match status {
+            1 => format!("Package {name} was not found!"),
+            2 => format!("Package {name} not a system app!"),
+            3 => format!("Package {name} is currently frozen!"),
+            4 => format!("Package {name} is not encryption aware!"),
+            _ => return Ok(Ok(())),
+        };
+        Ok(Err(Exception::security(message)))
+    }
+    pub(crate) fn package_startability_captured(&self, safe_mode: bool, name: Option<&str>, filter_uid: i32, user: i32) -> Result<i32, NotModelled> {
+        let owner = self.lifecycle_owner()?;
+        owner.check_frozen_publication().map_err(|_| NotModelled("freezer generation publication failed"))?;
+        let unlocked = owner.ce_storage_unlocked(user).map_err(|_| NotModelled("original CE storage owner query failed"))?;
+        let resolved = name.map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+        let package = resolved.as_ref().and_then(|name| self.state.packages.get(name));
+        if package.is_none() || self.filtered(package, filter_uid, user)?
+            || !user_state(package.unwrap(), user).installed { return Ok(1); }
+        let package = package.unwrap();
+        if safe_mode && !package.is.system { return Ok(2); }
+        if owner.checked_is_frozen(name.unwrap_or("null"))
+            .map_err(|_| NotModelled("freezer generation publication failed"))? { return Ok(3); }
+        if !unlocked {
+            let pkg = package.pkg.as_deref().ok_or(NotModelled("startability parsed package owner unavailable"))?;
+            if pkg.booleans & (booleans::DIRECT_BOOT_AWARE | booleans::PARTIALLY_DIRECT_BOOT_AWARE) == 0 { return Ok(4); }
+        }
+        Ok(0)
+    }
+
+    pub(super) fn activity_supports_intent(&self, component: Option<&ComponentName>,
+        intent: Option<&super::super::intent::Intent>, resolved_type: Option<&str>, user: i32) -> Thrown<bool> {
+        if let Err(error) = self.enforce_cross_user(user, false, false, "activitySupportsIntentAsUser")? {
+            return Ok(Err(error));
+        }
+        let Some(component) = component else {
+            return Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "component is null")));
+        };
+        let resolver = self.state.platform.custom_resolver.as_deref().map(|flat| {
+            flat.split_once('/').map(|(package, class)| ComponentName {
+                package: package.into(), class: if class.starts_with('.') { format!("{package}{class}") } else { class.into() }
+            })
+        }).unwrap_or_else(|| Some(ComponentName { package: "android".into(), class: "com.android.internal.app.ResolverActivity".into() }));
+        if resolver.as_ref() == Some(component) { return Ok(Ok(true)); }
+        let Some((ps, package)) = self.package_of(&component.package) else { return Ok(Ok(false)); };
+        let Some(activity) = package.activities.iter().find(|activity| activity.main.component.name == component.class) else { return Ok(Ok(false)); };
+        if self.filtered_component(Some(ps), component, 1, self.calling_uid, user)? { return Ok(Ok(false)); }
+        let Some(intent) = intent else {
+            return Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "intent is null")));
+        };
+        for info in &activity.main.component.intents {
+            let matches = match info.filter.matches(intent.action.as_deref(), resolved_type,
+                intent.data.as_ref().and_then(|data| data.scheme()),
+                intent.data.as_ref(), intent.categories.as_deref(), false, None) {
+                Ok(value) => value,
+                Err(error) => return match error.binder_exception() {
+                    Some(exception) => Ok(Err(exception)),
+                    None => Err(NotModelled("activity URI matching exception not serialized by Parcel")),
+                },
+            };
+            if matches >= 0 { return Ok(Ok(true)); }
+        }
+        Ok(Ok(false))
+    }
+
+    pub(crate) fn internal_block_uninstall(&self, user: i32, name: Option<&str>) -> Result<bool, NotModelled> {
+        let blocks = self.state.system.uninstall_blocks.as_ref().ok_or(NotModelled("native Settings block-uninstall owner unavailable"))?;
+        Ok(blocks.get(user, name))
+    }
+    pub(crate) fn internal_shared_libraries(&self) -> Result<Vec<Library>, NotModelled> {
+        let libraries = self.state.shared_libraries.as_ref().ok_or(NotModelled("native SharedLibraries owner unavailable"))?;
+        Ok(libraries.iter().cloned().map(Library).collect())
+    }
+
+    fn block_uninstall(&self, name: Option<&str>, user: i32) -> Thrown<bool> {
+        let package = name.and_then(|name| self.state.packages.get(name));
+        if package.is_none() || self.filtered_including_uninstalled(package, user)? {
+            return Ok(Ok(false));
+        }
+        let blocks = self.state.system.uninstall_blocks.as_ref()
+            .ok_or(NotModelled("the native Settings block-uninstall owner"))?;
+        Ok(Ok(blocks.get(user, name)))
+    }
+
+    fn can_package_query(
+        &self,
+        source: Option<&str>,
+        targets: Option<&[Option<String>]>,
+        user: i32,
+    ) -> Thrown<Vec<bool>> {
+        let Some(targets) = targets else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "Attempt to get length of null array",
+            )));
+        };
+        let results = vec![false; targets.len()];
+        if !self.state.users.contains_key(&user) {
+            return Ok(Ok(results));
+        }
+        if let Err(error) = self.enforce_cross_user(user, false, false, "can package query")? {
+            return Ok(Err(error));
+        }
+        let source_name =
+            source.map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+        let source_setting = source_name
+            .as_ref()
+            .and_then(|name| self.state.packages.get(name));
+        let mut missing = source_setting.is_none()
+            || self.filtered_including_uninstalled(source_setting, user)?;
+        let mut settings = Vec::with_capacity(targets.len());
+        for name in targets {
+            if missing {
+                break;
+            }
+            let resolved = name
+                .as_ref()
+                .map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+            let setting = resolved
+                .as_ref()
+                .and_then(|name| self.state.packages.get(name));
+            missing = setting.is_none() || self.filtered_including_uninstalled(setting, user)?;
+            settings.push(setting);
+        }
+        if missing {
+            let names = targets
+                .iter()
+                .map(|name| name.as_deref().unwrap_or("null"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = format!(
+                "Package(s) {} and/or [{}] not found.",
+                source.unwrap_or("null"),
+                names
+            );
+            let mut payload = Parcel::new();
+            payload.write_string16(Some("android.os.ParcelableException"));
+            payload.write_string16(Some(
+                "android.content.pm.PackageManager$NameNotFoundException",
+            ));
+            payload.write_string16(Some(&message));
+            let outer =
+                format!("android.content.pm.PackageManager$NameNotFoundException: {message}");
+            return Ok(Err(Exception::parcelable(Some(&outer), &payload)
+                .map_err(|_| NotModelled("package query exception payload"))?));
+        }
+        let source_uid = apps_filter::uid(user, source_setting.unwrap().app_id);
+        settings
+            .into_iter()
+            .map(|setting| {
+                self.filtered(setting, source_uid, user)
+                    .map(|filtered| !filtered)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Ok)
+    }
+
+    fn suspending_package(&self, name: Option<&str>, user: i32) -> Thrown<Option<String>> {
+        if let Err(error) = self.full_cross_user(user, false)? {
+            return Ok(Err(error));
+        }
+        let package = name.and_then(|name| self.state.packages.get(name));
+        if package.is_none() || self.filtered_including_uninstalled(package, user)? {
+            return Ok(Ok(None));
+        }
+        let state = user_state(package.unwrap(), user);
+        if state.suspended_by.is_empty() {
+            return Ok(Ok(None));
+        }
+        let suspensions = state
+            .suspensions
+            .as_ref()
+            .ok_or(NotModelled("native suspension params owner unavailable"))?;
+        let (mut last, mut system, mut quarantined) = (None, None, None);
+        for suspension in suspensions {
+            last = Some(suspension.package.clone());
+            if suspension.package == "android" {
+                system = last.clone();
+            }
+            let Some(params) = &suspension.params else {
+                return Ok(Err(Exception::new(
+                    aim_binder_host::parcel::EX_NULL_POINTER,
+                    "Attempt to invoke virtual method 'boolean com.android.server.pm.pkg.SuspendParams.isQuarantined()' on a null object reference",
+                )));
+            };
+            if params.quarantined && quarantined.is_none() {
+                quarantined = last.clone();
+            }
+        }
+        Ok(Ok(quarantined.or(system).or(last)))
+    }
+    fn suspended_extras(&self, name: Option<&str>, user: i32) -> Thrown<Option<SuspensionExtras>> {
+        let uid = match self.package_uid(name.unwrap_or_default(), 0, user)? {
+            Ok(uid) => uid,
+            Err(error) => return Ok(Err(error)),
+        };
+        if uid != self.calling_uid {
+            return Ok(Err(Exception::security(format!(
+                "Calling package {} does not belong to calling uid {}",
+                name.unwrap_or("null"),
+                self.calling_uid
+            ))));
+        }
+        let name =
+            self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST);
+        let Some(package) = self.state.packages.get(&name) else {
+            return Ok(Ok(None));
+        };
+        let state = user_state(package, user);
+        if state.suspended_by.is_empty() {
+            return Ok(Ok(None));
+        }
+        let suspensions = state
+            .suspensions
+            .as_ref()
+            .ok_or(NotModelled("native suspension params owner unavailable"))?;
+        let mut bundle = super::super::restrictions::persistable::Bundle::default();
+        for suspension in suspensions {
+            if let Some(extras) = suspension
+                .params
+                .as_ref()
+                .and_then(|params| params.app_extras.as_ref())
+            {
+                let mut entries = extras.entries.iter().collect::<Vec<_>>();
+                entries.sort_by_key(|(key, _)| {
+                    key.as_deref()
+                        .map_or(0, super::super::parse::parcel::java_hash)
+                });
+                for (key, value) in entries {
+                    if let Some((_, old)) = bundle.entries.iter_mut().find(|(name, _)| name == key)
+                    {
+                        *old = value.clone();
+                    } else {
+                        bundle.entries.push((key.clone(), value.clone()));
+                    }
+                }
+            }
+        }
+        if bundle.entries.is_empty() {
+            return Ok(Ok(None));
+        }
+        let payload = bundle
+            .parcel()
+            .map_err(|_| NotModelled("native suspension extras parcel is invalid"))?;
+        Ok(Ok(Some(SuspensionExtras(payload))))
+    }
+
+    fn legacy_domain_state(&self, name: Option<&str>, user: i32) -> Thrown<i32> {
+        let caller_user = user_id(self.calling_uid);
+        if caller_user != user {
+            if let Err(error) = self.enforce_cross_user(
+                user,
+                true,
+                false,
+                "Caller is not allowed to edit other users",
+            )? {
+                return Ok(Err(error));
+            }
+        }
+        for id in [caller_user, user] {
+            if self.user(id).is_none() {
+                return Ok(Err(Exception::security(format!(
+                    "User {id} does not exist"
+                ))));
+            }
+        }
+        let package = name.and_then(|name| self.state.packages.get(name));
+        if self.filtered(package, self.calling_uid, user)? {
+            return Ok(Ok(0));
+        }
+        let states = self
+            .state
+            .legacy_domains
+            .as_ref()
+            .ok_or(NotModelled("native legacy domain owner unavailable"))?;
+        Ok(Ok(states
+            .iter()
+            .find(|(package, _)| package.as_deref() == name)
+            .and_then(|(_, states)| {
+                states
+                    .iter()
+                    .find(|(id, _)| *id == user)
+                    .map(|(_, state)| *state)
+            })
+            .unwrap_or(0)))
+    }
+
+    fn keyset_package(&self, name: &str) -> Thrown<&PackageState> {
+        let package = self.package_of(name).map(|(ps, _)| ps);
+        let visible = match package {
+            Some(ps) => {
+                !self.filtered_including_uninstalled(Some(ps), user_id(self.calling_uid))?
+            }
+            None => false,
+        };
+        if !visible {
+            return Ok(Err(Exception::new(
+                EX_ILLEGAL_ARGUMENT,
+                format!("Unknown package: {name}"),
+            )));
+        }
+        Ok(Ok(package.unwrap()))
+    }
+    fn keyset(
+        &self,
+        name: Option<&str>,
+        alias: Option<&str>,
+        signing: bool,
+    ) -> Thrown<Option<super::super::keysets::KeySet>> {
+        let Some(name) = name else {
+            return Ok(Ok(None));
+        };
+        if !signing && alias.is_none() {
+            return Ok(Ok(None));
+        }
+        let ps = match self.keyset_package(name)? {
+            Ok(ps) => ps,
+            Err(e) => return Ok(Err(e)),
+        };
+        if signing
+            && app_id(self.calling_uid) != app_id(ps.pkg.as_ref().unwrap().uid)
+            && self.calling_uid != SYSTEM_UID
+        {
+            return Ok(Err(Exception::security(
+                "May not access signing KeySet of other apps.",
+            )));
+        }
+        let data = ps
+            .key_set_data
+            .as_ref()
+            .ok_or(NotModelled("native package keyset owner unavailable"))?;
+        let id = if signing {
+            data.proper_signing_key_set
+        } else {
+            match data
+                .defined_key_sets
+                .iter()
+                .find(|(key, _)| key.as_deref() == alias)
+            {
+                Some((_, id)) => *id,
+                None => {
+                    let mut aliases = data.defined_key_sets.iter().collect::<Vec<_>>();
+                    aliases.sort_by_key(|(alias, _)| {
+                        alias
+                            .as_deref()
+                            .map_or(0, super::super::parse::parcel::java_hash)
+                    });
+                    let aliases = aliases
+                        .iter()
+                        .map(|(alias, id)| format!("{}={id}", alias.as_deref().unwrap_or("null")))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Ok(Err(Exception::new(
+                        EX_ILLEGAL_ARGUMENT,
+                        format!(
+                            "Unknown KeySet alias: {}, aliases = {{{aliases}}}",
+                            alias.unwrap()
+                        ),
+                    )));
+                }
+            }
+        };
+        let pool = self
+            .state
+            .key_sets
+            .as_ref()
+            .ok_or(NotModelled("native keyset pool unavailable"))?;
+        if !pool.key_sets.iter().any(|(key, _)| *key == id) {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null value for KeySet IBinder token",
+            )));
+        }
+        let tokens = self
+            .state
+            .system
+            .key_set_tokens
+            .as_ref()
+            .ok_or(NotModelled("native keyset Binder owner unavailable"))?;
+        Ok(Ok(Some(super::super::keysets::KeySet {
+            token: Some(tokens.token(id)),
+        })))
+    }
+    fn signed_by_keyset(
+        &self,
+        name: Option<&str>,
+        keyset: Option<&super::super::keysets::KeySet>,
+        exact: bool,
+    ) -> Thrown<bool> {
+        if keyset.is_some_and(|keyset| keyset.token.is_none()) {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null value for KeySet IBinder token",
+            )));
+        }
+        if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() {
+            return Ok(Ok(false));
+        }
+        let (Some(name), Some(keyset)) = (name, keyset) else {
+            return Ok(Ok(false));
+        };
+        let ps = match self.keyset_package(name)? {
+            Ok(ps) => ps,
+            Err(e) => return Ok(Err(e)),
+        };
+        let Some(token) = keyset.token else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "null value for KeySet IBinder token",
+            )));
+        };
+        let tokens = self
+            .state
+            .system
+            .key_set_tokens
+            .as_ref()
+            .ok_or(NotModelled("native keyset Binder owner unavailable"))?;
+        let Some(id) = tokens.id(token) else {
+            return Ok(Ok(false));
+        };
+        let pool = self
+            .state
+            .key_sets
+            .as_ref()
+            .ok_or(NotModelled("native keyset pool unavailable"))?;
+        let data = ps
+            .key_set_data
+            .as_ref()
+            .ok_or(NotModelled("native package keyset owner unavailable"))?;
+        if exact && data.proper_signing_key_set == -1 {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "Package has no KeySet data",
+            )));
+        }
+        let Some((_, test)) = pool.key_sets.iter().find(|(key, _)| *key == id) else {
+            return Ok(Ok(false));
+        };
+        let Some((_, proper)) = pool
+            .key_sets
+            .iter()
+            .find(|(key, _)| *key == data.proper_signing_key_set)
+        else {
+            return Ok(Err(Exception::new(
+                aim_binder_host::parcel::EX_NULL_POINTER,
+                "Attempt to invoke virtual method on a null object reference",
+            )));
+        };
+        Ok(Ok(test.iter().all(|key| proper.contains(key))
+            && (!exact || proper.iter().all(|key| test.contains(key)))))
+    }
+
+    fn configured_role(&self, role: super::super::roles::Role) -> Thrown<Option<String>> {
+        if role == super::super::roles::Role::SetupWizard && self.calling_uid != 1000 {
+            return Ok(Err(Exception::security("Non-system caller")));
+        }
+        let owner = self
+            .state
+            .system
+            .roles
+            .as_ref()
+            .ok_or(NotModelled("native configured role owner unavailable"))?;
+        Ok(owner.package(role, self))
     }
 
     fn cross_profile_property(&self, user: i32) -> Thrown<()> {
@@ -626,7 +1454,7 @@ impl Query<'_> {
         if self.user(user).is_none() {
             return Ok(Ok(Vec::new()));
         }
-        let flags = self.update_flags_for_component(flags, user);
+        let flags = self.update_flags_for_component(flags, user)?;
         let mut registered: Vec<(&PackageState, &AndroidPackage, &super::super::pkg::Provider)> =
             Vec::new();
         for ps in self.state.packages.values() {
@@ -683,19 +1511,19 @@ impl Query<'_> {
                 }
             }
             if let Some(key) = metadata {
+                // ParsedComponent.getMetaData exposes an empty Bundle when
+                // no manifest metadata was declared; a missing key is a miss.
                 let Some(values) = &provider.main.component.meta_data else {
-                    return Ok(Err(Exception::new(
-                        aim_binder_host::parcel::EX_NULL_POINTER,
-                        "provider metadata is null",
-                    )));
+                    continue;
                 };
                 if !values.0.iter().any(|(name, _)| name == key) {
                     continue;
                 }
             }
             let state = user_state(ps, user);
+            let component=ComponentName{package:provider.main.component.package_name.clone(),class:provider.main.component.name.clone()};
             if !info::is_enabled_and_matches(ps, &provider.main, flags, user)
-                || self.filtered(Some(ps), self.calling_uid, user)?
+                || self.filtered_component(Some(ps), &component, 4, self.calling_uid, user)?
             {
                 continue;
             }
@@ -950,6 +1778,20 @@ impl Query<'_> {
                 .find(|m| m.package.as_deref() == name)
                 .cloned()))
         }
+    }
+
+    fn app_metadata_fd(&self, name: Option<&str>, user: i32) -> Thrown<Option<super::super::app_metadata::Descriptor>> {
+        if !self.uid_has_permission(self.calling_uid, "android.permission.GET_APP_METADATA")? {
+            return Ok(Err(Exception::security("android.permission.GET_APP_METADATA required")));
+        }
+        let resolved = name.map(|name| self.resolve_internal_package_name(name, VERSION_CODE_HIGHEST));
+        let package = resolved.as_ref().and_then(|name| self.state.packages.get(name));
+        if package.is_none() || self.filtered_including_uninstalled(package, user)? { return Ok(Err(name_not_found(name.unwrap_or("null")))); }
+        let path = package.unwrap().app_metadata_file_path.as_ref()
+            .ok_or(NotModelled("native Settings app metadata file path owner unavailable"))?;
+        let Some(path) = path else { return Ok(Ok(None)); };
+        let owner = self.state.system.app_metadata_files.as_ref().ok_or(NotModelled("native app metadata filesystem owner unavailable"))?;
+        owner.open(path).map(Ok).map_err(|_| NotModelled("native app metadata path mapping or Binder FD export failed"))
     }
 
     fn app_metadata_source(&self, name: Option<&str>, user: i32) -> Thrown<i32> {
@@ -1259,7 +2101,7 @@ impl Query<'_> {
         Ok(consumers)
     }
 
-    fn check_package_permission(
+    pub(crate) fn check_package_permission(
         &self,
         name: Option<&str>,
         permission: Option<&str>,
@@ -1399,22 +2241,221 @@ impl Query<'_> {
         Ok(entries)
     }
 
-    fn is_instant(&self, name: &str, user: i32) -> Thrown<bool> {
-        if let Err(e) = self.enforce_full_cross_user(user, "isInstantApp")? {
-            return Ok(Err(e));
+    fn sync_providers(&self, mut names: Option<Vec<Option<String>>>, mut infos: Option<Vec<Option<SyncProvider>>>)
+        -> Result<pm::QuerySyncProvidersReply<SyncProvider>, NotModelled> {
+        if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some() {
+            return Ok(pm::QuerySyncProvidersReply { out_names: names, out_info: infos });
         }
-        if apps_filter::is_isolated(self.calling_uid) {
-            return Err(NotModelled("an isolated caller's owner"));
+        let safe_mode = self.lifecycle_owner()?.safe_mode();
+        let registry = self.state.package_registry.as_ref().ok_or(NotModelled("native provider authority registry unavailable"))?;
+        let user = user_id(self.calling_uid);
+        let mut added_names = Vec::new(); let mut added_infos = Vec::new();
+        for (name, registered) in registry.ordered_authorities().into_iter().rev() {
+            if !registered.value.syncable { continue; }
+            let Some((package, pkg)) = self.package_of(&registered.package) else { continue; };
+            if safe_mode && !package.is.system { continue; }
+            let state = user_state(package, user);
+            let target = self.target(package, pkg, &state, user);
+            let Some(application) = generate_application_info(&target, 0) else { continue; };
+            let Some(info) = info::generate_provider_info(&target, &registered.value, 0, Some(Arc::new(application))) else { continue; };
+            let component = ComponentName { package: registered.package.clone(), class: registered.value.main.component.name.clone() };
+            if self.filtered_component(Some(package), &component, 4, self.calling_uid, user)? { continue; }
+            added_names.push(Some(name.into())); added_infos.push(Some(SyncProvider::Native(info)));
         }
-        let Some(ps) = self.state.packages.get(name) else {
-            return Ok(Ok(false));
+        if !added_names.is_empty() {
+            names.as_mut().ok_or(NotModelled("original querySyncProviders null output names list"))?.extend(added_names);
+        }
+        if !added_infos.is_empty() {
+            infos.as_mut().ok_or(NotModelled("original querySyncProviders null output provider list"))?.extend(added_infos);
+        }
+        Ok(pm::QuerySyncProvidersReply { out_names: names, out_info: infos })
+    }
+
+    fn archive_owner(&self) -> Result<&super::super::archive::Owner, NotModelled> {
+        self.state.system.archive_owner.as_deref().ok_or(NotModelled("native PackageArchiver owner unavailable"))
+    }
+    fn archived_package(&self, name: Option<&str>, user: i32) -> Thrown<Option<super::super::archive::Package>> {
+        let Some(name) = name else { return Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "packageName is null"))); };
+        if let Err(exception) = self.internal_enforce_cross_user(self.calling_uid, user, true, true, "getArchivedPackage")? { return Ok(Err(exception)); }
+        let Some(package) = self.state.packages.get(name) else { return Ok(Ok(None)); };
+        if self.filtered(Some(package), self.calling_uid, user)? { return Ok(Ok(None)); }
+        let state = user_state(package, user);
+        if state.archive_state.is_none() && !state.installed { return Ok(Ok(None)); }
+        let private = package.setting_flags.ok_or(NotModelled("archived package raw Settings flags unavailable"))?.1;
+        let activities = match self.archive_owner()?.activities(package, user) {
+            Ok(activities) if !activities.is_empty() => activities,
+            _ => return Ok(Err(Exception::illegal_argument("Package does not have a main activity"))),
         };
-        if apps_filter::is_caller_same_app(self.state, Some(name), self.calling_uid)?
-            || self.can_view_instant_apps()?
-        {
-            return Ok(Ok(user_state(ps, user).instant_app));
+        let signing = package.signatures.as_ref().map(|details| info::SigningInfo {
+            scheme_version: details.scheme_version, signatures: details.signatures.clone(), public_keys: details.public_keys.clone(),
+            past_signing_certificates: details.past_signatures.as_ref().map(|past| past.iter().map(|(certificate, _)| certificate.clone()).collect()),
+        });
+        Ok(Ok(Some(super::super::archive::Package { name: name.into(), signing, version: package.version_code,
+            target_sdk: package.target_sdk_version, device_storage: package.is.default_to_device_protected_storage,
+            legacy_storage: private & (1 << 29) != 0, fragile: private & (1 << 24) != 0, activities })))
+    }
+    fn archived_icon(&self, name: Option<&str>, user: Option<i32>, calling_package: Option<&str>) -> Thrown<Option<super::super::instant::Bitmap>> {
+        let owner = self.archive_owner()?;
+        let overlay = match owner.overlay_enabled(self.calling_uid, calling_package.unwrap_or("null")) {
+            Ok(overlay) => overlay, Err(exception) => return Ok(Err(exception)),
+        };
+        let (Some(name), Some(user)) = (name, user) else { return Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "package or user is null"))); };
+        let Some(package) = self.state.packages.get(name) else { return Ok(Ok(None)); };
+        if self.filtered(Some(package), self.calling_uid, user)? { return Ok(Ok(None)); }
+        Ok(owner.icon(package, user, overlay))
+    }
+    fn archivable(&self, name: Option<&str>, user: Option<i32>) -> Thrown<bool> {
+        let (Some(name), Some(user)) = (name, user) else { return Ok(Err(Exception::new(aim_binder_host::parcel::EX_NULL_POINTER, "package or user is null"))); };
+        if let Err(exception) = self.internal_enforce_cross_user(self.calling_uid, user, true, true, "isAppArchivable")? { return Ok(Err(exception)); }
+        let Some(package) = self.state.packages.get(name) else { return Ok(Err(name_not_found(name))); };
+        if self.filtered(Some(package), self.calling_uid, user)? { return Ok(Err(name_not_found(name))); }
+        if package.is.system || package.is.updated_system_app { return Ok(Ok(false)); }
+        let owner = self.archive_owner()?;
+        match owner.opted_out(info::uid(user, package.app_id), name) { Ok(true) => return Ok(Ok(false)), Err(exception) => return Ok(Err(exception)), _ => {} }
+        let installer = package.install_source.update_owner.as_ref().or(package.install_source.installer.as_ref());
+        let Some(installer) = installer.filter(|installer| !installer.is_empty()) else { return Ok(Ok(false)); };
+        let Some((installer_state, installer_pkg)) = self.package_of(installer) else { return Ok(Ok(false)); };
+        let installer_user = user_state(installer_state, user);
+        if generate_application_info(&self.target(installer_state, installer_pkg, &installer_user, user), 0).is_none() { return Ok(Ok(false)); }
+        if self.calling_uid != 2000 {
+            let resolution = super::super::resolve::Resolution::new(Arc::new(self.state.clone()), &apps_filter::Config {
+                force_system_packages_queryable: self.state.system.force_system_packages_queryable,
+                force_queryable_packages: self.state.system.force_queryable_packages.clone(),
+            }).map_err(|_| NotModelled("native archivable installer receiver registry unavailable"))?;
+            let receivers = resolution.query_intent_receivers(&super::super::intent::Intent {
+                action: Some("android.intent.action.UNARCHIVE_PACKAGE".into()), package: Some(installer.clone()), ..Default::default()
+            }, None, 0, user, SYSTEM_UID).map_err(|_| NotModelled("native archivable installer receiver resolution unavailable"))?;
+            if receivers.is_empty() { return Ok(Ok(false)); }
         }
-        Err(NotModelled("instant app access grants"))
+        match owner.launcher(name, user) { Ok(activities) => Ok(Ok(!activities.is_empty())), Err(_) => Ok(Ok(false)) }
+    }
+
+    pub(crate) fn internal_can_request_installs(&self, name: Option<&str>, caller: i32, user: i32, throw_missing_permission: bool) -> Thrown<bool> {
+        let uid = self.package_uid_internal(name.unwrap_or_default(), 0, user, caller)?;
+        if caller != uid && !matches!(caller, 0 | SYSTEM_UID) {
+            return Ok(Err(Exception::security(format!("Caller uid {caller} does not own package {}", name.unwrap_or("null")))));
+        }
+        if self.internal_is_instant(name.unwrap_or_default(), user, SYSTEM_UID)? { return Ok(Ok(false)); }
+        let Some((_, package)) = self.package_of(name.unwrap_or_default()) else { return Ok(Ok(false)); };
+        if package.target_sdk_version < 26 { return Ok(Ok(false)); }
+        if !package.requested_permissions.iter().any(|permission| permission == "android.permission.REQUEST_INSTALL_PACKAGES") {
+            if throw_missing_permission { return Ok(Err(Exception::security("Need to declare android.permission.REQUEST_INSTALL_PACKAGES to call this api"))); }
+            return Ok(Ok(false));
+        }
+        Ok(self.security_policy()?.install_disabled(name.unwrap_or_default(), uid, user).map(|disabled| !disabled))
+    }
+    fn device_admin_any_user(&self, name: Option<&str>) -> Thrown<bool> {
+        if !self.uid_has_permission(self.calling_uid, "android.permission.MANAGE_USERS")? {
+            return Ok(Err(Exception::security("android.permission.MANAGE_USERS permission is required to call this API")));
+        }
+        if apps_filter::instant_app_package_name(self.state, self.calling_uid)?.is_some()
+            && !apps_filter::is_caller_same_app(self.state, name, self.calling_uid)? { return Ok(Ok(false)); }
+        let setting_exists = name.is_some_and(|name| self.state.packages.contains_key(name));
+        Ok(self.security_policy()?.admin_any_user(name, setting_exists))
+    }
+    fn package_state_protected(&self, name: Option<&str>, user: i32) -> Thrown<bool> {
+        if let Err(exception) = self.internal_enforce_cross_user(self.calling_uid, user, false, true, "isPackageStateProtected")? { return Ok(Err(exception)); }
+        if !matches!(app_id(self.calling_uid), 0 | SYSTEM_UID)
+            && !self.uid_has_permission(self.calling_uid, "android.permission.MANAGE_DEVICE_ADMINS")? {
+            return Ok(Err(Exception::security("Caller must have the android.permission.MANAGE_DEVICE_ADMINS permission.")));
+        }
+        Ok(Ok(self.security_policy()?.protected(user, name)))
+    }
+
+    fn instant_owner(&self) -> Result<&super::super::instant::Owner, NotModelled> {
+        self.state.system.instant_registry.as_deref().ok_or(NotModelled("native instant registry owner unavailable"))
+    }
+    fn instant_android_id(&self, name: Option<&str>, user: i32) -> Thrown<Option<String>> {
+        if !self.uid_has_permission(self.calling_uid, "android.permission.ACCESS_INSTANT_APPS")? {
+            return Ok(Err(Exception::security("android.permission.ACCESS_INSTANT_APPS required")));
+        }
+        if let Err(exception) = self.internal_enforce_cross_user(self.calling_uid, user, true, false, "getInstantAppAndroidId")? { return Ok(Err(exception)); }
+        match self.is_instant(name.unwrap_or_default(), user)? { Err(exception) => return Ok(Err(exception)), Ok(false) => return Ok(Ok(None)), Ok(true) => {} }
+        match self.instant_owner()?.android_id(user, name.unwrap_or_default()) {
+            Ok(id) => Ok(Ok(Some(id))), Err(message) => Ok(Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, message))),
+        }
+    }
+
+    fn instant_cookie(&self, name: Option<&str>, user: i32) -> Thrown<Option<Vec<u8>>> {
+        if let Err(error) = self.internal_enforce_cross_user(self.calling_uid, user, true, false, "getInstantAppCookie")? { return Ok(Err(error)); }
+        if !apps_filter::is_caller_same_app(self.state, name, self.calling_uid)? { return Ok(Ok(None)); }
+        let resolved = self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST);
+        let Some((_, package)) = self.package_of(&resolved) else { return Ok(Ok(None)); };
+        self.instant_owner()?.cookie(user, &package.package_name).map(Ok)
+            .map_err(|_| NotModelled("native instant cookie disk identity unavailable"))
+    }
+    fn set_instant_cookie(&self, name: Option<&str>, cookie: Option<Vec<u8>>, user: i32) -> Thrown<bool> {
+        if let Err(error) = self.internal_enforce_cross_user(self.calling_uid, user, true, true, "setInstantAppCookie")? { return Ok(Err(error)); }
+        if !apps_filter::is_caller_same_app(self.state, name, self.calling_uid)? { return Ok(Ok(false)); }
+        let resolved = self.resolve_internal_package_name(name.unwrap_or_default(), VERSION_CODE_HIGHEST);
+        let Some((_, package)) = self.package_of(&resolved) else { return Ok(Ok(false)); };
+        self.instant_owner()?.set_cookie(user, package, cookie).map(Ok)
+            .map_err(|_| NotModelled("native instant cookie signing or disk owner unavailable"))
+    }
+    fn instant_permission(&self, user: i32, operation: &str) -> Thrown<()> {
+        if !self.internal_can_view_instant(self.calling_uid, user)?
+            && !self.uid_has_permission(self.calling_uid, "android.permission.ACCESS_INSTANT_APPS")? {
+            return Ok(Err(Exception::security(format!("{operation}: requires android.permission.ACCESS_INSTANT_APPS"))));
+        }
+        self.internal_enforce_cross_user(self.calling_uid, user, true, false, operation)
+    }
+    fn instant_icon(&self, name: Option<&str>, user: i32) -> Thrown<Option<super::super::instant::Bitmap>> {
+        if let Err(error) = self.instant_permission(user, "getInstantAppIcon")? { return Ok(Err(error)); }
+        self.instant_owner()?.icon(user, name.unwrap_or("null")).map(Ok)
+            .map_err(|_| NotModelled("native instant icon disk or codec owner unavailable"))
+    }
+    fn instant_apps(&self, user: i32) -> Thrown<Option<Vec<super::super::instant::App>>> {
+        if let Err(error) = self.instant_permission(user, "getEphemeralApplications")? { return Ok(Err(error)); }
+        let owner = self.instant_owner()?;
+        let mut apps = Vec::new();
+        for package in self.packages_in_order() {
+            let state = user_state(package, user);
+            if !state.instant_app || !state.installed { continue; }
+            let Some(pkg) = package.pkg.as_deref() else { continue; };
+            let application = generate_application_info(&self.target(package, pkg, &state, user), 0);
+            apps.push(super::super::instant::App { package: None, label: None,
+                requested: pkg.requested_permissions.iter().cloned().map(Some).collect(),
+                granted: state.granted_permissions.iter().cloned().map(Some).collect(), application });
+        }
+        match owner.uninstalled(user) {
+            Ok(uninstalled) => apps.extend(uninstalled),
+            Err(message) => {
+                let code = if message == "null InstantAppInfo in original uninstalled metadata list" {
+                    aim_binder_host::parcel::EX_NULL_POINTER
+                } else { aim_binder_host::parcel::EX_ILLEGAL_STATE };
+                return Ok(Err(Exception::new(code, message)));
+            }
+        }
+        Ok(Ok((!apps.is_empty()).then_some(apps)))
+    }
+
+    pub(crate) fn internal_can_view_instant(&self, filter_uid: i32, user: i32) -> Result<bool, NotModelled> {
+        if filter_uid < 10000 || self.uid_has_permission(self.calling_uid, "android.permission.ACCESS_INSTANT_APPS")? { return Ok(true); }
+        if self.uid_has_permission(self.calling_uid, "android.permission.VIEW_INSTANT_APPS")? {
+            let _ = user;
+            return Err(NotModelled("native default-home and app-prediction instant visibility owner"));
+        }
+        Ok(false)
+    }
+    pub(crate) fn internal_is_instant(&self, name: &str, user: i32, mut filter_uid: i32) -> Result<bool, NotModelled> {
+        if apps_filter::is_isolated(filter_uid) {
+            filter_uid = self.state.system.isolated_owners.iter().find(|(isolated, _)| *isolated == filter_uid)
+                .map(|(_, owner)| *owner).ok_or(NotModelled("isolated instant caller owner"))?;
+        }
+        let Some(package) = self.state.packages.get(name) else { return Ok(false); };
+        if apps_filter::is_caller_same_app(self.state, Some(name), filter_uid)?
+            || self.internal_can_view_instant(filter_uid, user)? { return Ok(user_state(package, user).instant_app); }
+        let access = self.state.system.instant_access.as_ref()
+            .ok_or(NotModelled("native instant app access-grant owner"))?;
+        Ok(access.granted(user, app_id(filter_uid), package.app_id) && user_state(package, user).instant_app)
+    }
+    pub(crate) fn internal_check_uid_signatures_all_users(&self, uid1: i32, uid2: i32) -> Thrown<i32> {
+        self.check_uid_signatures_captured(uid1, uid2, true)
+    }
+
+    fn is_instant(&self, name: &str, user: i32) -> Thrown<bool> {
+        if let Err(e) = self.enforce_full_cross_user(user, "isInstantApp")? { return Ok(Err(e)); }
+        self.internal_is_instant(name, user, self.calling_uid).map(Ok)
     }
 
     fn can_view_instant_apps(&self) -> Result<bool, NotModelled> {
@@ -1790,11 +2831,55 @@ impl Query<'_> {
             .is_some_and(|s| certificate(s, bytes, kind)))
     }
 
+    pub(crate) fn check_uid_signatures_captured(
+        &self,
+        uid1: i32,
+        uid2: i32,
+        all_users: bool,
+    ) -> Thrown<i32> {
+        let users = if all_users {
+            [user_id(uid1), user_id(uid2)]
+        } else {
+            [user_id(self.calling_uid); 2]
+        };
+        if all_users {
+            for user in users {
+                if let Err(error) =
+                    self.enforce_cross_user(user, false, false, "checkUidSignaturesForAllUsers")?
+                {
+                    return Ok(Err(error));
+                }
+            }
+        }
+        let (s1, s2) = (
+            self.uid_signatures_at(uid1, users[0])?,
+            self.uid_signatures_at(uid2, users[1])?,
+        );
+        Ok(Ok(match (s1, s2) {
+            (Some(s1), Some(s2)) => check_signatures(
+                &AndroidPackage {
+                    signing_details: Some(s1),
+                    ..Default::default()
+                },
+                &AndroidPackage {
+                    signing_details: Some(s2),
+                    ..Default::default()
+                },
+            ),
+            _ => SIGNATURE_UNKNOWN_PACKAGE,
+        }))
+    }
     fn uid_signatures(
         &self,
         uid: i32,
     ) -> Result<Option<super::super::pkg::SigningDetails>, NotModelled> {
-        let user = user_id(self.calling_uid);
+        self.uid_signatures_at(uid, user_id(self.calling_uid))
+    }
+    fn uid_signatures_at(
+        &self,
+        uid: i32,
+        user: i32,
+    ) -> Result<Option<super::super::pkg::SigningDetails>, NotModelled> {
         let signatures = match setting(self.state, app_id(uid)) {
             Some(Setting::Shared(su)) if !self.shared_filtered(su, user, true)? => {
                 Some(su.signatures.as_ref())
@@ -2257,7 +3342,7 @@ mod permission_tests {
     }
 }
 
-struct Library(super::super::model::SharedLibrary);
+pub(crate) struct Library(pub(crate) super::super::model::SharedLibrary);
 impl aim_service_aidl::WriteParcelable for Library {
     fn write_to(&self, p: &mut Parcel) {
         info::write_library(p, &self.0);
@@ -2346,5 +3431,42 @@ struct EmptyListSlice;
 impl aim_service_aidl::WriteParcelable for EmptyListSlice {
     fn write_to(&self, p: &mut Parcel) {
         p.write_i32(0);
+    }
+}
+
+struct SuspensionExtras(Parcel);
+impl aim_service_aidl::WriteParcelable for SuspensionExtras {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_raw(self.0.data(), self.0.objects());
+    }
+}
+
+struct InstantComponent(ComponentName);
+impl aim_service_aidl::WriteParcelable for InstantComponent {
+    fn write_to(&self, p: &mut Parcel) {
+        p.write_string16(Some(&self.0.package));
+        p.write_string16(Some(&self.0.class));
+    }
+}
+
+fn name_not_found(name: &str) -> Exception {
+    let mut payload = Parcel::new(); payload.write_string16(Some("android.os.ParcelableException"));
+    payload.write_string16(Some("android.content.pm.PackageManager$NameNotFoundException")); payload.write_string16(Some(name));
+    Exception::parcelable(Some(&format!("android.content.pm.PackageManager$NameNotFoundException: {name}")), &payload)
+        .expect("pure NameNotFoundException payload owns no Binder capability")
+}
+
+enum SyncProvider { Original(Parcel), Native(info::ProviderInfo) }
+impl ReadParcelable for SyncProvider {
+    fn read_from(reader: &mut Reader<'_>) -> ParcelResult<Self> {
+        let start = reader.position(); super::super::reply::provider_info(reader)?;
+        let (bytes, objects) = reader.since(start); let mut body = Parcel::new(); body.write_raw(bytes, &objects);
+        Ok(Self::Original(body))
+    }
+}
+impl aim_service_aidl::WriteParcelable for SyncProvider {
+    fn write_to(&self, parcel: &mut Parcel) {
+        match self { Self::Original(body) => parcel.write_raw_files(body.data(), body.objects(), body.files()),
+            Self::Native(info) => info.write_to(parcel) }
     }
 }

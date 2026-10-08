@@ -9,7 +9,7 @@
 //! scan: no certificates (`PARSE_COLLECT_CERTIFICATES` is not set), and
 //! nothing the scan sets afterwards. What it does not port yet it refuses
 //! with [`Error::Unsupported`] rather than guess, among them
-//! `<install-constraints>`, `<extension-sdk>` and advanced
+//! `<install-constraints>` and advanced
 //! glob patterns; none of the image's packages has them.
 //!
 //! Ported from the Android Open Source Project (`android-16.0.0_r1`,
@@ -23,6 +23,7 @@ mod cluster;
 pub mod component;
 mod components;
 mod key_sets;
+pub mod lite;
 pub mod package;
 pub mod parcel;
 pub mod platform;
@@ -77,6 +78,9 @@ pub struct Platform {
     pub sdk: i32,
     /// `Build.VERSION.ACTIVE_CODENAMES`.
     pub codenames: Vec<String>,
+    /// Activated original SdkExtensions properties, supplied by the runtime
+    /// property owner separately from image build.props.
+    pub sdk_extensions: Option<HashMap<i32,i32>>,
     /// The system features (`hasSystemFeature`).
     pub features: HashSet<String>,
     /// The aconfig flags' values, by `package.name`, and the packages that
@@ -106,6 +110,21 @@ pub struct Platform {
 }
 
 impl Platform {
+    pub fn set_sdk_extensions(&mut self,property:&dyn Fn(&str)->std::result::Result<Option<String>,String>)
+        ->std::result::Result<(),String> {
+        let mut versions=HashMap::new();
+        for (sdk,suffix) in [(30,"r"),(31,"s"),(33,"t"),(34,"u"),(35,"v"),(36,"b"),(1_000_000,"ad_services")] {
+            let value=property(&format!("build.version.extensions.{suffix}"))?;
+            let version=value.as_deref().and_then(|value|{
+                let value=value.trim();
+                if let Some(hex)=value.strip_prefix("0x").or_else(||value.strip_prefix("0X")) {
+                    i32::from_str_radix(hex,16).ok()
+                }else{value.parse::<i32>().ok()}
+            }).unwrap_or(0); // Original SystemProperties.getInt(..., 0).
+            versions.insert(sdk,version);
+        }
+        self.sdk_extensions=Some(versions);Ok(())
+    }
     fn flag(&self, name: &str) -> bool {
         self.flags.get(name).copied().unwrap_or(false)
     }
@@ -142,6 +161,8 @@ pub struct SplitPermission {
 pub enum Error {
     /// The original fails too (`INSTALL_PARSE_FAILED_*`), or skips it.
     Parse(String),
+    /// Original INSTALL_FAILED_OLDER_SDK compatibility rejection.
+    OlderSdk(String),
     /// Something this parser does not port yet.
     Unsupported(String),
 }
@@ -150,6 +171,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Parse(s) => write!(f, "parse failed: {s}"),
+            Error::OlderSdk(s) => write!(f, "older sdk: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported: {s}"),
         }
     }
@@ -914,7 +936,18 @@ impl Parser<'_> {
         let mut min_extensions: Option<Vec<(i32, i32)>> = None;
         for c in &e.children {
             if c.name == "extension-sdk" {
-                return Err(Error::Unsupported("<extension-sdk>".into()));
+                let attrs=self.obtain(c);
+                let sdk=attrs.int("sdkVersion",-1);
+                let minimum=attrs.int("minExtensionVersion",-1);
+                if sdk<0{return fail("<extension-sdk> must specify an sdkVersion >= 0");}
+                if minimum<0{return fail("<extension-sdk> must specify minExtensionVersion >= 0");}
+                if sdk<30{return fail(format!("Specified sdkVersion {sdk} is not valid"));}
+                let versions=self.platform.sdk_extensions.as_ref().ok_or_else(||Error::Unsupported("extension SDK runtime property owner unavailable".into()))?;
+                let available=versions.get(&sdk).copied().unwrap_or(0);
+                if available<minimum{return Err(Error::OlderSdk(format!("Package requires {sdk} extension version {minimum} which exceeds device version {available}")));}
+                let versions=min_extensions.get_or_insert_with(Vec::new);
+                if let Some((_,version))=versions.iter_mut().find(|(key,_)|*key==sdk){*version=minimum;}
+                else{versions.push((sdk,minimum));}
             }
         }
         if let Some(v) = &mut min_extensions {

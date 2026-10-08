@@ -128,6 +128,7 @@ pub fn clean(node: &Node) -> Result<(), String> {
 
 /// Detaches the derived image (its shadow stays).
 pub fn detach_derived() -> Result<(), String> {
+    let _lease = aim_storage::system::ImageLease::write(&aim_paths::system_image())?;
     aim_storage::system::detach(
         &aim_paths::system_image(),
         Some(&aim_paths::derived_image_shadow()),

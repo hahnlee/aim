@@ -5,6 +5,7 @@ public class PackageStateUnserialized {
     public PackageStateUnserialized setUsesLibraryFiles(java.util.List<String> values) { throw new RuntimeException("stub"); }
     public PackageStateUnserialized setSeInfo(String value) { throw new RuntimeException("stub"); }
     public PackageStateUnserialized setOverrideSeInfo(String value) { throw new RuntimeException("stub"); }
+    public java.util.List<com.android.server.pm.pkg.SharedLibraryWrapper> getUsesLibraryInfos() { throw new RuntimeException("stub"); }
     public String getSeInfo() { throw new RuntimeException("stub"); }
     public String getOverrideSeInfo() { throw new RuntimeException("stub"); }
     public PackageStateUnserialized(com.android.server.pm.PackageSetting setting) { throw new RuntimeException("stub"); }

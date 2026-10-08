@@ -26,6 +26,7 @@ pub fn node() -> Node {
 pub fn run(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
     let (image, shadow) = (aim_paths::system_image(), aim_paths::derived_image_shadow());
     let mount = aim_paths::derived_image_mount();
+    let _lease = system::ImageLease::write(&image)?;
     system::attach(&image, Some(&shadow), &mount, true)?;
     let translated = log.run(
         Command::new(ctx.workspace.host_bin("linux-translate"))

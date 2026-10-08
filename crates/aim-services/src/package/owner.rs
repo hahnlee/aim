@@ -41,7 +41,9 @@ mod signing;
 mod scan_settings;
 mod unread;
 mod initial_user;
+mod live_install;
 mod mutation;
+mod users;
 mod runtime_permissions;
 pub mod runtime_metadata;
 pub mod recovery;
@@ -105,6 +107,17 @@ pub struct Store {
     first_write_files: Vec<OwnedFile>,
     preferred_users: BTreeSet<u32>,
     list_document: Option<String>,
+}
+
+/// Settings stores these keyed owners in maps; serialized iteration order
+/// does not change their fields or identities. Signature runtime-only values
+/// follow the same persisted comparison already used by Settings writers.
+pub(crate) fn canonical_persistent_settings(settings: super::settings::Settings) -> super::settings::Settings {
+    let mut settings = signing::persisted(settings);
+    settings.packages.sort_by(|a, b| a.name.cmp(&b.name));
+    settings.disabled_system_packages.sort_by(|a, b| a.name.cmp(&b.name));
+    settings.shared_users.sort_by(|a, b| a.name.cmp(&b.name));
+    settings
 }
 
 impl Store {
@@ -354,6 +367,30 @@ impl Store {
         result
     }
 
+    /// Metadata and setting retirement mutate the same packages.xml document.
+    /// Build and validate both original transitions before one resilient write;
+    /// readers never observe a live package with its domain owner withdrawn.
+    pub(crate) fn commit_removed_package_all(
+        &mut self, scan: &super::scan::SigningScan, package: &str,
+    ) -> Result<(), WriteError> {
+        let mut metadata = self.state.settings.clone();
+        metadata.domain_verification.clear_package(package);
+        key_sets::clear_package(&mut metadata, package).map_err(WriteError::before)?;
+        let metadata_root = key_sets::replace(&self.settings_document, &metadata, package)
+            .map_err(WriteError::before)?;
+        let projected = scan_settings::replace(&metadata_root, scan).map_err(WriteError::before)?;
+        let desired = super::settings::Settings::parse(&projected).map_err(WriteError::before)?;
+        let root = removal::replace(&metadata_root, &canonical_persistent_settings(desired), package)
+            .map_err(WriteError::before)?;
+        let result = self.commit_package_document_with_key_sets(root, Some(scan.settings.key_sets.clone()));
+        if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+            for (_, user) in &mut self.state.users {
+                user.restrictions.packages.retain(|(name, _)| name != package);
+            }
+        }
+        result
+    }
+
     /// Remove a deleted setting's saved user entry, preserving other XML.
     /// Call only after the global setting commit; permission files have their
     /// own owner and are not changed by this stage (#798/#822).
@@ -412,6 +449,19 @@ impl Store {
     /// Persist package/shared setting metadata from a validated immutable scan.
     /// APEX code is omitted as in Settings.writeLPr. Permission/domain/version
     /// owners must be reconciled already; users/list/publication follow separately.
+    /// The actual Settings writer/read projection of one completed scan.
+    /// Native runtime/APEX metadata remains in the scan; this view contains
+    /// exactly the fields that the original persistent Settings reader owns.
+    pub(crate) fn persistent_scan_settings(
+        &self,
+        scan: &super::scan::SigningScan,
+    ) -> Result<super::settings::Settings, WriteError> {
+        let document = scan_settings::replace(&self.settings_document, scan)
+            .map_err(WriteError::before)?;
+        let settings = super::settings::Settings::parse(&document).map_err(WriteError::before)?;
+        Ok(canonical_persistent_settings(settings))
+    }
+
     pub fn commit_scan_settings(
         &mut self,
         snapshot: &super::scan_snapshot::Snapshot,
@@ -521,6 +571,7 @@ impl Store {
         key_sets: Option<super::settings::KeySets>,
         write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
     ) -> Result<(), WriteError> {
+        let root = verifier::replace(&root,self.state.settings.verifier.as_deref());
         let mut persisted = super::settings::Settings::parse(&root).map_err(WriteError::before)?;
         if let Some(key_sets) = key_sets {
             persisted.key_sets.reference_counts = key_sets.reference_counts;
@@ -906,3 +957,11 @@ fn write_with_observed(
 
 #[cfg(test)]
 mod tests;
+
+mod preferred;
+
+mod verifier;
+
+mod shutdown_usage;
+
+mod native_read;

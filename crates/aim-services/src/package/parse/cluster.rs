@@ -165,7 +165,7 @@ pub(super) fn assets(
     assets
 }
 
-fn names(manifest: &Element) -> Result<(String, Option<String>, i32)> {
+pub(super) fn names(manifest: &Element) -> Result<(String, Option<String>, i32)> {
     if manifest.name != "manifest" {
         return fail("No <manifest> tag");
     }

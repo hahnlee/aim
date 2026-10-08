@@ -9,10 +9,15 @@
 //! beside it (`<data>.asif`), created on first use (a copy of a template
 //! in the `userdata` node's output `--userdata DIR`, where there is one),
 //! attached hidden at `<data>` for the boot and detached when it stops
-//! (docs/storage.md).
+//! (docs/storage.md). `--androidboot` adds an entry to the device's
+//! bootconfig (`hardware=aim`) or replaces the one of its key. A reboot
+//! (`sys.powerctl` `reboot,...`) boots again in the same process.
 
 use std::collections::BTreeSet;
+use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use aim_guest_init::{Boot, BootOptions, RunMode, boot};
@@ -130,9 +135,7 @@ fn main() {
     };
     options.timeout = timeout;
     options.userdata = userdata;
-    if !androidboot.is_empty() {
-        options.androidboot = androidboot;
-    }
+    options.merge_androidboot(androidboot);
     let mut boot = match Boot::prepare(options) {
         Ok(boot) => boot,
         Err(error) => {
@@ -190,6 +193,23 @@ fn main() {
     println!("triggers: {}", report.triggers.join(" "));
     println!("{}", report.summary());
     if report.fatal.is_some() {
+        std::process::exit(1);
+    }
+    // A reboot restarts the device: the kernel's reboot(2) is this
+    // process's to carry out, so the boot runs again from the start, with
+    // the same arguments and pid (which names the boot's binder, so its
+    // keeper and shells find the new boot as they found the old).
+    if mode == RunMode::Run
+        && report
+            .shutdown
+            .as_deref()
+            .is_some_and(|command| command.starts_with("reboot"))
+    {
+        let _ = std::io::stdout().flush();
+        let error = std::env::current_exe()
+            .map(|exe| Command::new(exe).args(std::env::args_os().skip(1)).exec())
+            .unwrap_or_else(|error| error);
+        eprintln!("guest-init: reboot: {error}");
         std::process::exit(1);
     }
 }

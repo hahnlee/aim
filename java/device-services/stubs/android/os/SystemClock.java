@@ -5,4 +5,5 @@ package android.os;
 public final class SystemClock {
     private SystemClock() { throw new RuntimeException("stub"); }
     public static long uptimeMillis() { throw new RuntimeException("stub"); }
+    public static long elapsedRealtime() { throw new RuntimeException("stub"); }
 }

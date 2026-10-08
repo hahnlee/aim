@@ -82,6 +82,8 @@ mod tests {
             let after = unsafe { clock_gettime_nsec_np(darwin) } as i64;
             assert!(before <= t && t <= after, "{before} {t} {after}");
         }
-        assert!(super::boottime_ns() >= super::monotonic_ns());
+        // Read in this order: boottime only ever runs ahead of monotonic.
+        let monotonic = super::monotonic_ns();
+        assert!(super::boottime_ns() >= monotonic);
     }
 }

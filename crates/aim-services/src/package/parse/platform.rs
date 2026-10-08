@@ -47,6 +47,7 @@ impl Platform {
         let mut platform = Platform {
             sdk,
             codenames,
+            sdk_extensions: None,
             features,
             flag_packages,
             flags,

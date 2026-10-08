@@ -3,6 +3,101 @@ use super::{Store, WriteError, attribute, element, prepare, write_resilient};
 use crate::package::write::mutation::{Change, Plan};
 use aim_android_xml::{Node, Value, abx};
 impl Store {
+    /// Persist the global uninstall-block owner without touching package records.
+    /// Runtime null names cannot be written by TypedXmlSerializer.attribute.
+    pub fn commit_uninstall_blocks(
+        &mut self,
+        user: u32,
+        blocks: &crate::package::mutations::UninstallBlocks,
+    ) -> Result<(), WriteError> {
+        if self.unread_restrictions.contains(&user) {
+            return Err(WriteError::before("package restrictions not restored"));
+        }
+        let names = blocks.0.get(&(user as i32));
+        if names.is_some_and(|names| names.iter().any(Option::is_none)) {
+            return Err(WriteError::before(
+                "null uninstall-block package cannot be serialized",
+            ));
+        }
+        let mut root = self
+            .restrictions
+            .get(&user)
+            .cloned()
+            .ok_or_else(|| WriteError::before("uninstall-block user owner absent"))?;
+        root.content.retain(|node| !matches!(node, Node::Element(entry) if entry.name == "block-uninstall-packages"));
+        // Legacy package-level attributes otherwise resurrect cleared blocks.
+        for node in &mut root.content {
+            if let Node::Element(entry) = node {
+                if entry.name == "pkg" {
+                    attribute(entry, "blockUninstall", None);
+                }
+            }
+        }
+        if let Some(names) = names.filter(|names| !names.is_empty()) {
+            let mut section = element("block-uninstall-packages");
+            for name in names {
+                let mut entry = element("block-uninstall");
+                attribute(&mut entry, "packageName", name.clone().map(Value::String));
+                section.content.push(Node::Element(entry));
+            }
+            root.content.push(Node::Element(section));
+        }
+        let parsed =
+            crate::package::restrictions::Restrictions::parse(&root).map_err(WriteError::before)?;
+        let bytes = abx::write(&root).map_err(WriteError::before)?;
+        let dir = self.data.join("system/users").join(user.to_string());
+        let path = dir.join("package-restrictions.xml");
+        let backup = dir.join("package-restrictions-backup.xml");
+        prepare(&path, &backup, &self.restrictions[&user]).map_err(WriteError::before)?;
+        let result = write_resilient(&path, &backup, &bytes);
+        if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+            self.restrictions.insert(user, root);
+            self.state
+                .users
+                .iter_mut()
+                .find(|(id, _)| *id == user)
+                .unwrap()
+                .1
+                .restrictions = parsed;
+        }
+        result
+    }
+    /// One Settings write for a complete batch, after its native scan changes
+    /// were prepared atomically. Retained resolver/role sections stay intact.
+    pub fn commit_updated_scan_restrictions(
+        &mut self, scan: &crate::package::scan::SigningScan, user: u32,
+        cross_user_suspension: bool,
+    ) -> Result<(), WriteError> {
+        self.validate_committed_scan(scan)?;
+        if self.unread_restrictions.contains(&user) { return Err(WriteError::before("package restrictions not restored")); }
+        let mut root = self.restrictions.get(&user).cloned().ok_or_else(|| WriteError::before("mutation user absent"))?;
+        root.content.retain(|node| !matches!(node, Node::Element(entry) if entry.name == "pkg"));
+        let mut states = Vec::new();
+        for package in &scan.settings.packages {
+            let users = scan.scanned_user_states(&package.name).ok_or_else(|| WriteError::before("mutation package user owner absent"))?;
+            let state = users.get(&(user as i32)).cloned().unwrap_or_default();
+            root.content.push(Node::Element(super::initial_user::initial_package(&package.name, &state, user as i32, cross_user_suspension)?));
+            states.push((package.name.clone(), state));
+        }
+        let mut parsed = crate::package::restrictions::Restrictions::parse(&root).map_err(WriteError::before)?;
+        parsed.packages = states;
+        let bytes = abx::write(&root).map_err(WriteError::before)?;
+        let dir = self.data.join("system/users").join(user.to_string());
+        let path = dir.join("package-restrictions.xml");
+        let backup = dir.join("package-restrictions-backup.xml");
+        prepare(&path, &backup, &self.restrictions[&user]).map_err(WriteError::before)?;
+        let result = write_resilient(&path, &backup, &bytes);
+        if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+            self.restrictions.insert(user, root);
+            self.state.users.iter_mut().find(|(id, _)| *id == user).unwrap().1.restrictions = parsed;
+        }
+        result
+    }
+    pub fn commit_scan_settings_owner(&mut self, scan: &crate::package::scan::SigningScan) -> Result<(), WriteError> {
+        let root = super::scan_settings::replace(&self.settings_document, scan).map_err(WriteError::before)?;
+        self.commit_package_document(root)
+    }
+
     pub fn commit_mutation(&mut self, plan: &Plan) -> Result<(), WriteError> {
         match &plan.change {
             Change::None => return Ok(()),
@@ -102,6 +197,17 @@ impl Store {
                 attribute(entry, "stopped", (*stopped).then_some(Value::Bool(true)));
                 attribute(entry, "nl", (*not_launched).then_some(Value::Bool(true)));
             }
+            Change::Distraction(value) => attribute(entry, "distraction_flags", (*value != 0).then_some(Value::Int(*value))),
+            Change::Suspensions(values) => {
+                entry.content.retain(|node| !matches!(node, Node::Element(child) if child.name == "suspend-params"));
+                let raw = crate::package::restrictions::UserState { suspensions: values.clone(), ..Default::default() };
+                let serialized = super::initial_user::initial_package(&plan.package, &raw, user as i32, false)?;
+                attribute(entry, "suspended", values.as_ref().is_some_and(|values| !values.is_empty()).then_some(Value::Bool(true)));
+                entry.content.extend(serialized.content);
+            }
+            Change::Hidden(hidden) => {
+                attribute(entry, "hidden", (*hidden).then_some(Value::Bool(true)))
+            }
             Change::SplashTheme(theme) => attribute(
                 entry,
                 "splash-screen-theme",
@@ -146,12 +252,70 @@ mod tests {
     use super::*;
     use crate::package::owner::tests::Data;
     #[test]
+    fn nullable_runtime_block_does_not_corrupt_restrictions_on_write_failure() {
+        use crate::package::mutations::{BlockUninstall, UninstallBlocks};
+        let data = Data::new();
+        let path = data.settings();
+        std::fs::write(&path, b"<package-restrictions/>").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        let mut blocks = UninstallBlocks::from_state(store.state());
+        blocks.set(&BlockUninstall {
+            package: None,
+            blocked: true,
+            user: 0,
+        });
+        let error = store.commit_uninstall_blocks(0, &blocks).unwrap_err();
+        assert!(!error.committed);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(blocks.get(0, None));
+    }
+    #[test]
+    fn uninstall_blocks_clear_legacy_attribute_and_keep_package_state() {
+        use crate::package::mutations::{BlockUninstall, UninstallBlocks};
+        let data = Data::new();
+        let path = data.settings();
+        std::fs::write(path, b"<package-restrictions><pkg name='example.app' blockUninstall='true' hidden='true'/><default-apps><default-browser packageName='browser'/></default-apps></package-restrictions>").unwrap();
+        let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
+        let mut blocks = UninstallBlocks::from_state(store.state());
+        blocks.set(&BlockUninstall {
+            package: Some("example.app".into()),
+            blocked: false,
+            user: 0,
+        });
+        blocks.set(&BlockUninstall {
+            package: Some("absent".into()),
+            blocked: true,
+            user: 0,
+        });
+        store.commit_uninstall_blocks(0, &blocks).unwrap();
+        let reopened = Store::open(&data.0, &[0]).unwrap().unwrap();
+        let restrictions = &reopened.state().users[0].1.restrictions;
+        assert_eq!(restrictions.block_uninstall, vec!["absent"]);
+        assert!(restrictions.packages[0].1.hidden);
+        assert_eq!(restrictions.default_browser.as_deref(), Some("browser"));
+        blocks.set(&BlockUninstall {
+            package: Some("absent".into()),
+            blocked: false,
+            user: 0,
+        });
+        store.commit_uninstall_blocks(0, &blocks).unwrap();
+        assert!(
+            Store::open(&data.0, &[0]).unwrap().unwrap().state().users[0]
+                .1
+                .restrictions
+                .block_uninstall
+                .is_empty()
+        );
+    }
+    #[test]
     fn mutation_reopen_preserves_other_user_and_package_fields() {
         let data = Data::new();
         let path = data.settings();
         std::fs::write(&path,b"<package-restrictions><pkg name='example.app' stopped='true' nl='true' hidden='true' enabled='3' splash-screen-theme='old'/></package-restrictions>").unwrap();
         let mut store = Store::open(&data.0, &[0]).unwrap().unwrap();
         for change in [
+            Change::Hidden(false),
             Change::SplashTheme(Some("new<&".into())),
             Change::MinAspectRatio(7),
             Change::HarmfulWarning(Some(" ⚠<&😀 ".into())),
@@ -173,7 +337,7 @@ mod tests {
         let opened = Store::open(&data.0, &[0]).unwrap().unwrap();
         let state = &opened.state.users[0].1.restrictions.packages[0].1;
         assert!(!state.stopped && !state.not_launched);
-        assert!(state.hidden);
+        assert!(!state.hidden);
         assert_eq!(state.enabled, 3);
         assert_eq!(state.min_aspect_ratio, 7);
         assert_eq!(state.harmful_app_warning.as_deref(), Some(" ⚠<&😀 "));

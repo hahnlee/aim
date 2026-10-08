@@ -381,8 +381,9 @@ fn snake(name: &str) -> String {
         }
         out.extend(c.to_lowercase());
     }
-    const KEYWORDS: [&str; 12] = [
+    const KEYWORDS: &[&str] = &[
         "type", "in", "ref", "match", "mod", "fn", "use", "loop", "box", "where", "move", "self",
+        "async", "await", "dyn", "try", "yield", "gen",
     ];
     if KEYWORDS.contains(&out.as_str()) {
         format!("r#{out}")
@@ -426,6 +427,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
             "Option<Vec<Option<String>>>",
             "read_string_list(r)?",
             "write_string_list(p, {v}.as_deref());",
+        ),
+        ("List", false) if ty.args.is_empty() => Kind::Plain(
+            "Option<Vec<ParcelValue>>",
+            "read_array_list(r)?",
+            "write_array_list(p, {v}.as_deref());",
         ),
         ("byte", true) => Kind::Plain(
             "Option<Vec<u8>>",
@@ -482,7 +488,11 @@ fn kind(ty: &Type) -> Result<Kind, String> {
         {
             Kind::Plain("Option<Binder>", "r.read_binder()?", "p.write_binder({v});")
         }
-        (b, false) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
+        (b, false) if b != "List" && b != "Map"
+            && b.chars().next().is_some_and(char::is_uppercase) => {
+            // Generic Java parcelables retain their own Parcelable wire format.
+            // Their type arguments do not turn them into inline typed arrays.
+            for argument in &ty.args { kind(argument)?; }
             Kind::Parcelable(b.to_string())
         }
         (b, true) if ty.args.is_empty() && b.chars().next().is_some_and(char::is_uppercase) => {
@@ -1013,6 +1023,117 @@ pub fn write_typed_list<T: WriteParcelable>(p: &mut Parcel, value: Option<&[Opti
     }
 }
 
+/// Java Parcel.writeValue/readValue, distinct from a typed Parcelable's presence word.
+/// Custom values retain their length-prefixed wire form until their owning schema decodes them.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParcelValue {
+    Null,
+    String(Option<String>),
+    Integer(i32),
+    Short(i16),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    Boolean(bool),
+    Binder(Option<Binder>),
+    Bytes(Option<Vec<u8>>),
+    Strings(Option<Vec<Option<String>>>),
+    Ints(Option<Vec<i32>>),
+    Longs(Option<Vec<i64>>),
+    Booleans(Option<Vec<bool>>),
+    Byte(i8),
+    Doubles(Option<Vec<f64>>),
+    Character(u16),
+    Shorts(Option<Vec<i16>>),
+    Characters(Option<Vec<u16>>),
+    Floats(Option<Vec<f32>>),
+    /// Parcel's custom/container length record, with no Binder/FD capabilities.
+    /// Types: Map, Parcelable, List, SparseArray, Parcelable[], Object[], Serializable.
+    Custom { kind: i32, bytes: Vec<u8> },
+}
+fn read_value_array<T>(r: &mut Reader<'_>, size: usize, mut read: impl FnMut(&mut Reader<'_>) -> Result<T>) -> Result<Option<Vec<T>>> {
+    let count = r.read_i32()?;
+    if count < 0 { return Ok(None); }
+    if count as usize > r.remaining() / size { return Err(aim_binder_host::parcel::BAD_VALUE); }
+    (0..count).map(|_| read(r)).collect::<Result<Vec<_>>>().map(Some)
+}
+fn write_value_array<T>(p: &mut Parcel, values: Option<&[T]>, mut write: impl FnMut(&mut Parcel, &T)) {
+    match values {
+        None => p.write_i32(-1),
+        Some(values) => { p.write_i32(values.len() as i32); for value in values { write(p, value); } }
+    }
+}
+impl ParcelValue {
+    pub fn read(r: &mut Reader<'_>) -> Result<Self> {
+        use aim_binder_host::parcel::BAD_VALUE;
+        let kind = r.read_i32()?;
+        Ok(match kind {
+            -1 => Self::Null,
+            0 => Self::String(r.read_string16()?),
+            1 => Self::Integer(r.read_i32()?),
+            5 => Self::Short(r.read_i32()? as i16),
+            6 => Self::Long(r.read_i64()?),
+            7 => Self::Float(r.read_f32()?),
+            8 => Self::Double(f64::from_bits(r.read_i64()? as u64)),
+            9 => Self::Boolean(r.read_bool()?),
+            13 => Self::Bytes(read_byte_array(r)?),
+            14 => Self::Strings(read_string_list(r)?),
+            15 => Self::Binder(r.read_binder()?),
+            18 => Self::Ints(read_int_array(r)?),
+            19 => Self::Longs(read_long_array(r)?),
+            20 => Self::Byte(r.read_i32()? as i8),
+            23 => Self::Booleans(read_bool_array(r)?),
+            28 => Self::Doubles(read_value_array(r, 8, |r| Ok(f64::from_bits(r.read_i64()? as u64)))?),
+            29 => Self::Character(r.read_i32()? as u16),
+            30 => Self::Shorts(read_value_array(r, 4, |r| Ok(r.read_i32()? as i16))?),
+            31 => Self::Characters(read_value_array(r, 4, |r| Ok(r.read_i32()? as u16))?),
+            32 => Self::Floats(read_value_array(r, 4, |r| r.read_f32())?),
+            2 | 4 | 11 | 12 | 16 | 17 | 21 => {
+                let length: usize = r.read_i32()?.try_into().map_err(|_| BAD_VALUE)?;
+                if length > r.remaining() || length % 4 != 0 { return Err(BAD_VALUE); }
+                let start = r.position();
+                let end = start.checked_add(length).ok_or(BAD_VALUE)?;
+                if r.next_object().is_some_and(|position| position < end) { return Err(BAD_VALUE); }
+                r.set_position(end);
+                Self::Custom { kind, bytes: r.since(start).0.to_vec() }
+            }
+            _ => return Err(BAD_VALUE),
+        })
+    }
+    pub fn write(&self, p: &mut Parcel) {
+        match self {
+            Self::Null => p.write_i32(-1),
+            Self::String(value) => { p.write_i32(0); p.write_string16(value.as_deref()); }
+            Self::Integer(value) => { p.write_i32(1); p.write_i32(*value); }
+            Self::Short(value) => { p.write_i32(5); p.write_i32(i32::from(*value)); }
+            Self::Long(value) => { p.write_i32(6); p.write_i64(*value); }
+            Self::Float(value) => { p.write_i32(7); p.write_f32(*value); }
+            Self::Double(value) => { p.write_i32(8); p.write_i64(value.to_bits() as i64); }
+            Self::Boolean(value) => { p.write_i32(9); p.write_bool(*value); }
+            Self::Bytes(value) => { p.write_i32(13); write_byte_array(p, value.as_deref()); }
+            Self::Strings(value) => { p.write_i32(14); write_string_list(p, value.as_deref()); }
+            Self::Binder(value) => { p.write_i32(15); p.write_binder(*value); }
+            Self::Ints(value) => { p.write_i32(18); write_int_array(p, value.as_deref()); }
+            Self::Longs(value) => { p.write_i32(19); write_long_array(p, value.as_deref()); }
+            Self::Byte(value) => { p.write_i32(20); p.write_i32(i32::from(*value)); }
+            Self::Booleans(value) => { p.write_i32(23); write_bool_array(p, value.as_deref()); }
+            Self::Doubles(value) => { p.write_i32(28); write_value_array(p, value.as_deref(), |p, value| p.write_i64(value.to_bits() as i64)); }
+            Self::Character(value) => { p.write_i32(29); p.write_i32(i32::from(*value)); }
+            Self::Shorts(value) => { p.write_i32(30); write_value_array(p, value.as_deref(), |p, value| p.write_i32(i32::from(*value))); }
+            Self::Characters(value) => { p.write_i32(31); write_value_array(p, value.as_deref(), |p, value| p.write_i32(i32::from(*value))); }
+            Self::Floats(value) => { p.write_i32(32); write_value_array(p, value.as_deref(), |p, value| p.write_f32(*value)); }
+            Self::Custom { kind, bytes } => { p.write_i32(*kind); p.write_i32(bytes.len() as i32); p.write_raw(bytes, &[]); }
+        }
+    }
+}
+/// Raw AIDL `List`: count (-1 for null), then individually tagged Java values.
+pub fn read_array_list(r: &mut Reader<'_>) -> Result<Option<Vec<ParcelValue>>> {
+    read_value_array(r, 4, ParcelValue::read)
+}
+pub fn write_array_list(p: &mut Parcel, values: Option<&[ParcelValue]>) {
+    write_value_array(p, values, |p, value| value.write(p));
+}
+
 "#;
 
 /// The `TRANSACTION_*` codes and `DESCRIPTOR` of `descriptor`'s stub in
@@ -1063,11 +1184,15 @@ fn dex_stub_codes(
 /// methods to marshal.
 fn own_interfaces(lock: &Lock) -> Result<Vec<(Interface, Vec<String>, String)>, String> {
     let mut out = Vec::new();
+    let mut descriptors = std::collections::BTreeSet::new();
     for entry in lock.array("OWN_INTERFACES") {
         let fields: Vec<&str> = entry.split('|').collect();
         let [descriptor, file, methods] = fields[..] else {
             return Err(format!("{LOCK}: bad OWN_INTERFACES entry `{entry}`"));
         };
+        if !descriptors.insert(descriptor) {
+            return Err(format!("{LOCK}: duplicate OWN_INTERFACES descriptor `{descriptor}`"));
+        }
         let path = aim_paths::root().join(file);
         let text = fs::read_to_string(&path).map_err(|e| format!("{file}: {e}"))?;
         let iface = parse(&text).map_err(|e| format!("{file}: {e}"))?;
@@ -1313,7 +1438,20 @@ interface IClipboard {
         assert_eq!(snake("setPrimaryClip"), "set_primary_clip");
         assert_eq!(snake("getUIDState"), "get_uid_state");
         assert_eq!(snake("type"), "r#type");
+        assert_eq!(snake("async"), "r#async");
+        assert_eq!(snake("await"), "r#await");
+        assert_eq!(snake("dyn"), "r#dyn");
         assert_eq!(camel("setPrimaryClip"), "SetPrimaryClip");
+    }
+
+    #[test]
+    fn generic_parcelables_keep_the_whole_parcelable_wire_contract() {
+        let iface = parse("package own; interface IQuery { ParceledListSlice<ApplicationInfo> applications(); void put(in Box<PackageInfo> value); }").unwrap();
+        let code = interface_code(&iface, &["*".into()], "test").unwrap();
+        assert!(code.contains("read_applications_reply<ParceledListSlice: ReadParcelable>"));
+        assert!(code.contains("write_typed(p, result);"));
+        assert!(!code.contains("write_typed_list"));
+        assert!(kind(&Type { name: "Map".into(), args: vec![], array: false }).is_err());
     }
 
     #[test]

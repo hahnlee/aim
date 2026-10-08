@@ -18,6 +18,8 @@ pub struct ScanMetadataCompletion<'a> {
     pub clock: ScanClock,
     /// Original SystemServer factory-test mode, supplied by its boot owner.
     pub factory_test: bool,
+    /// Original adjusted SCAN_AS_INSTANT_APP request bit, not a final-state guess.
+    pub scan_as_instant_app:bool,
 }
 
 #[derive(Debug)]
@@ -233,6 +235,7 @@ impl SigningScan {
                     error: NativeLibraryError::Input(message),
                 }
             })?;
+        let old_package=self.loaded.get(&candidate.record.settings.name).map(|code|code.runtime_package().clone());
         let mut staged = self.clone();
         let first_shared_code = candidate.record.settings.shared_app_id().is_some_and(|id| {
             !self.settings.packages.iter().any(|setting| {
@@ -315,7 +318,32 @@ impl SigningScan {
             candidate.record.settings.name.clone(),
             std::sync::Arc::new(loaded),
         );
-        staged.package_registry.register(staged.loaded[name].clone()).map_err(|message|SigningError::Rejected(super::Error {package:name.clone(),path:candidate.record.settings.code_path.clone(),phase:"registration",message}))?;
+        staged
+            .package_registry
+            .register(staged.loaded[name].clone())
+            .map_err(|message| {
+                SigningError::Rejected(super::Error {
+                    package: name.clone(),
+                    path: candidate.record.settings.code_path.clone(),
+                    phase: "registration",
+                    message,
+                })
+            })?;
+        let view = staged
+            .package_registry
+            .package_view(name, &staged.loaded[name].package)
+            .map_err(|message| {
+                SigningError::Rejected(super::Error {
+                    package: name.clone(),
+                    path: candidate.record.settings.code_path.clone(),
+                    phase: "registration",
+                    message,
+                })
+            })?;
+        std::sync::Arc::make_mut(staged.loaded.get_mut(name).unwrap()).set_runtime_package(view);
+        staged
+            .package_registry
+            .rebind(name, staged.loaded[name].clone());
         staged.pending_metadata.remove(name);
         let setting = staged.seinfo_setting_for_scan(name).map_err(|message| {
             SigningError::Rejected(super::Error {
@@ -369,6 +397,9 @@ impl SigningScan {
             );
         }
         staged.complete_transferred_identity(&candidate.record.identity);
+        staged.permission_admissions.push(super::permission_admissions::Admission{
+            name:candidate.record.settings.name.clone(),scan_as_instant:inputs.scan_as_instant_app,old_package,
+        });
         *self = staged;
         Ok(CompletedScanMetadata {
             candidate,

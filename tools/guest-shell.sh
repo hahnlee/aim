@@ -21,7 +21,7 @@ data="$1"
 shift
 runtime="$data.run"
 # guest-init holds the data directory's lock while it runs.
-guest_init="$(lsof -t -- "$data.lock" 2>/dev/null | head -1)"
+guest_init="$(lsof -t -- "$data.lock" 2>/dev/null | head -1 || true)"
 [[ -n "$guest_init" && -f "$runtime/path-map" ]] || { echo "$data: no running guest" >&2; exit 1; }
 # Before init's first `export`, linux-run's default environment.
 env=()

@@ -235,6 +235,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
 
 /// Linux epoll event bits for one kevent of an interest.
 fn bits(k: &libc::kevent, i: &Interest) -> u32 {
+    if let Some(events)=super::fuse_device::readiness(k.ident as i32){return match events{Ok(events)=>(events as u32)&(i.events|EPOLLERR|EPOLLHUP),Err(_)=>EPOLLERR};}
     let eof = k.flags & libc::EV_EOF != 0;
     let mut b = 0;
     if k.flags & libc::EV_ERROR != 0 {

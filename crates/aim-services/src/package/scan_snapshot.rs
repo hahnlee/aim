@@ -4,17 +4,24 @@ use super::{
     owner::{app_ids::Owner, usage::Usage},
     scan::SigningScan,
 };
-pub mod endpoint;
 pub(crate) mod computer;
-pub mod query_state;
-pub(crate) mod version_page;
-pub mod user_record;
-pub mod setting_record;
+pub mod endpoint;
 pub mod library_record;
-pub mod shared_record;
+pub mod query_state;
+mod components;
+mod preferred_selection;
+pub mod install_context;
+mod removal;
+pub mod boot_context;
+mod diagnostics;
+mod readonly_query;
 mod retained_record;
-mod uid_record;
 pub mod runtime_record;
+pub mod setting_record;
+pub mod shared_record;
+mod uid_record;
+pub mod user_record;
+pub(crate) mod version_page;
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -42,6 +49,22 @@ pub fn uid_owner_registry(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
 }
 
 impl Snapshot {
+    pub(in crate::package) fn replica_runtime(&self,name:&str,factory:bool)->Result<Option<&crate::package::scan::ReplicaRuntime>,String>{
+        // Store::create/publish validate the complete runtime/seinfo/library
+        // graph once before this owner becomes immutable. Check this record's
+        // membership without rebuilding every package identity table.
+        let settings=if factory{&self.owner.settings.disabled_system_packages}else{&self.owner.settings.packages};
+        if !settings.iter().any(|setting|setting.name==name){return Ok(None);}
+        self.owner.snapshot_replica_runtime(name,factory)
+    }
+    /// Snapshot creation/publication validates these complete owner graphs before
+    /// any immutable record access. Mutable SigningScan getters keep their gates.
+    pub(in crate::package) fn install_permissions_fixed(&self, name: &str, factory: bool) -> Result<Option<bool>, String> {
+        self.owner.validated_install_permissions_fixed(name, factory)
+    }
+    pub(in crate::package) fn legacy_permissions(&self, name: &str, factory: bool) -> Result<Option<crate::package::owner::legacy_permissions::State>, String> {
+        self.owner.validated_legacy_permissions(name, factory)
+    }
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -53,12 +76,44 @@ impl Snapshot {
     }
 }
 
+#[derive(Debug)]
+pub enum CommitError {
+    Snapshot(Error),
+    Disk { snapshot: Option<Arc<Snapshot>>, error: super::owner::WriteError },
+}
 pub struct Store {
     current: Mutex<Arc<Snapshot>>,
     replica: bool,
 }
 
 impl Store {
+    /// The System publication gate supplies a snapshot already validated by its
+    /// candidate Store. Keep the coordinator Arc stable across graph mutations.
+    pub(crate) fn publish_validated_store(&self, candidate: &Store) {
+        let snapshot = candidate.capture();
+        *self.current.lock().unwrap() = snapshot;
+    }
+    /// Publish a validated candidate only while its exact canonical base remains
+    /// current. Query projections may lag a disk-committed installation.
+    pub(crate) fn publish_validated_store_after(
+        &self, base: &Arc<Snapshot>, candidate: &Store,
+    ) -> Result<Arc<Snapshot>, Error> {
+        let snapshot = candidate.capture();
+        let mut current = self.current.lock().unwrap();
+        if !Arc::ptr_eq(&current, base) { return Err(Error::Stale); }
+        if snapshot.version != base.version.checked_add(1).ok_or(Error::VersionExhausted)? {
+            return Err(Error::Invalid("validated publication version differs".into()));
+        }
+        *current = snapshot.clone();
+        Ok(snapshot)
+    }
+
+    pub(crate) fn prepare_usage_store(base: &Arc<Snapshot>, usage: Usage) -> Result<Self, Error> {
+        let mut owner = base.owner().clone();
+        owner.update_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+        Self::new_replica_at_version(owner, usage, base.version.checked_add(1).ok_or(Error::VersionExhausted)?)
+    }
+
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
         Self::create(owner, usage, false, 1)
     }
@@ -101,6 +156,25 @@ impl Store {
 
     pub fn capture(&self) -> Arc<Snapshot> {
         self.current.lock().unwrap().clone()
+    }
+
+    /// Persist while the exact base remains locked. The callback performs disk
+    /// work only; Binder calls and cache/broadcast effects happen after return.
+    pub fn publish_after(
+        &self, base:&Arc<Snapshot>, owner:SigningScan, usage:Usage,
+        persist:impl FnOnce(&Arc<Snapshot>)->Result<(),super::owner::WriteError>,
+    )->Result<Arc<Snapshot>,CommitError> {
+        let mut current=self.current.lock().unwrap();
+        if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
+        let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
+        validate(&owner,&usage).map_err(CommitError::Snapshot)?;
+        let next=Arc::new(Snapshot {version,owner,usage});
+        if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
+        match persist(&next) {
+            Ok(())=>{*current=next.clone();Ok(next)},
+            Err(error) if error.committed=>{*current=next.clone();Err(CommitError::Disk {snapshot:Some(next),error})},
+            Err(error)=>Err(CommitError::Disk {snapshot:None,error}),
+        }
     }
 
     /// The commit owner supplies a completed candidate. An exact captured base
@@ -149,7 +223,7 @@ fn validate_replica(snapshot: &Snapshot) -> Result<(), Error> {
     ] {
         for setting in settings {
             let name = &setting.name;
-            owner
+            snapshot
                 .install_permissions_fixed(name, factory)
                 .map_err(Error::Invalid)?
                 .ok_or_else(missing)?;
@@ -177,11 +251,11 @@ fn validate_replica(snapshot: &Snapshot) -> Result<(), Error> {
             endpoint::PackageCode::captured(snapshot, name, factory).map_err(Error::Invalid)?;
             if !factory && owner.loaded_packages().contains_key(name) {
                 owner
-                    .seinfo_state(name)
+                    .validated_seinfo_state(name)
                     .map_err(Error::Invalid)?
                     .ok_or_else(missing)?;
                 owner
-                    .library_dependencies(name)
+                    .validated_library_dependencies(name)
                     .map_err(Error::Invalid)?
                     .ok_or_else(missing)?;
             }
@@ -364,6 +438,43 @@ mod tests {
             36,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn raw_metadata_lease_preserves_source_and_rejects_live_queries_until_retirement() {
+        use aim_binder_host::{local::{Call,Service},parcel::{Parcel,Reader,EX_ILLEGAL_STATE}};
+        use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+        let store=Store::new(owner(),Usage::new(["fixture"])).unwrap();
+        let initial=store.capture();let raw=endpoint::Endpoint::raw_metadata(initial.clone());
+        let call=|endpoint:&endpoint::Endpoint,code:u32,request:&Parcel|{
+            endpoint.transact(&mut Call{code,flags:0,sender_pid:10,sender_euid:1000,data:Reader::new(request.data(),request.objects())}).unwrap()
+        };
+        let mut names=Parcel::new();api::GetPackageNames{disabled:false}.write(&mut names);
+        let reply=call(&raw,api::GET_PACKAGE_NAMES,&names);
+        assert_eq!(api::read_get_package_names_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap(),Some(vec![Some("fixture".into())]));
+        let mut version=Parcel::new();api::GetVersion{}.write(&mut version);
+        let reply=call(&raw,api::GET_VERSION,&version);
+        assert_eq!(api::read_get_version_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap(),initial.version() as i64);
+        let mut candidate=initial.owner().clone();candidate.settings.packages[0].version_code=37;
+        let full=store.publish(&initial,candidate,initial.usage().clone()).unwrap();
+        assert!(full.version()>initial.version());assert_eq!(initial.owner().settings.packages[0].version_code,0);
+        let reply=call(&raw,api::GET_VERSION,&version);
+        assert_eq!(api::read_get_version_reply(&mut Reader::new(reply.data(),reply.objects())).unwrap().unwrap(),initial.version() as i64);
+        let mut query=Parcel::new();api::GetComputer{}.write(&mut query);
+        let reply=call(&raw,api::GET_COMPUTER,&query);
+        let error=Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap_err();
+        assert_eq!(error.code,EX_ILLEGAL_STATE);assert_eq!(error.message,"live permission query capture is not initialized");
+        // Session abort/death calls this same retirement boundary.
+        raw.close_lease();
+        let reply=call(&raw,api::GET_PACKAGE_NAMES,&names);
+        assert_eq!(Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap_err().message,"package scan snapshot is closed");
+        assert_eq!(full.owner().settings.packages[0].version_code,37);
+        let second=endpoint::Endpoint::raw_metadata(initial.clone());
+        let mut close=Parcel::new();api::Close{}.write(&mut close);
+        let reply=call(&second,api::CLOSE,&close);
+        Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap();
+        let reply=call(&second,api::GET_VERSION,&version);
+        assert_eq!(Reader::new(reply.data(),reply.objects()).read_exception().unwrap().unwrap_err().message,"package scan snapshot is closed");
     }
 
     #[test]

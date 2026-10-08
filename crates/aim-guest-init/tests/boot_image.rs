@@ -183,6 +183,11 @@ fn real_image_dry_run_boot() {
     assert_eq!(boot.property("ro.sf.lcd_density").as_deref(), Some("320"));
     assert!(!launched.contains("qemu-props"));
     assert!(!launched.contains("goldfish-logcat"));
+    // adbd listens on the Mac's loopback only (docs/cts.md).
+    assert_eq!(
+        boot.property("service.adb.listen_addrs").as_deref(),
+        Some("tcp:localhost:5555")
+    );
     assert_eq!(
         boot.property("ro.crypto.state").as_deref(),
         Some("unencrypted")

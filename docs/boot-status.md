@@ -47,11 +47,311 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
-PackageManager still runs original. On the M4 C branch, the native Binder
-endpoint has 83 IPackageManager method dispatches (141 remaining), backed by
-captured settings, permissions and finalized library registry. Native-interface
+PackageManager still runs original. The inactive D1 source now includes
+`NativePackageManagerService` and
+`image/m4-package-switch/system-server-redirects.inactive`: native construction,
+original UserManager and ART adapters, lifecycle barriers and display metrics.
+`NativePackageBootstrap` assembles the native snapshot, mutation, user,
+permission and observer adapters using a retained typed bootstrap bridge.
+The stable native PackageManagerInternal is registered before original permission
+owners are constructed. BootSession initially owns only actual SystemConfig
+facts; original UserManager creates its user roster before native Settings
+recovery, lifecycle binding and raw scan. Raw queries then serve permission
+projection before full capture and runtime construction. The native Rust assembly builds and controlled C boots reach native raw scan. Failed epochs close their native
+workers and snapshots and propagate SystemServer startup failure.
+Its native boot-session backend and original constructor inputs still require
+integration; the ten redirected calls and two retained guarded calls remain
+inactive in the default image pending C acceptance. The consolidated native unit gate
+now passes 756 tests with zero failures; eight ignored tests remain not run.
+Java compilation, DEX generation and strict linkage against the original
+image now pass. The inactive UM redirect gate verifies all 14 original PMS
+call sites. An isolated experimental C worktree has built redirected services.jar and its
+matching oat/vdex and derived image; the default image remains original. Experimental C boots now reach the redirected native PM main.
+The first attempts exposed startup ordering defects: native image mapping
+must open the actual mounted guest `/data` only at PM entry, and the headless
+mode Binder query must follow original UM registration. C now reaches the
+raw-scan entry after UM creation. Initial APK scanning follows the original
+`InitAppsHelper` `/data/app` scope and does not require the later mount service;
+adopted volumes stay on the post-mount listener path. Early scan now uses original parser/AppsFilter constructor
+state; provider-backed policies bind at the later original systemReady phase.
+First-boot Settings/restriction publication precedes protected preferred/browser
+reads. These controlled C startup fixes are not yet CTS/app acceptance. Adding an adb bootconfig
+key now preserves the default `hardware=aim`; without it the wrong init/fstab
+prevented zygote startup. These fixes are under controlled boot verification;
+C now parses original system APKs with actual display density. The current
+C44 passes RoleController/window startup, but GMS provider startup still hits
+another prepared-mutation race. All common prepare callers now serialize native
+capture/prepare under the same gate where owner side effects permit it; installation
+codes use fieldwise latest rebase after their actual lower-owner work (#1055).
+Application-data plans retain their true source capture. Latest selection, conflict
+checks and publication share the coordinator lock, and callbacks run after release.
+Two exact interleaving regressions pass. Caller-preserving native CLI read/install/
+mutation cohorts compile with original helper APIs (#1052). C45 full Java/linkage/
+Rust/oat/image build passes; native full gate 726/0, eight ignored not run.
+C46 reaches `sys.boot_completed=1` with zygote running and native PM active.
+Native read CLI lists the actual packages and resolves paths/features; HOME resolves
+to `dev.aim.home/.Home`. Original Settings cold start completes with `Status: ok`
+(13.501 s under the concurrent host load). Local Calculator installation reaches
+the installer but fails its device-policy generation check; this is not an install
+pass. Original
+Googlesdksetup provider startup fails when its own getProviderInfo returns absent;
+this remains under owner-level correction. C47 Java/DEX linkage, Rust/oat and derived-image build pass with saved factory
+runtime capture for persisted disabled-system packages. C49 repeats the C46 data and reaches `sys.boot_completed=1`, after fixing
+completed-scan persistence on restored boots and bounding installed-application
+Binder replies. `dumpsys --pid package` and `package_native` both return the
+actual native guest-init owner PID, distinct from original SystemServer.
+Repeat-data boot completion is verified. Afterward Settings launch times out and
+SystemServer watchdog reports blocked foreground/main/UI/AM handlers; its traces
+are preserved. A local Calculator installation rejects a host path at the original
+installer context boundary. The host-to-guest installer context mapper and snapshot lock scopes are corrected
+in C50; C50 still hits a main-thread startup Watchdog while original connectivity
+systemReady waits, so it has no app/CTS pass. Actual snapshot traces and the native
+usage coordinator path are under investigation. C51 integrates the raw-FD/vold/
+FUSE owner cohort: eleven focused syscall/backend/cache tests pass, including a
+SIGKILL writer and actual write-before-release; its helper is exercised by the
+parent test. C52 reaches boot completion and Settings launches with `Status: ok` (21.631 s
+under host load), HOME resolves to AimHome and both public service PID queries
+identify guest-init. The actual FUSE mount rejects the original trailing-comma
+options (#1081); its parser correction passes a focused regression. Calculator
+installation reaches permission-candidate runtime validation but fails setting/code
+identity. Contacts provider enumeration null-metadata rejection is corrected at the query
+owner with a passing focused regression (#1082); actual replay is pending. Post-boot app ANRs and a subsequent foreground/main Watchdog remain. A native
+sample confirms each component/usage publication repeatedly serializes the whole
+parsed APK inventory under the publication path; owner-local immutable code reuse
+and usage-only projection now pass focused regressions (#1083, #1085). C53
+includes install-candidate runtime rebinding (#1084) and provider metadata lookup
+(#1082), reaches boot completion with native PM ownership and starts the original
+MediaProvider ExternalStorageService/FuseDaemon through its original JNI and real
+raw-FD handoff. The subsequent per-user bind layout lacks `/mnt/installer/0` and
+fails a FUSE bind (#1086 scope); it is not a mounted storage pass. Calculator
+installation advances to a missing candidate library dependency inventory (#1084).
+A later original scheduler request for isolated UID packages raises unsupported
+and kills SystemServer; exact UID-query semantics are under correction.
+C54 reaches boot completion and Settings starts cold successfully (9.008 s),
+with no SystemServer fatal/Watchdog observed during that check. The selected
+isolated/compute/SDK UID regression passes (#1089). Installer and Android-writable
+view roots exist (#1090), but a real FUSE target lookup for Android/data still
+returns ENOENT, so the volume is unmountable. Local install now advances past the
+library graph and fails the legacy permission package inventory. These producer
+gaps are under correction; original MediaProvider mount, CTS and full app
+acceptance remain unverified. The first actual host parsing-module run reaches
+UsesSdkTest over authorized adbd/Tradefed and fails on the legacy candidate
+inventory and `<extension-sdk>` support. The run is interrupted after an image
+rebuild force-detaches the live derived mount; its partial results are not a
+module pass. The experimental image now includes main's adb init configuration,
+Active-image rebuild refusal now has a live guest lease check: exclusive image
+mutation is refused while guest-init retains its reader. C55 reaches boot completion
+and original MediaProvider reports emulated;0 mounted, with real installer/FUSE
+Android data paths. Settings starts cold (26.448 s under load). adb/Tradefed now
+runs the parsing module; extension-sdk parsing reaches commit and two official
+manifest-fixture regressions pass (#1097). Install-context/candidate generation
+and usage-runtime rebasing still fail, and adb shell storage remains an empty
+caller view pending namespace alias correction. The completed official parsing module reports zero passed and eleven failed tests;
+its XML is retained. Install snapshot/usage rebasing, init bind-source propagation,
+setgid creation inheritance and blocked default SIGCHLD handling have focused
+regression passes (#1100, #1098, #1099, #1101). C56 includes these fixes and
+C56 reaches boot completion and mounts through original MediaProvider again;
+Settings starts warm successfully (4.714 s). Calculator install now fails the
+final scan publication with Stale, and the caller storage view remains an empty
+anchor because init bind provenance is absent from the generated path-map. The
+official parsing module replay exercises all eleven tests and all fail at original
+permission PREPARE (exception -4, null message); official XML confirms zero passed, eleven failed and one completed module.
+C56 shutdown completed before the next image rebuild. Atomic install publication
+and failed-session reopening regressions each pass (#1100, #1103); C57 includes those fixes and the init path-map preservation correction; its
+controlled repeat-data replay reaches boot completion and original FUSE mounting.
+Both guest-shell and real adb shell UID 2000 see the actual media_rw directory
+inventory rather than an empty anchor. Calculator install advances past final
+publication Stale but fails post-install permission lifecycle/live state matching
+for an unrelated existing package. Zygote later aborts in GetOpenFdsIgnoring/Restat
+and restarts the system; this is under kernel investigation. C57 CTS diagnostic
+option trial is rejected during configuration, so its tests are not run. A later
+unmodified-harness single UsesSdk test executes and fails; exact PREPARE logging
+identifies original AppIdPermissionPolicy.trimPermissionStates line 1585 throwing
+NullPointerException from onPackageAdded. Receipt UID scope and original permission
+owner lifecycle are under correction. Final single-test XML confirms zero passed, one failed and one completed module.
+C57 is stopped before rebuild. An interrupted internal mount-journal lock
+regression passes (#1104); whether it caused this zygote abort needs replay.
+C58 starts with fresh disposable data and reaches boot completion. The first
+Calculator PREPARE completes but install-base validation rejects a changed
+publication; a subsequent unchanged official CTS-generated APK immediately
+reproduces trimPermissionStates NullPointerException. This establishes a failed
+PREPARE cleanup gap in one fresh boot; neither installation passes. C58 Settings
+starts warm successfully (4.601 s) and storage shows actual FUSE content. C58
+is stopped. C59 includes committed-aware original permission rollback, UID receipt
+scope, exact install identity diagnostics and the typed original DVS XML/settings
+bridge; Java/image linkage and native tests pass before controlled replay. C59
+fails construction because existing-install completion reaches domain reconciliation
+before domain initialization. Its runtime initializer now follows persistence
+installation and precedes installer construction. C60 reaches boot completion
+without that failure or the previous null DVS connection. Calculator installation
+advances to PACKAGE_ADDED, but original OverlayManager then throws native
+`internal mutation base changed` from overlay publication and kills SystemServer.
+Native durable commit and query publication precede this PACKAGE_ADDED event;
+committed reservation release retires permission scopes without rollback. The
+CLI completion is interrupted and is not counted as a pass. C60 is
+stopped. Internal mutation publication now retries pure verified operation
+preparation if usage/context publication wins the final prewrite CAS; bootstrap
+and persistence identity and true field conflicts remain checked. Rust compile
+passes; C61 reaches boot completion and retains Calculator at its actual
+/data/app path. Explicit Calculator cold start passes (2.197 s). The implicit
+MAIN/LAUNCHER difference is original AMS MATCH_DEFAULT_ONLY behavior, confirmed
+with the same explicit query flag returning no activity. Repeated official CTS
+generated APK install fails final query publication scan-owner validation but no
+longer raises PREPARE NullPointerException or rollback errors. SystemServer remains
+alive during these checks through the final pre-shutdown query. Canonical
+scan/usage exact-base CAS and latest install query recapture are implemented;
+six usage-owner regressions and the full native cohort pass. C62 still detects
+postcommit target-code replacement by a nonusage publisher. Freezer-specific
+canonical/query-lag preservation passes seven actual owner regressions; C63 still
+reproduces target-code replacement by another publisher. Caller/location and exact
+identity diagnostics at C64 identify internal_grant_implicit_access as the actual
+stale publisher (system_package_internal_implicit.rs:56), replacing the new
+committed path with the previous path at the same version. C64 remains alive
+through replay and is stopped. Typed visibility/query-lag publication is being
+corrected with eight passing owner regressions. C65 reaches boot completion,
+installs and publishes the actual new CTS-generated APK path, but postpublication
+monitor validation rejects a newer coherent query snapshot. SystemServer remains
+alive through the final path query and C65 is stopped. Receipt-based monitor
+validation uses actual target identity/receipt and passes its regression. C66
+returns Success for the unchanged official generated APK. Its full parsing module
+then reaches SDK assertions and finds missing minExtensionVersions dump output;
+an asynchronous original DVS save races new native package attachment and kills
+SystemServer with an attached-universe validation error. These two gaps are under
+correction; the module is not a pass. Dump field and DVS baseline merge
+regressions pass. C67 completes the official module with five passed and six
+failed tests; the remaining failures are native install/context owner changes.
+No SystemServer fatal is observed during the completed run. Typed unrelated user
+state rebase and isolated context publication pass regressions and the full
+native cohort. C68 progresses through seven tests with one blank install failure
+before an asynchronous DVS export of a retired UUID kills SystemServer during
+test eight. The run is stopped after stalled recovery and remains partial, not
+a completed module. Previous-baseline/no-delta UUID validation now passes three
+regressions; C69 adds that fix and owner-specific install exception provenance,
+reaches boot completion, and official CtsPackageManagerParsingHostTestCases XML
+confirms all eleven tests passed, zero failed and the module completed
+(2026.10.08_17.02.43). SystemServer remains alive after the run. Full C CTS/app
+acceptance remains incomplete. C70 verifies Calculator update and Chrome install
+both return Success, and original libchrome loads directly from its unchanged
+APK after ABI preparation. Chrome first-run later hits an input-focus ANR;
+launch acknowledgement is not an app pass. Timestamp formatting and
+instrumentation CLI are implemented. C71 actual instrumentation list succeeds,
+and PreferredActivity now executes device tests but fails preferred-add permission
+semantics (zero host tests passed, two failed). PackageSetting actual device
+checks of first install time and code path pass, including code path after real
+reboot; both host tests fail cleanup because SDK-library removal policy has no
+real flag producer. A typed original hidden Flags leaf fixes that gap. Preferred
+Context permissions now use authenticated live original AMS checks, including
+shell permission delegation. C71 is stopped before the next rebuild.
+The original DVS verifier proxy and immutable signer owner fixes pass Java/image
+linkage before their next runtime replay. C72 preferred add/delegated permission
+checks pass before reboot, but duplicate preferred restoration and removal
+cleanup fail. The exact original preferred XML admission rule and library/runtime
+removal recompletion now pass native regressions. C73 finds a nonshared UID
+incorrectly cast as SharedUserApi; C74 corrects that and identifies strict
+settings removal mismatch. C75 shows native query Settings have 42 UID-less APEX
+metadata records and transient/shared-UID runtime fields absent from parsed
+packages.xml. Shared UID and removal Binder lifetime are fixed; persistent
+settings projection now reuses the actual writer/parser with strict persistent
+field equality. Its projection/removal regression and actual System DVS disk
+fixture pass. C76 reaches boot completion and actual preferred-test APK uninstall
+returns Success, with no DVS fatal observed. PreferredActivity full CTS replay
+completes with one passed and one failed host test: reboot duplicate state passes,
+but uninstall leaves one live preferred entry. PackageSetting device/date/code
+checks pass, while cleanup detects canonical removal CAS and postcommit query
+publication races. C77 adds actual preferred removal callbacks (including factory
+KEEP_DATA), atomic single-file metadata/setting removal, latest canonical query
+publication and consistent persistent owner checks. All native tests pass before
+replay. C77 reaches reboot preferred verification but an old DVS export after
+actual package deletion is rejected as foreign and terminates SystemServer.
+Exact unchanged previous-baseline deleted attachments are now handled without
+reinserting deleted records; foreign UUID/signature and altered retired fields
+remain rejected (six regressions pass). C78 stops before module execution because
+installer session recovery checks a missing prepared stage at XML read boundary.
+Original readFromXml does not impose that existence check, and successful
+nonstaged sessions must be removed from active persisted inventory; both owner
+lifetimes are corrected: read-boundary regressions pass six tests, ordinary
+root/child success retirement preserves history/allocated IDs and passes its
+regression. C79 boots the same failed-history disposable data successfully, with
+all native tests passing. PreferredActivity device checks pass before reboot,
+but the replay cannot finish: original MediaProvider hits a startup ANR and dies,
+while vold retains the FUSE callback device fd during bind setup. Actual sdcard
+stat blocks in FUSE read_reply and Tradefed reports external storage unavailable
+after 239 seconds. This incomplete invocation is not a module pass. The vold
+callback now transfers its original fd and releases its local owner before bind
+setup (#1127). The actual broker/duplicated-fd/pending-LOOKUP daemon-close
+regression passes (one test, no skips), and the derived image rebuild succeeds.
+C80 reaches reboot completion with the actual FUSE storage accessible (17
+media_rw-owned directories), and its second preferred host test passes live
+addition, state checks and reboot verification. Its first test starts with one
+preferred entry retained from the aborted C79 run: original CTS setup installs
+without clearing preferences, while teardown deletes the package. The following
+initial-zero check passes after that actual deletion. A clean full module replay
+completes in C80: official PreferredActivityHost XML records two passed tests,
+zero failures and done=true (2026.10.08_19.39.52). Both host tests perform actual
+reboot verification and cleanup. Broader 66-module/app acceptance remains
+incomplete. Removal persistence lock order is also corrected (#1128): disk is
+locked before canonical snapshot publication and released before query callbacks;
+the actual four-publication regression passes without skips.
+C14 passed shared and nonshared APEX permission UID handling.
+The absent projection requires matching parsed APEX name/path and uid -1;
+ordinary missing owners still fail, and the focused regression passes.
+C12 passed the pinned Settings suspension
+policy connection; C11 passed separate restriction/Settings APEX inventories.
+The compressed-stub factory runtime retention fix passed controlled C10/C11.
+Focused restriction inventory and factory code/sparse-user retention regressions
+both pass. Full native unit verification passes 785 tests, zero failures, with
+eight ignored tests still not run.
+The host parsing module has run and failed; full C CTS/app acceptance
+remains incomplete.
+On the M4 C branch, the native Binder
+endpoint has source bodies and dispatches for all 298 public methods across
+IPackageManager (224), Native (14), Installer (26) and Session (34). The source
+owner inventory records 192 conditionally connected methods and 106 partial;
+no public-method producer factory is entirely absent. The full C handoff and
+runtime activation reach boot completion in controlled C46. Image,
+app-data, permission, staged/stream and completion producers are being integrated.
+The post-scan runtime constructor now calls the native persistence, installer,
+preferred, archive, metadata, mutation, maintenance, verification and user owners
+in one sequence and retains their workers. Native mutation reservations apply
+original consumer records through the shared Store's persistence/publication gate.
+The install environment now has one production callback owner path; app-data,
+permission reservation metadata and query publication are constructed together,
+without rebinding a second owner in pipeline attachment. Historical SessionInfo
+transport uses typed arrays so Binder and FD capability tables survive delivery.
+NativeServices now retains that runtime and can publish bootstrap-bound native
+endpoints under `package` and `package_native` after assembly; partial construction
+and shutdown detach the owner before worker teardown. This entry is not invoked
+by the image's current boot path. Initial scan and Java BootstrapFactory source
+are connected through generated BootSession dispatch and a native service-host
+begin entry. The native entry now derives boot policy/resources from retained original
+leaves after UM creation, retains actual Settings readers, and applies accepted
+scan facts before runtime construction. Production Java factory assembly
+remains under integration; the default image does not invoke this
+entry and activation is incomplete. The original PMS still runs.
+guest-init now recognizes an explicit `package` native-service request and
+provides its canonical image/mounted data owner without publishing package
+endpoints early. The default native-services manifest does not request it.
+Compressed system stub admission now runs native gzip extraction, ABI library
+copy and signed full-code scanning before Capture. It retains the same
+destination receipt owner through runtime and invokes original F2fs release
+on only those owned paths before systemReady. Controlled C10 boot passes compressed-stub runtime completion; full service
+publication and CTS/app acceptance remain unverified.
+The native initial scan now separates admitted raw code/Settings visibility from
+permission-projected Capture construction. The raw graph remains available to
+the original permission owner's startup queries while the projection is consumed
+once outside its mutex. This is implemented source, with no live boot evidence.
+The web-instant Settings watcher now publishes its actual UM-scoped disabled
+map into immutable native capture generations; boot-state records read the
+requested retained capture, rather than a mutable current-policy fallback.
+The latest source inventory finds concrete producer bodies for Computer 153/153
+and Internal 134/134; production Java construction and capture attachment
+are still being connected, so these are not validated running interfaces.
+These counts are source progress,
+not boot or conformance results. Implementation has moved to consolidated
+build and test verification; original-image linkage and C acceptance remain
+unproven. Native-interface
 audio playback capture reads actual visible ApplicationInfo flags; the module
-metadata provider getter reads its configured owner (11 of 14 native methods). Shared/declared library consumers, paths, APEX directories, protected
+metadata provider getter reads its configured owner. Shared/declared library consumers, paths, APEX directories, protected
 broadcasts, initial non-stopped packages, sandbox name, user stopped/suspended/
 quarantined state, harmful warnings and app metadata source are exposed. Activity
 filter enumeration uses registered filters with current MIME groups in manifest
@@ -64,7 +364,8 @@ exception payloads reject Binder/FD objects until a capability owner exists;
 class/message bytes are forwarded without native class lookup. Three binder-host
 envelope/capability refusal tests pass. Actual original
 Parcel reading and reverse write/decode/rewrite pass in the full package oracle
-(63.88s, no skips), including actual provider XML/text/APEX module values and
+(103.62s, no skips), including suspension extras, all 128 page-size compatibility
+flag combinations against original framework strings, provider XML/text/APEX module values and
 ArrayMap equal-hash insertion order. That comparison exposed a common reply helper that rebuilt exceptions
 from only code/message; it now retains the complete exception.
 SystemConfig UID permission assignments use actual bionic/partition UID names and
@@ -86,14 +387,21 @@ decisions and persistence exist, but their required effects are not connected
 (#988). Installer/session state and pinned metadata codecs exist with explicit
 policy/storage/callback owner contracts. A retained bootstrap can install a native
 installer Binder with real session storage, five oneway callbacks and per-call
-original UM/DPM policy reads. It handles 15 of 26 top-level methods and 19 of 34
+original UM/DPM policy reads. It handles 15 of 26 top-level methods and 29 of 34
 session methods; default publication and durable install/commit recovery remain
-#986. The original policy record oracle passes in 36.99s without skips using
-fixture UM/DPM owners. This does not prove live SystemServer policy or SELinux
-restorecon. The complete derived-image build passes (89.8s); the original
+#986. The original policy/FileBridge oracle passes in 20.16s without skips using
+fixture UM/DPM owners and the original FileBridge output stream. A separate
+original ART test passes in 57.66s with an explicit native true-mode writer:
+Binder imports its typed proxy FD, writes and reads back 17,003 bytes, duplicates
+its shared offset, transfers and retransfers it through original SCM_RIGHTS,
+executes a new original ART process image with the inherited capability and
+rejects every writer with EPERM after abandon.
+The image selector remains unchanged; this is not default installer publication. This does not prove live SystemServer policy or SELinux
+restorecon. The complete derived-image build passes (118.5s, 12 rebuilt/30 fresh nodes); the original
 first-system-scan test passes all six restart cases (174.25s, no skips). Session names, real read-only file descriptors, split markers, sealing, transfer
 and loader metadata use concrete stage/record owners; child graphs persist and
-recover. Thirty-six installer tests pass. Legal guest symlink and complete virtual
+recover. Thirty-five installer owner tests pass; APKLite projection has two passing tests.
+Domain limits and APKLite platform inputs require their original owner bindings. Legal guest symlink and complete virtual
 credential/mode handling remain #1001; host symlinks are refused. Other FD-bearing
 installer records reject before allocation until their capabilities are owned. Actual original ART
 comparison passes five SessionParams/SessionInfo cases (20.47s), including nullable
@@ -110,13 +418,15 @@ queries keep actual caller UID (permissions) separate from filter UID (visibilit
 Unused scan leases release their query capture without creating a child endpoint;
 claimed endpoints release their graph on close. Java Data/Store/scope reference
 counts keep an old computer alive until the last owning scope closes. This is a
-typed adapter with 21 private Binder methods, not the full original
-Computer/PackageManagerInternal facade. Names normalize through the captured
+typed adapter with 22 private Binder methods. Concrete facades match the actual
+image API (153 Computer declarations and 134 abstract PackageManagerInternal
+methods); unbound methods require explicit typed owners. The retained IPM query
+transport refuses writes. Full facade lifecycle integration remains incomplete. Names normalize through the captured
 rename table and visible library owner; UID target SDK uses actual retained/shared
 UID owners. A paged, version-bound UID registry supplies current, shared and
 retained slots; Java getters do not infer those selections from names. The
-integrated service units pass 630 tests (six input-dependent tests
-excluded); the explicit retained native scan passes in 2.33s without skips.
+integrated service units pass 688 tests (six input-dependent tests
+not run); the explicit retained native scan passes in 2.33s without skips.
 Its public UID/name/instant/SDK/installer calls and explicit uninstall filtering
 are implemented separately from internal UID lookup (no public user/flag checks)
 and original caller-based name normalization. Java internal read helpers use

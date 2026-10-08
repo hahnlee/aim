@@ -37,7 +37,7 @@ pub struct WakeTarget<'a> {
 /// store to the word has already happened with release ordering; waiters
 /// re-read it and go back to sleep if it still equals their expected value.
 /// Readers never write these words, so a wake with no sleepers is a no-op.
-pub trait FutexWaker {
+pub trait FutexWaker: Send {
     fn wake_all(&self, target: WakeTarget<'_>);
 }
 

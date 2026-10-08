@@ -178,3 +178,4 @@ mod tests {
         assert_eq!(captured.overrides().unwrap()[0].1.icon, Some(0));
     }
 }
+crate::install_mutator_user_runtime_restore!();

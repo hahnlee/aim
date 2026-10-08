@@ -15,6 +15,9 @@ pub trait ReadOwners {
     ) -> Result<(), ReadError>;
     fn start_attempt(&mut self, settings: &Settings, pending: &[Package]) -> Result<(), ReadError>;
     fn package_registered(&mut self, package: &Package, created: bool) -> Result<(), ReadError>;
+    fn package_header(&mut self, _package: &Package, _start: &Element) -> Result<(), ReadError> {
+        Err(ReadError::Owner("package header persistence owner unavailable".into()))
+    }
     fn shared_registered(&mut self, group: &SharedUser, created: bool) -> Result<(), ReadError>;
     fn package_child(
         &mut self,
@@ -87,6 +90,7 @@ impl Settings {
             match start.name.as_str() {
                 "updated-package" => owners.factory_record(settings, reader, &start, ids)?,
                 "package" => {
+                    let header = start.clone();
                     settings.read_package_with_ids(
                         reader,
                         start,
@@ -95,6 +99,7 @@ impl Settings {
                         |package, reader, child, ids, created| {
                             let Some(child) = child else {
                                 owners.package_registered(package, created)?;
+                                owners.package_header(package, &header)?;
                                 return Ok(true);
                             };
                             let handled = owners.package_child(package, reader, child, ids)?;

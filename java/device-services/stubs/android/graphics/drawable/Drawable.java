@@ -7,6 +7,8 @@ import android.graphics.ColorFilter;
 import android.graphics.Rect;
 
 public abstract class Drawable {
+    public int getIntrinsicHeight(){throw new RuntimeException("stub");}
+    public int getIntrinsicWidth(){throw new RuntimeException("stub");}
     public Drawable() { throw new RuntimeException("stub"); }
     public abstract void draw(Canvas canvas);
     public abstract void setAlpha(int alpha);
@@ -24,4 +26,6 @@ public abstract class Drawable {
         void scheduleDrawable(Drawable who, Runnable what, long when);
         void unscheduleDrawable(Drawable who, Runnable what);
     }
+ public final android.graphics.Rect getBounds(){throw new RuntimeException("stub");}
+ public void setBounds(int left,int top,int right,int bottom){throw new RuntimeException("stub");}
 }

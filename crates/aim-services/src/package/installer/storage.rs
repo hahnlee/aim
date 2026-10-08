@@ -1,5 +1,7 @@
 //! Exclusive native install_sessions.xml and staging owner.
 //! Original android-16.0.0_r1 AtomicFile/PackageInstallerSession protocol (AOSP, Apache-2.0).
+#[path = "storage/staged.rs"]
+mod staged;
 use super::{
     Parameters, Record, Session,
     codec::{Object, SessionParams},
@@ -11,7 +13,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 #[derive(Debug)]
 pub struct Error {
@@ -153,13 +155,7 @@ impl Store {
             if user < 0 || uid < 0 {
                 return Err(before("negative installer user/UID"));
             }
-            for flag in [
-                "committed",
-                "isReady",
-                "isFailed",
-                "isApplied",
-                "isDataLoader",
-            ] {
+            for flag in ["isReady", "isFailed", "isApplied"] {
                 if node.bool(flag).map_err(before)?.unwrap_or(false) {
                     return Err(before(format!("recovery owner unavailable: {flag}")));
                 }
@@ -208,6 +204,20 @@ impl Store {
                 auto_install_dependencies_enabled: true,
                 ..Default::default()
             };
+            if node.bool("isDataLoader").map_err(before)?.unwrap_or(false) {
+                params.data_loader_params = Some(
+                    super::codec::DataLoader {
+                        kind: node
+                            .int("dataLoaderType")
+                            .map_err(before)?
+                            .ok_or_else(|| before("data loader type absent"))?,
+                        package: text(node, "dataLoaderPackageName"),
+                        class: text(node, "dataLoaderClassName"),
+                        arguments: text(node, "dataLoaderArguments"),
+                    }
+                    .object(),
+                );
+            }
             params.originating_uri = text(node, "originatingUri").map(uri);
             params.referrer_uri = text(node, "referrerUri").map(uri);
             let mut children = BTreeSet::new();
@@ -238,6 +248,10 @@ impl Store {
                             .map_err(before)?
                             .ok_or_else(|| before("auto-revoke mode absent"))?
                     }
+                    "preVerifiedDomains"
+                    | "sessionFile"
+                    | "sessionChecksum"
+                    | "sessionChecksumSignature" => {}
                     "childSession" => {
                         children.insert(
                             child
@@ -300,6 +314,12 @@ impl Store {
             let session = Session {
                 id,
                 installer_uid: uid as u32,
+                original_installer_uid: uid as u32,
+                committed: node.bool("committed").map_err(before)?.unwrap_or(false),
+                committed_millis: node.long("committedMillis").map_err(before)?.unwrap_or(0),
+                resolved_package: None,
+                validated_target_sdk: None,
+                checksums: super::checksums::Pending::read_xml(node).map_err(before)?,
                 user: user as u32,
                 parameters: Parameters {
                     multi_package: params.multi_package,
@@ -316,18 +336,51 @@ impl Store {
                 destroyed: node.bool("destroyed").map_err(before)?.unwrap_or(false),
                 client_progress: 0.0,
                 reported_progress: 0.0,
+                has_app_metadata: false,
+                installation_files: node
+                    .children()
+                    .filter(|child| child.name == "sessionFile")
+                    .map(|child| {
+                        Ok(super::InstallationFile {
+                            location: child.int("location").map_err(before)?.unwrap_or(0),
+                            name: text(child, "name"),
+                            length: child.long("lengthBytes").map_err(before)?.unwrap_or(-1),
+                            metadata: child.bytes_base64("metadata").map_err(before)?,
+                            signature: child.bytes_base64("signature").map_err(before)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?,
+                pre_verified_domains: {
+                    let mut domains: Vec<String> = node
+                        .children()
+                        .filter(|child| child.name == "preVerifiedDomains")
+                        .filter_map(|child| text(child, "domain"))
+                        .collect();
+                    domains.sort_by_key(|domain| crate::package::info::java_hash(domain));
+                    let mut unique = Vec::new();
+                    for domain in domains {
+                        if !unique.contains(&domain) {
+                            unique.push(domain);
+                        }
+                    }
+                    let domains = unique;
+                    (!domains.is_empty()).then_some(domains)
+                },
             };
+            for (index, file) in session.installation_files.iter().enumerate() {
+                if session.installation_files[..index].iter().any(|existing| {
+                    existing.location == file.location && existing.name == file.name
+                }) {
+                    return Err(before("Trying to add a duplicate installation file"));
+                }
+            }
             if text(node, "sessionStageDir") != self.guest_stage(&session, &record) {
                 return Err(before(
                     "persisted installer stage path differs from native owner",
                 ));
             }
-            if session.prepared && !params.multi_package {
-                let stage = self.stage_path(&session, &record)?;
-                if !fs::symlink_metadata(stage).map_err(before)?.is_dir() {
-                    return Err(before("prepared installer stage absent"));
-                }
-            }
+            // readFromXml restores the stage capability path and flags; stage
+            // contents are verified by that session's operation/recovery owner.
             records.push((session, record));
         }
         let map: BTreeMap<_, _> = records.iter().map(|(s, _)| (s.id, s)).collect();
@@ -360,7 +413,7 @@ impl Store {
             format!("/data/app/vmdl{}.tmp", session.id)
         })
     }
-    fn stage_path(&self, session: &Session, record: &Record) -> Result<PathBuf, Error> {
+    pub(crate) fn stage_path(&self, session: &Session, record: &Record) -> Result<PathBuf, Error> {
         if record.params.volume_uuid.is_some() {
             return Err(before("adopted volume install storage owner unavailable"));
         }
@@ -372,7 +425,11 @@ impl Store {
         if params.volume_uuid.is_some() {
             return Err(before("adopted volume install storage owner unavailable"));
         }
-        if params.app_icon.is_some() || params.data_loader_params.is_some() {
+        if params
+            .app_icon
+            .as_ref()
+            .is_some_and(|icon| !icon.objects.is_empty())
+        {
             return Err(before(
                 "installer icon/data-loader storage owner unavailable",
             ));
@@ -412,6 +469,84 @@ impl Store {
         guest_inode::record(&path, self.stage_inode).map_err(before)?;
         (self.labeler)(&path, &self.guest_stage(session, record).unwrap())?;
         Ok(())
+    }
+    pub fn write_target(
+        &self,
+        session: &Session,
+        record: &Record,
+        name: &str,
+        offset: i64,
+    ) -> Result<std::fs::File, Error> {
+        if !valid_filename(name) {
+            return Err(before("invalid session filename"));
+        }
+        let path = self.stage_path(session, record)?.join(name);
+        let mode = if name == "app.metadata" { 0o640 } else { 0o644 };
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(mode | 0o600)
+            .open(&path)
+            .map_err(before)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode | 0o600)).map_err(before)?;
+        guest_inode::record(
+            &path,
+            GuestInode {
+                mode: Some(mode),
+                ..self.stage_inode
+            },
+        )
+        .map_err(before)?;
+        (self.labeler)(
+            &path,
+            &format!("{}/{}", self.guest_stage(session, record).unwrap(), name),
+        )?;
+        if offset > 0 {
+            use std::io::{Seek, SeekFrom};
+            file.seek(SeekFrom::Start(offset as u64)).map_err(before)?;
+        }
+        Ok(file)
+    }
+    pub fn fetch_package_name(
+        &self,
+        session: &Session,
+        record: &Record,
+        policy: &super::native::LitePolicy,
+    ) -> Result<String, Error> {
+        let path = self.stage_path(session, record)?;
+        let names = if record.params.data_loader_params.is_some() {
+            session
+                .installation_files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect()
+        } else {
+            self.names(session, record)?
+        };
+        for name in names {
+            let name = name.ok_or_else(|| before("null installation filename"))?;
+            let file = path.join(&name);
+            if file.is_dir()
+                || name.ends_with(".removed")
+                || name.ends_with(".idsig")
+                || name.ends_with("app.metadata")
+                || name.ends_with(".digests")
+                || name.ends_with(".digests.signature")
+                || policy
+                    .art_managed_extensions
+                    .iter()
+                    .any(|extension| name.ends_with(extension))
+            {
+                continue;
+            }
+            return crate::package::parse::lite::package_name(&file, &policy.environment)
+                .map_err(before);
+        }
+        Err(before(format!(
+            "Can't fetch package name for session={}",
+            session.id
+        )))
     }
     pub fn names(&self, session: &Session, record: &Record) -> Result<Vec<Option<String>>, Error> {
         if session.parameters.multi_package {
@@ -464,6 +599,9 @@ impl Store {
             .open(path)
             .map_err(before)
     }
+    pub fn remove_metadata(&self, session: &Session, record: &Record) -> Result<(), Error> {
+        fs::remove_file(self.stage_path(session, record)?.join("app.metadata")).map_err(before)
+    }
     pub fn remove_split(
         &self,
         session: &Session,
@@ -503,6 +641,266 @@ impl Store {
             ),
         )?;
         Ok(())
+    }
+    pub fn recovered_icons(&self) -> Result<Vec<(i32, Vec<u8>)>, Error> {
+        let directory = self.data.join("system/install_sessions");
+        let mut icons = Vec::new();
+        match fs::read_dir(directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(before)?;
+                    let name = entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| before("Invalid installer icon filename"))?;
+                    if let Some(id) = name
+                        .strip_prefix("app_icon.")
+                        .and_then(|name| name.strip_suffix(".png"))
+                        .and_then(|id| id.parse::<i32>().ok())
+                    {
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_NOFOLLOW)
+                            .open(entry.path())
+                            .map_err(before)?;
+                        use std::io::Read;
+                        let mut bytes = Vec::new();
+                        file.take(16 * 1024 * 1024)
+                            .read_to_end(&mut bytes)
+                            .map_err(before)?;
+                        icons.push((id, bytes));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(before(error)),
+        }
+        Ok(icons)
+    }
+    pub fn write_icon(&self, id: i32, png: Option<&[u8]>) -> Result<(), Error> {
+        let directory = self.data.join("system/install_sessions");
+        fs::create_dir_all(&directory).map_err(before)?;
+        let path = directory.join(format!("app_icon.{id}.png"));
+        if let Some(png) = png {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o640)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path)
+                .map_err(before)?;
+            record_inode(
+                &path,
+                &GuestInode {
+                    mode: Some(0o100640),
+                    ..self.file_inode
+                },
+            )
+            .map_err(before)?;
+            (self.labeler)(
+                &path,
+                &format!("/data/system/install_sessions/app_icon.{id}.png"),
+            )?;
+            file.write_all(png).map_err(before)?;
+            file.sync_all().map_err(before)?;
+        } else {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(before(error)),
+            }
+        }
+        Ok(())
+    }
+    pub fn staging_directories(&self) -> Result<Vec<String>, Error> {
+        let mut stages = Vec::new();
+        for (relative, all) in [("app", false), ("app-staging", true)] {
+            match fs::read_dir(self.data.join(relative)) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry.map_err(before)?;
+                        let name = entry
+                            .file_name()
+                            .into_string()
+                            .map_err(|_| before("Invalid staging directory name"))?;
+                        if all || name.starts_with("vmdl") && name.ends_with(".tmp") {
+                            stages.push(format!("/data/{relative}/{name}"));
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(before(error)),
+            }
+        }
+        Ok(stages)
+    }
+    pub fn remove_staging_directory(&self, guest: &str) -> Result<(), Error> {
+        let valid = guest.strip_prefix("/data/app/").is_some_and(|name| {
+            name.starts_with("vmdl") && name.ends_with(".tmp") && valid_filename(name)
+        }) || guest
+            .strip_prefix("/data/app-staging/")
+            .is_some_and(valid_filename);
+        if !valid {
+            return Err(before("Unowned staging removal path"));
+        }
+        let path = self.data.join(guest.strip_prefix("/data/").unwrap());
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path).map_err(before),
+            Ok(_) => fs::remove_file(path).map_err(before),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(before(error)),
+        }
+    }
+    pub fn inherit_existing(
+        &self,
+        session: &Session,
+        record: &Record,
+        existing: &crate::package::pkg::AndroidPackage,
+        files: &crate::package::write::Files,
+        policy: &super::native::LitePolicy,
+    ) -> Result<(), Error> {
+        let stage = self.stage_path(session, record)?;
+        let mut replacements = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(&stage).map_err(before)? {
+            let entry = entry.map_err(before)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| before("Invalid staged filename"))?;
+            if entry.path().is_dir()
+                || name.ends_with(".removed")
+                || name.ends_with(".idsig")
+                || name.ends_with("app.metadata")
+                || name.ends_with(".digests")
+                || name.ends_with(".digests.signature")
+                || policy
+                    .art_managed_extensions
+                    .iter()
+                    .any(|extension| name.ends_with(extension))
+            {
+                continue;
+            }
+            replacements.insert(
+                crate::package::parse::lite::split_name(&entry.path(), &policy.environment)
+                    .map_err(before)?,
+            );
+        }
+        let mut inherited = vec![(
+            None,
+            existing
+                .base_apk_path
+                .clone()
+                .ok_or_else(|| before("Existing base APK unavailable"))?,
+        )];
+        let names = existing.split_names.as_deref().unwrap_or_default();
+        let paths = existing.split_code_paths.as_deref().unwrap_or_default();
+        if names.len() != paths.len() {
+            return Err(before("Existing split names and paths differ"));
+        }
+        for (name, path) in names.iter().zip(paths) {
+            inherited.push((
+                Some(
+                    name.clone()
+                        .ok_or_else(|| before("Null existing split name"))?,
+                ),
+                path.clone()
+                    .ok_or_else(|| before("Null existing split path"))?,
+            ));
+        }
+        for (split, path) in inherited {
+            if replacements.contains(&split)
+                || split
+                    .as_ref()
+                    .is_some_and(|split| stage.join(format!("{split}.removed")).exists())
+            {
+                continue;
+            }
+            let name =
+                split.map_or_else(|| "base.apk".into(), |split| format!("split_{split}.apk"));
+            let host = files(&path).ok_or_else(|| before("Existing APK VFS owner unavailable"))?;
+            let mut source = fs::File::open(host).map_err(before)?;
+            let mut target = self.write_target(session, record, &name, 0)?;
+            target.set_len(0).map_err(before)?;
+            std::io::copy(&mut source, &mut target).map_err(before)?;
+            target.sync_all().map_err(before)?;
+        }
+        Ok(())
+    }
+    pub fn normalize_apks(
+        &self,
+        session: &Session,
+        record: &Record,
+        policy: &super::native::LitePolicy,
+        pending: &mut super::checksums::Pending,
+        files: &super::hardlink::Files,
+    ) -> Result<(), Error> {
+        let stage = self.stage_path(session, record)?;
+        let mut inputs = Vec::new();
+        for entry in fs::read_dir(&stage).map_err(before)? {
+            let entry = entry.map_err(before)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| before("Invalid staged file name"))?;
+            if entry.path().is_dir()
+                || name.ends_with(".removed")
+                || name.ends_with(".idsig")
+                || name.ends_with("app.metadata")
+                || name.ends_with(".digests")
+                || name.ends_with(".digests.signature")
+                || policy
+                    .art_managed_extensions
+                    .iter()
+                    .any(|extension| name.ends_with(extension))
+            {
+                continue;
+            }
+            let split = crate::package::parse::lite::split_name(&entry.path(), &policy.environment)
+                .map_err(before)?;
+            let target =
+                split.map_or_else(|| "base.apk".into(), |split| format!("split_{split}.apk"));
+            if !valid_filename(&target) {
+                return Err(before("Invalid normalized APK filename"));
+            }
+            if inputs
+                .iter()
+                .any(|(_, old_target): &(String, String)| old_target == &target)
+            {
+                return Err(before("Duplicate staged APK split"));
+            }
+            inputs.push((name, target));
+        }
+        // Move every source aside first so a swap of incoming filenames cannot
+        // overwrite another accepted APK. The stage remains sealed throughout.
+        let mut staged = Vec::new();
+        for (index, (name, target)) in inputs.into_iter().enumerate() {
+            let temporary = format!(".native-apk-{}-{index}", session.id);
+            let temporary_path = stage.join(&temporary);
+            if temporary_path.exists() {
+                return Err(before("APK normalization temporary path already exists"));
+            }
+            fs::rename(stage.join(&name), &temporary_path).map_err(before)?;
+            staged.push((name, target, temporary_path));
+        }
+        for (name, target, temporary) in staged {
+            fs::rename(&temporary, stage.join(&target)).map_err(before)?;
+            pending
+                .stage_apk(&name, &target, session, record, self, files)
+                .map_err(|error| before(format!("Checksum staging: {error:?}")))?;
+            let old_signature = stage.join(format!("{name}.idsig"));
+            if old_signature.exists() && name != target {
+                fs::rename(old_signature, stage.join(format!("{target}.idsig"))).map_err(before)?;
+            }
+        }
+        pending
+            .require_consumed()
+            .map_err(|error| before(format!("Invalid remaining checksum entries: {error:?}")))
+    }
+    pub fn validation_path(&self, session: &Session, record: &Record) -> Result<String, Error> {
+        self.stage_path(session, record)?;
+        self.guest_stage(session, record)
+            .ok_or_else(|| before("Multi-package parent has no APK directory"))
     }
     pub fn resolved_path(
         &self,
@@ -547,13 +945,27 @@ impl Store {
         if self.inspect()? != self.claimed {
             return Err(before("installer state changed outside exclusive owner"));
         }
+        let states = self.staged_states()?;
         let mut root = element("sessions");
         for (session, record) in records {
             if session.destroyed && !session.parameters.staged {
                 continue;
             }
-            root.content
-                .push(Node::Element(self.session_document(session, record)?));
+            let mut node = self.session_document(session, record)?;
+            if let Some(status) = states.get(&session.id) {
+                node.attrs.retain(|(name, _)| {
+                    !matches!(
+                        name.as_str(),
+                        "isReady" | "isFailed" | "isApplied" | "errorCode" | "errorMessage"
+                    )
+                });
+                boolean(&mut node, "isReady", status.ready);
+                boolean(&mut node, "isFailed", status.failed);
+                boolean(&mut node, "isApplied", status.applied);
+                int(&mut node, "errorCode", status.error_code);
+                string(&mut node, "errorMessage", &status.error_message);
+            }
+            root.content.push(Node::Element(node));
         }
         let bytes = abx::write(&root).map_err(before)?;
         let [main, backup, new] = self.paths();
@@ -615,14 +1027,14 @@ impl Store {
         for (name, value) in [
             ("createdMillis", record.created_millis),
             ("updatedMillis", 0),
-            ("committedMillis", 0),
+            ("committedMillis", session.committed_millis),
             ("sizeBytes", p.size_bytes),
         ] {
             long(&mut node, name, value)
         }
         for (name, value) in [
             ("prepared", session.prepared),
-            ("committed", false),
+            ("committed", session.committed),
             ("destroyed", session.destroyed),
             ("sealed", session.sealed),
             ("multiPackage", p.multi_package),
@@ -630,7 +1042,7 @@ impl Store {
             ("isReady", false),
             ("isFailed", false),
             ("isApplied", false),
-            ("isDataLoader", false),
+            ("isDataLoader", p.data_loader_params.is_some()),
             (
                 "applicationEnabledSettingPersistent",
                 p.application_enabled_setting_persistent,
@@ -693,6 +1105,39 @@ impl Store {
         let mut child = element("auto-revoke-permissions-mode");
         int(&mut child, "mode", p.auto_revoke_permissions_mode);
         node.content.push(Node::Element(child));
+        session.checksums.append_xml(&mut node);
+        if let Some(loader) = &p.data_loader_params {
+            let loader = super::codec::DataLoader::from_object(loader)
+                .map_err(|e| before(format!("data loader parcel: {e}")))?;
+            int(&mut node, "dataLoaderType", loader.kind);
+            string(&mut node, "dataLoaderPackageName", &loader.package);
+            string(&mut node, "dataLoaderClassName", &loader.class);
+            string(&mut node, "dataLoaderArguments", &loader.arguments);
+        }
+        for file in &session.installation_files {
+            let mut child = element("sessionFile");
+            int(&mut child, "location", file.location);
+            string(&mut child, "name", &file.name);
+            long(&mut child, "lengthBytes", file.length);
+            if let Some(value) = &file.metadata {
+                child
+                    .attrs
+                    .push(("metadata".into(), Value::BytesBase64(value.clone())));
+            }
+            if let Some(value) = &file.signature {
+                child
+                    .attrs
+                    .push(("signature".into(), Value::BytesBase64(value.clone())));
+            }
+            node.content.push(Node::Element(child));
+        }
+        if let Some(domains) = &session.pre_verified_domains {
+            for domain in domains {
+                let mut child = element("preVerifiedDomains");
+                string(&mut child, "domain", &Some(domain.clone()));
+                node.content.push(Node::Element(child));
+            }
+        }
         for id in &session.children {
             let mut child = element("childSession");
             int(&mut child, "sessionId", *id);
@@ -773,6 +1218,71 @@ mod tests {
         }
         Ok(())
     }
+    fn persisted_prepared_session(stage: &str) -> String {
+        format!("<sessions><session sessionId='7' userId='0' installerUid='10100' createdMillis='1' mode='1' installFlags='16' installLocation='1' sizeBytes='-1' installRason='0' packageSource='0' prepared='true' sessionStageDir='{stage}'/></sessions>")
+    }
+    #[test]
+    fn prepared_missing_stage_recovers_without_creating_files_and_operations_fail() {
+        let data = Data::new();
+        fs::create_dir(data.0.join("app")).unwrap();
+        let xml = persisted_prepared_session("/data/app/vmdl7.tmp");
+        fs::write(data.main(), &xml).unwrap();
+        let store = data.open(Arc::new(label));
+        let records = store.recovered().unwrap();
+        assert_eq!(records.len(), 1);
+        let (session, record) = &records[0];
+        assert!(session.prepared);
+        assert_eq!(session.installer_uid, 10100);
+        assert_eq!(
+            store.guest_stage(session, record).as_deref(),
+            Some("/data/app/vmdl7.tmp")
+        );
+        let stage = data.0.join("app/vmdl7.tmp");
+        assert!(!stage.exists());
+        let missing = std::io::Error::from_raw_os_error(libc::ENOENT).to_string();
+        for error in [
+            store.write_target(session, record, "base.apk", 0).unwrap_err(),
+            store.resolved_path(session, record).unwrap_err(),
+        ] {
+            assert!(!error.committed);
+            assert_eq!(error.message, missing);
+        }
+        assert!(!stage.exists());
+        assert_eq!(fs::read_to_string(data.main()).unwrap(), xml);
+    }
+    #[test]
+    fn recovery_rejects_foreign_and_non_normalized_stage_paths() {
+        for stage in [
+            "/data/app/vmdl8.tmp",
+            "/data/app/../app/vmdl7.tmp",
+            "/data/local/tmp/vmdl7.tmp",
+            "/data/app/vmdl7.tmp/",
+        ] {
+            let data = Data::new();
+            fs::write(data.main(), persisted_prepared_session(stage)).unwrap();
+            let store = data.open(Arc::new(label));
+            let error = store.recovered().err().unwrap();
+            assert!(!error.committed);
+            assert!(error.message.contains("stage path differs from native owner"));
+        }
+    }
+    #[test]
+    fn recovery_state_file_cannot_be_a_symlink() {
+        let data = Data::new();
+        let other = data.0.join("other.xml");
+        fs::write(&other, persisted_prepared_session("/data/app/vmdl7.tmp")).unwrap();
+        std::os::unix::fs::symlink(&other, data.main()).unwrap();
+        let inode = GuestInode {
+            uid: Some(1000),
+            gid: Some(1000),
+            mode: Some(0o600),
+        };
+        let error = Store::open(data.0.clone(), inode, inode, Arc::new(label))
+            .err()
+            .unwrap();
+        assert!(!error.committed);
+        assert!(error.message.contains("not a regular file"));
+    }
     #[test]
     fn same_bytes_replacement_inode_is_not_the_exclusive_owner() {
         let data = Data::new();
@@ -835,4 +1345,12 @@ pub(crate) fn valid_filename(name: &str) -> bool {
         && !matches!(name, "." | "..")
         && !name.contains(['\0', '/'])
         && name.len() <= 255
+}
+
+fn record_inode(path: &Path, inode: &GuestInode) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(mode) = inode.mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))?;
+    }
+    guest_inode::record(path, *inode)
 }

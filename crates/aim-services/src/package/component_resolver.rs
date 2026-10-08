@@ -10,6 +10,7 @@
 //! The feed's packages are the scanned ones, whose filters already carry
 //! the priorities `adjustPriority` capped.
 
+#[path="component_resolver/raw.rs"] mod raw;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use super::info::{
     generate_application_info, generate_provider_info, generate_service_info,
     is_enabled_and_matches, user_state,
 };
-use super::intent::Intent;
+use super::intent::{Intent,ComponentName};
 use super::intent_filter::{CATEGORY_BROWSABLE, IntentFilter};
 use super::intent_resolver::{Build, Entry, IntentResolver, query_from_list};
 use super::model::{PackageState, PackageUserState, State};
@@ -78,10 +79,15 @@ pub enum Info {
     Provider(ProviderInfo),
 }
 
+#[derive(Clone,Debug,PartialEq)]
+pub struct Auxiliary {
+    pub failure:Option<ComponentName>,pub package:String,pub version:i64,pub split:String,
+}
 /// `android.content.pm.ResolveInfo`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolveInfo {
     pub info: Info,
+    pub auxiliary: Option<Auxiliary>,
     pub filter: Option<IntentFilter>,
     pub priority: i32,
     pub preferred_order: i32,
@@ -158,6 +164,7 @@ impl ResolveInfo {
     pub fn new(info: Info) -> ResolveInfo {
         ResolveInfo {
             info,
+            auxiliary: None,
             filter: None,
             priority: 0,
             preferred_order: 0,

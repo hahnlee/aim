@@ -216,7 +216,7 @@ impl Image {
                     &apks.platform,
                 ) {
                     Ok(parsed) => parsed,
-                    Err(parse::Error::Parse(reason)) => {
+                    Err(parse::Error::Parse(reason) | parse::Error::OlderSdk(reason)) => {
                         image.rejected.push(Rejected { location, reason });
                         continue;
                     }
