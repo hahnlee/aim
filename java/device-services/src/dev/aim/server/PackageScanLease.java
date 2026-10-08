@@ -37,6 +37,7 @@ public final class PackageScanLease implements AutoCloseable {
     private final Map<StateKey, SharedUserReplica> sharedReplicas = new HashMap<>();
     private java.util.List<String> sharedNames;
     private boolean closed;
+    private boolean endpointTransferred;
 
     public PackageScanLease(IPackageScanSnapshot endpoint) throws RemoteException {
         this.endpoint = NativePackageCapabilities.attach(endpoint);
@@ -133,7 +134,7 @@ public final class PackageScanLease implements AutoCloseable {
     @Override
     public synchronized void close() throws RemoteException {
         if (closed) return;
-        endpoint.close();
+        if (!endpointTransferred) endpoint.close();
         closed = true;
         active.clear();
         disabled.clear();
@@ -407,7 +408,31 @@ public final class PackageScanLease implements AutoCloseable {
         if (closed) throw new IllegalStateException("package scan lease is closed");
         long metadata = endpoint.getMetadataVersion();
         if (metadata <= 0 || metadata > version) throw new IOException("invalid metadata version");
-        if (previous == null || previous.metadataVersion() != metadata) {
+        var activeChanges = new java.util.LinkedHashMap<String, PackageStateReplica>();
+        var factoryChanges = new java.util.LinkedHashMap<String, PackageStateReplica>();
+        boolean full = previous == null || previous.metadataComparisonId() <= 0;
+        if (!full && previous.metadataVersion() != metadata) {
+            byte[] changes = endpoint.getChangedUsersForMetadataBase(previous.metadataComparisonId());
+            if (changes == null) full = true;
+            else {
+                var record = Parcel.obtain();
+                try {
+                    record.unmarshall(changes, 0, changes.length); record.setDataPosition(0);
+                    if (record.readLong() != version || record.readLong() != metadata) throw new IOException("user metadata delta version differs");
+                    int count = record.readInt();
+                    if (count < 0 || count > record.dataAvail() / 12) throw new IOException("invalid user metadata delta count");
+                    for (int i = 0; i < count; i++) {
+                        String name = Objects.requireNonNull(record.readString()); boolean factory = record.readBoolean();
+                        var target = factory ? factoryChanges : activeChanges;
+                        var replica = getPackageStateReplica(name, factory, crossUserSuspensions);
+                        if (replica == null || target.put(name, replica) != null) throw new IOException("invalid user metadata delta owner");
+                    }
+                    if (record.dataAvail() != 0) throw new IOException("user metadata delta trailing data");
+                } catch (IllegalArgumentException | NullPointerException failure) { throw new IOException("invalid user metadata delta", failure); }
+                finally { record.recycle(); }
+            }
+        }
+        if (full) {
             logFullReason(previous == null ? "no_previous" : "metadata_changed", metadata, previous);
             var result = captureData(owner, crossUserSuspensions);
             result.metadataVersion(metadata);
@@ -442,11 +467,23 @@ public final class PackageScanLease implements AutoCloseable {
             throw new IOException("invalid usage records", failure);
         } finally { parcel.recycle(); }
         var computer = captureComputer();
-        try { return previous.withUsage(version, metadata, records, computer, crossUserSuspensions); }
+        PackageSnapshots.Data result = null;
+        try {
+            result = previous.withChangedUsers(version, metadata, records, activeChanges, factoryChanges, computer, crossUserSuspensions);
+            if (previous.metadataVersion() != metadata) transferComparisonEndpoint(result);
+            return result;
+        }
         catch (IOException | RemoteException | RuntimeException failure) {
-            try { computer.close(); } catch (RemoteException closeFailure) { failure.addSuppressed(closeFailure); }
+            try { if (result != null) result.close(); else computer.close(); }
+            catch (RemoteException | RuntimeException closeFailure) { failure.addSuppressed(closeFailure); }
             throw failure;
         }
+    }
+
+    private void transferComparisonEndpoint(PackageSnapshots.Data data) throws RemoteException {
+        long id = endpoint.getMetadataComparisonId();
+        data.ownMetadataEndpoint(endpoint, id);
+        endpointTransferred = true;
     }
 
     private void logFullReason(String reason, long metadata, PackageSnapshots.Data previous) {
@@ -492,7 +529,9 @@ public final class PackageScanLease implements AutoCloseable {
         try {
             if (computer.getVersion() != version) throw new IOException("native query capture version differs");
             var uidOwners = PackageUidOwners.capture(computer, version, packages, shared, crossUserSuspensions);
-            return new PackageSnapshots.Data(version, packages, disabled, shared, owner, computer, uidOwners);
+            var data = new PackageSnapshots.Data(version, packages, disabled, shared, owner, computer, uidOwners);
+            transferComparisonEndpoint(data);
+            return data;
         } catch (RemoteException | IOException | RuntimeException failure) {
             try { computer.close(); } catch (RemoteException closeFailure) { failure.addSuppressed(closeFailure); }
             throw failure;

@@ -92,6 +92,22 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Only scoped user metadata may differ. Every other owner field must match.
+    pub(crate) fn scoped_user_metadata_changes(&self, other: &Self) -> Option<Vec<(String, bool)>> {
+        let mut normalized=self.clone();
+        normalized.scanned_users=other.scanned_users.clone();
+        normalized.disabled_users=other.disabled_users.clone();
+        if &normalized!=other{return None;}
+        let mut changed=Vec::new();
+        for setting in &self.settings.packages {
+            if self.scanned_users.get(&setting.name)!=other.scanned_users.get(&setting.name){changed.push((setting.name.clone(),false));}
+        }
+        for setting in &self.settings.disabled_system_packages {
+            if self.disabled_users.get(&setting.name)!=other.disabled_users.get(&setting.name){changed.push((setting.name.clone(),true));}
+        }
+        Some(changed)
+    }
+
     /// Bounded ownership diagnostics; never print signer, key or owner values.
     pub(crate) fn metadata_difference_fields(&self, other: &Self) -> Vec<String> {
         let mut fields=Vec::new();

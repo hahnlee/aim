@@ -22,7 +22,7 @@ impl Store {
         let version=current.version().checked_add(1).filter(|version|*version<=i64::MAX as u64)
             .ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         super::validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version};
+        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone()};
         if self.replica{super::validate_replica(&next).map_err(CommitError::Snapshot)?;}
         next.metadata_revision=super::derive_metadata_revision(&current,&next).map_err(|error|super::CommitError::Snapshot(error))?;
         let next=Arc::new(next);

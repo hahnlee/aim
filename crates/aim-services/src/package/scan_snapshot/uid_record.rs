@@ -77,6 +77,7 @@ mod tests {
             usage: Usage::new([]),
             replica_validated: false,
             metadata_revision: 1,
+            lineage: std::sync::Arc::new(()),
         }
     }
 

@@ -384,7 +384,19 @@ compares the complete native owner, normalizing only active usage, and retains
 metadata revision only on exact equivalence. Real metadata changes still receive
 a new revision and full validation. A full-suite empty-graph regression exposed
 usage normalization on unchanged input; that boundary is corrected. Latest
-aggregate native tests pass 792/0, ten ignored; actual C90 replay is pending. Original PMS on a cloned native
+aggregate native tests pass 792/0, ten ignored. C90 still reaches ANR.
+C92 bounded creator diagnostics prove both duplicate app-data state publications
+and actual per-package component user-state changes trigger whole metadata graph
+reconstruction. Duplicate unchanged receipts now retain metadata revision while
+persisting/publishing normally (13 regressions pass). Generic active scoped-user
+metadata delta compares complete native owners, normalizing only usage/user maps,
+and uses unique lease-owned comparison capabilities with strict lineage/lifetime
+checks; foreign, expired, factory or nonuser changes use full capture. Current
+whole native suite passes 794/0, eleven ignored and full Java builds pass. C93
+completed Binder calls fall to about 282,898 over 173.9s versus roughly four
+million before; Chrome still ANRs. Its actual main thread waits 3.5335s in
+registerReceiverWithFeature during the five-second FocusEvent window. Current
+ART scoped-user mutation and contemporaneous AMS holder proof remain pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 Original 66-module CTS campaign is running with provenance-checked resume;

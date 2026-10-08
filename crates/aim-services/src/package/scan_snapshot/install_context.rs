@@ -63,7 +63,7 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     normalized.refresh_library_user_inputs()?;
     latest.refresh_library_user_inputs()?;
     if normalized!=latest{
-        let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision()};
+        let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision(),lineage:base.lineage.clone()};
         return Ok(Some(format!("unmerged owner: {}; targets={targets:?}, protected appIds={protected:?}",install_identity_delta(&before,current))));
     }
     for (name,user,state) in changes{candidate.set_user_state(&name,user,state)?;}
@@ -122,7 +122,7 @@ impl super::Store {
         let version=current.version().checked_add(1).filter(|version|*version<=i64::MAX as u64)
             .ok_or(super::CommitError::Snapshot(super::Error::VersionExhausted))?;
         super::validate(&owner,&usage).map_err(super::CommitError::Snapshot)?;
-        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version};
+        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone()};
         if self.replica{super::validate_replica(&next).map_err(super::CommitError::Snapshot)?;}
         next.metadata_revision=super::derive_metadata_revision(&current,&next).map_err(|error|super::CommitError::Snapshot(error))?;
         let next=Arc::new(next);

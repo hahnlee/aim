@@ -328,6 +328,7 @@ impl WriteParcelable for PackageSeInfo {
 struct Lease {
     snapshot: Option<Arc<Snapshot>>,
     usage_records: Option<Vec<u8>>,
+    comparison_id: Option<u64>,
     code: BTreeMap<(String, bool), Arc<Vec<u8>>>,
     settings: BTreeMap<(String, bool), Arc<Vec<u8>>>,
     runtimes: BTreeMap<(String, bool), Arc<Vec<u8>>>,
@@ -475,10 +476,34 @@ struct ComputerLease {
     binder: Option<aim_binder_host::parcel::Binder>,
 }
 
+fn comparisons() -> &'static Mutex<BTreeMap<u64,std::sync::Weak<Snapshot>>> {
+    static REGISTRY: std::sync::OnceLock<Mutex<BTreeMap<u64,std::sync::Weak<Snapshot>>>>=std::sync::OnceLock::new();
+    REGISTRY.get_or_init(||Mutex::new(BTreeMap::new()))
+}
+
+fn changed_user_metadata(before:&Snapshot,current:&Snapshot)->Result<Option<Vec<(String,bool)>>,String>{
+    if !before.replica_validated||!current.replica_validated||!Arc::ptr_eq(&before.lineage,&current.lineage)
+        ||before.version()>current.version()||before.usage().names().ne(current.usage().names())
+        ||before.usage().historical_available()!=current.usage().historical_available(){return Ok(None);}
+    let mut owner=before.owner().clone();
+    if before.usage()!=current.usage(){owner.update_validated_replica_usage(before.usage(),current.usage())?;}
+    let changed=owner.scoped_user_metadata_changes(current.owner());
+    // Retained shared-UID factory members require their complete original owner.
+    // Conservatively capture the full graph until that scoped mapping is available.
+    Ok(changed.filter(|rows|!rows.iter().any(|(_,factory)|*factory)))
+}
+
 pub struct Endpoint {
     lease: Mutex<Lease>,
     computer: Mutex<Option<ComputerLease>>,
     raw_metadata: bool,
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self){
+        let lease=self.lease.get_mut().unwrap();
+        if let Some(id)=lease.comparison_id.take(){comparisons().lock().unwrap().remove(&id);}
+    }
 }
 
 impl Endpoint {
@@ -501,7 +526,8 @@ impl Endpoint {
         let mut endpoint=Self::new(snapshot);endpoint.raw_metadata=true;endpoint
     }
     pub fn close_lease(&self){
-        let mut lease=self.lease.lock().unwrap();lease.snapshot.take();lease.usage_records.take();
+        let mut lease=self.lease.lock().unwrap();if let Some(id)=lease.comparison_id.take(){comparisons().lock().unwrap().remove(&id);}
+        lease.snapshot.take();lease.usage_records.take();
         self.computer.lock().unwrap().take();
         lease.code.clear();lease.users.clear();lease.settings.clear();lease.runtimes.clear();lease.libraries.clear();lease.shared_users.clear();
     }
@@ -512,6 +538,7 @@ impl Endpoint {
             lease: Mutex::new(Lease {
                 snapshot: Some(snapshot),
                 usage_records: None,
+                comparison_id: None,
                 code: BTreeMap::new(),
                 users: BTreeMap::new(),
                 settings: BTreeMap::new(),
@@ -548,7 +575,8 @@ impl Service for Endpoint {
             if call.data.remaining() != 0 {
                 return Err(aim_binder_host::parcel::BAD_VALUE);
             }
-            lease.snapshot.take();lease.usage_records.take();
+            if let Some(id)=lease.comparison_id.take(){comparisons().lock().unwrap().remove(&id);}
+        lease.snapshot.take();lease.usage_records.take();
             self.computer.lock().unwrap().take();
             lease.code.clear();
             lease.users.clear();
@@ -573,6 +601,36 @@ impl Service for Endpoint {
             return Ok(reply);
         }
         match call.code {
+            api::GET_METADATA_COMPARISON_ID => {
+                api::GetMetadataComparisonId::read(&mut call.data)?;
+                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
+                if lease.comparison_id.is_none(){
+                    static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
+                    let id=match NEXT.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|id|id.checked_add(1).filter(|next|*next<=i64::MAX as u64)){
+                        Ok(id)=>id,Err(_)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"metadata capability IDs exhausted"));return Ok(reply);}
+                    };
+                    let mut registry=comparisons().lock().unwrap();registry.retain(|_,value|value.strong_count()!=0);
+                    registry.insert(id,Arc::downgrade(&snapshot));lease.comparison_id=Some(id);
+                }
+                api::write_get_metadata_comparison_id_reply(&mut reply,lease.comparison_id.unwrap() as i64);
+            }
+            api::GET_CHANGED_USERS_FOR_METADATA_BASE => {
+                let args=api::GetChangedUsersForMetadataBase::read(&mut call.data)?;
+                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
+                if args.comparison_id<=0{reply.write_exception(&Exception::illegal_argument("invalid metadata comparison capability"));}
+                else{
+                    let before={let mut registry=comparisons().lock().unwrap();registry.retain(|_,value|value.strong_count()!=0);registry.get(&(args.comparison_id as u64)).and_then(std::sync::Weak::upgrade)};
+                    let changed=match before.as_ref().map(|before|changed_user_metadata(before,&snapshot)).transpose(){
+                        Ok(changed)=>changed.flatten(),Err(error)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,error));return Ok(reply);}
+                    };
+                    let bytes=changed.map(|changed|{
+                        let mut record=Parcel::new();record.write_i64(snapshot.version() as i64);record.write_i64(snapshot.metadata_revision() as i64);
+                        record.write_i32(changed.len() as i32);for (name,factory) in changed{record.write_string16(Some(&name));record.write_bool(factory);}record.data().to_vec()
+                    });
+                    let bytes=bytes.filter(|bytes|bytes.len()<=MAX_CHUNK);
+                    api::write_get_changed_users_for_metadata_base_reply(&mut reply,&bytes);
+                }
+            }
             api::GET_METADATA_VERSION => {
                 api::GetMetadataVersion::read(&mut call.data)?;
                 if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}

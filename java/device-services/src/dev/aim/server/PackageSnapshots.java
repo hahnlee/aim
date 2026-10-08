@@ -237,6 +237,9 @@ public final class PackageSnapshots {
         private int references = 1;
         private boolean ownerClosed;
         private Data parent;
+        private Data metadataRoot = this;
+        private IPackageScanSnapshot metadataEndpoint;
+        private long comparisonId;
 
         Data withoutPackages(java.util.Set<String> names) {
             var active = new LinkedHashMap<>(packages);
@@ -245,6 +248,7 @@ public final class PackageSnapshots {
             var result = new Data(version, active, disabled, sharedUsers, owner, computer, uidOwners);
             result.parent = this;
             result.ownsComputer = false;
+            result.metadataRoot = null;
             return result;
         }
 
@@ -317,10 +321,12 @@ public final class PackageSnapshots {
         void release() {
             IPackageComputer endpoint;
             Data retainedParent;
+            IPackageScanSnapshot comparison;
             synchronized (this) {
                 if (references == 0) throw new IllegalStateException("package query capture already released");
                 endpoint = --references == 0 ? computer : null;
                 retainedParent = references == 0 ? parent : null;
+                comparison = references == 0 ? metadataEndpoint : null;
             }
             try {
                 if (endpoint != null && ownsComputer) {
@@ -328,8 +334,16 @@ public final class PackageSnapshots {
                     catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
                 }
             } finally {
-                if (retainedParent != null) retainedParent.release();
+                try { if (comparison != null) comparison.close(); }
+                catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+                finally { if (retainedParent != null) retainedParent.release(); }
             }
+        }
+
+        long metadataComparisonId() { return metadataRoot == null ? 0 : metadataRoot.comparisonId; }
+        void ownMetadataEndpoint(IPackageScanSnapshot endpoint, long id) {
+            if (id <= 0 || metadataEndpoint != null) throw new IllegalArgumentException("invalid metadata comparison ownership");
+            metadataEndpoint = endpoint; comparisonId = id; metadataRoot = this;
         }
 
         long metadataVersion() { return metadataVersion; }
@@ -337,12 +351,19 @@ public final class PackageSnapshots {
 
         Data withUsage(long version, long metadata, Map<String, PackageUsageState> usage,
                 IPackageComputer computer, boolean crossUserSuspensions) throws IOException, RemoteException {
-            if (metadata != metadataVersion || !usage.keySet().equals(packages.keySet()))
-                throw new IOException("usage-only metadata inventory differs");
+            return withChangedUsers(version, metadata, usage, java.util.Map.of(), java.util.Map.of(), computer, crossUserSuspensions);
+        }
+
+        Data withChangedUsers(long version, long metadata, Map<String, PackageUsageState> usage,
+                Map<String, PackageStateReplica> activeChanges, Map<String, PackageStateReplica> factoryChanges,
+                IPackageComputer computer, boolean crossUserSuspensions) throws IOException, RemoteException {
+            if (!usage.keySet().equals(packages.keySet()) || !packages.keySet().containsAll(activeChanges.keySet())
+                    || !disabled.keySet().containsAll(factoryChanges.keySet()))
+                throw new IOException("incremental metadata inventory differs");
             var active = new LinkedHashMap<String, PackageState>();
             for (var entry : packages.entrySet()) {
-                if (!(entry.getValue() instanceof PackageStateReplica replica))
-                    throw new IOException("usage-only package owner is not a native replica");
+                var value = activeChanges.containsKey(entry.getKey()) ? activeChanges.get(entry.getKey()) : entry.getValue();
+                if (!(value instanceof PackageStateReplica replica)) throw new IOException("incremental package owner is not a native replica");
                 active.put(entry.getKey(), replica.withUsage(usage.get(entry.getKey()), version));
             }
             var shared = new LinkedHashMap<String, SharedUserApi>();
@@ -351,13 +372,20 @@ public final class PackageSnapshots {
                     throw new IOException("usage-only shared owner is not a native replica");
                 shared.put(entry.getKey(), replica.withPackages(active));
             }
+            var factories = new LinkedHashMap<>(disabled); factories.putAll(factoryChanges);
             var registered = PackageUidOwners.capture(computer, version, active, shared, crossUserSuspensions);
-            var result = new Data(version, active, disabled, shared, owner, computer, registered);
+            var result = new Data(version, active, factories, shared, owner, computer, registered);
             result.metadataVersion = metadata;
             // Flatten usage generations to the original immutable metadata owner.
-            Data retained = parent == null ? this : parent;
-            retained.retain();
-            result.parent = retained;
+            Data retained;
+            if (metadata == metadataVersion) {
+                retained = metadataRoot == null ? this : metadataRoot;
+                result.metadataRoot = retained;
+            } else {
+                retained = this;
+                while (retained.parent != null) retained = retained.parent;
+            }
+            retained.retain(); result.parent = retained;
             return result;
         }
 

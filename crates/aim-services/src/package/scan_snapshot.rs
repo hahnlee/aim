@@ -43,6 +43,7 @@ pub struct Snapshot {
     usage: Usage,
     replica_validated: bool,
     metadata_revision: u64,
+    lineage: Arc<()>,
 }
 
 /// Exact registered UID-slot projection for the facade's retained capture.
@@ -161,7 +162,7 @@ impl Store {
         let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
         // Exact immutable validated owner plus a checked usage-only delta. Code,
         // settings, permissions and user inventories cannot have changed here.
-        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision})), replica:true })
+        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision,lineage:base.lineage.clone()})), replica:true })
     }
 
     /// A typed query-context delta may advance its Computer lease while the
@@ -212,7 +213,7 @@ impl Store {
                 diagnose_metadata(1,Some(base),&owner,&usage,version,metadata);
             }
         }
-        Self::create_with_metadata_revision(owner, usage, true, version, metadata)
+        Self::create_with_metadata_revision(owner, usage, true, version, metadata, base.lineage.clone())
     }
 
     #[track_caller]
@@ -222,11 +223,11 @@ impl Store {
         replica: bool,
         version: u64,
     ) -> Result<Self, Error> {
-        Self::create_with_metadata_revision(owner, usage, replica, version, version)
+        Self::create_with_metadata_revision(owner, usage, replica, version, version, Arc::new(()))
     }
 
     #[track_caller]
-    fn create_with_metadata_revision(owner: SigningScan, usage: Usage, replica: bool, version: u64, metadata_revision: u64) -> Result<Self, Error> {
+    fn create_with_metadata_revision(owner: SigningScan, usage: Usage, replica: bool, version: u64, metadata_revision: u64, lineage: Arc<()>) -> Result<Self, Error> {
         if version == 0 || version > i64::MAX as u64 || metadata_revision == 0 || metadata_revision > version {
             return Err(Error::VersionExhausted);
         }
@@ -237,6 +238,7 @@ impl Store {
             usage,
             replica_validated: replica,
             metadata_revision,
+            lineage,
         });
         if replica {
             validate_replica(&snapshot)?;
@@ -263,7 +265,7 @@ impl Store {
         if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
         let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version};
+        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version,lineage:current.lineage.clone()};
         if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
         next.metadata_revision=derive_metadata_revision(&current,&next).map_err(CommitError::Snapshot)?;
         let next=Arc::new(next);
@@ -301,6 +303,7 @@ impl Store {
             usage,
             replica_validated: self.replica,
             metadata_revision: version,
+            lineage: current.lineage.clone(),
         };
         if self.replica {
             validate_replica(&next)?;
@@ -896,6 +899,7 @@ mod tests {
             usage: Usage::new(["fixture"]),
             replica_validated: false,
             metadata_revision: i64::MAX as u64,
+            lineage: Arc::new(()),
         });
         *store.current.lock().unwrap() = exhausted.clone();
         assert_eq!(

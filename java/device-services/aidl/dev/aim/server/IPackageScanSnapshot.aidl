@@ -43,4 +43,8 @@ interface IPackageScanSnapshot {
     long getMetadataVersion();
     int getUsageRecordsLength();
     byte[] getUsageRecordsChunk(int offset, int length);
+    /** Lease-owned opaque comparison capability, never a snapshot version. */
+    long getMetadataComparisonId();
+    /** Null requires a full capture (expired/foreign/global change). Otherwise exact changed user-record keys. */
+    byte[] getChangedUsersForMetadataBase(long comparisonId);
 }
