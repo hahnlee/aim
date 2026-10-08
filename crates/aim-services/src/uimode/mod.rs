@@ -1836,7 +1836,6 @@ impl UiModeManagerService {
             .ok()
             .and_then(|fd| self.process.file(fd))
             .and_then(|f| aim_binder_host::server::file_fd(&f))
-            .map(std::fs::File::from)
         else {
             return;
         };

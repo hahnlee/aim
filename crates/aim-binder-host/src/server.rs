@@ -22,7 +22,10 @@ use crate::mach::{self, Buffer, Msg, Port, Received};
 use crate::wire::{self, Ioctl, IoctlReply, Reader, SharedFile, Writer};
 
 /// A fileport as the driver's opaque `File`.
-struct FilePort(Port, u32);
+struct FilePort(Port, u32, Option<RegularPorts>);
+struct RegularPorts { metadata: wire::RegularMetadata, writer: Option<Port> }
+impl Drop for RegularPorts { fn drop(&mut self) { if let Some(port) = self.writer { mach::release_send(port); } } }
+
 
 impl Drop for FilePort {
     fn drop(&mut self) {
@@ -35,7 +38,7 @@ impl Drop for FilePort {
 pub fn file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
     use std::os::fd::AsRawFd;
     let class = registered_descriptor_class(fd.as_raw_fd()).ok()?;
-    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, class)) as File)
+    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, class, None)) as File)
 }
 
 /// Export a native proxy capability with an explicit versioned Binder class.
@@ -45,7 +48,7 @@ pub fn proxy_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
         return None;
     }
     mach::fd_to_port(fd.as_raw_fd())
-        .map(|port| Arc::new(FilePort(port, crate::proxy_file::CLASS)) as File)
+        .map(|port| Arc::new(FilePort(port, crate::proxy_file::CLASS, None)) as File)
 }
 
 fn path_creation_errno(error: std::io::Error) -> Errno {
@@ -101,19 +104,60 @@ pub fn path_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
         return None;
     }
     mach::fd_to_port(fd.as_raw_fd())
-        .map(|port| Arc::new(FilePort(port, crate::path_file::CLASS)) as File)
+        .map(|port| Arc::new(FilePort(port, crate::path_file::CLASS, None)) as File)
+}
+
+/// Capture the actual regular backing and writer descriptions together. They
+/// remain owned by the driver's File Arc through queued and delivered buffers.
+pub fn regular_file_from_fd(backing: std::os::fd::BorrowedFd<'_>, writer: Option<std::os::fd::BorrowedFd<'_>>, metadata: wire::RegularMetadata) -> Result<File, Errno> {
+    use std::os::fd::AsRawFd;
+    crate::regular_file::validate(backing, writer, &metadata).map_err(path_creation_errno)?;
+    let backing = mach::fd_to_port(backing.as_raw_fd()).ok_or(errno::EBADF)?;
+    let writer = match writer {
+        Some(writer) => match mach::fd_to_port(writer.as_raw_fd()) { Some(port) => Some(port), None => { mach::release_send(backing); return Err(errno::EBADF); } },
+        None => None,
+    };
+    Ok(Arc::new(FilePort(backing, crate::regular_file::CLASS, Some(RegularPorts { metadata, writer }))) as File)
 }
 
 pub fn file_class(file: &File) -> Option<u32> {
     file.downcast_ref::<FilePort>().map(|file| file.1)
 }
 
-/// A new host fd for a file a guest sent (a fileport), which a binder
-/// process on the host received.
-pub fn file_fd(file: &File) -> Option<std::os::fd::OwnedFd> {
+/// A native descriptor retains the actual driver owner through its final close.
+/// Extracting a plain OwnedFd is allowed only for capabilities without regular
+/// metadata; a regular writer lease cannot be separated from its backing.
+pub struct RetainedFd { backing: std::fs::File, owner: File }
+impl RetainedFd {
+    pub fn into_file_owner(self) -> File { self.owner }
+    pub fn try_clone(&self) -> std::io::Result<Self> { Ok(Self { backing:self.backing.try_clone()?, owner:self.owner.clone() }) }
+    pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> { self.backing.metadata() }
+    pub fn set_len(&self, length:u64) -> std::io::Result<()> { self.backing.set_len(length) }
+    pub fn sync_all(&self) -> std::io::Result<()> { self.backing.sync_all() }
+    pub fn into_owned_fd(self) -> std::io::Result<std::os::fd::OwnedFd> {
+        if self.owner.downcast_ref::<FilePort>().is_some_and(|file| file.1==crate::regular_file::CLASS) {
+            return Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+        }
+        Ok(self.backing.into())
+    }
+}
+impl std::os::fd::AsRawFd for RetainedFd { fn as_raw_fd(&self)->i32 { std::os::fd::AsRawFd::as_raw_fd(&self.backing) } }
+impl std::os::fd::AsFd for RetainedFd { fn as_fd(&self)->std::os::fd::BorrowedFd<'_> { std::os::fd::AsFd::as_fd(&self.backing) } }
+impl std::io::Read for RetainedFd { fn read(&mut self, bytes:&mut[u8])->std::io::Result<usize> { std::io::Read::read(&mut self.backing,bytes) } }
+impl std::io::Write for RetainedFd {
+    fn write(&mut self, bytes:&[u8])->std::io::Result<usize> { std::io::Write::write(&mut self.backing,bytes) }
+    fn flush(&mut self)->std::io::Result<()> { std::io::Write::flush(&mut self.backing) }
+}
+impl std::io::Seek for RetainedFd { fn seek(&mut self, position:std::io::SeekFrom)->std::io::Result<u64> { std::io::Seek::seek(&mut self.backing,position) } }
+impl std::os::unix::fs::FileExt for RetainedFd {
+    fn read_at(&self, bytes:&mut[u8], offset:u64)->std::io::Result<usize> { std::os::unix::fs::FileExt::read_at(&self.backing,bytes,offset) }
+    fn write_at(&self, bytes:&[u8], offset:u64)->std::io::Result<usize> { std::os::unix::fs::FileExt::write_at(&self.backing,bytes,offset) }
+}
+
+pub fn file_fd(file: &File) -> Option<RetainedFd> {
     let port = file.downcast_ref::<FilePort>()?.0;
-    // SAFETY: a new fd this process owns.
-    mach::port_to_fd(port).map(|fd| unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) })
+    use std::os::fd::FromRawFd;
+    mach::port_to_fd(port).map(|fd| RetainedFd { backing:unsafe { std::fs::File::from_raw_fd(fd) }, owner:file.clone() })
 }
 
 /// A receive buffer: shared memory mapped read-write here and read-only in
@@ -518,6 +562,27 @@ impl Server {
     }
 }
 
+fn valid_exported_files(io: &Ioctl, ports: &[Port]) -> bool {
+    if io.validate().is_err() { return false; }
+    let count = io.fds.len() + io.regular.iter().flatten().filter(|metadata| metadata.writer).count();
+    if count != ports.len() { return false; }
+    let mut ports = ports.iter().copied();
+    io.file_classes.iter().zip(&io.regular).all(|(class, regular)| {
+        use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+        let Some(backing) = ports.next().and_then(mach::port_to_fd) else { return false; };
+        let backing = unsafe { OwnedFd::from_raw_fd(backing) };
+        if let Some(metadata) = regular {
+            let writer = if metadata.writer {
+                let Some(fd) = ports.next().and_then(mach::port_to_fd) else { return false; };
+                Some(unsafe { OwnedFd::from_raw_fd(fd) })
+            } else { None };
+            *class == crate::regular_file::CLASS && crate::regular_file::validate(backing.as_fd(), writer.as_ref().map(AsFd::as_fd), metadata).is_ok()
+        } else {
+            registered_descriptor_class(backing.as_raw_fd()).is_ok_and(|actual| actual == *class)
+        }
+    })
+}
+
 /// Serves the ioctls of any guest thread: a guest thread has one ioctl in
 /// flight at a time, and a worker never blocks, so one worker per CPU
 /// serves them all. A read that would wait parks instead
@@ -530,6 +595,7 @@ impl Server {
 /// blocks, as Linux wakes the target of a binder call synchronously: a
 /// resumed one, whose thread waits for a transaction or a reply, before the
 /// worker's own.
+
 struct Worker(Arc<Pool>);
 
 impl Worker {
@@ -603,19 +669,7 @@ impl Worker {
         } else {
             errno::EBADF
         };
-        let io = Ioctl::decode(&req.data)
-            .ok()
-            .filter(|io| io.fds.len() == req.ports.len())
-            .filter(|io| {
-                req.ports.iter().zip(&io.file_classes).all(|(port, class)| {
-                    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-                    mach::port_to_fd(*port).is_some_and(|fd| {
-                        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                        registered_descriptor_class(fd.as_raw_fd())
-                            .is_ok_and(|actual| actual == *class)
-                    })
-                })
-            });
+        let io = Ioctl::decode(&req.data).ok().filter(|io| valid_exported_files(io, &req.ports));
         let (Some(io), Some((file, tid))) = (io, thread) else {
             for p in &req.ports {
                 mach::release_send(*p);
@@ -626,17 +680,18 @@ impl Worker {
             };
             return Err(Answer::new(req.reply, reply, Vec::new(), false));
         };
+        let mut ports = req.ports.iter().copied();
+        let files = io.fds.iter().enumerate().map(|(index, fd)| {
+            let backing = ports.next().unwrap();
+            let regular = io.regular[index].clone().map(|metadata| {
+                let writer = if metadata.writer { Some(ports.next().unwrap()) } else { None };
+                RegularPorts { metadata, writer }
+            });
+            (*fd, Arc::new(FilePort(backing, io.file_classes[index], regular)) as File)
+        }).collect();
         let guest = Gathered {
             segments: io.segments,
-            files: io
-                .fds
-                .iter()
-                .zip(&req.ports)
-                .enumerate()
-                .map(|(index, (fd, p))| {
-                    (*fd, Arc::new(FilePort(*p, io.file_classes[index])) as File)
-                })
-                .collect(),
+            files,
             reserved: io.reserved,
             grow: io.grow,
             reply: IoctlReply::default(),
@@ -740,7 +795,10 @@ impl Answer {
     fn new(to: Port, reply: IoctlReply, files: Vec<File>, exit: bool) -> Self {
         let ports = files
             .iter()
-            .map(|f| (f.downcast_ref::<FilePort>().unwrap().0, mach::COPY_SEND))
+            .flat_map(|f| {
+                let file = f.downcast_ref::<FilePort>().unwrap();
+                std::iter::once((file.0, mach::COPY_SEND)).chain(file.2.as_ref().and_then(|regular| regular.writer).map(|port| (port, mach::COPY_SEND)))
+            })
             .collect();
         let msg = Msg {
             id: wire::REPLY,
@@ -826,11 +884,17 @@ impl GuestProcess for Gathered {
             // EMFILE: the reader has no fd for it.
             return Err(24);
         }
+        let next = file.downcast_ref::<FilePort>().unwrap();
+        if (next.1 == crate::regular_file::CLASS) != next.2.is_some() { return Err(wire::EPROTO); }
+        let ports: usize = self.installed.iter().map(|file| 1 + file.downcast_ref::<FilePort>().unwrap().2.as_ref().is_some_and(|regular| regular.writer.is_some()) as usize).sum();
+        let next = file.downcast_ref::<FilePort>().unwrap();
+        if ports + 1 + next.2.as_ref().is_some_and(|regular| regular.writer.is_some()) as usize > mach::MAX_PORTS { return Err(24); }
         let fd = self.reserved.remove(0);
         self.reply.installs.push(fd);
         self.reply
             .file_classes
             .push(file.downcast_ref::<FilePort>().unwrap().1);
+        self.reply.regular.push(file.downcast_ref::<FilePort>().unwrap().2.as_ref().map(|regular| regular.metadata.clone()));
         self.installed.push(file);
         Ok(fd)
     }
@@ -860,6 +924,101 @@ mod path_carrier_tests {
         ffi::CString,
         os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     };
+    #[test]
+    fn regular_sidecar_count_and_backing_incarnation_are_checked_before_driver_adoption() {
+        use std::fs::OpenOptions;
+        let path=std::env::temp_dir().join(format!("aim-binder-regular-validation-{}",std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let source=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();
+        let writer=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("writers")).unwrap();
+        let backing=mach::fd_to_port(source.as_raw_fd()).unwrap();let lock=mach::fd_to_port(writer.as_raw_fd()).unwrap();
+        let metadata=wire::RegularMetadata {flags:2,uid:1000,gid:1001,identity:crate::regular_file::identity(source.as_fd()).unwrap(),writer:true};
+        let mut io=Ioctl {fds:vec![9],file_classes:vec![crate::regular_file::CLASS],regular:vec![Some(metadata)],..Default::default()};
+        assert!(valid_exported_files(&io,&[backing,lock]));
+        assert!(!valid_exported_files(&io,&[backing]));
+        assert!(!valid_exported_files(&io,&[backing,lock,lock]));
+        io.regular[0].as_mut().unwrap().identity[8]^=1;
+        assert!(!valid_exported_files(&io,&[backing,lock]));
+        mach::release_send(backing);mach::release_send(lock);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn regular_writer_sidecar_survives_real_binder_reply_buffer_and_sender_close() {
+        use crate::{local::{LocalProcess,Service,Call,Reply},parcel::{Binder,Parcel}};
+        use std::{fs::OpenOptions,sync::Weak};
+        struct Echo(Weak<LocalProcess>);
+        impl Service for Echo {
+            fn descriptor(&self)->&str { "test.RegularLease" }
+            fn accepts_fds(&self)->bool { true }
+            fn transact(&self, call:&mut Call<'_>)->Reply {
+                let fd=call.data.read_fd()?;
+                let mut reply=Parcel::new();
+                reply.write_file(self.0.upgrade().unwrap().file(fd).unwrap());
+                Ok(reply)
+            }
+        }
+        let path=std::env::temp_dir().join(format!("aim-binder-regular-roundtrip-{}",std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let source=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();
+        let writer=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("writers")).unwrap();
+        let contender=OpenOptions::new().read(true).write(true).open(path.join("writers")).unwrap();
+        assert_eq!(unsafe {libc::flock(writer.as_raw_fd(),libc::LOCK_SH)},0);
+        let metadata=wire::RegularMetadata {flags:2,uid:1000,gid:1001,identity:crate::regular_file::identity(source.as_fd()).unwrap(),writer:true};
+        let file=regular_file_from_fd(source.as_fd(),Some(writer.as_fd()),metadata.clone()).unwrap();
+        let driver=Driver::new();
+        let open=|pid| LocalProcess::open(&driver,Device::Binder,Credentials {pid,euid:1000,security_context:None});
+        let owner=open(701);let caller=open(702);
+        let Binder::Local(ptr)=owner.add_service(Arc::new(Echo(Arc::downgrade(&owner)))) else {unreachable!()};
+        let mut object=aim_binder_driver::uapi::FlatBinderObject {kind:aim_binder_driver::uapi::BINDER_TYPE_BINDER,flags:aim_binder_driver::uapi::FLAT_BINDER_FLAG_ACCEPTS_FDS,binder:ptr,cookie:ptr}.encode();
+        let mut control=Gathered {segments:vec![],files:vec![],reserved:vec![],grow:false,reply:Default::default(),installed:vec![]};
+        driver.ioctl(owner.proc_handle(),701,aim_binder_driver::uapi::BINDER_SET_CONTEXT_MGR_EXT,&mut object,&mut control).unwrap();
+        owner.start();
+        let mut request=Parcel::new();request.write_file(file);
+        drop(source);drop(writer);
+        let reply=caller.transact(0,1,&request,false).unwrap();
+        drop(request);
+        let fd=reply.reader().read_fd().unwrap();
+        let file=caller.file(fd).unwrap();
+        let stored=file.downcast_ref::<FilePort>().unwrap();
+        assert_eq!(stored.2.as_ref().unwrap().metadata,metadata);
+        let mut received=file_fd(&file).unwrap();
+        assert!(received.try_clone().unwrap().into_owned_fd().is_err(),"typed regular owners cannot be extracted as bare fds");
+        drop(file);drop(reply);
+        assert!(caller.file(fd).is_none(),"reply buffer closes its single public FD");
+        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},-1);
+        use std::io::{Read,Write,Seek,SeekFrom};
+        received.write_all(b"actual backing").unwrap();
+        received.seek(SeekFrom::Start(0)).unwrap();
+        let mut bytes=Vec::new();received.read_to_end(&mut bytes).unwrap();assert_eq!(bytes,b"actual backing");
+        drop(received);
+        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0,"last writer descriptor closes synchronously");
+        std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn regular_fileport_keeps_exact_writer_lock_until_final_reference_closes() {
+        use std::fs::OpenOptions;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!("aim-binder-regular-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir(&path).unwrap();
+        let source = OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();
+        let writer = OpenOptions::new().read(true).write(true).create_new(true).open(path.join("writers")).unwrap();
+        let contender = OpenOptions::new().read(true).write(true).open(path.join("writers")).unwrap();
+        assert_eq!(unsafe { libc::flock(writer.as_raw_fd(),libc::LOCK_SH) },0);
+        let metadata = wire::RegularMetadata { flags:2, uid:1000, gid:1001, identity:crate::regular_file::identity(source.as_fd()).unwrap(), writer:true };
+        let file = regular_file_from_fd(source.as_fd(),Some(writer.as_fd()),metadata.clone()).unwrap();
+        drop(source); drop(writer);
+        let queued = file.clone(); drop(file);
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB) },-1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));
+        let stored = queued.downcast_ref::<FilePort>().unwrap();
+        assert_eq!(stored.2.as_ref().unwrap().metadata,metadata);
+        let received = unsafe { OwnedFd::from_raw_fd(mach::port_to_fd(stored.2.as_ref().unwrap().writer.unwrap()).unwrap()) };
+        drop(queued);
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB) },-1);
+        drop(received);
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB) },0,"last real fileport/fd close must release the writer immediately");
+        std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     fn path_fileport_creation_preserves_kernel_descriptor_and_linux_error_contract() {
         assert_eq!(

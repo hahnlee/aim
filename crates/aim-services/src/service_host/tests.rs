@@ -221,7 +221,7 @@ impl Service for AllocationFixture {
         if let Some(error) = self.failure.lock().unwrap().as_ref() {
             reply.write_exception(error);
         } else {
-            std::fs::File::from(file).set_len(length as u64).unwrap();
+            file.set_len(length as u64).unwrap();
             reply.write_no_exception();
         }
         Ok(reply)

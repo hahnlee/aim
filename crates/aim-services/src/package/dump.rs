@@ -2,7 +2,8 @@
 //! permission rules apply before any package state is written to the owned FD.
 use aim_binder_host::{local::{Call, Reply}, parcel::{Parcel, Reader, Exception, BAD_VALUE, EX_ILLEGAL_STATE}};
 use super::model::State;
-use std::{fs::File, io::Write, sync::Arc};
+use std::{io::Write, sync::Arc};
+use aim_binder_host::server::RetainedFd;
 pub struct Dates { format: Arc<dyn Fn(i64) -> Result<String, Exception> + Send + Sync> }
 impl Dates {
     pub(crate) fn new(bridge: Arc<super::bootstrap::Bridge>, system: std::sync::Weak<crate::system::System>) -> Self {
@@ -31,8 +32,8 @@ pub(crate) fn timestamp(out: &mut String, indent: &str, name: &str, millis: i64,
     Ok(())
 }
 pub const DUMP_TRANSACTION: u32 = u32::from_be_bytes(*b"_DMP");
-struct Request { out: File, args: Vec<String> }
-fn read_request(reader: &mut Reader<'_>, mut file: impl FnMut(u32)->Option<File>) -> Result<Request,i32> {
+struct Request { out: RetainedFd, args: Vec<String> }
+fn read_request(reader: &mut Reader<'_>, mut file: impl FnMut(u32)->Option<RetainedFd>) -> Result<Request,i32> {
     let fd=reader.read_fd()?;
     let out=file(fd).ok_or(BAD_VALUE)?;
     let args=aim_service_aidl::read_string_list(reader)?.unwrap_or_default().into_iter().map(Option::unwrap_or_default).collect();
@@ -64,7 +65,7 @@ pub fn run(
 )->Reply {
     let process=system.process();
     let mut request=read_request(&mut call.data,|fd|process.file(fd)
-        .and_then(|file|aim_binder_host::server::file_fd(&file)).map(File::from))?;
+        .and_then(|file|aim_binder_host::server::file_fd(&file)))?;
     let result=(||{
         let uid=call.sender_euid as i32;let pid=call.sender_pid;
         if !system.check_permission("android.permission.DUMP",pid,uid)? {
@@ -251,7 +252,7 @@ mod tests {
     fn dump_rejects_unowned_or_non_fd_input_before_capture() {
         let mut missing=Parcel::new();missing.write_i32(1);missing.write_i32(0);
         assert!(read_request(&mut missing.reader(),|_|panic!("non FD resolved")).is_err());
-        let file=File::open(std::env::current_exe().unwrap()).unwrap();
+        let file=std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
         let mut request=Parcel::new();request.write_file(Arc::new(file));request.write_i32(0);
         assert!(matches!(read_request(&mut request.reader(),|_|None),Err(BAD_VALUE)));
     }

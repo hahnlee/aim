@@ -43,7 +43,7 @@ impl DomainSet {
             Self::Blob { fd, len } => {
                 let file = process.file(fd).ok_or(BAD_VALUE)?;
                 let fd = aim_binder_host::server::file_fd(&file).ok_or(BAD_VALUE)?;
-                let file = std::fs::File::from(fd);
+                let file = fd;
                 if file.metadata().map_err(|_| BAD_VALUE)?.len() < len as u64 {
                     return Err(BAD_VALUE);
                 }

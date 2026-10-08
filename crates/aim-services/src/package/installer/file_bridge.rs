@@ -300,7 +300,7 @@ mod tests {
         let capability = aim_binder_host::server::file_from_fd(client.as_fd()).unwrap();
         drop(client);
         let fd = aim_binder_host::server::file_fd(&capability).unwrap();
-        let mut client = UnixStream::from(fd);
+        let mut client = UnixStream::from(fd.into_owned_fd().unwrap());
         client
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();

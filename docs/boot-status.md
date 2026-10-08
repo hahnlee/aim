@@ -718,6 +718,13 @@ traffic with supported inactive timers, and UDP bind/connected traffic. It also
 verifies that an unsupported TCP keepalive state returns EOPNOTSUPP without
 hiding the unrelated UDP inventory. The official seven baseline failures occur
 at the host file-pull assertion; this integration result is not their CTS replay.
+The regular descriptor Binder transport now retains backing and existing writer
+lease fileports in the same driver file owner, with wire version4 and explicit
+Path/Regular classes. Native extracted descriptors retain that original owner
+through their lifetime and forwarding. Thirty-five host regressions pass, including
+actual Binder reply-buffer and immediate final-reference writer release; the PM
+library suite passes829/0 with eleven ignored. Matching ABI installation/close,
+publication and a new coherent runtime remain required; C111 used wire3.
 Original AppSecurity retains thirty fs-verity ENOTTY failures (#226). A shared
 storage core now streams Merkle construction, measures from a fixed header,
 authenticates returned bytes and binds durable metadata to actual inode

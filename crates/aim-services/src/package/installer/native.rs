@@ -2959,7 +2959,7 @@ mod tests {
         reader.read_fd().unwrap();
         assert_eq!(reader.remaining(), 0);
         let fd = aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
-        let mut file = std::fs::File::from(fd);
+        let mut file = fd;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"real read capability");
@@ -3372,7 +3372,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let fd = aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
-        let mut stream = std::os::unix::net::UnixStream::from(fd);
+        let mut stream = std::os::unix::net::UnixStream::from(fd.into_owned_fd().unwrap());
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
@@ -3507,7 +3507,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let fd = aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
-        let mut idle = std::os::unix::net::UnixStream::from(fd);
+        let mut idle = std::os::unix::net::UnixStream::from(fd.into_owned_fd().unwrap());
         idle.set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .unwrap();
         assert!(owner.writes.open(active_id));
@@ -3689,7 +3689,7 @@ mod tests {
         );
         fn finish(file: &aim_binder_driver::File, bytes: &[u8]) {
             let fd = aim_binder_host::server::file_fd(file).unwrap();
-            let mut stream = std::os::unix::net::UnixStream::from(fd);
+            let mut stream = std::os::unix::net::UnixStream::from(fd.into_owned_fd().unwrap());
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .unwrap();
@@ -3735,7 +3735,7 @@ mod tests {
         );
         let reply = call(node.as_ref(), session_api::GET_APP_METADATA_FD, 10100, &get);
         let mut file =
-            std::fs::File::from(aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap());
+            aim_binder_host::server::file_fd(&reply.files()[0].1).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "JSONred");
@@ -4409,7 +4409,7 @@ impl super::SessionOperations for NativeOwners {
             let fd = aim_binder_host::server::file_fd(&file).ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "incoming FD fileport unavailable")
             })?;
-            let mut incoming = std::fs::File::from(fd);
+            let mut incoming = fd;
             use std::io::Read;
             let mut buffer = [0u8; 8192];
             if length < 0 {

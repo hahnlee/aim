@@ -26,5 +26,6 @@ pub mod mach;
 pub mod parcel;
 pub mod proxy_file;
 pub mod path_file;
+pub mod regular_file;
 pub mod server;
 pub mod wire;

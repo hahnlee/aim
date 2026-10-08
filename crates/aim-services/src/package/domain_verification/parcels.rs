@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(reader.read_i32().unwrap(), 1);
         assert_eq!(large.0.files().len(), 1);
         let file = aim_binder_host::server::file_fd(&large.0.files()[0].1).unwrap();
-        let bytes = std::fs::File::from(file).metadata().unwrap().len();
+        let bytes = file.metadata().unwrap().len();
         assert!(bytes > 16384);
     }
 

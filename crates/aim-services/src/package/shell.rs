@@ -25,7 +25,7 @@ impl<'a> Context<'a> {
     }
     pub fn capture(&self)->Result<Arc<super::scan_snapshot::query_state::Capture>,Exception>{self.system()?.capture_package_queries()}
     pub fn process(&self)->&Arc<LocalProcess>{&self.process}
-    pub fn input_clone(&mut self)->Result<std::fs::File,Exception>{
+    pub fn input_clone(&mut self)->Result<aim_binder_host::server::RetainedFd,Exception>{
         self.command.input().ok_or_else(||Exception::illegal_argument("shell input descriptor missing"))?
             .try_clone().map_err(|error|failure(format!("shell input descriptor: {error}")))
     }
@@ -38,7 +38,7 @@ impl<'a> Context<'a> {
         Ok(binder)
     }
     pub fn retire_receiver(&self,binder:Binder){if let Binder::Local(ptr)=binder{if let Some(receiver)=self.receivers.lock().unwrap().remove(&ptr){receiver.inner.lock().unwrap().take();}}}
-    pub fn install_input(&mut self,path:Option<&str>)->Result<std::fs::File,Exception>{self.command.open_input(&self.process,path)}
+    pub fn install_input(&mut self,path:Option<&str>)->Result<aim_binder_host::server::RetainedFd,Exception>{self.command.open_input(&self.process,path)}
     pub fn translate_user(&self,user:i32,all_default:i32,operation:&str)->Result<i32,Exception>{self.system()?.shell_handle_incoming_user(self.pid,self.uid,user,all_default,operation)}
     pub fn user_exists(&self,user:i32)->Result<bool,Exception>{Ok(self.capture()?.state().users.contains_key(&user))}
     pub fn boot_completed(&self)->Result<bool,Exception>{self.system()?.shell_boot_completed()}

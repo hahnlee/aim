@@ -20,9 +20,9 @@ impl System {
         let reply=owner.transact(code,request,false).map_err(shell_install_transport)?;
         self.check_package_bootstrap(&bridge)?;Ok(reply)
     }
-    pub fn shell_install_size(&self,uid:u32,pid:i32,file:std::fs::File,path:&str,abi:Option<&str>)->Result<i64>{
+    pub fn shell_install_size(&self,uid:u32,pid:i32,file:aim_binder_host::server::RetainedFd,path:&str,abi:Option<&str>)->Result<i64>{
         let caller=self.shell_install_identity(uid,pid)?;
-        let file=aim_binder_host::server::file_from_fd(file.as_fd()).ok_or_else(||shell_install_failure("install input file transfer failed"))?;
+        let file=file.into_file_owner();
         let mut request=Parcel::new();api::CalculateInstalledSize{file:Some(InputFile(file)),path:Some(path.into()),abi:abi.map(Into::into),calling_uid:caller,calling_pid:pid}.write(&mut request);
         let reply=self.shell_install_policy_reply(api::CALCULATE_INSTALLED_SIZE,&request)?;
         let mut reader=reply.reader();let value=api::read_calculate_installed_size_reply(&mut reader).map_err(shell_install_transport)??;

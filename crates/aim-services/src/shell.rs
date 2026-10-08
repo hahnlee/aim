@@ -18,9 +18,9 @@ pub struct ShellCommand {
     pub args: Vec<String>,
     /// The next argument `next_arg` returns.
     next: usize,
-    input: Option<std::fs::File>,
-    out: Option<std::fs::File>,
-    err: Option<std::fs::File>,
+    input: Option<aim_binder_host::server::RetainedFd>,
+    out: Option<aim_binder_host::server::RetainedFd>,
+    err: Option<aim_binder_host::server::RetainedFd>,
     result: Option<Strong>,
     callback: Option<Strong>,
 }
@@ -39,12 +39,12 @@ impl ShellCommand {
     /// descriptors, the arguments, the shell callback and the result
     /// receiver.
     pub fn read(process: &Arc<LocalProcess>, r: &mut Reader<'_>) -> Result<Self> {
-        let file = |r: &mut Reader<'_>| -> Result<Option<std::fs::File>> {
+        let file = |r: &mut Reader<'_>| -> Result<Option<aim_binder_host::server::RetainedFd>> {
             let fd = r.read_fd()?;
             Ok(process
                 .file(fd)
                 .and_then(|f| aim_binder_host::server::file_fd(&f))
-                .map(std::fs::File::from))
+                )
         };
         let input=file(r)?;
         let out = file(r)?;
@@ -72,10 +72,10 @@ impl ShellCommand {
     }
 
     /// Actual transferred input for streaming install commands.
-    pub fn input(&mut self)->Option<&mut std::fs::File>{self.input.as_mut()}
-    pub fn output(&mut self)->Option<&mut std::fs::File>{self.out.as_mut()}
-    pub fn error(&mut self)->Option<&mut std::fs::File>{self.err.as_mut()}
-    pub fn open_input(&mut self,process:&Arc<LocalProcess>,path:Option<&str>)->std::result::Result<std::fs::File,aim_binder_host::parcel::Exception>{
+    pub fn input(&mut self)->Option<&mut aim_binder_host::server::RetainedFd>{self.input.as_mut()}
+    pub fn output(&mut self)->Option<&mut aim_binder_host::server::RetainedFd>{self.out.as_mut()}
+    pub fn error(&mut self)->Option<&mut aim_binder_host::server::RetainedFd>{self.err.as_mut()}
+    pub fn open_input(&mut self,process:&Arc<LocalProcess>,path:Option<&str>)->std::result::Result<aim_binder_host::server::RetainedFd,aim_binder_host::parcel::Exception>{
         use aim_binder_host::parcel::{Exception,EX_ILLEGAL_STATE};
         let error=|message:String|Exception::new(EX_ILLEGAL_STATE,message);
         if path.is_none()||path==Some("-"){
@@ -90,7 +90,7 @@ impl ShellCommand {
         if reader.read_i32().map_err(|code|error(format!("shell openFile commfd: {code}")))?!=0{return Err(error("shell openFile unexpected communication descriptor".into()));}
         let fd=reader.read_fd().map_err(|code|error(format!("shell openFile fd: {code}")))?;
         if reader.remaining()!=0{return Err(error("shell openFile reply trailing bytes".into()));}
-        process.file(fd).and_then(|file|aim_binder_host::server::file_fd(&file)).map(std::fs::File::from).ok_or_else(||error("shell openFile descriptor owner missing".into()))
+        process.file(fd).and_then(|file|aim_binder_host::server::file_fd(&file)).ok_or_else(||error("shell openFile descriptor owner missing".into()))
     }
     /// Whether the command runs: `Binder.onTransact` runs it only with an
     /// output.
