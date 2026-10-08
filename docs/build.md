@@ -153,6 +153,13 @@ vnode or shares a hardlink with it (#1146). The public command paths and embedde
 signatures are preserved. This is executable publication, not an atomic boot
 cohort upgrade; ordinary direct `cargo build --release` is outside this publisher.
 
+The `generate-service-aidl` command calls the pinned service generator directly
+under the workspace build lock and original-image read lease. It rebuilds no
+image or graph dependency. Use a separate worktree and private Cargo target
+when frozen campaigns still depend on the current workspace's generated files;
+the command updates that worktree's `target/aim/gen/service-aidl`, records input
+and output hashes, and verifies the original transaction codes as usual.
+
 ### Rebuild times
 
 A branch that changes one host crate costs its cargo build and nothing

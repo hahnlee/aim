@@ -573,7 +573,11 @@ original ART/PM library gates require separate invocation. The two HAL client
 inputs in #1156 have existing graph owners but have not been built in Source;
 historical Main logs and old skip markers do not prove this cohort ran. Full
 integration waits for frozen build/image leases; no missing-input skip is counted
-as executed.
+as executed. The standalone service-AIDL generation command is verified in
+the isolated C worktree: existing getUserIds code9 is unchanged and the appended
+active-user leaf is generated as code10 with typed request/reply helpers. Source
+shared generated SHA remains unchanged. This is contract preparation only; the
+new Java leaf still needs a coherent image build before runtime deployment.
 Inherited capability refresh now pins each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
 grant a class to a reused number (#1152). The concurrent replacement regression

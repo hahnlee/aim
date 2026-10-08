@@ -53,6 +53,8 @@ commands:
            --display-bin FILE --empty-template FILE
                          isolated first-boot template from existing inputs;
                          no graph build and no shared template replacement
+  generate-service-aidl regenerate the typed service contract from existing pins;
+                         no image or dependency build
   status [NODE...]       which nodes are stale, and why
   storage [DATA...]      what the system, derived and data images occupy on the
                          host, and what a data image could give back (docs/storage.md)
@@ -224,6 +226,38 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let args = parse(args)?;
     let options = Options { jobs: args.jobs };
     match args.command.as_str() {
+        "generate-service-aidl" => {
+            if !args.names.is_empty() { return Err("generate-service-aidl takes no targets".into()); }
+            let _lock = lock()?;
+            let image = aim_paths::original_image();
+            let _image_lease = aim_storage::system::ImageLease::read_root(&image)?;
+            let lock_path = aim_paths::root().join(nodes::service_aidl::LOCK);
+            let inputs = || -> Result<Vec<(String, String)>, String> {
+                let contract = lockfile::Lock::read(&lock_path)?;
+                let mut paths = vec![lock_path.clone()];
+                for entry in contract.array("OWN_INTERFACES") {
+                    let file = entry.split('|').nth(1).ok_or("invalid own-interface input")?;
+                    paths.push(aim_paths::root().join(file));
+                }
+                paths.into_iter().map(|path| {
+                    let hash = hash::sha256_file(&path).map_err(|error| error.to_string())?;
+                    Ok((path.display().to_string(), hash))
+                }).collect()
+            };
+            let before = inputs()?;
+            let mut log = log::Log::create(aim_paths::cache().join("logs/service-aidl-direct.log"), args.verbose)?;
+            nodes::service_aidl::run(&mut log)?;
+            if inputs()? != before { return Err("service AIDL inputs changed during generation".into()); }
+            let output = nodes::service_aidl::out().join("lib.rs");
+            let receipt = serde_json::json!({
+                "original_image": image, "inputs": before,
+                "output": output, "output_sha256": hash::sha256_file(&output).map_err(|error| error.to_string())?
+            });
+            fs::write(nodes::service_aidl::out().join("direct-provenance.json"),
+                serde_json::to_vec_pretty(&receipt).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+            Ok(ExitCode::SUCCESS)
+        }
         "template" => {
             let input = |name: &str| {
                 args.template_inputs

@@ -12,7 +12,7 @@ mod image;
 mod java;
 mod moltenvk;
 mod oat;
-mod service_aidl;
+pub(crate) mod service_aidl;
 mod system_server;
 mod translation_cache;
 pub(crate) mod userdata;
