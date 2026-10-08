@@ -89,12 +89,53 @@ pub struct Store {
     replica: bool,
 }
 
+/// Called only after both immutable replica owners passed their full gates.
+/// A logical commit still advances its version and executes persistence once.
+fn derive_metadata_revision(before: &Snapshot, candidate: &Snapshot) -> Result<u64, Error> {
+    if !before.replica_validated || !candidate.replica_validated
+        || before.usage().names().ne(candidate.usage().names())
+        || before.usage().historical_available()!=candidate.usage().historical_available() {
+        return Ok(candidate.version());
+    }
+    if before.owner()==candidate.owner() && before.usage()==candidate.usage() {
+        return Ok(before.metadata_revision());
+    }
+    let mut normalized=before.owner().clone();
+    if before.usage()!=candidate.usage() {
+        normalized.update_validated_replica_usage(before.usage(),candidate.usage()).map_err(Error::Invalid)?;
+    }
+    Ok(if &normalized==candidate.owner(){before.metadata_revision()}else{candidate.version()})
+}
+
+/// Bounded diagnostics shared by every metadata generation owner. No owner
+/// values, certificates or key material are printed.
+#[track_caller]
+pub(super) fn diagnose_metadata(kind: usize, before: Option<&Snapshot>, owner: &SigningScan, usage: &Usage, version: u64, metadata: u64) {
+    static COUNTS: [std::sync::atomic::AtomicUsize;7]=[const{std::sync::atomic::AtomicUsize::new(0)};7];
+    if before.is_some_and(|before|before.metadata_revision()==metadata){return;}
+    if COUNTS[kind].fetch_add(1,std::sync::atomic::Ordering::Relaxed)>=20{return;}
+    let labels=["create","base_aware","publish","publish_after","install","removal","replace_validated"];
+    let fields=if let Some(before)=before {
+        let mut normalized=before.owner().clone();
+        let normalization_failed=before.usage()!=usage && before.usage().names().eq(usage.names())
+            && normalized.update_validated_replica_usage(before.usage(),usage).is_err();
+        let mut fields=normalized.metadata_difference_fields(owner);
+        if normalization_failed{fields.push("usage_normalization_unavailable".into());}
+        fields
+    }else{vec!["no_preceding_snapshot".into(),format!("package_counts={}/{}",owner.settings.packages.len(),owner.settings.disabled_system_packages.len())]};
+    eprintln!("Package metadata creator={} at {} version={:?}->{} metadata={:?}->{} fields={:?}",
+        labels[kind],std::panic::Location::caller(),before.map(Snapshot::version),version,before.map(Snapshot::metadata_revision),metadata,fields);
+}
+
 impl Store {
     /// The System publication gate supplies a snapshot already validated by its
     /// candidate Store. Keep the coordinator Arc stable across graph mutations.
+    #[track_caller]
     pub(crate) fn publish_validated_store(&self, candidate: &Store) {
         let snapshot = candidate.capture();
-        *self.current.lock().unwrap() = snapshot;
+        let mut current=self.current.lock().unwrap();
+        diagnose_metadata(6,Some(&current),snapshot.owner(),snapshot.usage(),snapshot.version(),snapshot.metadata_revision());
+        *current = snapshot;
     }
     /// Publish a validated candidate only while its exact canonical base remains
     /// current. Query projections may lag a disk-committed installation.
@@ -129,14 +170,17 @@ impl Store {
         Self::prepare_usage_store(base, base.usage().clone())
     }
 
+    #[track_caller]
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
         Self::create(owner, usage, false, 1)
     }
 
+    #[track_caller]
     pub fn new_replica(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
         Self::new_replica_at_version(owner, usage, 1)
     }
 
+    #[track_caller]
     pub(crate) fn new_replica_at_version(
         owner: SigningScan,
         usage: Usage,
@@ -148,6 +192,7 @@ impl Store {
     /// A query epoch need not reconstruct unchanged original package metadata.
     /// Compare every native owner field; normalize only the active usage rows
     /// which the facade captures separately against the latest Computer lease.
+    #[track_caller]
     pub(crate) fn new_replica_after(base: &Arc<Snapshot>, owner: SigningScan, usage: Usage, version: u64) -> Result<Self, Error> {
         if version != base.version.checked_add(1).ok_or(Error::VersionExhausted)? {
             return Err(Error::Invalid("metadata publication base version differs".into()));
@@ -163,10 +208,14 @@ impl Store {
                 normalized.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
             }
             if normalized == owner { metadata = base.metadata_revision; }
+            else {
+                diagnose_metadata(1,Some(base),&owner,&usage,version,metadata);
+            }
         }
         Self::create_with_metadata_revision(owner, usage, true, version, metadata)
     }
 
+    #[track_caller]
     fn create(
         owner: SigningScan,
         usage: Usage,
@@ -176,6 +225,7 @@ impl Store {
         Self::create_with_metadata_revision(owner, usage, replica, version, version)
     }
 
+    #[track_caller]
     fn create_with_metadata_revision(owner: SigningScan, usage: Usage, replica: bool, version: u64, metadata_revision: u64) -> Result<Self, Error> {
         if version == 0 || version > i64::MAX as u64 || metadata_revision == 0 || metadata_revision > version {
             return Err(Error::VersionExhausted);
@@ -191,6 +241,7 @@ impl Store {
         if replica {
             validate_replica(&snapshot)?;
         }
+        diagnose_metadata(0,None,snapshot.owner(),snapshot.usage(),version,metadata_revision);
         Ok(Self {
             current: Mutex::new(snapshot),
             replica,
@@ -203,6 +254,7 @@ impl Store {
 
     /// Persist while the exact base remains locked. The callback performs disk
     /// work only; Binder calls and cache/broadcast effects happen after return.
+    #[track_caller]
     pub fn publish_after(
         &self, base:&Arc<Snapshot>, owner:SigningScan, usage:Usage,
         persist:impl FnOnce(&Arc<Snapshot>)->Result<(),super::owner::WriteError>,
@@ -211,8 +263,11 @@ impl Store {
         if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
         let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let next=Arc::new(Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version});
+        let mut next=Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version};
         if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
+        next.metadata_revision=derive_metadata_revision(&current,&next).map_err(CommitError::Snapshot)?;
+        let next=Arc::new(next);
+        diagnose_metadata(3,Some(base),next.owner(),next.usage(),version,next.metadata_revision());
         match persist(&next) {
             Ok(())=>{*current=next.clone();Ok(next)},
             Err(error) if error.committed=>{*current=next.clone();Err(CommitError::Disk {snapshot:Some(next),error})},
@@ -223,6 +278,7 @@ impl Store {
     /// The commit owner supplies a completed candidate. An exact captured base
     /// prevents stale or foreign transactions from replacing a newer graph.
     /// Files, broadcasts and permission callbacks still belong to that owner.
+    #[track_caller]
     pub fn publish(
         &self,
         base: &Arc<Snapshot>,
@@ -239,16 +295,19 @@ impl Store {
             .filter(|version| *version <= i64::MAX as u64)
             .ok_or(Error::VersionExhausted)?;
         validate(&owner, &usage)?;
-        let next = Arc::new(Snapshot {
+        let mut next = Snapshot {
             version,
             owner,
             usage,
             replica_validated: self.replica,
             metadata_revision: version,
-        });
+        };
         if self.replica {
             validate_replica(&next)?;
         }
+        next.metadata_revision=derive_metadata_revision(&current,&next)?;
+        let next=Arc::new(next);
+        diagnose_metadata(2,Some(base),next.owner(),next.usage(),version,next.metadata_revision());
         *current = next.clone();
         Ok(next)
     }

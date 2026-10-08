@@ -3,6 +3,7 @@ use super::{CommitError,Error,Snapshot,Store};
 use crate::package::{scan::SigningScan,owner::WriteError};
 use std::{collections::BTreeSet,sync::Arc};
 impl Store {
+    #[track_caller]
     pub(crate) fn publish_removal_after(
         &self,base:&Arc<Snapshot>,targets:&BTreeSet<String>,mut owner:SigningScan,
         persist:impl FnOnce(&Arc<Snapshot>)->Result<(),WriteError>,
@@ -21,8 +22,11 @@ impl Store {
         let version=current.version().checked_add(1).filter(|version|*version<=i64::MAX as u64)
             .ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         super::validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let next=Arc::new(Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version});
+        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version};
         if self.replica{super::validate_replica(&next).map_err(CommitError::Snapshot)?;}
+        next.metadata_revision=super::derive_metadata_revision(&current,&next).map_err(|error|super::CommitError::Snapshot(error))?;
+        let next=Arc::new(next);
+        super::diagnose_metadata(5,Some(&current),next.owner(),next.usage(),version,next.metadata_revision());
         match persist(&next){
             Ok(())=>{*current=next.clone();Ok(next)},
             Err(error)if error.committed=>{*current=next.clone();Err(CommitError::Disk{snapshot:Some(next),error})},

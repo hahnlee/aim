@@ -10,6 +10,8 @@ import java.util.Objects;
 /** Private code transport bound to one native capture, before replica construction. */
 public final class PackageScanLease implements AutoCloseable {
     private static final int CHUNK = 64 * 1024;
+    private static final java.util.concurrent.atomic.AtomicInteger FULL_DIAGNOSTICS = new java.util.concurrent.atomic.AtomicInteger();
+    private boolean fullReasonLogged;
     private final IPackageScanSnapshot endpoint;
     private final long version;
     private final Map<String, PackageCode> active = new HashMap<>();
@@ -406,6 +408,7 @@ public final class PackageScanLease implements AutoCloseable {
         long metadata = endpoint.getMetadataVersion();
         if (metadata <= 0 || metadata > version) throw new IOException("invalid metadata version");
         if (previous == null || previous.metadataVersion() != metadata) {
+            logFullReason(previous == null ? "no_previous" : "metadata_changed", metadata, previous);
             var result = captureData(owner, crossUserSuspensions);
             result.metadataVersion(metadata);
             return result;
@@ -446,10 +449,26 @@ public final class PackageScanLease implements AutoCloseable {
         }
     }
 
+    private void logFullReason(String reason, long metadata, PackageSnapshots.Data previous) {
+        if (fullReasonLogged) return;
+        fullReasonLogged = true;
+        if (FULL_DIAGNOSTICS.getAndIncrement() >= 20) return;
+        String caller = "unknown";
+        for (var frame : Thread.currentThread().getStackTrace()) {
+            String name = frame.getClassName();
+            if (!name.equals(PackageScanLease.class.getName()) && !name.equals(Thread.class.getName()) && !name.equals("dalvik.system.VMStack")) {
+                caller = frame.toString(); break;
+            }
+        }
+        android.util.Slog.i("NativePackageMetadata", "full capture reason=" + reason + " version=" + version
+                + " metadata=" + metadata + " previous=" + (previous == null ? "null" : previous.metadataVersion()) + " caller=" + caller);
+    }
+
     public synchronized PackageSnapshots.Data captureData(PackageSnapshots.Owner owner,
             boolean crossUserSuspensions) throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");
         Objects.requireNonNull(owner);
+        if (!fullReasonLogged) logFullReason("direct_scope", -1, null);
         var packages = capturePackageMap(false, crossUserSuspensions);
         var disabled = capturePackageMap(true, crossUserSuspensions);
         var shared = new java.util.LinkedHashMap<String, com.android.server.pm.pkg.SharedUserApi>();

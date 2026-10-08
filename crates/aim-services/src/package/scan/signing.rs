@@ -92,6 +92,48 @@ pub struct NewPackageOutcome {
 }
 
 impl SigningScan {
+    /// Bounded ownership diagnostics; never print signer, key or owner values.
+    pub(crate) fn metadata_difference_fields(&self, other: &Self) -> Vec<String> {
+        let mut fields=Vec::new();
+        macro_rules! changed {($($field:ident),*)=>{$(if self.$field!=other.$field {fields.push(stringify!($field).to_owned());})*};}
+        changed!(settings,identities,libraries,package_registry,update_ownership,installers,
+            disabled_users,scanned_users,loaded,disabled_loaded,pending_metadata,transferred_packages,
+            displaced_shared_settings,apex_origins,seinfo,legacy_permissions,library_dependencies,
+            shared_processes,replica_runtime,hidden_api_allowlist,strict_signature_packages,
+            first_api_level,parsed,permission_admissions);
+        for setting in self.settings.packages.iter().chain(&self.settings.disabled_system_packages).take(512) {
+            let factory=self.settings.disabled_system_packages.iter().any(|value|std::ptr::eq(value,setting));
+            let settings=if factory {&other.settings.disabled_system_packages}else{&other.settings.packages};
+            if let Some(after)=settings.iter().find(|value|value.name==setting.name) {
+                if setting==after {continue;}
+                let mut keys=Vec::new();
+                macro_rules! key {($($field:ident),*)=>{$(if setting.$field!=after.$field {keys.push(stringify!($field));})*};}
+                key!(app_id,code_path,version_code,flags,private_flags,category_hint,last_update_time,
+                    install_source,key_set_data,signatures,page_size_compat,primary_cpu_abi,secondary_cpu_abi);
+                if keys.is_empty(){keys.push("other_setting_fields");}
+                fields.push(format!("package={} factory={} keys={}",setting.name.chars().take(96).collect::<String>(),factory,keys.join(",")));
+            }else{fields.push(format!("removed_package={} factory={}",setting.name.chars().take(96).collect::<String>(),factory));}
+            if fields.len()>40 {break;}
+        }
+        for (name, before) in &self.scanned_users {
+            let Some(after)=other.scanned_users.get(name) else {continue;};
+            for (user, before) in before {
+                let Some(after)=after.get(user) else {continue;};
+                if before==after {continue;}
+                let mut keys=Vec::new();
+                macro_rules! user_key {($($field:ident),*)=>{$(if before.$field!=after.$field {keys.push(stringify!($field));})*};}
+                user_key!(installed,enabled,stopped,not_launched,hidden,distraction_flags,ce_data_inode,de_data_inode,
+                    instant_app,first_install_time,enabled_components,disabled_components,runtime);
+                if keys.is_empty(){keys.push("other_user_fields");}
+                fields.push(format!("package={} user={} keys={}",name.chars().take(96).collect::<String>(),user,keys.join(",")));
+                if fields.len()>48 {break;}
+            }
+            if fields.len()>48 {break;}
+        }
+        fields.push(format!("package_counts={}/{}->{}/{}",self.settings.packages.len(),self.settings.disabled_system_packages.len(),other.settings.packages.len(),other.settings.disabled_system_packages.len()));
+        fields
+    }
+
     pub fn disabled_user_aliases(&self, package: &str) -> Result<Vec<i32>, String> {
         self.disabled_users.get(package).map(|owner| owner.aliases())
             .ok_or_else(|| format!("disabled user alias owner absent: {package}"))

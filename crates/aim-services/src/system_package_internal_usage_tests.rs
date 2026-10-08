@@ -390,7 +390,8 @@ fn usage_metadata_revision_and_bounded_batch_preserve_exact_snapshot_contract() 
     let reply=call(api::GET_USAGE_RECORDS_CHUNK,&invalid);assert!(api::read_get_usage_records_chunk_reply(&mut reply.reader()).unwrap().is_err());
     // Every ordinary publication changes metadata, even when the caller's
     // current owner happens to compare equal. Only sealed usage inherits it.
-    let generic=prepared.publish(&next,next.owner().clone(),next.usage().clone()).unwrap();
+    let mut changed=next.owner().clone();changed.settings.packages[0].category_hint=7;
+    let generic=prepared.publish(&next,changed,next.usage().clone()).unwrap();
     assert_eq!(generic.metadata_revision(),generic.version());
     assert!(generic.metadata_revision()>next.metadata_revision());
     assert_eq!(base.scan().usage().times("p").unwrap()[2],0);
@@ -438,4 +439,44 @@ fn query_epochs_retain_metadata_only_for_equal_complete_native_owners() {
     let changed=Store::new_replica_after(&factory_base,owner,factory_base.usage().clone(),factory_base.version()+1).unwrap().capture();
     assert_eq!(changed.metadata_revision(),changed.version());
     assert_ne!(changed.metadata_revision(),factory_base.metadata_revision());
+}
+
+
+#[test]
+fn duplicate_app_data_receipt_keeps_metadata_but_persists_and_publishes_each_commit() {
+    use crate::package::{installer::removal::NativeStore, owner::Store as Disk};
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let base=publish(&fixture,&bridge);
+    let snapshots=fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap().snapshots.clone().unwrap();
+    std::fs::create_dir_all(fixture.root.join("data/system/users/0")).unwrap();
+    let mut disk=Disk::create(&fixture.root.join("data"),&[0]).unwrap();disk.commit_scan_settings(base.scan()).unwrap();
+    let publications=Arc::new(AtomicUsize::new(0));let count=publications.clone();
+    let store=NativeStore{snapshots:snapshots.clone(),disk:Arc::new(Mutex::new(disk)),
+        publish:Arc::new(move|before,after|{assert_eq!(after.version(),before.version()+1);count.fetch_add(1,Ordering::SeqCst);Ok(())}),
+        invalidate:Arc::new(||Ok(()))};
+    let mut receipt=base.scan().owner().scanned_user_states("p").unwrap()[&0].clone();receipt.ce_data_inode=991;receipt.de_data_inode=992;
+    let first=store.user_state("p",0,receipt.clone()).unwrap();
+    assert_eq!(first.metadata_revision(),first.version());
+    let path=fixture.root.join("data/system/users/0/package-restrictions.xml");let written=std::fs::read(&path).unwrap();
+    let duplicate=store.user_state("p",0,receipt.clone()).unwrap();
+    assert_eq!(duplicate.version(),first.version()+1);
+    assert_eq!(duplicate.metadata_revision(),first.metadata_revision());
+    assert_eq!(duplicate.owner(),first.owner());
+    assert_eq!(publications.load(Ordering::SeqCst),2);
+    assert_eq!(std::fs::read(&path).unwrap(),written);
+    receipt.stopped=!receipt.stopped;
+    let stopped=store.user_state("p",0,receipt.clone()).unwrap();
+    assert_eq!(stopped.metadata_revision(),stopped.version());
+    receipt.ce_data_inode+=1;
+    let inode=store.user_state("p",0,receipt.clone()).unwrap();
+    assert_eq!(inode.metadata_revision(),inode.version());
+    receipt.installed=false;
+    let removed=store.user_state("p",0,receipt).unwrap();
+    assert_eq!(removed.metadata_revision(),removed.version());
+    assert_eq!(publications.load(Ordering::SeqCst),5);
+    // A no-op generic persisted commit also keeps metadata while executing its
+    // actual writer once; publication generation and CAS are not skipped.
+    let writes=AtomicUsize::new(0);
+    let same=snapshots.publish_after(&removed,removed.owner().clone(),removed.usage().clone(),|_|{writes.fetch_add(1,Ordering::SeqCst);Ok(())}).unwrap();
+    assert_eq!(same.metadata_revision(),removed.metadata_revision());
+    assert_eq!(same.version(),removed.version()+1);assert_eq!(writes.load(Ordering::SeqCst),1);
 }

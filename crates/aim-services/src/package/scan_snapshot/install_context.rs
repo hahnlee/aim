@@ -106,6 +106,7 @@ impl super::Store {
     /// Rebase usage and persist while the publication gate is held. The native
     /// candidate computation calls no Binder/guest owner, closing the previous
     /// capture-to-CAS window without weakening code/settings/UID ownership.
+    #[track_caller]
     pub(crate) fn publish_install_after(
         &self,base:&Arc<Snapshot>,mut owner:crate::package::scan::SigningScan,
         persist:impl FnOnce(&Arc<Snapshot>)->Result<(),crate::package::owner::WriteError>,
@@ -121,8 +122,11 @@ impl super::Store {
         let version=current.version().checked_add(1).filter(|version|*version<=i64::MAX as u64)
             .ok_or(super::CommitError::Snapshot(super::Error::VersionExhausted))?;
         super::validate(&owner,&usage).map_err(super::CommitError::Snapshot)?;
-        let next=Arc::new(Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version});
+        let mut next=Snapshot{version,owner,usage,replica_validated:self.replica,metadata_revision:version};
         if self.replica{super::validate_replica(&next).map_err(super::CommitError::Snapshot)?;}
+        next.metadata_revision=super::derive_metadata_revision(&current,&next).map_err(|error|super::CommitError::Snapshot(error))?;
+        let next=Arc::new(next);
+        super::diagnose_metadata(4,Some(&current),next.owner(),next.usage(),version,next.metadata_revision());
         match persist(&next){
             Ok(())=>{*current=next.clone();Ok(next)},
             Err(error)if error.committed=>{*current=next.clone();Err(super::CommitError::Disk{snapshot:Some(next),error})},
