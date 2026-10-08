@@ -50,6 +50,22 @@ public final class PackageScanLease implements AutoCloseable {
 
     public long getVersion() { return version; }
 
+    /** A retained query endpoint from this exact capture; caller owns close. */
+    public synchronized IPackageComputer captureComputer() throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        var computer = endpoint.getComputer();
+        if (computer == null) throw new IOException("missing native package query capture");
+        try {
+            NativePackageCapabilities.attach(computer);
+            if (computer.getVersion() != version) throw new IOException("native query capture version differs");
+            return computer;
+        } catch (RemoteException | IOException | RuntimeException failure) {
+            try { computer.close(); } catch (RemoteException closeFailure) { failure.addSuppressed(closeFailure); }
+            throw failure;
+        }
+    }
+
+
     public synchronized PackageCode getCode(String name, boolean factory)
             throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");

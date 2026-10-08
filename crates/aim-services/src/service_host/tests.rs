@@ -5524,7 +5524,9 @@ fn verify_boot_scan(
                 |_, _| panic!("missing first-boot settings must not read"),
             )
             .unwrap();
-        disk.commit_scan_settings(query.scan()).unwrap();
+        // The live oracle may publish a newer graph; seed this fresh disk from
+        // the same capture whose user/keyset owners are about to be committed.
+        disk.commit_scan_settings(current.scan()).unwrap();
         disk.commit_domains(&current.domains().unwrap().owner().persisted())
             .unwrap();
         for user in [0, 10] {

@@ -2543,3 +2543,33 @@ fn restored_boot_commit_reconciles_global_scan_and_preserves_user_side_owners() 
     assert_eq!(reopened.state.users[0].1.restrictions.packages.iter().find(|(name,_)|name=="example.app").unwrap().1.ce_data_inode,99);
     assert!(!reopened.state.users[0].1.restrictions.packages.iter().find(|(name,_)|name=="example.app").unwrap().1.stopped);
 }
+
+#[test]
+fn metadata_mutation_retains_real_durable_keyset_allocation_owner_and_rejects_roles(){
+    let data=Data::new();let path=data.settings();
+    fs::write(data.0.join("system/packages.xml"),b"<packages><package name='example.app' codePath='/data/app/example' userId='10100' domainSetId='00000000-0000-0000-0000-000000000001'/><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings></packages>").unwrap();
+    fs::write(path,b"<package-restrictions><pkg name='example.app'/></package-restrictions>").unwrap();
+    let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();let baseline=store.state.settings.clone();
+    let mut allocated=baseline.clone();
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    let mut scalar=[0u8;32];scalar[31]=1;
+    let mut encoded=vec![0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00];
+    encoded.extend_from_slice(p256::SecretKey::from_slice(&scalar).unwrap().public_key().to_encoded_point(false).as_bytes());
+    key_sets::register(&mut allocated,"example.app",&[encoded],None,&[]).unwrap();
+    key_sets::clear_package(&mut allocated,"example.app").unwrap();
+    assert!(allocated.key_sets.last_issued_key_id>baseline.key_sets.last_issued_key_id);
+    assert!(allocated.key_sets.last_issued_key_set_id>baseline.key_sets.last_issued_key_set_id);
+    assert_eq!(allocated.key_sets.public_keys,baseline.key_sets.public_keys);
+    assert_eq!(allocated.key_sets.key_sets,baseline.key_sets.key_sets);
+    store.commit_key_sets(&allocated).unwrap();
+    let mut candidate=baseline.clone();candidate.packages[0].category_hint=4;
+    assert!(store.rebase_unchanged_key_set_metadata(&baseline,&mut candidate).unwrap());
+    assert_eq!(candidate.key_sets,store.state.settings.key_sets);
+    assert_eq!(candidate.packages[0].category_hint,4);
+    assert_eq!(baseline.key_sets.last_issued_key_id,0);
+    let mut changed=baseline.clone();changed.packages[0].key_set_data.proper_signing_key_set=12;
+    assert!(store.rebase_unchanged_key_set_metadata(&baseline,&mut changed).is_err());
+    let mut producer=baseline.clone();producer.key_sets.last_issued_key_id=1;
+    assert!(store.rebase_unchanged_key_set_metadata(&baseline,&mut producer).is_err());
+    assert_eq!(store.state.settings.key_sets,allocated.key_sets);
+}

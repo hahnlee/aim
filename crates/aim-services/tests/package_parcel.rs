@@ -290,6 +290,7 @@ fn compile_original_parcel_oracle(dir: &std::path::Path, jdk: &std::path::Path, 
         )
         .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SdkDataOracle.java"))
         .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackageSnapshotConcurrencyOracle.java"))
+        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackageServiceQueryOracle.java"))
         .args(common::java::private_aidl_sources(&dir)));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();

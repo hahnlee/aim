@@ -323,7 +323,21 @@ one test, zero failures, zero ignored in 231.46 seconds after genuine reader hea
 owners are connected in its fixtures. It exercises original modern domain events,
 Settings defaults, incremental signatures/permissions, keysets, nullable URI rules,
 UUID modes, TimSort and user selections. C83 ParsingHost reaches eight successful
-test completions without the earlier snapshot/DVS fatal; final XML is pending.
+test completions without the earlier snapshot/DVS fatal; official current C83
+ParsingHost XML then records 11 passes, zero failures and done=true
+(2026.10.08_20.20.45). The explicit original libcore TimSort gate also passes,
+one test with zero failures/ignored. A separate Bluetooth component mutation
+exposes keyset allocation-counter regression during concurrent installs; that
+owner race is corrected with exact unchanged pool/role validation and complete
+durable KeySets retention (#1132); its real allocation/retirement regression
+passes. Internal graph preparation remains outside publication/disk locks.
+Chrome C83 renders FirstRun but still reaches FocusEvent ANR and exits. The
+resolveService owner now uses its exact captured native computer endpoint without
+eager whole-Java-graph construction (#1131), preserving caller/filter identity
+and install candidate scope. Coherent original/native builds pass; actual C84
+Chrome and keyset runtime verification are pending. The original domain transport
+fixture also seeds persistence from its actual current capture before commits;
+its prior stale-capture failure is awaiting a full actual replay.
 C14 passed shared and nonshared APEX permission UID handling.
 The absent projection requires matching parsed APEX name/path and uid -1;
 ordinary missing owners still fail, and the focused regression passes.

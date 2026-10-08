@@ -2637,20 +2637,30 @@ impl System {
         loop {
         let latest=self.capture_package_queries()?;
         self.check_package_bootstrap(bridge)?;
-        let applied = crate::package::internal_mutation_apply::apply_rebased(base.scan(),latest.scan(), &record).map_err(|error|
-            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
-        let update = latest.prepare_internal_mutation(applied.scan.clone(), applied.usage).map_err(|error|
+        let mut applied = crate::package::internal_mutation_apply::apply_rebased(base.scan(),latest.scan(), &record).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let disk = self.package_bootstrap.lock().unwrap().current.as_ref()
             .filter(|current| Arc::ptr_eq(&current.bridge, bridge)).and_then(|current| current.persistence.clone())
             .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "internal mutation persistence unavailable"))?;
         let disk_owner=disk.clone();
+        // Capture the authoritative unchanged keyset owner under a short disk
+        // lock. Complete graph preparation stays outside both coordination
+        // locks; the pool is checked again before any writes below.
+        let captured_key_sets = {
+            let disk=disk.lock().unwrap();
+            disk.rebase_unchanged_key_set_metadata(&latest.scan().owner().settings,&mut applied.scan.settings).map_err(|error|
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+            disk.state().settings.key_sets.clone()
+        };
+        let update = latest.prepare_internal_mutation(applied.scan.clone(), applied.usage).map_err(|error|
+            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
         let mut disk = disk.lock().unwrap();
         let mut state = self.package_bootstrap.lock().unwrap();
         let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, bridge)
             && current.persistence.as_ref().is_some_and(|owner| Arc::ptr_eq(owner,&disk_owner)))
             .ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "internal mutation bootstrap or persistence retired"))?;
-        if !current.queries.as_ref().is_some_and(|capture| Arc::ptr_eq(capture, &latest)) {
+        if !current.queries.as_ref().is_some_and(|capture| Arc::ptr_eq(capture, &latest))
+            || disk.state().settings.key_sets != captured_key_sets {
             // Usage/context publication intentionally does not take install gate.
             // Nothing has been written: discard this prepared candidate and
             // rebase the same verified field operation on the newest owner.
@@ -2658,7 +2668,9 @@ impl System {
             // publication coordinator across full graph/RPC preparation.
             drop(state); drop(disk); continue;
         }
-        disk.validate_committed_scan(latest.scan().owner()).map_err(|error|
+        let mut durable_base=latest.scan().owner().clone();
+        durable_base.settings.key_sets=captured_key_sets;
+        disk.validate_committed_scan(&durable_base).map_err(|error|
             Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string()))?;
         let mut written = Ok(());
         if applied.settings_changed { written = disk.commit_scan_settings_owner(&applied.scan); }
@@ -2861,9 +2873,11 @@ impl System {
         let before = base.state().clone();
         let mut written = Ok(());
         let after = if prepared.changes_state() {
-            disk.validate_committed_scan(base.scan().owner()).map_err(|error|
-                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string()))?;
             let mut owner = base.scan().owner().clone();
+            disk.rebase_unchanged_key_set_metadata(&base.scan().owner().settings,&mut owner.settings).map_err(|error|
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,error.to_string()))?;
+            disk.validate_committed_scan(&owner).map_err(|error|
+                Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error.to_string()))?;
             prepared.apply_scan(&mut owner).map_err(|error|
                 Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, error))?;
             let update = base.prepare_package_update(owner.clone()).map_err(|error|

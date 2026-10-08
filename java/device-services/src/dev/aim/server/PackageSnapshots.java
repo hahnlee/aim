@@ -131,6 +131,39 @@ public final class PackageSnapshots {
             }
         }
 
+        /** Resolution consumes the native query capture, without materializing Java package owners. */
+        public android.content.pm.ResolveInfo resolveServiceQuery(android.content.Intent intent, String type,
+                long flags, int user, int filterUid, int filterPid, boolean start) {
+            Data candidate;
+            synchronized (this) {
+                if (closed) throw new IllegalStateException("package replica store is closed");
+                candidate = NativeInstallPermissionScope.candidate(this);
+                if (candidate != null) candidate.retain();
+            }
+            if (candidate != null) {
+                try (var computer = new ComputerSnapshot(candidate)) {
+                    return computer.resolveServiceInternal(intent, type, flags, user, filterUid, filterPid, start);
+                } finally { candidate.release(); }
+            }
+            int callingUid = android.os.Binder.getCallingUid();
+            int callingPid = android.os.Binder.getCallingPid();
+            try {
+                var endpoint = source.capture();
+                if (endpoint == null) throw new IOException("missing native snapshot endpoint");
+                try (var lease = new PackageScanLease(endpoint)) {
+                    var computer = lease.captureComputer();
+                    try {
+                        synchronized (this) {
+                            if (closed) throw new IllegalStateException("package replica store is closed");
+                        }
+                        return ComputerSnapshot.resolveRecord(computer.resolveServiceInternalRecord(intent, type,
+                                flags, user, filterUid, filterPid, start, callingUid, callingPid));
+                    } finally { computer.close(); }
+                }
+            } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
+            catch (IOException failure) { throw new IllegalStateException("native service query capture failed", failure); }
+        }
+
         public long getVersion() { var data = capture(); try { return data.version; } finally { data.release(); } }
         public ComputerSnapshot computer() {
             var data = capture(); try { return new ComputerSnapshot(data); } finally { data.release(); }
