@@ -202,6 +202,10 @@ fn scan_system_image<S>(
             parsed: input.parsed,
             signing: crate::package::sign::SigningDetails::unknown(),
         };
+        if let Err(error) = super::process_policy::validate(&code.parsed) {
+            rejected.push(super::Rejected { location: code.location.clone(), reason: error.message });
+            continue;
+        }
         owner.refresh_init_apex(&code);
         let identity =
             Identity::select_for_location(&code.parsed, &owner.settings, true, &code.location);

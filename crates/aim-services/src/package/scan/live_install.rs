@@ -205,6 +205,8 @@ impl SigningScan {
         files: &crate::package::write::Files,
     ) -> Result<NewPackageOutcome, Rejection> {
         let name = identity.internal_name.clone();
+        super::process_policy::validate(&request.code)
+            .map_err(|error| reject(error.status, format!("Scanning Failed.: {}", error.message)))?;
         if !request.metadata.code_path.starts_with("/data/app/")
             || request
                 .metadata
@@ -757,6 +759,24 @@ mod tests {
         let group=admission.owner.shared_legacy_permissions("org.example.group").unwrap().unwrap();assert!(group.users()[0].permissions.is_empty());
 
     }
+    #[test]
+    fn undefined_component_process_rejects_atomic_batch_before_uid_changes() {
+        use crate::package::pkg::{Activity, MainComponent, Process};
+        let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let before = owner.clone();
+        let users = [super::super::User { id: 0, pre_created: false, adb_install_disallowed: false }];
+        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update reads"));
+        let mut invalid = request("org.example.invalid", 1);
+        invalid.code.processes = Some(vec![Process { map_key: Some("org.example.invalid".into()), name: Some("org.example.invalid".into()), ..Default::default() }]);
+        invalid.code.receivers.push(Activity { main: MainComponent { component: crate::package::pkg::Component { name: "org.example.invalid.Receiver".into(), ..Default::default() }, process_name: Some("org.example.invalid:missing".into()), ..Default::default() }, ..Default::default() });
+        let error = match owner.prepare_live_installs(vec![request("org.example.valid", 1), invalid], &users, false, &files) {
+            Ok(_) => panic!("undefined receiver process admitted"), Err(error) => error,
+        };
+        assert_eq!(error.status, super::super::process_policy::STATUS);
+        assert_eq!(error.message, "Scanning Failed.: Can't install because receiver org.example.invalid.Receiver's process attribute org.example.invalid:missing (in package org.example.invalid) is not included in the <processes> list");
+        assert_eq!(owner, before);
+    }
+
     #[test]
     fn first_shared_install_and_matching_second_preserve_signer_atomicity() {
         let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();

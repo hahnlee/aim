@@ -22,6 +22,7 @@ pub use enrich::{ScanClock, ScanTime};
 mod identity;
 mod image;
 mod policy;
+pub mod process_policy;
 pub use policy::{ScanPolicy, application_flags};
 mod certificates;
 pub use certificates::CertificateScanPolicy;

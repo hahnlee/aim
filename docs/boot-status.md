@@ -572,6 +572,13 @@ priority rules; native install stages retain original public failure text and
 status while logging their own stage diagnostics separately. The complete PM
 library suite passes 815/0 with eleven ignored; matched-image CTS replay remains
 pending.
+Five C111 UseProcess cases accept packages whose application/component process
+is absent from a nonempty declared process map (#1180); all exact original cases
+pass. Native scan now validates application and activity/service/receiver/provider
+process keys in the pinned order before live UID mutation, and during image/data
+scan with their existing rejection cleanup. Null/empty process maps retain their
+original allowance. The pinned DEX status -122 and public failure text are kept;
+two focused policy/atomic-batch checks pass without skips. CTS replay is pending.
 The same official base-only split test exposes an unsupported query branch
 for activities declared in absent dynamic splits (#1176). Native post-resolution
 filtering now follows the original captured installer/drop policy, constructing

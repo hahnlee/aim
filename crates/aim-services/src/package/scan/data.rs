@@ -733,6 +733,7 @@ impl SigningScan {
                 message,
             })
         };
+        super::process_policy::validate(&raw.parsed).map_err(|error| fail("validation", error.message))?;
         if raw.location.partition != Partition::Data
             || raw.location.kind != Kind::App
             || raw.location.apex.is_some()
