@@ -491,8 +491,13 @@ could start. The regression verifies actual memfd resize, shared mmap and
 write/readback, ordinary unmapped FD resize, and retained image EROFS; the
 C106 with the new host cohort passes the previous SurfaceFlinger allocator
 failure, but original zygote aborts before SystemServer: fchmodat of
-/sys/fs/cgroup/system/uid_1000/. returns ENOENT (#1150). Native-service and
-app policy replays are therefore not yet run for this cohort. Path-only descriptor capabilities preserve
+/sys/fs/cgroup/system/uid_1000/. returns ENOENT (#1150). The syscall owner now binds current-process procfs FD magic links to a
+retained descriptor, matching original bionic's O_PATH chmod fallback. The
+focused owner regression passes with UID ownership, rename retention, hidden
+and closed FDs, and symlink errors. Native-service and app policy replays
+remain pending for the corrected cohort. A subsequent full ABI run reports
+173 pass, one capability-registry EBADF failure under investigation, and five
+ignored entries; it is not counted as a clean full-suite pass. Path-only descriptor capabilities preserve
 actual backing identity and ARM64 flags through SCM/Binder; guessed hidden
 kernel descriptors fail as nonexistent guest FDs. Typed import failure rejects
 the actual delivered transaction, closes descriptors and releases its buffer,

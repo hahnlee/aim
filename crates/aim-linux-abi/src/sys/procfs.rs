@@ -1495,6 +1495,18 @@ fn canonical(guest: &str) -> String {
     guest.to_string()
 }
 
+/// The current process's procfs descriptor magic link. Callers must retain the
+/// referenced descriptor before changing its inode, rather than reopen its name.
+pub(super) fn current_fd_link(guest: &str) -> Option<Result<i32, Errno>> {
+    let canon = canonical(guest);
+    let tail = canon.strip_prefix(&format!("/proc/{}/fd/", pid()))
+        .or_else(|| canon.strip_prefix(&format!("/proc/{}/task/{}/fd/", pid(), super::process::gettid())))?;
+    let fd: i32 = tail.parse().ok()?;
+    if fd < 0 || fdtab::is_hidden(fd) { return Some(Err(ENOENT)); }
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 { return Some(Err(ENOENT)); }
+    Some(Ok(fd))
+}
+
 /// The thread of this process whose `comm` a canonical path names.
 fn comm_tid(canon: &str) -> Option<i32> {
     let rest = canon.strip_prefix("/proc/")?.strip_suffix("/comm")?;

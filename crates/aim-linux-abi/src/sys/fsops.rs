@@ -665,6 +665,12 @@ fn fchmodat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         Ok(value) => value,
         Err(error) => return error,
     };
+    if let Some(fd) = procfs::current_fd_link(&resolved.guest) {
+        return match fd {
+            Ok(fd) => chmod_fd(fd, a[2] as u32, id, true),
+            Err(error) => -(error as i64),
+        };
+    }
     if let Some(route) = vfs::fuse_route(&resolved.guest) {
         let mut mode = a[2] as u32 & 0o7777;
         if route.default_permissions {
@@ -710,15 +716,17 @@ pub fn fchmod(a: [u64; 6]) -> i64 {
     fchmod_as(a, &super::cred::current())
 }
 fn fchmod_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
-    let fd = a[0] as i32;
+    chmod_fd(a[0] as i32, a[1] as u32, id, false)
+}
+fn chmod_fd(fd: i32, mode: u32, id: &super::cred::Identity, magic_link: bool) -> i64 {
     if super::fdtab::is_hidden(fd) {
         return -(crate::errno::EBADF as i64);
     }
-    if super::fs::is_path_fd(fd) {
+    if !magic_link && super::fs::is_path_fd(fd) {
         return -(crate::errno::EBADF as i64);
     }
     if let Some(file) = super::fuse_client::get(fd) {
-        let mut mode = a[1] as u32 & 0o7777;
+        let mut mode = mode & 0o7777;
         if file.route.default_permissions {
             let stat = match super::fuse_client::stat(&file.route, Some(file.node), Some(file.fh)) {
                 Ok(stat) => stat,
@@ -741,18 +749,22 @@ fn fchmod_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         .map(|_| 0)
         .unwrap_or_else(|error| -(error as i64));
     }
-    let guest = fd_guest(fd).unwrap_or_default();
-    let original = fd;
     let anchor = match metadata_fd_copy(fd) {
         Ok(fd) => fd,
         Err(error) => return error,
     };
     let fd = anchor.as_raw_fd();
+    let guest = fd_guest(fd).unwrap_or_default();
     inode_mutation(Host::Fd(fd), &guest, true, |stat| {
-        if let Err(error) = writable_fd_metadata(original, &stat) {
+        // Following a procfs magic link to an O_PATH symlink must not change
+        // its target. Bionic maps this Linux ELOOP to ENOTSUP.
+        if magic_link && stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return -(crate::errno::ELOOP as i64);
+        }
+        if let Err(error) = writable_fd_metadata(fd, &stat) {
             return error;
         }
-        let mode = match chmod_mode(&stat, a[1] as u32 & 0o7777, id) {
+        let mode = match chmod_mode(&stat, mode & 0o7777, id) {
             Ok(mode) => mode,
             Err(error) => return error,
         };
@@ -1260,6 +1272,60 @@ mod tests {
         assert_eq!(vfs::lookup(&vfs::guest_path_of_host(&image_path.canonicalize().unwrap()).unwrap()).1,vfs::Area::Image);
         assert_eq!(ftruncate([image.as_raw_fd() as u64,37,0,0,0,0]),-(crate::errno::EROFS as i64));
         assert_eq!(image.metadata().unwrap().len(),0);drop(image);std::fs::remove_file(image_path).unwrap();
+    }
+
+    #[test]
+    fn mapped_cgroup_directory_dot_metadata_preserves_real_inode() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host = view.join("run/cgroup-dot");
+        std::fs::create_dir_all(host.join("system/uid_1000")).unwrap();
+        let host = host.canonicalize().unwrap();
+        vfs::add_mount("/sys/fs/cgroup", host.clone(), vfs::Area::Writable, "none", "cgroup2");
+        let proc_host = view.join("run/proc-dot"); std::fs::create_dir_all(&proc_host).unwrap();
+        vfs::add_mount("/proc", proc_host.canonicalize().unwrap(), vfs::Area::Kernfs, "proc", "proc");
+        let path = c("/sys/fs/cgroup/system/uid_1000/.");
+        let id = super::super::cred::Identity::default();
+        let resolved = resolve_metadata(vfs::LINUX_AT_FDCWD, path.as_bytes(), true, &id).unwrap();
+        let anchor = metadata_anchor(&resolved, true, false).unwrap();
+        assert_eq!(fchmodat_as([AT, path.as_ptr() as u64, 0o750, 0, 0, 0], &id), 0);
+        let directory = CString::new(host.join("system/uid_1000").as_os_str().as_encoded_bytes()).unwrap();
+        let fd = unsafe { libc::open(directory.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        assert!(fd >= 0);
+        assert_eq!(fchmodat_as([fd as u64, c".".as_ptr() as u64, 0o755, 0, 0, 0], &id), 0);
+        assert_eq!(unsafe { libc::close(fd) }, 0);
+        let path_fd = super::super::fs::openat([AT, path.as_ptr() as u64, 0o10000000 | 0o100000, 0, 0, 0]);
+        assert!(path_fd >= 0);
+        assert_eq!(fchmod_as([path_fd as u64, 0o750, 0, 0, 0, 0], &id), -(crate::errno::EBADF as i64));
+        let magic = c(&format!("/proc/self/fd/{path_fd}"));
+        let proc_resolved = resolve_metadata(vfs::LINUX_AT_FDCWD, magic.as_bytes(), true, &id).unwrap();
+        assert!(matches!(metadata_anchor(&proc_resolved, true, false), Err(error) if error == -(ENOENT as i64)));
+        assert_eq!(fchmodat_as([AT, magic.as_ptr() as u64, 0o750, 0, 0, 0], &id), 0);
+        attrs::record_checked(Host::Fd(path_fd as i32), || path.to_str().unwrap().into(), Attr{uid:Some(1000),gid:Some(1000),mode:Some(0o750)}).unwrap();
+        let mut system = id.clone(); system.uid=[1000;4]; system.gid=[1000;4]; system.cap_eff=0;
+        let mut foreign = system.clone(); foreign.uid=[2000;4];
+        assert_eq!(fchmodat_as([AT, magic.as_ptr() as u64, 0o777, 0, 0, 0], &foreign), -EPERM);
+        std::fs::rename(host.join("system/uid_1000"),host.join("system/retained")).unwrap();
+        std::fs::create_dir(host.join("system/uid_1000")).unwrap();
+        assert_eq!(fchmodat_as([AT, magic.as_ptr() as u64, 0o711, 0, 0, 0], &system), 0);
+        let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+        assert_eq!(unsafe{libc::fstat(path_fd as i32,&mut stat)},0);
+        attrs::apply(Host::Fd(path_fd as i32),||path.to_str().unwrap().into(),&mut stat);
+        assert_eq!(stat.st_mode & 0o7777,0o711);
+        let hidden=c(&format!("/proc/self/fd/{}",anchor.as_raw_fd()));
+        assert_eq!(fchmodat_as([AT,hidden.as_ptr() as u64,0o777,0,0,0],&id),-(ENOENT as i64));
+        assert_eq!(super::super::fs::close([path_fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(fchmodat_as([AT,magic.as_ptr() as u64,0o777,0,0,0],&id),-(ENOENT as i64));
+        std::os::unix::fs::symlink("retained",host.join("system/link")).unwrap();
+        let link=c("/sys/fs/cgroup/system/link");
+        let link_fd=super::super::fs::openat([AT,link.as_ptr() as u64,0o10000000|0o100000,0,0,0]);assert!(link_fd>=0);
+        let magic=c(&format!("/proc/self/fd/{link_fd}"));
+        assert_eq!(fchmodat_as([AT,magic.as_ptr() as u64,0o777,0,0,0],&id),-(crate::errno::ELOOP as i64));
+        assert_eq!(super::super::fs::close([link_fd as u64,0,0,0,0,0]),0);
+        drop(anchor);
+        assert!(vfs::remove_mount("/sys/fs/cgroup"));
+        assert!(vfs::remove_mount("/proc"));
+        std::fs::remove_dir_all(proc_host).unwrap();
+        std::fs::remove_dir_all(host).unwrap();
     }
 
     #[test]
