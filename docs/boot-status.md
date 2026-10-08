@@ -440,11 +440,18 @@ divergence. It stops at the module boundary with XML/logs/dumps preserved; it
 is not acceptance evidence. Fresh-template native CPU samples show repeated
 grantImplicitAccess AppsFilter construction inside the bootstrap mutex while
 AMS holds its monitor. Typed visibility-only capture now retains validated
-metadata and its static resolver relations; focused verification and fresh
-runtime replay are pending. The keyset mismatch comes from native installation
+metadata and its static resolver relations. Resolution/preparation run outside
+the bootstrap mutex, with epoch/base checks before publication; 17 visibility
+regressions and two strict fast/full parity cases pass. Fresh runtime replay is
+pending. The keyset mismatch comes from native installation
 persisting canonical metadata before publishing queries while the metadata
-actor uses the previous query owner; publication serialization is being fixed
-at that producer (#1132), retaining strict pool/role checks. Latest whole native library verification
+actor uses the previous query owner. A typed installation permit now serializes
+durable/canonical commit through query publication with metadata mutations,
+including compressed activation without recursively locking the same gate;
+original callbacks run after release (#1142). Real SPKI/durable publication,
+already-held permit, foreign permit rejection and callback release regression
+passes; strict pool/role checks remain. Latest full native suite passes 799/0,
+eleven ignored, and the C host build passes; fresh runtime replay is pending. Latest whole native library verification
 passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.

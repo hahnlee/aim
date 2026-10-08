@@ -402,8 +402,10 @@ pub struct Native {
     pub disk: std::sync::Arc<std::sync::Mutex<crate::package::owner::Store>>,
     pub apks: std::sync::Arc<Apks>,
     pub environment: std::sync::Arc<dyn Environment>,
+    pub publication_gate: std::sync::Arc<std::sync::Mutex<()>>,
 }
-struct NativePrepared {
+pub(crate) struct NativePrepared {
+    publication_gate: std::sync::Arc<std::sync::Mutex<()>>,
     snapshots: std::sync::Arc<crate::package::scan_snapshot::Store>,
     disk: std::sync::Arc<std::sync::Mutex<crate::package::owner::Store>>,
     environment: std::sync::Arc<dyn Environment>,
@@ -412,8 +414,23 @@ struct NativePrepared {
     admission: crate::package::scan::live_install::CompletedAdmission,
     verified_sessions: Vec<VerifiedCode>,
 }
-impl Owners for Native {
-    fn prepare(&self, code: Vec<VerifiedCode>) -> Result<Box<dyn PreparedInstall>, Failure> {
+pub(crate) struct PublicationPermit<'a> {
+    gate: &'a std::sync::Arc<std::sync::Mutex<()>>,
+    _guard: std::sync::MutexGuard<'a, ()>,
+}
+impl<'a> PublicationPermit<'a> {
+    fn acquire(gate: &'a std::sync::Arc<std::sync::Mutex<()>>) -> Self {
+        Self { gate, _guard: gate.lock().unwrap() }
+    }
+    pub(crate) fn matches_gate(&self, gate:&std::sync::Arc<std::sync::Mutex<()>>) -> bool {
+        std::sync::Arc::ptr_eq(self.gate,gate)
+    }
+}
+impl Native {
+    pub(crate) fn publication_permit(&self) -> PublicationPermit<'_> {
+        PublicationPermit::acquire(&self.publication_gate)
+    }
+    pub(crate) fn prepare_native(&self, code: Vec<VerifiedCode>) -> Result<NativePrepared, Failure> {
         let base = self.snapshots.capture();
         let verified_sessions = code.clone();
         let reservation = self.environment.reserve(code, &base).map_err(|error| stage_failure("Reservation", error))?;
@@ -433,7 +450,8 @@ impl Owners for Native {
             })?;
         let mut admission = reservation.complete_metadata(admission, &self.apks).map_err(|error| stage_failure("Scan metadata", error))?;
         reservation.prepare_runtime(&mut admission).map_err(|error| stage_failure("Runtime and permission preparation", error))?;
-        Ok(Box::new(NativePrepared {
+        Ok(NativePrepared {
+            publication_gate: self.publication_gate.clone(),
             snapshots: self.snapshots.clone(),
             disk: self.disk.clone(),
             environment: self.environment.clone(),
@@ -441,7 +459,12 @@ impl Owners for Native {
             reservation,
             admission,
             verified_sessions,
-        }))
+        })
+    }
+}
+impl Owners for Native {
+    fn prepare(&self, code: Vec<VerifiedCode>) -> Result<Box<dyn PreparedInstall>, Failure> {
+        self.prepare_native(code).map(|prepared|Box::new(prepared) as Box<dyn PreparedInstall>)
     }
     fn confirm_publication(&self, receipt: &PublishedInstall) -> Result<(), Failure> {
         if self.snapshots.capture().version() < receipt.generation {
@@ -455,9 +478,34 @@ impl Owners for Native {
         self.environment.finish(receipt)
     }
 }
+pub(crate) struct NativeCommitted {
+    pub(crate) receipt: PublishedInstall,
+    snapshot: std::sync::Arc<crate::package::scan_snapshot::Snapshot>,
+    reservation: Box<dyn Reservation>,
+}
+impl NativeCommitted {
+    pub(crate) fn finish(self) -> Result<PublishedInstall, Failure> {
+        self.reservation.publication_finished(&self.snapshot).map_err(|error|
+            Failure::after_commit(owner_failure("Committed publication effects", error).message))?;
+        Ok(self.receipt)
+    }
+}
 impl PreparedInstall for NativePrepared {
     fn commit(self: Box<Self>) -> Result<PublishedInstall, Failure> {
+        let gate=self.publication_gate.clone();
+        let permit=PublicationPermit::acquire(&gate);
+        let committed=(*self).commit_under_permit(&permit)?;
+        drop(permit);
+        committed.finish()
+    }
+}
+impl NativePrepared {
+    pub(crate) fn commit_under_permit(self, permit:&PublicationPermit<'_>) -> Result<NativeCommitted, Failure> {
+        if !permit.matches_gate(&self.publication_gate) {
+            return Err(Failure::invalid("install publication permit belongs to another owner"));
+        }
         let NativePrepared {
+            publication_gate: _,
             snapshots,
             disk,
             environment,
@@ -465,7 +513,7 @@ impl PreparedInstall for NativePrepared {
             reservation,
             admission,
             verified_sessions,
-        } = *self;
+        } = self;
         let users: Vec<u32> = reservation
             .users()
             .iter()
@@ -473,6 +521,8 @@ impl PreparedInstall for NativePrepared {
                 u32::try_from(user.id).map_err(|_| Failure::invalid("Negative installed user"))
             })
             .collect::<Result<_, _>>()?;
+        // Metadata writers use this same gate. Durable/canonical installation
+        // must not become visible to them before its query projection exists.
         let mut disk = disk.lock().unwrap();
         let result = admission.persist_publish_install(
             &snapshots,
@@ -516,9 +566,6 @@ impl PreparedInstall for NativePrepared {
         environment
             .publish_queries(&publication.snapshot)
             .map_err(Failure::after_commit)?;
-        reservation
-            .publication_finished(&publication.snapshot)
-            .map_err(|error| Failure::after_commit(owner_failure("Committed publication effects", error).message))?;
         let mut packages = Vec::new();
         let mut new_installations=std::collections::BTreeSet::new();
         for metadata in publication.completed {
@@ -536,11 +583,77 @@ impl PreparedInstall for NativePrepared {
                 }
             }
         }
-        Ok(PublishedInstall {
+        let snapshot=publication.snapshot.clone();
+        Ok(NativeCommitted { snapshot, reservation, receipt: PublishedInstall {
             generation: publication.snapshot.version(),
             packages,
             verified_sessions,
             new_installations,
-        })
+        } })
+    }
+}
+
+#[cfg(test)]
+mod publication_gate_tests {
+    use super::*;
+    use std::sync::{Arc,Mutex,mpsc};
+    struct EnvironmentProbe{query:Arc<Mutex<Arc<crate::package::scan_snapshot::Snapshot>>>,entered:mpsc::Sender<()>,release:Mutex<mpsc::Receiver<()>>}
+    impl Environment for EnvironmentProbe{
+        fn reserve(&self,_:Vec<VerifiedCode>,_:&Arc<crate::package::scan_snapshot::Snapshot>)->Result<Box<dyn Reservation>,Failure>{panic!("commit fixture does not run preparation")}
+        fn publish_queries(&self,snapshot:&Arc<crate::package::scan_snapshot::Snapshot>)->Result<(),String>{self.entered.send(()).unwrap();self.release.lock().unwrap().recv().unwrap();*self.query.lock().unwrap()=snapshot.clone();Ok(())}
+        fn finish(&self,_:PublishedInstall)->Result<(),Exception>{panic!("commit fixture does not run completion")}
+    }
+    struct ReservationProbe{gate:Arc<Mutex<()>>,finished:Arc<std::sync::atomic::AtomicBool>}
+    impl Reservation for ReservationProbe{
+        fn requests(&self)->Result<Vec<crate::package::scan::live_install::Request>,Failure>{panic!("prepared admission fixture")}
+        fn users(&self)->&[crate::package::scan::User]{&[]}
+        fn build_debuggable(&self)->bool{false}
+        fn complete_metadata(&self,_:crate::package::scan::live_install::Admission,_:&Apks)->Result<crate::package::scan::live_install::CompletedAdmission,Failure>{panic!("prepared admission fixture")}
+        fn prepare_runtime(&self,_:&mut crate::package::scan::live_install::CompletedAdmission)->Result<(),Failure>{panic!("prepared admission fixture")}
+        fn cross_user_suspensions(&self)->bool{false}
+        fn mark_committed(&self,_:&Arc<crate::package::scan_snapshot::Snapshot>){assert!(self.gate.try_lock().is_err());}
+        fn publication_finished(&self,_:&Arc<crate::package::scan_snapshot::Snapshot>)->Result<(),Exception>{assert!(self.gate.try_lock().is_ok());self.finished.store(true,std::sync::atomic::Ordering::Release);Ok(())}
+    }
+    #[test]
+    fn metadata_writer_waits_for_real_keyset_commit_and_query_publication(){
+        for nested in [false,true] {
+        use crate::package::{scan::SigningScan,settings::{Settings,Package},owner::{Store,key_sets,usage::Usage}};
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        static NEXT:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+        let path=std::env::temp_dir().join(format!("aim-install-publish-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir(&path).unwrap();
+        let settings=Settings{packages:vec![Package{name:"p".into(),app_id:10100,code_path:"/data/app/p".into(),domain_set_id:Some("00000000-0000-0000-0000-000000000001".into()),..Default::default()}],..Default::default()};
+        let mut owner=SigningScan::new(&Default::default(),&settings,36).unwrap();
+        owner.capture_replica_runtime(std::collections::BTreeMap::from([(("p".into(),false),crate::package::scan::ReplicaRuntime{usage:[0;8],seinfo:None,override_seinfo:None,library_files:vec![],libraries:vec![]})])).unwrap();
+        let snapshots=Arc::new(crate::package::scan_snapshot::Store::new(owner,Usage::new(["p"])).unwrap());let base=snapshots.capture();
+        let mut disk=Store::create(&path,&[]).unwrap();disk.commit_scan_settings(&base).unwrap();let disk=Arc::new(Mutex::new(disk));
+        let mut candidate=base.owner().clone();let mut scalar=[0u8;32];scalar[31]=1;
+        let mut key=vec![0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00];
+        key.extend_from_slice(p256::SecretKey::from_slice(&scalar).unwrap().public_key().to_encoded_point(false).as_bytes());key_sets::register(&mut candidate.settings,"p",&[key],None,&[]).unwrap();
+        let query=Arc::new(Mutex::new(base.clone()));let gate=Arc::new(Mutex::new(()));let finished=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (entered,at_projection)=mpsc::channel();let (release,resume)=mpsc::channel();
+        let environment:Arc<dyn Environment>=Arc::new(EnvironmentProbe{query:query.clone(),entered,release:Mutex::new(resume)});
+        let wrong=NativePrepared{publication_gate:gate.clone(),snapshots:snapshots.clone(),disk:disk.clone(),environment:environment.clone(),base:base.clone(),reservation:Box::new(ReservationProbe{gate:gate.clone(),finished:finished.clone()}),admission:crate::package::scan::live_install::CompletedAdmission{owner:candidate.clone(),completed:vec![]},verified_sessions:vec![]};
+        let unrelated=Arc::new(Mutex::new(()));let wrong_permit=PublicationPermit::acquire(&unrelated);
+        let error=wrong.commit_under_permit(&wrong_permit).err().expect("wrong owner permit must reject");
+        assert!(!error.committed);assert_eq!(snapshots.capture().owner().settings.key_sets.last_issued_key_id,0);drop(wrong_permit);
+        let prepared=NativePrepared{publication_gate:gate.clone(),snapshots:snapshots.clone(),disk:disk.clone(),environment,base:base.clone(),reservation:Box::new(ReservationProbe{gate:gate.clone(),finished:finished.clone()}),admission:crate::package::scan::live_install::CompletedAdmission{owner:candidate,completed:vec![]},verified_sessions:vec![]};
+        let worker_gate=gate.clone();
+        let installer=std::thread::spawn(move||{
+            if nested {let permit=PublicationPermit::acquire(&worker_gate);let committed=prepared.commit_under_permit(&permit)?;drop(permit);committed.finish()}
+            else {Box::new(prepared).commit()}
+        });
+        if at_projection.recv().is_err(){panic!("native commit failed before query publication: {:?}",installer.join().unwrap().err().map(|error|error.message));}
+        assert_eq!(disk.lock().unwrap().state().settings.key_sets.last_issued_key_id,1);
+        assert_eq!(snapshots.capture().owner().settings.key_sets.last_issued_key_id,1);
+        assert_eq!(query.lock().unwrap().owner().settings.key_sets.last_issued_key_id,0);
+        let (observed,observation)=mpsc::channel();let writer_gate=gate.clone();let writer_disk=disk.clone();let writer_query=query.clone();
+        let writer=std::thread::spawn(move||{let _guard=writer_gate.lock().unwrap();let query=writer_query.lock().unwrap().clone();writer_disk.lock().unwrap().validate_committed_scan(query.owner()).unwrap();observed.send(query.owner().settings.key_sets.clone()).unwrap();});
+        assert!(observation.recv_timeout(std::time::Duration::from_millis(30)).is_err());release.send(()).unwrap();
+        let receipt=installer.join().unwrap().unwrap();let actual=observation.recv().unwrap();writer.join().unwrap();
+        assert_eq!(actual,disk.lock().unwrap().state().settings.key_sets);
+        assert_eq!(receipt.generation,snapshots.capture().version());assert!(finished.load(std::sync::atomic::Ordering::Acquire));
+        drop(disk);std::fs::remove_dir_all(path).unwrap();
+        }
     }
 }

@@ -55,17 +55,18 @@ impl Owner {
     }
     pub fn enable_compressed(&self, name: &str, user: i32) -> Result<bool, Exception> {
         let before_version = self.store.snapshots.capture().version();
-        let gate = self.gate.lock().unwrap();
-        let result = (|| -> Result<bool, Exception> {
+        let gate = self.native.publication_permit();
+        if !gate.matches_gate(&self.gate) { return Err(illegal("Compressed owner publication gate differs")); }
+        let result = (|| -> Result<Option<(pipeline::NativeCommitted, Vec<i32>)>, Exception> {
         let before = self.native.snapshots.capture();
         let setting = before.owner().settings.packages.iter().find(|package| package.name == name).ok_or_else(|| illegal("Compressed package setting missing"))?;
         let accepted = before.owner().loaded_packages().get(name).ok_or_else(|| illegal("Compressed stub code missing"))?;
         if setting.flags & super::settings::FLAG_SYSTEM == 0 || !accepted.package.is2(booleans2::STUB) { return Err(illegal("Compressed enable requires an accepted system stub")) }
         let freeze = self.lifecycle.freeze(name.into()).map_err(illegal)?;
         self.effects.kill(name, setting.app_id, -1, "setEnabledSetting", 16)?;
-        let result = self.expand(name, user, &before);
+        let result = self.expand(name, user, &before, &gate);
         match result {
-            Ok(()) => { drop(freeze); Ok(true) }
+            Ok(committed) => { drop(freeze); Ok(Some(committed)) }
             Err(error) => {
                 self.errors.lock().unwrap().push(format!("Compressed enable failure: {error:?}"));
                 self.restore_stub(name, &before)?;
@@ -73,14 +74,23 @@ impl Owner {
                 let mut state = capture.owner().scanned_user_states(name).and_then(|users| users.get(&0)).cloned().unwrap_or_default();
                 state.enabled = 2; state.last_disable_app_caller = Some("android".into());
                 self.store.user_state(name, 0, state)?;
-                drop(freeze); Ok(false)
+                drop(freeze); Ok(None)
             }
         }
         })();
         drop(gate);
+        let result = result.and_then(|committed| match committed {
+            None => Ok(false),
+            Some((committed, users)) => {
+                let receipt=committed.finish().map_err(|error|illegal(error.message))?;
+                self.native.finish(receipt)?;
+                self.bridge.clear_code_cache(name,&users)?;
+                Ok(true)
+            }
+        });
         self.store.finish_after_unlock(before_version, result)
     }
-    fn expand(&self, name: &str, user: i32, before: &Arc<Snapshot>) -> Result<(), Exception> {
+    fn expand(&self, name: &str, user: i32, before: &Arc<Snapshot>, permit:&pipeline::PublicationPermit<'_>) -> Result<(pipeline::NativeCommitted,Vec<i32>), Exception> {
         let setting = before.owner().settings.packages.iter().find(|package| package.name == name).unwrap();
         let stub_path = std::path::Path::new(&setting.code_path);
         let stub_name = stub_path.file_name().and_then(|name| name.to_str()).ok_or_else(|| illegal("Invalid stub code path"))?;
@@ -121,18 +131,19 @@ impl Owner {
         let record = installer::Record { params: SessionParams { mode: 1, install_flags: flags, app_package_name: Some(name.into()), required_installed_version_code: setting.version_code,
             application_enabled_setting_persistent: true, ..Default::default() }, installer_uid: 1000, user: user as u32, installer_package: Some("android".into()), installer_attribution_tag: None,
             created_millis: now, initiating_package: None, originating_package: None, installer_package_uid: 1000 };
-        let prepared = self.native.prepare(vec![pipeline::VerifiedCode { session, record, package, signing }]).map_err(|error| illegal(error.message))?;
-        let receipt = match prepared.commit() {
-            Ok(receipt) => receipt,
+        let prepared = self.native.prepare_native(vec![pipeline::VerifiedCode { session, record, package, signing }]).map_err(|error| illegal(error.message))?;
+        let committed = match prepared.commit_under_permit(permit) {
+            Ok(committed) => committed,
             Err(error) => { if error.committed { stage.keep = true; } return Err(illegal(format!("Compressed publication committed={}: {}", error.committed, error.message))); }
         };
         stage.keep = true;
+        let receipt=&committed.receipt;
         let state = (self.source)()?; let active = state.packages.get(name).ok_or_else(|| illegal("Expanded package not published"))?;
         if state.generation != receipt.generation || state.generation <= retained.version() || active.pkg.as_ref().is_none_or(|code| code.is2(booleans2::STUB)) { stage.keep = true; return Err(illegal("Expanded publication does not replace the stub")) }
         if active.path != stage_guest { stage.keep = false; }
-        self.native.confirm_publication(&receipt).map_err(|error| illegal(error.message))?;
-        self.native.finish(receipt)?;
-        let users: Vec<_> = active.users.keys().copied().collect(); self.bridge.clear_code_cache(name, &users)
+        self.native.confirm_publication(receipt).map_err(|error| illegal(error.message))?;
+        let users: Vec<_> = active.users.keys().copied().collect();
+        Ok((committed,users))
     }
     fn publish(&self, base: &Arc<Snapshot>, result: Result<Arc<Snapshot>, super::scan_snapshot::CommitError>) -> Result<Arc<Snapshot>, Exception> {
         match result {

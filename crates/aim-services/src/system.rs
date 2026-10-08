@@ -3255,6 +3255,7 @@ impl System {
         let environment = self.package_install_event_environment(bridge, environment)?;
         let pipeline = Arc::new(crate::package::installer::pipeline::Native {
             snapshots, disk, apks: apks.clone(), environment,
+            publication_gate: self.package_install_lock.clone(),
         });
         self.check_package_bootstrap(bridge)?;
         installer.configure_installation(apks, pipeline.clone())?;
