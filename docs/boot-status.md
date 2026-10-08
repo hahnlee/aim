@@ -541,7 +541,9 @@ probe: exit0,27949 bytes,660 parsed property rows,SDK36 and boot_completed1,
 with no PTY error. Its fresh full66 campaign allocates the device and starts the
 first official Parsing module completes with actual XML:11 passed,0 failed,
 done=true, SHA86d5e8020002161d5fa7d50b84582f7337acaa0e0a78fc0cb4f76d401aba8cdb.
-PreferredActivity follows automatically; full66 remains incomplete. The
+PreferredActivity also completes with official XML2/0, done=true, after two
+real Tradefed reboots; SHA0f6827de97f9eb7c4c51ce432046ca0a52ad79af3d64ba9b2c1f3f712e80e18b.
+Setting follows automatically; current full66 is2/66 complete, not accepted. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
