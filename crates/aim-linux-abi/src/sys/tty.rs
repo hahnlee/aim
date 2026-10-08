@@ -410,6 +410,41 @@ mod tests {
     }
 
     #[test]
+    fn pty_slave_open_obeys_real_guest_namespace_ancestors_and_exec_import() {
+        use std::ffi::CString;
+        let (_guard, root) = crate::vfs::test_view();
+        let device = root.join("owned-pty-dev");
+        std::fs::create_dir_all(&device).unwrap();
+        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "owned-pty-dev", "tmpfs");
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0);
+            let mut unlock = 0i32;
+            assert_eq!(ioctl(master, TIOCSPTLCK, &mut unlock as *mut i32 as u64), Some(0));
+            let mut number = u32::MAX;
+            assert_eq!(ioctl(master, TIOCGPTN, &mut number as *mut u32 as u64), Some(0));
+            let slave = CString::new(format!("/dev/pts/{number}")).unwrap();
+            let open = || crate::sys::fs::openat([crate::vfs::LINUX_AT_FDCWD as u64, slave.as_ptr() as u64, 2 | 0x100, 0, 0, 0]);
+            // A real master does not make a missing guest ancestor searchable.
+            assert_eq!(open(), -(crate::errno::ENOENT as i64));
+            std::fs::create_dir(device.join("pts")).unwrap();
+            for imported in [false, true] {
+                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts); }
+                let fd = open(); assert!(fd >= 0, "PTY slave open after import={imported}: {fd}");
+                let mut size: libc::winsize = std::mem::zeroed();
+                assert_eq!(libc::ioctl(fd as i32, libc::TIOCGWINSZ, &mut size), 0);
+                assert_eq!(crate::sys::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+            }
+            libc::close(master);
+        }
+        assert!(crate::vfs::remove_mount("/dev"));
+        // The same-process import adds a second owned entry; the real exec
+        // starts with only map entries, then imports its one inherited mount.
+        assert!(crate::vfs::remove_mount("/dev"));
+        std::fs::remove_dir_all(device).unwrap();
+    }
+
+    #[test]
     fn a_pty_pair_through_the_ioctls() {
         // SAFETY: a host pty pair made and closed here.
         unsafe {

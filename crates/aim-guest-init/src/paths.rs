@@ -539,6 +539,9 @@ impl Layout {
         for dir in [
             self.properties_dir(),
             self.socket_dir(),
+            // The PTY owner maps numeric slaves to actual host terminals;
+            // their guest namespace directory must exist for DAC traversal.
+            self.dev_dir().join("pts"),
             self.kernfs_dir().join("proc"),
             self.kernfs_dir().join("sys"),
             self.cgroup_dir(),
@@ -624,6 +627,17 @@ mod tests {
 
     fn map() -> PathMap {
         Layout::new("/img".into(), "/w".into(), Some("/r".into())).path_map()
+    }
+
+    #[test]
+    fn prepared_runtime_contains_the_actual_pty_namespace_directory() {
+        let dir = std::env::temp_dir().join(format!("aim-runtime-pts-{}", std::process::id()));
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("runtime")));
+        layout.prepare_runtime().unwrap();
+        let pts = layout.dev_dir().join("pts");
+        assert!(fs::metadata(&pts).unwrap().is_dir());
+        assert_eq!(layout.path_map().lookup("/dev/pts/3").0, pts.join("3"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

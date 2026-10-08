@@ -520,7 +520,21 @@ This does not establish the fresh-first-boot Chrome gate. Debug boots and helper
 are reaped; diagnostic logging is removed. A new fresh native full66 campaign
 uses this exact immutable host pair, explicit --linux-run through Tradefed,
 pre-spawn hashes and actual readiness before invocation. Full CTS remains
-incomplete; the old cohorts' failures and missing tests are retained.
+incomplete; the old cohorts' failures and missing tests are retained. The C109 fresh
+campaign's first invocation cannot allocate a device because original adbd
+exec-out fails opening /dev/pts/3 (#1154). It records NOT RUN with no XML;
+its runner, wrapper, guest and display are normally stopped. Runtime preparation
+now creates the actual devpts namespace directory, preserving DAC traversal and
+real terminal identity. Two real PTY/runtime-directory regressions pass; fresh
+exec-out and CTS replay require a new immutable cohort. A separate rollback on
+a clone of native-written data constructs original PMS (package owner PID equals
+SystemServer50573), preserving five selected packages' UID/codepath/version,
+persisted signatures and runtime permissions; Calculator, WebView and Chrome
+render. Strict component parity is incomplete because native internal Version
+metadata is0/0 with missing fingerprints, making original PMS apply its pre-Q
+AppDetails migration (#1157). Donor/clone cleanup is verified and the clone is
+retained. GMS idle traffic is not accepted: the fresh native boot also records a
+CrisisAlerts persistent-process fatal (#1155), under independent investigation.
 Inherited capability refresh now pins
 each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
