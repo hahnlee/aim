@@ -508,7 +508,7 @@ a new vnode while the frozen original executable path dies before main. This
 narrows #1146 to executable publication/vnode generation behavior; it does not
 prove a permission workaround or a resolved reboot. Originals and frozen CTS
 binary bytes remain unchanged; controls are cleaned after verification. Latest whole native library verification
-passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
+passes 802/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0
