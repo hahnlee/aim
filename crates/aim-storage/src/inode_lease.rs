@@ -28,6 +28,8 @@ pub struct Admission {inode:Inode,_metadata:PrivateFd}
 pub struct WriterLease {inode:Inode,descriptor:PrivateFd}
 pub struct ExclusiveLease {inode:Inode,descriptor:PrivateFd}
 pub type EnableSlot = ExclusiveLease;
+/// Serializes position-dependent operations; aliases retain the same flock.
+pub type OffsetLock = ExclusiveLease;
 fn duplicate(fd:BorrowedFd<'_>)->io::Result<PrivateFd>{PrivateFd::allocate(||{let result=unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};if result<0{Err(io::Error::last_os_error())}else{Ok(unsafe{OwnedFd::from_raw_fd(result)})}})}
 fn locked(fd:BorrowedFd<'_>,operation:i32)->io::Result<()>{loop{if unsafe{libc::flock(fd.as_raw_fd(),operation)}==0{return Ok(());}let error=io::Error::last_os_error();if error.kind()==io::ErrorKind::Interrupted{continue;}if operation&libc::LOCK_NB!=0&&error.kind()==io::ErrorKind::WouldBlock{return Err(io::Error::from_raw_os_error(libc::EBUSY));}return Err(error);}}
 impl Inode {
@@ -57,6 +59,11 @@ impl Inode {
     pub fn admission(&self)->io::Result<Admission>{
         if Identity::from_fd(self.source())?!=self.identity(){return Err(io::Error::from_raw_os_error(libc::ESTALE));}
         let metadata=self.lock_file("admission")?;locked(metadata.as_fd(),libc::LOCK_EX)?;Ok(Admission{inode:self.clone(),_metadata:metadata})}
+    pub fn offset_lock(&self)->io::Result<OffsetLock>{
+        if Identity::from_fd(self.source())?!=self.identity(){return Err(io::Error::from_raw_os_error(libc::ESTALE));}
+        let descriptor=self.lock_file("offset")?;locked(descriptor.as_fd(),libc::LOCK_EX)?;
+        Ok(ExclusiveLease{inode:self.clone(),descriptor})
+    }
     /// Adopt the actual carrier under admission and verify its lock-file inode.
     pub fn adopt_writer(&self,carrier:OwnedFd)->io::Result<WriterLease>{
         self.adopt_private_writer(PrivateFd::adopt(carrier)?)
@@ -83,6 +90,7 @@ impl WriterLease {
     pub fn into_fd(self)->io::Result<OwnedFd>{self.descriptor.into_fd()}
 }
 impl ExclusiveLease {
+    pub fn try_clone(&self)->io::Result<Self>{Ok(Self{inode:self.inode.clone(),descriptor:self.descriptor.try_clone()?})}
     pub fn identity(&self)->Identity{self.inode.identity()}
     pub fn descriptor(&self)->BorrowedFd<'_>{self.descriptor.as_fd()}
 }
@@ -145,6 +153,30 @@ mod tests {
         let header=unsafe{libc::CMSG_FIRSTHDR(&message)};unsafe{(*header).cmsg_level=libc::SOL_SOCKET;(*header).cmsg_type=libc::SCM_RIGHTS;(*header).cmsg_len=libc::CMSG_LEN(4);(libc::CMSG_DATA(header) as *mut i32).write_unaligned(writer.descriptor().as_raw_fd());}
         assert_eq!(unsafe{libc::sendmsg(sender.as_raw_fd(),&message,0)},1);drop(writer);busy(fixture.inode.admission().unwrap().exclusive());
         control.fill(0);message.msg_controllen=size as _;assert_eq!(unsafe{libc::recvmsg(receiver.as_raw_fd(),&mut message,0)},1);let fd=unsafe{(libc::CMSG_DATA(libc::CMSG_FIRSTHDR(&message)) as *const i32).read_unaligned()};let lease=fixture.inode.adopt_writer(unsafe{OwnedFd::from_raw_fd(fd)}).unwrap();busy(fixture.inode.admission().unwrap().exclusive());drop(lease);assert!(fixture.inode.admission().unwrap().exclusive().is_ok());
+    }
+    #[test]
+    fn offset_lock_serializes_processes_until_final_alias_close(){
+        let fixture=Fixture::new();let lock=fixture.inode.offset_lock().unwrap();let alias=lock.try_clone().unwrap();
+        let ready=pipe();let acquired=pipe();let child=unsafe{libc::fork()};assert!(child>=0);
+        if child==0{
+            drop(lock);drop(alias);
+            byte(ready[1].as_raw_fd(),b'r');
+            let _lock=match fixture.inode.offset_lock(){Ok(lock)=>lock,Err(_)=>unsafe{libc::_exit(41)}};
+            byte(acquired[1].as_raw_fd(),b'a');unsafe{libc::_exit(0)}
+        }
+        struct Child(Option<i32>);
+        impl Drop for Child{fn drop(&mut self){if let Some(pid)=self.0{unsafe{libc::kill(pid,libc::SIGKILL);libc::waitpid(pid,std::ptr::null_mut(),0);}}}}
+        let mut owned_child=Child(Some(child));
+        assert_eq!(read_byte(ready[0].as_raw_fd()),b'r');
+        let mut event=libc::pollfd{fd:acquired[0].as_raw_fd(),events:libc::POLLIN,revents:0};
+        assert_eq!(unsafe{libc::poll(&mut event,1,50)},0);
+        drop(lock);assert_eq!(unsafe{libc::poll(&mut event,1,50)},0);
+        drop(alias);assert_eq!(unsafe{libc::poll(&mut event,1,2000)},1);
+        assert_eq!(read_byte(acquired[0].as_raw_fd()),b'a');
+        let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);
+        owned_child.0=None;
+        assert!(libc::WIFEXITED(status));assert_eq!(libc::WEXITSTATUS(status),0);
+        assert!(fixture.inode.offset_lock().is_ok());
     }
     #[test]
     fn canonical_directory_and_lock_nodes_reject_symlink_redirection(){
