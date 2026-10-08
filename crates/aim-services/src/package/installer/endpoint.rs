@@ -509,6 +509,7 @@ impl Service for Endpoint {
                     }
                     let owners = self.owners.clone();
                     let node = Arc::new(SessionNode {
+                        bound: self.sessions.bind_session(id)?,
                         operations: self.owners.session_operations(),
                         sessions: self.sessions.clone(),
                         id,

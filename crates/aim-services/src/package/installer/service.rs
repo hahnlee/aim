@@ -428,7 +428,7 @@ impl Service for SessionNode {
                         (self.notify)(event);
                     }
                 }),
-            Action::Close => self.sessions.close(self.id, call.sender_euid).map(|event| {
+            Action::Close => self.sessions.close_bound(self.id, call.sender_euid, &self.bound).map(|event| {
                 if let Some(event) = event {
                     (self.notify)(event);
                 }
@@ -451,7 +451,7 @@ impl Service for SessionNode {
                 }),
             Action::Read => self
                 .sessions
-                .snapshot(self.id)
+                .bound_snapshot(self.id, &self.bound)
                 .map(|session| match call.code {
                     aidl::IS_MULTI_PACKAGE => aidl::write_is_multi_package_reply(
                         &mut reply,

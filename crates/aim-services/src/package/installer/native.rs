@@ -2132,6 +2132,7 @@ mod tests {
         );
         use aim_service_aidl::android_content_pm_ipackageinstallersession as session_api;
         let node = super::super::SessionNode {
+            bound: sessions.bind_session(id).unwrap(),
             operations: Some(owner.clone()),
             sessions: sessions.clone(),
             id,
@@ -2228,6 +2229,7 @@ mod tests {
             ["BB", "Aa"]
         );
         let node = super::super::SessionNode {
+            bound: sessions.bind_session(id).unwrap(),
             operations: Some(owner.clone()),
             sessions: sessions.clone(),
             id,

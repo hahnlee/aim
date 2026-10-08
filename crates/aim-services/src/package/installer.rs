@@ -3,7 +3,7 @@
 //! recovery must be connected before publishing PackageInstaller (#986).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
@@ -118,6 +118,25 @@ struct State {
     allocated: BTreeSet<i32>,
     records: BTreeMap<i32, Record>,
     historical: Vec<(Session, Record)>,
+    bound: BTreeMap<i32, Weak<BoundSession>>,
+}
+
+/// One original Session object may outlive removal from PIS's active map.
+/// Only live Binder nodes hold this owner; the registry keeps a weak index.
+pub(crate) struct BoundSession {
+    id: i32,
+    registry: Weak<Sessions>,
+    terminal: Mutex<Option<Session>>,
+}
+impl Drop for BoundSession {
+    fn drop(&mut self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let mut state = registry.0.lock().unwrap();
+            if state.bound.get(&self.id).is_some_and(|owner| std::ptr::eq(owner.as_ptr(), self)) {
+                state.bound.remove(&self.id);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -281,6 +300,36 @@ impl Sessions {
             .get(&id)
             .cloned()
             .ok_or_else(|| state("Unknown session"))
+    }
+
+    pub(crate) fn bind_session(self: &Arc<Self>, id: i32) -> Result<Arc<BoundSession>, Exception> {
+        let mut state = self.0.lock().unwrap();
+        if !state.sessions.contains_key(&id) { return Err(self::state("Unknown session")); }
+        if let Some(owner) = state.bound.get(&id).and_then(Weak::upgrade) { return Ok(owner); }
+        let owner = Arc::new(BoundSession {id,registry:Arc::downgrade(self),terminal:Mutex::new(None)});
+        state.bound.insert(id, Arc::downgrade(&owner));
+        Ok(owner)
+    }
+    fn check_bound(&self, id: i32, owner: &BoundSession) -> Result<(), Exception> {
+        if owner.id != id || !std::ptr::eq(owner.registry.as_ptr(), self) {
+            return Err(Exception::security("Foreign bound session owner"));
+        }
+        Ok(())
+    }
+    pub(crate) fn bound_snapshot(&self,id:i32,owner:&BoundSession)->Result<Session,Exception>{
+        self.check_bound(id,owner)?;
+        let state=self.0.lock().unwrap();
+        if let Some(session)=state.sessions.get(&id){return Ok(session.clone());}
+        owner.terminal.lock().unwrap().clone().ok_or_else(||self::state("Unknown bound session"))
+    }
+    pub(crate) fn close_bound(&self,id:i32,uid:u32,owner:&BoundSession)->Result<Option<Event>,Exception>{
+        self.check_bound(id,owner)?;
+        let mut state=self.0.lock().unwrap();
+        let mut terminal=owner.terminal.lock().unwrap();
+        let session=state.sessions.get_mut(&id).or(terminal.as_mut()).ok_or_else(||self::state("Unknown bound session"))?;
+        session.owner(uid)?;
+        session.active_count=session.active_count.wrapping_sub(1);
+        Ok((session.active_count==0).then_some(Event::Active{id,user:session.user,active:false}))
     }
 
     /// Preparation is performed by the storage owner first. A caller must
@@ -454,14 +503,23 @@ impl Sessions {
             let record = state.records.get(id).cloned().ok_or_else(|| self::state("Finished parameter owner unavailable"))?;
             Ok((session,record))
         }).collect::<Result<Vec<_>,Exception>>()?;
+        let bound = records.iter().filter_map(|(session,_)|state.bound.get(&session.id).and_then(Weak::upgrade)).collect::<Vec<_>>();
         for (session,record) in records {
             if !state.historical.iter().any(|(old,_)|old.id==session.id) {
                 if state.historical.len()>500 {state.historical.drain(..400);}
                 state.historical.push((session.clone(),record));
             }
+            if let Some(owner)=bound.iter().find(|owner|owner.id==session.id) {
+                let mut terminal=session.clone();terminal.destroyed=true;
+                *owner.terminal.lock().unwrap()=Some(terminal);
+            }
             state.sessions.remove(&session.id);
             state.records.remove(&session.id);
         }
+        // A temporary upgrade may be the last strong owner if its Binder node
+        // dies concurrently; release outside the registry lock.
+        drop(state);
+        drop(bound);
         Ok(ids)
     }
     pub fn historical_records(&self)->Vec<(Session,Record)> {self.0.lock().unwrap().historical.clone()}
@@ -704,6 +762,7 @@ pub trait SessionOperations: Send + Sync {
     fn graph_changed(&self) -> Result<(), Exception>;
 }
 pub struct SessionNode {
+    pub(crate) bound: Arc<BoundSession>,
     pub operations: Option<Arc<dyn SessionOperations>>,
     pub sessions: Arc<Sessions>,
     pub id: i32,
@@ -821,6 +880,42 @@ mod tests {
         assert_eq!(sessions.snapshot(id).unwrap().active_count, 0);
     }
     #[test]
+    fn bound_binder_close_survives_terminal_retirement_with_real_owner_and_count() {
+        use aim_binder_host::{local::{Call,Service},parcel::{Parcel,Reader,BAD_VALUE,EX_SECURITY}};
+        use aim_service_aidl::android_content_pm_ipackageinstallersession as aidl;
+        let sessions=Arc::new(Sessions::default());
+        let id=sessions.create_record(Record{params:codec::SessionParams{mode:1,..Default::default()},
+            installer_uid:2000,user:0,installer_package:Some("fixture.installer".into()),installer_attribution_tag:None,
+            created_millis:1,initiating_package:None,originating_package:None,installer_package_uid:2000},false).unwrap();
+        sessions.prepared(id).unwrap();sessions.open(id,2000).unwrap();sessions.open(id,2000).unwrap();
+        sessions.with_record_mut(id,|session,_|{session.committed=true;session.sealed=true;Ok(())}).unwrap();
+        let events=Arc::new(Mutex::new(Vec::new()));
+        let make_node=||{let events=events.clone();Arc::new(SessionNode{bound:sessions.bind_session(id).unwrap(),
+            operations:None,sessions:sessions.clone(),id,notify:Arc::new(move|event|events.lock().unwrap().push(event))})};
+        let first=make_node();let second=make_node();assert!(Arc::ptr_eq(&first.bound,&second.bound));
+        let lease=Arc::downgrade(&first.bound);
+        sessions.finish_nonstaged(id).unwrap();assert!(sessions.snapshot(id).is_err());assert!(sessions.records().is_empty());
+        assert!(sessions.bound_snapshot(id,&first.bound).unwrap().destroyed);
+        let mut request=Parcel::new();aidl::Close{}.write(&mut request);
+        let transact=|node:&SessionNode,uid,parcel:&Parcel|node.transact(&mut Call{code:aidl::CLOSE,flags:0,sender_pid:1,sender_euid:uid,data:Reader::new(parcel.data(),parcel.objects())});
+        let denied=transact(&first,10199,&request).unwrap();assert_eq!(denied.reader().read_exception().unwrap().unwrap_err().code,EX_SECURITY);
+        assert_eq!(sessions.bound_snapshot(id,&first.bound).unwrap().active_count,2);assert!(events.lock().unwrap().is_empty());
+        let mut malformed=Parcel::new();aidl::Close{}.write(&mut malformed);malformed.write_i32(1);
+        assert_eq!(transact(&first,2000,&malformed).unwrap_err(),BAD_VALUE);
+        let reply=transact(&first,2000,&request).unwrap();reply.reader().read_exception().unwrap().unwrap();
+        assert_eq!(sessions.bound_snapshot(id,&first.bound).unwrap().active_count,1);assert!(events.lock().unwrap().is_empty());
+        let reply=transact(&second,2000,&request).unwrap();reply.reader().read_exception().unwrap().unwrap();
+        assert_eq!(sessions.bound_snapshot(id,&second.bound).unwrap().active_count,0);
+        assert!(matches!(events.lock().unwrap().as_slice(),[Event::Active{id:returned,active:false,..}]if *returned==id));
+        let mut read=Parcel::new();aidl::IsMultiPackage{}.write(&mut read);
+        let reply=first.transact(&mut Call{code:aidl::IS_MULTI_PACKAGE,flags:0,sender_pid:1,sender_euid:2000,data:Reader::new(read.data(),read.objects())}).unwrap();
+        assert!(!aidl::read_is_multi_package_reply(&mut reply.reader()).unwrap().unwrap());
+        drop(first);assert!(lease.upgrade().is_some());drop(second);assert!(lease.upgrade().is_none());
+        assert!(!sessions.0.lock().unwrap().bound.contains_key(&id));
+        assert!(sessions.records().is_empty());assert_eq!(sessions.historical_records().len(),1);
+    }
+
+    #[test]
     fn binder_rejects_trailing_data_before_mutation_and_emits_callbacks() {
         use aim_binder_host::local::{Call, Service};
         use aim_binder_host::parcel::{BAD_VALUE, Parcel, Reader};
@@ -832,6 +927,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let saved = events.clone();
         let node = SessionNode {
+            bound: sessions.bind_session(id).unwrap(),
             operations: None,
             sessions: sessions.clone(),
             id,

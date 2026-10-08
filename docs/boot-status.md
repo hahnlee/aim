@@ -422,7 +422,9 @@ official CTS APK and catches new canonical metadata paired with an older Compute
 raw boot metadata capture remains separate. A real System/ServiceHost Binder
 regression passes across canonical-before-query publication. Installation publishes
 the APK but its subsequent bound-session close fails after registry retirement;
-that session-owner correction is in progress. A separate actual FUSE path-walk
+live Binder session capabilities now retain the actual terminal owner/count
+through registry retirement with weak indexing and last-capability cleanup;
+two focused regressions pass, and actual install replay is pending. A separate actual FUSE path-walk
 LOOKUP reference leak is corrected (#1139); ten real protocol regressions pass,
 with runtime integration pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
