@@ -5,6 +5,18 @@ use crate::package::settings::Version;
 
 const APP_DETAILS_ACTIVITY: &str = "android.app.AppDetailsActivity";
 impl SigningScan {
+    /// The fresh APK inventory replaces package settings, but readLPw already
+    /// established the two core VersionInfo owners through forceCurrent.
+    pub(crate) fn retain_first_boot_versions(&mut self, restored: &crate::package::settings::Settings) -> Result<(), String> {
+        for uuid in [None, Some("primary_physical".to_owned())] {
+            if restored.versions.iter().filter(|version|version.volume_uuid==uuid).count()!=1 {
+                return Err("first-boot VersionInfo handoff lacks a unique core volume owner".into());
+            }
+        }
+        self.settings.versions=restored.versions.clone();
+        Ok(())
+    }
+
     pub(crate) fn finish_boot_settings(&mut self, current: &Version, lifecycle: &crate::package::lifecycle::Owner) -> Result<(), String> {
         if current.volume_uuid.is_some() { return Err("boot current version is not internal storage".into()); }
         self.settings.versions.iter().find(|version|version.volume_uuid.is_none())
@@ -43,6 +55,29 @@ mod tests {
     use crate::package::{owner::{Store,usage::Usage},restrictions::UserState,
         scan::CapturedUsers,scan_snapshot};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn fresh_scan_retains_read_force_current_version_owners_before_real_persistence() {
+        let data=std::env::temp_dir().join(format!("aim-first-boot-version-{}",std::process::id()));
+        std::fs::create_dir_all(data.join("system/users/0")).unwrap();
+        let current=Version{sdk_version:36,database_version:3,build_fingerprint:Some("actual-build".into()),fingerprint:Some("actual-partitions".into()),..Default::default()};
+        let mut read=crate::package::settings::Settings::default();
+        let (mut disk,report)=crate::package::owner::recovery::Plan::inspect(&data).unwrap()
+            .recover_boot(&[0],&mut read,&current,|_,_|panic!("absent settings input unexpectedly read")).unwrap();
+        assert!(report.first_boot);
+        let lifecycle=crate::package::lifecycle::Owner::from_settings(&read,false,"actual-partitions",Box::new(|_|None),Box::new(|_|Err("CE owner not used in this fixture".into()))).unwrap();
+        assert!(lifecycle.first_boot());assert!(!lifecycle.partition_upgrading());
+        let mut scan=SigningScan::new(&Default::default(),&Default::default(),36).unwrap();
+        assert!(scan.settings.versions.is_empty());
+        scan.retain_first_boot_versions(&read).unwrap();scan.finish_boot_settings(&current,&lifecycle).unwrap();
+        let snapshot=scan_snapshot::Store::new(scan,Usage::new(std::iter::empty::<&str>())).unwrap().capture();
+        disk.commit_completed_boot_scan(&snapshot,true).unwrap();drop(disk);
+        let reopened=Store::open(&data,&[0]).unwrap().unwrap();
+        assert_eq!(reopened.state().settings.versions,read.versions);
+        let next=crate::package::lifecycle::Owner::from_settings(&reopened.state().settings,true,"actual-partitions",Box::new(|_|None),Box::new(|_|Err("CE owner not used in this fixture".into()))).unwrap();
+        assert!(!next.first_boot());assert!(!next.partition_upgrading());assert!(!next.is_upgrading_from_lower_than(29));
+        drop(reopened);std::fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn completed_boot_versions_and_pre_q_component_migration_persist_then_do_not_repeat() {

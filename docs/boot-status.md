@@ -549,8 +549,11 @@ gone; representative Calculator/WebView/Chrome rendering passes. Its owned
 processes and attachments are cleaned. This proves selected rollback parity,
 not all-package parity; fresh empty-data template fingerprints expose a separate first-scan handoff:
 readLPw's forceCurrent Version owners are discarded when a new APK scan owner
-replaces prepared settings. Preserving that authoritative handoff is under
-#1157 correction; the earlier existing-data rollback does not cover it. A standalone isolated template command now
+replaces prepared settings. The first-scan owner now retains those authoritative internal/external Version
+rows. A genuine absent-file recovery→first scan→initial restriction claim→real
+commit/reopen regression passes, with fingerprints and the next lifecycle flags
+preserved. Fresh template runtime replay remains pending; the earlier
+existing-data rollback does not cover this path. A standalone isolated template command now
 uses explicit existing image/immutable-host/display/empty inputs and an exclusive
 new output; it holds the image read lease, records hashes before boot, refuses
 protected-path overlap and checks drift before publication. Focused CLI isolation

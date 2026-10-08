@@ -201,7 +201,8 @@ impl System {
         let upgrade=begin.lifecycle.owner.first_boot()||begin.lifecycle.owner.device_upgrading();
         let mut restored_runtime_metadata=None;
         let (mut owner,system,apex)=if begin.prepared.report.first_boot{
-            let scan=boot.scan_first_boot(apks,policy).map_err(|error|failure(format!("first boot scan: {error:?}")))?;
+            let mut scan=boot.scan_first_boot(apks,policy).map_err(|error|failure(format!("first boot scan: {error:?}")))?;
+            scan.owner.retain_first_boot_versions(&begin.prepared.settings).map_err(failure)?;
             let factories=SystemImagePackages{packages:scan.packages,retained_data:vec![],retained_code:vec![],rejected:scan.rejected};
             (scan.owner,factories,scan.apex)
         }else{
