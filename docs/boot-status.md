@@ -514,7 +514,12 @@ The actual translation-cache test uses a fresh process so unrelated tests cannot
 preinitialize its process-wide runtime (#1149); its original execution assertions
 remain. Procnet exposes actual registered guest socket identities/endpoints,
 but unavailable TCP timer epoch/probe metrics return a real unsupported error;
-#1144 remains incomplete and no full network-table CTS pass is claimed.
+#1144 remains incomplete and no full network-table CTS pass is claimed. A real isolated
+public-ABI integration test passes for IPv4/IPv6 TCP listening and connected
+traffic with supported inactive timers, and UDP bind/connected traffic. It also
+verifies that an unsupported TCP keepalive state returns EOPNOTSUPP without
+hiding the unrelated UDP inventory. The official seven baseline failures occur
+at the host file-pull assertion; this integration result is not their CTS replay.
 An identical-signed-bytes executable control runs original sh successfully from
 a new vnode while the frozen original executable path dies before main. This
 narrows #1146 to executable publication/vnode generation behavior; it does not
