@@ -125,7 +125,11 @@ pub(in crate::package) fn complete_candidate_runtime(
             );
         }
     }
-    owner.complete_runtime_at_boot(usage, retained)
+    let mut candidate = owner.clone();
+    candidate.complete_runtime_at_boot(usage, retained)?;
+    candidate.rebuild_shared_processes_from_native_members()?;
+    *owner = candidate;
+    Ok(())
 }
 impl Owner {
     pub fn new(
@@ -560,6 +564,25 @@ mod tests {
             .unwrap();
         assert!(!same_install_identity(&before, &replaced).unwrap());
     }
+    #[test]
+    fn candidate_runtime_rebuilds_new_shared_group_before_store_validation() {
+        let base = base();
+        let mut owner = base.owner().clone();
+        owner.rebuild_shared_processes_from_native_members().unwrap();
+        owner.identities.get_shared_user("new.group", 0, 0, true).unwrap();
+        let usage = base.usage().clone();
+        assert!(Store::new(owner.clone(), usage.clone()).is_err());
+        complete_candidate_runtime(&mut owner, &base, &usage).unwrap();
+        assert!(owner.shared_processes("new.group").unwrap().unwrap().records().is_empty());
+        let candidate = Store::new(owner.clone(), usage.clone()).unwrap().capture();
+        assert!(candidate.owner().shared_processes("new.group").unwrap().is_some());
+        assert!(!base.owner().identities.shared_users.contains_key("new.group"));
+        owner.identities.shared_users.get_mut("new.group").unwrap().add_package("foreign", 0, 0);
+        let before = owner.clone();
+        assert!(complete_candidate_runtime(&mut owner, &base, &usage).is_err());
+        assert_eq!(owner, before);
+    }
+
     #[test]
     fn candidate_runtime_preserves_exact_factory_and_unloaded_scopes() {
         let base = base();

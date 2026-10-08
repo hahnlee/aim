@@ -758,6 +758,39 @@ mod tests {
 
     }
     #[test]
+    fn first_shared_install_and_matching_second_preserve_signer_atomicity() {
+        let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
+        let users = [super::super::User { id: 0, pre_created: false, adb_install_disallowed: false }];
+        let files: crate::package::write::Files = Box::new(|_| panic!("No restricted update reads"));
+        let shared = |name: &str, cert: u8| {
+            let mut value = request(name, 1);
+            value.code.shared_user_id = Some("new.group".into());
+            let bytes = if cert == 1 {
+                include_bytes!("../../../tests/fixtures/settings-certificate-1.der").as_slice()
+            } else {
+                include_bytes!("../../../tests/fixtures/settings-certificate-2.der").as_slice()
+            };
+            value.signing.signatures = vec![bytes.to_vec()];
+            value
+        };
+        let first = owner.prepare_live_installs(vec![shared("org.example.first", 1)], &users, false, &files).unwrap();
+        assert!(!owner.identities.shared_users.contains_key("new.group"));
+        let id = first.owner.settings.packages[0].app_id;
+        assert_eq!(first.owner.identities.shared_users["new.group"].app_id, id);
+        let second = owner.prepare_live_installs(vec![shared("org.example.first", 1), shared("org.example.second", 1)], &users, false, &files).unwrap();
+        assert_eq!(second.owner.settings.packages[1].app_id, id);
+        assert_eq!(second.owner.identities.shared_users["new.group"].member_count(), 2);
+        let before = owner.clone();
+        let error = match owner.prepare_live_installs(vec![shared("org.example.first", 1), shared("org.example.foreign", 9)], &users, false, &files) {
+            Ok(_) => panic!("foreign shared signer admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status, -8);
+        assert_eq!(owner, before);
+        assert!(!owner.settings.packages.iter().any(|p|p.name=="org.example.foreign"));
+    }
+
+    #[test]
     fn live_batch_reserves_uids_and_preserves_old_owner_on_late_rejection() {
         let owner = SigningScan::new(&SystemConfig::default(), &Settings::default(), 36).unwrap();
         let users = [

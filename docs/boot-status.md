@@ -565,6 +565,14 @@ priority rules; native install stages retain original public failure text and
 status while logging their own stage diagnostics separately. The complete PM
 library suite passes 815/0 with eleven ignored; matched-image CTS replay remains
 pending.
+C111 first-valid shared UID install also fails before the intended foreign-cert
+negative phase because candidate process-group assignments retain the old group
+inventory (#1173); the original exact test passes. Candidate runtime completion
+now rebuilds ordered process groups from actual finalized native member owners
+transactionally before Store validation. Three focused checks pass without skips:
+first/second null process maps, real-DER shared signer admission and foreign-cert
+atomic rejection, and candidate validation/failure atomicity. Actual CTS replay
+remains pending.
 C111 also exposes retained updated-system-app state after factory restore rejects
 an APK inside APEX (#1171). Native restore now resolves the actual original APEX
 inventory before parsing, retaining its partition, application privilege and

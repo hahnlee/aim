@@ -928,6 +928,34 @@ mod tests {
         );
     }
     #[test]
+    fn new_native_group_and_null_process_members_require_rebuilt_assignments() {
+        let mut scan = SigningScan::new(&Default::default(), &Default::default(), 36).unwrap();
+        scan.rebuild_shared_processes_from_native_members().unwrap();
+        let old = scan.clone();
+        let id = scan.identities.get_shared_user("new.group", 0, 0, true).unwrap().unwrap().app_id;
+        for name in ["first", "second"] {
+            scan.settings.packages.push(crate::package::settings::Package { name: name.into(), app_id: id, shared_user: true, code_path: format!("/data/app/{name}"), version_code: 1, ..Default::default() });
+            scan.identities.shared_users.get_mut("new.group").unwrap().add_package_with_code(name, 0, 0, Some(36));
+            load(&mut scan, name, 0);
+            let loaded = std::sync::Arc::make_mut(scan.loaded.get_mut(name).unwrap());
+            loaded.package.uid = id;
+            loaded.package.processes = None;
+            assert!(scan.validate_shared_processes().is_err());
+            scan.rebuild_shared_processes_from_native_members().unwrap();
+            assert!(scan.shared_processes("new.group").unwrap().unwrap().records().is_empty());
+            assert_eq!(scan.shared_processes.as_ref().unwrap().inputs["new.group"].1.len(), if name=="first" {1} else {2});
+        }
+        assert!(old.validate_shared_processes().is_ok());
+        assert!(!old.identities.shared_users.contains_key("new.group"));
+        let valid = scan.clone();
+        scan.identities.shared_users.get_mut("new.group").unwrap().add_package("foreign", 0, 0);
+        let assignment = scan.shared_processes.clone();
+        assert!(scan.rebuild_shared_processes_from_native_members().is_err());
+        assert_eq!(scan.shared_processes, assignment);
+        assert!(valid.validate_shared_processes().is_ok());
+    }
+
+    #[test]
     fn native_process_rebuild_uses_member_slots_not_name_sorting() {
         let mut scan = scan();
         load(&mut scan, "a", 1); load(&mut scan, "b", 0);
