@@ -498,16 +498,17 @@ The focused regression verifies UID ownership, rename retention, hidden/closed
 FDs and symlink errors. Later original SystemServer fails lchown of
 /sys/fs/cgroup/apps/uid_90000/. with EPERM while creating an isolated Chromium
 process, then dies with ProcessList's createProcessGroup assertion (#1153).
-The cgroup apps parent is actually guest system:system, mode0775. This ownership
-gap remains unresolved; reboot and complete app validation remain pending.
-C108 preserves a generic failure-boundary diagnostic: inode owner1000:1000,
-requested owner0:0, caller filesystem UID/GID1000:1000 and cap_eff1806897c20.
-The original same-owner operation without CAP_CHOWN passes its focused test;
-the discrepancy is in the ownership requested by processgroup, not evidence
-for a DAC exemption. SystemServer's actual identity/status and diagnostic log
-are retained. C108 also reproduces the death while initializing the real WebView
-provider; both diagnostic boot processes are normally stopped and the temporary
-logging code is removed from the runtime source.
+Original processgroup reads the controller root /sys/fs/cgroup, not /apps;
+our SetupCgroups had applied cgroups.json ownership only to its children. The
+mounted root therefore retained0:0/0755, causing a1000:1000 SystemServer without
+CAP_CHOWN to request0:0 on its1000:1000 child. C108 preserves that exact denial
+and actual SystemServer credentials. SetupCgroups now applies the configured
+mode/UID/GID to the same mounted root before children, as original
+MountV2CgroupController does. A real inode regression verifies root identity,
+root-before-child ordering, the configured1000:1000/0775 and an alternate tuple.
+No stat, DAC or capability guard is relaxed. Corrected isolated app, reboot and
+full CTS replays remain pending. Diagnostic processes are normally stopped and
+temporary failure logging is removed.
 Inherited capability refresh now pins
 each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or

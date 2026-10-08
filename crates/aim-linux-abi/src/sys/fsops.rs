@@ -1275,6 +1275,18 @@ mod tests {
     }
 
     #[test]
+    fn directory_nofollow_chown_preserves_current_owner_without_capabilities() {
+        let (_guard, view) = crate::vfs::test_view();
+        let host=view.join("data/nofollow-chown");std::fs::create_dir_all(&host).unwrap();
+        let path=c("/data/nofollow-chown/.");let inode=CString::new(host.as_os_str().as_encoded_bytes()).unwrap();
+        attrs::record_checked(Host::Path(&inode),||"/data/nofollow-chown".into(),Attr{uid:Some(1000),gid:Some(1000),mode:Some(0o775)}).unwrap();
+        let mut system=super::super::cred::Identity::default();system.uid=[1000;4];system.gid=[1000;4];system.cap_eff=0;
+        assert_eq!(fchownat_as([AT,path.as_ptr() as u64,1000,1000,AT_SYMLINK_NOFOLLOW,0],&system),0);
+        assert_eq!(owner("/data/nofollow-chown"),(1000,1000,0o775));
+        std::fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
     fn mapped_cgroup_directory_dot_metadata_preserves_real_inode() {
         let (_guard, view) = crate::vfs::test_view();
         let host = view.join("run/cgroup-dot");

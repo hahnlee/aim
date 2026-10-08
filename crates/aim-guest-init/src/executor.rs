@@ -34,6 +34,16 @@ use crate::mount::DataMount;
 use crate::props::{Properties, decode_persistent_properties, encode_persistent_properties};
 use crate::supervisor::{Planner, StartOutcome, Supervisor, SupervisorEvent, template_service};
 
+fn setup_cgroup_hierarchy(fs: &mut FsOps, root: &str, mode: u32, uid: u32, gid: u32) -> Result<(), String> {
+    // MountV2CgroupController applies the descriptor to the mounted root before
+    // CreateV2SubHierarchy. ProcessGroup reads this root's owner for new groups.
+    fs.mkdir(root, Some(mode), Some(uid), Some(gid))?;
+    for sub in ["apps", "system"] {
+        fs.mkdir(&format!("{root}/{sub}"), Some(mode), Some(uid), Some(gid))?;
+    }
+    Ok(())
+}
+
 /// Something the boot loop must hand to the action manager.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outgoing {
@@ -1064,10 +1074,7 @@ impl GuestExecutor {
                 // isolation directories.
                 InitAction::SetupCgroups => match self.fs.cgroup2.clone() {
                     Some((root, mode, uid, gid)) => {
-                        for sub in ["apps", "system"] {
-                            let path = format!("{root}/{sub}");
-                            self.fs.mkdir(&path, Some(mode), Some(uid), Some(gid))?;
-                        }
+                        setup_cgroup_hierarchy(&mut self.fs, &root, mode, uid, gid)?;
                         Effect::Applied(format!(
                             "SetupCgroups: {root}/apps and {root}/system (cgroup v2; no controller acts)"
                         ))
@@ -1124,5 +1131,41 @@ impl PropertyLookup for PropsAdapter {
 impl InitProperties for PropsAdapter {
     fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<(String, String)>, String> {
         InitProperties::init_set(&mut *self.0.borrow_mut(), name, value)
+    }
+}
+
+#[cfg(test)]
+mod cgroup_tests {
+    use super::*;
+    use crate::paths::Layout;
+
+    #[test]
+    fn setup_cgroups_applies_configured_owner_to_mounted_root_before_children() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = std::env::temp_dir().join(format!("aim-cgroup-setup-{}",std::process::id()));
+        std::fs::create_dir_all(directory.join("image")).unwrap();
+        let layout = Layout::new(directory.join("image"),directory.join("data"),Some(directory.join("run")));
+        layout.prepare().unwrap();
+        let mut fs = FsOps::new(layout.path_map(),layout.fs_attrs_file(),true);
+        fs.mount("cgroup2","none","/sys/fs/cgroup", &[]).unwrap();
+        let root = layout.cgroup_dir(); let before = std::fs::metadata(&root).unwrap();
+        let mounted = crate::guest_inode::read(&root).unwrap().unwrap();
+        assert_eq!((mounted.uid,mounted.gid,mounted.mode),(Some(0),Some(0),Some(0o755)));
+        setup_cgroup_hierarchy(&mut fs,"/sys/fs/cgroup",0o775,1000,1000).unwrap();
+        let after = std::fs::metadata(&root).unwrap();
+        assert_eq!((before.dev(),before.ino()),(after.dev(),after.ino()));
+        for suffix in ["","apps","system"] {
+            let inode=crate::guest_inode::read(&root.join(suffix)).unwrap().unwrap();
+            assert_eq!((inode.uid,inode.gid,inode.mode),(Some(1000),Some(1000),Some(0o775)));
+        }
+        let records=&fs.attrs()[1..];
+        assert_eq!(records.iter().map(|record|record.guest.as_str()).collect::<Vec<_>>(),
+            ["/sys/fs/cgroup","/sys/fs/cgroup/apps","/sys/fs/cgroup/system"]);
+        setup_cgroup_hierarchy(&mut fs,"/sys/fs/cgroup",0o750,2100,2200).unwrap();
+        for suffix in ["","apps","system"] {
+            let inode=crate::guest_inode::read(&root.join(suffix)).unwrap().unwrap();
+            assert_eq!((inode.uid,inode.gid,inode.mode),(Some(2100),Some(2200),Some(0o750)));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
