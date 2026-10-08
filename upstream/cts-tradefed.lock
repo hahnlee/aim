@@ -400,3 +400,7 @@
 # Shared preparer required by CtsShortcutHostTestCases.config. The Backup
 # test module is not added to the PM gate; this is its actual helper class JAR.
 "android-cts/testcases/CtsBackupHostTestCases/CtsBackupHostTestCases.jar|6e79d3b59dc6af090996415776c601d32a6b4f51b8e81ab465f747efa53af4dd"
+
+# Separate template-parity gate (docs/first-boot.md, #620); not part of PM66.
+"android-cts/testcases/CtsBootStatsTestCases/CtsBootStatsTestCases.config|19bfc32b040541c004d8923161ead81362e6b51d018e5eb52de611e80f9b832a"
+"android-cts/testcases/CtsBootStatsTestCases/CtsBootStatsTestCases.jar|ba2558788c85d2d2cdaf183ab85b4171e62d1f4f74d9aa0490c9896f56871a30"

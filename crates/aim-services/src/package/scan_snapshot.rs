@@ -41,6 +41,7 @@ pub struct Snapshot {
     version: u64,
     owner: SigningScan,
     usage: Usage,
+    replica_validated: bool,
 }
 
 /// Exact registered UID-slot projection for the facade's retained capture.
@@ -109,9 +110,13 @@ impl Store {
     }
 
     pub(crate) fn prepare_usage_store(base: &Arc<Snapshot>, usage: Usage) -> Result<Self, Error> {
+        if !base.replica_validated { return Err(Error::Invalid("usage base is not a validated replica".into())); }
         let mut owner = base.owner().clone();
-        owner.update_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
-        Self::new_replica_at_version(owner, usage, base.version.checked_add(1).ok_or(Error::VersionExhausted)?)
+        owner.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+        let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
+        // Exact immutable validated owner plus a checked usage-only delta. Code,
+        // settings, permissions and user inventories cannot have changed here.
+        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true})), replica:true })
     }
 
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
@@ -144,6 +149,7 @@ impl Store {
             version,
             owner,
             usage,
+            replica_validated: replica,
         });
         if replica {
             validate_replica(&snapshot)?;
@@ -168,7 +174,7 @@ impl Store {
         if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
         let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let next=Arc::new(Snapshot {version,owner,usage});
+        let next=Arc::new(Snapshot {version,owner,usage,replica_validated:self.replica});
         if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
         match persist(&next) {
             Ok(())=>{*current=next.clone();Ok(next)},
@@ -200,6 +206,7 @@ impl Store {
             version,
             owner,
             usage,
+            replica_validated: self.replica,
         });
         if self.replica {
             validate_replica(&next)?;
@@ -772,6 +779,7 @@ mod tests {
             version: i64::MAX as u64,
             owner: owner(),
             usage: Usage::new(["fixture"]),
+            replica_validated: false,
         });
         *store.current.lock().unwrap() = exhausted.clone();
         assert_eq!(

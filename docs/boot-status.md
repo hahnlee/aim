@@ -338,6 +338,23 @@ and install candidate scope. Coherent original/native builds pass; actual C84
 Chrome and keyset runtime verification are pending. The original domain transport
 fixture also seeds persistence from its actual current capture before commits;
 its prior stale-capture failure is awaiting a full actual replay.
+C85 replaces whole-graph usage revalidation with a sealed validated usage delta
+(#1133); ten targeted and 789 aggregate native tests pass. Chrome still reaches
+FocusEvent ANR. Its actual SystemServer trace identifies queryIntentReceivers
+materializing the whole Java package graph while AMS holds its lock; the next
+typed query-only owner correction passes compile. C86 then identifies
+filterAppAccess/canQueryPackage/isSameApp/getApplicationInfo full-graph capture
+under AMS; those pure DTO/bool paths are converted together to exact native
+query captures (#1131), preserving caller identity, aliases and candidate scope.
+Actual C87 replay remains pending. The domain fixture is repaired to use its
+actual persisted domain state and retain captured uninstall-block ownership;
+the exact host-only lifecycle/persistence reproduction passes in 6.64 seconds.
+The actual original ART transport replays remain pending. Original PMS on a cloned native
+data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
+launches Chrome cold in 1517ms and renders example.com without observed ANR.
+Original 66-module CTS campaign is running with provenance-checked resume;
+ParsingHost first replay completes 11/0, but the interrupted parent did not
+record it and the campaign correctly reruns it rather than importing XML.
 C14 passed shared and nonshared APEX permission UID handling.
 The absent projection requires matching parsed APEX name/path and uid -1;
 ordinary missing owners still fail, and the focused regression passes.

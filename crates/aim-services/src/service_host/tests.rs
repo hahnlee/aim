@@ -5524,11 +5524,11 @@ fn verify_boot_scan(
                 |_, _| panic!("missing first-boot settings must not read"),
             )
             .unwrap();
-        // The live oracle may publish a newer graph; seed this fresh disk from
-        // the same capture whose user/keyset owners are about to be committed.
-        disk.commit_scan_settings(current.scan()).unwrap();
-        disk.commit_domains(&current.domains().unwrap().owner().persisted())
+        // The runtime domain owner can allocate an unpersisted user during a
+        // rejected selection. Seed the actual persisted scan projection here.
+        disk.commit_domains(&current.scan().owner().settings.domain_verification)
             .unwrap();
+        disk.commit_scan_settings(current.scan()).unwrap();
         for user in [0, 10] {
             disk.claim_unread_restrictions(user).unwrap();
             disk.commit_initial_scan_restrictions(

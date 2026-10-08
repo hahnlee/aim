@@ -75,6 +75,7 @@ mod tests {
             version: 7,
             owner,
             usage: Usage::new([]),
+            replica_validated: false,
         }
     }
 

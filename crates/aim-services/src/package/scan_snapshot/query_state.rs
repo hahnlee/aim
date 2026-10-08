@@ -1480,11 +1480,9 @@ impl Capture {
 impl Capture {
     pub(crate) fn prepare_usage_update(self:&Arc<Self>,usage:crate::package::owner::usage::Usage)
         -> Result<PackageUpdate,String> {
-        let version=self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let mut owner=self.scan.owner().clone();
-        owner.update_replica_usage(self.scan.usage(),&usage)?;
-        let store=super::Store::new_replica_at_version(owner,usage,version)
+        let store=super::Store::prepare_usage_store(&self.scan, usage)
             .map_err(|error|format!("usage query replica: {error:?}"))?;
+        let version=store.capture().version();
         let mut context=(*self.context).clone();context.scan_version=version;
         // Usage is owned by Snapshot.usage and its active ReplicaRuntime rows;
         // PackageState (including shared/UID views) contains no usage fields.

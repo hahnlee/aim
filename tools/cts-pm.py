@@ -111,11 +111,76 @@ def save(path, value):
     temp.replace(path)
 
 
+def campaign_provenance(args):
+    receipt = args.image / '.overlay-receipt'
+    if not receipt.is_file():
+        raise ValueError('campaign requires the actual derived image overlay receipt')
+    return {'label': args.label, 'release': '16_r1', 'image': str(args.image.resolve()),
+            'data': str(args.data.resolve()), 'port': args.port, 'cts_args': args.cts_args,
+            'manifest_sha256': digest(MANIFEST), 'modules': [m['name'] for m in modules()],
+            'image_receipt_sha256': digest(receipt)}
+
+
+def validate_result(result, module, args):
+    expected = ['cts', '-s', f'127.0.0.1:{args.port}', '--skip-device-info',
+                '--skip-preconditions', '-m', module, *args.cts_args]
+    if shlex.split(result['command'] or '') != expected:
+        raise ValueError(f'{module}: official XML command differs from the full campaign invocation')
+    rows = result['modules']
+    if not rows or not any(m['name'] == module for m in rows):
+        raise ValueError(f'{module}: official XML lacks the requested module')
+    for row in rows:
+        name = row['name']
+        if name != module and not name.startswith(module + '[') and not name.startswith(module + ' ['):
+            raise ValueError(f'{module}: official XML includes foreign module {name}')
+    return all(m['done'] and m['tests']
+               and int(m['declared_total'] or -1) == len(m['tests'])
+               and all(t['result'] in ('pass', 'fail') for t in m['tests']) for m in rows)
+
+
+def resume_state(args, provenance):
+    state = json.loads((args.output / 'campaign.json').read_text())
+    for key, value in provenance.items():
+        old = state.get(key)
+        if key in ('image', 'data') and old is not None:
+            old = str(Path(old).resolve())
+        if old != value:
+            raise ValueError(f'resume provenance differs: {key}')
+    seen = set()
+    for row in state['runs']:
+        module = row['module']
+        if module not in provenance['modules'] or module in seen:
+            raise ValueError(f'unexpected or duplicate campaign module: {module}')
+        seen.add(module)
+        if row['status'] != 'recorded':
+            continue
+        xml = Path(row['xml']).resolve()
+        if xml.parent != args.output.resolve():
+            raise ValueError(f'{module}: result XML is outside this campaign')
+        result = summarize(xml)
+        sha = digest(xml)
+        if row.get('xml_sha256') is not None:
+            if row['xml_sha256'] != sha:
+                raise ValueError(f'{module}: recorded result XML hash differs')
+        else:
+            # The running pre-resume runner retained its exact parsed summary.
+            # Upgrade only that evidence, never import an arbitrary result XML.
+            stored = row.get('summary', {})
+            if any(stored.get(k) != result[k] for k in ('release', 'command', 'modules')):
+                raise ValueError(f'{module}: legacy XML differs from its recorded summary')
+            row['xml_sha256'] = sha
+        if not validate_result(result, module, args):
+            row['status'] = 'not-run-complete'
+    return state
+
+
 def run(args):
-    if args.output.exists():
-        raise ValueError('campaign output already exists; preserve the prior evidence')
-    if args.label not in ('original', 'native'):
-        raise ValueError('campaign must identify original or native')
+    if args.stop_after is not None and args.stop_after < 1:
+        raise ValueError('--stop-after must be positive')
+    if args.output.exists() and not args.resume:
+        raise ValueError('campaign output already exists; use --resume to validate its provenance')
+    if args.resume and not (args.output / 'campaign.json').is_file():
+        raise ValueError('--resume requires an existing campaign')
     services = (args.image / 'system/etc/aim/native-services').read_text().splitlines()
     native = {line.split()[0] for line in services if line.strip() and not line.lstrip().startswith('#')}
     if ('package' in native) != (args.label == 'native'):
@@ -124,21 +189,40 @@ def run(args):
                                   '--exclude-filter', '--retry', '--skip-all-system-status-check',
                                   '--skip-system-status-check') for v in args.cts_args):
         raise ValueError('module/test filtering or retry changes the complete batch scope')
+    provenance = campaign_provenance(args)
+    if args.resume:
+        state = resume_state(args, provenance)
+    else:
+        state = dict(provenance, runs=[], started=datetime.datetime.now(datetime.timezone.utc).isoformat())
     prepare()
-    args.output.mkdir(parents=True)
-    plan = [m['name'] for m in modules()]
-    state = {'label': args.label, 'release': '16_r1', 'image': str(args.image.resolve()),
-             'data': str(args.data.resolve()), 'port': args.port, 'cts_args': args.cts_args,
-             'manifest_sha256': digest(MANIFEST), 'modules': plan, 'runs': [],
-             'started': datetime.datetime.now(datetime.timezone.utc).isoformat()}
-    receipt = args.image / '.overlay-receipt'
-    state['image_receipt_sha256'] = digest(receipt) if receipt.is_file() else None
+    args.output.mkdir(parents=True, exist_ok=args.resume)
     save(args.output / 'campaign.json', state)
-    for index, module in enumerate(plan):
+    completed = 0
+    for index, module in enumerate(state['modules']):
+        prior = next((r for r in state['runs'] if r['module'] == module), None)
+        if prior and prior['status'] == 'recorded':
+            continue
+        # This explicit request takes effect between module invocations only.
+        if (args.output / 'request-stop').exists():
+            print('campaign stopped between modules: request-stop', flush=True)
+            return 0
+        attempt = 1
+        stem = f'{index + 1:02d}-{module}'
+        while (args.output / f'{stem}-attempt{attempt}.log').exists():
+            attempt += 1
+        stem += f'-attempt{attempt}'
         before = {str(p) for p in (HARNESS / 'results').glob('*') if p.is_dir()}
-        log = args.output / f'{index + 1:02d}-{module}.log'
+        log = args.output / (stem + '.log')
         command = [str(ROOT / 'tools/cts-tradefed.sh'), str(args.data), str(args.port), '-m', module, *args.cts_args]
-        with log.open('w') as output:
+        row = {'module': module, 'log': str(log), 'status': 'not-run-complete'}
+        history = list(prior.get('attempts', [])) if prior else []
+        if prior:
+            history.append({k: v for k, v in prior.items() if k != 'attempts'})
+        def record():
+            row['attempts'] = history
+            state['runs'] = [r for r in state['runs'] if r['module'] != module] + [row]
+            save(args.output / 'campaign.json', state)
+        with log.open('x') as output:
             child = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
             try:
                 code = child.wait(timeout=args.timeout)
@@ -146,26 +230,26 @@ def run(args):
                 # Only our wrapper PID; its trap cleans its own harness group.
                 child.send_signal(signal.SIGTERM)
                 child.wait()
-                state['runs'].append({'module': module, 'status': 'not-run-complete', 'log': str(log)})
-                save(args.output / 'campaign.json', state)
+                record()
                 raise
-        row = {'module': module, 'wrapper_exit': code, 'log': str(log)}
+        row['wrapper_exit'] = code
         try:
             xml = result_for(module, before)
             result = summarize(xml)
-            copied = args.output / f'{index + 1:02d}-{module}.xml'
-            copied.write_bytes(xml.read_bytes())
-            row.update(status='recorded', xml=str(copied), summary=result)
-            if (not result['modules'] or not any(m['name'] == module for m in result['modules'])
-                    or any(not m['done'] or not m['tests']
-                           or int(m['declared_total'] or -1) != len(m['tests'])
-                           for m in result['modules'])):
-                row['status'] = 'not-run-complete'
+            copied = args.output / (stem + '.xml')
+            with copied.open('xb') as output:
+                output.write(xml.read_bytes())
+            row.update(xml=str(copied), xml_sha256=digest(copied), summary=result)
+            if validate_result(result, module, args):
+                row['status'] = 'recorded'
         except (ValueError, ET.ParseError) as error:
-            row.update(status='not-run-complete', error=str(error))
-        state['runs'].append(row)
-        save(args.output / 'campaign.json', state)
+            row['error'] = str(error)
+        record()
+        completed += 1
         print(module, row['status'], flush=True)
+        if args.stop_after is not None and completed >= args.stop_after:
+            print('campaign stopped between modules: --stop-after', flush=True)
+            return 0
     return 0
 
 
@@ -222,6 +306,8 @@ def main():
     runner = sub.add_parser('run'); runner.add_argument('data', type=Path); runner.add_argument('port', type=int)
     runner.add_argument('--label', choices=['original', 'native'], required=True); runner.add_argument('--image', type=Path, required=True)
     runner.add_argument('--output', type=Path, required=True); runner.add_argument('--timeout', type=int, default=10800)
+    runner.add_argument('--resume', action='store_true')
+    runner.add_argument('--stop-after', type=int, help='stop after N completed invocations in this run')
     runner.add_argument('--cts-args', nargs=argparse.REMAINDER, default=[])
     diff = sub.add_parser('compare'); diff.add_argument('original', type=Path); diff.add_argument('native', type=Path)
     args = parser.parse_args()

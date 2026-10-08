@@ -298,6 +298,24 @@ impl SigningScan {
     /// notifyPackageUse updates active PackageStateUnserialized usage and its
     /// package usage owner together. Disabled factory records retain their own
     /// historical state and must not inherit an active package's new timestamp.
+    /// Only the immutable, fully validated Snapshot owner may use this path.
+    /// General mutable scan updates continue to validate their entire graph.
+    pub(in crate::package) fn update_validated_replica_usage(&mut self, before: &Usage, after: &Usage) -> Result<(), String> {
+        if before.names().ne(after.names()) || before.historical_available() != after.historical_available() {
+            return Err("validated usage immutable inventory differs".into());
+        }
+        let assigned = self.replica_runtime.as_mut().ok_or("validated runtime owner unavailable")?;
+        for name in before.names() {
+            let previous = before.times(name).unwrap();
+            let times = after.times(name).unwrap();
+            if previous == times { continue; }
+            let runtime = assigned.values.get_mut(&(name.to_owned(), false)).ok_or("validated usage member unavailable")?;
+            if runtime.usage != *previous { return Err("validated usage runtime base differs".into()); }
+            runtime.usage = *times;
+        }
+        Ok(())
+    }
+
     pub(in crate::package) fn update_replica_usage(&mut self, before: &Usage, after: &Usage) -> Result<(), String> {
         self.validate_replica_runtime(Some(before))?;
         let assigned = self.replica_runtime.as_ref().ok_or("replica runtime is not captured")?;

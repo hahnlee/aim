@@ -327,3 +327,31 @@ fn implicit_visibility_publication_preserves_install_and_actual_grant_during_que
     assert!(Arc::ptr_eq(&snapshots.capture(), &installed));
     assert_eq!(fixture.system.capture_package_queries().unwrap().context().system.implicit_access, next);
 }
+
+
+#[test]
+fn usage_delta_requires_validated_snapshot_and_keeps_all_other_owner_fields() {
+    use crate::package::{scan_snapshot::{Store, Error}, owner::usage::Usage};
+    let mut fixture = Fixture::new();
+    let bridge = fixture.attach();
+    let base = publish(&fixture, &bridge);
+    let unsealed = Store::new(base.scan().owner().clone(), base.scan().usage().clone()).unwrap();
+    assert!(matches!(Store::prepare_usage_store(&unsealed.capture(), base.scan().usage().clone()), Err(Error::Invalid(_))));
+    assert!(matches!(Store::prepare_usage_store(base.scan(), Usage::new(["foreign"])), Err(Error::Invalid(_))));
+    let mut usage = base.scan().usage().clone();
+    usage.notify("p", 2, 991);
+    let prepared = Store::prepare_usage_store(base.scan(), usage.clone()).unwrap();
+    let after = prepared.capture();
+    assert_eq!(after.version(), base.scan().version() + 1);
+    assert_eq!(after.usage(), &usage);
+    let mut expected = base.scan().owner().clone();
+    let mut runtime = base.scan().owner().replica_runtime("p", false).unwrap().unwrap().clone();
+    runtime.usage[2] = 991;
+    expected.capture_replica_runtime(BTreeMap::from([(("p".into(), false), runtime)])).unwrap();
+    assert_eq!(after.owner(), &expected, "sealed delta must equal the fully validated owner update");
+    assert_eq!(after.owner().replica_runtime("p", false).unwrap().unwrap().usage[2], 991);
+    assert_eq!(base.scan().usage().times("p").unwrap()[2], 0);
+    // Revalidating the result through the general untrusted-owner constructor
+    // still passes; this seal never admits a new unchecked package graph.
+    Store::new_replica(after.owner().clone(), after.usage().clone()).unwrap();
+}

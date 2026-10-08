@@ -66,6 +66,95 @@ impl Service for DomainSetEcho {
     }
 }
 
+fn publish_fixture_domains(system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>,
+        config: &SystemConfig, persistence: &Arc<Mutex<crate::package::owner::Store>>, count: usize) {
+        let base = system.capture_package_scan().unwrap();
+        let mut candidate = base.owner().clone();
+        // Only fixture metadata changes; its original APK and extracted tree stay read-only.
+        candidate.add_fixture_domains("android", count);
+        let mut user = candidate.scanned_user_states("android").unwrap()[&0].clone();
+        user.installed = true; user.enabled = 1;
+        candidate.set_user_state("android", 0, user).unwrap();
+        let id = candidate.settings.packages.iter().find(|p| p.name == "android").unwrap().domain_set_id.clone().unwrap();
+        candidate.settings.domain_verification.active.retain(|p| p.name != "android");
+        candidate.settings.domain_verification.active.push(crate::package::domain_verification::Package {
+            name: "android".into(), id, has_auto_verify_domains: true, signature: None,
+            domains: vec![(Some("h0.example".into()), 1)], users: vec![], uri_relative_filter_groups: vec![],
+        });
+        let seinfo =
+            crate::package::owner::seinfo::Policy::load(&aim_paths::original_image()).unwrap();
+        candidate
+            .assign_seinfo_at_boot(&seinfo, &mut |code| {
+                bridge
+                    .seinfo_target_sdk(code)
+                    .map_err(|error| format!("{error:?}"))
+            })
+            .unwrap();
+        let orders = candidate
+            .identities
+            .shared_users
+            .iter()
+            .map(|(name, group)| {
+                let members = candidate
+                    .settings
+                    .packages
+                    .iter()
+                    .filter(|setting| setting.shared_app_id() == Some(group.app_id))
+                    .map(|setting| setting.name.clone())
+                    .collect();
+                (name.clone(), members)
+            })
+            .collect();
+        candidate.complete_shared_processes(orders).unwrap();
+        let previous = system.capture_package_queries().unwrap();
+        let mut context = super::query_context_for(&candidate, base.version() + 1).with_boot_classpath(&aim_paths::derived_image()).unwrap();
+        context.system.uninstall_blocks = previous.context().system.uninstall_blocks.clone();
+        system
+            .complete_package_scan_with_domains(
+                bridge,
+                Some(&base),
+                candidate,
+                base.usage().clone(),
+                BTreeMap::new(),
+                context,
+                config,
+            )
+            .unwrap();
+        persistence.lock().unwrap().commit_domains(&system.capture_package_queries().unwrap().domains().unwrap().owner().persisted()).unwrap();
+        let capture = system.capture_package_queries().unwrap();
+        let mut domains = capture.domains().unwrap().owner().clone();
+        let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(1);
+        for (part, pattern, value) in [(0, 0, "/path"), (1, 0, "q=1"), (2, 1, "fragment"), (0, 1, "😀"), (0, 0, "Aa"), (0, 0, "BB")] { group.add(part, pattern, value); }
+        domains.set_uri_groups("android", &[("h0.example".into(), Some(vec![group]))]).unwrap();
+        system.commit_package_domains(bridge, capture.prepare_domain_update(domains).unwrap(), &mut persistence.lock().unwrap()).unwrap();
+        let before_selection = system.capture_package_queries().unwrap();
+        let saved_domains = persistence.lock().unwrap().state().settings.domain_verification.clone();
+        let mut request = Parcel::new();
+        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as domain_api;
+        request.write_interface_token(domain_api::DESCRIPTOR);
+        request.write_string16(Some(&before_selection.domains().unwrap().owner().package("android").unwrap().id));
+        request.write_i32(1); request.write_bool(false); request.write_i32(1); request.write_string16(Some("h0.example")); request.write_bool(true); request.write_i32(0);
+        let status = system.call("query_domains", domain_api::SET_DOMAIN_VERIFICATION_USER_SELECTION,
+            |out| out.write_raw(request.data(), request.objects()), domain_api::read_set_domain_verification_user_selection_reply).unwrap();
+        assert_eq!(status, 3);
+        let allocated = system.capture_package_queries().unwrap();
+        assert_eq!(allocated.scan().version(), before_selection.scan().version() + 1);
+        assert!(before_selection.domains().unwrap().owner().package("android").unwrap().users.is_empty());
+        assert!(allocated.domains().unwrap().owner().package("android").unwrap().users[0].enabled_hosts.is_empty());
+        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved_domains);
+        assert_eq!(allocated.scan().owner().settings.domain_verification, before_selection.scan().owner().settings.domain_verification);
+    }
+
+#[test]
+#[ignore = "requires pinned original inputs; host-only domain projection reproduction"]
+fn native_domain_owner_publication_preserves_persistence_projection() {
+    let oracle = |system: &Arc<System>, bridge: &Arc<crate::package::bootstrap::Bridge>,
+        config: &SystemConfig, persistence: &Arc<Mutex<crate::package::owner::Store>>| {
+        publish_fixture_domains(system, bridge, config, persistence, 4);
+    };
+    super::exercise_bootstrap_on(Driver::new(), true, false, Some(&oracle));
+}
+
 #[test]
 #[ignore = "requires pinned image, built host/image, JDK and d8; run explicitly"]
 fn original_art_reads_large_native_domain_query_over_binder() {
@@ -138,79 +227,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
                   bridge: &Arc<crate::package::bootstrap::Bridge>,
                   config: &SystemConfig,
                   persistence: &Arc<Mutex<crate::package::owner::Store>>| {
-        let base = system.capture_package_scan().unwrap();
-        let mut candidate = base.owner().clone();
-        // Only fixture metadata changes; its original APK and extracted tree stay read-only.
-        candidate.add_fixture_domains("android", 4000);
-        let mut user = candidate.scanned_user_states("android").unwrap()[&0].clone();
-        user.installed = true; user.enabled = 1;
-        candidate.set_user_state("android", 0, user).unwrap();
-        let id = candidate.settings.packages.iter().find(|p| p.name == "android").unwrap().domain_set_id.clone().unwrap();
-        candidate.settings.domain_verification.active.retain(|p| p.name != "android");
-        candidate.settings.domain_verification.active.push(crate::package::domain_verification::Package {
-            name: "android".into(), id, has_auto_verify_domains: true, signature: None,
-            domains: vec![(Some("h0.example".into()), 1)], users: vec![], uri_relative_filter_groups: vec![],
-        });
-        let seinfo =
-            crate::package::owner::seinfo::Policy::load(&aim_paths::original_image()).unwrap();
-        candidate
-            .assign_seinfo_at_boot(&seinfo, &mut |code| {
-                bridge
-                    .seinfo_target_sdk(code)
-                    .map_err(|error| format!("{error:?}"))
-            })
-            .unwrap();
-        let orders = candidate
-            .identities
-            .shared_users
-            .iter()
-            .map(|(name, group)| {
-                let members = candidate
-                    .settings
-                    .packages
-                    .iter()
-                    .filter(|setting| setting.shared_app_id() == Some(group.app_id))
-                    .map(|setting| setting.name.clone())
-                    .collect();
-                (name.clone(), members)
-            })
-            .collect();
-        candidate.complete_shared_processes(orders).unwrap();
-        let context = super::query_context_for(&candidate, base.version() + 1).with_boot_classpath(&aim_paths::derived_image()).unwrap();
-        system
-            .complete_package_scan_with_domains(
-                bridge,
-                Some(&base),
-                candidate,
-                base.usage().clone(),
-                BTreeMap::new(),
-                context,
-                config,
-            )
-            .unwrap();
-        persistence.lock().unwrap().commit_domains(&system.capture_package_queries().unwrap().domains().unwrap().owner().persisted()).unwrap();
-        let capture = system.capture_package_queries().unwrap();
-        let mut domains = capture.domains().unwrap().owner().clone();
-        let mut group = crate::package::intent_filter::UriRelativeFilterGroup::new(1);
-        for (part, pattern, value) in [(0, 0, "/path"), (1, 0, "q=1"), (2, 1, "fragment"), (0, 1, "😀"), (0, 0, "Aa"), (0, 0, "BB")] { group.add(part, pattern, value); }
-        domains.set_uri_groups("android", &[("h0.example".into(), Some(vec![group]))]).unwrap();
-        system.commit_package_domains(bridge, capture.prepare_domain_update(domains).unwrap(), &mut persistence.lock().unwrap()).unwrap();
-        let before_selection = system.capture_package_queries().unwrap();
-        let saved_domains = persistence.lock().unwrap().state().settings.domain_verification.clone();
-        let mut request = Parcel::new();
-        use aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager as domain_api;
-        request.write_interface_token(domain_api::DESCRIPTOR);
-        request.write_string16(Some(&before_selection.domains().unwrap().owner().package("android").unwrap().id));
-        request.write_i32(1); request.write_bool(false); request.write_i32(1); request.write_string16(Some("h0.example")); request.write_bool(true); request.write_i32(0);
-        let status = system.call("query_domains", domain_api::SET_DOMAIN_VERIFICATION_USER_SELECTION,
-            |out| out.write_raw(request.data(), request.objects()), domain_api::read_set_domain_verification_user_selection_reply).unwrap();
-        assert_eq!(status, 3);
-        let allocated = system.capture_package_queries().unwrap();
-        assert_eq!(allocated.scan().version(), before_selection.scan().version() + 1);
-        assert!(before_selection.domains().unwrap().owner().package("android").unwrap().users.is_empty());
-        assert!(allocated.domains().unwrap().owner().package("android").unwrap().users[0].enabled_hosts.is_empty());
-        assert_eq!(persistence.lock().unwrap().state().settings.domain_verification, saved_domains);
-        assert_eq!(allocated.scan().owner().settings.domain_verification, before_selection.scan().owner().settings.domain_verification);
+        publish_fixture_domains(system, bridge, config, persistence, 4000);
         let process = system.process();
         super::register(&process, "query_domain_set", process.add_service(Arc::new(DomainSetEcho(Arc::downgrade(&process)))));
         for (alias, pattern) in [("query_uri_bounds", "["), ("query_uri_invalid", "*")] {

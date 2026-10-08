@@ -68,7 +68,7 @@ testcases/MODULE/`, add each with the sha256 of its inflated content to
 
 ## Input status (2026-10-08)
 
-All 384 host/harness pins and all 1,065 device-input pins are present and
+All 386 host/harness pins and all 1,065 device-input pins are present and
 hash verified. The relevant C device/permission cohort has 43 modules (42
 instrumentation modules and one native GTest), with 934 archive paths. The
 Secure FRP test APK already embeds its install helper (#1087). The official C parsing host module has completed twice with zero passed and
@@ -80,6 +80,19 @@ complete (2026.10.08_16.45.04); installation/context ownership failures remain.
 C69 official parsing XML confirms eleven passed, zero failed and module complete
 (2026.10.08_17.02.43). Full native C acceptance remains incomplete.
 Runs retain Tradefed results and logs as acceptance evidence.
+
+The separate template-parity gate in [first-boot.md](first-boot.md), #620,
+uses the official `CtsBootStatsTestCases` host module. Its config and JAR
+are pinned and hash verified in `upstream/cts-tradefed.lock`; the config
+requires only that JAR and the existing `JarHostTest` harness, with no
+APK or file-push inputs. It is not added to the PM 66-module manifest.
+Run it separately on the original first boot and native template first boot
+with `tools/cts-tradefed.sh DATA PORT -m CtsBootStatsTestCases`, retaining
+both official XML results. Input preparation is complete; this gate has
+not been executed. The original `BootStatsHostTest.testBootStats` clears
+the events log, reboots the device through Tradefed and reads the boot
+atoms with `cmd stats print-stats`; run it on the disposable gate device
+after preserving the first-boot measurements.
 
 ## Original device transport checks (2026-10-02)
 
