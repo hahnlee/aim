@@ -3,20 +3,21 @@ use sha2::{Digest,Sha256};
 use std::{fs::{self,File},os::unix::fs::OpenOptionsExt,path::{Path,PathBuf}};
 use crate::inode_lease::{Identity,Inode,WriterLease,ExclusiveLease,EnableSlot};
 use std::os::fd::AsFd;
+use crate::private_fd::PrivateFile;
 const HEADER:u64=512;
 const MAGIC:&[u8;8]=b"AIMVRT02";
 
-pub struct Metadata{file:File,identity:Identity,descriptor:Descriptor,tree_len:u64,signature_len:u64}
+pub struct Metadata{file:PrivateFile,identity:Identity,descriptor:Descriptor,tree_len:u64,signature_len:u64}
 impl Metadata {
  fn open(path:&Path,binding:&[u8;36])->Result<Self>{
-  let file=File::options().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;
+  let file=PrivateFile::allocate(||File::options().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path))?;
   let mut header=[0;HEADER as usize];tree::read_exact(&file,&mut header,0)?;
   if &header[..8]!=MAGIC||&header[8..44]!=binding||header[44..48].iter().any(|byte|*byte!=0)||header[416..].iter().any(|byte|*byte!=0)||Sha256::digest(&header[..384]).as_slice()!=&header[384..416]{return Err(Error::Linux(EIO));}
   let descriptor=Descriptor::from_bytes(header[48..304].try_into().unwrap())?;
   let tree_len=u64::from_le_bytes(header[304..312].try_into().unwrap());let signature_len=u64::from_le_bytes(header[312..320].try_into().unwrap());
   let expected=descriptor.levels()?.iter().try_fold(0u64,|sum,(_,length)|sum.checked_add(*length).ok_or(Error::Linux(EOVERFLOW)))?;
   let digest=descriptor.digest();
-  if tree_len!=expected||signature_len>16128||header[320..320+digest.len()]!=digest||header[320+digest.len()..384].iter().any(|byte|*byte!=0)||file.metadata()?.len()!=HEADER.checked_add(tree_len).and_then(|n|n.checked_add(signature_len)).ok_or(Error::Linux(EOVERFLOW))?{return Err(Error::Linux(EIO));}
+  if tree_len!=expected||signature_len>16128||header[320..320+digest.len()]!=digest||header[320+digest.len()..384].iter().any(|byte|*byte!=0)||tree::stat(&file)?.st_size as u64!=HEADER.checked_add(tree_len).and_then(|n|n.checked_add(signature_len)).ok_or(Error::Linux(EOVERFLOW))?{return Err(Error::Linux(EIO));}
   Ok(Self{file,identity:Identity::from_bytes(binding)?,descriptor,tree_len,signature_len})
  }
  pub fn descriptor(&self)->&Descriptor{&self.descriptor}
@@ -31,9 +32,9 @@ impl Metadata {
   let mut output=Vec::new();output.try_reserve_exact(length).map_err(|_|Error::Linux(12))?;output.resize(length,0);tree::read_exact(&self.file,&mut output,start+offset)?;Ok(output)
  }
  /// Copy only bytes whose complete Merkle path was authenticated, never reread.
- pub fn verify_range(&self,data:&File,offset:u64,length:usize)->Result<Vec<u8>>{
+ pub fn verify_range(&self,data:&impl AsFd,offset:u64,length:usize)->Result<Vec<u8>>{
   if Identity::from_fd(data.as_fd())?!=self.identity{return Err(Error::Linux(EIO));}
-  let size=self.descriptor.data_size();if data.metadata()?.len()!=size{return Err(Error::Linux(EIO));}
+  let size=self.descriptor.data_size();if tree::stat(data)?.st_size as u64!=size{return Err(Error::Linux(EIO));}
   let end=offset.checked_add(length as u64).ok_or(Error::Linux(EOVERFLOW))?.min(size);if offset>=end{return Ok(Vec::new());}
   let options=self.descriptor.options();let block=options.block_size as u64;let fanout=options.block_size/options.digest_size();let layout=self.descriptor.levels()?;
   let mut output=Vec::new();output.try_reserve_exact((end-offset) as usize).map_err(|_|Error::Linux(12))?;
@@ -61,8 +62,8 @@ impl Store{
   if !fs::symlink_metadata(directory)?.is_dir(){return Err(Error::Linux(EINVAL));}
   Ok(Self{directory:directory.into(),runtime:runtime.into()})
  }
- pub fn lock_inode(&self,data:&File)->Result<Admission>{
-  let metadata=data.metadata()?;if metadata.is_dir(){return Err(Error::Linux(21));}if !metadata.is_file(){return Err(Error::Linux(EINVAL));}
+ pub fn lock_inode(&self,data:&impl AsFd)->Result<Admission>{
+  let metadata=tree::stat(data)?;if metadata.st_mode&libc::S_IFMT==libc::S_IFDIR{return Err(Error::Linux(21));}if metadata.st_mode&libc::S_IFMT!=libc::S_IFREG{return Err(Error::Linux(EINVAL));}
   let inode=Inode::open(&self.runtime,data.as_fd())?;let admission=inode.admission()?;
   Ok(Admission{store:self.clone(),inode,admission})
  }
@@ -72,10 +73,10 @@ impl Store{
  }
  /// Publish an already built private blob only under the caller's exclusive
  /// filesystem admission. This has no ioctl entrypoint or ENABLE success.
- fn publish(&self,identity:Identity,tree_file:&File,descriptor:Descriptor,signature:&[u8])->Result<Metadata>{
-  self.publish_with_sync(identity,tree_file,descriptor,signature,|directory|File::open(directory)?.sync_all())
+ fn publish(&self,identity:Identity,tree_file:&impl AsFd,descriptor:Descriptor,signature:&[u8])->Result<Metadata>{
+  self.publish_with_sync(identity,tree_file,descriptor,signature,|directory|PrivateFile::allocate(||File::open(directory))?.sync_all())
  }
- fn publish_with_sync(&self,identity:Identity,tree_file:&File,descriptor:Descriptor,signature:&[u8],sync:impl FnOnce(&Path)->std::io::Result<()>)->Result<Metadata>{
+ fn publish_with_sync(&self,identity:Identity,tree_file:&impl AsFd,descriptor:Descriptor,signature:&[u8],sync:impl FnOnce(&Path)->std::io::Result<()>)->Result<Metadata>{
   if signature.len()>16128{return Err(Error::Linux(super::EMSGSIZE));}
   let layout=descriptor.levels()?;let tree_len=layout.iter().try_fold(0u64,|sum,(_,length)|sum.checked_add(*length).ok_or(Error::Linux(EOVERFLOW)))?;
   let mut header=[0;HEADER as usize];header[..8].copy_from_slice(MAGIC);header[8..44].copy_from_slice(&binding(identity));header[48..304].copy_from_slice(descriptor.bytes());header[304..312].copy_from_slice(&tree_len.to_le_bytes());header[312..320].copy_from_slice(&(signature.len()as u64).to_le_bytes());
@@ -83,7 +84,7 @@ impl Store{
   let target=self.path(identity);let temporary=target.with_extension(format!("{}.tmp",nonce()?));
   let mut published=false;
   let result=(||{
-   let file=File::options().create_new(true).read(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&temporary)?;tree::write_all(&file,&header,0)?;
+   let file=PrivateFile::allocate(||File::options().create_new(true).read(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&temporary))?;tree::write_all(&file,&header,0)?;
    let mut buffer=vec![0;65536];let mut offset=0;while offset<tree_len{let n=(tree_len-offset).min(buffer.len()as u64)as usize;tree::read_exact(tree_file,&mut buffer[..n],HEADER+offset)?;tree::write_all(&file,&buffer[..n],HEADER+offset)?;offset+=n as u64;}
    tree::write_all(&file,signature,HEADER+tree_len)?;file.sync_all()?;
    // Atomic no-replace publication: a committed inode cannot be re-enabled.
@@ -93,7 +94,7 @@ impl Store{
    Metadata::open(&target,&binding(identity))
   })();
   if result.is_err(){
-   if published{fs::remove_file(&target)?;File::open(&self.directory)?.sync_all()?;}
+   if published{fs::remove_file(&target)?;PrivateFile::allocate(||File::open(&self.directory))?.sync_all()?;}
    match fs::remove_file(&temporary){Ok(())=>{},Err(error)if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
   }
   result
@@ -110,7 +111,7 @@ pub struct Admission{store:Store,inode:Inode,admission:crate::inode_lease::Admis
 pub struct EnableGuard{store:Store,inode:Inode,_slot:EnableSlot,_writers:ExclusiveLease}
 struct Temporary(PathBuf);
 impl Drop for Temporary{fn drop(&mut self){if let Err(error)=fs::remove_file(&self.0){if error.kind()!=std::io::ErrorKind::NotFound{eprintln!("fs-verity temporary cleanup: {error}");}}}}
-pub struct Prepared{file:File,_temporary:Temporary,descriptor:Descriptor,signature:Vec<u8>,identity:Identity}
+pub struct Prepared{file:PrivateFile,_temporary:Temporary,descriptor:Descriptor,signature:Vec<u8>,identity:Identity}
 impl Prepared{
  pub fn descriptor(&self)->&Descriptor{&self.descriptor}
  pub fn backing_descriptor(&self)->std::os::fd::BorrowedFd<'_>{self.file.as_fd()}
@@ -138,14 +139,13 @@ impl EnableGuard{
  pub fn build(&self,options:super::BuildOptions,signature:&[u8],interrupted:impl FnMut()->bool)->Result<Prepared>{
   if signature.len()>16128{return Err(Error::Linux(super::EMSGSIZE));}
   let path=self.store.directory.join(format!("build-{}.tmp",nonce()?));
-  let file=File::options().create_new(true).read(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&path)?;
+  let file=PrivateFile::allocate(||File::options().create_new(true).read(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&path))?;
   let temporary=Temporary(path);
-  let source=File::from(self.inode.source().try_clone_to_owned()?);
-  let before=source.metadata()?;
+  let source=self.inode.source();
+  let before=tree::stat(&source)?;
   let descriptor=super::build(&source,&file,HEADER,options,interrupted)?;
-  use std::os::unix::fs::MetadataExt;
-  let after=source.metadata()?;
-  if (before.len(),before.mtime(),before.mtime_nsec(),before.ctime(),before.ctime_nsec())!=(after.len(),after.mtime(),after.mtime_nsec(),after.ctime(),after.ctime_nsec()){
+  let after=tree::stat(&source)?;
+  if (before.st_size,before.st_mtime,before.st_mtime_nsec,before.st_ctime,before.st_ctime_nsec)!=(after.st_size,after.st_mtime,after.st_mtime_nsec,after.st_ctime,after.st_ctime_nsec){
    return Err(Error::Linux(EIO));
   }
   Ok(Prepared{file,_temporary:temporary,descriptor,signature:signature.into(),identity:self.identity()})
@@ -153,8 +153,8 @@ impl EnableGuard{
  pub fn commit(self,prepared:Prepared)->Result<Metadata>{
   let _admission=self.inode.admission()?;
   if prepared.identity!=self.identity()||Identity::from_fd(self.inode.source())?!=self.identity(){return Err(Error::Linux(EIO));}
-  let source=File::from(self.inode.source().try_clone_to_owned()?);
-  if source.metadata()?.len()!=prepared.descriptor.data_size(){return Err(Error::Linux(EIO));}
+  let source=self.inode.source();
+  if tree::stat(&source)?.st_size as u64!=prepared.descriptor.data_size(){return Err(Error::Linux(EIO));}
   self.store.publish(self.identity(),&prepared.file,prepared.descriptor.clone(),&prepared.signature)
  }
 }

@@ -1,6 +1,6 @@
 use super::{Error,Result,EIO,EINVAL,EOVERFLOW,EMSGSIZE};
 use sha2::{Digest,Sha256,Sha512};
-use std::{fs::File,os::unix::fs::FileExt};
+use std::os::fd::{AsFd,AsRawFd};
 
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct BuildOptions{pub algorithm:u8,pub block_size:usize,pub salt:Vec<u8>}
@@ -47,17 +47,21 @@ fn levels(size:u64,options:&BuildOptions)->Result<Vec<(u64,u64)>>{
  let mut sizes=Vec::new();while hashes>1{hashes=hashes.div_ceil(fanout);sizes.push(hashes.checked_mul(options.block_size as u64).ok_or(Error::Linux(EOVERFLOW))?);}
  let mut offset=0u64;let mut out=vec![(0,0);sizes.len()];for index in (0..sizes.len()).rev(){out[index]=(offset,sizes[index]);offset=offset.checked_add(sizes[index]).ok_or(Error::Linux(EOVERFLOW))?;}Ok(out)
 }
-pub(crate) fn read_exact(file:&File,bytes:&mut[u8],offset:u64)->Result<()>{
- let mut at=0;while at<bytes.len(){let n=file.read_at(&mut bytes[at..],offset.checked_add(at as u64).ok_or(Error::Linux(EOVERFLOW))?)?;if n==0{return Err(Error::Linux(EIO));}at+=n;}Ok(())
+pub(crate) fn read_exact(file:&impl AsFd,bytes:&mut[u8],offset:u64)->Result<()>{
+ let mut at=0;while at<bytes.len(){let position=i64::try_from(offset.checked_add(at as u64).ok_or(Error::Linux(EOVERFLOW))?).map_err(|_|Error::Linux(EOVERFLOW))?;let n=unsafe{libc::pread(file.as_fd().as_raw_fd(),bytes[at..].as_mut_ptr().cast(),bytes.len()-at,position)};if n<0{return Err(std::io::Error::last_os_error().into());}let n=n as usize;if n==0{return Err(Error::Linux(EIO));}at+=n;}Ok(())
 }
-pub(crate) fn write_all(file:&File,bytes:&[u8],offset:u64)->Result<()>{
- let mut at=0;while at<bytes.len(){let n=file.write_at(&bytes[at..],offset.checked_add(at as u64).ok_or(Error::Linux(EOVERFLOW))?)?;if n==0{return Err(Error::Linux(EIO));}at+=n;}Ok(())
+pub(crate) fn write_all(file:&impl AsFd,bytes:&[u8],offset:u64)->Result<()>{
+ let mut at=0;while at<bytes.len(){let position=i64::try_from(offset.checked_add(at as u64).ok_or(Error::Linux(EOVERFLOW))?).map_err(|_|Error::Linux(EOVERFLOW))?;let n=unsafe{libc::pwrite(file.as_fd().as_raw_fd(),bytes[at..].as_ptr().cast(),bytes.len()-at,position)};if n<0{return Err(std::io::Error::last_os_error().into());}let n=n as usize;if n==0{return Err(Error::Linux(EIO));}at+=n;}Ok(())
+}
+pub(crate) fn stat(file:&impl AsFd)->Result<libc::stat>{
+ let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+ if unsafe{libc::fstat(file.as_fd().as_raw_fd(),&mut stat)}<0{return Err(std::io::Error::last_os_error().into());}Ok(stat)
 }
 /// Build into a private metadata file using a block-sized working buffer.
 /// The caller owns exclusive write admission; this function does not enable verity.
-pub fn build(data:&File,tree:&File,tree_offset:u64,options:BuildOptions,mut interrupted:impl FnMut()->bool)->Result<Descriptor>{
+pub fn build(data:&impl AsFd,tree:&impl AsFd,tree_offset:u64,options:BuildOptions,mut interrupted:impl FnMut()->bool)->Result<Descriptor>{
  let options=BuildOptions::new(options.algorithm,options.block_size,options.salt,65536,65536)?;
- let size=data.metadata()?.len();let layout=levels(size,&options)?;
+ let size=stat(data)?.st_size as u64;let layout=levels(size,&options)?;
  let blocks=size.div_ceil(options.block_size as u64);let mut buffer=vec![0;options.block_size];
  let mut root=vec![0;options.digest_size()];
  if blocks==1{read_exact(data,&mut buffer[..size as usize],0)?;root=options.hash(&buffer);}
@@ -87,7 +91,7 @@ pub fn build(data:&File,tree:&File,tree_offset:u64,options:BuildOptions,mut inte
 #[cfg(test)]
 mod tests {
  use super::*;
- use std::{fs,path::PathBuf};
+ use std::{fs::{self,File},path::PathBuf};
  struct Data(PathBuf);
  impl Data{fn new(bytes:&[u8])->Self{let path=std::env::temp_dir().join(format!("aim-verity-core-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));fs::create_dir(&path).unwrap();fs::write(path.join("data"),bytes).unwrap();Self(path)}fn data(&self)->File{File::open(self.0.join("data")).unwrap()}fn tree(&self)->File{File::options().create_new(true).read(true).write(true).open(self.0.join("tree")).unwrap()}}
  impl Drop for Data{fn drop(&mut self){fs::remove_dir_all(&self.0).unwrap();}}
