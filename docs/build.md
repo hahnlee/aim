@@ -159,6 +159,10 @@ image or graph dependency. Use a separate worktree and private Cargo target
 when frozen campaigns still depend on the current workspace's generated files;
 the command updates that worktree's `target/aim/gen/service-aidl`, records input
 and output hashes, and verifies the original transaction codes as usual.
+The read-only `check-service-java DEX STUB_DEX` command validates an already
+compiled private service DEX against the pinned original boot/systemserver
+classpaths and checks its own generated AIDL transaction codes. It holds an
+original-image read lease and builds or replaces no artifact.
 
 ### Rebuild times
 

@@ -9,7 +9,7 @@ mod boot_image;
 mod derived_image;
 mod device_services;
 mod image;
-mod java;
+pub(crate) mod java;
 mod moltenvk;
 mod oat;
 pub(crate) mod service_aidl;

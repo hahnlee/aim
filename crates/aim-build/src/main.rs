@@ -53,6 +53,8 @@ commands:
            --display-bin FILE --empty-template FILE
                          isolated first-boot template from existing inputs;
                          no graph build and no shared template replacement
+  check-service-java DEX STUB_DEX
+                         verify linkage and generated transaction codes; no build
   generate-service-aidl regenerate the typed service contract from existing pins;
                          no image or dependency build
   status [NODE...]       which nodes are stale, and why
@@ -176,7 +178,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             }
             name if matches!(
                 parsed.command.as_str(),
-                "build" | "status" | "clean" | "storage"
+                "build" | "status" | "clean" | "storage" | "check-service-java"
             ) =>
             {
                 parsed.names.push(name.into())
@@ -226,6 +228,17 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let args = parse(args)?;
     let options = Options { jobs: args.jobs };
     match args.command.as_str() {
+        "check-service-java" => {
+            if args.names.len() != 2 { return Err("check-service-java requires DEX STUB_DEX".into()); }
+            let image = aim_paths::original_image();
+            let _image_lease = aim_storage::system::ImageLease::read_root(&image)?;
+            use aim_android_image::classpath::{self, BOOTCLASSPATH, SYSTEMSERVERCLASSPATH};
+            let mut jars = classpath::jars(&image, "bootclasspath.pb", BOOTCLASSPATH)?;
+            jars.extend(classpath::jars(&image, "systemserverclasspath.pb", SYSTEMSERVERCLASSPATH)?);
+            nodes::java::check_linkage(&image, &jars, Some(Path::new(&args.names[1])), Path::new(&args.names[0]))?;
+            nodes::service_aidl::check_own_stubs(Path::new(&args.names[0]))?;
+            Ok(ExitCode::SUCCESS)
+        }
         "generate-service-aidl" => {
             if !args.names.is_empty() { return Err("generate-service-aidl takes no targets".into()); }
             let _lock = lock()?;

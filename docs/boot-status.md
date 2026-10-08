@@ -586,7 +586,10 @@ as executed. The standalone service-AIDL generation command is verified in
 the isolated C worktree: existing getUserIds code9 is unchanged and the appended
 active-user leaf is generated as code10 with typed request/reply helpers. Source
 shared generated SHA remains unchanged. This is contract preparation only; the
-new Java leaf still needs a coherent image build before runtime deployment.
+new Java leaf still needs a coherent image build before runtime deployment. The private complete Java service DEX and
+stub DEX now pass the original boot/systemserver linkage checker and generated
+own-AIDL transaction-code verifier through the read-only check-service-java CLI.
+No image or graph build occurred; this is contract proof, not runtime deployment.
 Inherited capability refresh now pins each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
 grant a class to a reused number (#1152). The concurrent replacement regression
