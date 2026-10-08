@@ -17,6 +17,27 @@ static REGISTRAR:OnceLock<Arc<dyn Registrar>>=OnceLock::new();
 /// native descriptors deliberately retain their native lifetime semantics.
 pub fn install(registrar:Arc<dyn Registrar>)->Result<(),Arc<dyn Registrar>>{REGISTRAR.set(registrar)}
 pub struct PrivateFd {descriptor:Option<OwnedFd>,registrar:Option<Arc<dyn Registrar>>}
+/// Receive a nonblocking kernel allocation batch under one registration guard.
+/// The caller waits for readiness before entering; it must not block here.
+pub fn receive_allocations<T>(create: impl FnOnce() -> io::Result<(T, Vec<OwnedFd>)>) -> io::Result<(T, Vec<PrivateFd>)> {
+    let registrar = REGISTRAR.get().cloned();
+    let guard = registrar.as_ref().map(|owner| owner.enter());
+    let (value, descriptors) = create()?;
+    let mut private = Vec::with_capacity(descriptors.len());
+    let mut descriptors = descriptors.into_iter();
+    while let Some(descriptor) = descriptors.next() {
+        let descriptor = match &registrar {
+            Some(owner) => match owner.adopt(descriptor) {
+                Ok(descriptor) => descriptor,
+                Err(error) => { drop(descriptors); drop(guard); drop(private); return Err(error); }
+            },
+            None => descriptor,
+        };
+        private.push(PrivateFd { descriptor: Some(descriptor), registrar: registrar.clone() });
+    }
+    drop(guard);
+    Ok((value, private))
+}
 impl PrivateFd {
     pub fn allocate(create:impl FnOnce()->io::Result<OwnedFd>)->io::Result<Self>{
         let registrar=REGISTRAR.get().cloned();
@@ -109,6 +130,20 @@ mod tests {
         assert_eq!(inode.admission().unwrap().exclusive().err().unwrap().raw_os_error(),Some(libc::EBUSY));drop(writer);
         assert!(inode.admission().unwrap().exclusive().is_ok());drop(inode);drop(source);std::fs::remove_dir_all(directory).unwrap();
         assert!(!ENTERED.load(Ordering::SeqCst));
+        let (tag, received) = receive_allocations(|| {
+            assert!(ENTERED.load(Ordering::SeqCst));
+            let mut descriptors = Vec::new();
+            for _ in 0..2 {
+                let raw = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                if raw < 0 { return Err(io::Error::last_os_error()); }
+                descriptors.push(unsafe { OwnedFd::from_raw_fd(raw) });
+            }
+            Ok((17, descriptors))
+        }).unwrap();
+        assert_eq!(tag, 17); assert_eq!(received.len(), 2);
+        let slots = received.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+        drop(received);
+        for slot in slots { assert!(EVENTS.lock().unwrap().contains(&('c', slot))); }
         println!("PRIVATE_FD_OWNER_EXECUTED");
     }
 }
