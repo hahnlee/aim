@@ -3,12 +3,23 @@ use sha2::{Digest,Sha256};
 use std::{fs::{self,File},os::unix::fs::OpenOptionsExt,path::{Path,PathBuf}};
 use crate::inode_lease::{Identity,Inode,WriterLease,ExclusiveLease,EnableSlot};
 use std::os::fd::AsFd;
-use crate::private_fd::PrivateFile;
+use crate::private_fd::{PrivateFd,PrivateFile};
 const HEADER:u64=512;
 const MAGIC:&[u8;8]=b"AIMVRT02";
 
 pub struct Metadata{file:PrivateFile,identity:Identity,descriptor:Descriptor,tree_len:u64,signature_len:u64}
 impl Metadata {
+ /// Import the actual private proof capability. The binding names the data
+ /// inode; the proof blob itself has a different, independently owned inode.
+ pub fn from_private_fd(descriptor:PrivateFd,identity:Identity)->Result<Self>{
+  use std::os::fd::AsRawFd;
+  let file=PrivateFile::from_private_fd(descriptor);
+  if tree::stat(&file)?.st_mode&libc::S_IFMT!=libc::S_IFREG{return Err(Error::Linux(EINVAL));}
+  let flags=unsafe{libc::fcntl(file.as_raw_fd(),libc::F_GETFL)};
+  if flags<0{return Err(std::io::Error::last_os_error().into());}
+  if flags&libc::O_ACCMODE!=libc::O_RDONLY||flags&libc::O_EVTONLY!=0{return Err(Error::Linux(EINVAL));}
+  Self::from_file(file,&binding(identity))
+ }
  fn open(path:&Path,binding:&[u8;36])->Result<Self>{
   let file=PrivateFile::allocate(||File::options().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path))?;
   Self::from_file(file,binding)
@@ -171,6 +182,22 @@ mod tests{
  fn proof(store:&Store,data:&File)->Metadata{
   let admission=store.lock_inode(data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
   let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![9],16384,4096).unwrap(),&[],||false).unwrap();guard.commit(prepared).unwrap()
+ }
+ #[test]
+ fn private_metadata_import_retains_actual_readonly_proof_and_rejects_invalid_capabilities(){
+  let files=Data::new();fs::write(files.0.join("data"),vec![9;8193]).unwrap();let data=files.data();let store=files.store();
+  let admission=store.lock_inode(&data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
+  let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![],4096,4096).unwrap(),b"admitted signature",||false).unwrap();let view=prepared.metadata_view().unwrap();
+  let identity=guard.identity();let imported=Metadata::from_private_fd(view.file.try_clone().unwrap().into_private_fd(),identity).unwrap();
+  assert_ne!(Identity::from_fd(imported.backing_descriptor()).unwrap(),identity,"proof and data inode identities are distinct");
+  assert_eq!(imported.measure(64).unwrap(),view.measure(64).unwrap());assert_eq!(imported.read_metadata(3,0,100).unwrap(),b"admitted signature");assert_eq!(imported.verify_range(&data,4093,17).unwrap(),vec![9;17]);
+  let writable=PrivateFd::allocate(||Ok(File::options().read(true).write(true).open(&prepared._temporary.0)?.into())).unwrap();
+  assert!(matches!(Metadata::from_private_fd(writable,identity),Err(Error::Linux(EINVAL))));
+  let mut wrong=identity;wrong.generation=wrong.generation.wrapping_add(1);
+  assert!(matches!(Metadata::from_private_fd(view.file.try_clone().unwrap().into_private_fd(),wrong),Err(Error::Linux(EIO))));
+  let path=files.0.join("truncated-proof");fs::write(&path,b"AIMVRT02").unwrap();let truncated=PrivateFd::allocate(||Ok(File::open(path)?.into())).unwrap();
+  assert!(matches!(Metadata::from_private_fd(truncated,identity),Err(Error::Linux(EIO))));
+  drop(prepared);drop(view);assert_eq!(imported.verify_range(&data,0,1).unwrap(),[9]);
  }
  #[test]
  fn prepared_readonly_metadata_is_complete_and_commit_publishes_the_same_blob(){

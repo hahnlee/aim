@@ -37,6 +37,8 @@ impl Drop for PrivateFd{fn drop(&mut self){if let Some(descriptor)=self.descript
 /// File I/O borrows the wrapped open description without detaching its role.
 pub struct PrivateFile {descriptor:PrivateFd}
 impl PrivateFile {
+    /// Preserve an already registered private descriptor without reallocating.
+    pub fn from_private_fd(descriptor:PrivateFd)->Self{Self{descriptor}}
     pub fn allocate(create:impl FnOnce()->io::Result<File>)->io::Result<Self>{Ok(Self{descriptor:PrivateFd::allocate(||Ok(create()?.into()))?})}
     pub fn adopt(file:File)->io::Result<Self>{Self::allocate(||Ok(file))}
     pub fn try_clone(&self)->io::Result<Self>{Ok(Self{descriptor:self.descriptor.try_clone()?})}
