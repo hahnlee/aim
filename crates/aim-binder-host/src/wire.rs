@@ -24,6 +24,9 @@ pub const REJECT_DELIVERY: i32 = 0x6264_000b;
 pub const INTERRUPT: i32 = 0x6264_0006;
 pub const FILES: i32 = 0x6264_0007;
 pub const FILE_CLASS: i32 = 0x6264_0009;
+pub const CREATE_REGULAR_SCM:i32=0x6264_000c;
+pub const RESOLVE_REGULAR_SCM:i32=0x6264_000d;
+pub const DRAIN_REGULAR_SCM:i32=0x6264_000e;
 pub const CREATE_PATH: i32 = 0x6264_000a;
 pub const REPLY: i32 = 0x6264_0100;
 
@@ -38,10 +41,10 @@ pub struct RegularMetadata {
     pub writer: bool,
 }
 impl RegularMetadata {
-    fn encode(&self, writer: &mut Writer) {
+    pub(crate) fn encode(&self, writer: &mut Writer) {
         writer.u64(self.flags).u32(self.uid).u32(self.gid).bytes(&self.identity).u32(self.writer as u32);
     }
-    fn decode(reader: &mut Reader<'_>) -> Result<Self, Errno> {
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, Errno> {
         let flags = reader.u64()?;
         let uid = reader.u32()?;
         let gid = reader.u32()?;
@@ -120,6 +123,7 @@ impl<'a> Reader<'a> {
     pub fn new(b: &'a [u8]) -> Self {
         Self(b)
     }
+    pub fn remaining(&self)->usize{self.0.len()}
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Errno> {
         if self.0.len() < n {

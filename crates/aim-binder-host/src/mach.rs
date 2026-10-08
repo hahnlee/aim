@@ -481,3 +481,11 @@ pub fn reply(buf: &mut Buffer, to: Port, msg: &Msg) {
         release_send(to);
     }
 }
+
+/// Bounded send-once reply. COPY_SEND attachments remain owned by the caller
+/// through success or failure; the caller releases its reply right on error.
+pub fn reply_bounded(buf:&mut Buffer,to:Port,msg:&Msg,timeout_ms:u32)->Result<(),i32>{
+    let size=encode(buf,msg,(to,MOVE_SEND_ONCE),(NULL,0));
+    let result=unsafe{mach_msg(buf.bytes().as_mut_ptr(),SEND_MSG|0x10,size,0,NULL,timeout_ms,NULL)};
+    if result==0{Ok(())}else{Err(result)}
+}

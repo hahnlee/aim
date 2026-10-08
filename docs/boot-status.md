@@ -731,6 +731,11 @@ MADV_DONTNEED revalidation, corrupt-page/EOF SIGBUS with exact address, shrink
 and fork COW isolation pass in the bounded fixture. These use genuine host-built
 Merkle proofs; ENABLE ioctl is not exposed. Shared page-cache ownership, prior
 mapping ENABLE transition and full runtime/CTS acceptance remain incomplete.
+Five native SCM owner checks now pass, including actual Client/server Mach
+create/resolve/drain RPCs, kernel-queued rights, bounded reply failure and final
+writer release. The authenticated one-descriptor carrier uses synchronous EOF
+drain; no worker-held lease remains beyond that admission point. New control
+commands retain IOCTL wire4; ABI consumer/admission integration is pending.
 A real SCM syscall fixture also verifies one-FD carrier queue/reexport/discard,
 actual writer lifetime and read-only access, with explicit synchronous drain
 before admission. Automatic production admission and coherent deployment remain

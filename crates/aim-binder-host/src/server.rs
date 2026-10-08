@@ -90,12 +90,47 @@ fn create_path_fileport(port: Port, flags: u32) -> Result<(Vec<(Port, u32)>, Vec
     Ok((vec![(port, mach::MOVE_SEND)], out.0))
 }
 
+fn scm_control(req:&mach::Received)->Result<crate::regular_scm::ReplyGuard,Errno>{
+    use std::os::fd::{AsFd,FromRawFd,OwnedFd};
+    let convert=|port|mach::port_to_fd(port).map(|fd|unsafe{OwnedFd::from_raw_fd(fd)}).ok_or(errno::EBADF);
+    match req.id {
+        wire::CREATE_REGULAR_SCM=>{
+            let mut reader=Reader::new(&req.data);let metadata=wire::RegularMetadata::decode(&mut reader)?;
+            if reader.remaining()!=0||req.ports.len()!=1+metadata.writer as usize{return Err(wire::EPROTO);}
+            let backing=convert(req.ports[0])?;let writer=if metadata.writer{Some(convert(req.ports[1])?)}else{None};
+            crate::regular_scm::create(backing,writer,metadata).map_err(path_creation_errno)
+        }
+        wire::RESOLVE_REGULAR_SCM=>{
+            if req.ports.len()!=1||!req.data.is_empty(){return Err(wire::EPROTO);}
+            let carrier=convert(req.ports[0])?;crate::regular_scm::resolve(carrier.as_fd()).map_err(path_creation_errno)
+        }
+        _=>Err(wire::EPROTO),
+    }
+}
+
+fn serve_regular_control(req:&mach::Received,buffer:&mut Buffer){
+    let mut guard=None;
+    let result=if req.id==wire::DRAIN_REGULAR_SCM{
+        if !req.ports.is_empty()||req.data.len()!=36{Err(wire::EPROTO)}else{
+            crate::regular_scm::drain(req.data[..].try_into().unwrap()).map(|_|(Vec::new(),Vec::new())).map_err(path_creation_errno)
+        }
+    }else{scm_control(req).map(|reply|{let ports=reply.ports();let data=reply.data().to_vec();guard=Some(reply);(ports,data)})};
+    for port in &req.ports{mach::release_send(*port);}
+    let mut data=Writer::default();let (ports,extra)=match result{Ok(result)=>{data.i32(0);result},Err(error)=>{data.i32(error);(vec![],vec![])}};
+    data.0.extend_from_slice(&extra);
+    let message=Msg{id:wire::REPLY,ports,data:data.0};
+    if let Err(error)=mach::reply_bounded(buffer,req.reply,&message,1000){mach::release_send(req.reply);eprintln!("regular SCM reply failed: Mach {error}");}
+    drop(guard);
+}
+
 fn registered_descriptor_class(fd: i32) -> std::io::Result<u32> {
     let proxy = crate::proxy_file::registered_class_result(fd)?;
     if proxy != 0 {
         return Ok(proxy);
     }
-    crate::path_file::registered_class_result(fd)
+    let path=crate::path_file::registered_class_result(fd)?;
+    if path!=0{return Ok(path);}
+    crate::regular_scm::registered_class(fd)
 }
 
 pub fn path_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
@@ -327,6 +362,9 @@ impl Server {
             let Ok(req) = mach::receive(&mut buf, self.set) else {
                 continue;
             };
+            if req.local==self.service&&matches!(req.id,wire::CREATE_REGULAR_SCM|wire::RESOLVE_REGULAR_SCM|wire::DRAIN_REGULAR_SCM){
+                serve_regular_control(&req,&mut buf);continue;
+            }
             let result = if req.local == self.service && req.id == wire::CREATE_PATH {
                 if req.ports.len() != 1 || req.data.len() != 4 {
                     Err(wire::EPROTO)
@@ -924,6 +962,48 @@ mod path_carrier_tests {
         ffi::CString,
         os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     };
+    struct FiniteScmService {port:Port,thread:Option<std::thread::JoinHandle<()>>}
+    impl FiniteScmService {
+        fn join(&mut self){self.thread.take().unwrap().join().unwrap();}
+    }
+    impl Drop for FiniteScmService {
+        fn drop(&mut self){
+            mach::destroy_receive(self.port);mach::release_send(self.port);
+            if let Some(thread)=self.thread.take(){if thread.join().is_err(){eprintln!("SCM fixture service unwound");}}
+        }
+    }
+    #[test]
+    fn actual_client_regular_scm_control_rpc_preserves_identity_writer_and_drains_eof(){
+        use std::fs::OpenOptions;
+        let path=std::env::temp_dir().join(format!("aim-scm-control-{}",std::process::id()));std::fs::create_dir(&path).unwrap();
+        let backing=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();
+        let writer=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("writers")).unwrap();
+        let contender=OpenOptions::new().read(true).write(true).open(path.join("writers")).unwrap();assert_eq!(unsafe{libc::flock(writer.as_raw_fd(),libc::LOCK_SH)},0);
+        let metadata=wire::RegularMetadata{flags:2,uid:1000,gid:1001,identity:crate::regular_file::identity(backing.as_fd()).unwrap(),writer:true};
+        let service=mach::new_port(true).unwrap();
+        let owner=std::thread::spawn(move||{
+            let mut buffer=Buffer::default();
+            for _ in 0..3{
+                let Ok(request)=mach::receive(&mut buffer,service)else{return;};
+                if let Err(panic)=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||serve_regular_control(&request,&mut buffer))){
+                    for port in &request.ports{mach::release_send(*port);}mach::release_send(request.reply);
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        });
+        let mut owner=FiniteScmService{port:service,thread:Some(owner)};
+        let client=crate::client::Client::from_service_port(service);
+        let port=client.create_regular_scm(backing.as_raw_fd(),Some(writer.as_raw_fd()),&metadata).unwrap();
+        let carrier=unsafe{OwnedFd::from_raw_fd(mach::port_to_fd(port.as_port()).unwrap())};drop(port);drop(backing);drop(writer);
+        let resolved=client.resolve_regular_scm(carrier.as_raw_fd()).unwrap();assert_eq!(resolved.metadata,metadata);
+        let data=unsafe{OwnedFd::from_raw_fd(mach::port_to_fd(resolved.backing.as_port()).unwrap())};
+        let lease=unsafe{OwnedFd::from_raw_fd(mach::port_to_fd(resolved.writer.as_ref().unwrap().as_port()).unwrap())};
+        assert_eq!(crate::regular_file::identity(data.as_fd()).unwrap(),metadata.identity);
+        drop(resolved);drop(carrier);drop(data);drop(lease);
+        client.drain_regular_scm(&metadata.identity).unwrap();owner.join();
+        assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
+        drop(owner);std::fs::remove_dir_all(path).unwrap();
+    }
     #[test]
     fn regular_sidecar_count_and_backing_incarnation_are_checked_before_driver_adoption() {
         use std::fs::OpenOptions;

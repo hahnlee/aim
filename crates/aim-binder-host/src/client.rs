@@ -124,6 +124,36 @@ pub struct Client {
 }
 
 impl Client {
+    #[cfg(test)]
+    pub(crate) fn from_service_port(service:Port)->Self{Self{service}}
+    /// Return an opaque carrier fileport. The ABI materializes it privately.
+    pub fn create_regular_scm(&self,backing:i32,writer:Option<i32>,metadata:&wire::RegularMetadata)->Result<crate::regular_scm::FilePort,Errno>{
+        if metadata.writer!=writer.is_some(){return Err(wire::EPROTO);}
+        let backing=crate::regular_scm::FilePort::new(mach::fd_to_port(backing).ok_or(errno::EBADF)?);
+        let writer=writer.map(|fd|mach::fd_to_port(fd).map(crate::regular_scm::FilePort::new).ok_or(errno::EBADF)).transpose()?;
+        let mut data=Writer::default();metadata.encode(&mut data);
+        let mut ports=vec![(backing.as_port(),mach::COPY_SEND)];if let Some(writer)=&writer{ports.push((writer.as_port(),mach::COPY_SEND));}
+        let request=Msg{id:wire::CREATE_REGULAR_SCM,ports,data:data.0};
+        let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{let mut reader=status(&reply)?;if reader.u32()?!=crate::regular_scm::CLASS||reader.remaining()!=0||reply.ports.len()!=1{return Err(wire::EPROTO);}Ok(())})();
+        if let Err(error)=result{for port in reply.ports{mach::release_send(port);}return Err(error);}
+        Ok(crate::regular_scm::FilePort::new(reply.ports[0]))
+    }
+    pub fn resolve_regular_scm(&self,carrier:i32)->Result<crate::regular_scm::Resolved,Errno>{
+        let carrier=crate::regular_scm::FilePort::new(mach::fd_to_port(carrier).ok_or(errno::EBADF)?);
+        let request=Msg{id:wire::RESOLVE_REGULAR_SCM,ports:vec![(carrier.as_port(),mach::COPY_SEND)],data:vec![]};
+        let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{let mut reader=status(&reply)?;let metadata=wire::RegularMetadata::decode(&mut reader)?;if reader.remaining()!=0||reply.ports.len()!=1+metadata.writer as usize{return Err(wire::EPROTO);}Ok(metadata)})();
+        let metadata=match result{Ok(metadata)=>metadata,Err(error)=>{for port in reply.ports{mach::release_send(port);}return Err(error);}};
+        Ok(crate::regular_scm::Resolved{backing:crate::regular_scm::FilePort::new(reply.ports[0]),writer:if metadata.writer{Some(crate::regular_file::WriterPort::new(reply.ports[1]))}else{None},metadata})
+    }
+    pub fn drain_regular_scm(&self,identity:&[u8;36])->Result<(),Errno>{
+        let request=Msg{id:wire::DRAIN_REGULAR_SCM,ports:vec![],data:identity.to_vec()};
+        let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{if !reply.ports.is_empty()||status(&reply)?.remaining()!=0{return Err(wire::EPROTO);}Ok(())})();
+        for port in reply.ports{mach::release_send(port);}result
+    }
+
     /// Register an owned Linux path carrier with the native daemon. Errors are Linux wire errno.
     pub fn create_path(&self, fd: i32, flags: u32) -> Result<std::os::fd::OwnedFd, Errno> {
         use std::os::fd::FromRawFd;
