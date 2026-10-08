@@ -459,12 +459,14 @@ the original com.google.android.webview 133.0.6943.137/694313732 provider comple
 relro 1/1, starts its renderer, returns the exact JavaScript DOM marker and renders
 local HTML/SVG in an inspected capture. Reproducible probe source is in
 tools/webview-probe; originals remain unchanged. Settings storage/default-app and
-Chromium app-info screens render, but the permissions screen crashes in instant-app
-visibility policy and Wellbeing hits a same-user cross-user guard. Source now
-uses the pinned instant-view permissions/HOME/AppPrediction policy (#987) and
-the original SUSPEND_APPS plus other-user-only FULL cross-user rule (#1145);
-two instant-policy regressions and the user-permission matrix pass. Actual UI
-replays await deployment, so those flows are not counted as passes. The frozen original CTS baseline also finds
+Chromium app-info screens render. C107 with the pinned instant-view
+permissions/HOME/AppPrediction policy (#987) and the original SUSPEND_APPS plus
+other-user-only FULL cross-user rule (#1145) renders the original app-permission
+screen (Calculator notifications listed, 2650ms cold launch) and Wellbeing
+dashboard (704ms warm launch); foreground activity receipts and inspected
+screenshots confirm both. Later isolated Chromium process-group creation kills
+SystemServer (#1153), so this is bounded UI evidence, not full app acceptance.
+The frozen original CTS baseline also finds
 actual cross-app file access (#1143) and missing procfs network tables (#1144);
 those lower owners are being corrected separately with original results preserved.
 The frozen native campaign completes Parsing 11/0 and PreferredActivity 2/0,
@@ -488,14 +490,17 @@ cross-process inode lock (#1143). Anonymous memfd metadata is identified by its
 actual inode/seal owner rather than a diagnostic host pathname. C105 exposed
 the old classification as EROFS during gralloc ftruncate before SurfaceFlinger
 could start. The regression verifies actual memfd resize, shared mmap and
-write/readback, ordinary unmapped FD resize, and retained image EROFS; the
-C106 with the new host cohort passes the previous SurfaceFlinger allocator
-failure, but original zygote aborts before SystemServer: fchmodat of
-/sys/fs/cgroup/system/uid_1000/. returns ENOENT (#1150). The syscall owner now binds current-process procfs FD magic links to a
-retained descriptor, matching original bionic's O_PATH chmod fallback. The
-focused owner regression passes with UID ownership, rename retention, hidden
-and closed FDs, and symlink errors. Native-service and app policy replays
-remain pending for the corrected cohort. Inherited capability refresh now pins
+write/readback, ordinary unmapped FD resize, and retained image EROFS. Current
+C107 reaches boot_completed=1 with original SystemServer and both native package
+service names. The syscall owner binds current-process procfs FD magic links to
+a retained descriptor, matching original bionic's O_PATH chmod fallback (#1150).
+The focused regression verifies UID ownership, rename retention, hidden/closed
+FDs and symlink errors. Later original SystemServer fails lchown of
+/sys/fs/cgroup/apps/uid_90000/. with EPERM while creating an isolated Chromium
+process, then dies with ProcessList's createProcessGroup assertion (#1153).
+The cgroup apps parent is actually guest system:system, mode0775. This ownership
+gap remains unresolved; reboot and complete app validation remain pending.
+Inherited capability refresh now pins
 each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
 grant a class to a reused number (#1152). The concurrent replacement regression
@@ -506,7 +511,8 @@ The owner now coalesces level notifications, sends outside that mutex, and
 uses an explicitly nonblocking notification socket with a poll-based lifetime
 wait. Draining precedes packet acknowledgement and queued requests re-arm
 readiness. Eleven ACK/clone/death/abort regressions and the actual full-buffer
-backpressure test pass; the corrected runtime replay remains pending. Path-only descriptor capabilities preserve
+backpressure test pass. C107 actually returns mounted FUSE statistics from
+df -k /sdcard; this is not a complete Install CTS rerun. Path-only descriptor capabilities preserve
 actual backing identity and ARM64 flags through SCM/Binder; guessed hidden
 kernel descriptors fail as nonexistent guest FDs. Typed import failure rejects
 the actual delivered transaction, closes descriptors and releases its buffer,
