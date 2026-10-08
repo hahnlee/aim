@@ -548,10 +548,20 @@ fn fd_guest(fd: i32) -> Option<String> {
     procfs::fd_guest_path(fd).ok()
 }
 fn writable_fd_metadata(fd: i32, stat: &libc::stat) -> Result<(), i64> {
-    if vfs::on_read_only_root(stat.st_dev)
-        || attrs::recording()
-            && fd_guest(fd).is_some_and(|path| vfs::lookup(&path).1 == vfs::Area::Image)
-    {
+    if vfs::on_read_only_root(stat.st_dev) {
+        return Err(-(crate::errno::EROFS as i64));
+    }
+    // Anonymous memory has an actual writable inode/seal owner. F_GETPATH's
+    // diagnostic host pathname is not a guest mount identity.
+    if memfd::key(fd).is_some() { return Ok(()); }
+    let guest = crate::xrt::original_guest_path(fd).or_else(|| {
+        let mut path=[0u8;libc::PATH_MAX as usize];
+        if unsafe{libc::fcntl(fd,libc::F_GETPATH,path.as_mut_ptr())}<0 {return None;}
+        let length=path.iter().position(|byte|*byte==0)?;
+        use std::os::unix::ffi::OsStrExt;
+        vfs::guest_path_of_host(std::path::Path::new(std::ffi::OsStr::from_bytes(&path[..length])))
+    });
+    if attrs::recording() && guest.is_some_and(|path|vfs::lookup(&path).1==vfs::Area::Image) {
         return Err(-(crate::errno::EROFS as i64));
     }
     Ok(())
@@ -1227,6 +1237,29 @@ mod tests {
         assert!(fd >= 0, "create {path}: {fd}");
         // SAFETY: the fd just opened.
         unsafe { libc::close(fd as i32) };
+    }
+
+    #[test]
+    fn mapped_metadata_memfd_and_unmapped_fd_resize_real_shared_memory() {
+        let(_guard,_view)=crate::vfs::test_view();assert!(attrs::recording());
+        let fd=memfd::memfd_create([c"metadata-anonymous".as_ptr() as u64,3,0,0,0,0]);assert!(fd>=0);assert!(memfd::key(fd as i32).is_some());
+        assert_eq!(ftruncate([fd as u64,16384,0,0,0,0]),0);
+        let address=super::super::mem::mmap([0,16384,3,1,fd as u64,0]);assert!(address>0,"actual shared mmap: {address}");
+        unsafe{(address as *mut u8).write(0x5a)};
+        let mut byte=0u8;assert_eq!(unsafe{libc::pread(fd as i32,(&mut byte as *mut u8).cast(),1,0)},1);assert_eq!(byte,0x5a);
+        let context:crate::context::GuestContext=unsafe{std::mem::zeroed()};
+        assert_eq!(super::super::mem::munmap(&context,[address as u64,16384,0,0,0,0]),0);
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+        let path=std::env::temp_dir().join(format!("aim-unmapped-metadata-{}",std::process::id()));
+        let ordinary=std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        use std::os::fd::AsRawFd;assert!(vfs::guest_path_of_host(&path).is_none());
+        assert_eq!(ftruncate([ordinary.as_raw_fd() as u64,37,0,0,0,0]),0);assert_eq!(ordinary.metadata().unwrap().len(),37);
+        drop(ordinary);std::fs::remove_file(path).unwrap();
+        let image_path=_view.join("root/system/metadata-readonly-fixture");std::fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+        let image=std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&image_path).unwrap();
+        assert_eq!(vfs::lookup(&vfs::guest_path_of_host(&image_path.canonicalize().unwrap()).unwrap()).1,vfs::Area::Image);
+        assert_eq!(ftruncate([image.as_raw_fd() as u64,37,0,0,0,0]),-(crate::errno::EROFS as i64));
+        assert_eq!(image.metadata().unwrap().len(),0);drop(image);std::fs::remove_file(image_path).unwrap();
     }
 
     #[test]

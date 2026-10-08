@@ -480,11 +480,16 @@ causes. The exact process/file-dependent condition remains unresolved. An indepe
 with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
 so this is not claimed as the reboot fix. Diagnostics leave no owned processes
 or temporary files behind.
-Current Source lower-owner cohort passes 169 ABI tests (four ignored), 802 PM
+Current Source lower-owner cohort passes 170 ABI tests (four ignored), 802 PM
 library tests (eleven ignored) and 65 complete Binder tests. Guest DAC now
 checks ancestor search, final access, owner/groups/capabilities and checked
 metadata persistence; metadata mutations use hidden real inode anchors and a
-cross-process inode lock (#1143). Path-only descriptor capabilities preserve
+cross-process inode lock (#1143). Anonymous memfd metadata is identified by its
+actual inode/seal owner rather than a diagnostic host pathname. C105 exposed
+the old classification as EROFS during gralloc ftruncate before SurfaceFlinger
+could start. The regression verifies actual memfd resize, shared mmap and
+write/readback, ordinary unmapped FD resize, and retained image EROFS; the
+new runtime boot replay remains pending. Path-only descriptor capabilities preserve
 actual backing identity and ARM64 flags through SCM/Binder; guessed hidden
 kernel descriptors fail as nonexistent guest FDs. Typed import failure rejects
 the actual delivered transaction, closes descriptors and releases its buffer,
