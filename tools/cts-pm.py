@@ -63,8 +63,18 @@ def prepare():
     return count
 
 
-def summarize(path):
-    tree = ET.parse(path).getroot()
+def xml_complete(rows):
+    def complete(module):
+        try:
+            total = int(module['declared_total'] or -1)
+        except (TypeError, ValueError):
+            return False
+        return module['done'] and bool(module['tests']) and total == len(module['tests'])
+    return bool(rows) and all(complete(module) for module in rows)
+
+
+def summarize(path, data=None):
+    tree = ET.fromstring(data) if data is not None else ET.parse(path).getroot()
     if (tree.tag != 'Result' or tree.attrib.get('suite_name') != 'CTS'
             or tree.attrib.get('suite_version') != '16_r1'
             or tree.attrib.get('suite_build_number') != '13467367'):
@@ -88,7 +98,9 @@ def summarize(path):
                      'declared_total': module.attrib.get('total_tests'),
                      'counts': dict(counts), 'tests': tests})
     return {'path': str(path), 'release': tree.attrib['suite_version'],
-            'command': tree.attrib.get('command_line_args'), 'modules': rows}
+            'command': tree.attrib.get('command_line_args'), 'modules': rows,
+            'counts': dict(collections.Counter(test['result'] for module in rows for test in module['tests'])),
+            'complete': xml_complete(rows)}
 
 
 def result_for(module, before):
@@ -271,29 +283,62 @@ def compare(original, native):
             raise ValueError('campaign module scope differs from the current pinned gate')
         if campaign['manifest_sha256'] != digest(MANIFEST):
             raise ValueError('campaign module manifest differs from the current pinned gate')
-        values, incomplete, unexecuted = {}, [], []
+        values, incomplete, unexecuted, evidence, wrapper_issues = {}, set(), [], [], []
         seen = set()
         for row in campaign['runs']:
-            if row['module'] not in expected or row['module'] in seen:
-                raise ValueError(f'unexpected or duplicate campaign module: {row["module"]}')
-            seen.add(row['module'])
-            if row['status'] != 'recorded':
-                incomplete.append(row['module']); continue
-            rows = summarize(Path(row['xml']))['modules']
-            if not any(m['name'] == row['module'] for m in rows):
-                incomplete.append(row['module'])
+            requested = row['module']
+            if requested not in expected or requested in seen:
+                raise ValueError(f'unexpected or duplicate campaign module: {requested}')
+            seen.add(requested)
+            issues = []
+            if row['status'] != 'recorded': issues.append(f"campaign status: {row['status']}")
+            if row.get('wrapper_exit') != 0: issues.append(f"wrapper exit: {row.get('wrapper_exit')}")
+            if row.get('error'): issues.append(row['error'])
+            record = {'module': requested, 'campaign_status': row['status'],
+                      'wrapper_exit': row.get('wrapper_exit'), 'wrapper_error': row.get('error'),
+                      'xml_retained': bool(row.get('xml')), 'xml_complete': False,
+                      'invocation_matches': False, 'counts': {}, 'acceptance_complete': False}
+            evidence.append(record)
+            if not row.get('xml'):
+                issues.append('no retained official XML')
+                incomplete.add(requested)
+                wrapper_issues.append({'module': requested, 'issues': issues})
+                continue
+            xml = Path(row['xml']).resolve(strict=True)
+            if xml.parent != path.resolve():
+                raise ValueError(f'{requested}: result XML is outside this campaign')
+            data = xml.read_bytes()
+            sha = hashlib.sha256(data).hexdigest()
+            if row.get('xml_sha256') != sha:
+                raise ValueError(f'{requested}: retained result XML hash differs or is missing')
+            result = summarize(xml, data)
+            rows = result['modules']
             for module in rows:
-                if (not module['done'] or not module['tests']
-                        or int(module['declared_total'] or -1) != len(module['tests'])):
-                    incomplete.append(module['name'])
+                name = module['name']
+                if name != requested and not name.startswith(requested + '[') and not name.startswith(requested + ' ['):
+                    raise ValueError(f'{requested}: official XML includes foreign module {name}')
+            command = ['cts', '-s', f"127.0.0.1:{campaign['port']}", '--skip-device-info',
+                       '--skip-preconditions', '-m', requested, *campaign['cts_args']]
+            matches = shlex.split(result['command'] or '') == command
+            if not matches: issues.append('official XML invocation differs from campaign')
+            has_requested = any(module['name'] == requested for module in rows)
+            if not has_requested: issues.append('official XML lacks the requested base module')
+            if not result['complete']: issues.append('official XML module incomplete')
+            record.update(xml=str(xml), xml_sha256=sha, xml_complete=result['complete'],
+                          invocation_matches=matches, counts=result['counts'])
+            for module in rows:
                 for test in module['tests']:
                     key = (module['name'], module['abi'], test['class'], test['name'])
                     if key in values: raise ValueError(f'duplicate campaign result: {key}')
                     values[key] = test['result']
                     if test['result'] not in ('pass', 'fail'): unexecuted.append(key)
-        missing = expected - {r['module'] for r in campaign['runs']}
-        return campaign, values, incomplete + sorted(missing), unexecuted
-    a, old, ai, au = load(original); b, new, bi, bu = load(native)
+            record['acceptance_complete'] = not issues and has_requested and result['complete'] and all(
+                test['result'] in ('pass', 'fail') for module in rows for test in module['tests'])
+            if not record['acceptance_complete']: incomplete.add(requested)
+            if issues: wrapper_issues.append({'module': requested, 'issues': issues})
+        incomplete.update(expected - seen)
+        return campaign, values, sorted(incomplete), unexecuted, evidence, wrapper_issues
+    a, old, ai, au, ae, aw = load(original); b, new, bi, bu, be, bw = load(native)
     if a['label'] != 'original' or b['label'] != 'native' or a['manifest_sha256'] != b['manifest_sha256'] or a['cts_args'] != b['cts_args']:
         raise ValueError('baseline/native labels, module manifest or harness arguments differ')
     regressions = [key for key in old.keys() & new.keys() if old[key] == 'pass' and new[key] != 'pass']
@@ -302,6 +347,8 @@ def compare(original, native):
               'missing_native_tests': sorted(old.keys() - new.keys()), 'native_only_tests': sorted(new.keys() - old.keys()),
               'original_incomplete_modules': ai, 'native_incomplete_modules': bi,
               'original_not_run_tests': au, 'native_not_run_tests': bu,
+              'original_module_evidence': ae, 'native_module_evidence': be,
+              'original_wrapper_issues': aw, 'native_wrapper_issues': bw,
               'counts': {'original': dict(collections.Counter(old.values())), 'native': dict(collections.Counter(new.values()))}}
     report['complete_same_outcomes'] = not any([regressions, changes, report['missing_native_tests'], report['native_only_tests'], ai, bi, au, bu])
     report['native_all_pass'] = bool(new) and not bi and not bu and all(v == 'pass' for v in new.values())

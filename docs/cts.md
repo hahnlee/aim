@@ -103,3 +103,11 @@ the same guest-init pid and adbd back in 6 s. No module has produced
 results yet: an install crashed system_server once (#784), and after a
 reboot a module waited on `/sdcard`, which the emulated volume does not
 provide without MediaProvider's FUSE (#221).
+
+Official campaign comparison verifies each retained XML's campaign-local path and
+recorded SHA before parsing. Test outcomes remain visible even when wrapper or
+invocation validation failed; XML completeness, wrapper issues and assumption
+failures are reported separately and still prevent acceptance. The comparator
+requires complete same outcomes and all native tests passed, so evidence reporting
+does not waive a failed or unexecuted gate. Six fixture regressions cover this
+separation, tampering and foreign modules.
