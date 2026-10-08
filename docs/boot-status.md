@@ -542,7 +542,13 @@ VersionInfo and commits SDK/database versions and original fingerprint updates
 at boot completion; pre-Q component migration follows the retained original
 lifecycle predicate for non-system user0 only. Actual persistence/reload and
 build-only-change regressions pass, and the combined PM library suite passes
-803/0 with eleven ignored. Strict original rollback replay remains pending. A standalone isolated template command now
+803/0 with eleven ignored. C110 actual rollback on a clone constructs original PMS and preserves both
+Version rows plus the selected five packages' UID/codepath/version/signatures,
+permission maps and component/restriction state. The prior AppDetails delta is
+gone; representative Calculator/WebView/Chrome rendering passes. Its owned
+processes and attachments are cleaned. This proves selected rollback parity,
+not all-package parity; fresh empty-data template fingerprints are still under
+#1157 investigation. A standalone isolated template command now
 uses explicit existing image/immutable-host/display/empty inputs and an exclusive
 new output; it holds the image read lease, records hashes before boot, refuses
 protected-path overlap and checks drift before publication. Focused CLI isolation
