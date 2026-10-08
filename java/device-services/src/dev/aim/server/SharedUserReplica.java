@@ -22,6 +22,16 @@ public final class SharedUserReplica implements SharedUserApi {
             }
         }
     }
+    SharedUserReplica withPackages(java.util.Map<String, com.android.server.pm.pkg.PackageState> packages) {
+        var updated = new java.util.ArrayList<PackageStateReplica>();
+        for (int i = 0; i < members.size(); i++) {
+            var member = members.get(i);
+            updated.add(state.getMembers().get(i).retained() == null
+                    ? (PackageStateReplica)java.util.Objects.requireNonNull(packages.get(member.getPackageName())) : member);
+        }
+        return new SharedUserReplica(state, updated);
+    }
+
     List<PackageStateReplica> getCurrentPackageStates() {
         var current = new java.util.ArrayList<PackageStateReplica>();
         for (int i = 0; i < members.size(); i++) {

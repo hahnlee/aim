@@ -354,7 +354,18 @@ including the 4,000-entry original Binder oracle, and keyset transport passes
 1/0/0 in 125.27s. The root-only crash child helper is not an independent gate.
 All seven meaningful originally excluded library gates have now been explicitly
 executed successfully. New pure query and concurrent cache fixtures still need
-actual ART wiring; their compilation does not establish runtime conformance. Original PMS on a cloned native
+actual ART wiring; their compilation does not establish runtime conformance.
+C87 native ParsingHost campaign records 11/0 with module complete; the current
+original campaign records Parsing 11/0, Preferred 2/0 and PackageSetting 2/0.
+Both stop normally between modules before the next image revision. Chrome
+C87 still reaches ANR in full Java package-owner reads. The owner now exposes
+a metadata revision inherited only by sealed usage-only snapshots, plus an exact
+versioned bulk usage capture. Java reuses immutable metadata while rewrapping
+changed active usage and rebinding shared/UID members; detached original settings
+and previous snapshots retain isolated usage values. Eleven targeted Rust cases,
+full device-services compilation and 790 aggregate native tests pass (nine
+ignored in that aggregate, including the separate host reproduction and crash
+child helper). Actual latest metadata/usage ART and app replay remain pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 Original 66-module CTS campaign is running with provenance-checked resume;

@@ -355,3 +355,43 @@ fn usage_delta_requires_validated_snapshot_and_keeps_all_other_owner_fields() {
     // still passes; this seal never admits a new unchecked package graph.
     Store::new_replica(after.owner().clone(), after.usage().clone()).unwrap();
 }
+
+
+#[test]
+fn usage_metadata_revision_and_bounded_batch_preserve_exact_snapshot_contract() {
+    use aim_binder_host::{local::Service, parcel::Reader};
+    use aim_service_aidl::dev_aim_server_ipackagescansnapshot as api;
+    use crate::package::scan_snapshot::{Store, endpoint::Endpoint};
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let base=publish(&fixture,&bridge);
+    let mut usage=base.scan().usage().clone();usage.notify("p",2,991);
+    let prepared=Store::prepare_usage_store(base.scan(),usage).unwrap();let next=prepared.capture();
+    assert_eq!(next.metadata_revision(),base.scan().metadata_revision());
+    assert!(next.version()>next.metadata_revision());
+    let endpoint=Endpoint::new(next.clone());
+    let call=|code,request:&Parcel| endpoint.transact(&mut Call{code,flags:0,sender_pid:97101,sender_euid:1000,data:Reader::new(request.data(),request.objects())}).unwrap();
+    let mut request=Parcel::new();api::GetMetadataVersion{}.write(&mut request);
+    let reply=call(api::GET_METADATA_VERSION,&request);
+    assert_eq!(api::read_get_metadata_version_reply(&mut reply.reader()).unwrap().unwrap(),base.scan().metadata_revision() as i64);
+    let mut request=Parcel::new();api::GetUsageRecordsLength{}.write(&mut request);
+    let reply=call(api::GET_USAGE_RECORDS_LENGTH,&request);let length=api::read_get_usage_records_length_reply(&mut reply.reader()).unwrap().unwrap();
+    assert!(length>20);
+    let mut request=Parcel::new();api::GetUsageRecordsChunk{offset:0,length}.write(&mut request);
+    let reply=call(api::GET_USAGE_RECORDS_CHUNK,&request);let bytes=api::read_get_usage_records_chunk_reply(&mut reply.reader()).unwrap().unwrap().unwrap();
+    let mut reader=Reader::new(&bytes,&[]);
+    assert_eq!(reader.read_i64().unwrap(),next.version() as i64);
+    assert_eq!(reader.read_i64().unwrap(),next.metadata_revision() as i64);
+    assert_eq!(reader.read_i32().unwrap(),1);
+    assert_eq!(reader.read_i64().unwrap(),next.version() as i64);
+    assert_eq!(reader.read_string16().unwrap().as_deref(),Some("p"));
+    assert_eq!(reader.read_bool().unwrap(),next.usage().historical_available());
+    assert_eq!(aim_service_aidl::read_long_array(&mut reader).unwrap().unwrap(),vec![0,0,991,0,0,0,0,0]);
+    assert_eq!(reader.remaining(),0);
+    let mut invalid=Parcel::new();api::GetUsageRecordsChunk{offset:0,length:65537}.write(&mut invalid);
+    let reply=call(api::GET_USAGE_RECORDS_CHUNK,&invalid);assert!(api::read_get_usage_records_chunk_reply(&mut reply.reader()).unwrap().is_err());
+    // Every ordinary publication changes metadata, even when the caller's
+    // current owner happens to compare equal. Only sealed usage inherits it.
+    let generic=prepared.publish(&next,next.owner().clone(),next.usage().clone()).unwrap();
+    assert_eq!(generic.metadata_revision(),generic.version());
+    assert!(generic.metadata_revision()>next.metadata_revision());
+    assert_eq!(base.scan().usage().times("p").unwrap()[2],0);
+}

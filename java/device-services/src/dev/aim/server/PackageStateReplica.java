@@ -24,6 +24,7 @@ import java.util.function.Supplier;
 /** One native capture exposed through the pinned original read-only interface. */
 public final class PackageStateReplica implements PackageStateInternal {
     private final Supplier<PackageSetting> factory;
+    private final Supplier<PackageSetting> metadataFactory;
     private final PackageStateInternal state;
     private final Map<Integer, PackageUserStateInternal> users;
     private final int hiddenApiPolicy;
@@ -31,9 +32,29 @@ public final class PackageStateReplica implements PackageStateInternal {
     PackageStateReplica(Supplier<PackageSetting> factory, Map<Integer, PackageUserStateReplica> users,
             int hiddenApiPolicy) {
         this.factory = factory;
+        this.metadataFactory = factory;
         this.state = fresh();
         this.users = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(users));
         this.hiddenApiPolicy = hiddenApiPolicy;
+    }
+
+    private PackageStateReplica(PackageStateReplica previous, PackageUsageState usage, long version) {
+        this.metadataFactory = previous.metadataFactory;
+        this.factory = () -> {
+            var setting = metadataFactory.get();
+            PackageObjects.restoreUsage(setting, usage, version);
+            return setting;
+        };
+        this.state = fresh();
+        this.users = previous.users;
+        this.hiddenApiPolicy = previous.hiddenApiPolicy;
+    }
+
+    PackageStateReplica withUsage(PackageUsageState usage, long version) {
+        if (!getPackageName().equals(usage.getPackageName()) || usage.getVersion() != version)
+            throw new IllegalArgumentException("usage replica identity differs");
+        return java.util.Arrays.equals(getLastPackageUsageTime(), usage.getLastPackageUsageTimeInMills())
+                ? this : new PackageStateReplica(this, usage, version);
     }
 
     public PackageSetting detachedSetting() { return factory.get(); }

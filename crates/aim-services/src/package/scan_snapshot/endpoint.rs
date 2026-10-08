@@ -327,6 +327,7 @@ impl WriteParcelable for PackageSeInfo {
 
 struct Lease {
     snapshot: Option<Arc<Snapshot>>,
+    usage_records: Option<Vec<u8>>,
     code: BTreeMap<(String, bool), Arc<Vec<u8>>>,
     settings: BTreeMap<(String, bool), Arc<Vec<u8>>>,
     runtimes: BTreeMap<(String, bool), Arc<Vec<u8>>>,
@@ -500,7 +501,7 @@ impl Endpoint {
         let mut endpoint=Self::new(snapshot);endpoint.raw_metadata=true;endpoint
     }
     pub fn close_lease(&self){
-        let mut lease=self.lease.lock().unwrap();lease.snapshot.take();
+        let mut lease=self.lease.lock().unwrap();lease.snapshot.take();lease.usage_records.take();
         self.computer.lock().unwrap().take();
         lease.code.clear();lease.users.clear();lease.settings.clear();lease.runtimes.clear();lease.libraries.clear();lease.shared_users.clear();
     }
@@ -510,6 +511,7 @@ impl Endpoint {
             raw_metadata: false,
             lease: Mutex::new(Lease {
                 snapshot: Some(snapshot),
+                usage_records: None,
                 code: BTreeMap::new(),
                 users: BTreeMap::new(),
                 settings: BTreeMap::new(),
@@ -546,7 +548,7 @@ impl Service for Endpoint {
             if call.data.remaining() != 0 {
                 return Err(aim_binder_host::parcel::BAD_VALUE);
             }
-            lease.snapshot.take();
+            lease.snapshot.take();lease.usage_records.take();
             self.computer.lock().unwrap().take();
             lease.code.clear();
             lease.users.clear();
@@ -571,6 +573,42 @@ impl Service for Endpoint {
             return Ok(reply);
         }
         match call.code {
+            api::GET_METADATA_VERSION => {
+                api::GetMetadataVersion::read(&mut call.data)?;
+                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
+                api::write_get_metadata_version_reply(&mut reply,snapshot.metadata_revision() as i64);
+            }
+            api::GET_USAGE_RECORDS_LENGTH | api::GET_USAGE_RECORDS_CHUNK => {
+                let chunk = if call.code==api::GET_USAGE_RECORDS_CHUNK {
+                    let args=api::GetUsageRecordsChunk::read(&mut call.data)?;
+                    Some((args.offset,args.length))
+                } else { api::GetUsageRecordsLength::read(&mut call.data)?;None };
+                if call.data.remaining()!=0{return Err(aim_binder_host::parcel::BAD_VALUE);}
+                if lease.usage_records.is_none() {
+                    let count=match i32::try_from(snapshot.usage().names().count()) {
+                        Ok(count)=>count,Err(_)=>{reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"usage records count overflow"));return Ok(reply);}
+                    };
+                    let mut record=Parcel::new();record.write_i64(snapshot.version() as i64);
+                    record.write_i64(snapshot.metadata_revision() as i64);record.write_i32(count);
+                    for name in snapshot.usage().names(){
+                        let Some(usage)=PackageUsage::captured(&snapshot,name) else {
+                            reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"usage records member unavailable"));return Ok(reply);
+                        };
+                        usage.write_to(&mut record);
+                    }
+                    if i32::try_from(record.data().len()).is_err(){reply.write_exception(&Exception::new(EX_ILLEGAL_STATE,"usage records length overflow"));return Ok(reply);}
+                    lease.usage_records=Some(record.data().to_vec());
+                }
+                let Some(bytes)=lease.usage_records.as_ref() else {return Err(aim_binder_host::parcel::BAD_VALUE);};
+                if let Some((offset,length))=chunk{
+                    if offset<0||length<=0||length as usize>MAX_CHUNK||offset as usize>bytes.len(){
+                        reply.write_exception(&Exception::illegal_argument("invalid usage records chunk"));
+                    }else{
+                        let start=offset as usize;let end=start.saturating_add(length as usize).min(bytes.len());
+                        api::write_get_usage_records_chunk_reply(&mut reply,&Some(bytes[start..end].to_vec()));
+                    }
+                }else{api::write_get_usage_records_length_reply(&mut reply,bytes.len() as i32);}
+            }
             api::GET_HIDDEN_API_ENFORCEMENT_POLICY => {
                 let args = api::GetHiddenApiEnforcementPolicy::read(&mut call.data)?;
                 if call.data.remaining() != 0 {

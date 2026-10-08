@@ -401,6 +401,52 @@ public final class PackageScanLease implements AutoCloseable {
 
     /** Assemble every setting and shared UID from this one capture before publication. */
     public synchronized PackageSnapshots.Data captureData(PackageSnapshots.Owner owner,
+            boolean crossUserSuspensions, PackageSnapshots.Data previous) throws RemoteException, IOException {
+        if (closed) throw new IllegalStateException("package scan lease is closed");
+        long metadata = endpoint.getMetadataVersion();
+        if (metadata <= 0 || metadata > version) throw new IOException("invalid metadata version");
+        if (previous == null || previous.metadataVersion() != metadata) {
+            var result = captureData(owner, crossUserSuspensions);
+            result.metadataVersion(metadata);
+            return result;
+        }
+        int length = endpoint.getUsageRecordsLength();
+        if (length < 20 || (length & 3) != 0) throw new IOException("invalid usage records length");
+        byte[] bytes = new byte[length];
+        for (int offset = 0; offset < length;) {
+            int count = Math.min(CHUNK, length - offset);
+            byte[] chunk = endpoint.getUsageRecordsChunk(offset, count);
+            if (chunk == null || chunk.length != count) throw new IOException("incomplete usage records");
+            System.arraycopy(chunk, 0, bytes, offset, count); offset += count;
+        }
+        var parcel = Parcel.obtain();
+        var records = new java.util.LinkedHashMap<String, PackageUsageState>();
+        try {
+            parcel.unmarshall(bytes, 0, bytes.length); parcel.setDataPosition(0);
+            if (parcel.readLong() != version || parcel.readLong() != metadata) throw new IOException("usage records version differs");
+            int count = parcel.readInt();
+            if (count < 0 || count > parcel.dataAvail() / 80) throw new IOException("invalid usage records count");
+            Boolean historical = null;
+            for (int i = 0; i < count; i++) {
+                var record = PackageUsageState.CREATOR.createFromParcel(parcel);
+                if (historical != null && historical != record.isHistoricalAvailable()) throw new IOException("usage records history differs");
+                historical = record.isHistoricalAvailable();
+                if (record.getVersion() != version || records.put(record.getPackageName(), record) != null)
+                    throw new IOException("usage records identity differs");
+            }
+            if (parcel.dataAvail() != 0) throw new IOException("usage records trailing data");
+        } catch (IllegalArgumentException | NullPointerException failure) {
+            throw new IOException("invalid usage records", failure);
+        } finally { parcel.recycle(); }
+        var computer = captureComputer();
+        try { return previous.withUsage(version, metadata, records, computer, crossUserSuspensions); }
+        catch (IOException | RemoteException | RuntimeException failure) {
+            try { computer.close(); } catch (RemoteException closeFailure) { failure.addSuppressed(closeFailure); }
+            throw failure;
+        }
+    }
+
+    public synchronized PackageSnapshots.Data captureData(PackageSnapshots.Owner owner,
             boolean crossUserSuspensions) throws RemoteException, IOException {
         if (closed) throw new IllegalStateException("package scan lease is closed");
         Objects.requireNonNull(owner);

@@ -42,6 +42,7 @@ pub struct Snapshot {
     owner: SigningScan,
     usage: Usage,
     replica_validated: bool,
+    metadata_revision: u64,
 }
 
 /// Exact registered UID-slot projection for the facade's retained capture.
@@ -66,6 +67,7 @@ impl Snapshot {
     pub(in crate::package) fn legacy_permissions(&self, name: &str, factory: bool) -> Result<Option<crate::package::owner::legacy_permissions::State>, String> {
         self.owner.validated_legacy_permissions(name, factory)
     }
+    pub fn metadata_revision(&self) -> u64 { self.metadata_revision }
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -116,7 +118,7 @@ impl Store {
         let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
         // Exact immutable validated owner plus a checked usage-only delta. Code,
         // settings, permissions and user inventories cannot have changed here.
-        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true})), replica:true })
+        Ok(Self { current: Mutex::new(Arc::new(Snapshot {version,owner,usage,replica_validated:true,metadata_revision:base.metadata_revision})), replica:true })
     }
 
     pub fn new(owner: SigningScan, usage: Usage) -> Result<Self, Error> {
@@ -150,6 +152,7 @@ impl Store {
             owner,
             usage,
             replica_validated: replica,
+            metadata_revision: version,
         });
         if replica {
             validate_replica(&snapshot)?;
@@ -174,7 +177,7 @@ impl Store {
         if !Arc::ptr_eq(&current,base) {return Err(CommitError::Snapshot(Error::Stale));}
         let version=current.version.checked_add(1).filter(|version|*version<=i64::MAX as u64).ok_or(CommitError::Snapshot(Error::VersionExhausted))?;
         validate(&owner,&usage).map_err(CommitError::Snapshot)?;
-        let next=Arc::new(Snapshot {version,owner,usage,replica_validated:self.replica});
+        let next=Arc::new(Snapshot {version,owner,usage,replica_validated:self.replica,metadata_revision:version});
         if self.replica {validate_replica(&next).map_err(CommitError::Snapshot)?;}
         match persist(&next) {
             Ok(())=>{*current=next.clone();Ok(next)},
@@ -207,6 +210,7 @@ impl Store {
             owner,
             usage,
             replica_validated: self.replica,
+            metadata_revision: version,
         });
         if self.replica {
             validate_replica(&next)?;
@@ -780,6 +784,7 @@ mod tests {
             owner: owner(),
             usage: Usage::new(["fixture"]),
             replica_validated: false,
+            metadata_revision: i64::MAX as u64,
         });
         *store.current.lock().unwrap() = exhausted.clone();
         assert_eq!(
