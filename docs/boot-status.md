@@ -505,20 +505,20 @@ CAP_CHOWN to request0:0 on its1000:1000 child. C108 preserves that exact denial
 and actual SystemServer credentials. SetupCgroups now applies the configured
 mode/UID/GID to the same mounted root before children, as original
 MountV2CgroupController does. A real inode regression verifies root identity,
-root-before-child ordering, the configured1000:1000/0775 and an alternate tuple.
-No stat, DAC or capability guard is relaxed. C109 actually confirms root1000:1000/0775, keeps the original WebView isolated
+root-before-child ordering, the configured 1000:1000/0775 and an alternate tuple.
+No stat, DAC or capability guard is relaxed. C109 actually confirms root 1000:1000/0775, keeps the original WebView isolated
 process alive, completes relro1/1 and DOM verification, and renders inspected
 HTML/SVG. The unchanged immutable runtime pair then completes two real guest
-reboots (SystemServer42633→43583→45430); both return boot_completed1 and the
+reboots (SystemServer 42633→43583→45430); both return boot_completed=1 and the
 original native service names, with no interpreter EPERM or process-group fatal.
 WebView DOM verification passes again after the first reboot. After the second,
-Calculator cold launch1663ms renders its actual UI; Chrome cold launch2624ms
+Calculator cold launch 1663ms renders its actual UI; Chrome cold launch 2624ms
 reaches first-run, continues without an account, and renders example.com with its
 sandboxed process alive and no observed ANR during this bounded replay. The
 browser reports offline network validation, so no general network pass is claimed.
 This does not establish the fresh-first-boot Chrome gate. Debug boots and helpers
-are reaped; diagnostic logging is removed. A new fresh native full66 campaign
-uses this exact immutable host pair, explicit --linux-run through Tradefed,
+are reaped; diagnostic logging is removed. The C109 fresh native full 66 campaign
+used this exact immutable host pair, explicit --linux-run through Tradefed,
 pre-spawn hashes and actual readiness before invocation. Full CTS remains
 incomplete; the old cohorts' failures and missing tests are retained. The C109 fresh
 campaign's first invocation cannot allocate a device because original adbd
@@ -528,22 +528,21 @@ now creates the actual devpts namespace directory, preserving DAC traversal and
 real terminal identity. Two real PTY/runtime-directory regressions pass; fresh
 exec-out and CTS replay require a new immutable cohort. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
-SystemServer50573), preserving five selected packages' UID/codepath/version,
+SystemServer 50573), preserving five selected packages' UID/codepath/version,
 persisted signatures and runtime permissions; Calculator, WebView and Chrome
 render. Strict component parity is incomplete because native internal Version
-metadata is0/0 with missing fingerprints, making original PMS apply its pre-Q
+metadata is 0/0 with missing fingerprints, making original PMS apply its pre-Q
 AppDetails migration (#1157). Donor/clone cleanup is verified and the clone is
 retained. GMS idle traffic is not accepted: the fresh native boot also records a
 CrisisAlerts persistent-process fatal (#1155), under independent investigation. Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,
-then runs normal test binaries; its48 ignored integration tests and explicit
+then runs normal test binaries; its 48 ignored integration tests and explicit
 original ART/PM library gates require separate invocation. The two HAL client
 inputs in #1156 have existing graph owners but have not been built in Source;
 historical Main logs and old skip markers do not prove this cohort ran. Full
 integration waits for frozen build/image leases; no missing-input skip is counted
 as executed.
-Inherited capability refresh now pins
-each open description and revalidates its actual kernel endpoint before managed
+Inherited capability refresh now pins each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
 grant a class to a reused number (#1152). The concurrent replacement regression
 and full ABI run pass: 174/0, four ignored. The frozen original
