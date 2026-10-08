@@ -525,8 +525,13 @@ campaign's first invocation cannot allocate a device because original adbd
 exec-out fails opening /dev/pts/3 (#1154). It records NOT RUN with no XML;
 its runner, wrapper, guest and display are normally stopped. Runtime preparation
 now creates the actual devpts namespace directory, preserving DAC traversal and
-real terminal identity. Two real PTY/runtime-directory regressions pass; fresh
-exec-out and CTS replay require a new immutable cohort. A separate rollback on
+real terminal identity. Two real PTY/runtime-directory regressions pass. Fresh C110 reaches genuine
+boot readiness, but five exec-out getprop probes return an error payload with
+Permission denied opening /dev/pts/3, despite exit0. There are no property rows,
+so the content gate fails and no CTS invocation/XML is created. The missing
+ancestor is fixed, while actual slave allocation ownership/mode remains under
+#1154 investigation. Its guest/display/ADB are normally stopped, with data and
+provenance preserved. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
 persisted signatures and runtime permissions; Calculator, WebView and Chrome
