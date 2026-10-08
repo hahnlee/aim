@@ -14,6 +14,11 @@ fn filter(state:&super::model::State)->Result<AppsFilter,Exception>{AppsFilter::
 pub fn run(ctx:&mut Context<'_>)->Result<Option<i32>,Exception>{
     let args=ctx.command.args.clone();let Some(command)=args.first().map(String::as_str)else{return Ok(None)};
     let result=match command{
+        "get-max-users"=>{
+            let mut request=Parcel::new();leaf::GetMaxSupportedUsers{}.write(&mut request);
+            let reply=ctx.system().and_then(|system|system.shell_read_leaf(ctx.uid,ctx.pid,leaf::GET_MAX_SUPPORTED_USERS,request));
+            max_users(&mut ctx.command,reply)?
+        },
         "path"=>path(ctx,&args[1..])?,
         "list"=>match args.get(1).map(String::as_str){Some("package"|"packages")=>packages(ctx,&args[2..],false)?,Some("instrumentation")=>instrumentation(ctx,&args[2..])?,Some("features")=>features(ctx)?,Some("libraries")=>libraries(ctx,&args[2..])?,Some("permissions")=>permissions(ctx,&args[2..])?,_=>return Ok(None)},
         "-l"=>packages(ctx,&args[1..],false)?,"-lf"=>packages(ctx,&args[1..],true)?,
@@ -30,6 +35,12 @@ pub fn run(ctx:&mut Context<'_>)->Result<Option<i32>,Exception>{
             let found=pm::read_has_system_feature_reply(&mut reply.reader()).map_err(decode)??;ctx.command.println(if found{"true"}else{"false"});if found{0}else{1}
         },_=>return Ok(None),
     };Ok(Some(result))
+}
+fn max_users(command:&mut crate::shell::ShellCommand,reply:Result<Parcel,Exception>)->Result<i32,Exception>{
+    let reply=reply?;let mut reader=reply.reader();
+    let count=leaf::read_get_max_supported_users_reply(&mut reader).map_err(decode)??;
+    if reader.remaining()!=0{return Err(decode(aim_binder_host::parcel::BAD_VALUE));}
+    command.println(&format!("Maximum supported users: {count}"));Ok(0)
 }
 fn instrumentation_options(args: &[String]) -> Result<(bool, Option<String>), String> {
     let mut source = false;
@@ -145,5 +156,46 @@ mod instrumentation_tests {
         assert_eq!(instrumentation_options(&[]).unwrap(), (false, None));
         assert_eq!(instrumentation_options(&["p.first".into(), "-f".into(), "p.last".into()]).unwrap(), (true, Some("p.last".into())));
         assert_eq!(instrumentation_options(&["--user".into(), "10".into()]).unwrap_err(), "Error: Unknown option: --user");
+    }
+}
+
+#[cfg(test)]
+mod max_users_tests {
+    use super::*;
+    use aim_binder_host::local::{LocalProcess,Service,Call,Reply};
+    use std::{sync::{Arc,Weak},os::fd::AsFd,io::{Read,Seek,SeekFrom}};
+    struct Owner {process:Weak<LocalProcess>,mode:i32}
+    impl Service for Owner {
+        fn descriptor(&self)->&str{"test.shell.maximum"}
+        fn accepts_fds(&self)->bool{true}
+        fn transact(&self,call:&mut Call<'_>)->Reply{
+            let process=self.process.upgrade().unwrap();
+            let mut command=crate::shell::ShellCommand::read(&process,&mut call.data)?;
+            assert_eq!(command.command(),Some("get-max-users"));assert_eq!(call.data.remaining(),0);
+            let mut leaf=Parcel::new();
+            if self.mode==1{leaf.write_exception(&Exception::new(EX_ILLEGAL_STATE,"original user-limit owner failed"));}
+            else{aim_service_aidl::dev_aim_server_ipackageshellreadleaf::write_get_max_supported_users_reply(&mut leaf,7);if self.mode==2{leaf.write_i32(99);}}
+            let mut result=Parcel::new();
+            match max_users(&mut command,Ok(leaf)){Ok(status)=>{result.write_no_exception();result.write_i32(status);},Err(error)=>result.write_exception(&error)}
+            Ok(result)
+        }
+    }
+    #[test]
+    fn maximum_users_cli_writes_original_prefix_and_never_defaults_on_leaf_failure(){
+        use aim_binder_driver::{Driver,Device,Credentials};
+        let driver=Driver::new();let process=LocalProcess::open(&driver,Device::Binder,Credentials{pid:90612,euid:1000,security_context:None});
+        for mode in 0..3 {
+            let path=std::env::temp_dir().join(format!("aim-max-users-{}-{mode}",std::process::id()));
+            let mut output=std::fs::OpenOptions::new().create_new(true).read(true).write(true).open(&path).unwrap();
+            let mut request=Parcel::new();for _ in 0..3{request.write_file(aim_binder_host::server::file_from_fd(output.as_fd()).unwrap());}
+            request.write_i32(1);request.write_string16(Some("get-max-users"));request.write_binder(None);request.write_binder(None);
+            let aim_binder_host::parcel::Binder::Local(ptr)=process.add_service(Arc::new(Owner{process:Arc::downgrade(&process),mode}))else{panic!("local owner required")};
+            let reply=process.local_service(ptr).unwrap().transact(crate::shell::SHELL_COMMAND_TRANSACTION,&request,false).unwrap();
+            if mode==0 {reply.reader().read_exception().unwrap().unwrap();let mut reader=reply.reader();reader.read_exception().unwrap().unwrap();assert_eq!(reader.read_i32().unwrap(),0);}
+            else {let error=reply.reader().read_exception().unwrap().unwrap_err();assert_eq!(error.code,EX_ILLEGAL_STATE);if mode==1{assert_eq!(error.message,"original user-limit owner failed");}}
+            output.seek(SeekFrom::Start(0)).unwrap();let mut text=String::new();output.read_to_string(&mut text).unwrap();
+            assert_eq!(text,if mode==0{"Maximum supported users: 7\n"}else{""});drop(reply);drop(output);std::fs::remove_file(path).unwrap();
+        }
+        driver.release(process.proc_handle());
     }
 }

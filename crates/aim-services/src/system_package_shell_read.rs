@@ -15,6 +15,7 @@ impl System {
         }
         let mut reader=request.reader();
         match code {
+            leaf::GET_MAX_SUPPORTED_USERS=>{leaf::GetMaxSupportedUsers::read(&mut reader).map_err(shell_read_transport)?;},
             leaf::PARSE_INTENT=>{leaf::ParseIntent::read(&mut reader).map_err(shell_read_transport)?;},
             leaf::DUMP_RESOLVE_INFO=>{leaf::DumpResolveInfo::read(&mut reader).map_err(shell_read_transport)?;},
             leaf::LIST_PERMISSIONS=>{

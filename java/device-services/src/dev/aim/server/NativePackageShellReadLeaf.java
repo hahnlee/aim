@@ -19,6 +19,7 @@ public final class NativePackageShellReadLeaf extends IPackageShellReadLeaf.Stub
     }
     private static void enforce(){if(Binder.getCallingUid()!=1000)throw new SecurityException("Native shell owner required");}
     private static String[] lines(String text){return text.split("\\n",-1).length==1&&text.isEmpty()?new String[0]:text.substring(0,text.endsWith("\n")?text.length()-1:text.length()).split("\\n",-1);}
+    @Override public int getMaxSupportedUsers(){enforce();return UserManager.getMaxSupportedUsers();}
     @Override public byte[] parseIntent(String[] arguments) {
         enforce();Objects.requireNonNull(arguments);
         final byte[][] result=new byte[1][];

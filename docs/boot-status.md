@@ -546,7 +546,12 @@ real Tradefed reboots; SHA0f6827de97f9eb7c4c51ce432046ca0a52ad79af3d64ba9b2c1f3f
 Setting also completes with official XML2/0, done=true,
 SHA5c278472e8b4437ca2273afb0b55f041199b0b564ca894d7f43c92089f90cfd1.
 Its second body has a device-unavailable detection warning, so only observed
-reboots are claimed. PackageManagerHost follows; current full66 is3/66 complete. The
+reboots are claimed. PackageManagerHost follows; current full66 is3/66 complete. PackageManagerHost observes unknown get-max-users in cross-user test bodies
+(#1163), so those fast-ended bodies are not counted as full coverage before XML.
+Native shell now calls the original UserManager.getMaxSupportedUsers through
+its authenticated typed leaf and prints the exact original prefix. Actual Binder
+CLI output/exception/tail tests and complete private Java original linkage/stub
+code checks pass; matched image deployment remains pending and C111 is unchanged. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,

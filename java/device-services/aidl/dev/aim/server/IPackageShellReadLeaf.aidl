@@ -5,4 +5,5 @@ interface IPackageShellReadLeaf {
     String[] dumpResolveInfo(in byte[] record, String prefix);
     String[] listPermissions(boolean groups, boolean labels, boolean summary, int minimum, int maximum, String group, int callingUid, int callingPid);
     String[] listInstrumentation(boolean showSourceDir, String targetPackage, int callingUid, int callingPid);
+    int getMaxSupportedUsers();
 }
