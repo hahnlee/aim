@@ -402,8 +402,14 @@ Calculator is nonshared, so the conditional changed-shared-UID branch remains
 unverified. C94 quiet cold launches take 1.34–1.56s but still reach FocusEvent ANR. C95
 uses the same native image with pending/completed Binder tracing: its 8.69s
 registerReceiver call begins after the first timeout and therefore does not
-establish the cause of that timeout. Contemporary pre-timeout owner proof and
-the full CTS/app/template gates remain pending. Original PMS on a cloned native
+establish the cause of that timeout. A no-SIGQUIT pre-timeout host sample of
+original Chrome finds 715/1934 main-thread samples in procfs maps, including
+682 repeated mount-root canonicalizations. Each procfs maps read now captures
+one inverse namespace view and resolves each visible host alias once (#1135),
+retaining direct/canonical prefix precedence and observing mount/symlink changes
+on new reads; all six VFS regressions pass and the C linux-run build succeeds.
+C96 boots the same native image with this lower-layer change; actual app results
+and the full CTS/app/template gates remain pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0

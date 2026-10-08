@@ -485,6 +485,7 @@ fn statm(p: i32) -> Option<String> {
 
 /// Linux-format `/proc/self/maps` from the VM map.
 pub(super) fn maps() -> String {
+    let paths = vfs::HostPathView::capture();
     let stack = stack().unwrap_or_default();
     let mut out = String::new();
     let mut regions = vmmap::regions(0, u64::MAX).peekable();
@@ -515,7 +516,7 @@ pub(super) fn maps() -> String {
         let guest_file = r.file.as_ref().and_then(|(path, d, i)| {
             super::memfd::link_name(path, *d, *i)
                 .or_else(|| crate::xrt::original_guest_path_of_host(path))
-                .or_else(|| vfs::guest_path_of_host(path))
+                .or_else(|| paths.as_ref().and_then(|view| view.guest_path(path)))
                 .map(|n| (n, *d, *i))
         });
         if let Some((n, d, i)) = guest_file {

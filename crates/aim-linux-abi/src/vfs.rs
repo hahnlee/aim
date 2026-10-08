@@ -689,57 +689,55 @@ pub fn load_own_mounts(text: &str) {
     }
 }
 
+/// One inverse namespace view for a generated procfs read. Host aliases are
+/// resolved once per view; a later read observes mount and symlink changes.
+pub(crate) struct HostPathView {
+    mounts: Vec<(String, PathBuf)>,
+    root: PathBuf,
+    canonical_mounts: std::cell::OnceCell<Vec<(String, PathBuf)>>,
+    canonical_root: std::cell::OnceCell<PathBuf>,
+}
+
+impl HostPathView {
+    pub(crate) fn capture() -> Option<Self> {
+        let v = VFS.get()?;
+        let mounts = v.mounts.read().unwrap();
+        Some(Self {
+            mounts: mounts.iter().filter(|m| !hidden(&mounts, m))
+                .map(|m| (m.guest.clone(), m.host.clone())).collect(),
+            root: v.root.clone(),
+            canonical_mounts: std::cell::OnceCell::new(),
+            canonical_root: std::cell::OnceCell::new(),
+        })
+    }
+
+    pub(crate) fn guest_path(&self, host: &Path) -> Option<String> {
+        let s = host.to_str()?;
+        if HOST_DEVICES.contains(&s) { return Some(s.to_owned()); }
+        if let Some(guest) = crate::sys::tty::pts_guest(s) { return Some(guest); }
+        let mut best: Option<(usize, usize, String)> = None;
+        let canonical = self.canonical_mounts.get_or_init(|| self.mounts.iter()
+            .filter_map(|(guest, path)| path.canonicalize().ok().map(|path| (guest.clone(), path)))
+            .collect());
+        for (guest, prefix) in self.mounts.iter().chain(canonical.iter()) {
+            let Ok(rest) = host.strip_prefix(prefix) else { continue; };
+            let len = prefix.as_os_str().len();
+            if best.as_ref().is_none_or(|b| len > b.0 || (len == b.0 && guest.len() < b.1)) {
+                let path = if rest.as_os_str().is_empty() { guest.clone() }
+                    else { format!("{}/{}", guest, rest.display()) };
+                best = Some((len, guest.len(), path));
+            }
+        }
+        if let Some((_, _, guest)) = best { return Some(guest); }
+        let root = self.canonical_root.get_or_init(|| self.root.canonicalize().unwrap_or_else(|_| self.root.clone()));
+        let rel = host.strip_prefix(root).ok()?;
+        Some(format!("/{}", rel.display()))
+    }
+}
+
 /// Guest path of a host path, if it lies inside the root or a mapped area.
 pub fn guest_path_of_host(host: &Path) -> Option<String> {
-    let v = VFS.get()?;
-    let s = host.to_str()?;
-    if HOST_DEVICES.contains(&s) {
-        return Some(s.to_string());
-    }
-    if let Some(guest) = crate::sys::tty::pts_guest(s) {
-        return Some(guest);
-    }
-    // The mount deepest into the host tree (a bind over its source's area);
-    // between mounts of the same host directory, the shorter mount point
-    // (`/data/user/0`, not its `/data_mirror` copy). Hidden mounts are not
-    // reachable.
-    let mounts = v.mounts.read().unwrap();
-    let mut best: Option<(usize, usize, String)> = None;
-    for m in mounts.iter() {
-        let Ok(rest) = host.strip_prefix(&m.host) else {
-            continue;
-        };
-        if hidden(&mounts, m) {
-            continue;
-        }
-        let len = m.host.as_os_str().len();
-        if best
-            .as_ref()
-            .is_none_or(|b| len > b.0 || (len == b.0 && m.guest.len() < b.1))
-        {
-            let g = if rest.as_os_str().is_empty() {
-                m.guest.clone()
-            } else {
-                format!("{}/{}", m.guest, rest.display())
-            };
-            best = Some((len, m.guest.len(), g));
-        }
-    }
-    for m in mounts.iter() {
-        if hidden(&mounts, m) {continue;}
-        let Ok(canonical) = m.host.canonicalize() else {continue;};
-        let Ok(rest) = host.strip_prefix(&canonical) else {continue;};
-        let len = canonical.as_os_str().len();
-        if best.as_ref().is_none_or(|b| len > b.0 || (len == b.0 && m.guest.len() < b.1)) {
-            let guest = if rest.as_os_str().is_empty() {m.guest.clone()} else {format!("{}/{}", m.guest, rest.display())};
-            best = Some((len, m.guest.len(), guest));
-        }
-    }
-    if let Some((_, _, guest)) = best {return Some(guest);}
-    let canonical_root = v.root.canonicalize().ok();
-    let root = canonical_root.as_deref().unwrap_or(&v.root);
-    let rel = host.strip_prefix(root).ok()?;
-    Some(format!("/{}", rel.display()))
+    HostPathView::capture()?.guest_path(host)
 }
 
 /// Guest path of an open directory fd.
@@ -1019,12 +1017,41 @@ mod tests {
         add_mount("/inverse-short", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs");
         add_mount("/inverse-long-name", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs");
         assert_eq!(guest_path_of_host(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
+        let read = HostPathView::capture().unwrap();
+        assert_eq!(read.guest_path(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
         let hidden_host = dir.join("inverse-hidden"); std::fs::create_dir_all(&hidden_host).unwrap();
         add_mount("/inverse-short", hidden_host, Area::Writable, "tmpfs", "tmpfs");
         assert_eq!(guest_path_of_host(&canonical.join("file")).as_deref(), Some("/inverse-long-name/file"));
+        assert_eq!(read.guest_path(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
+        let next_read = HostPathView::capture().unwrap();
+        assert_eq!(next_read.guest_path(&canonical.join("file")).as_deref(), Some("/inverse-long-name/file"));
         assert!(remove_mount("/inverse-short")); assert!(remove_mount("/inverse-short")); assert!(remove_mount("/inverse-long-name")); assert!(remove_mount("/inverse-parent"));
         std::fs::remove_file(alias).unwrap(); std::fs::remove_dir_all(nested).unwrap();
     }
+    #[test]
+    fn inverse_procfs_read_resolves_aliases_once_and_new_reads_see_retargeting() {
+        let (_view, dir) = test_view();
+        let before = dir.join("inverse-before");
+        let after = dir.join("inverse-after");
+        let alias = dir.join("inverse-changing-alias");
+        std::fs::create_dir_all(&before).unwrap();
+        std::fs::create_dir_all(&after).unwrap();
+        std::os::unix::fs::symlink(&before, &alias).unwrap();
+        add_mount("/inverse-changing", alias.clone(), Area::Writable, "tmpfs", "tmpfs");
+        let read = HostPathView::capture().unwrap();
+        let before_file = before.canonicalize().unwrap().join("file");
+        assert_eq!(read.guest_path(&before_file).as_deref(), Some("/inverse-changing/file"));
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&after, &alias).unwrap();
+        assert_eq!(read.guest_path(&before_file).as_deref(), Some("/inverse-changing/file"));
+        assert_eq!(guest_path_of_host(&after.canonicalize().unwrap().join("file")).as_deref(), Some("/inverse-changing/file"));
+        assert!(guest_path_of_host(&before_file).is_none());
+        assert!(remove_mount("/inverse-changing"));
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir(before).unwrap();
+        std::fs::remove_dir(after).unwrap();
+    }
+
     #[test]
     fn map_parses_and_orders_longest_first() {
         let (root, m) = parse_map(
