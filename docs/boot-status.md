@@ -471,10 +471,12 @@ The frozen native campaign completes Parsing 11/0 and PreferredActivity 2/0,
 then a real Setting reboot repeatedly fails interpreter resolution (#1146).
 Failed/incomplete and device-offline module records are preserved; the runner
 stops at a module boundary. Bounded diagnostics locate Darwin EPERM on the mount
-journal's existing-file write-open, not ELF absence or flock. The same process
-can create new files and read them but write-reopen fails in runtime and /tmp;
-normal permissions and flags plus absent sandbox denial leave the exact host
-policy unproven. An independent real-signal errno-preservation defect is fixed
+journal's existing-file write-open, not ELF absence or flock. Subsequent controls
+contradict a global write-denial interpretation: native C/Rust helpers can open
+the same journal, and linux-run's entry/initialization probes can create,
+write-reopen and delete control files, while its journal open fails before ABI
+initialization. Flags, variadic arguments and a sandbox denial are not proven
+causes. The exact process/file-dependent condition remains unresolved. An independent real-signal errno-preservation defect is fixed
 with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
 so this is not claimed as the reboot fix. Diagnostics leave no owned processes
 or temporary files behind. Latest whole native library verification
