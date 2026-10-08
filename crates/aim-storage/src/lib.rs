@@ -24,3 +24,5 @@ pub mod socket_inode;
 pub mod inode_lease;
 
 pub mod fsverity;
+
+pub mod private_fd;
