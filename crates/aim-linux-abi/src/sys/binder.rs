@@ -29,6 +29,11 @@ pub fn file_class(fd: i32) -> Result<u32, i32> {
     }
 }
 
+pub(super) fn create_path(fd: i32, flags: u32) -> Result<std::os::fd::OwnedFd,i32> {
+    let client = CLIENT.lock().unwrap();
+    client.as_ref().ok_or(crate::errno::ENODEV)?.create_path(fd,flags)
+}
+
 /// The files whose pages the daemon's process shares (`sharedfile`); none
 /// without a daemon.
 pub fn shared_files() -> Vec<aim_binder_host::wire::SharedFile> {
@@ -63,7 +68,8 @@ fn lookup(fd: i32) -> Option<BinderFile> {
     }
 }
 
-struct Guest;
+#[derive(Default)]
+struct Guest { exported: Vec<super::fdtab::ExportedFd> }
 
 /// Nothing maps below 4 GiB on macOS arm64 (`__PAGEZERO`), so a pointer
 /// there, null included, is EFAULT as copy_from_user would make it. A copy
@@ -106,8 +112,20 @@ impl UserMemory for Guest {
             super::fdtab::insert(fd, Kind::ProxyFile);
         }
     }
+    fn export_fd(&mut self, fd: i32) -> Result<i32,i32> {
+        let exported = super::fdtab::export_fd(fd)?;
+        let number = exported.fd;
+        self.exported.push(exported);
+        Ok(number)
+    }
+    fn install_typed(&mut self, fd:i32, class:u32) -> Result<(),i32> {
+        if class == aim_binder_host::path_file::CLASS { return super::fdtab::install_path(fd); }
+        self.installed_typed(fd,class); Ok(())
+    }
     fn file_class(&mut self, fd: i32) -> u32 {
-        if super::proxy_file::is_proxy(fd) {
+        if matches!(super::fdtab::get(fd),Some(Kind::Path(_))) {
+            aim_binder_host::path_file::CLASS
+        } else if super::proxy_file::is_proxy(fd) {
             aim_binder_host::proxy_file::CLASS
         } else {
             0
@@ -174,7 +192,7 @@ pub fn ioctl(fd: i32, cmd: u64, arg: u64) -> Option<i64> {
         let _ = file.interrupt(tid);
     };
     let r =
-        super::signal::interruptible(&interrupt, || file.ioctl(tid, cmd as u32, arg, &mut Guest));
+        super::signal::interruptible(&interrupt, || file.ioctl(tid, cmd as u32, arg, &mut Guest::default()));
     Some(match r {
         None => -(EINTR as i64),
         Some(Ok(())) => 0,

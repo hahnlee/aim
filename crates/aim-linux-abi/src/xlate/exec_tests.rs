@@ -66,6 +66,20 @@ fn snippet() -> Vec<u32> {
 
 #[test]
 fn translated_file_runs_from_the_cache() {
+    // xrt has one immutable configuration per process. Other ABI tests can
+    // initialize its no-cache runtime via ordinary open/procfs operations.
+    // Exercise explicit cache configuration in a fresh process, retaining every
+    // loader/execution assertion below rather than resetting production state.
+    const CHILD: &str = "__translation_cache_child";
+    if !std::env::args().any(|argument| argument == CHILD) {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "xlate::exec_tests::translated_file_runs_from_the_cache",
+                "--skip", CHILD, "--nocapture"])
+            .output().unwrap();
+        assert!(result.status.success(), "isolated cache execution failed: {}\n{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        return;
+    }
     let cache_dir = runtime_cache();
     let work = scratch("exec");
     let text = snippet();

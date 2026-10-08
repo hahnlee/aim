@@ -32,6 +32,7 @@ pub(super) const VM: u32 = 10;
 pub(super) const MAPS: u32 = 11;
 pub(super) const FDS: u32 = 12;
 pub(super) const FD_LINK: u32 = 13;
+pub(super) const NET_SOCKET_METADATA: u32 = 16;
 pub(super) const STOPPED: u32 = 14;
 pub(super) const SIGNAL: u32 = 15;
 
@@ -499,6 +500,15 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
                 .filter(|&fd| !fdtab::is_hidden(fd))
                 .collect();
             reply(0, |w| w.seq(fds.into_iter(), |w, fd| w.i32(fd)))
+        }
+        NET_SOCKET_METADATA => {
+            if !crate::sys::pidns::contains(peer) { return err(EPERM); }
+            let sockets = match crate::sys::net::proc_metadata() { Ok(sockets) => sockets, Err(error) => return err(error) };
+            reply(0, |w| w.seq(sockets.into_iter(), |w, owner| {
+                w.i32(owner.fd); w.u32(owner.uid); w.u64(owner.inode); w.u64(owner.cookie);
+                w.opt(owner.local, |w, value| w.bytes(&value));
+                w.opt(owner.peer, |w, value| w.bytes(&value)); w.bool(owner.port_zero); w.bool(owner.probes_known);
+            }))
         }
         FD_LINK => match procfs::fd_link(r.i32()) {
             Some(l) => reply(0, |w| w.str(&l)),

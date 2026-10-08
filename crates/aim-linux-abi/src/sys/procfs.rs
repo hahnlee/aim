@@ -25,6 +25,7 @@ use crate::vfs::{self, Area};
 /// What a synthesized path is.
 pub enum Node {
     File(Vec<u8>),
+    NetTable(String),
     Dir(Vec<Entry>),
     Link(String),
 }
@@ -109,6 +110,9 @@ pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
 pub(super) fn fd_link(fd: i32) -> Option<String> {
     if fdtab::is_hidden(fd) {
         return None;
+    }
+    if let Some((inode, _)) = super::net::proc_socket_identity(fd) {
+        return Some(format!("socket:[{inode}]"));
     }
     if let Some(n) = fdtab::anon_name(fd) {
         return Some(n);
@@ -891,6 +895,7 @@ const PID_ENTRIES: &[(&str, u8)] = &[
     ("environ", dir::DT_REG),
     ("exe", dir::DT_LNK),
     ("fd", dir::DT_DIR),
+    ("net", dir::DT_DIR),
     ("maps", dir::DT_REG),
     ("mountinfo", dir::DT_REG),
     ("mounts", dir::DT_REG),
@@ -988,6 +993,8 @@ fn thread_comm(p: i32, tid: i32) -> Option<String> {
     (len > 0).then(|| String::from_utf8_lossy(&n[..len]).into_owned())
 }
 
+const NET_FILES: [&str; 4] = ["tcp", "tcp6", "udp", "udp6"];
+
 /// Nodes under `/proc/<p>/` (`rest` is the path after it); `thread` is the
 /// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
 fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
@@ -1001,6 +1008,12 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
                 .iter()
                 .filter(|(n, _)| thread.is_none() || *n != "task");
             Node::Dir(e.map(|(n, t)| Entry::new(1, *t, n.as_bytes())).collect())
+        }
+        "net" => Node::Dir(NET_FILES.iter().map(|name| Entry::new(1, dir::DT_REG, name.as_bytes())).collect()),
+        name if name.starts_with("net/") => {
+            let kind = name.strip_prefix("net/")?;
+            if !NET_FILES.contains(&kind) { return None; }
+            Node::NetTable(kind.to_owned())
         }
         "cmdline" => Node::File(cmdline(p)),
         "comm" => {
@@ -1082,6 +1095,7 @@ pub fn node(guest: &str) -> Option<Node> {
                     ("loadavg", dir::DT_REG),
                     ("meminfo", dir::DT_REG),
                     ("mounts", dir::DT_LNK),
+                    ("net", dir::DT_LNK),
                     ("stat", dir::DT_REG),
                     ("sys", dir::DT_DIR),
                     ("uptime", dir::DT_REG),
@@ -1096,6 +1110,8 @@ pub fn node(guest: &str) -> Option<Node> {
             }
             "self" if tail.is_empty() => Node::Link(me.to_string()),
             "mounts" if tail.is_empty() => Node::Link("self/mounts".into()),
+            "net" if tail.is_empty() => Node::Link("self/net".into()),
+            "net" => return pid_node(me, &format!("net/{tail}"), None),
             "thread-self" if tail.is_empty() => {
                 Node::Link(format!("{me}/task/{}", super::process::gettid()))
             }
@@ -1504,7 +1520,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     }
     if let Some(node)=super::fuse_sysfs::node(guest){return Some(match node{
         Ok(Node::Dir(entries))=>dir_fd(guest,entries,flags&O_CLOEXEC!=0),
-        Ok(Node::File(_))=>-(errno::EACCES as i64),Ok(Node::Link(_))=>-(errno::EINVAL as i64),Err(error)=>-(error as i64),
+        Ok(Node::File(_) | Node::NetTable(_))=>-(errno::EACCES as i64),Ok(Node::Link(_))=>-(errno::EINVAL as i64),Err(error)=>-(error as i64),
     });}
     let cloexec = flags & O_CLOEXEC != 0;
     let write = flags & O_ACCMODE != 0;
@@ -1518,6 +1534,7 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         ));
     }
     let canon = canonical(guest);
+
     if canon.ends_with("/tracing/trace_marker") && node(&canon).is_some() {
         // Trace events are not collected: writes are discarded.
         // SAFETY: opening the host's null device.
@@ -1585,6 +1602,13 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         });
     }
     Some(match node(&canon) {
+        Some(Node::NetTable(kind)) => {
+            if write { return Some(-(EACCES as i64)); }
+            match super::net::proc_table(&kind) {
+                Ok(bytes) => content_fd(&bytes, cloexec),
+                Err(error) => -(error as i64),
+            }
+        }
         Some(Node::File(data)) => {
             if write && device_tree(&canon) {
                 // A device attribute with no store method.
@@ -1708,7 +1732,7 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     st.st_mtime = now;
     st.st_ctime = now;
     match node(&canon) {
-        Some(Node::File(_)) => {
+        Some(Node::File(_) | Node::NetTable(_)) => {
             st.st_mode = libc::S_IFREG | 0o444;
             st.st_nlink = 1;
         }

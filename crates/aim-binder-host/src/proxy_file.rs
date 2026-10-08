@@ -30,7 +30,7 @@ struct Registered {
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Default::default);
 
 /// Darwin's kernel socket handles, not a socket type or userspace marker.
-fn socket_identity(fd: RawFd) -> io::Result<(u64, u64)> {
+pub(crate) fn socket_identity(fd: RawFd) -> io::Result<(u64, u64)> {
     // SDK sys/proc_info.h: socket_fdinfo, psi.soi_so, psi.soi_proto.pri_un.
     let mut info = [0u8; 792];
     let n = unsafe {
@@ -446,7 +446,7 @@ pub fn request(
     Ok((value, result))
 }
 
-fn send(fd: RawFd, bytes: &[u8], reply: RawFd) -> io::Result<()> {
+pub(crate) fn send(fd: RawFd, bytes: &[u8], reply: RawFd) -> io::Result<()> {
     let mut control = [0usize; 4];
     let mut iov = libc::iovec {
         iov_base: bytes.as_ptr() as *mut _,
@@ -477,7 +477,7 @@ fn send(fd: RawFd, bytes: &[u8], reply: RawFd) -> io::Result<()> {
 fn receive(fd: RawFd, bytes: &mut [u8]) -> io::Result<(usize, Option<OwnedFd>)> {
     receive_flags(fd, bytes, 0)
 }
-fn receive_flags(fd: RawFd, bytes: &mut [u8], flags: i32) -> io::Result<(usize, Option<OwnedFd>)> {
+pub(crate) fn receive_flags(fd: RawFd, bytes: &mut [u8], flags: i32) -> io::Result<(usize, Option<OwnedFd>)> {
     let mut control = [0usize; 4];
     let mut iov = libc::iovec {
         iov_base: bytes.as_mut_ptr().cast(),

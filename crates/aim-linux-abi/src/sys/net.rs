@@ -39,6 +39,9 @@ use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL};
 use crate::vfs;
 
+mod proc_table;
+pub(super) use proc_table::{metadata as proc_metadata, table as proc_table, socket_identity as proc_socket_identity, SocketMetadata};
+
 const L_AF_UNIX: u16 = 1;
 const L_AF_INET: u16 = 2;
 const L_AF_INET6: u16 = 10;
@@ -110,6 +113,7 @@ pub struct InetOpts {
 pub struct Sock {
     pub ty: SockType,
     pub family: Family,
+    inet_owner: Mutex<Option<SocketMetadata>>,
     /// SO_PASSCRED: attach SCM_CREDENTIALS to received messages.
     passcred: AtomicBool,
     /// Serializes framed receives, so one message is read whole.
@@ -128,6 +132,7 @@ impl Sock {
         Arc::new(Sock {
             ty,
             family,
+            inet_owner: Mutex::new(None),
             passcred: AtomicBool::new(false),
             recv: Mutex::new(()),
             local: Mutex::new(None),
@@ -143,6 +148,7 @@ pub(super) fn save_sock(s: &Sock, w: &mut super::fork_state::Writer) {
         SockType::Dgram => 1,
         SockType::SeqPacket => 2,
     });
+    w.opt(*s.inet_owner.lock().unwrap(), |w, owner| { w.u32(owner.uid); w.u64(owner.inode); w.u64(owner.cookie); w.bool(owner.probes_known); });
     w.bool(s.passcred.load(std::sync::atomic::Ordering::Relaxed));
     w.opt(s.local.lock().unwrap().as_deref(), |w, a| w.bytes(a));
     w.opt(s.peer.lock().unwrap().as_deref(), |w, a| w.bytes(a));
@@ -175,6 +181,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
         1 => SockType::Dgram,
         _ => SockType::SeqPacket,
     };
+    let inet_owner = r.opt(|r| SocketMetadata { fd: -1, uid: r.u32(), inode: r.u64(), cookie: r.u64(), local: None, peer: None, port_zero: false, probes_known: r.bool() });
     let passcred = r.bool();
     let local = r.opt(|r| r.bytes());
     let peer = r.opt(|r| r.bytes());
@@ -195,6 +202,7 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
         _ => Family::Unix,
     };
     let s = Sock::of(ty, family);
+    *s.inet_owner.lock().unwrap() = inet_owner;
     s.passcred.store(passcred, Ordering::Relaxed);
     *s.local.lock().unwrap() = local;
     *s.peer.lock().unwrap() = peer;
@@ -789,10 +797,15 @@ pub fn socket(a: [u64; 6]) -> i64 {
                 return -(errno::last() as i64);
             }
             set_int(fd, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1);
-            if d == libc::AF_INET && base == L_SOCK_DGRAM && proto == IPPROTO_ICMP {
+            if host_ty == libc::SOCK_STREAM || host_ty == libc::SOCK_DGRAM {
                 let o = InetOpts::default();
-                o.icmp4.store(true, Ordering::Relaxed);
-                fdtab::insert(fd, Kind::Sock(Sock::of(SockType::Dgram, Family::Inet(o))));
+                o.icmp4.store(d == libc::AF_INET && proto == IPPROTO_ICMP, Ordering::Relaxed);
+                let socket = Sock::of(if host_ty == libc::SOCK_STREAM { SockType::Stream } else { SockType::Dgram }, Family::Inet(o));
+                match proc_table::created(fd) {
+                    Ok(owner) => *socket.inet_owner.lock().unwrap() = Some(owner),
+                    Err(error) => { unsafe { libc::close(fd); } return -(error as i64); }
+                }
+                fdtab::insert(fd, Kind::Sock(socket));
             }
             fd
         }
@@ -893,6 +906,7 @@ fn is_socket(fd: i32) -> Result<(), i64> {
 }
 
 pub fn bind(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     let fd = a[0] as i32;
     if let Err(e) = is_socket(fd) {
         return e;
@@ -962,6 +976,7 @@ pub fn bind(a: [u64; 6]) -> i64 {
 }
 
 pub fn connect(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     let fd = a[0] as i32;
     if let Err(e) = is_socket(fd) {
@@ -1103,12 +1118,14 @@ fn datagram_to_port_zero(fd: i32, t: &mut Target) -> bool {
 }
 
 pub fn listen(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     // SAFETY: plain listen.
     errno::check(unsafe { libc::listen(a[0] as i32, a[1] as i32) } as i64)
 }
 
 pub fn accept4(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     let (fd, addr, addrlen, flags) = (a[0] as i32, a[1], a[2], a[3]);
     if flags & !(L_SOCK_NONBLOCK | L_SOCK_CLOEXEC) != 0 {
@@ -1147,6 +1164,15 @@ pub fn accept4(a: [u64; 6]) -> i64 {
         s.passcred
             .store(l.passcred.load(Ordering::Relaxed), Ordering::Relaxed);
         fdtab::insert(nfd, Kind::Sock(s));
+    }
+    if sa.ss_family as i32 == libc::AF_INET || sa.ss_family as i32 == libc::AF_INET6 {
+        let owner = match proc_table::created(nfd) {
+            Ok(owner) => owner,
+            Err(error) => { fdtab::on_close(nfd); unsafe { libc::close(nfd); } return -(error as i64); }
+        };
+        let socket = Sock::of(SockType::Stream, Family::Inet(InetOpts::default()));
+        *socket.inet_owner.lock().unwrap() = Some(owner);
+        fdtab::insert(nfd, Kind::Sock(socket));
     }
     if let Some(p) = peer {
         put_addr(&p, addr, addrlen);
@@ -1228,16 +1254,19 @@ fn name_of(fd: i32, peer: bool, out: u64, outlen: u64) -> i64 {
 }
 
 pub fn getsockname(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     name_of(a[0] as i32, false, a[1], a[2])
 }
 
 pub fn getpeername(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     name_of(a[0] as i32, true, a[1], a[2])
 }
 
 pub fn shutdown(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     if a[1] > 2 {
         return -(EINVAL as i64);
@@ -1250,8 +1279,16 @@ pub fn shutdown(a: [u64; 6]) -> i64 {
 
 /// Linux cmsgs -> Darwin cmsgs. SCM_CREDENTIALS is dropped: receivers get
 /// the sender's identity from the frame header or the peer.
-fn control_to_host(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
+#[derive(Default)]
+struct HostControl {
+    bytes: Vec<u8>,
+    // Path proof descriptors must remain alive through sendmsg, even if the
+    // guest concurrently closes its public O_PATH descriptor.
+    _exports: Vec<fdtab::ExportedFd>,
+}
+fn control_to_host(ptr: u64, len: usize) -> Result<HostControl, i64> {
     let mut out = Vec::new();
+    let mut exports = Vec::new();
     let mut off = 0usize;
     while off + 16 <= len {
         // SAFETY: inside the guest control buffer.
@@ -1274,17 +1311,26 @@ fn control_to_host(ptr: u64, len: usize) -> Result<Vec<u8>, i64> {
             out.extend_from_slice(&(hlen as u32).to_le_bytes());
             out.extend_from_slice(&libc::SOL_SOCKET.to_le_bytes());
             out.extend_from_slice(&libc::SCM_RIGHTS.to_le_bytes());
-            // SAFETY: the fds follow the Linux header.
-            out.extend_from_slice(unsafe {
-                std::slice::from_raw_parts((ptr as *const u8).add(off + 16), n)
-            });
+            // Export preserves regular descriptors and substitutes only a
+            // genuine O_PATH proof carrier; SCM count and payload stay intact.
+            for index in 0..n / 4 {
+                let fd = unsafe { ((ptr as *const u8).add(off + 16 + index * 4) as *const i32).read_unaligned() };
+                let exported = fdtab::export_fd(fd).map_err(|error| -(error as i64))?;
+                out.extend_from_slice(&exported.fd.to_ne_bytes());
+                exports.push(exported);
+            }
+            // Preserve any original ancillary tail bytes for host validation.
+            let tail = n % 4;
+            if tail != 0 {
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts((ptr as *const u8).add(off + 16 + n - tail), tail) });
+            }
             out.resize((out.len() + 3) & !3, 0);
         } else if !(level == L_SOL_SOCKET && matches!(ty, L_SCM_CREDENTIALS | L_SCM_RIGHTS)) {
             return Err(-(EINVAL as i64));
         }
         off += (clen + 7) & !7;
     }
-    Ok(out)
+    Ok(HostControl { bytes: out, _exports: exports })
 }
 
 /// Darwin cmsgs (plus credentials) -> Linux cmsgs in the guest buffer.
@@ -1517,12 +1563,12 @@ fn send(
         },
         _ => (None, false),
     };
-    let mut hctrl = match ctrl {
+    let mut control = match ctrl {
         Some((p, l)) if p != 0 && l > 0 => match control_to_host(p, l) {
             Ok(c) => c,
             Err(e) => return e,
         },
-        _ => Vec::new(),
+        _ => HostControl::default(),
     };
     let hflags = host_send_flags(flags);
     let total = iov_len(iov);
@@ -1543,9 +1589,9 @@ fn send(
     full.extend_from_slice(iov);
     let r = match &target {
         Some(t) => with_target(t, |sa, len| {
-            sendmsg_host(fd, &mut full, Some((sa, len)), &mut hctrl, hflags)
+            sendmsg_host(fd, &mut full, Some((sa, len)), &mut control.bytes, hflags)
         }),
-        None => sendmsg_host(fd, &mut full, None, &mut hctrl, hflags),
+        None => sendmsg_host(fd, &mut full, None, &mut control.bytes, hflags),
     };
     if r == -(libc::ENOENT as i64) && abstract_target {
         return -111;
@@ -2031,6 +2077,7 @@ fn recv(
 // ---- syscalls ---------------------------------------------------------------
 
 pub fn sendto(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     let iov = [libc::iovec {
         iov_base: a[1] as *mut _,
         iov_len: a[2] as usize,
@@ -2039,6 +2086,7 @@ pub fn sendto(a: [u64; 6]) -> i64 {
 }
 
 pub fn recvfrom(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     let (fd, buf, len, flags, addr, addrlen) = (a[0] as i32, a[1], a[2] as usize, a[3], a[4], a[5]);
     let iov = [libc::iovec {
         iov_base: buf as *mut _,
@@ -2128,12 +2176,14 @@ fn recvmsg_one(fd: i32, mp: u64, flags: u64) -> i64 {
 }
 
 pub fn sendmsg(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     // SAFETY: guest struct msghdr.
     let m = unsafe { (a[1] as *const LinuxMsghdr).read_unaligned() };
     sendmsg_one(a[0] as i32, &m, a[2])
 }
 
 pub fn recvmsg(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     recvmsg_one(a[0] as i32, a[1], a[2])
 }
 
@@ -2141,6 +2191,7 @@ pub fn recvmsg(a: [u64; 6]) -> i64 {
 const MMSG: u64 = 64;
 
 pub fn sendmmsg(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     let (fd, vec, n, flags) = (a[0] as i32, a[1], a[2].min(1024), a[3]);
     for i in 0..n {
         let p = vec + i * MMSG;
@@ -2157,6 +2208,7 @@ pub fn sendmmsg(a: [u64; 6]) -> i64 {
 }
 
 pub fn recvmmsg(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     const L_MSG_WAITFORONE: u64 = 0x10000;
     let (fd, vec, n, mut flags) = (a[0] as i32, a[1], a[2].min(1024), a[3]);
     for i in 0..n {
@@ -2177,6 +2229,7 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
 /// read/readv on a socket with Linux state (a plain host read for
 /// AF_INET options).
 pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+    if fdtab::is_hidden(fd) { return Some(-(EBADF as i64)); }
     if let Family::Inet(o) = &any_sock(fd)?.family
         && !o.icmp4.load(Ordering::Relaxed)
     {
@@ -2191,6 +2244,7 @@ pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 /// write/writev on a socket with Linux state (a plain host write for
 /// AF_INET options, but for DHCP to the virtual router).
 pub fn write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+    if fdtab::is_hidden(fd) { return Some(-(EBADF as i64)); }
     let s = any_sock(fd)?;
     if let Family::Inet(_) = &s.family {
         return dhcp_to_router(fd, &s, iov, None);
@@ -2281,6 +2335,7 @@ fn put_opt(v: &[u8], out: u64, outlen: u64) -> i64 {
 }
 
 pub fn setsockopt(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_typed(a[0] as i32){return -ENOTSOCK;}
     let (fd, level, opt, val, len) = (a[0] as i32, a[1], a[2], a[3], a[4] as u32);
     let int = || {
@@ -2315,9 +2370,15 @@ pub fn setsockopt(a: [u64; 6]) -> i64 {
             }
         }
         // SAFETY: an int option.
-        return errno::check(
+        let result = errno::check(
             unsafe { libc::setsockopt(fd, l, o, (&v as *const i32).cast(), 4) } as i64,
         );
+        if result == 0 && l == libc::SOL_SOCKET && o == libc::SO_KEEPALIVE && v != 0 {
+            if let Some(socket) = any_sock(fd) {
+                if let Some(owner) = socket.inet_owner.lock().unwrap().as_mut() { owner.probes_known = false; }
+            }
+        }
+        return result;
     }
     if let Some(r) = setsockopt_other(fd, level, opt, val, len) {
         return r;
@@ -2546,6 +2607,7 @@ fn host_protocol(fd: i32) -> i32 {
 }
 
 pub fn getsockopt(a: [u64; 6]) -> i64 {
+    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
     let (fd, level, opt, val, len) = (a[0] as i32, a[1], a[2], a[3], a[4]);
     if let Err(e) = is_socket(fd) {
         return e;
@@ -2869,5 +2931,79 @@ mod tests {
         };
         let (len, d) = parse_header(&header(99, c));
         assert_eq!((len, d.pid, d.uid, d.gid), (99, 42, 1036, 1037));
+    }
+}
+
+#[cfg(test)]
+mod hidden_net_boundary_tests {
+    use super::*;
+    #[test]
+    fn hidden_proof_descriptors_cannot_be_used_or_sent_as_guest_sockets() {
+        use std::os::fd::AsRawFd;
+        let (proof, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = proof.as_raw_fd();
+        fdtab::keep_hidden(fd);
+        struct Hidden(i32);
+        impl Drop for Hidden { fn drop(&mut self) { fdtab::unhide(self.0); } }
+        let _hidden = Hidden(fd);
+        let args = [fd as u64,0,0,0,0,0];
+        for call in [bind,connect,listen,accept4,getsockname,getpeername,shutdown,sendto,recvfrom,sendmsg,recvmsg,sendmmsg,recvmmsg,setsockopt,getsockopt] {
+            assert_eq!(call(args), -(EBADF as i64));
+        }
+        assert_eq!(read(fd,&[]),Some(-(EBADF as i64)));
+        assert_eq!(write(fd,&[]),Some(-(EBADF as i64)));
+        let mut rights=[0u8;24];rights[..8].copy_from_slice(&20u64.to_ne_bytes());
+        rights[8..12].copy_from_slice(&(L_SOL_SOCKET as i32).to_ne_bytes());
+        rights[12..16].copy_from_slice(&L_SCM_RIGHTS.to_ne_bytes());
+        rights[16..20].copy_from_slice(&fd.to_ne_bytes());
+        assert!(matches!(control_to_host(rights.as_ptr() as u64,rights.len()), Err(error) if error == -(EBADF as i64)));
+        assert!(super::super::procfs::fd_link(fd).is_none());
+        // Kernel libc still owns a usable proof socket; guest checks did not
+        // shut it down or alter its data while rejecting the guessed number.
+        assert_eq!(unsafe { libc::write(fd,b"k".as_ptr().cast(),1) },1);
+        let mut byte=0u8;assert_eq!(unsafe{libc::read(peer.as_raw_fd(),(&mut byte as *mut u8).cast(),1)},1);assert_eq!(byte,b'k');
+    }
+}
+
+#[cfg(test)]
+mod path_scm_boundary_tests {
+    use super::*;
+    #[test]
+    fn path_scm_keeps_single_fd_payload_flags_and_proof_alive_after_sender_close() {
+        use std::os::fd::AsRawFd;
+        let (_view, directory) = vfs::test_view();
+        let name = format!("dev.aim.test.path-scm.{}",std::process::id());
+        let _server = aim_binder_host::server::Server::start(&name).unwrap();
+        super::super::binder::init(&name).unwrap();
+        let file = directory.join("data/path-scm-input");
+        std::fs::write(&file,b"original").unwrap();
+        let path = c"/data/path-scm-input";
+        let fd = super::super::fs::openat([vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,0o10000000u64|super::super::fs::O_CLOEXEC,0,0,0]) as i32;
+        assert!(fd>=0);
+        let rights = |fd:i32| { let mut value=[0u8;24];value[..8].copy_from_slice(&20u64.to_ne_bytes());value[8..12].copy_from_slice(&1i32.to_ne_bytes());value[12..16].copy_from_slice(&1i32.to_ne_bytes());value[16..20].copy_from_slice(&fd.to_ne_bytes());value };
+        let mut original = rights(fd);
+        let mut exported = control_to_host(original.as_ptr() as u64,original.len()).unwrap();
+        assert_eq!(exported.bytes.len(),16);
+        let proof = i32::from_ne_bytes(exported.bytes[12..16].try_into().unwrap());
+        assert_ne!(proof,fd);assert!(fdtab::is_hidden(proof));
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+        assert!(unsafe{libc::fcntl(proof,libc::F_GETFD)}>=0);
+        let (sender,receiver)=std::os::unix::net::UnixStream::pair().unwrap();
+        let mut payload=[b'p'];let mut iov=[libc::iovec{iov_base:payload.as_mut_ptr().cast(),iov_len:1}];
+        assert_eq!(sendmsg_host(sender.as_raw_fd(),&mut iov,None,&mut exported.bytes,0),1);
+        drop(exported);
+        original.fill(0);
+        let mut message=LinuxMsghdr{name:0,namelen:0,_pad:0,iov:iov.as_ptr() as u64,iovlen:1,control:original.as_mut_ptr() as u64,controllen:24,flags:0,_pad2:0};
+        assert_eq!(recvmsg_one(receiver.as_raw_fd(),&mut message as *mut _ as u64,L_MSG_CMSG_CLOEXEC),1);
+        assert_eq!(payload,[b'p']);assert_eq!(message.controllen,24);assert_eq!(message.flags & L_MSG_CTRUNC,0);
+        let received=i32::from_ne_bytes(original[16..20].try_into().unwrap());
+        assert!(matches!(fdtab::get(received),Some(Kind::Path(_))));
+        assert_eq!(super::super::fs::fcntl([received as u64,3,0,0,0,0]) as u64,0o10000000u64);
+        let mut byte=0u8;assert_eq!(super::super::fs::read([received as u64,(&mut byte as *mut u8) as u64,1,0,0,0]),-(EBADF as i64));
+        super::super::fs::close([received as u64,0,0,0,0,0]);
+        let ordinary=std::fs::File::open(&file).unwrap();let normal=rights(ordinary.as_raw_fd());
+        let control=control_to_host(normal.as_ptr() as u64,normal.len()).unwrap();
+        assert_eq!(i32::from_ne_bytes(control.bytes[12..16].try_into().unwrap()),ordinary.as_raw_fd());
+        std::fs::remove_file(file).unwrap();
     }
 }

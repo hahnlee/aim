@@ -34,7 +34,8 @@ impl Drop for FilePort {
 /// fd. The returned fileport keeps the file alive while it crosses Binder.
 pub fn file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
     use std::os::fd::AsRawFd;
-    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, 0)) as File)
+    let class = registered_descriptor_class(fd.as_raw_fd()).ok()?;
+    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, class)) as File)
 }
 
 /// Export a native proxy capability with an explicit versioned Binder class.
@@ -45,6 +46,62 @@ pub fn proxy_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
     }
     mach::fd_to_port(fd.as_raw_fd())
         .map(|port| Arc::new(FilePort(port, crate::proxy_file::CLASS)) as File)
+}
+
+fn path_creation_errno(error: std::io::Error) -> Errno {
+    match error.raw_os_error() {
+        Some(libc::EPROTO) => wire::EPROTO,
+        Some(libc::EAGAIN) => 11,
+        Some(libc::ENOTSOCK) => 88,
+        Some(libc::ECONNRESET) => 104,
+        Some(value)
+            if matches!(
+                value,
+                libc::EPERM
+                    | libc::ENOENT
+                    | libc::EINTR
+                    | libc::EIO
+                    | libc::EBADF
+                    | libc::ENOMEM
+                    | libc::EACCES
+                    | libc::EINVAL
+                    | libc::ENFILE
+                    | libc::EMFILE
+                    | libc::EPIPE
+            ) =>
+        {
+            value
+        }
+        _ => 5,
+    }
+}
+
+fn create_path_fileport(port: Port, flags: u32) -> Result<(Vec<(Port, u32)>, Vec<u8>), Errno> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let fd = mach::port_to_fd(port).ok_or(errno::EBADF)?;
+    let capability = crate::path_file::create(unsafe { OwnedFd::from_raw_fd(fd) }, flags)
+        .map_err(path_creation_errno)?;
+    let port = mach::fd_to_port(capability.carrier.as_raw_fd()).ok_or(errno::EBADF)?;
+    let mut out = Writer::default();
+    out.u32(crate::path_file::CLASS);
+    Ok((vec![(port, mach::MOVE_SEND)], out.0))
+}
+
+fn registered_descriptor_class(fd: i32) -> std::io::Result<u32> {
+    let proxy = crate::proxy_file::registered_class_result(fd)?;
+    if proxy != 0 {
+        return Ok(proxy);
+    }
+    crate::path_file::registered_class_result(fd)
+}
+
+pub fn path_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
+    use std::os::fd::AsRawFd;
+    if registered_descriptor_class(fd.as_raw_fd()).ok() != Some(crate::path_file::CLASS) {
+        return None;
+    }
+    mach::fd_to_port(fd.as_raw_fd())
+        .map(|port| Arc::new(FilePort(port, crate::path_file::CLASS)) as File)
 }
 
 pub fn file_class(file: &File) -> Option<u32> {
@@ -226,14 +283,23 @@ impl Server {
             let Ok(req) = mach::receive(&mut buf, self.set) else {
                 continue;
             };
-            let result = if req.local == self.service && req.id == wire::FILE_CLASS {
+            let result = if req.local == self.service && req.id == wire::CREATE_PATH {
+                if req.ports.len() != 1 || req.data.len() != 4 {
+                    Err(wire::EPROTO)
+                } else {
+                    create_path_fileport(
+                        req.ports[0],
+                        u32::from_le_bytes(req.data[..4].try_into().unwrap()),
+                    )
+                }
+            } else if req.local == self.service && req.id == wire::FILE_CLASS {
                 if req.ports.len() != 1 || !req.data.is_empty() {
                     Err(wire::EPROTO)
                 } else if let Some(fd) = mach::port_to_fd(req.ports[0]) {
                     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
                     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
                     let mut out = Writer::default();
-                    match crate::proxy_file::registered_class_result(fd.as_raw_fd()) {
+                    match registered_descriptor_class(fd.as_raw_fd()) {
                         Ok(class) => {
                             out.u32(class);
                             Ok((Vec::new(), out.0))
@@ -506,6 +572,31 @@ impl Worker {
 
     fn call(&self, req: Received) -> Result<Call, Answer> {
         let thread = self.0.threads.read().unwrap().get(&req.local).cloned();
+        if req.id == wire::REJECT_DELIVERY {
+            let result = (|| {
+                if !req.ports.is_empty() || req.data.len() != 16 {
+                    return Err(wire::EPROTO);
+                }
+                let (file, tid) = thread.as_ref().ok_or(errno::EBADF)?;
+                let mut reader = Reader::new(&req.data);
+                self.0
+                    .driver
+                    .reject_delivery(file.handle, *tid, reader.u64()?, reader.u64()?)
+            })();
+            for port in &req.ports {
+                mach::release_send(*port);
+            }
+            return Err(Answer::new(
+                req.reply,
+                IoctlReply {
+                    status: result.err().unwrap_or(0),
+                    ..Default::default()
+                },
+                Vec::new(),
+                false,
+            ));
+        }
+
         // A thread port of a file being released is gone.
         let status = if thread.is_some() {
             wire::EPROTO
@@ -520,7 +611,7 @@ impl Worker {
                     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
                     mach::port_to_fd(*port).is_some_and(|fd| {
                         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                        crate::proxy_file::registered_class_result(fd.as_raw_fd())
+                        registered_descriptor_class(fd.as_raw_fd())
                             .is_ok_and(|actual| actual == *class)
                     })
                 })
@@ -744,6 +835,10 @@ impl GuestProcess for Gathered {
         Ok(fd)
     }
 
+    fn delivered(&mut self, buffer: u64, transaction: u64) {
+        self.reply.deliveries.push((buffer, transaction));
+    }
+
     fn can_install(&mut self, count: usize) -> bool {
         // The installed files ride back as the reply's ports.
         if count <= self.reserved.len() || !self.grow || count > mach::MAX_PORTS {
@@ -755,5 +850,65 @@ impl GuestProcess for Gathered {
 
     fn close_fd(&mut self, fd: u32) {
         self.reply.closes.push(fd);
+    }
+}
+
+#[cfg(test)]
+mod path_carrier_tests {
+    use super::*;
+    use std::{
+        ffi::CString,
+        os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    };
+    #[test]
+    fn path_fileport_creation_preserves_kernel_descriptor_and_linux_error_contract() {
+        assert_eq!(
+            path_creation_errno(std::io::Error::from_raw_os_error(libc::EPROTO)),
+            71
+        );
+        assert_eq!(
+            path_creation_errno(std::io::Error::from_raw_os_error(libc::EAGAIN)),
+            11
+        );
+        let name = CString::new(std::env::temp_dir().as_os_str().as_encoded_bytes()).unwrap();
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+        assert!(fd >= 0);
+        let backing = unsafe { OwnedFd::from_raw_fd(fd) };
+        let port = mach::fd_to_port(backing.as_raw_fd()).unwrap();
+        assert_eq!(
+            create_path_fileport(port, crate::path_file::O_PATH | 0x10000).unwrap_err(),
+            errno::EINVAL
+        );
+        let flags = crate::path_file::O_PATH | 0x4000 | 0x8000;
+        let (ports, metadata) = create_path_fileport(port, flags).unwrap();
+        mach::release_send(port);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(metadata, crate::path_file::CLASS.to_le_bytes());
+        let carrier = unsafe { OwnedFd::from_raw_fd(mach::port_to_fd(ports[0].0).unwrap()) };
+        mach::release_send(ports[0].0);
+        assert_eq!(
+            registered_descriptor_class(carrier.as_raw_fd()).unwrap(),
+            crate::path_file::CLASS
+        );
+        let imported = crate::path_file::unwrap(carrier.as_fd()).unwrap();
+        assert_eq!(imported.flags, flags);
+        let mut before = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let mut after = std::mem::MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(
+            unsafe { libc::fstat(backing.as_raw_fd(), before.as_mut_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::fstat(imported.backing.as_raw_fd(), after.as_mut_ptr()) },
+            0
+        );
+        let before = unsafe { before.assume_init() };
+        let after = unsafe { after.assume_init() };
+        assert_eq!(
+            (before.st_dev, before.st_ino, before.st_mode),
+            (after.st_dev, after.st_ino, after.st_mode)
+        );
+        let file = file_from_fd(carrier.as_fd()).unwrap();
+        assert_eq!(file_class(&file), Some(crate::path_file::CLASS));
     }
 }

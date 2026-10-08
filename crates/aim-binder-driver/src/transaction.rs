@@ -408,7 +408,10 @@ impl State {
             from_pid: from.creds.pid,
             from_euid: from.creds.euid,
             from_tid: tid,
-            from_parent: from.threads.get(&tid).and_then(|thread| thread.transaction_stack),
+            from_parent: from
+                .threads
+                .get(&tid)
+                .and_then(|thread| thread.transaction_stack),
             to_pid: to.creds.pid,
             descriptor: crate::trace::descriptor(&head),
             code: tr.code,
@@ -862,6 +865,7 @@ impl State {
                 && let Some(b) = self.buffer_mut(to, offset)
             {
                 b.txn = None;
+                b.delivery = None;
             }
         }
     }

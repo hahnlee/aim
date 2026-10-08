@@ -19,10 +19,12 @@ pub const THREAD: i32 = 0x6264_0002;
 pub const MMAP: i32 = 0x6264_0003;
 pub const POLL: i32 = 0x6264_0004;
 pub const IOCTL: i32 = 0x6264_0008;
-const IOCTL_VERSION: u32 = 2;
+const IOCTL_VERSION: u32 = 3;
+pub const REJECT_DELIVERY: i32 = 0x6264_000b;
 pub const INTERRUPT: i32 = 0x6264_0006;
 pub const FILES: i32 = 0x6264_0007;
 pub const FILE_CLASS: i32 = 0x6264_0009;
+pub const CREATE_PATH: i32 = 0x6264_000a;
 pub const REPLY: i32 = 0x6264_0100;
 
 /// A file whose pages the daemon's process shares as a memory object
@@ -187,6 +189,8 @@ pub struct IoctlReply {
     /// in the same order).
     pub installs: Vec<u32>,
     pub file_classes: Vec<u32>,
+    /// Actual receiving buffer and transaction IDs, authenticated by its thread port.
+    pub deliveries: Vec<(u64, u64)>,
     /// Fds of freed fd arrays to close.
     pub closes: Vec<u32>,
     /// Readiness bytes to drain from the binder fd.
@@ -216,6 +220,10 @@ impl IoctlReply {
             w.u32(*fd);
         }
         w.u32(self.drain).u32(self.want_fds);
+        w.u32(self.deliveries.len() as u32);
+        for (buffer, id) in &self.deliveries {
+            w.u64(*buffer).u64(*id);
+        }
         w.0
     }
 
@@ -245,6 +253,9 @@ impl IoctlReply {
         }
         rep.drain = r.u32()?;
         rep.want_fds = r.u32()?;
+        for _ in 0..r.u32()? {
+            rep.deliveries.push((r.u64()?, r.u64()?));
+        }
         Ok(rep)
     }
 }
@@ -274,6 +285,7 @@ mod tests {
             closes: vec![7],
             drain: 1,
             want_fds: 12,
+            deliveries: vec![(0x4000, 123)],
         };
         assert_eq!(IoctlReply::decode(&rep.encode()).unwrap(), rep);
         assert_eq!(Ioctl::decode(&[1, 2]), Err(EPROTO));

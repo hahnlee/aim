@@ -216,6 +216,9 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         a[4] as i32,
         a[5],
     );
+    if flags & MAP_ANONYMOUS == 0 && (super::fs::is_path_fd(fd) || super::fdtab::is_hidden(fd)) {
+        return -(crate::errno::EBADF as i64);
+    }
     if flags & MAP_ANONYMOUS == 0 && super::proxy_file::is_proxy(fd) {
         return -(crate::errno::ENODEV as i64);
     }

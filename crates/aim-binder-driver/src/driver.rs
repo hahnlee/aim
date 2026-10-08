@@ -75,6 +75,64 @@ impl Driver {
         pending.deliver();
     }
 
+    /// Lookup a receipt owned by this exact receiving process/thread/buffer.
+    pub fn delivery_id(&self, handle: ProcHandle, tid: Tid, buffer: u64) -> Result<u64, Errno> {
+        let st = self.lock();
+        let alloc = st
+            .procs
+            .get(&handle.0)
+            .and_then(|p| p.alloc.as_ref())
+            .ok_or(errno::EBADF)?;
+        let offset = alloc.offset_of(buffer).ok_or(errno::EINVAL)?;
+        alloc.buffers[&offset]
+            .delivery
+            .filter(|(owner, _)| *owner == tid)
+            .map(|(_, id)| id)
+            .ok_or(errno::EPERM)
+    }
+    /// Reject a hosted delivery before exposing its command/FDs to userspace.
+    /// The host closes installed descriptors; this owner unwinds Binder state.
+    pub fn reject_delivery(
+        &self,
+        handle: ProcHandle,
+        tid: Tid,
+        buffer: u64,
+        id: u64,
+    ) -> Result<(), Errno> {
+        let mut st = self.lock();
+        let proc = handle.0;
+        let alloc = st
+            .procs
+            .get(&proc)
+            .and_then(|p| p.alloc.as_ref())
+            .ok_or(errno::EBADF)?;
+        let offset = alloc.offset_of(buffer).ok_or(errno::EINVAL)?;
+        let b = &alloc.buffers[&offset];
+        if b.delivery != Some((tid, id)) || !b.allow_user_free {
+            return Err(errno::EPERM);
+        }
+        if let Some(t) = st.txns.get(&id) {
+            if t.to_proc != Some(proc)
+                || t.to_thread != Some(tid)
+                || t.buffer != Some(offset)
+                || st.procs[&proc]
+                    .threads
+                    .get(&tid)
+                    .and_then(|t| t.transaction_stack)
+                    != Some(id)
+            {
+                return Err(errno::EPERM);
+            }
+            let parent = t.to_parent;
+            st.thread(proc, tid).unwrap().transaction_stack = parent;
+        }
+        st.buffer_mut(proc, offset).unwrap().txn = None;
+        st.cleanup_transaction(id, BR_FAILED_REPLY);
+        st.free_buffer(proc, offset, true, None);
+        self.unlock(st);
+        Ok(())
+    }
+
     /// Start recording every transaction ([`Driver::take_trace`]).
     pub fn start_trace(&self) {
         let mut st = self.lock();
@@ -94,21 +152,43 @@ impl Driver {
     /// Empty when tracing is disabled; no parcel contents are copied.
     pub fn pending_trace(&self) -> crate::PendingTraceSnapshot {
         let st = self.lock();
-        let mut snapshot = st.trace.as_ref().map(|trace| trace.snapshot()).unwrap_or_default();
+        let mut snapshot = st
+            .trace
+            .as_ref()
+            .map(|trace| trace.snapshot())
+            .unwrap_or_default();
         for pending in &mut snapshot.records {
-            if !pending.returning && let Some(txn) = st.txns.get(&pending.id) {
+            if !pending.returning
+                && let Some(txn) = st.txns.get(&pending.id)
+            {
                 pending.record.from_parent = txn.from_parent;
                 pending.record.to_parent = txn.to_parent;
             }
             for proc in st.procs.values() {
-                if st.contexts[proc.context].name != pending.record.device { continue; }
+                if st.contexts[proc.context].name != pending.record.device {
+                    continue;
+                }
                 if proc.creds.pid == pending.record.from_pid {
-                    pending.from_stack = proc.threads.get(&pending.record.from_tid).and_then(|thread| thread.transaction_stack);
-                    pending.from_queued = proc.todo.len() + proc.threads.get(&pending.record.from_tid).map_or(0, |thread| thread.todo.len());
+                    pending.from_stack = proc
+                        .threads
+                        .get(&pending.record.from_tid)
+                        .and_then(|thread| thread.transaction_stack);
+                    pending.from_queued = proc.todo.len()
+                        + proc
+                            .threads
+                            .get(&pending.record.from_tid)
+                            .map_or(0, |thread| thread.todo.len());
                 }
                 if proc.creds.pid == pending.record.to_pid {
-                    pending.to_stack = proc.threads.get(&pending.record.to_tid).and_then(|thread| thread.transaction_stack);
-                    pending.to_queued = proc.todo.len() + proc.threads.get(&pending.record.to_tid).map_or(0, |thread| thread.todo.len());
+                    pending.to_stack = proc
+                        .threads
+                        .get(&pending.record.to_tid)
+                        .and_then(|thread| thread.transaction_stack);
+                    pending.to_queued = proc.todo.len()
+                        + proc
+                            .threads
+                            .get(&pending.record.to_tid)
+                            .map_or(0, |thread| thread.todo.len());
                 }
             }
         }

@@ -479,7 +479,27 @@ initialization. Flags, variadic arguments and a sandbox denial are not proven
 causes. The exact process/file-dependent condition remains unresolved. An independent real-signal errno-preservation defect is fixed
 with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
 so this is not claimed as the reboot fix. Diagnostics leave no owned processes
-or temporary files behind. Latest whole native library verification
+or temporary files behind.
+Current Source lower-owner cohort passes 169 ABI tests (four ignored), 802 PM
+library tests (eleven ignored) and 65 complete Binder tests. Guest DAC now
+checks ancestor search, final access, owner/groups/capabilities and checked
+metadata persistence; metadata mutations use hidden real inode anchors and a
+cross-process inode lock (#1143). Path-only descriptor capabilities preserve
+actual backing identity and ARM64 flags through SCM/Binder; guessed hidden
+kernel descriptors fail as nonexistent guest FDs. Typed import failure rejects
+the actual delivered transaction, closes descriptors and releases its buffer,
+including nested and oneway work (#1147, matching host/runtime wire version 3).
+Exec preserves projected-mount identity for future parent events (#1148).
+The actual translation-cache test uses a fresh process so unrelated tests cannot
+preinitialize its process-wide runtime (#1149); its original execution assertions
+remain. Procnet exposes actual registered guest socket identities/endpoints,
+but unavailable TCP timer epoch/probe metrics return a real unsupported error;
+#1144 remains incomplete and no full network-table CTS pass is claimed.
+An identical-signed-bytes executable control runs original sh successfully from
+a new vnode while the frozen original executable path dies before main. This
+narrows #1146 to executable publication/vnode generation behavior; it does not
+prove a permission workaround or a resolved reboot. Originals and frozen CTS
+binary bytes remain unchanged; controls are cleaned after verification. Latest whole native library verification
 passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.

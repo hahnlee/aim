@@ -663,6 +663,7 @@ pub fn own_mounts_text() -> String {
         if let Some(route)=&m.fuse{out.push_str(&format!("\t{}\t{}\t{},{},{},{},{}",route.session.display(),route.relative,route.uid,route.gid,u8::from(route.allow_other),u8::from(route.default_permissions),u8::from(route.read_only)));}
         out.push('\n');
         if m.shared_fuse{out.push_str(&format!("mount-shared\t{}\n",m.guest));}
+        if m.projected_fuse{out.push_str(&format!("mount-projected\t{}\n",m.guest));}
         if let Some(source)=&m.bind_source{out.push_str(&format!("bind-source\t{}\t{}\n",m.guest,source));}
     }
     out
@@ -675,6 +676,7 @@ pub fn load_own_mounts(text: &str) {
         let f: Vec<&str> = line.split('\t').collect();
         if let ["propagation",root,kind]=f.as_slice(){let kind=match *kind{"slave"=>Propagation::Slave,"shared"=>Propagation::Shared,_=>Propagation::Private};PROPAGATION_RULES.lock().unwrap().push(((*root).into(),kind));continue;}
         if let ["mount-shared",guest]=f.as_slice(){let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==*guest&&mount.own){mount.shared_fuse=true;}continue;}
+        if let ["mount-projected",guest]=f.as_slice(){let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==*guest&&mount.own){mount.projected_fuse=true;}continue;}
         if let ["bind-source",guest,source]=f.as_slice(){let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==*guest&&mount.own){mount.bind_source=Some((*source).into());}continue;}
         if f.len()==5||f.len()==8 {
             let(area,guest,host,source,fstype)=(f[0],f[1],f[2],f[3],f[4]);
@@ -742,6 +744,7 @@ pub fn guest_path_of_host(host: &Path) -> Option<String> {
 
 /// Guest path of an open directory fd.
 fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
+    if crate::sys::fdtab::is_hidden(fd) { return Err(errno::EBADF); }
     if let Some(file)=crate::sys::fuse_client::get(fd){return Ok(file.guest.clone());}
     if let Some(p) = crate::sys::synthesized_dir_path(fd) {
         return Ok(p);
@@ -1136,14 +1139,20 @@ mod fuse_route_tests {
     use super::*;
     #[test]
     fn init_path_map_alias_receives_late_mount_and_exec_import_does_not_duplicate_shared_entries(){
-        let(_guard,root)=test_view();let old_rules=std::mem::take(&mut *PROPAGATION_RULES.lock().unwrap());let parent=root.join("init-map-parent");let lower=root.join("init-map-lower");for path in [&parent,&lower]{std::fs::create_dir_all(path).unwrap();}
+        let(_guard,root)=test_view();let old_private=PRIVATE_MOUNTS.swap(false,Ordering::AcqRel);let old_rules=std::mem::take(&mut *PROPAGATION_RULES.lock().unwrap());let parent=root.join("init-map-parent");let lower=root.join("init-map-lower");for path in [&parent,&lower]{std::fs::create_dir_all(path).unwrap();}
         let text=format!("root\t/\t{}\nrw\t/storage/aim-init-alias\t{}\nbind-source\t/storage/aim-init-alias\t/mnt/aim-init-user\npropagation\t/storage/aim-init-alias\tslave\n",root.display(),parent.display());
         let(_,entries)=parse_map(&text).unwrap();assert_eq!(entries[0].bind_source.as_deref(),Some("/mnt/aim-init-user"));vfs().mounts.write().unwrap().extend(entries);
         publish_plain_mount("/mnt/aim-init-user/emulated",&lower,Area::Writable,"lower","bind",None).unwrap();refresh_fuse_mounts().unwrap();assert_eq!(lookup("/storage/aim-init-alias/emulated/0").0,lower.join("0"));
         let inherited=own_mounts_text();load_own_mounts(&inherited);refresh_fuse_mounts().unwrap();
         assert_eq!(vfs().mounts.read().unwrap().iter().filter(|mount|mount.guest=="/mnt/aim-init-user/emulated"&&mount.shared_fuse).count(),1);
         assert_eq!(lookup("/storage/aim-init-alias/emulated/0").0,lower.join("0"));
-        publish_fuse_route("/mnt/aim-init-user/emulated",&lower,"",None).unwrap();refresh_fuse_mounts().unwrap();vfs().mounts.write().unwrap().retain(|mount|mount.guest!="/storage/aim-init-alias");*PROPAGATION_RULES.lock().unwrap()=old_rules;
+        // An imported projection must remain an inherited event, not turn
+        // into an explicit child mount hiding the next parent event.
+        let retargeted=root.join("init-map-retargeted");std::fs::create_dir_all(&retargeted).unwrap();
+        publish_plain_mount("/mnt/aim-init-user/emulated",&retargeted,Area::Writable,"retargeted","bind",None).unwrap();refresh_fuse_mounts().unwrap();
+        assert_eq!(lookup("/storage/aim-init-alias/emulated/0").0,retargeted.join("0"));
+        assert_eq!(vfs().mounts.read().unwrap().iter().filter(|mount|mount.guest=="/storage/aim-init-alias/emulated"&&mount.projected_fuse).count(),1);
+        publish_fuse_route("/mnt/aim-init-user/emulated",&lower,"",None).unwrap();refresh_fuse_mounts().unwrap();vfs().mounts.write().unwrap().retain(|mount|mount.guest!="/storage/aim-init-alias");*PROPAGATION_RULES.lock().unwrap()=old_rules;PRIVATE_MOUNTS.store(old_private,Ordering::Release);
     }
     #[test]
     fn late_plain_pass_through_bind_propagates_actual_lower_into_slave_alias(){

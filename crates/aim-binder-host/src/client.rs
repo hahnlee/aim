@@ -24,6 +24,13 @@ pub trait UserMemory {
     fn installed_typed(&mut self, fd: i32, _class: u32) {
         self.installed(fd);
     }
+    fn install_typed(&mut self, fd: i32, class: u32) -> Result<(), Errno> {
+        self.installed_typed(fd, class);
+        Ok(())
+    }
+    fn export_fd(&mut self, fd: i32) -> Result<i32, Errno> {
+        Ok(fd)
+    }
     fn file_class(&mut self, _fd: i32) -> u32 {
         0
     }
@@ -105,6 +112,32 @@ pub struct Client {
 }
 
 impl Client {
+    /// Register an owned Linux path carrier with the native daemon. Errors are Linux wire errno.
+    pub fn create_path(&self, fd: i32, flags: u32) -> Result<std::os::fd::OwnedFd, Errno> {
+        use std::os::fd::FromRawFd;
+        let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let request = Msg {
+            id: wire::CREATE_PATH,
+            ports: vec![(port, mach::COPY_SEND)],
+            data: flags.to_le_bytes().to_vec(),
+        };
+        let result = with_thread(|t| call(t, self.service, &request));
+        mach::release_send(port);
+        let reply = result??;
+        let result = (|| {
+            let class = status(&reply)?.u32()?;
+            if class != crate::path_file::CLASS || reply.ports.len() != 1 {
+                return Err(wire::EPROTO);
+            }
+            let fd = mach::port_to_fd(reply.ports[0]).ok_or(errno::EBADF)?;
+            Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+        })();
+        for port in &reply.ports {
+            mach::release_send(*port);
+        }
+        result
+    }
+
     /// Ask the native owner's registry about an actual descriptor capability.
     pub fn file_class(&self, fd: i32) -> Result<u32, Errno> {
         let mut ty = 0i32;
@@ -354,14 +387,18 @@ impl BinderFile {
         }
         let fds = std::mem::take(&mut io.fds);
         io.file_classes.clear();
+        let exports = fds
+            .iter()
+            .map(|fd| mem.export_fd(*fd as i32))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut ports = Vec::new();
-        for fd in fds {
+        for (fd, exported) in fds.into_iter().zip(exports) {
             if ports.len() == mach::MAX_PORTS {
                 break;
             }
             // An fd that is not open has no port; the driver fails the
             // transaction with EBADF.
-            if let Some(p) = mach::fd_to_port(fd as i32) {
+            if let Some(p) = mach::fd_to_port(exported) {
                 io.fds.push(fd);
                 io.file_classes.push(mem.file_class(fd as i32));
                 ports.push((p, mach::MOVE_SEND));
@@ -381,8 +418,19 @@ impl BinderFile {
             };
             let r = call(t, port, &msg)?;
             let reply = IoctlReply::decode(&r.data)?;
-            for (fd, p) in reply.installs.iter().zip(&r.ports) {
-                install(*fd as i32, *p);
+            for (index, (fd, p)) in reply.installs.iter().zip(&r.ports).enumerate() {
+                if let Err(error) = install(*fd as i32, *p) {
+                    for port in r.ports.iter().skip(index + 1) {
+                        mach::release_send(*port);
+                    }
+                    for fd in reply.installs.iter().chain(&reply.closes) {
+                        mem.closed(*fd as i32);
+                        unsafe { libc::close(*fd as i32) };
+                        t.reserved.retain(|reserved| *reserved != *fd as i32);
+                    }
+                    reject_deliveries(t, port, &reply)?;
+                    return Err(error);
+                }
                 t.reserved.retain(|r| *r != *fd as i32);
             }
             for p in r.ports.iter().skip(reply.installs.len()) {
@@ -397,7 +445,18 @@ impl BinderFile {
             Ok(reply)
         })??;
         for (index, fd) in reply.installs.iter().enumerate() {
-            mem.installed_typed(*fd as i32, reply.file_classes[index]);
+            if let Err(error) = mem.install_typed(*fd as i32, reply.file_classes[index]) {
+                for fd in reply.installs.iter().chain(&reply.closes) {
+                    mem.closed(*fd as i32);
+                    unsafe { libc::close(*fd as i32) };
+                }
+                with_thread(|t| -> Result<(), Errno> {
+                    let port = self.thread_port(t, tid)?;
+                    reject_deliveries(t, port, &reply)
+                })??;
+                self.drain(reply.drain);
+                return Err(error);
+            }
         }
         for (addr, bytes) in &reply.writes {
             mem.write(*addr, bytes)?;
@@ -421,6 +480,31 @@ impl BinderFile {
             e => Err(e),
         }
     }
+}
+
+fn reject_deliveries(
+    thread: &mut ThreadState,
+    port: Port,
+    reply: &IoctlReply,
+) -> Result<(), Errno> {
+    for (buffer, id) in reply.deliveries.iter().rev() {
+        let mut data = Writer::default();
+        data.u64(*buffer).u64(*id);
+        let result = call(
+            thread,
+            port,
+            &Msg {
+                id: wire::REJECT_DELIVERY,
+                ports: Vec::new(),
+                data: data.0,
+            },
+        )?;
+        let result = IoctlReply::decode(&result.data)?;
+        if result.status != 0 {
+            return Err(result.status);
+        }
+    }
+    Ok(())
 }
 
 /// Top the pool up to `count` placeholders. A placeholder only holds its
@@ -460,16 +544,21 @@ fn refill_reserved(pool: &mut Vec<i32>, count: usize) {
 
 /// Put a received file at the reserved number `fd` (close-on-exec, as the
 /// driver installs it).
-fn install(fd: i32, port: Port) {
-    if let Some(new) = mach::port_to_fd(port) {
-        // SAFETY: replacing our placeholder with the received file.
-        unsafe {
-            libc::dup2(new, fd);
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::close(new);
-        }
-    }
+fn install(fd: i32, port: Port) -> Result<(), Errno> {
+    let result = (|| {
+        let new = mach::port_to_fd(port).ok_or(errno::EBADF)?;
+        let result = if unsafe { libc::dup2(new, fd) } < 0 {
+            Err(errno::EBADF)
+        } else if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            Err(errno::EBADF)
+        } else {
+            Ok(())
+        };
+        unsafe { libc::close(new) };
+        result
+    })();
     mach::release_send(port);
+    result
 }
 
 /// Gather the guest memory the write stream makes the driver read.
@@ -595,5 +684,15 @@ mod tests {
             // SAFETY: our placeholders.
             unsafe { libc::close(fd) };
         }
+    }
+    #[test]
+    fn failed_host_descriptor_install_cannot_succeed_with_a_placeholder() {
+        use std::os::fd::AsRawFd;
+        let source = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(install(source.as_raw_fd(), mach::NULL), Err(errno::EBADF));
+        assert!(unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0);
+        let port = mach::fd_to_port(source.as_raw_fd()).unwrap();
+        assert_eq!(install(-1, port), Err(errno::EBADF));
+        assert!(unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GETFD) } >= 0);
     }
 }

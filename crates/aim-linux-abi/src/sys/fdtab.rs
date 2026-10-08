@@ -29,6 +29,8 @@ pub static SLOW: [AtomicU8; SLOW_FDS] = [const { AtomicU8::new(0) }; SLOW_FDS];
 
 #[derive(Clone)]
 pub enum Kind {
+    /// A Linux O_PATH open description; flags do not grant read/write access.
+    Path(Arc<PathDescription>),
     ProxyFile,
     Event(Arc<event::EventFd>),
     Timer(Arc<event::TimerFd>),
@@ -54,6 +56,58 @@ pub enum Kind {
     Binder(aim_binder_host::client::BinderFile),
 }
 
+pub(super) struct PathProof(std::os::fd::OwnedFd);
+impl PathProof {
+    fn new(fd: std::os::fd::OwnedFd) -> Arc<Self> {
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        Arc::new(Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(hide(fd.into_raw_fd())) }))
+    }
+}
+impl Drop for PathProof { fn drop(&mut self) {
+    use std::os::fd::AsRawFd; unhide(self.0.as_raw_fd());
+} }
+
+pub struct PathDescription {
+    pub flags: u64,
+    proof: Mutex<Option<Arc<PathProof>>>,
+}
+impl PathDescription {
+    pub(super) fn new(flags: u64) -> Arc<Self> {
+        Arc::new(Self { flags: flags & !super::fs::O_CLOEXEC, proof: Mutex::new(None) })
+    }
+}
+
+/// Keeps a hidden proof alive through the actual descriptor transfer syscall.
+pub(super) struct ExportedFd { pub fd: i32, _proof: Option<Arc<PathProof>> }
+pub(super) fn export_fd(fd: i32) -> Result<ExportedFd, crate::errno::Errno> {
+    if is_hidden(fd) { return Err(crate::errno::EBADF); }
+    let Some(Kind::Path(path)) = get(fd) else { return Ok(ExportedFd { fd, _proof: None }); };
+    let mut proof = path.proof.lock().unwrap();
+    if proof.is_none() {
+        let carrier = super::binder::create_path(fd,path.flags as u32)?;
+        *proof = Some(PathProof::new(carrier));
+    }
+    use std::os::fd::AsRawFd;
+    let proof = proof.as_ref().unwrap().clone();
+    Ok(ExportedFd { fd: proof.0.as_raw_fd(), _proof: Some(proof) })
+}
+
+pub(super) fn install_path(fd: i32) -> Result<(), crate::errno::Errno> {
+    use std::os::fd::{AsRawFd, BorrowedFd};
+    let old_flags = unsafe { libc::fcntl(fd,libc::F_GETFD) };
+    if old_flags < 0 { return Err(crate::errno::last()); }
+    let adopted = aim_binder_host::path_file::unwrap(unsafe { BorrowedFd::borrow_raw(fd) })
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    let proof = PathProof::new(adopted.proof.try_clone()
+        .map_err(|error| crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?);
+    on_close(fd);
+    if unsafe { libc::dup2(adopted.backing.as_raw_fd(),fd) } < 0 { return Err(crate::errno::last()); }
+    if unsafe { libc::fcntl(fd,libc::F_SETFD,old_flags) } < 0 { return Err(crate::errno::last()); }
+    super::fuse_client::adopt(fd)?;
+    insert(fd,Kind::Path(Arc::new(PathDescription { flags: adopted.flags as u64, proof:Mutex::new(Some(proof)) })));
+    Ok(())
+}
+
 static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
 
 fn set_slow(fd: i32, on: bool) {
@@ -63,8 +117,9 @@ fn set_slow(fd: i32, on: bool) {
 }
 
 pub fn insert(fd: i32, kind: Kind) {
-    TABLE.write().unwrap().insert(fd, kind);
+    let previous = TABLE.write().unwrap().insert(fd, kind);
     set_slow(fd, true);
+    drop(previous);
 }
 
 pub fn get(fd: i32) -> Option<Kind> {
@@ -87,7 +142,8 @@ pub fn on_close(fd: i32) {
         Some(_) => {}
     }
     set_slow(fd, false);
-    TABLE.write().unwrap().remove(&fd);
+    let previous = TABLE.write().unwrap().remove(&fd);
+    drop(previous);
 }
 
 /// `new` now refers to the same open file as `old`.
@@ -109,6 +165,10 @@ pub fn adopt(fd: i32) {
         insert(fd, Kind::ProxyFile);
         return;
     }
+    if super::binder::file_class(fd) == Ok(aim_binder_host::path_file::CLASS) {
+        if let Err(error) = install_path(fd) { on_close(fd); unsafe { libc::close(fd); } eprintln!("path descriptor adoption failed: errno={error}"); }
+        return;
+    }
     adopt_untyped(fd);
 }
 
@@ -118,6 +178,7 @@ pub(super) fn adopt_received(fd: i32) -> Result<(), i32> {
     match super::binder::file_class(fd)? {
         0 => adopt_untyped(fd),
         aim_binder_host::proxy_file::CLASS => insert(fd, Kind::ProxyFile),
+        aim_binder_host::path_file::CLASS => install_path(fd)?,
         _ => return Err(71),
     }
     Ok(())
@@ -197,6 +258,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
             Kind::Sock(_)
             | Kind::Dir(_)
             | Kind::Memfd(_)
+            | Kind::Path(_)
             | Kind::Content
             | Kind::Knob(_)
             | Kind::Random
@@ -295,6 +357,7 @@ pub fn hide(fd: i32) -> i32 {
         fd
     };
     HIDDEN.lock().unwrap().push(fd);
+    set_slow(fd,true);
     fd
 }
 
@@ -314,10 +377,12 @@ pub fn hidden_base() -> i32 {
 /// Leave `fd` (the layer's, kept across exec) out of the guest's view.
 pub fn keep_hidden(fd: i32) {
     HIDDEN.lock().unwrap().push(fd);
+    set_slow(fd,true);
 }
 
 pub fn unhide(fd: i32) {
     HIDDEN.lock().unwrap().retain(|&h| h != fd);
+    if !TABLE.read().unwrap().contains_key(&fd) { set_slow(fd,false); }
 }
 
 pub fn is_hidden(fd: i32) -> bool {
@@ -342,7 +407,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Epoll(a) => Arc::as_ptr(a) as *const (),
             Kind::Inotify(a) => Arc::as_ptr(a) as *const (),
             Kind::Dir(a) => Arc::as_ptr(a) as *const (),
-            Kind::Memfd(_) | Kind::SyncFile | Kind::Random | Kind::ProxyFile => std::ptr::null(),
+            Kind::Memfd(_) | Kind::SyncFile | Kind::Random | Kind::ProxyFile | Kind::Path(_) => std::ptr::null(),
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => continue,
         };
         let (i, new) = match objects.iter().position(|&o| !p.is_null() && o == p) {
@@ -396,6 +461,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::SyncFile => w.u32(7),
             Kind::Random => w.u32(8),
             Kind::ProxyFile => w.u32(9),
+            Kind::Path(path) => { w.u32(10); w.u64(path.flags); },
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
@@ -420,6 +486,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             7 => Kind::SyncFile,
             8 => Kind::Random,
             9 => Kind::ProxyFile,
+            10 => Kind::Path(PathDescription::new(r.u64())),
             _ => Kind::Memfd((r.u64(), r.u64())),
         };
         objects.push(k.clone());

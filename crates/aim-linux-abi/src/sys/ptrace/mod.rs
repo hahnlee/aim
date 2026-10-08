@@ -373,6 +373,18 @@ pub fn remote_fds(pid: i32) -> Option<Vec<i32>> {
     Some(Reader::new(&b).seq(|r| r.i32()))
 }
 
+/// Public netns metadata, not process memory or remote descriptor access.
+pub(crate) fn remote_net_sockets(pid: i32) -> Result<Vec<super::net::SocketMetadata>, crate::errno::Errno> {
+    if !pidns::contains(pid) { return Err(crate::errno::ESRCH); }
+    let bytes = call_result(pid, &request(agent::NET_SOCKET_METADATA, |_| {}))
+        .map_err(|error| (-error) as crate::errno::Errno)?;
+    Ok(Reader::new(&bytes).seq(|r| super::net::SocketMetadata {
+        fd: r.i32(), uid: r.u32(), inode: r.u64(), cookie: r.u64(),
+        local: r.opt(|r| r.bytes().try_into().expect("net local address record")),
+        peer: r.opt(|r| r.bytes().try_into().expect("net peer address record")), port_zero: r.bool(), probes_known: r.bool(),
+    }))
+}
+
 /// The target of another process's `/proc/<pid>/fd/<fd>`.
 pub fn remote_fd_link(pid: i32, fd: i32) -> Option<String> {
     if !cred::may_ptrace(pid, true) {

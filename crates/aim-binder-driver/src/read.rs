@@ -305,6 +305,8 @@ impl State {
         } else {
             self.free_transaction(id);
         }
+        self.buffer_mut(proc, offset).unwrap().delivery = Some((tid, id));
+        guest.delivered(tr.buffer, id);
         true
     }
 
