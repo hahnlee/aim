@@ -12,17 +12,40 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 shell_args=()
-if [[ "${1:-}" == "--linux-run" ]]; then
-  [[ $# -ge 2 && -x "$2" ]] || { echo '--linux-run requires an executable path' >&2; exit 2; }
-  shell_args=(--linux-run "$2")
-  shift 2
-fi
+host_tools=
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --linux-run)
+      [[ $# -ge 2 && -x "$2" ]] || { echo '--linux-run requires an executable path' >&2; exit 2; }
+      shell_args=(--linux-run "$2"); shift 2 ;;
+    --cts-host-toolsdir)
+      [[ $# -ge 2 && -d "$2" && -z "$host_tools" ]] || { echo '--cts-host-toolsdir requires one directory' >&2; exit 2; }
+      host_tools="$2"; shift 2 ;;
+    *) echo "unknown wrapper option: $1" >&2; exit 2 ;;
+  esac
+done
 [[ $# -ge 2 ]] || { sed -n '7,10p' "$0" >&2; exit 2; }
 data="$1"
 port="$2"
 shift 2
 harness="$root/_build/cts-tradefed/android-cts"
 [[ -f "$harness/tools/cts-tradefed" ]] || { echo "no harness: run tools/cts-module.py --tradefed" >&2; exit 1; }
+if [[ -n "$host_tools" ]]; then
+  selected_module=
+  previous=
+  for argument in "$@"; do
+    [[ "$argument" != *module-dir-path* ]] || { echo 'conflicting module-dir-path selection' >&2; exit 2; }
+    if [[ "$previous" == -m || "$previous" == --module ]]; then selected_module="$argument"; fi
+    previous="$argument"
+  done
+  [[ "$selected_module" == CtsStagedInstallHostTestCases ]] || {
+    echo '--cts-host-toolsdir requires explicit CtsStagedInstallHostTestCases selection' >&2; exit 2;
+  }
+  selection="$(python3 "$root/tools/lib/cts_host_tools.py" "$host_tools" "$root" "$harness")"
+  module_arg="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["module_arg"])' <<< "$selection")"
+  echo "cts host-tool selection: $selection"
+  set -- "$@" --module-arg "$module_arg"
+fi
 command -v adb > /dev/null || { echo "adb (Android SDK Platform-Tools) must be on PATH" >&2; exit 1; }
 build_tools=("$root"/_build/java/build-tools-*/android-*)
 for jdk in \

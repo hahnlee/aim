@@ -31,3 +31,15 @@ extracted bytes, modes and symlinks, corrupt-input rejection, and real original
 APEX extraction without changing its hash. A future harness must select this
 host-tool path explicitly and record the provenance; existence of the build
 recipe is not a passing CTS result.
+
+For a future explicit staged-install invocation, use
+`tools/cts-tradefed.sh --cts-host-toolsdir target/aim/cts-host-tools DATA PORT -m CtsStagedInstallHostTestCases`.
+Campaigns accept the same `--cts-host-toolsdir` on `tools/cts-pm.py run`;
+only the staged-install module receives the supported module argument. The
+pinned `SuiteModuleLoader` fixture verifies
+`CtsStagedInstallHostTestCases:{config-descriptor}metadata:module-dir-path:=DIR`
+and actual `TestInformation.getDependencyFile` selection. The private directory
+contains byte-identical official JAR/APK/config inputs and a separately hashed
+Darwin dependency ZIP; the official Linux ZIP remains untouched. Invocation
+logs and campaign provenance record the complete selection and component hashes.
+A missing/stale extraction receipt or conflicting module directory is an error.

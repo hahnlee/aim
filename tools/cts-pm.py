@@ -13,6 +13,10 @@ import signal
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+import importlib.util
+_host_spec = importlib.util.spec_from_file_location('cts_host_tools', Path(__file__).parent / 'lib/cts_host_tools.py')
+cts_host_tools = importlib.util.module_from_spec(_host_spec)
+_host_spec.loader.exec_module(cts_host_tools)
 
 ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / '_build/cts-tradefed/android-cts'
@@ -136,12 +140,17 @@ def campaign_provenance(args):
         if not os.access(executable, os.X_OK):
             raise ValueError('--linux-run requires an executable path')
         provenance.update(linux_run=str(executable), linux_run_sha256=digest(executable))
+    if getattr(args, 'cts_host_toolsdir', None) is not None:
+        if any('module-dir-path' in value for value in args.cts_args):
+            raise ValueError('conflicting module-dir-path selection')
+        provenance['cts_host_tools'] = cts_host_tools.stage(args.cts_host_toolsdir, ROOT, HARNESS)
     return provenance
 
 
 def validate_result(result, module, args):
     expected = ['cts', '-s', f'127.0.0.1:{args.port}', '--skip-device-info',
-                '--skip-preconditions', '-m', module, *args.cts_args]
+                '--skip-preconditions', '-m', module, *args.cts_args,
+                *cts_host_tools.arguments(getattr(args, 'host_tool_selection', None), module)]
     if shlex.split(result['command'] or '') != expected:
         raise ValueError(f'{module}: official XML command differs from the full campaign invocation')
     rows = result['modules']
@@ -158,7 +167,7 @@ def validate_result(result, module, args):
 
 def resume_state(args, provenance):
     state = json.loads((args.output / 'campaign.json').read_text())
-    for key in ('linux_run', 'linux_run_sha256'):
+    for key in ('linux_run', 'linux_run_sha256', 'cts_host_tools'):
         if state.get(key) != provenance.get(key):
             raise ValueError(f'resume provenance differs: {key}')
     for key, value in provenance.items():
@@ -211,6 +220,7 @@ def run(args):
                                   '--skip-system-status-check') for v in args.cts_args):
         raise ValueError('module/test filtering or retry changes the complete batch scope')
     provenance = campaign_provenance(args)
+    args.host_tool_selection = provenance.get('cts_host_tools')
     if args.resume:
         state = resume_state(args, provenance)
     else:
@@ -235,6 +245,8 @@ def run(args):
         before = {str(p) for p in (HARNESS / 'results').glob('*') if p.is_dir()}
         log = args.output / (stem + '.log')
         shell_args = ['--linux-run', provenance['linux_run']] if args.linux_run is not None else []
+        if args.host_tool_selection and module == cts_host_tools.MODULE:
+            shell_args += ['--cts-host-toolsdir', args.host_tool_selection['directory']]
         command = [str(ROOT / 'tools/cts-tradefed.sh'), *shell_args, str(args.data), str(args.port), '-m', module, *args.cts_args]
         row = {'module': module, 'log': str(log), 'status': 'not-run-complete'}
         history = list(prior.get('attempts', [])) if prior else []
@@ -364,6 +376,7 @@ def main():
     runner.add_argument('--label', choices=['original', 'native'], required=True); runner.add_argument('--image', type=Path, required=True)
     runner.add_argument('--output', type=Path, required=True); runner.add_argument('--timeout', type=int, default=10800)
     runner.add_argument('--linux-run', type=Path, help='explicit immutable runtime executable for guest shell authorization')
+    runner.add_argument('--cts-host-toolsdir', type=Path, help='verified Darwin dependency for the staged-install host module')
     runner.add_argument('--resume', action='store_true')
     runner.add_argument('--stop-after', type=int, help='stop after N completed invocations in this run')
     runner.add_argument('--cts-args', nargs=argparse.REMAINDER, default=[])

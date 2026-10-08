@@ -161,6 +161,8 @@ def main():
                             for name in ['deapexer', 'debugfs_static', 'fsck.erofs']},
                   'libraries': {str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
                                 for path in (out / 'prefix/lib').glob('*.a')},
+                  'python_runtime': {str(path.relative_to(out)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                     for path in (out / 'python').rglob('*') if path.is_file() and '__pycache__' not in path.parts},
                   'protoc_version': subprocess.check_output([out / 'prefix/bin/protoc', '--version']).decode().strip()}
     (out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
 

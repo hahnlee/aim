@@ -682,8 +682,12 @@ using isolated pinned source copies and statically linked compression libraries.
 Actual ext4 and EROFS LZ4/LZMA/ZSTD/deflate extraction preserves content, modes
 and symlinks; corrupt inputs reject, and an unchanged original APEX extracts
 successfully. Provenance and validation receipts retain input/output hashes.
-Official CTS harness selection and the affected test replay remain pending;
-no official CTS archive, JAR, APK or image is modified.
+The pinned original Tradefed module metadata option selects a detached Darwin
+host-tool ZIP through its actual dependency resolver; a real Java fixture and
+selected-bundle original APEX extraction pass. CLI selection records component,
+Python runtime, original dependency and selected dependency hashes. Four focused
+selection checks and six existing comparison checks pass. Affected official CTS
+replay remains pending; no official CTS archive, JAR, APK or image is modified.
 The native network validation discrepancy exposes original DnsResolver socket
 fchown failing with EINVAL before its address-family source probe (#1162). Socket
 allocation now owns durable Linux sockfs UID/GID/mode keyed by the retained

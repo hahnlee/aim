@@ -60,8 +60,12 @@ def main():
         run(tool / 'deapexer', 'extract', original, out / 'official')
         assert any(p.is_file() for p in (out / 'official').rglob('*'))
         assert before == hashlib.sha256(original.read_bytes()).hexdigest()
-        print(json.dumps({'ext4': 'pass', 'erofs_codecs': ['lz4', 'lzma', 'zstd', 'deflate'], 'corrupt_rejected': 'pass',
-                          'original_apex_sha256': before, 'original_unchanged': True}))
+        result = {'ext4': 'pass', 'erofs_codecs': ['lz4', 'lzma', 'zstd', 'deflate'],
+                  'corrupt_rejected': 'pass', 'original_apex_sha256': before, 'original_unchanged': True,
+                  'validator_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                  'provenance_sha256': hashlib.sha256((tool / 'provenance.json').read_bytes()).hexdigest()}
+        (tool / 'validation.json').write_text(json.dumps(result, indent=2) + '\n')
+        print(json.dumps(result))
 
 
 if __name__ == '__main__':
