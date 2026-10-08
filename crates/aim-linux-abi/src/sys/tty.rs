@@ -52,6 +52,21 @@ pub fn pts_guest(host: &str) -> Option<String> {
     Some(format!("/dev/pts/{n}"))
 }
 
+/// Linux devpts_new_index uses the allocating filesystem identity. Pinned
+/// first_stage_init mounts devpts with NULL options, whose slave mode is 0600.
+/// Darwin grantpt prepares the physical node; guest attributes belong to its
+/// actual allocated inode, not the host user's uid or reusable slave number.
+pub(super) fn allocated_master(fd: i32, identity: &super::cred::Identity) -> Result<(), crate::errno::Errno> {
+    if !super::attrs::recording() { return Ok(()); }
+    let mut name = [0 as libc::c_char;128];
+    if unsafe { libc::ioctl(fd, DARWIN_TIOCPTYGNAME, name.as_mut_ptr()) } != 0 { return Err(errno::last()); }
+    if unsafe { libc::grantpt(fd) } != 0 { return Err(errno::last()); }
+    let host = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    pts_guest(host.to_str().map_err(|_| EINVAL)?).ok_or(EINVAL)?;
+    super::attrs::allocated_character(super::attrs::Host::Path(host),
+        super::attrs::Attr { uid:Some(identity.uid[3]), gid:Some(identity.gid[3]), mode:Some(0o600) })
+}
+
 /// The terminal ioctls; None for a request that is not one.
 pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
     if !matches!(
@@ -168,7 +183,18 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                     return Some(-(EINVAL as i64));
                 }
                 // Darwin's slave opens only after grantpt; devpts needs none.
-                if libc::grantpt(fd) != 0 {
+                let mut name = [0 as libc::c_char;128];
+                let allocated = if super::attrs::recording()
+                    && libc::ioctl(fd, DARWIN_TIOCPTYGNAME, name.as_mut_ptr()) == 0 {
+                    match super::attrs::character_attributes(super::attrs::Host::Path(
+                        std::ffi::CStr::from_ptr(name.as_ptr()))) {
+                        Ok(attributes) => attributes.is_some(),
+                        Err(error) => return Some(-(error as i64)),
+                    }
+                } else { false };
+                // Allocation already performed grantpt. Repeating it would
+                // change the devfs cookie after guest ownership was recorded.
+                if !allocated && libc::grantpt(fd) != 0 {
                     return Some(-(errno::last() as i64));
                 }
                 errno::check(libc::unlockpt(fd) as i64)
@@ -410,6 +436,77 @@ mod tests {
     }
 
     #[test]
+    fn pty_allocator_filesystem_identity_survives_unlock_and_reuse_without_foreign_grants() {
+        use std::{ffi::CString, os::fd::{OwnedFd, FromRawFd, AsRawFd}};
+        use crate::sys::{attrs, fs, fsops};
+        let (_guard, root) = crate::vfs::test_view();
+        let device = root.join("shell-pty-device");
+        std::fs::create_dir_all(device.join("pts")).unwrap();
+        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "shell-pty-device", "tmpfs");
+        let mut shell = crate::sys::cred::current();
+        shell.uid = [2000;4]; shell.gid = [2000;4]; shell.groups.clear();
+        shell.cap_eff = 0; shell.cap_perm = 0;
+        let mut foreign = shell.clone(); foreign.uid = [2001;4]; foreign.gid = [2001;4];
+        let allocate = |identity: &crate::sys::cred::Identity| unsafe {
+            let fd = fs::openat_as([crate::vfs::LINUX_AT_FDCWD as u64, c"/dev/ptmx".as_ptr() as u64, 2 | 0x100, 0, 0, 0],identity);
+            assert!(fd>=0,"PTY allocation: {fd}");
+            let master = OwnedFd::from_raw_fd(fd as i32);
+            let mut number = u32::MAX;
+            assert_eq!(ioctl(master.as_raw_fd(),TIOCGPTN,&mut number as *mut u32 as u64),Some(0));
+            (master,number)
+        };
+        let unlock = |master: &OwnedFd| { let mut value=0i32;
+            assert_eq!(ioctl(master.as_raw_fd(),TIOCSPTLCK,&mut value as *mut i32 as u64),Some(0)); };
+        let open = |path: &CString, identity: &crate::sys::cred::Identity| fs::openat_as(
+            [crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,2|0x100,0,0,0],identity);
+        let (master,number) = allocate(&shell);
+        let path = CString::new(format!("/dev/pts/{number}")).unwrap();
+        let stat = attrs::path_stat(path.to_str().unwrap()).unwrap();
+        assert_eq!((stat.st_uid,stat.st_gid,stat.st_mode & 0o777),(2000,2000,0o600));
+        unlock(&master);
+        assert_eq!(fsops::fchmodat([crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,0o640,0,0,0]),0);
+        assert_eq!(fsops::fchownat([crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,2000,2020,0,0]),0);
+        // Physical backend grant operations may alter ctime. Guest ownership
+        // is bound to the immutable allocation inode/generation, not ctime.
+        assert_eq!(unsafe{libc::grantpt(master.as_raw_fd())},0);
+        assert_eq!(unsafe{libc::grantpt(master.as_raw_fd())},0);
+        unlock(&master);
+        let changed = attrs::path_stat(path.to_str().unwrap()).unwrap();
+        assert_eq!((changed.st_uid,changed.st_gid,changed.st_mode & 0o777),(2000,2020,0o640));
+        assert_eq!(open(&path,&foreign),-(crate::errno::EACCES as i64));
+        let slave = open(&path,&shell); assert!(slave>=0);
+        assert_eq!(fs::close([slave as u64,0,0,0,0,0]),0); drop(master);
+        let mut held = Vec::new(); let mut reused = None;
+        // Retain lower-numbered allocations while searching so unrelated host
+        // PTYs cannot make an immediate-global-reuse assumption flaky.
+        for _ in 0..64 {
+            let allocation = allocate(&foreign);
+            if allocation.1 == number { reused = Some(allocation.0); break; }
+            held.push(allocation.0);
+        }
+        let master = reused.expect("freed owned slave not found within allocation bound");
+        unlock(&master);
+        let fresh = attrs::path_stat(path.to_str().unwrap()).unwrap();
+        assert_ne!((fresh.st_dev,fresh.st_ino),(stat.st_dev,stat.st_ino));
+        assert_eq!((fresh.st_uid,fresh.st_gid,fresh.st_mode & 0o777),(2001,2001,0o600));
+        assert_eq!(open(&path,&shell),-(crate::errno::EACCES as i64));
+        let slave = open(&path,&foreign); assert!(slave>=0);
+        assert_eq!(fs::close([slave as u64,0,0,0,0,0]),0); drop(master); drop(held);
+        // A durable metadata failure must fail allocation and close its new
+        // master, rather than report an unowned successful terminal.
+        let journal = crate::vfs::runtime_dir().unwrap().join("fs-attrs");
+        let saved = journal.with_extension("pty-test-saved");
+        std::fs::rename(&journal,&saved).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        let failed = fs::openat_as([crate::vfs::LINUX_AT_FDCWD as u64,c"/dev/ptmx".as_ptr() as u64,2|0x100,0,0,0],&shell);
+        std::fs::remove_dir(&journal).unwrap();
+        std::fs::rename(saved,journal).unwrap();
+        assert_eq!(failed,-(crate::errno::EISDIR as i64));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        std::fs::remove_dir_all(device).unwrap();
+    }
+
+    #[test]
     fn pty_slave_open_obeys_real_guest_namespace_ancestors_and_exec_import() {
         use std::ffi::CString;
         let (_guard, root) = crate::vfs::test_view();
@@ -429,7 +526,7 @@ mod tests {
             assert_eq!(open(), -(crate::errno::ENOENT as i64));
             std::fs::create_dir(device.join("pts")).unwrap();
             for imported in [false, true] {
-                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts); }
+                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts).unwrap(); }
                 let fd = open(); assert!(fd >= 0, "PTY slave open after import={imported}: {fd}");
                 let mut size: libc::winsize = std::mem::zeroed();
                 assert_eq!(libc::ioctl(fd as i32, libc::TIOCGWINSZ, &mut size), 0);
@@ -437,10 +534,10 @@ mod tests {
             }
             libc::close(master);
         }
-        assert!(crate::vfs::remove_mount("/dev"));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
         // The same-process import adds a second owned entry; the real exec
         // starts with only map entries, then imports its one inherited mount.
-        assert!(crate::vfs::remove_mount("/dev"));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
         std::fs::remove_dir_all(device).unwrap();
     }
 

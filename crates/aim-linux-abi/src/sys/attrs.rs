@@ -225,6 +225,10 @@ fn parse(text: &str) -> HashMap<String, Attr> {
 
 /// The table's attributes of a guest path.
 fn table_lookup(guest: &str) -> Attr {
+    if !guest.starts_with('/') { return Attr::default(); }
+    table_lookup_key(&vfs::attr_key(if guest.len() > 1 { guest.trim_end_matches('/') } else { guest }))
+}
+fn table_lookup_key(key: &str) -> Attr {
     let Some(path) = file() else {
         return Attr::default();
     };
@@ -244,24 +248,38 @@ fn table_lookup(guest: &str) -> Attr {
             map: parse(&text),
         });
     }
-    let map = &t.as_ref().unwrap().map;
-    if map.is_empty() || !guest.starts_with('/') {
-        return Attr::default();
-    }
-    let key = vfs::attr_key(if guest.len() > 1 {
-        guest.trim_end_matches('/')
-    } else {
-        guest
-    });
-    map.get(&key).copied().unwrap_or_default()
+    t.as_ref().unwrap().map.get(key).copied().unwrap_or_default()
+}
+
+// Darwin devfs does not carry writable guest xattrs. Its allocated character
+// inode has a real generation identity; a reused slave number is a new inode.
+fn device_key(st: &libc::stat) -> String {
+    format!("/@devfs/{}/{}/{}/{}/{}", st.st_dev, st.st_ino, st.st_gen, st.st_birthtime, st.st_birthtime_nsec)
+}
+/// Only actual PTY allocation creates a devfs owner binding. Other character
+/// devices retain their existing inode/xattr/table metadata path.
+pub(super) fn allocated_character(host: Host, attributes: Attr) -> Result<(), crate::errno::Errno> {
+    if !recording() { return Ok(()); }
+    let stat = host_stat(host)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFCHR { return Err(crate::errno::EINVAL); }
+    with_inode_lock(host, &stat, || table_record_key(&device_key(&stat), attributes))
+}
+pub(super) fn character_attributes(host: Host) -> Result<Option<Attr>, crate::errno::Errno> {
+    let stat = host_stat(host)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFCHR { return Ok(None); }
+    let attributes = table_lookup_key(&device_key(&stat));
+    Ok((attributes != Attr::default()).then_some(attributes))
 }
 
 fn table_record(guest: &str, a: Attr) -> Result<(), crate::errno::Errno> {
+    table_record_key(&vfs::attr_key(guest), a)
+}
+fn table_record_key(key: &str, a: Attr) -> Result<(), crate::errno::Errno> {
     let path = file().ok_or(crate::errno::EIO)?;
     let field = |v: Option<u32>| v.map_or("-".to_string(), |v| v.to_string());
     let line = format!(
         "{}\t{}\t{}\t{}\n",
-        vfs::attr_key(guest),
+        key,
         field(a.uid),
         field(a.gid),
         a.mode.map_or("-".to_string(), |m| format!("{m:o}"))
@@ -376,6 +394,10 @@ fn lookup_stat(host: Host, guest: impl FnOnce() -> String, st: &libc::stat) -> A
     if !recording() {
         return Attr::default();
     }
+    if st.st_mode & libc::S_IFMT == libc::S_IFCHR {
+        let device = table_lookup_key(&device_key(st));
+        if device != Attr::default() { return device; }
+    }
     let (inode, original) = inode_attrs(host, st);
     if let Some(a) = inode {
         return a;
@@ -475,6 +497,12 @@ pub fn record_checked(host: Host, guest: impl FnOnce() -> String, a: Attr) -> Re
     if !recording() { return Ok(()); }
     let stat = host_stat(host)?;
     with_inode_lock(host, &stat, || {
+        if stat.st_mode & libc::S_IFMT == libc::S_IFCHR {
+            let previous = table_lookup_key(&device_key(&stat));
+            if previous != Attr::default() {
+                return table_record_key(&device_key(&stat), a.over(previous));
+            }
+        }
         if set_guest(host, a)? { return Ok(()); }
         table_record(&guest(), a)
     })
