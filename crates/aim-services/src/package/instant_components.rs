@@ -132,6 +132,13 @@ impl Owner {
         Ok(owner)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_resolution_test(installer: Option<super::component_resolver::ResolveInfo>) -> Self {
+        Self { installer: installer.as_ref().map(|info| {let (package,class)=info.component();ComponentName {package:package.into(),class:class.into()}}),
+            installer_resolve_info: installer, installer_info: None, settings: None,
+            resolver_packages: Vec::new(), debuggable: false }
+    }
+
     pub fn installer_resolve_info(&self)->Option<&super::component_resolver::ResolveInfo> {self.installer_resolve_info.as_ref()}
 
     pub fn installer_info_record(&self) -> Option<&[u8]> { self.installer_info.as_deref() }

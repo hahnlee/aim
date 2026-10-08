@@ -1173,3 +1173,69 @@ fn registered_activity_priorities_use_native_privilege_and_selected_wizard() {
     let records=ordinary.query_intent_activities(&search,Some("image/png"),crate::package::component_resolver::GET_RESOLVED_FILTER,0,SYSTEM_UID).unwrap();
     assert_eq!(records[0].priority,0);assert_eq!(records[0].filter.as_ref().unwrap().priority,0);
 }
+
+fn dynamic_split_state(installer: bool) -> Arc<State> {
+    let mut value = (*state()).clone();
+    let target = value.packages.get_mut("a.viewer").unwrap();
+    let parsed = Arc::make_mut(target.pkg.as_mut().unwrap());
+    parsed.version_code = 100;
+    let mut missing = main("a.viewer", "a.viewer.Feature", vec![filter("SPLIT_TEST", None, None, 0)]);
+    missing.split_name = Some("feature_warm".into());
+    let mut failed_split = main("a.viewer", "a.viewer.FailureSplit", vec![filter("android.intent.action.INSTALL_FAILURE", None, None, 10)]);
+    failed_split.split_name = Some("other_feature".into());
+    parsed.activities = vec![Activity { main: missing, ..Default::default() },
+        Activity { main: failed_split, ..Default::default() },
+        Activity { main: main("a.viewer", "a.viewer.FailureBase", vec![filter("android.intent.action.INSTALL_FAILURE", None, None, 0)]), ..Default::default() }];
+    let template = installer.then(|| {
+        let initial = Resolution::new(Arc::new(value.clone()), &Default::default()).unwrap();
+        let mut info = missing_split_info(&initial);
+        let Info::Activity(activity) = &mut info.info else { unreachable!() };
+        activity.info.item.package_name = Some("installer.owner".into());
+        activity.info.item.name = Some("InstallerActivity".into());
+        info.priority=1; info.icon=999; info.label_res=998; info
+    });
+    value.system.instant_components = Some(Arc::new(super::super::instant_components::Owner::for_resolution_test(template)));
+    Arc::new(value)
+}
+
+fn missing_split_info(resolution: &Resolution) -> ResolveInfo {
+    resolution.query_activities_with_splits(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001,false).unwrap().remove(0)
+}
+
+#[test]
+fn dynamic_split_declared_on_base_drops_only_when_captured_installer_absent() {
+    let state=dynamic_split_state(false); let resolution=Resolution::new(state.clone(),&Default::default()).unwrap();
+    let list=resolution.query_intent_activities(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001).unwrap();
+    assert!(list.is_empty());
+    let mut unknown=(*state).clone();unknown.system.instant_components=None;
+    let unknown=Resolution::new(Arc::new(unknown),&Default::default()).unwrap();
+    assert!(matches!(unknown.query_intent_activities(&Intent {action:Some("SPLIT_TEST".into()),package:Some("a.viewer".into()),..Default::default()},None,0,0,10001),Err(ResolutionError::NotModelled(NotModelled("captured instant installer owner unavailable")))));
+}
+
+#[test]
+fn dynamic_split_replaces_with_installer_auxiliary_before_visibility_and_skips_split_failure() {
+    let resolution=Resolution::new(dynamic_split_state(true),&Default::default()).unwrap();
+    let mut info=missing_split_info(&resolution);
+    let Info::Activity(activity)=&mut info.info else{unreachable!()};
+    activity.info.item.label_res=44;activity.info.item.icon=77;
+    let list=resolution.apply_post_resolution_filter(vec![info],None,true,10001,0,&Intent::default()).unwrap();
+    assert_eq!(list.len(),1);let result=&list[0];
+    assert_eq!(result.component(),("installer.owner","InstallerActivity")); // Installer is deliberately outside AppsFilter inventory.
+    assert_eq!((result.label_res,result.icon),(44,77));assert_eq!(result.priority,1);
+    assert_eq!(result.resolve_package_name.as_deref(),Some("a.viewer"));assert!(result.is_instant_app_available);
+    assert_eq!(result.filter.as_ref(),Some(&IntentFilter::default()));
+    let auxiliary=result.auxiliary.as_ref().unwrap();assert_eq!((auxiliary.package.as_str(),auxiliary.version,auxiliary.split.as_str()),("a.viewer",100,"feature_warm"));
+    assert_eq!(auxiliary.failure,Some(ComponentName{package:"a.viewer".into(),class:"a.viewer.FailureBase".into()}));
+}
+
+#[test]
+fn dynamic_split_web_block_drops_instant_target_but_keeps_full_target() {
+    let mut state=(*dynamic_split_state(true)).clone();
+    state.system.web_instant_policy=Some(Arc::new(super::super::web_instant_state::Snapshot{epoch:1,disabled:std::collections::BTreeMap::from([(0,true)])}));
+    let resolution=Resolution::new(Arc::new(state.clone()),&Default::default()).unwrap();let info=missing_split_info(&resolution);
+    let web=Intent{action:Some(VIEW.into()),data:Some(Uri::parse("https://example.test/")),..Default::default()};
+    assert_eq!(resolution.apply_post_resolution_filter(vec![info.clone()],None,true,SYSTEM_UID,0,&web).unwrap().len(),1);
+    state.packages.get_mut("a.viewer").unwrap().users.get_mut(&0).unwrap().instant_app=true;
+    let instant=Resolution::new(Arc::new(state),&Default::default()).unwrap();
+    assert!(instant.apply_post_resolution_filter(vec![info],None,true,SYSTEM_UID,0,&web).unwrap().is_empty());
+}

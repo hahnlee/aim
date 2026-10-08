@@ -268,10 +268,15 @@ impl Resolution {
         user: i32,
         calling_uid: i32,
     ) -> Result<Vec<ResolveInfo>> {
+        self.query_activities_with_splits(intent, resolved_type, flags | MATCH_QUARANTINED_COMPONENTS,
+            user, calling_uid, true)
+    }
+
+    fn query_activities_with_splits(&self, intent: &Intent, resolved_type: Option<&str>, flags: i64,
+        user: i32, calling_uid: i32, allow_dynamic_splits: bool) -> Result<Vec<ResolveInfo>> {
         if !self.user_exists(user) {
             return Ok(Vec::new());
         }
-        let flags = flags | MATCH_QUARANTINED_COMPONENTS;
         let instant_pkg = instant_app_package_name(&self.state, calling_uid)?;
         self.enforce_cross_user(calling_uid, user)?;
         let package = intent.package.as_deref();
@@ -330,7 +335,7 @@ impl Resolution {
                 &mut list,
             )?;
         }
-        self.apply_post_resolution_filter(list, instant_pkg, true, calling_uid, user, intent)
+        self.apply_post_resolution_filter(list, instant_pkg, allow_dynamic_splits, calling_uid, user, intent)
     }
 
     /// The explicit component's instant-app and visibility blocks.
@@ -480,11 +485,16 @@ impl Resolution {
         if instant_pkg.is_some() {
             return Err(NotModelled("an instant app's results").into());
         }
+        // A missing policy matters only for results that actually consult it;
+        // ordinary full-app results do not acquire an unrelated owner dependency.
+        let block_instant = || -> Result<bool> {
+            if !intent.is_web_intent() { return Ok(false); }
+            Ok(self.state.system.web_instant_policy.as_ref()
+                .ok_or(NotModelled("captured web instant policy unavailable"))?.is_disabled(user))
+        };
         let mut kept = Vec::with_capacity(list.len());
         for info in list.drain(..).rev() {
-            if info.is_instant_app_available && intent.is_web_intent() {
-                return Err(NotModelled("web instant apps' setting").into());
-            }
+            if info.is_instant_app_available && block_instant()? { continue; }
             if let Info::Activity(ai) = &info.info
                 && allow_dynamic_splits
                 && let Some(split) = &ai.info.split_name
@@ -497,7 +507,28 @@ impl Resolution {
                     .flatten()
                     .any(|s| s == split)
             {
-                return Err(NotModelled("an activity in a split not installed").into());
+                let installer = self.state.system.instant_components.as_ref()
+                    .ok_or(NotModelled("captured instant installer owner unavailable"))?;
+                let Some(template) = installer.installer_resolve_info() else { continue; };
+                let package = ai.info.item.package_name.as_deref()
+                    .ok_or(NotModelled("split activity package identity unavailable"))?;
+                if self.state.packages.get(package)
+                    .is_some_and(|package| super::info::user_state(package, user).instant_app)
+                    && block_instant()? { continue; }
+                let mut replacement = template.clone();
+                replacement.auxiliary = Some(super::component_resolver::Auxiliary {
+                    failure: self.find_install_failure_activity(package, calling_uid, user)?,
+                    package: package.into(), version: ai.info.application_info.long_version_code,
+                    split: split.clone(),
+                });
+                replacement.filter = Some(IntentFilter::default());
+                replacement.resolve_package_name = Some(package.into());
+                replacement.label_res = if info.label_res != 0 {info.label_res} else if ai.info.item.label_res != 0 {ai.info.item.label_res} else {ai.info.application_info.item.label_res};
+                replacement.icon = if info.icon != 0 {info.icon} else if ai.info.item.icon != 0 {ai.info.item.icon} else {ai.info.application_info.item.icon};
+                replacement.is_instant_app_available = true;
+                // The original returns its installer before AppsFilter checks.
+                kept.push(replacement);
+                continue;
             }
             let (package, _) = info.component();
             let target = self.state.packages.get(package);
@@ -513,6 +544,17 @@ impl Resolution {
         }
         kept.reverse();
         Ok(kept)
+    }
+
+    fn find_install_failure_activity(&self, package: &str, caller: i32, user: i32) -> Result<Option<ComponentName>> {
+        let intent = Intent { action: Some("android.intent.action.INSTALL_FAILURE".into()),
+            package: Some(package.into()), ..Default::default() };
+        let matches = self.query_activities_with_splits(&intent, None, 0, user, caller, false)?;
+        Ok(matches.into_iter().find_map(|result| match result.info {
+            Info::Activity(activity) if activity.info.split_name.is_none() => Some(ComponentName {
+                package: package.into(), class: activity.info.item.name?,
+            }), _ => None,
+        }))
     }
 
     /// `SaferIntentUtils.enforceIntentFilterMatching` with intent matching

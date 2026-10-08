@@ -565,6 +565,13 @@ priority rules; native install stages retain original public failure text and
 status while logging their own stage diagnostics separately. The complete PM
 library suite passes 815/0 with eleven ignored; matched-image CTS replay remains
 pending.
+The same official base-only split test exposes an unsupported query branch
+for activities declared in absent dynamic splits (#1176). Native post-resolution
+filtering now follows the original captured installer/drop policy, constructing
+typed auxiliary failure/package/version/split metadata when an installer exists
+and applying original label/icon selection before visibility filtering. Three
+focused cases and the complete PM library suite pass826/0 with eleven ignored;
+actual affected CTS replay remains pending.
 C111 required split-type removal and required-base tests accept invalid final
 inventories (#1174), while malformed type syntax loses its original parse status
 (#1175). Native install now validates actual submitted/retained split requirements
