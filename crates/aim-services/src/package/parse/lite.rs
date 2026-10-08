@@ -7,7 +7,7 @@ use super::{
     cluster, fail,
 };
 use aim_apps::{apk::Apk, res::Element};
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::{BTreeMap, BTreeSet}, path::Path};
 pub struct Environment {
     pub sdk: i32,
     pub codenames: Vec<String>,
@@ -67,6 +67,68 @@ fn java_split(value: &str) -> Vec<&str> {
         }
     }
     parts
+}
+#[derive(Debug)]
+pub struct InstallError {
+    pub legacy_status: i32,
+    pub message: String,
+}
+#[derive(Clone, Debug)]
+pub struct InstallLite {
+    pub package: String,
+    pub split: Option<String>,
+    pub required: BTreeSet<String>,
+    pub provided: BTreeSet<String>,
+    pub split_required: bool,
+}
+fn install_manifest(manifest: &Element, environment: &Environment) -> std::result::Result<InstallLite, InstallError> {
+    // Validate the install-only type sets independently so their original
+    // MANIFEST_MALFORMED status survives the general APK preparation boundary.
+    for name in ["requiredSplitTypes", "splitTypes"] {
+        if let Some(value) = attr_value(manifest, ANDROID, name).filter(|value| !value.is_empty()) {
+            cluster::validate_split_types(&value).map_err(|error| InstallError { legacy_status: -108, message: error.to_string() })?;
+        }
+    }
+    let package = package_name_manifest(manifest, environment).map_err(|error| InstallError {
+        legacy_status: if matches!(error, super::Error::OlderSdk(_)) { -12 } else { -2 },
+        message: error.to_string(),
+    })?;
+    let types = |name| attr_value(manifest, ANDROID, name)
+        .filter(|value| !value.is_empty())
+        .map(|value| java_split(value.trim_matches(|c| c <= '\u{20}')).into_iter()
+            .map(|name| name.trim_matches(|c| c <= '\u{20}').to_owned()).collect())
+        .unwrap_or_default();
+    let required: BTreeSet<String> = types("requiredSplitTypes");
+    Ok(InstallLite {
+        package,
+        split: attr_value(manifest, "", "split").filter(|name| !name.is_empty()),
+        split_required: super::attrs::attr_bool(manifest, ANDROID, "isSplitRequired", false) || !required.is_empty(),
+        required,
+        provided: types("splitTypes"),
+    })
+}
+pub fn install_lite(path: &Path, environment: &Environment) -> std::result::Result<InstallLite, InstallError> {
+    let malformed = |error: String| InstallError { legacy_status: -100, message: error };
+    let apk = Apk::open(path).map_err(|error| malformed(error.to_string()))?;
+    if let Some(bytes) = apk.file_if_present("resources.arsc").map_err(|error| malformed(error.to_string()))? {
+        super::resources::Table::parse(&bytes).map_err(|error| malformed(error.to_string()))?;
+    }
+    let manifest = apk.manifest().map_err(|error| malformed(error.to_string()))?;
+    install_manifest(&manifest, environment)
+}
+/// Inherited base APKs contribute requirements, but only submitted bases provide types.
+/// PackageInstallerSession validateApkInstallLocked (AOSP).
+pub fn validate_install_splits(parts: &[(InstallLite, bool)]) -> std::result::Result<(), InstallError> {
+    let base = parts.iter().find(|(part, _)| part.split.is_none()).ok_or_else(|| InstallError {
+        legacy_status: -2, message: "Missing base APK".into(),
+    })?;
+    let required: BTreeSet<_> = parts.iter().flat_map(|(part, _)| part.required.iter()).collect();
+    let provided: BTreeSet<_> = parts.iter().filter(|(part, incoming)| part.split.is_some() || *incoming)
+        .flat_map(|(part, _)| part.provided.iter()).collect();
+    if (base.0.split_required || !required.is_empty()) && (parts.len() <= 1 || !required.is_subset(&provided)) {
+        return Err(InstallError { legacy_status: -28, message: format!("Missing split for {}", base.0.package) });
+    }
+    Ok(())
 }
 pub fn package_name(path: &Path, environment: &Environment) -> Result<String> {
     let apk = Apk::open(path).map_err(|error| super::Error::Parse(error.to_string()))?;
@@ -253,6 +315,52 @@ mod tests {
             codenames: vec![],
             properties: BTreeMap::new(),
         }
+    }
+    fn part(split: Option<&str>, required: &str, provided: &str, required_flag: bool) -> InstallLite {
+        let mut manifest = element("manifest", &[("", "package", "org.example.types"),
+            (ANDROID, "requiredSplitTypes", required), (ANDROID, "splitTypes", provided)], vec![]);
+        if let Some(split) = split {
+            manifest.attrs.extend(element("manifest", &[("", "split", split)], vec![]).attrs);
+        }
+        if required_flag {
+            manifest.attrs.push(Attr { ns: ANDROID.into(), name: "isSplitRequired".into(), id: 0, value: Value::Int(1), kind: 18, data: 1 });
+        }
+        install_manifest(&manifest, &environment()).unwrap()
+    }
+    #[test]
+    fn required_split_types_removal_and_replacement_follow_final_inventory() {
+        let base = part(None, "", "", false);
+        let feature = part(Some("feature"), "data", "", false);
+        let data = part(Some("feature.data"), "", "data", false);
+        let optional = part(Some("feature.optional"), "", "foo", false);
+        let inventory = vec![(base.clone(), false), (feature.clone(), false), (data.clone(), false), (optional, false)];
+        assert!(validate_install_splits(&inventory).is_ok());
+        assert!(validate_install_splits(&inventory[..3]).is_ok());
+        let missing = validate_install_splits(&inventory[..2]).unwrap_err();
+        assert_eq!(missing.legacy_status, -28);
+        assert_eq!(missing.message, "Missing split for org.example.types");
+        assert!(validate_install_splits(&[(base, false), (feature, false), (data, true)]).is_ok());
+    }
+    #[test]
+    fn inherited_base_does_not_supply_types_and_required_base_needs_split() {
+        let base = part(None, "data", "data", false);
+        let split = part(Some("feature"), "", "", false);
+        assert!(validate_install_splits(&[(base.clone(), true), (split.clone(), true)]).is_ok());
+        assert_eq!(validate_install_splits(&[(base, false), (split, true)]).unwrap_err().legacy_status, -28);
+        let base = part(None, "", "", true);
+        assert_eq!(validate_install_splits(&[(base.clone(), true)]).unwrap_err().legacy_status, -28);
+        assert!(validate_install_splits(&[(base, true), (part(Some("feature"), "", "", false), true)]).is_ok());
+    }
+    #[test]
+    fn malformed_split_types_keep_manifest_parse_status() {
+        let apk = aim_paths::fetched().join("cts-tradefed/android-cts/testcases/CtsPackageManagerHostTestCases/CtsInvalidRequiredSplitTypeSplitApp.apk");
+        assert_eq!(install_lite(&apk, &environment()).unwrap_err().legacy_status, -108);
+        for name in ["requiredSplitTypes", "splitTypes"] {
+            let manifest = element("manifest", &[("", "package", "org.example.types"), (ANDROID, name, "bad/type")], vec![]);
+            assert_eq!(install_manifest(&manifest, &environment()).unwrap_err().legacy_status, -108);
+        }
+        let parsed = part(Some("feature"), " data, foo,data,", "data,", false);
+        assert_eq!(parsed.required, BTreeSet::from(["data".into(), "foo".into()]));
     }
     #[test]
     fn lite_accepts_no_application_and_ignores_full_parser_only_rejections() {

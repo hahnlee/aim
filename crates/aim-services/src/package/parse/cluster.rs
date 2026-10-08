@@ -193,7 +193,7 @@ pub(super) fn names(manifest: &Element) -> Result<(String, Option<String>, i32)>
 }
 
 // ApkLite keeps the sets for install validation, not in the parser cache.
-fn validate_split_types(value: &str) -> Result<()> {
+pub(super) fn validate_split_types(value: &str) -> Result<()> {
     let value = value.trim_matches(|c| c <= '\u{20}');
     let mut types: Vec<_> = value.split(',').collect();
     if value.contains(',') {

@@ -260,6 +260,7 @@ fn original_art_consumes_native_installer_proxy_capability() {
             } != 0
             {
                 return Err(installer::storage::Error {
+                    legacy_status: -110,
                     committed: false,
                     message: std::io::Error::last_os_error().to_string(),
                 });

@@ -255,6 +255,7 @@ impl Pending {
             .and_then(|_| target.sync_all())
             .map_err(|error| {
                 StageError::Storage(super::storage::Error {
+                    legacy_status: -110,
                     committed: false,
                     message: error.to_string(),
                 })
@@ -271,6 +272,7 @@ impl Pending {
                 .and_then(|_| target.sync_all())
                 .map_err(|error| {
                     StageError::Storage(super::storage::Error {
+                    legacy_status: -110,
                         committed: false,
                         message: error.to_string(),
                     })

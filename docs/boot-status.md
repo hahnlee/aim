@@ -565,6 +565,14 @@ priority rules; native install stages retain original public failure text and
 status while logging their own stage diagnostics separately. The complete PM
 library suite passes 815/0 with eleven ignored; matched-image CTS replay remains
 pending.
+C111 required split-type removal and required-base tests accept invalid final
+inventories (#1174), while malformed type syntax loses its original parse status
+(#1175). Native install now validates actual submitted/retained split requirements
+and providers before inheritance copies; inherited bases contribute requirements
+but not provided types. Missing splits retain legacy -28, malformed type syntax
+retains MANIFEST_MALFORMED -108 through typed storage/native failure mapping.
+Thirteen focused split regressions pass, including unchanged official APKs and
+real inherited-copy admission. Actual affected CTS replay remains pending.
 C111 first-valid shared UID install also fails before the intended foreign-cert
 negative phase because candidate process-group assignments retain the old group
 inventory (#1173); the original exact test passes. Candidate runtime completion

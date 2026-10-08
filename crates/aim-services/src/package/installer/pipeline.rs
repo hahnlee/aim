@@ -79,6 +79,7 @@ pub fn verify_batch(
         }
         let host = (apks.files)(&path)
             .ok_or_else(|| Failure::invalid("Install staging VFS path unavailable"))?;
+        let mut parts = Vec::new();
         for entry in
             std::fs::read_dir(&host).map_err(|error| Failure::invalid(error.to_string()))?
         {
@@ -100,8 +101,9 @@ pub fn verify_batch(
             {
                 continue;
             }
-            crate::package::parse::lite::package_name(&entry.path(), &lite.environment)
-                .map_err(|error| Failure::invalid(error.to_string()))?;
+            let part = crate::package::parse::lite::install_lite(&entry.path(), &lite.environment)
+                .map_err(|error| Failure { legacy_status: error.legacy_status, committed: false, message: error.message })?;
+            parts.push((part, true));
             if !name.ends_with(".apk") {
                 return Err(Failure {
                     legacy_status: -110,
@@ -109,6 +111,10 @@ pub fn verify_batch(
                     message: "Native staged APK filename normalization owner unavailable".into(),
                 });
             }
+        }
+        if record.params.mode == 1 {
+            crate::package::parse::lite::validate_install_splits(&parts)
+                .map_err(|error| Failure { legacy_status: error.legacy_status, committed: false, message: error.message })?;
         }
         let package = apks.checked_parsed_path(&path, 0).map_err(|error| match error {
             crate::package::parse::Error::OlderSdk(message) => Failure { legacy_status: -12, committed: false, message },

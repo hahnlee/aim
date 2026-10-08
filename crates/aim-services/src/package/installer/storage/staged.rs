@@ -101,6 +101,7 @@ impl Store {
             fs::remove_file(&new).map_err(before)?;
         }
         self.claimed = self.inspect().map_err(|error| Error {
+            legacy_status: error.legacy_status,
             committed,
             message: format!("{}; write result: {result:?}", error.message),
         })?;

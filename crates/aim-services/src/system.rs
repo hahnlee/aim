@@ -1937,6 +1937,7 @@ impl System {
         let bridge = bridge.clone();
         Ok(Arc::new(move |_, guest| {
             let fail = |message: String| crate::package::installer::storage::Error {
+                legacy_status: -110,
                 committed: false,
                 message,
             };

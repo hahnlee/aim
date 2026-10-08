@@ -40,6 +40,13 @@ struct WriterConfig {
     mode: WriteModeSource,
     allocation: AllocationOwner,
 }
+fn storage_install_failure(error: storage::Error) -> super::pipeline::Error {
+    super::pipeline::Error::Install(super::pipeline::Failure {
+        legacy_status: error.legacy_status,
+        committed: error.committed,
+        message: error.message,
+    })
+}
 pub struct LitePolicy {
     pub environment: crate::package::parse::lite::Environment,
     pub art_managed_extensions: Vec<String>,
@@ -1033,7 +1040,7 @@ impl NativeOwners {
                 .lock()
                 .unwrap()
                 .normalize_apks(session, record, &lite, &mut pending, &files)
-                .map_err(|error| failure(&error.message))?;
+                .map_err(storage_install_failure)?;
             if record.params.mode == 2 {
                 let name = record
                     .params
@@ -1053,7 +1060,7 @@ impl NativeOwners {
                     .lock()
                     .unwrap()
                     .inherit_existing(session, record, existing, &config.apks.files, &lite)
-                    .map_err(|error| failure(&error.message))?;
+                    .map_err(storage_install_failure)?;
             }
             self.sessions
                 .with_record_mut(session.id, |current, _| {
@@ -1849,6 +1856,20 @@ mod tests {
     };
     use aim_service_aidl::android_content_pm_ipackageinstaller as aidl;
     use std::collections::BTreeSet;
+    #[test]
+    fn install_storage_failures_preserve_public_parse_and_missing_split_status() {
+        for status in [-108, -28, -110] {
+            let error = storage_install_failure(storage::Error { legacy_status: status, committed: false, message: "owner rejection".into() });
+            match error {
+                super::super::pipeline::Error::Install(failure) => {
+                    assert_eq!(failure.legacy_status, status);
+                    assert_eq!(failure.message, "owner rejection");
+                    assert!(!failure.committed);
+                }
+                _ => panic!("storage rejection changed owner category"),
+            }
+        }
+    }
     struct Data(std::path::PathBuf);
     impl Data {
         fn new() -> Self {
@@ -1994,6 +2015,7 @@ mod tests {
                 } != 0
                 {
                     return Err(storage::Error {
+                        legacy_status: -110,
                         committed: false,
                         message: std::io::Error::last_os_error().to_string(),
                     });

@@ -6342,6 +6342,7 @@ fn verify_installer_binding(
             } != 0
             {
                 return Err(crate::package::installer::storage::Error {
+                    legacy_status: -110,
                     committed: false,
                     message: std::io::Error::last_os_error().to_string(),
                 });
