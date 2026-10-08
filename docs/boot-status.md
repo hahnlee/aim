@@ -572,6 +572,15 @@ priority rules; native install stages retain original public failure text and
 status while logging their own stage diagnostics separately. The complete PM
 library suite passes 815/0 with eleven ignored; matched-image CTS replay remains
 pending.
+C111 live feature resource and replacement code-cache cases expose missing
+post-install replacement lifecycle (#1177/#1179). Native installation now
+captures prior visibility before replacement, classifies final installed users
+against original installed-or-data state, clears actual code cache/profiles for
+replacement, completes ART, then delivers original replacement/new broadcasts
+and code cleanup with dont-kill retention. Captured code/signers/UID/user owners
+are revalidated; failed ART completion retires the plan without broadcasts.
+The focused lifecycle/user regression and private javac/D8/original linkage
+plus generated transaction24/25 checks pass. Actual affected CTS replay is pending.
 Five C111 UseProcess cases accept packages whose application/component process
 is absent from a nonempty declared process map (#1180); all exact original cases
 pass. Native scan now validates application and activity/service/receiver/provider

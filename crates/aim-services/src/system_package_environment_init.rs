@@ -110,6 +110,23 @@ impl System {
             self.environment_bridge_capability(bridge, EnvironmentLeaf::AppData)?,
         );
         let (create, flags, rollback, commit) = app.callbacks();
+        let cache=crate::package::mutation_producers::Bridge::new(self.package_bootstrap_binder_leaf(bridge,
+            aim_service_aidl::dev_aim_server_ipackagebootstrapbridge::GET_PACKAGE_ENABLE_BRIDGE)?);
+        let cache_system=Arc::downgrade(self);let cache_bridge=bridge.clone();
+        let clear_code_cache:environment::CodeCacheClear=Arc::new(move|name,_users|{
+            let system=cache_system.upgrade().ok_or_else(||environment_error("install cache System stopped"))?;
+            let inventory=system.native_boot_persistence_users(&cache_bridge)?;
+            inventory.revalidate(&system,&cache_bridge)?;
+            cache.clear_code_cache(name,&inventory.all)?;
+            system.check_package_bootstrap(&cache_bridge)
+        });
+        let user_system=Arc::downgrade(self);let user_bridge=bridge.clone();
+        let post_install_users:environment::PostInstallUsers=Arc::new(move||{
+            let system=user_system.upgrade().ok_or_else(||environment_error("post-install user System stopped"))?;
+            let inventory=system.native_boot_persistence_users(&user_bridge)?;
+            inventory.revalidate(&system,&user_bridge)?;
+            Ok(inventory.all)
+        });
         let weak = Arc::downgrade(self);
         let retained = bridge.clone();
         let current = Arc::new(move || {
@@ -177,6 +194,8 @@ impl System {
             app_data: create,
             rollback_app_data: rollback,
             commit_app_data: commit,
+            clear_code_cache,
+            post_install_users,
             permissions: permission.runtime_prepare(),
             release_permissions: permission.release(),
             effects: self.package_effects_owner(bridge)?,

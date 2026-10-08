@@ -17,6 +17,7 @@ pub mod codec;
 pub mod internal_installs;
 pub mod endpoint;
 pub mod environment;
+pub mod post_install;
 pub mod environment_image;
 pub mod environment_producers;
 pub mod existing;

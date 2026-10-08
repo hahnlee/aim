@@ -28,4 +28,10 @@ interface IPackageMutationBridge {
     void registerPackageMonitor(in IBinder callback, int userId, int callingUid);
     void unregisterPackageMonitor(in IBinder callback);
     void userRemoved(int userId);
+    void postInstallPackage(String name, int appId, boolean replacing, boolean dontKill,
+        String installer, String oldInstaller, int dataLoaderType, boolean system, boolean virtualPreload, boolean staticLibrary,
+        in int[] firstUsers, in int[] firstInstantUsers, in int[] updateUsers, in int[] updateInstantUsers,
+        in int[] removedUsers, in int[] removedInstantUsers, in int[] priorVisibility);
+    int[] capturePostInstallVisibility(String name, int appId, String codePath, long version, in int[] users);
+
 }

@@ -76,6 +76,21 @@ impl Owner {
                 error
             })
     }
+    pub fn capture_post_install_visibility(&self,setting:&super::settings::Package,users:&[i32])->Result<Vec<i32>,Exception>{
+        self.call(api::CAPTURE_POST_INSTALL_VISIBILITY,|p|api::CapturePostInstallVisibility{
+            name:Some(setting.name.clone()),app_id:setting.uid_owner_id(),code_path:Some(setting.code_path.clone()),version:setting.version_code,users:Some(users.to_vec()),
+        }.write(p),aim_service_aidl::read_int_array)?.ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"original prior visibility reply null"))
+    }
+    pub fn post_install(&self, plan:&super::installer::post_install::Plan)->Result<(),Exception>{
+        self.call(api::POST_INSTALL_PACKAGE,|p|api::PostInstallPackage{
+            name:Some(plan.name.clone()),app_id:plan.app_id,replacing:plan.replacing,dont_kill:plan.dont_kill,
+            installer:plan.installer.clone(),old_installer:plan.old_installer.clone(),data_loader_type:plan.data_loader,
+            system:plan.system,virtual_preload:plan.virtual_preload,static_library:plan.static_library,
+            first_users:Some(plan.first_users.clone()),first_instant_users:Some(plan.first_instant.clone()),
+            update_users:Some(plan.update_users.clone()),update_instant_users:Some(plan.update_instant.clone()),
+            removed_users:Some(plan.removed_users.clone()),removed_instant_users:Some(plan.removed_instant.clone()),prior_visibility:Some(plan.prior_visibility.clone()),
+        }.write(p),|_|Ok(()))
+    }
     pub fn suspension_allowed(&self, user: i32, uid: i32) -> Result<bool, Exception> {
         self.call(api::IS_SUSPENSION_ALLOWED, |p| api::IsSuspensionAllowed { user_id: user, calling_uid: uid }.write(p), |r| r.read_bool())
     }

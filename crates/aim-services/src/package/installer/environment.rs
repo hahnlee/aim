@@ -30,6 +30,8 @@ pub type AppDataCreate =
     Arc<dyn Fn(crate::package::users::AppData) -> Result<AppDataResult, Exception> + Send + Sync>;
 pub type AppDataFlags = Arc<dyn Fn(i32) -> Result<i32, Exception> + Send + Sync>;
 pub type AppDataRollback = Arc<dyn Fn(&str, i32, i64) -> Result<(), Exception> + Send + Sync>;
+pub type PostInstallUsers = Arc<dyn Fn() -> Result<Vec<i32>, Exception> + Send + Sync>;
+pub type CodeCacheClear = Arc<dyn Fn(&str, &[i32]) -> Result<(), Exception> + Send + Sync>;
 pub type AppDataCommit = Arc<dyn Fn(&str, i32, i64) -> Result<(), Exception> + Send + Sync>;
 pub type RuntimePrepare =
     Arc<dyn Fn(&mut scan::live_install::CompletedAdmission, &Arc<Snapshot>) -> Result<(), Exception> + Send + Sync>;
@@ -79,6 +81,8 @@ pub struct Config {
     pub app_data: AppDataCreate,
     pub rollback_app_data: AppDataRollback,
     pub commit_app_data: AppDataCommit,
+    pub clear_code_cache: CodeCacheClear,
+    pub post_install_users: PostInstallUsers,
     pub permissions: RuntimePrepare,
     pub release_permissions: ReservationRelease,
     pub effects: Arc<crate::package::effects::Owner>,
@@ -89,6 +93,7 @@ pub struct Config {
 pub struct Owner {
     config: Arc<Config>,
     errors: Arc<Mutex<Vec<String>>>,
+    pending: Arc<super::post_install::Pending>,
 }
 impl Owner {
     pub(crate) fn config(&self) -> Arc<Config> {
@@ -112,6 +117,7 @@ impl Owner {
         Ok(Arc::new(Self {
             config: Arc::new(Config { data, ..config }),
             errors: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(super::post_install::Pending::default()),
         }))
     }
     pub fn errors(&self) -> Vec<String> {
@@ -119,6 +125,7 @@ impl Owner {
     }
 }
 struct Member {
+    prior_visibility: Vec<i32>,
     code: VerifiedCode,
     host: PathBuf,
     guest: String,
@@ -132,6 +139,7 @@ struct Reserved {
     created: Mutex<Vec<(String, i32, i64)>>,
     committed: AtomicBool,
     errors: Arc<Mutex<Vec<String>>>,
+    pending: Arc<super::post_install::Pending>,
 }
 fn failure(status: i32, message: impl ToString) -> Failure {
     Failure {
@@ -221,6 +229,7 @@ impl pipeline::Environment for Owner {
             created: Mutex::new(Vec::new()),
             committed: AtomicBool::new(false),
             errors: self.errors.clone(),
+            pending: self.pending.clone(),
         };
         let directory = self.config.data.join("app");
         if !directory.is_dir() {
@@ -331,6 +340,7 @@ impl pipeline::Environment for Owner {
                 failure(-110, error)
             })?;
             reserved.members.push(Member {
+                prior_visibility: Vec::new(),
                 code,
                 host: host.clone(),
                 guest: guest.clone(),
@@ -360,13 +370,27 @@ impl pipeline::Environment for Owner {
             }
             prepare_native_libraries(member, &self.config)?;
         }
+        let all_users=(self.config.post_install_users)().map_err(|error|failure(-110,error.message))?;
+        for member in &mut reserved.members {
+            let name=if member.code.package.static_shared_library_name.is_some(){format!("{}_{}",member.code.package.package_name,member.code.package.static_shared_lib_version)}else{member.code.package.package_name.clone()};
+            if let Some(setting)=base.owner().settings.packages.iter().find(|setting|setting.name==name) {
+                member.prior_visibility=self.config.effects.capture_post_install_visibility(setting,&all_users)
+                    .map_err(|error|failure(-110,format!("Original pre-install visibility: {}",error.message)))?;
+                super::post_install::validate_visibility(&all_users,&member.prior_visibility).map_err(|error|failure(-110,error.message))?;
+            }
+        }
+        if !Arc::ptr_eq(base,&self.config.snapshots.capture()){return Err(failure(-110,"pre-install visibility capture generation changed"));}
         Ok(Box::new(reserved))
     }
     fn publish_queries(&self, snapshot: &Arc<Snapshot>) -> Result<(), String> {
         (self.config.publish)(snapshot)
     }
     fn finish(&self, receipt: PublishedInstall) -> Result<(), Exception> {
-        (self.config.completion)(receipt)
+        self.pending.complete(receipt.generation,|| (self.config.completion)(receipt),|plan| {
+            plan.validate(&self.config.snapshots.capture())?;
+            self.config.effects.post_install(plan)
+        },|old| self.config.code_resources.clean(old,false).map_err(|message|
+            Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,format!("Committed install old code cleanup: {message}"))))
     }
 }
 // SCAN_NEW_INSTALL consumes ABI metadata already derived by installation.
@@ -658,59 +682,20 @@ impl pipeline::Reservation for Reserved {
         }
     }
     fn publication_finished(&self, snapshot: &Arc<Snapshot>) -> Result<(), Exception> {
+        let all_users=(self.config.post_install_users)()?;
+        let mut plans=Vec::new();
         for member in &self.members {
-            let name = if member.code.package.static_shared_library_name.is_some() {
-                format!(
-                    "{}_{}",
-                    member.code.package.package_name, member.code.package.static_shared_lib_version
-                )
-            } else {
-                member.code.package.package_name.clone()
-            };
-            if let Some(previous) = self
-                .base
-                .owner()
-                .settings
-                .packages
-                .iter()
-                .find(|package| package.name == name)
-            {
-                if previous.code_path != member.guest
-                    && previous.code_path.starts_with("/data/app/")
-                    && member.code.record.params.install_flags & 0x1000 == 0
-                {
-                    self.config
-                        .code_resources
-                        .clean(&previous.code_path, false)
-                        .map_err(|message| {
-                            Exception::new(
-                                aim_binder_host::parcel::EX_ILLEGAL_STATE,
-                                format!("Committed install old code cleanup: {message}"),
-                            )
-                        })?;
-                }
-            }
-            if let Some(users) = snapshot.owner().scanned_user_states(&name) {
-                for (user, state) in users {
-                    if state.installed {
-                        self.config.effects.package_added(
-                            &name,
-                            *user,
-                            false,
-                            member
-                                .code
-                                .record
-                                .params
-                                .data_loader_params
-                                .as_ref()
-                                .map_or(0, |_| 1),
-                            None,
-                        )?;
-                    }
-                }
-            }
+            let name=if member.code.package.static_shared_library_name.is_some(){format!("{}_{}",member.code.package.package_name,member.code.package.static_shared_lib_version)}else{member.code.package.package_name.clone()};
+            let mut plan=super::post_install::Plan::capture(&self.base,snapshot,&name,member.code.record.user as i32,
+                member.code.record.params.install_flags,if member.code.record.params.data_loader_params.is_some(){1}else{0},member.code.package.static_shared_library_name.is_some(),&all_users)?;
+            plan.prior_visibility=member.prior_visibility.clone();
+            plan.validate(&self.config.snapshots.capture())?;
+            // Original setPrepareResult(clearCodeCache=replace), after committed
+            // app-data preparation and before either ART completion branch.
+            if plan.replacing {(self.config.clear_code_cache)(&name,&plan.cache_users)?;}
+            plans.push(plan);
         }
-        Ok(())
+        self.pending.retain(snapshot.version(),plans)
     }
 }
 impl Drop for Reserved {

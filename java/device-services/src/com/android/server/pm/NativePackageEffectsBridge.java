@@ -334,6 +334,103 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
             throw failure;
         }
     }
+    @Override public int[] capturePostInstallVisibility(String name,int appId,String codePath,long version,int[] userIds) {
+        enforceNative();
+        Computer current=snapshot();
+        PackageStateInternal previous=Objects.requireNonNull(current.getPackageStateInternal(name),"prior visibility package absent");
+        if(previous.getAppId()!=appId||previous.getVersionCode()!=version||!Objects.equals(previous.getPathString(),codePath)) throw new IllegalStateException("prior visibility code/UID changed");
+        SparseArray<int[]> lists=current.getVisibilityAllowLists(name,userIds);
+        ArrayList<Integer> encoded=new ArrayList<>();
+        for(int user:userIds) {
+            int[] values=lists.get(user); encoded.add(user);encoded.add(values==null?-1:values.length);
+            if(values!=null) for(int value:values) encoded.add(value);
+        }
+        return encoded.stream().mapToInt(Integer::intValue).toArray();
+    }
+    private static SparseArray<int[]> decodeVisibility(int[] encoded) {
+        SparseArray<int[]> result=new SparseArray<>();
+        java.util.HashSet<Integer> seen=new java.util.HashSet<>();
+        for(int i=0;i<encoded.length;) {
+            if(i+2>encoded.length) throw new IllegalArgumentException("prior visibility truncated");
+            int user=encoded[i++],count=encoded[i++];
+            if(user<0||count< -1||count>encoded.length-i||!seen.add(user)) throw new IllegalArgumentException("prior visibility invalid");
+            int[] values=count<0?null:Arrays.copyOfRange(encoded,i,i+count);
+            if(count>=0)i+=count;result.put(user,values);
+        }
+        return result;
+    }
+    private boolean safetyLabelsEnabled() {
+        PackageManager packages=context.getPackageManager();
+        return DeviceConfig.getBoolean("privacy", "safety_label_change_notifications_enabled", true)
+                && !packages.hasSystemFeature("android.hardware.type.automotive")
+                && !packages.hasSystemFeature("android.software.leanback")
+                && !packages.hasSystemFeature("android.hardware.type.watch");
+    }
+    private void postInstallBroadcast(String action,String name,Bundle extras,int flags,String target,
+            int[] normal,int[] instant,SparseArray<int[]> allowLists,Bundle options) {
+        post(() -> deliver(action,name,extras,flags,target,normal,instant,allowLists,null,options));
+        if(target==null) monitors.notifyPackageMonitor(action,name,extras,normal,instant,allowLists,handler,null);
+    }
+    @Override public void postInstallPackage(String name,int appId,boolean replacing,boolean dontKill,
+            String installer,String oldInstaller,int dataLoaderType,boolean system,boolean virtualPreload,
+            boolean staticLibrary,int[] firstUsers,int[] firstInstantUsers,int[] updateUsers,
+            int[] updateInstantUsers,int[] removedUsers,int[] removedInstantUsers,int[] priorVisibility) {
+        enforceNative();
+        clean(() -> {
+            Computer current=snapshot();
+            PackageStateInternal state=Objects.requireNonNull(current.getPackageStateInternal(name),"post-install package absent");
+            if(state.getAppId()!=appId) throw new IllegalStateException("post-install UID changed");
+            String targetInstaller=installer!=null?installer:oldInstaller;
+            SparseArray<int[]> removedAllow=decodeVisibility(priorVisibility);
+            if(replacing) {
+                Bundle removed=new Bundle(); removed.putInt(Intent.EXTRA_UID,appId);
+                removed.putBoolean(Intent.EXTRA_DATA_REMOVED,false);
+                removed.putBoolean(Intent.EXTRA_SYSTEM_UPDATE_UNINSTALL,false);
+                removed.putBoolean(Intent.EXTRA_DONT_KILL_APP,dontKill);
+                removed.putBoolean(Intent.EXTRA_USER_INITIATED,true);
+                removed.putBoolean(Intent.EXTRA_REPLACING,true);
+                removed.putBoolean(Intent.EXTRA_REMOVED_FOR_ALL_USERS,false);
+                if(oldInstaller!=null) postInstallBroadcast(Intent.ACTION_PACKAGE_REMOVED,name,removed,0,oldInstaller,removedUsers,removedInstantUsers,null,null);
+                if(!staticLibrary) {
+                    postInstallBroadcast(Intent.ACTION_PACKAGE_REMOVED,name,removed,0,null,removedUsers,removedInstantUsers,removedAllow,null);
+                    postInstallBroadcast(Intent.ACTION_PACKAGE_REMOVED_INTERNAL,name,removed,0,"android",removedUsers,removedInstantUsers,removedAllow,null);
+                }
+            }
+            Bundle extras=new Bundle(); extras.putInt(Intent.EXTRA_UID,appId);
+            if(replacing) extras.putBoolean(Intent.EXTRA_REPLACING,true);
+            extras.putInt(PackageInstaller.EXTRA_DATA_LOADER_TYPE,dataLoaderType);
+            if(staticLibrary) {
+                if(targetInstaller!=null) {
+                    int[] all=java.util.stream.IntStream.concat(Arrays.stream(firstUsers),Arrays.stream(updateUsers)).toArray();
+                    postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,targetInstaller,all,new int[0],null,null);
+                }
+                return;
+            }
+            Bundle first=new Bundle();first.putInt(Intent.EXTRA_UID,appId);first.putInt(PackageInstaller.EXTRA_DATA_LOADER_TYPE,dataLoaderType);
+            SparseArray<int[]> firstAllow=current.getVisibilityAllowLists(name,firstUsers);
+            postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,first,0,null,firstUsers,firstInstantUsers,firstAllow,null);
+            if(safetyLabelsEnabled()) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,first,0,context.getPackageManager().getPermissionControllerPackageName(),firstUsers,firstInstantUsers,firstAllow,null);
+            monitors.notifyPackageAddedForNewUsers(name,appId,firstUsers,firstInstantUsers,false,dataLoaderType,firstAllow,handler);
+            if(system||virtualPreload) for(int user:firstUsers) post(() -> bootCompleted(name,user,virtualPreload));
+            SparseArray<int[]> updates=current.getVisibilityAllowLists(name,updateUsers);
+            postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,null,updateUsers,updateInstantUsers,updates,null);
+            if(targetInstaller!=null) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,targetInstaller,updateUsers,updateInstantUsers,null,null);
+            if(safetyLabelsEnabled()) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,context.getPackageManager().getPermissionControllerPackageName(),updateUsers,updateInstantUsers,null,null);
+            var internal=Objects.requireNonNull(LocalServices.getService(android.content.pm.PackageManagerInternal.class));
+            String[] verifiers=internal.getKnownPackageNames(4 /* KnownPackages.PACKAGE_VERIFIER */,UserHandle.USER_SYSTEM);
+            for(String verifier:verifiers) if(verifier!=null&&!verifier.equals(targetInstaller)) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,0,verifier,updateUsers,updateInstantUsers,null,null);
+            String[] requiredInstallers=internal.getKnownPackageNames(2 /* KnownPackages.PACKAGE_INSTALLER */,UserHandle.USER_SYSTEM);
+            for(String required:requiredInstallers) postInstallBroadcast(Intent.ACTION_PACKAGE_ADDED,name,extras,Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND,required,firstUsers,updateInstantUsers,null,null);
+            if(replacing) {
+                postInstallBroadcast(Intent.ACTION_PACKAGE_REPLACED,name,extras,0,null,updateUsers,updateInstantUsers,removedAllow,null);
+                if(targetInstaller!=null) postInstallBroadcast(Intent.ACTION_PACKAGE_REPLACED,name,extras,0,targetInstaller,updateUsers,updateInstantUsers,null,null);
+                for(String verifier:verifiers) if(verifier!=null&&!verifier.equals(targetInstaller)) postInstallBroadcast(Intent.ACTION_PACKAGE_REPLACED,name,extras,0,verifier,updateUsers,updateInstantUsers,null,null);
+                BroadcastOptions options=BroadcastOptions.makeBasic();
+                options.setTemporaryAppAllowlist(activity.getBootTimeTempAllowListDuration(),android.os.PowerExemptionManager.TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,android.os.PowerExemptionManager.REASON_PACKAGE_REPLACED,"");
+                postInstallBroadcast(Intent.ACTION_MY_PACKAGE_REPLACED,null,null,0,name,updateUsers,updateInstantUsers,null,options.toBundle());
+            }
+        });
+    }
     private void added(String name, int user, boolean archived, int dataLoaderType, String predictionPackage) {
         Computer snapshot = snapshot();
         PackageStateInternal state = Objects.requireNonNull(snapshot.getPackageStateInternal(name));
@@ -373,17 +470,19 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         if (predictionPackage != null) context.sendBroadcastAsUser(new Intent(PackageInstaller.ACTION_SESSION_COMMITTED)
                 .putExtra(PackageInstaller.EXTRA_SESSION, session).putExtra(Intent.EXTRA_USER, UserHandle.of(user)).setPackage(predictionPackage), UserHandle.of(launcherUser));
     }
-    private void bootCompleted(String name, int user) {
+    private void bootCompleted(String name, int user) { bootCompleted(name,user,false); }
+    private void bootCompleted(String name, int user, boolean includeStopped) {
         if (!users.isUserRunning(user)) return;
         BroadcastOptions options = BroadcastOptions.makeBasic();
         options.setTemporaryAppAllowlist(activity.getBootTimeTempAllowListDuration(), android.os.PowerExemptionManager.TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED, android.os.PowerExemptionManager.REASON_LOCKED_BOOT_COMPLETED, "");
         try {
             var manager = Objects.requireNonNull(ActivityManager.getService());
             Intent locked = new Intent(Intent.ACTION_LOCKED_BOOT_COMPLETED).setPackage(name).putExtra(Intent.EXTRA_USER_HANDLE, user);
+            if(includeStopped) locked.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
             manager.broadcastIntentWithFeature(null, null, locked, null, null, 0, null, null,
                     new String[] {"android.permission.RECEIVE_BOOT_COMPLETED"}, null, null, -1, options.toBundle(), false, false, user);
             if (users.isUserUnlockingOrUnlocked(user)) manager.broadcastIntentWithFeature(null, null,
-                    new Intent(Intent.ACTION_BOOT_COMPLETED).setPackage(name).putExtra(Intent.EXTRA_USER_HANDLE, user), null, null, 0, null, null,
+                    new Intent(Intent.ACTION_BOOT_COMPLETED).setPackage(name).putExtra(Intent.EXTRA_USER_HANDLE, user).addFlags(includeStopped?Intent.FLAG_INCLUDE_STOPPED_PACKAGES:0), null, null, 0, null, null,
                     new String[] {"android.permission.RECEIVE_BOOT_COMPLETED"}, null, null, -1, options.toBundle(), false, false, user);
         } catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }
     }

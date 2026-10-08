@@ -13,11 +13,16 @@ public final class PackageEnableBridge extends IPackageEnableBridge.Stub {
         var packages = LocalServices.getService(PackageManagerInternal.class);
         if (packages == null) throw new IllegalStateException("Native package scope unavailable");
         var state = packages.getPackageStateInternal(packageName);
-        if (state == null) throw new IllegalStateException("Compressed package not published");
+        if (state == null) throw new IllegalStateException("Package not published");
         var binder = ServiceManager.checkService("installd");
         if (binder == null) throw new IllegalStateException("installd owner unavailable");
         var installd = IInstalld.Stub.asInterface(binder);
         int flags = IInstalld.FLAG_STORAGE_DE | IInstalld.FLAG_STORAGE_CE | IInstalld.FLAG_STORAGE_EXTERNAL | IInstalld.FLAG_CLEAR_CODE_CACHE_ONLY;
         for (int user : users) installd.clearAppData(state.getVolumeUuid(), packageName, user, flags, state.getUserStateOrDefault(user).getCeDataInode());
+        var art=java.util.Objects.requireNonNull(com.android.server.LocalManagerRegistry.getManager(com.android.server.art.ArtManagerLocal.class),"ART profile owner unavailable for live cache cleanup");
+        {
+            var local=java.util.Objects.requireNonNull(com.android.server.LocalManagerRegistry.getManager(com.android.server.pm.PackageManagerLocal.class),"PackageManagerLocal unavailable");
+            try(var snapshot=local.withFilteredSnapshot()) { art.clearAppProfiles(snapshot,packageName); }
+        }
     }
 }

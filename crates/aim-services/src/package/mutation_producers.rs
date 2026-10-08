@@ -15,12 +15,12 @@ impl Bridge {
         let enabled = reader.read_bool().map_err(|code| illegal(format!("Quarantine flag value: {code}")))?;
         if reader.remaining() != 0 { return Err(illegal("Quarantine flag owner sent trailing bytes")) } Ok(enabled)
     }
-    fn clear_code_cache(&self, name: &str, users: &[i32]) -> Result<(), Exception> {
+    pub(crate) fn clear_code_cache(&self, name: &str, users: &[i32]) -> Result<(), Exception> {
         let mut request = Parcel::new(); request.write_interface_token(api::DESCRIPTOR);
         request.write_string16(Some(name)); aim_service_aidl::write_int_array(&mut request, Some(users));
-        let reply = self.node.transact(api::CLEAR_CODE_CACHE, &request, false).map_err(|code| illegal(format!("Compressed code cache owner: {code}")))?;
-        let mut reader = reply.reader(); reader.read_exception().map_err(|code| illegal(format!("Compressed cache reply: {code}")))??;
-        if reader.remaining() != 0 { return Err(illegal("Compressed cache reply has trailing bytes")) } Ok(())
+        let reply = self.node.transact(api::CLEAR_CODE_CACHE, &request, false).map_err(|code| illegal(format!("Package code cache owner: {code}")))?;
+        let mut reader = reply.reader(); reader.read_exception().map_err(|code| illegal(format!("Package cache reply: {code}")))??;
+        if reader.remaining() != 0 { return Err(illegal("Package cache reply has trailing bytes")) } Ok(())
     }
 }
 pub struct Owner {

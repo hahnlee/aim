@@ -5,6 +5,9 @@ package android.content;
 import android.os.IBinder;
 
 public class Intent implements android.os.Parcelable {
+    public static final int FLAG_INCLUDE_STOPPED_PACKAGES=32;
+    public static String ACTION_PACKAGE_REPLACED;
+    public static String ACTION_MY_PACKAGE_REPLACED;
     public interface CommandOptionHandler { boolean handleOption(String option, android.os.ShellCommand command); }
     public static Intent parseCommandArgs(android.os.ShellCommand command,CommandOptionHandler handler) throws java.net.URISyntaxException {throw new RuntimeException("stub");}
 
