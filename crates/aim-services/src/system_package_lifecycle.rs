@@ -24,6 +24,7 @@ impl Restored {
 /// publisher. No independent shadow owner is created by facade/query producers.
 pub struct Production {
     pub owner: Arc<lifecycle::Owner>,
+    pub current_version: crate::package::settings::Version,
 }
 impl Production {
     pub fn construct(restored: Restored, original: &Arc<Bridge>, storage: Strong,
@@ -58,7 +59,7 @@ impl Production {
         let owner = lifecycle::Owner::from_settings(&restored.settings, restored.read_succeeded,
             fingerprint, live_native_properties, ce_storage)
             .map_err(|message| Exception::new(EX_ILLEGAL_STATE, message))?;
-        Ok(Self { owner })
+        Ok(Self { owner, current_version: current })
     }
     pub fn attach(&self, mut context: Context) -> Result<Context, Exception> {
         if context.system.lifecycle.is_some() {

@@ -77,6 +77,11 @@ impl Owner {
     pub fn prior_sdk_version(&self) -> i32 {
         self.prior_sdk
     }
+    /// The constructor's mIsUpgrade partition comparison, excluding the public
+    /// persist.pm.mock-upgrade override.
+    pub(crate) fn partition_upgrading(&self) -> bool {
+        self.upgrade
+    }
     pub fn device_upgrading(&self) -> bool {
         self.upgrade
             || (self.properties)("persist.pm.mock-upgrade")

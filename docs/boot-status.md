@@ -482,7 +482,7 @@ causes. The exact process/file-dependent condition remains unresolved. An indepe
 with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
 so this is not claimed as the reboot fix. Diagnostics leave no owned processes
 or temporary files behind.
-Current Source lower-owner cohort passes 174 ABI tests (four ignored), 802 PM
+Current Source lower-owner cohort passes 174 ABI tests (four ignored), 803 PM
 library tests (eleven ignored) and 65 complete Binder tests. Guest DAC now
 checks ancestor search, final access, owner/groups/capabilities and checked
 metadata persistence; metadata mutations use hidden real inode anchors and a
@@ -532,7 +532,12 @@ SystemServer 50573), preserving five selected packages' UID/codepath/version,
 persisted signatures and runtime permissions; Calculator, WebView and Chrome
 render. Strict component parity is incomplete because native internal Version
 metadata is 0/0 with missing fingerprints, making original PMS apply its pre-Q
-AppDetails migration (#1157). Donor/clone cleanup is verified and the clone is
+AppDetails migration (#1157). Native boot now retains the actual current
+VersionInfo and commits SDK/database versions and original fingerprint updates
+at boot completion; pre-Q component migration follows the retained original
+lifecycle predicate for non-system user0 only. Actual persistence/reload and
+build-only-change regressions pass, and the combined PM library suite passes
+803/0 with eleven ignored. Strict original rollback replay remains pending. Donor/clone cleanup is verified and the clone is
 retained. GMS idle traffic is not accepted: the fresh native boot also records a
 CrisisAlerts persistent-process fatal (#1155), under independent investigation. Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,
@@ -579,7 +584,7 @@ including actual signed Mach-O verification/execution and retention of an old
 open generation. This fixes publication lifetime ownership, not a proven Darwin
 denial mechanism or a complete boot-cohort upgrade (#1146). Originals and frozen CTS
 binary bytes remain unchanged; controls are cleaned after verification. Latest whole native library verification
-passes 802/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
+passes 803/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0

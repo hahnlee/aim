@@ -39,6 +39,7 @@ pub use abi::{
     ZipNativeLibraries,
 };
 mod boot;
+mod boot_settings;
 mod completion;
 mod data;
 mod disabled;
