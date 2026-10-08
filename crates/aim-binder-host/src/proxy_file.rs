@@ -49,6 +49,29 @@ pub(crate) fn socket_identity(fd: RawFd) -> io::Result<(u64, u64)> {
     Ok((word(160), word(264)))
 }
 
+/// Compare two pinned descriptors' actual kernel endpoints, never FD numbers.
+pub fn same_endpoint(first: RawFd, second: RawFd) -> io::Result<bool> {
+    let mut ty = 0i32;
+    let mut size = std::mem::size_of::<i32>() as u32;
+    if unsafe {
+        libc::getsockopt(
+            first,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut ty as *mut i32).cast(),
+            &mut size,
+        )
+    } < 0
+    {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOTSOCK) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    Ok(socket_identity(first)? == socket_identity(second)?)
+}
+
 fn register(client: &UnixDatagram, server: &UnixDatagram, owner: &Arc<Owner>) -> io::Result<()> {
     let identity = socket_identity(client.as_raw_fd())?;
     let peer = socket_identity(server.as_raw_fd())?;

@@ -185,10 +185,50 @@ pub(super) fn adopt_received(fd: i32) -> Result<(), i32> {
 }
 
 pub(super) fn refresh_capabilities() -> Result<(), i32> {
-    for fd in open_fds() {
-        if super::binder::file_class(fd)? == aim_binder_host::proxy_file::CLASS {
-            insert(fd, Kind::ProxyFile);
+    refresh_capability_snapshot(open_fds(), super::binder::file_class)
+}
+fn refresh_capability_snapshot(
+    fds: Vec<i32>,
+    mut classify: impl FnMut(i32) -> Result<u32, i32>,
+) -> Result<(), i32> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let pin = |fd| -> Result<Option<OwnedFd>, i32> {
+        let held = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if held >= 0 {
+            return Ok(Some(unsafe { OwnedFd::from_raw_fd(held) }));
         }
+        let error = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
+        if error == libc::EBADF {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    };
+    for fd in fds {
+        let Some(held) = pin(fd)? else {
+            continue;
+        };
+        if classify(held.as_raw_fd())? != aim_binder_host::proxy_file::CLASS {
+            continue;
+        }
+        // Serialize publication with managed FD-table replacement, then pin the
+        // current slot again: classification of its earlier occupant grants no
+        // capability to a reused numeric descriptor.
+        let mut table = TABLE.write().unwrap();
+        let Some(current) = pin(fd)? else {
+            continue;
+        };
+        if !aim_binder_host::proxy_file::same_endpoint(current.as_raw_fd(), held.as_raw_fd())
+            .map_err(|error| error.raw_os_error().unwrap_or(libc::EIO))?
+        {
+            continue;
+        }
+        let old = table.insert(fd, Kind::ProxyFile);
+        set_slow(fd, true);
+        drop(table);
+        drop(old);
     }
     Ok(())
 }
@@ -576,5 +616,62 @@ mod tests {
             // SAFETY: our fds.
             unsafe { libc::close(fd) };
         }
+    }
+    #[test]
+    fn capability_refresh_pins_snapshot_and_rejects_fd_number_replacement() {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        let path =
+            std::env::temp_dir().join(format!("aim-capability-refresh-{}", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let (owner, capability, worker) = aim_binder_host::proxy_file::open(file).unwrap();
+        let slot = capability.into_raw_fd();
+        let replacement = std::fs::File::open("/dev/null").unwrap();
+        let (start, ready) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let replacing = std::thread::spawn(move || {
+            ready.recv().unwrap();
+            on_close(slot);
+            // dup2 closes/replaces atomically: another parallel test cannot take
+            // a temporarily vacant slot belonging to this test.
+            assert_eq!(unsafe { libc::dup2(replacement.as_raw_fd(), slot) }, slot);
+            done.send(()).unwrap();
+        });
+        refresh_capability_snapshot(vec![slot], |held| {
+            let class = aim_binder_host::proxy_file::registered_class_result(held)
+                .map_err(|e| e.raw_os_error().unwrap())
+                .unwrap();
+            assert_eq!(class, aim_binder_host::proxy_file::CLASS);
+            start.send(()).unwrap();
+            finished.recv().unwrap();
+            Ok(class)
+        })
+        .unwrap();
+        replacing.join().unwrap();
+        assert!(get(slot).is_none());
+        on_close(slot);
+        assert_eq!(unsafe { libc::close(slot) }, 0);
+        // Use an impossible descriptor as well: normal enumeration loss is
+        // skipped before registry RPC, not converted into a false registry result.
+        refresh_capability_snapshot(vec![i32::MAX], |_| {
+            panic!("closed snapshot entry classified")
+        })
+        .unwrap();
+        let held = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(
+            refresh_capability_snapshot(vec![held.as_raw_fd()], |_| Err(libc::EBADF)),
+            Err(libc::EBADF)
+        );
+        assert_eq!(
+            refresh_capability_snapshot(vec![held.as_raw_fd()], |_| Err(libc::EPROTO)),
+            Err(libc::EPROTO)
+        );
+        owner.revoke();
+        drop(worker);
+        std::fs::remove_file(path).unwrap();
     }
 }

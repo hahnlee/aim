@@ -480,7 +480,7 @@ causes. The exact process/file-dependent condition remains unresolved. An indepe
 with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
 so this is not claimed as the reboot fix. Diagnostics leave no owned processes
 or temporary files behind.
-Current Source lower-owner cohort passes 170 ABI tests (four ignored), 802 PM
+Current Source lower-owner cohort passes 174 ABI tests (four ignored), 802 PM
 library tests (eleven ignored) and 65 complete Binder tests. Guest DAC now
 checks ancestor search, final access, owner/groups/capabilities and checked
 metadata persistence; metadata mutations use hidden real inode anchors and a
@@ -495,9 +495,11 @@ failure, but original zygote aborts before SystemServer: fchmodat of
 retained descriptor, matching original bionic's O_PATH chmod fallback. The
 focused owner regression passes with UID ownership, rename retention, hidden
 and closed FDs, and symlink errors. Native-service and app policy replays
-remain pending for the corrected cohort. A subsequent full ABI run reports
-173 pass, one capability-registry EBADF failure under investigation, and five
-ignored entries; it is not counted as a clean full-suite pass. The frozen original
+remain pending for the corrected cohort. Inherited capability refresh now pins
+each open description and revalidates its actual kernel endpoint before managed
+FD publication; disappearing descriptors cannot abort binder initialization or
+grant a class to a reused number (#1152). The concurrent replacement regression
+and full ABI run pass: 174/0, four ignored. The frozen original
 Install CTS preparation exposes a FUSE notification backpressure deadlock
 (#1151): broker send holds its connection mutex while daemon reads wait on it.
 The owner now coalesces level notifications, sends outside that mutex, and
