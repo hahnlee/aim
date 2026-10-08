@@ -32,8 +32,8 @@ fn owner_failure(stage: &str, mut error: Exception) -> Exception {
     error.message = format!("{stage} (exception {}): {}", error.code, error.message);
     error
 }
-fn stage_failure(stage: &str, mut failure: Failure) -> Failure {
-    failure.message = format!("{stage}: {}", failure.message);
+fn stage_failure(stage: &str, failure: Failure) -> Failure {
+    eprintln!("{stage}: status={} committed={} message={}", failure.legacy_status, failure.committed, failure.message);
     failure
 }
 /// Code validated by the real parser and APK signature verifier. This has not
@@ -668,5 +668,17 @@ mod publication_gate_tests {
         assert_eq!(receipt.generation,snapshots.capture().version());assert!(finished.load(std::sync::atomic::Ordering::Acquire));
         drop(disk);std::fs::remove_dir_all(path).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_text_tests {
+    use super::*;
+    #[test]
+    fn native_stage_diagnostics_preserve_original_public_failure() {
+        let failure=Failure{legacy_status:-2,committed:false,message:"New package fails restrict-update check: owned.package".into()};
+        let failure=stage_failure("Admission requests",stage_failure("Native install preparation",failure));
+        assert_eq!(failure.legacy_status,-2);assert!(!failure.committed);
+        assert_eq!(failure.message,"New package fails restrict-update check: owned.package");
     }
 }

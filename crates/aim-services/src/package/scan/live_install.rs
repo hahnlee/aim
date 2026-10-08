@@ -293,7 +293,7 @@ impl SigningScan {
             authorize_update(&self.settings, old, &request.signing, request.rollback)?;
             if let Some(expected) = &old.restrict_update_hash {
                 if package_digest(files, &request.code)? != *expected {
-                    return Err(reject(-2, "New package fails restrict-update check"));
+                    return Err(reject(-2, format!("New package fails restrict-update check: {name}")));
                 }
             }
         }

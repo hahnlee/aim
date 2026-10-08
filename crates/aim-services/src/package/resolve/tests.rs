@@ -123,7 +123,7 @@ fn state() -> Arc<State> {
                 ..Provider::default()
             }];
         }),
-        package("c.high", 10003, true, |p| {
+        {let mut high=package("c.high", 10003, true, |p| {
             p.activities = vec![Activity {
                 main: main(
                     "c.high",
@@ -132,7 +132,7 @@ fn state() -> Arc<State> {
                 ),
                 ..Activity::default()
             }];
-        }),
+        });high.is.privileged=true;high},
         package("d.caller", 10004, false, |_| {}),
         package("android", 1000, true, |_| {}),
         package("f.jpeg", 10006, true, |p| {
@@ -1147,4 +1147,29 @@ fn resolve_instant_match_uses_caller_permission_and_requested_user() {
         assert_eq!(actual & MATCH_DIRECT_BOOT_UNAWARE != 0, user == 0);
     }
     assert_eq!(resolution.update_flags_for_resolve(0, 0, 10004, false, false, false).unwrap() & MATCH_INSTANT, 0);
+}
+
+
+#[test]
+fn registered_activity_priorities_use_native_privilege_and_selected_wizard() {
+    let mut source=(*state()).clone();
+    let privileged=source.packages.get_mut("b.gallery").unwrap();privileged.is.privileged=true;
+    let pkg=Arc::make_mut(privileged.pkg.as_mut().unwrap());
+    pkg.activities[0].main.component.intents[0].filter.priority=100;
+    source.system.roles=Some(crate::package::roles::Owner::priority_fixture(None));
+    let original=source.packages["b.gallery"].pkg.as_ref().unwrap().activities[0].main.component.intents[0].filter.clone();
+    let resolver=Resolution::new(Arc::new(source.clone()),&Default::default()).unwrap();
+    let intent=Intent{action:Some("android.intent.action.VIEW".into()),package:Some("b.gallery".into()),..Default::default()};
+    let records=resolver.query_intent_activities(&intent,Some("image/png"),crate::package::component_resolver::GET_RESOLVED_FILTER,0,SYSTEM_UID).unwrap();
+    assert_eq!(records.len(),1);assert_eq!(records[0].priority,0);assert_eq!(records[0].filter.as_ref().unwrap().priority,0);
+    assert_eq!(source.packages["b.gallery"].pkg.as_ref().unwrap().activities[0].main.component.intents[0].filter,original,"supplied parsed APK remains unchanged");
+    source.system.roles=Some(crate::package::roles::Owner::priority_fixture(Some("b.gallery".into())));
+    let wizard=Resolution::new(Arc::new(source.clone()),&Default::default()).unwrap();
+    assert_eq!(wizard.query_intent_activities(&intent,Some("image/png"),0,0,SYSTEM_UID).unwrap()[0].priority,100);
+    let system=source.packages.get_mut("b.gallery").unwrap();system.is.system=true;system.is.privileged=false;
+    let pkg=Arc::make_mut(system.pkg.as_mut().unwrap());pkg.activities[0].main.component.intents[0].filter.actions=vec!["android.intent.action.SEARCH".into()];
+    let ordinary=Resolution::new(Arc::new(source),&Default::default()).unwrap();
+    let search=Intent{action:Some("android.intent.action.SEARCH".into()),package:Some("b.gallery".into()),..Default::default()};
+    let records=ordinary.query_intent_activities(&search,Some("image/png"),crate::package::component_resolver::GET_RESOLVED_FILTER,0,SYSTEM_UID).unwrap();
+    assert_eq!(records[0].priority,0);assert_eq!(records[0].filter.as_ref().unwrap().priority,0);
 }

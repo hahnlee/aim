@@ -7,10 +7,11 @@
 //! its scan's order, but results are sorted by package name after their
 //! priority and match, and a package's own filters keep its manifest
 //! order either way, so the order of the replies does not depend on it.
-//! The feed's packages are the scanned ones, whose filters already carry
-//! the priorities `adjustPriority` capped.
+//! Activity priorities are adjusted at registration using the captured privilege,
+//! factory activity filters and authoritative setup wizard selection.
 
 #[path="component_resolver/raw.rs"] mod raw;
+#[path="component_resolver/priority.rs"] mod priority;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -292,7 +293,7 @@ impl ComponentResolver {
                 (Kind::Service, pkg.services.len()),
             ] {
                 for component in 0..count {
-                    r.add(ps, pkg, kind, component)?;
+                    r.add(state, ps, pkg, kind, component)?;
                 }
             }
             for (i, p) in pkg.providers.iter().enumerate() {
@@ -350,6 +351,7 @@ impl ComponentResolver {
 
     fn add(
         &mut self,
+        state: &State,
         ps: &PackageState,
         pkg: &AndroidPackage,
         kind: Kind,
@@ -358,6 +360,10 @@ impl ComponentResolver {
         let main = main_of(pkg, kind, component);
         for (intent, info) in main.component.intents.iter().enumerate() {
             let mut filter = info.filter.clone();
+            if kind==Kind::Activity {
+                filter.priority=priority::adjust(ps,state.disabled_system_packages.get(&ps.name),
+                    &pkg.activities[component],&filter,state.system.roles.as_ref().and_then(|owner|owner.setup_wizard_priority_owner()));
+            }
             for group in filter.mime_groups.clone().iter().flatten().rev() {
                 let (_, types) = ps
                     .mime_groups

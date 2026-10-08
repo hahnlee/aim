@@ -558,6 +558,13 @@ Native shell now calls the original UserManager.getMaxSupportedUsers through
 its authenticated typed leaf and prints the exact original prefix. Actual Binder
 CLI output/exception/tail tests and complete private Java original linkage/stub
 code checks pass; matched image deployment remains pending and C111 is unchanged.
+The same frozen PMHost cohort exposes activity filter priority and public
+restrict-update error mismatches (#1169/#1170). Native activity registration now
+applies the pinned privilege/protected-action/setup-wizard and factory-filter
+priority rules; native install stages retain original public failure text and
+status while logging their own stage diagnostics separately. The complete PM
+library suite passes 815/0 with eleven ignored; matched-image CTS replay remains
+pending.
 C111 also exposes retained updated-system-app state after factory restore rejects
 an APK inside APEX (#1171). Native restore now resolves the actual original APEX
 inventory before parsing, retaining its partition, application privilege and

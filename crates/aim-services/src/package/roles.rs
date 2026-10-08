@@ -58,6 +58,16 @@ pub struct Owner {
     browser_source: Option<BrowserSource>,
 }
 impl Owner {
+    /// None is the boot scan's deferred phase; Some(None) is an authoritative
+    /// selection with no setup wizard. No package name is inferred here.
+    #[cfg(test)]
+    pub(crate) fn priority_fixture(wizard:Option<String>)->Arc<Self>{
+        Arc::new(Self{frozen:[(Role::SetupWizard,wizard)].into(),live:Default::default(),known:None,browsers:Default::default(),browser_source:None})
+    }
+    pub(crate) fn setup_wizard_priority_owner(&self)->Option<Option<&str>> {
+        self.frozen.get(&Role::SetupWizard).map(|name|name.as_deref())
+    }
+
     /// Called at the full native constructor gate using the applied resource configuration.
     pub fn load(state: &Arc<State>, platform: &Platform, config: Config) -> Result<Self, String> {
         let resources = Resources {
