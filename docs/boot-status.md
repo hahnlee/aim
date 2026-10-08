@@ -746,6 +746,12 @@ header/tree rebuild. Seven storage checks pass, including pre-publication reads,
 same-inode commit, abort cleanup, corruption and directory-sync rollback. This
 supports mapping transition transactions; cross-process admission and ENABLE
 activation remain pending.
+Concurrent verified reads exposed native lock-node openat(O_CREAT) returning
+ENOENT during simultaneous opens of a retained existing directory (#1186).
+Atomic existing-open/create-exclusive admission with a bounded EEXIST reopen
+fixes the actual race; seven primitive checks and the strict four-thread
+duplicate verified-read/position test pass without skips. No filesystem error
+is swallowed or converted to successful admission.
 Original AppSecurity retains thirty fs-verity ENOTTY failures (#226). A shared
 storage core now streams Merkle construction, measures from a fixed header,
 authenticates returned bytes and binds durable metadata to actual inode

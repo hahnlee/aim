@@ -51,7 +51,19 @@ impl Inode {
     pub fn directory(&self)->&Path{&self.0.path}
     fn lock_file(&self,suffix:&str)->io::Result<PrivateFd>{
         let name=std::ffi::CString::new(format!("{}.{}",self.identity().name(),suffix)).unwrap();
-        let fd=PrivateFd::allocate(||{let fd=unsafe{libc::openat(self.0.directory.as_raw_fd(),name.as_ptr(),libc::O_RDWR|libc::O_CREAT|libc::O_NOFOLLOW|libc::O_CLOEXEC,0o600)};if fd<0{Err(io::Error::last_os_error())}else{Ok(unsafe{OwnedFd::from_raw_fd(fd)})}})?;let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+        let fd=PrivateFd::allocate(||{
+            let flags=libc::O_RDWR|libc::O_NOFOLLOW|libc::O_CLOEXEC;
+            let mut fd=unsafe{libc::openat(self.0.directory.as_raw_fd(),name.as_ptr(),flags)};
+            if fd<0{
+                let error=io::Error::last_os_error();if error.kind()!=io::ErrorKind::NotFound{return Err(error);}
+                fd=unsafe{libc::openat(self.0.directory.as_raw_fd(),name.as_ptr(),flags|libc::O_CREAT|libc::O_EXCL,0o600)};
+                if fd<0{
+                    let error=io::Error::last_os_error();if error.kind()!=io::ErrorKind::AlreadyExists{return Err(error);}
+                    fd=unsafe{libc::openat(self.0.directory.as_raw_fd(),name.as_ptr(),flags)};
+                }
+            }
+            if fd<0{Err(io::Error::last_os_error())}else{Ok(unsafe{OwnedFd::from_raw_fd(fd)})}
+        })?;let mut stat:libc::stat=unsafe{std::mem::zeroed()};
         if unsafe{libc::fstat(fd.as_raw_fd(),&mut stat)}<0{return Err(io::Error::last_os_error());}
         if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Err(io::Error::from_raw_os_error(libc::EINVAL));}
         Ok(fd)
@@ -153,6 +165,20 @@ mod tests {
         let header=unsafe{libc::CMSG_FIRSTHDR(&message)};unsafe{(*header).cmsg_level=libc::SOL_SOCKET;(*header).cmsg_type=libc::SCM_RIGHTS;(*header).cmsg_len=libc::CMSG_LEN(4);(libc::CMSG_DATA(header) as *mut i32).write_unaligned(writer.descriptor().as_raw_fd());}
         assert_eq!(unsafe{libc::sendmsg(sender.as_raw_fd(),&message,0)},1);drop(writer);busy(fixture.inode.admission().unwrap().exclusive());
         control.fill(0);message.msg_controllen=size as _;assert_eq!(unsafe{libc::recvmsg(receiver.as_raw_fd(),&mut message,0)},1);let fd=unsafe{(libc::CMSG_DATA(libc::CMSG_FIRSTHDR(&message)) as *const i32).read_unaligned()};let lease=fixture.inode.adopt_writer(unsafe{OwnedFd::from_raw_fd(fd)}).unwrap();busy(fixture.inode.admission().unwrap().exclusive());drop(lease);assert!(fixture.inode.admission().unwrap().exclusive().is_ok());
+    }
+    #[test]
+    fn offset_lock_parallel_readers_open_same_node_and_preserve_shared_position(){
+        use std::io::{Read,Write,Seek};
+        for precreated in [false,true]{
+            let mut fixture=Fixture::new();let bytes=(0u64..128).flat_map(u64::to_le_bytes).collect::<Vec<_>>();fixture.file.write_all(&bytes).unwrap();fixture.file.rewind().unwrap();
+            if precreated{drop(fixture.inode.offset_lock().unwrap());}
+            let barrier=Arc::new(std::sync::Barrier::new(4));let mut workers=Vec::new();
+            for _ in 0..4{let inode=fixture.inode.clone();let mut source=fixture.file.try_clone().unwrap();let barrier=barrier.clone();workers.push(std::thread::spawn(move||->io::Result<Vec<u64>>{
+                barrier.wait();let mut values=Vec::new();loop{let _lock=inode.offset_lock()?;let mut bytes=[0u8;8];let count=source.read(&mut bytes)?;if count==0{break;}if count!=8{return Err(io::Error::from_raw_os_error(libc::EIO));}values.push(u64::from_le_bytes(bytes));}Ok(values)
+            }));}
+            let results=workers.into_iter().map(|worker|worker.join()).collect::<Vec<_>>();let mut values=Vec::new();
+            for result in results{values.extend(result.unwrap().unwrap());}values.sort_unstable();assert_eq!(values,(0u64..128).collect::<Vec<_>>(),"precreated={precreated}");
+        }
     }
     #[test]
     fn offset_lock_serializes_processes_until_final_alias_close(){
