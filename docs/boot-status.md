@@ -546,7 +546,13 @@ real Tradefed reboots; SHA0f6827de97f9eb7c4c51ce432046ca0a52ad79af3d64ba9b2c1f3f
 Setting also completes with official XML2/0, done=true,
 SHA5c278472e8b4437ca2273afb0b55f041199b0b564ca894d7f43c92089f90cfd1.
 Its second body has a device-unavailable detection warning, so only observed
-reboots are claimed. PackageManagerHost follows; current full66 is3/66 complete. PackageManagerHost observes unknown get-max-users in cross-user test bodies
+reboots are claimed. PackageManagerHost follows; current full66 is3/66 complete. Its restricted permission tests reveal missing native runtime permission dump
+rows before mutation assertions (#1061). Native dump now reads the existing
+original permission owner for live granted/denied/flags, revalidates native
+UID/code/shared-user/user-inventory/install identity, and emits the pinned
+runtime permission format once per shared group. Eight owned regressions pass;
+actual affected CTS replay remains pending. No permission state is synthesized
+or changed to make the diagnostic pass. PackageManagerHost observes unknown get-max-users in cross-user test bodies
 (#1163), so those fast-ended bodies are not counted as full coverage before XML.
 Native shell now calls the original UserManager.getMaxSupportedUsers through
 its authenticated typed leaf and prints the exact original prefix. Actual Binder

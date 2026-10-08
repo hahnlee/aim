@@ -78,7 +78,7 @@ pub fn run(
             && super::info::user_state(package,user).installed).map(|package|package.name.clone()).collect::<Vec<_>>();
         let denial=allowed(pid,uid,&packages,|permission|if permission=="android.permission.DUMP"{Ok(true)}else{system.check_permission(permission,pid,uid)},
             |package|system.note_op_now(43,uid,package,None,""))?;
-        let text=match denial { Some(text)=>text, None=>render(&state,&request.args)? };
+        let text=match denial { Some(text)=>text, None=>render(&state,&request.args,|names|system.capture_package_dump_permissions(&state,names))? };
         request.out.write_all(text.as_bytes()).map_err(|error|Exception::new(EX_ILLEGAL_STATE,format!("package dump output: {error}")))?;
         Ok::<_,Exception>(())
     })();
@@ -107,7 +107,7 @@ pub(crate) fn sdk_versions(out: &mut String, setting: &super::model::PackageStat
     }
 }
 
-fn render(state:&State,args:&[String])->Result<String,Exception> {
+fn render(state:&State,args:&[String],capture_permissions:impl FnOnce(&[String])->Result<std::collections::BTreeMap<i32,super::owner::legacy_permissions::State>,Exception>)->Result<String,Exception> {
     use std::fmt::Write;
     let mut out=String::new();let mut package=None;let mut all_components=false;let mut include_apex=false;
     for arg in args {
@@ -122,9 +122,12 @@ fn render(state:&State,args:&[String])->Result<String,Exception> {
     if package.is_some_and(|name|!state.packages.contains_key(name)){
         let _=writeln!(out,"Unable to find package: {}",package.unwrap());return Ok(out);
     }
+    let selected=state.packages.values().filter(|ps|package.is_none_or(|name|name==ps.name)
+        && (include_apex || package.is_some() || ps.apex_module_name.is_none())).collect::<Vec<_>>();
+    let names=selected.iter().map(|ps|ps.name.clone()).collect::<Vec<_>>();
+    let permissions=capture_permissions(&names)?;
     out.push_str("Packages:\n");
-    for ps in state.packages.values().filter(|ps|package.is_none_or(|name|name==ps.name)
-        && (include_apex || package.is_some() || ps.apex_module_name.is_none())) {
+    for ps in &selected {
         let _=writeln!(out,"  Package [{}]:",ps.name);
         let _=writeln!(out,"    userId={}\n    codePath={}",ps.app_id,ps.path);
         sdk_versions(&mut out, ps);
@@ -146,15 +149,104 @@ fn render(state:&State,args:&[String])->Result<String,Exception> {
         for (&id,user) in &ps.users{
             let _=writeln!(out,"    User {id}: installed={} hidden={} suspended={} stopped={} notLaunched={} enabled={} instant={} virtual={} distractionFlags={}",user.installed,user.hidden,!user.suspended_by.is_empty(),user.stopped,user.not_launched,user.enabled,user.instant_app,user.virtual_preload,user.distraction_flags);
             timestamp(&mut out, "      ", "firstInstallTime", user.first_install_time, state.system.diagnostic_dates.as_deref())?;
-            if !user.granted_permissions.is_empty(){out.push_str("      granted permissions:\n");for name in &user.granted_permissions{let _=writeln!(out,"        {name}: granted=true");}}
+            if ps.shared_user_app_id.is_none() && ps.app_id>=0 {
+                runtime_permissions(&mut out,"      ",permissions.get(&ps.app_id).ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"package dump live permission owner absent"))?,id,package.is_some())?;
+            }
+        }
+    }
+    let shared=selected.iter().filter_map(|ps|ps.shared_user_app_id).collect::<std::collections::BTreeSet<_>>();
+    if !shared.is_empty(){
+        out.push_str("Shared users:\n");
+        for group in state.shared_users.values().filter(|group|shared.contains(&group.app_id)) {
+            let _=writeln!(out,"  SharedUser [{}]:\n    appId={}",group.name,group.app_id);
+            let live=permissions.get(&group.app_id).ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"shared UID dump live permission owner absent"))?;
+            for user in live.users().iter().filter(|user|!user.permissions.is_empty()) {
+                let _=writeln!(out,"    User {}: ",user.id);
+                runtime_permissions(&mut out,"      ",live,user.id,package.is_some())?;
+            }
         }
     }
     Ok(out)
 }
 
+fn runtime_permissions(out:&mut String,prefix:&str,state:&super::owner::legacy_permissions::State,user:i32,dump_all:bool)->Result<(),Exception>{
+    use std::fmt::Write;
+    let user=state.user(user).ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"dump permission user outside original capture"))?;
+    let permissions=user.permissions.iter().filter(|permission|permission.runtime).collect::<Vec<_>>();
+    if dump_all||!permissions.is_empty(){
+        let _=writeln!(out,"{prefix}runtime permissions:");
+        for permission in permissions {
+            let name=permission.name.as_deref().unwrap_or("null");
+            let _=write!(out,"{prefix}  {name}: granted={}",permission.granted);
+            let mut flags=permission.flags as u32;
+            if flags!=0 {
+                out.push_str(", flags=[ ");
+                while flags!=0 {
+                    let bit=1u32<<flags.trailing_zeros();flags&=!bit;
+                    out.push_str(&permission_flag(bit));if flags!=0{out.push('|');}
+                }
+                out.push(']');
+            }
+            out.push('\n');
+        }
+    }
+    Ok(())
+}
+fn permission_flag(bit:u32)->String{
+    let label=match bit.trailing_zeros(){
+        0=>"USER_SET",1=>"USER_FIXED",2=>"POLICY_FIXED",3=>"REVOKED_COMPAT",4=>"SYSTEM_FIXED",5=>"GRANTED_BY_DEFAULT",
+        6=>"REVIEW_REQUIRED",7=>"REVOKE_WHEN_REQUESTED",8=>"USER_SENSITIVE_WHEN_GRANTED",9=>"USER_SENSITIVE_WHEN_DENIED",
+        11=>"RESTRICTION_INSTALLER_EXEMPT",12=>"RESTRICTION_SYSTEM_EXEMPT",13=>"RESTRICTION_UPGRADE_EXEMPT",
+        14=>"APPLY_RESTRICTION",15=>"GRANTED_BY_ROLE",16=>"ONE_TIME",17=>"AUTO_REVOKED",
+        _=>return (bit as i32).to_string(),
+    };label.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn render_fixture(state:&State,args:&[String])->Result<String,Exception>{
+        render(state,args,|names|{
+            let mut output=std::collections::BTreeMap::new();
+            for name in names {
+                let package=&state.packages[name];let mut parcel=Parcel::new();parcel.write_i32(package.app_id);parcel.write_i32(package.users.len() as i32);
+                let users=package.users.keys().copied().collect::<Vec<_>>();for user in &users {parcel.write_i32(*user);parcel.write_bool(false);parcel.write_i32(0);}
+                output.insert(package.app_id,super::super::owner::legacy_permissions::State::read(parcel.data(),package.app_id,&users).unwrap());
+            }Ok(output)
+        })
+    }
+    fn live(app:i32,permissions:&[(Option<&str>,bool,bool,i32)])->super::super::owner::legacy_permissions::State{
+        let mut permissions=permissions.to_vec();permissions.sort_by_key(|(name,_,_,_)|name.map_or(0,super::super::info::java_hash));
+        let mut parcel=Parcel::new();parcel.write_i32(app);parcel.write_i32(1);parcel.write_i32(0);parcel.write_bool(false);parcel.write_i32(permissions.len() as i32);
+        for (name,runtime,granted,flags) in permissions {parcel.write_string16(name);parcel.write_bool(runtime);parcel.write_bool(granted);parcel.write_i32(flags);}
+        super::super::owner::legacy_permissions::State::read(parcel.data(),app,&[0]).unwrap()
+    }
+    #[test]
+    fn runtime_dump_uses_live_denied_granted_and_all_original_flag_labels() {
+        let mut state=State::default();state.system.diagnostic_dates=Some(Arc::new(Dates{format:Arc::new(|_|Ok("date".into()))}));
+        state.packages.insert("fixture.app".into(),super::super::model::PackageState{name:"fixture.app".into(),app_id:10100,
+            users:[(0,super::super::model::PackageUserState{installed:true,granted_permissions:vec!["shadow.guess".into()],..Default::default()})].into(),..Default::default()});
+        let permissions=live(10100,&[(Some("permission.denied"),true,false,0),(Some("permission.granted"),true,true,(1<<11)|(1<<14)),(Some("permission.install"),false,true,0)]);
+        let text=render(&state,&["fixture.app".into()],|_|Ok([(10100,permissions)].into())).unwrap();
+        assert!(text.contains("      runtime permissions:\n"));
+        assert!(text.contains("        permission.denied: granted=false\n"));
+        assert!(text.contains("        permission.granted: granted=true, flags=[ RESTRICTION_INSTALLER_EXEMPT|APPLY_RESTRICTION]\n"));
+        assert!(!text.contains("shadow.guess"));assert!(!text.contains("permission.install: granted="));
+        let labels=[(0,"USER_SET"),(1,"USER_FIXED"),(2,"POLICY_FIXED"),(3,"REVOKED_COMPAT"),(4,"SYSTEM_FIXED"),(5,"GRANTED_BY_DEFAULT"),(6,"REVIEW_REQUIRED"),(7,"REVOKE_WHEN_REQUESTED"),(8,"USER_SENSITIVE_WHEN_GRANTED"),(9,"USER_SENSITIVE_WHEN_DENIED"),(11,"RESTRICTION_INSTALLER_EXEMPT"),(12,"RESTRICTION_SYSTEM_EXEMPT"),(13,"RESTRICTION_UPGRADE_EXEMPT"),(14,"APPLY_RESTRICTION"),(15,"GRANTED_BY_ROLE"),(16,"ONE_TIME"),(17,"AUTO_REVOKED")];
+        for (bit,label) in labels {assert_eq!(permission_flag(1<<bit),label);}
+        assert_eq!(permission_flag(1<<19),"524288");assert_eq!(permission_flag(1<<31),"-2147483648");
+    }
+    #[test]
+    fn shared_uid_runtime_dump_is_group_scoped_without_duplicate_package_rows() {
+        let mut state=State::default();state.system.diagnostic_dates=Some(Arc::new(Dates{format:Arc::new(|_|Ok("date".into()))}));
+        for name in ["fixture.one","fixture.two"] {state.packages.insert(name.into(),super::super::model::PackageState{name:name.into(),app_id:0,shared_user_app_id:Some(10150),shared_user:Some("fixture.shared".into()),users:[(0,Default::default())].into(),..Default::default()});}
+        state.shared_users.insert("fixture.shared".into(),super::super::model::SharedUser{name:"fixture.shared".into(),app_id:10150,packages:vec!["fixture.one".into(),"fixture.two".into()],..Default::default()});
+        let permissions=live(10150,&[(Some("permission.shared"),true,false,1)]);
+        let text=render(&state,&[],|_|Ok([(10150,permissions)].into())).unwrap();
+        assert_eq!(text.matches("permission.shared: granted=false").count(),1);
+        assert!(!text.split("Shared users:").next().unwrap().contains("runtime permissions:"));
+        assert!(text.contains("SharedUser [fixture.shared]"));assert!(text.contains("    User 0: "));
+    }
     #[test]
     fn dump_rejects_unowned_or_non_fd_input_before_capture() {
         let mut missing=Parcel::new();missing.write_i32(1);missing.write_i32(0);
@@ -209,14 +301,14 @@ mod tests {
             users:[(0,super::super::model::PackageUserState{installed:true,enabled:3,first_install_time:1_234_567,..Default::default()})].into(),..Default::default()};
         state.packages.insert(package.name.clone(),package);
         state.packages.insert("p.two".into(),super::super::model::PackageState{name:"p.two".into(),..Default::default()});
-        assert!(render(&state,&["p.one".into()]).unwrap_err().message.contains("date owner absent"));
+        assert!(render_fixture(&state,&["p.one".into()]).unwrap_err().message.contains("date owner absent"));
         let times = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = times.clone();
         state.system.diagnostic_dates = Some(Arc::new(Dates { format: Arc::new(move |millis| {
             seen.lock().unwrap().push(millis);
             Ok(format!("guest-date-{millis}"))
         }) }));
-        let text=render(&state,&["p.one".into()]).unwrap();
+        let text=render_fixture(&state,&["p.one".into()]).unwrap();
         assert!(text.contains("    codePath=/system/app/One\n"));
         assert!(text.contains("    User 0:"));
         assert!(text.contains("      firstInstallTime=guest-date-1234567\n"));
@@ -224,9 +316,9 @@ mod tests {
         state.system.diagnostic_dates = Some(Arc::new(Dates { format: Arc::new(|_| {
             Err(Exception::new(EX_ILLEGAL_STATE, "guest date owner detached"))
         }) }));
-        assert_eq!(render(&state,&["p.one".into()]).unwrap_err().message, "guest date owner detached");
+        assert_eq!(render_fixture(&state,&["p.one".into()]).unwrap_err().message, "guest date owner detached");
         assert!(text.contains("Package [p.one]"));assert!(text.contains("versionCode=9"));assert!(text.contains("enabled=3"));assert!(!text.contains("p.two"));
-        assert!(render(&state,&["--proto".into()]).unwrap().contains("Unsupported"));
-        assert!(render(&state,&["p.absent".into()]).unwrap().contains("Unable to find package"));
+        assert!(render_fixture(&state,&["--proto".into()]).unwrap().contains("Unsupported"));
+        assert!(render_fixture(&state,&["p.absent".into()]).unwrap().contains("Unable to find package"));
     }
 }

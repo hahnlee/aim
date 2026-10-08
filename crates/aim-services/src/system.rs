@@ -31,6 +31,8 @@ mod existing;
 mod events;
 #[path = "system_package_public_services.rs"]
 mod package_public_services;
+#[path = "system_package_dump_permissions.rs"]
+mod package_dump_permissions;
 #[path = "system_package_boot_persistence.rs"]
 mod package_boot_persistence;
 #[path = "system_package_runtime_creation.rs"]
