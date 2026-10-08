@@ -17,6 +17,9 @@ import importlib.util
 _host_spec = importlib.util.spec_from_file_location('cts_host_tools', Path(__file__).parent / 'lib/cts_host_tools.py')
 cts_host_tools = importlib.util.module_from_spec(_host_spec)
 _host_spec.loader.exec_module(cts_host_tools)
+_bundle_spec = importlib.util.spec_from_file_location('cts_runtime_bundle', Path(__file__).parent / 'lib/cts_runtime_bundle.py')
+cts_runtime_bundle = importlib.util.module_from_spec(_bundle_spec)
+_bundle_spec.loader.exec_module(cts_runtime_bundle)
 
 ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / '_build/cts-tradefed/android-cts'
@@ -135,6 +138,7 @@ def campaign_provenance(args):
             'data': str(args.data.resolve()), 'port': args.port, 'cts_args': args.cts_args,
             'manifest_sha256': digest(MANIFEST), 'modules': [m['name'] for m in modules()],
             'image_receipt_sha256': digest(receipt)}
+    provenance['campaign_script_sha256'] = digest(Path(__file__))
     if args.linux_run is not None:
         executable = args.linux_run.resolve(strict=True)
         if not os.access(executable, os.X_OK):
@@ -167,7 +171,9 @@ def validate_result(result, module, args):
 
 def resume_state(args, provenance):
     state = json.loads((args.output / 'campaign.json').read_text())
-    for key in ('linux_run', 'linux_run_sha256', 'cts_host_tools'):
+    if state.get('wrapper_bundle', {}).get('directory'):
+        cts_runtime_bundle.validate(state['wrapper_bundle']['directory'])
+    for key in ('linux_run', 'linux_run_sha256', 'cts_host_tools', 'wrapper_bundle'):
         if state.get(key) != provenance.get(key):
             raise ValueError(f'resume provenance differs: {key}')
     for key, value in provenance.items():
@@ -211,6 +217,7 @@ def run(args):
         raise ValueError('campaign output already exists; use --resume to validate its provenance')
     if args.resume and not (args.output / 'campaign.json').is_file():
         raise ValueError('--resume requires an existing campaign')
+    args.output.mkdir(parents=True, exist_ok=args.resume)
     services = (args.image / 'system/etc/aim/native-services').read_text().splitlines()
     native = {line.split()[0] for line in services if line.strip() and not line.lstrip().startswith('#')}
     if ('package' in native) != (args.label == 'native'):
@@ -220,13 +227,13 @@ def run(args):
                                   '--skip-system-status-check') for v in args.cts_args):
         raise ValueError('module/test filtering or retry changes the complete batch scope')
     provenance = campaign_provenance(args)
+    provenance['wrapper_bundle'] = cts_runtime_bundle.snapshot(ROOT, HARNESS, args.output / 'wrapper-bundles')
     args.host_tool_selection = provenance.get('cts_host_tools')
     if args.resume:
         state = resume_state(args, provenance)
     else:
         state = dict(provenance, runs=[], started=datetime.datetime.now(datetime.timezone.utc).isoformat())
     prepare()
-    args.output.mkdir(parents=True, exist_ok=args.resume)
     save(args.output / 'campaign.json', state)
     completed = 0
     for index, module in enumerate(state['modules']):
@@ -247,8 +254,14 @@ def run(args):
         shell_args = ['--linux-run', provenance['linux_run']] if args.linux_run is not None else []
         if args.host_tool_selection and module == cts_host_tools.MODULE:
             shell_args += ['--cts-host-toolsdir', args.host_tool_selection['directory']]
-        command = [str(ROOT / 'tools/cts-tradefed.sh'), *shell_args, str(args.data), str(args.port), '-m', module, *args.cts_args]
-        row = {'module': module, 'log': str(log), 'status': 'not-run-complete'}
+        bundle = cts_runtime_bundle.validate(provenance['wrapper_bundle']['directory'])
+        base = Path(bundle['directory'])
+        command = [str(base / 'tools/cts-tradefed.sh'), '--repository-root', str(ROOT),
+                   '--guest-shell', str(base / 'tools/guest-shell.sh'),
+                   '--host-tool-helper', str(base / 'tools/lib/cts_host_tools.py'),
+                   '--harness', str(base / 'harness/android-cts'), *shell_args, str(args.data), str(args.port), '-m', module, *args.cts_args]
+        row = {'module': module, 'log': str(log), 'status': 'not-run-complete',
+               'wrapper_bundle_identity': bundle['identity'], 'wrapper_command': command}
         history = list(prior.get('attempts', [])) if prior else []
         if prior:
             history.append({k: v for k, v in prior.items() if k != 'attempts'})

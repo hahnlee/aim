@@ -4,14 +4,45 @@ import os
 import subprocess
 import tempfile
 import unittest
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('bundle', ROOT / 'tools/lib/cts_runtime_bundle.py')
 bundle = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bundle)
+pm_spec = importlib.util.spec_from_file_location('cts_pm', ROOT / 'tools/cts-pm.py')
+pm = importlib.util.module_from_spec(pm_spec)
+pm_spec.loader.exec_module(pm)
 
 
 class Lifetime(unittest.TestCase):
+    def test_existing_campaign_output_is_rejected_before_snapshot_writes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            sentinel = output / 'campaign.json'
+            sentinel.write_text('retained campaign bytes')
+            args = SimpleNamespace(output=output, resume=False, stop_after=None)
+            with patch.object(pm.cts_runtime_bundle, 'snapshot') as snapshot:
+                with self.assertRaisesRegex(ValueError, 'already exists'):
+                    pm.run(args)
+                snapshot.assert_not_called()
+            self.assertEqual(sentinel.read_text(), 'retained campaign bytes')
+            self.assertEqual({p.name for p in output.iterdir()}, {'campaign.json'})
+
+    def test_resume_rejects_changed_wrapper_generation_and_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            provenance = {'wrapper_bundle': {'identity': 'retained'}, 'cts_args': []}
+            (output / 'campaign.json').write_text(json.dumps(dict(provenance, runs=[])))
+            args = SimpleNamespace(output=output)
+            self.assertEqual(pm.resume_state(args, provenance)['wrapper_bundle'], provenance['wrapper_bundle'])
+            with self.assertRaisesRegex(ValueError, 'wrapper_bundle'):
+                pm.resume_state(args, dict(provenance, wrapper_bundle={'identity': 'changed'}))
+            with self.assertRaisesRegex(ValueError, 'cts_args'):
+                pm.resume_state(args, dict(provenance, cts_args=['--changed']))
+
     def test_waiting_bash_retains_detached_generation_after_source_edit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

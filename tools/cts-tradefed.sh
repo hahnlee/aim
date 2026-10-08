@@ -11,10 +11,22 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+guest_shell=
+host_tool_helper=
+harness_override=
 shell_args=()
 host_tools=
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
+    --repository-root|--guest-shell|--host-tool-helper|--harness)
+      [[ $# -ge 2 ]] || { echo "$1 requires a path" >&2; exit 2; }
+      case "$1" in
+        --repository-root) root="$2" ;;
+        --guest-shell) guest_shell="$2" ;;
+        --host-tool-helper) host_tool_helper="$2" ;;
+        --harness) harness_override="$2" ;;
+      esac
+      shift 2 ;;
     --linux-run)
       [[ $# -ge 2 && -x "$2" ]] || { echo '--linux-run requires an executable path' >&2; exit 2; }
       shell_args=(--linux-run "$2"); shift 2 ;;
@@ -28,7 +40,9 @@ done
 data="$1"
 port="$2"
 shift 2
-harness="$root/_build/cts-tradefed/android-cts"
+harness="${harness_override:-$root/_build/cts-tradefed/android-cts}"
+guest_shell="${guest_shell:-$root/tools/guest-shell.sh}"
+host_tool_helper="${host_tool_helper:-$root/tools/lib/cts_host_tools.py}"
 [[ -f "$harness/tools/cts-tradefed" ]] || { echo "no harness: run tools/cts-module.py --tradefed" >&2; exit 1; }
 if [[ -n "$host_tools" ]]; then
   selected_module=
@@ -41,7 +55,7 @@ if [[ -n "$host_tools" ]]; then
   [[ "$selected_module" == CtsStagedInstallHostTestCases ]] || {
     echo '--cts-host-toolsdir requires explicit CtsStagedInstallHostTestCases selection' >&2; exit 2;
   }
-  selection="$(python3 "$root/tools/lib/cts_host_tools.py" "$host_tools" "$root" "$harness")"
+  selection="$(python3 "$host_tool_helper" "$host_tools" "$root" "$harness")"
   module_arg="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["module_arg"])' <<< "$selection")"
   echo "cts host-tool selection: $selection"
   set -- "$@" --module-arg "$module_arg"
@@ -91,7 +105,7 @@ trap 'exit 1' HUP INT TERM ALRM
 # allowed ("Always allow from this computer"): adbd checks adb_keys before
 # it asks, and the lightweight shell has no dialog to ask with.
 key="$(cat "$HOME/.android/adbkey.pub")"
-"$root/tools/guest-shell.sh" ${shell_args[@]+"${shell_args[@]}"} "$data" "grep -qxF '$key' /data/misc/adb/adb_keys 2>/dev/null ||
+"$guest_shell" --repository-root "$root" ${shell_args[@]+"${shell_args[@]}"} "$data" "grep -qxF '$key' /data/misc/adb/adb_keys 2>/dev/null ||
   { echo '$key' >> /data/misc/adb/adb_keys; };
   chown system:shell /data/misc/adb/adb_keys && chmod 0640 /data/misc/adb/adb_keys"
 

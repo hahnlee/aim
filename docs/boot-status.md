@@ -642,8 +642,12 @@ All fifteen test-executing invocations retain SELinux/thread checker failures;
 clean invocation acceptance is zero. Shortcut completes9 pass/3 ignored but its
 wrapper exits127 after an in-place source script edit during Bash wait (#1178).
 Official body evidence remains intact; the original guest/display/logcat/runner
-exit normally and its image lease is released. Future harness scripts must use
-detached immutable generations before another acceptance campaign.
+exit normally and its image lease is released. Future campaigns now capture detached immutable wrapper/helper/harness script
+generations, validate hashes, modes and external JAR targets before each launch,
+and preserve exact bundle/command provenance. Resume rejects changed generations;
+fresh output directories remain exclusive. Three lifetime/resume/output checks,
+six comparison checks and four host selection checks pass. Actual next-cohort
+invocation acceptance remains pending.
 Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,
 then runs normal test binaries; its 48 ignored integration tests and explicit

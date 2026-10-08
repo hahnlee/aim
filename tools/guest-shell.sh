@@ -11,6 +11,11 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "${1:-}" == "--repository-root" ]]; then
+  [[ $# -ge 2 && -d "$2" ]] || { echo '--repository-root requires a directory' >&2; exit 2; }
+  root="$2"
+  shift 2
+fi
 linux_run="$root/target/release/linux-run"
 if [[ "${1:-}" == "--linux-run" ]]; then
   linux_run="$2"
