@@ -553,7 +553,13 @@ uses explicit existing image/immutable-host/display/empty inputs and an exclusiv
 new output; it holds the image read lease, records hashes before boot, refuses
 protected-path overlap and checks drift before publication. Focused CLI isolation
 passes; the two native template builds and structural/runtime/BootStats parity
-have not yet run and remain required. Donor/clone cleanup is verified and the clone is
+remain incomplete. The first genuine empty-data C110 template boot reaches
+boot_completed at131.94s and captures original permission state at127.67s,
+but times out at300s waiting for the settings shipped set because packages.list
+is absent. The failed output/raw boot and input provenance are retained; no
+published template is counted. A second identical build waits for the constructor
+output correction, then two completed builds still must satisfy the original
+structure and runtime parity gates. Donor/clone cleanup is verified and the clone is
 retained. GMS idle traffic is not accepted: the fresh native boot also records a
 CrisisAlerts persistent-process fatal (#1155), under independent investigation. Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,
