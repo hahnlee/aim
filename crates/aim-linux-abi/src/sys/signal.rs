@@ -768,10 +768,20 @@ unsafe fn act_now(ctx: *mut GuestContext, m: &mut DarwinMcontext) {
 
 // ---- host signal handler --------------------------------------------------------
 
+struct HostErrno(i32);
+impl HostErrno {
+    fn save() -> Self { Self(unsafe { *libc::__error() }) }
+}
+impl Drop for HostErrno {
+    fn drop(&mut self) { unsafe { *libc::__error() = self.0; } }
+}
+
 /// The host handler for every signal the layer takes. `patch` handles its
 /// `brk` sites first. A fault nothing takes is reported by `diag`, then
 /// kills the process with the signal, as Linux's default action.
 extern "C" fn host_handler(sig: i32, info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
+    // A signal can arrive between a host syscall and its errno read.
+    let _errno = HostErrno::save();
     // SAFETY: SA_SIGINFO handler arguments from the kernel.
     unsafe {
         if sig == libc::SIGTRAP && crate::patch::handle_brk(uc as *mut libc::ucontext_t) {
@@ -1515,4 +1525,47 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
         flags: r.i32(),
     };
     *lock(&current().sig.alt) = alt;
+}
+
+#[cfg(test)]
+mod host_errno_tests {
+    use super::HostErrno;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SIGNALS: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn signal_handler_preserves_interrupted_host_errno() {
+        extern "C" fn handler(_: i32) {
+            let _errno = HostErrno::save();
+            unsafe { libc::close(-1); }
+            SIGNALS.fetch_add(1, Ordering::Relaxed);
+        }
+        // Signal dispositions stay isolated from the parallel test harness.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler as *const () as usize;
+                libc::sigemptyset(&mut action.sa_mask);
+                if libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()) != 0 { libc::_exit(2); }
+                let result = libc::open(c"/dev/null/not-a-directory".as_ptr(), libc::O_RDONLY);
+                let error = *libc::__error();
+                if result != -1 || error != libc::ENOTDIR { libc::_exit(3); }
+                if libc::kill(libc::getpid(), libc::SIGUSR1) != 0 || *libc::__error() != error { libc::_exit(4); }
+                let fd = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
+                if fd < 0 { libc::_exit(5); }
+                *libc::__error() = libc::EINTR;
+                if libc::kill(libc::getpid(), libc::SIGUSR1) != 0 || *libc::__error() != libc::EINTR { libc::_exit(6); }
+                libc::close(fd);
+                if SIGNALS.load(Ordering::Relaxed) != 2 { libc::_exit(7); }
+                libc::_exit(0);
+            }
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        assert!(libc::WIFEXITED(status));
+        assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
 }

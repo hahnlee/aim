@@ -466,7 +466,18 @@ the original SUSPEND_APPS plus other-user-only FULL cross-user rule (#1145);
 two instant-policy regressions and the user-permission matrix pass. Actual UI
 replays await deployment, so those flows are not counted as passes. The frozen original CTS baseline also finds
 actual cross-app file access (#1143) and missing procfs network tables (#1144);
-those lower owners are being corrected separately with original results preserved. Latest whole native library verification
+those lower owners are being corrected separately with original results preserved.
+The frozen native campaign completes Parsing 11/0 and PreferredActivity 2/0,
+then a real Setting reboot repeatedly fails interpreter resolution (#1146).
+Failed/incomplete and device-offline module records are preserved; the runner
+stops at a module boundary. Bounded diagnostics locate Darwin EPERM on the mount
+journal's existing-file write-open, not ELF absence or flock. The same process
+can create new files and read them but write-reopen fails in runtime and /tmp;
+normal permissions and flags plus absent sandbox denial leave the exact host
+policy unproven. An independent real-signal errno-preservation defect is fixed
+with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
+so this is not claimed as the reboot fix. Diagnostics leave no owned processes
+or temporary files behind. Latest whole native library verification
 passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
