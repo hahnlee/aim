@@ -536,7 +536,11 @@ UID/GID and Linux default0600 mode against the real devfs inode/generation/birth
 identity. Guest chmod/chown and repeated unlock/grantpt preserve that binding;
 a reused slave allocation receives its new owner's state. The genuine shellUID2000
 open/foreign-denial/reuse/durable-error regression passes. This does not count as
-actual adbd exec-out acceptance; a new immutable runtime replay is required. A separate rollback on
+full CTS acceptance. C111 now completes actual adbd exec-out getprop on its first
+probe: exit0,27949 bytes,660 parsed property rows,SDK36 and boot_completed1,
+with no PTY error. Its fresh full66 campaign allocates the device and starts the
+first official Parsing test body; no complete module XML is yet retained. The
+old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
 persisted signatures and runtime permissions; Calculator, WebView and Chrome
