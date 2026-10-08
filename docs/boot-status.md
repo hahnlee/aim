@@ -349,7 +349,12 @@ query captures (#1131), preserving caller identity, aliases and candidate scope.
 Actual C87 replay remains pending. The domain fixture is repaired to use its
 actual persisted domain state and retain captured uninstall-block ownership;
 the exact host-only lifecycle/persistence reproduction passes in 6.64 seconds.
-The actual original ART transport replays remain pending. Original PMS on a cloned native
+The actual original ART domain transport replay passes 1/0/0 in 213.27s,
+including the 4,000-entry original Binder oracle, and keyset transport passes
+1/0/0 in 125.27s. The root-only crash child helper is not an independent gate.
+All seven meaningful originally excluded library gates have now been explicitly
+executed successfully. New pure query and concurrent cache fixtures still need
+actual ART wiring; their compilation does not establish runtime conformance. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 Original 66-module CTS campaign is running with provenance-checked resume;
