@@ -725,6 +725,12 @@ through their lifetime and forwarding. Thirty-five host regressions pass, includ
 actual Binder reply-buffer and immediate final-reference writer release; the PM
 library suite passes829/0 with eleven ignored. Matching ABI installation/close,
 publication and a new coherent runtime remain required; C111 used wire3.
+A current-source guest fixture now runs with the actual authenticated native
+coordinator and strict fork Ready ACK. Its owned protected ELF includes explicit
+TLS instructions, is asserted to translate, and produces authenticated derivative
+page-cache entries. Actual translated execution, pre/post-fork TLS, private COW,
+SIGBUS/address, data/BSS and corrupt-original EIO checks pass. This does not
+establish image CTS/app acceptance or complete ENABLE ioctl activation.
 The in-progress pager is now exercised by an actual NDK/original-bionic guest:
 normal mmap, closed source FD, private COW, growth/move, protection changes,
 MADV_DONTNEED revalidation, corrupt-page/EOF SIGBUS with exact address, shrink
