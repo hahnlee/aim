@@ -99,7 +99,7 @@ fn resolve_as(dirfd: i32, path: &[u8], follow: bool, id: &super::cred::Identity,
     vfs::resolve_checked(dirfd, path, follow, |directory| attrs::search(directory, id, kind))
 }
 
-fn openat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+pub(super) fn openat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     let (dirfd, mut flags, mode) = (a[0] as i32, a[2], a[3]);
     if flags & O_PATH != 0 { flags &= O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW; }
     // SAFETY: guest path pointer.
@@ -180,6 +180,12 @@ fn openat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
     if fd < 0 {
         return -(errno::last() as i64);
+    }
+    if r.guest == "/dev/ptmx" {
+        if let Err(error) = super::tty::allocated_master(fd, id) {
+            unsafe { libc::close(fd); }
+            return -(error as i64);
+        }
     }
     if creating {
         if let Err(error) = attrs::created(attrs::Host::Fd(fd), || r.guest.clone()) {
