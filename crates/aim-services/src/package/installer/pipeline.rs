@@ -612,7 +612,20 @@ mod publication_gate_tests {
         fn prepare_runtime(&self,_:&mut crate::package::scan::live_install::CompletedAdmission)->Result<(),Failure>{panic!("prepared admission fixture")}
         fn cross_user_suspensions(&self)->bool{false}
         fn mark_committed(&self,_:&Arc<crate::package::scan_snapshot::Snapshot>){assert!(self.gate.try_lock().is_err());}
-        fn publication_finished(&self,_:&Arc<crate::package::scan_snapshot::Snapshot>)->Result<(),Exception>{assert!(self.gate.try_lock().is_ok());self.finished.store(true,std::sync::atomic::Ordering::Release);Ok(())}
+        fn publication_finished(&self,_:&Arc<crate::package::scan_snapshot::Snapshot>)->Result<(),Exception>{
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);
+            loop {
+                match self.gate.try_lock() {
+                    Ok(guard)=>{drop(guard);break;}
+                    Err(std::sync::TryLockError::WouldBlock)=>{
+                        assert!(std::time::Instant::now()<deadline,"publication callback cannot acquire the released installer gate");
+                        std::thread::yield_now();
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_))=>panic!("publication gate poisoned"),
+                }
+            }
+            self.finished.store(true,std::sync::atomic::Ordering::Release);Ok(())
+        }
     }
     #[test]
     fn metadata_writer_waits_for_real_keyset_commit_and_query_publication(){

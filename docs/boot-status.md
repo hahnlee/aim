@@ -482,7 +482,7 @@ causes. The exact process/file-dependent condition remains unresolved. An indepe
 with a two-delivered-signal regression (1/0/0); EPERM still reproduces after it,
 so this is not claimed as the reboot fix. Diagnostics leave no owned processes
 or temporary files behind.
-Current Source lower-owner cohort passes 174 ABI tests (four ignored), 803 PM
+Current Source lower-owner cohort passes 174 ABI tests (four ignored), 805 PM
 library tests (eleven ignored) and 65 complete Binder tests. Guest DAC now
 checks ancestor search, final access, owner/groups/capabilities and checked
 metadata persistence; metadata mutations use hidden real inode anchors and a
@@ -604,7 +604,11 @@ then packages.list is committed and every actual runtime user is queued before
 the worker starts. Real list ownership/persistence and permission main/reserve
 write regressions pass; coherent Source compilation also passes. The Java leaf
 and host caller require a matched image rebuild, so the current C111 cohort
-continues using its frozen prior contract and is not deployment evidence.
+continues using its frozen prior contract and is not deployment evidence. The registered-constructor PM library rerun now
+passes805/0 with eleven ignored. A fixture's one-shot publication gate try_lock
+had falsely rejected a concurrent legitimate writer; its bounded actual lock
+acquisition retains keyset/query ordering and catches a retained installer permit
+(#1164). No production publication behavior is relaxed.
 Inherited capability refresh now pins each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
 grant a class to a reused number (#1152). The concurrent replacement regression
@@ -642,7 +646,7 @@ including actual signed Mach-O verification/execution and retention of an old
 open generation. This fixes publication lifetime ownership, not a proven Darwin
 denial mechanism or a complete boot-cohort upgrade (#1146). Originals and frozen CTS
 binary bytes remain unchanged; controls are cleaned after verification. Latest whole native library verification
-passes 803/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
+passes 805/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0
