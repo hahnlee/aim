@@ -539,7 +539,9 @@ open/foreign-denial/reuse/durable-error regression passes. This does not count a
 full CTS acceptance. C111 now completes actual adbd exec-out getprop on its first
 probe: exit0,27949 bytes,660 parsed property rows,SDK36 and boot_completed1,
 with no PTY error. Its fresh full66 campaign allocates the device and starts the
-first official Parsing test body; no complete module XML is yet retained. The
+first official Parsing module completes with actual XML:11 passed,0 failed,
+done=true, SHA86d5e8020002161d5fa7d50b84582f7337acaa0e0a78fc0cb4f76d401aba8cdb.
+PreferredActivity follows automatically; full66 remains incomplete. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
