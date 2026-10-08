@@ -547,8 +547,10 @@ Version rows plus the selected five packages' UID/codepath/version/signatures,
 permission maps and component/restriction state. The prior AppDetails delta is
 gone; representative Calculator/WebView/Chrome rendering passes. Its owned
 processes and attachments are cleaned. This proves selected rollback parity,
-not all-package parity; fresh empty-data template fingerprints are still under
-#1157 investigation. A standalone isolated template command now
+not all-package parity; fresh empty-data template fingerprints expose a separate first-scan handoff:
+readLPw's forceCurrent Version owners are discarded when a new APK scan owner
+replaces prepared settings. Preserving that authoritative handoff is under
+#1157 correction; the earlier existing-data rollback does not cover it. A standalone isolated template command now
 uses explicit existing image/immutable-host/display/empty inputs and an exclusive
 new output; it holds the image read lease, records hashes before boot, refuses
 protected-path overlap and checks drift before publication. Focused CLI isolation
@@ -556,7 +558,7 @@ passes; the two native template builds and structural/runtime/BootStats parity
 remain incomplete. The first genuine empty-data C110 template boot reaches
 boot_completed at131.94s and captures original permission state at127.67s,
 but times out at300s waiting for the settings shipped set because packages.list
-is absent. The failed output/raw boot and input provenance are retained; no
+is absent (#1160). The failed output/raw boot and input provenance are retained; no
 published template is counted. A second identical build waits for the constructor
 output correction, then two completed builds still must satisfy the original
 structure and runtime parity gates. Donor/clone cleanup is verified and the clone is
