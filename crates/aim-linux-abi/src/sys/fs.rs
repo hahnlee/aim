@@ -638,6 +638,7 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
     if super::evdev::fstat(fd, &mut st).is_some() {
         return Ok(st);
     }
+    if let Some(result)=super::net::socket_inode_stat(fd){return result.map_err(|error|-(error as i64));}
     if let Some((inode, uid)) = super::net::proc_socket_identity(fd) {
         st.st_ino = inode;
         st.st_uid = uid;

@@ -400,6 +400,15 @@ impl HostLauncher {
 /// listening when `+listen` was given. Darwin has no `SOCK_SEQPACKET` for
 /// AF_UNIX; such sockets are created as `SOCK_STREAM` and the guest type is
 /// recorded in the sockets table for the syscall layer.
+/// The native launcher represents original init's root filesystem identity;
+/// the socket pathname's SocketSpec uid/gid are a separate bind-time owner.
+pub fn create_owned_socket(spec: &SocketSpec, runtime: &Path) -> Result<(OwnedFd,i32),String> {
+    let (fd,ty)=create_socket(spec)?;
+    aim_storage::socket_inode::allocated(runtime,fd.as_raw_fd(),0,0)
+        .map_err(|error|format!("socket inode allocation {}: {error}",spec.name))?;
+    Ok((fd,ty))
+}
+
 pub fn create_socket(spec: &SocketSpec) -> Result<(OwnedFd, i32), String> {
     let host_type = match spec.socket_type {
         SocketType::Stream => libc::SOCK_STREAM,
@@ -506,7 +515,7 @@ impl Launcher for HostLauncher {
             .map_err(|e| format!("{}: {e}", spec.identity_file.display()))?;
         let mut passed: Vec<(OwnedFd, i32)> = Vec::new();
         for socket in &spec.sockets {
-            let (fd, host_type) = create_socket(socket)?;
+            let (fd, host_type) = create_owned_socket(socket, &self.layout.runtime)?;
             append(
                 &self.layout.sockets_file(),
                 &format!(
@@ -693,6 +702,22 @@ mod tests {
             descriptor_env_name("ANDROID_FILE_", "/dev/kmsg"),
             "ANDROID_FILE__dev_kmsg"
         );
+    }
+
+    #[test]
+    fn native_service_socket_has_allocator_inode_owner_separate_from_bound_path() {
+        let dir=std::env::temp_dir().join(format!("gi-socket-owner-{}",std::process::id()));
+        let sockets=dir.join("dev/socket");fs::create_dir_all(&sockets).unwrap();
+        let spec=SocketSpec{name:"owned-listener".into(),socket_type:SocketType::Stream,passcred:false,listen:true,
+            perm:0o660,uid:2000,gid:3003,host_path:sockets.join("owned-listener"),env_name:"ANDROID_SOCKET_owned_listener".into(),fd:3};
+        let(fd,_)=create_owned_socket(&spec,&dir).unwrap();
+        let identity=aim_storage::socket_inode::identity(fd.as_raw_fd()).unwrap();
+        let bytes=fs::read(dir.join("socket-inodes").join(format!("{:x}",identity.cookie))).unwrap();
+        let owner=aim_storage::socket_inode::decode(&bytes,identity).unwrap();
+        assert_eq!((owner.uid,owner.gid,owner.mode),(0,0,0o777));
+        let path_owner=crate::guest_inode::read(&spec.host_path).unwrap().unwrap();
+        assert_eq!((path_owner.uid,path_owner.gid,path_owner.mode),(Some(2000),Some(3003),Some(0o660)));
+        drop(fd);fs::remove_dir_all(dir).unwrap();
     }
 
     /// A datagram socket (logd's `logdw`) holds what Linux's does, not

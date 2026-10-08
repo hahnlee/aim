@@ -40,6 +40,10 @@ use crate::errno::{self, EAGAIN, EBADF, EINVAL};
 use crate::vfs;
 
 mod proc_table;
+mod socket_inode;
+pub(crate) use socket_inode::stat as socket_inode_stat;
+pub(crate) use socket_inode::is_socket as is_socket_inode;
+pub(crate) use socket_inode::with as with_socket_inode;
 pub(super) use proc_table::{metadata as proc_metadata, table as proc_table, socket_identity as proc_socket_identity, SocketMetadata};
 
 const L_AF_UNIX: u16 = 1;
@@ -847,6 +851,7 @@ pub fn socket(a: [u64; 6]) -> i64 {
         _ => return -EAFNOSUPPORT,
     };
     fdtab::set_flags(fd, nonblock, cloexec);
+    if let Err(error)=socket_inode::allocated(fd){fdtab::on_close(fd);unsafe{libc::close(fd);}return -(error as i64);}
     fd as i64
 }
 
@@ -869,6 +874,7 @@ pub fn socketpair(a: [u64; 6]) -> i64 {
         setup_unix(fd, st);
         fdtab::set_flags(fd, ty & L_SOCK_NONBLOCK != 0, ty & L_SOCK_CLOEXEC != 0);
         fdtab::insert(fd, Kind::Sock(Sock::new(st)));
+        if let Err(error)=socket_inode::allocated(fd){for fd in fds{fdtab::on_close(fd);unsafe{libc::close(fd);}}return -(error as i64);}
     }
     // SAFETY: guest int[2].
     unsafe { (sv as *mut [i32; 2]).write_unaligned(fds) };
@@ -1174,6 +1180,7 @@ pub fn accept4(a: [u64; 6]) -> i64 {
         *socket.inet_owner.lock().unwrap() = Some(owner);
         fdtab::insert(nfd, Kind::Sock(socket));
     }
+    if let Err(error)=socket_inode::allocated(nfd){fdtab::on_close(nfd);unsafe{libc::close(nfd);}return -(error as i64);}
     if let Some(p) = peer {
         put_addr(&p, addr, addrlen);
     }

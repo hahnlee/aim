@@ -41,6 +41,11 @@ impl Info {
     }
 }
 
+pub(super) fn raw_identity(fd:i32)->Result<(u64,u64),Errno>{
+    let identity=aim_storage::socket_inode::identity(fd).map_err(|error|error.raw_os_error().map(errno::from_darwin).unwrap_or(EIO))?;
+    Ok((identity.inode,identity.cookie))
+}
+
 pub(super) fn created(fd: i32) -> Result<SocketMetadata, Errno> {
     let info = Info::read(unsafe { libc::getpid() }, fd)?;
     if !matches!(info.family(), libc::AF_INET | libc::AF_INET6) { return Err(97); }
@@ -56,7 +61,9 @@ pub(crate) fn socket_identity(fd: i32) -> Option<(u64, u32)> {
     let Kind::Sock(socket) = fdtab::get(fd)? else { return None; };
     let owner = (*socket.inet_owner.lock().unwrap())?;
     let info = Info::read(unsafe { libc::getpid() }, fd).ok()?;
-    (info.cookie() == owner.cookie).then_some((owner.inode, owner.uid))
+    if info.cookie()!=owner.cookie{return None;}
+    let uid=super::socket_inode::stat(fd)?.ok()?.st_uid;
+    Some((owner.inode,uid))
 }
 
 pub(crate) fn metadata() -> Result<Vec<SocketMetadata>, Errno> {
@@ -66,6 +73,7 @@ pub(crate) fn metadata() -> Result<Vec<SocketMetadata>, Errno> {
         let Some(Kind::Sock(socket)) = fdtab::get(fd) else { continue; };
         let Some(mut owner) = *socket.inet_owner.lock().unwrap() else { continue; };
         owner.fd = fd;
+        if let Some(stat)=super::socket_inode::stat(fd){owner.uid=stat?.st_uid;}
         let copied = |name: Option<Vec<u8>>| name.map(|bytes| { let mut value = [0;28]; let count = bytes.len().min(28); value[..count].copy_from_slice(&bytes[..count]); value });
         owner.local = copied(socket.local.lock().unwrap().clone());
         if let Family::Inet(options) = &socket.family {

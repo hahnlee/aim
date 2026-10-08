@@ -516,6 +516,11 @@ fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
     (out.join().unwrap(), err.join().unwrap())
 }
 
+#[test]
+fn socket_inode_owner_is_shared_across_real_guest_fork() {
+    check("socket_inode_owner_fork");
+}
+
 /// Linux retains blocked default-disposition SIGCHLD for synchronous waits,
 /// including fork+exec exit before the wait and an explicit SIG_DFL reset.
 #[test]

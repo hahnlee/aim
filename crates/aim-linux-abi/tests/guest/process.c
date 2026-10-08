@@ -1449,6 +1449,51 @@ static void default_sigchld_sigtimedwait(void) {
   puts("ok default_sigchld_sigtimedwait");
 }
 
+// sockfs inode ownership is shared through actual inherited and SCM sockets.
+static void socket_inode_owner_fork(void) {
+  int socket_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  CHECK(socket_fd >= 0, "allocate socket inode");
+  CHECK(fchown(socket_fd, 1073, (gid_t)-1) == 0, "resolver socket chown");
+  struct stat before;
+  CHECK(fstat(socket_fd, &before) == 0 && before.st_uid == 1073, "socket fstat owner");
+  pid_t child = fork();
+  CHECK(child >= 0, "socket owner fork");
+  if (child == 0) {
+    struct stat shared;
+    if (fstat(socket_fd, &shared) != 0 || shared.st_ino != before.st_ino || shared.st_uid != 1073) _exit(31);
+    if (fchown(socket_fd, 4099, (gid_t)-1) != 0) _exit(32);
+    _exit(0);
+  }
+  int status;
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+        "fork socket owner status %#x", status);
+  struct stat after;
+  CHECK(fstat(socket_fd, &after) == 0 && after.st_ino == before.st_ino && after.st_uid == 4099,
+        "parent did not observe child socket owner");
+  int channel[2]; CHECK(socketpair(AF_UNIX, SOCK_DGRAM, 0, channel) == 0, "SCM owner channel");
+  child = fork(); CHECK(child >= 0, "SCM owner fork");
+  if (child == 0) {
+    close(channel[0]); close(socket_fd);
+    if (setgid(40001) != 0 || setuid(40001) != 0) _exit(41);
+    char byte, control[CMSG_SPACE(sizeof(int))]; struct iovec iov = {&byte, 1};
+    struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+    if (recvmsg(channel[1], &message, 0) != 1) _exit(42);
+    struct cmsghdr* header = CMSG_FIRSTHDR(&message); int received;
+    if (header == NULL || header->cmsg_type != SCM_RIGHTS) _exit(43);
+    memcpy(&received, CMSG_DATA(header), sizeof(received)); struct stat transferred;
+    if (fstat(received, &transferred) != 0 || transferred.st_ino != before.st_ino || transferred.st_uid != 4099) _exit(44);
+    errno = 0; if (fchown(received, 40001, (gid_t)-1) != -1 || errno != EPERM) _exit(45);
+    close(received); close(channel[1]); _exit(0);
+  }
+  close(channel[1]); char byte = 1, control[CMSG_SPACE(sizeof(int))] = {0}; struct iovec iov = {&byte, 1};
+  struct msghdr message = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control, .msg_controllen = sizeof(control)};
+  struct cmsghdr* header = CMSG_FIRSTHDR(&message); header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS; header->cmsg_len = CMSG_LEN(sizeof(int));
+  memcpy(CMSG_DATA(header), &socket_fd, sizeof(socket_fd)); CHECK(sendmsg(channel[0], &message, 0) == 1, "send real socket owner FD");
+  CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0, "foreign SCM owner status %#x", status);
+  close(channel[0]); close(socket_fd);
+  puts("ok socket_inode_owner_fork");
+}
+
 int main(int argc, char** argv) {
   self_path = "/data/local/tmp/process";
   arg_area = argv[0];
@@ -1486,6 +1531,7 @@ int main(int argc, char** argv) {
     const char* name;
     void (*fn)(void);
   } checks[] = {
+      {"socket_inode_owner_fork", socket_inode_owner_fork},
       {"default_sigchld_sigtimedwait", default_sigchld_sigtimedwait},
       {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
       {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},

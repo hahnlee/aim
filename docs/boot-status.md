@@ -652,6 +652,15 @@ traffic with supported inactive timers, and UDP bind/connected traffic. It also
 verifies that an unsupported TCP keepalive state returns EOPNOTSUPP without
 hiding the unrelated UDP inventory. The official seven baseline failures occur
 at the host file-pull assertion; this integration result is not their CTS replay.
+The native network validation discrepancy exposes original DnsResolver socket
+fchown failing with EINVAL before its address-family source probe (#1162). Socket
+allocation now owns durable Linux sockfs UID/GID/mode keyed by the retained
+Darwin socket cookie, including native init-created inherited sockets. Actual
+fstat/fchown, duplicate/SCM transfer and guest fork preserve that inode owner;
+unknown unregistered adoption fails explicitly. Four focused checks pass with
+no skips, including a different-UID SCM receiver denied foreign chown and native
+init socket inode ownership distinct from its bound pathname. Actual network
+validation on the newly deployed runtime remains pending.
 An identical-signed-bytes executable control runs original sh successfully from
 a new vnode while the frozen original executable path dies before main. This
 narrows #1146 to executable publication/vnode generation behavior; it does not

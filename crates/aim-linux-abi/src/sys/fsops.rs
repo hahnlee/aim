@@ -863,7 +863,7 @@ fn fchownat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
 pub fn fchown(a: [u64; 6]) -> i64 {
     fchown_as(a, &super::cred::current())
 }
-fn fchown_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+pub(super) fn fchown_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     fchown_fd_as(a, id, false)
 }
 fn fchown_fd_as(a: [u64; 6], id: &super::cred::Identity, allow_path: bool) -> i64 {
@@ -897,6 +897,14 @@ fn fchown_fd_as(a: [u64; 6], id: &super::cred::Identity, allow_path: bool) -> i6
         )
         .map(|_| 0)
         .unwrap_or_else(|error| -(error as i64));
+    }
+    match super::net::is_socket_inode(fd) {
+        Err(error)=>return -(error as i64),
+        Ok(true)=>return super::net::with_socket_inode(fd,|stat,attributes| {
+            let change=chown_change(stat,a[1],a[2],id).map_err(|error|(-error) as crate::errno::Errno)?;
+            attributes.uid=change.uid.or(attributes.uid);attributes.gid=change.gid.or(attributes.gid);attributes.mode=change.mode.or(attributes.mode);Ok(())
+        }).map(|_|0).unwrap_or_else(|error|-(error as i64)),
+        Ok(false)=>{},
     }
     let guest = fd_guest(fd).unwrap_or_default();
     let original = fd;
