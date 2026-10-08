@@ -18,7 +18,41 @@ fn retired_unchanged(before:&State,after:&Package)->bool {
         && old.has_auto_verify_domains==after.has_auto_verify_domains
         && old.signature==after.signature)
 }
+/// Native admitted lifecycle state, independent of the last successful DVS save.
+#[derive(Clone,Default)]
+pub(crate) struct AdmissionReceipts {
+    generation:u64,
+    packages:std::collections::BTreeMap<(String,String),(u64,Package)>,
+}
+impl AdmissionReceipts {
+    pub(crate) fn record(&mut self,generation:u64,owner:&Owner)->Result<(),String> {
+        if generation==0||generation<self.generation{return Err("domain lifecycle admission generation regressed".into());}
+        for name in owner.attached_names() {
+            let package=owner.package(name).ok_or("native admitted domain package absent")?.clone();
+            self.packages.entry((package.name.clone(),package.id.to_ascii_lowercase())).or_insert((generation,package));
+        }
+        self.generation=generation;Ok(())
+    }
+    fn unchanged(&self,after:&Package)->bool {
+        self.packages.get(&(after.name.clone(),after.id.to_ascii_lowercase()))
+            .is_some_and(|(_,old)|retired_unchanged(&State{active:vec![old.clone()],..Default::default()},after))
+    }
+    pub(crate) fn validate_version(&self,version:u64)->Result<(),String> {
+        if version==0||version>self.generation{return Err("original domain export exceeds admitted lifecycle generation".into());}
+        Ok(())
+    }
+    pub(crate) fn acknowledge(&mut self,version:u64,desired:&State,current:&Owner)->Result<(),String> {
+        self.validate_version(version)?;
+        self.packages.retain(|(name,id),(admitted,_)|version<*admitted
+            || current.package(name).is_some_and(|p|p.id.eq_ignore_ascii_case(id))
+            || desired.active.iter().any(|p|p.name==*name&&p.id.eq_ignore_ascii_case(id)));
+        Ok(())
+    }
+}
 pub fn merge(owner:&Owner,before:&State,desired:State)->Result<Owner,String>{
+    merge_with_receipts(owner,before,desired,&AdmissionReceipts::default())
+}
+pub(crate) fn merge_with_receipts(owner:&Owner,before:&State,desired:State,receipts:&AdmissionReceipts)->Result<Owner,String>{
     let current=owner.persisted();let active=owner.attached_names().collect::<BTreeSet<_>>();
     for name in &active{
         let live=owner.package(name).ok_or("native attached domain owner absent")?;
@@ -32,12 +66,12 @@ pub fn merge(owner:&Owner,before:&State,desired:State)->Result<Owner,String>{
             continue;
         };
         if !live.id.eq_ignore_ascii_case(&after.id){
-            if retired_unchanged(before,after){continue;}
+            if retired_unchanged(before,after)||receipts.unchanged(after){continue;}
             return Err(format!("original DVS domain UUID differs: {name}"));
         }
     }
     for after in &desired.active {
-        if !current.active.iter().any(|p|p.name==after.name) && !retired_unchanged(before,after) {
+        if !current.active.iter().any(|p|p.name==after.name) && !retired_unchanged(before,after) && !receipts.unchanged(after) {
             return Err(format!("foreign original DVS package {}",after.name));
         }
     }
@@ -45,7 +79,7 @@ pub fn merge(owner:&Owner,before:&State,desired:State)->Result<Owner,String>{
     for live in &mut merged.active{
         let Some(after)=desired.active.iter().find(|value|value.name==live.name)else{continue;};
         if !live.id.eq_ignore_ascii_case(&after.id){
-            if retired_unchanged(before,after){continue;}
+            if retired_unchanged(before,after)||receipts.unchanged(after){continue;}
             return Err(format!("original DVS domain UUID differs: {}",live.name));
         }
         let old=before.active.iter().find(|value|value.name==live.name&&value.id.eq_ignore_ascii_case(&live.id)).unwrap_or(live);
@@ -75,6 +109,36 @@ mod tests {
     use super::*;
     use crate::package::{domain_verification::{User,owner::Input},pkg::{AndroidPackage,Activity},
         intent_filter::{IntentFilter,ParsedIntentInfo},system_config::SystemConfig};
+    #[test]
+    fn admission_without_export_survives_removal_until_matching_absence_acknowledgement() {
+        let config=SystemConfig::default();let mut owner=Owner::new(State::default(),Default::default());
+        let before=owner.persisted();let mut receipts=AdmissionReceipts::default();receipts.record(1,&owner).unwrap();
+        let code=AndroidPackage{package_name:"admitted".into(),..Default::default()};
+        owner.add(Input{id:"00000000-0000-0000-0000-000000000001",name:"admitted",code:Some(&code),signatures:&[],system:false,restrict_domains:true,pre_verified:None},&config).unwrap();
+        let admitted=owner.persisted();receipts.record(2,&owner).unwrap();
+        owner.clear_package("admitted");receipts.record(3,&owner).unwrap();
+        // An export made before admission does not acknowledge the later clear.
+        receipts.acknowledge(1,&before,&owner).unwrap();
+        let delayed=decode(&encode(&admitted).unwrap()).unwrap();
+        assert_eq!(merge_with_receipts(&owner,&before,delayed.clone(),&receipts).unwrap().persisted(),owner.persisted());
+        assert!(owner.package("admitted").is_none());
+        let mut modified=delayed.clone();modified.active[0].users.push(User{id:0,allow_link_handling:false,enabled_hosts:vec![]});
+        assert!(merge_with_receipts(&owner,&before,modified,&receipts).is_err());
+        let mut foreign=delayed.clone();foreign.active[0].signature=Some("foreign".into());
+        assert!(merge_with_receipts(&owner,&before,foreign,&receipts).is_err());
+        let mut uuid=delayed.clone();uuid.active[0].id="00000000-0000-0000-0000-000000000002".into();
+        assert!(merge_with_receipts(&owner,&before,uuid,&receipts).is_err());
+        receipts.acknowledge(3,&owner.persisted(),&owner).unwrap();
+        assert!(merge_with_receipts(&owner,&before,delayed,&receipts).is_err());
+    }
+    #[test]
+    fn admission_generations_reject_regression_and_unconfirmed_export_epochs() {
+        let owner=Owner::new(State::default(),Default::default());
+        let mut receipts=AdmissionReceipts::default();receipts.record(3,&owner).unwrap();
+        assert!(receipts.record(2,&owner).is_err());
+        assert!(receipts.validate_version(4).is_err());assert!(receipts.validate_version(0).is_err());
+        assert!(receipts.validate_version(3).is_ok());
+    }
     fn deleted_native_fixture()->(Owner,State) {
         let config=SystemConfig::default();
         let mut owner=Owner::new(State::default(),Default::default());

@@ -3,6 +3,6 @@ import dev.aim.server.IPackageDomainSettingsChanged;
 interface IPackageDomainSettings {
     void seed(in byte[] nativeSettings, IPackageDomainSettingsChanged changes);
     byte[] capture();
-    void reconcilePackages();
+    boolean reconcilePackages(long expectedVersion);
     void close();
 }

@@ -53,6 +53,25 @@ fn private_aidl(dir: &Path, interface: &str) -> PathBuf {
     out.join(format!("dev/aim/server/{interface}.java"))
 }
 
+/// Generate the complete own interface closure: bootstrap capabilities grow
+/// independently, so a fixed list of four roots is not a complete oracle ABI.
+pub fn private_aidl_sources(dir: &Path) -> Vec<PathBuf> {
+    let input = aim_paths::root().join("java/device-services/aidl");
+    let out = dir.join("aidl");
+    fs::create_dir_all(&out).unwrap();
+    let mut roots: Vec<_> = fs::read_dir(input.join("dev/aim/server")).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "aidl"))
+        .collect();
+    roots.sort();
+    super::runtime::run(std::process::Command::new(
+        aim_paths::fetched().join("java/build-tools-36.0.0/android-16/aidl"))
+        .args(["--lang=java", "--min_sdk_version", "36"])
+        .arg(format!("-I{}", input.display()))
+        .arg(format!("-o{}", out.display())).args(roots));
+    sources(&out)
+}
+
 /// Compile the complete checked-in device service sources and generated own
 /// interfaces for oracle compilation and its vendor implementation dex.
 /// Original API stubs remain compile-only and are never returned as inputs.

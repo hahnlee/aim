@@ -111,6 +111,7 @@ public final class PackageMigrationPolicyOracle {
         } finally { request.recycle(); reply.recycle(); }
     }
     private static final class LocalCompat extends com.android.server.compat.PlatformCompat {
+        @Override public boolean isChangeEnabledByUid(long id, int uid) { throw new AssertionError("unexpected UID compatibility query"); }
         LocalCompat(android.content.Context context) { super(context); }
         @Override public android.os.IBinder asBinder() { return this; }
         @Override public boolean isChangeEnabled(long id, android.content.pm.ApplicationInfo info) { throw new AssertionError("unexpected logging compatibility query"); }
@@ -183,6 +184,7 @@ public final class PackageMigrationPolicyOracle {
         } finally { request.recycle(); reply.recycle(); }
     }
     private static final class VerifierProxy implements com.android.server.pm.verify.domain.proxy.DomainVerificationProxy {
+        public android.content.ComponentName getComponentName() { throw new AssertionError("unused verifier component owner"); }
         public boolean isCallerVerifier(int uid) { return uid == 10073 || uid == 1010073; }
         public void sendBroadcastForPackages(java.util.Set<String> names) { throw new AssertionError("identity broadcast"); }
         public boolean runMessage(int code, Object object) { throw new AssertionError("identity message"); }

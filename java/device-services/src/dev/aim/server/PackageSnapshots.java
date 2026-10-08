@@ -57,16 +57,18 @@ public final class PackageSnapshots {
 
         public boolean crossUserSuspensions() { return crossUserSuspensions; }
 
-        private boolean refreshing;
+        private final ThreadLocal<Boolean> refreshing = ThreadLocal.withInitial(() -> false);
 
         public long refresh() throws RemoteException, IOException {
+            long retainedVersion;
             synchronized (this) {
                 if (closed) throw new IllegalStateException("package replica store is closed");
-                if (refreshing) {
+                if (refreshing.get()) {
                     if (current == null) throw new IllegalStateException("initial package capture is in progress");
                     return current.version;
                 }
-                refreshing = true;
+                retainedVersion = current == null ? 0 : current.version;
+                refreshing.set(true);
             }
             Data next = null;
             Data previous = null;
@@ -78,37 +80,46 @@ public final class PackageSnapshots {
                     synchronized (this) {
                         if (closed) throw new IllegalStateException("package replica store is closed");
                         if (current != null) {
-                            if (version < current.version) throw new IOException("native snapshot version moved backwards");
-                            if (version == current.version) return version;
+                            if (version < retainedVersion) throw new IOException("native snapshot version moved backwards");
+                            if (version <= current.version) return current.version;
                         }
                     }
                     next = lease.captureData(owner, crossUserSuspensions);
                 }
                 synchronized (this) {
                     if (closed) throw new IllegalStateException("package replica store is closed");
+                    // An independent capture may have published while this RPC
+                    // was assembling its immutable graph. Retire the loser.
+                    if (current != null && next.version <= current.version) return current.version;
                     previous = current;
                     current = next;
                     next = null;
                     return current.version;
                 }
             } finally {
-                synchronized (this) { refreshing = false; }
+                refreshing.remove();
                 if (next != null) next.close();
                 if (previous != null) previous.close();
             }
         }
 
         private Data capture() {
+            long retainedVersion;
             synchronized (this) {
                 if (closed) throw new IllegalStateException("package replica store is closed");
                 var candidate = NativeInstallPermissionScope.candidate(this);
                 if (candidate != null) { candidate.retain(); return candidate; }
                 if (current == null) throw new IllegalStateException("native package replica is unavailable");
-                long observed = versions == null ? current.version : versions.currentVersion();
-                if (observed < current.version) throw new IllegalStateException("native package version moved backwards");
-                // A reentrant permission callback uses the last fully published
-                // immutable graph while the next graph is assembled outside locks.
-                if (observed == current.version || refreshing) { current.retain(); return current; }
+                retainedVersion = current.version;
+                // Same-thread recursion alone may use the retained immutable
+                // graph while its next capture is assembled outside locks.
+                if (versions == null || refreshing.get()) { current.retain(); return current; }
+            }
+            long observed = versions.currentVersion();
+            synchronized (this) {
+                if (closed || current == null) throw new IllegalStateException("package replica store is closed");
+                if (observed < retainedVersion) throw new IllegalStateException("native package version moved backwards");
+                if (observed <= current.version) { current.retain(); return current; }
             }
             try { refresh(); }
             catch (RemoteException failure) { throw failure.rethrowFromSystemServer(); }

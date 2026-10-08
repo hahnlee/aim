@@ -71,6 +71,10 @@ impl Owner {
     }
     pub fn package_added(&self, name: &str, user: i32, archived: bool, loader: i32, prediction: Option<&str>) -> Result<(), Exception> {
         self.call(api::PACKAGE_ADDED, |p| api::PackageAdded { package_name: Some(name.into()), user_id: user, archived, data_loader_type: loader, prediction_package: prediction.map(str::to_owned) }.write(p), |_| Ok(()))
+            .map_err(|mut error| {
+                error.message = format!("Original packageAdded {name} user={user} (exception {}): {}", error.code, error.message);
+                error
+            })
     }
     pub fn suspension_allowed(&self, user: i32, uid: i32) -> Result<bool, Exception> {
         self.call(api::IS_SUSPENSION_ALLOWED, |p| api::IsSuspensionAllowed { user_id: user, calling_uid: uid }.write(p), |r| r.read_bool())

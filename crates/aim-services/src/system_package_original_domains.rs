@@ -9,6 +9,8 @@ use aim_service_aidl::{
 };
 struct State {
     before: domain::State,
+    receipts: original_bridge::AdmissionReceipts,
+    pending: bool,
     failure: Option<Exception>,
 }
 pub struct Runtime {
@@ -16,6 +18,8 @@ pub struct Runtime {
     bridge: Arc<crate::package::bootstrap::Bridge>,
     leaf: Strong,
     state: Mutex<State>,
+    lifecycle: Mutex<()>,
+    lifecycle_done: std::sync::Condvar,
     closed: std::sync::atomic::AtomicBool,
 }
 fn failure(message: impl Into<String>) -> Exception {
@@ -30,17 +34,62 @@ impl Runtime {
             .system
             .upgrade()
             .ok_or_else(|| failure("original domain system stopped"))?;
-        system.check_package_bootstrap(&self.bridge)?;
-        let mut request = Parcel::new();
-        leaf::ReconcilePackages {}.write(&mut request);
-        let reply = self
-            .leaf
-            .transact(leaf::RECONCILE_PACKAGES, &request, false)
-            .map_err(|status| failure(format!("domain lifecycle transport: {status}")))?;
-        leaf::read_reconcile_packages_reply(&mut reply.reader())
-            .map_err(|status| failure(format!("domain lifecycle reply: {status}")))??;
-        system.check_package_bootstrap(&self.bridge)
+        let _operation = self.lifecycle.lock().unwrap();
+        loop {
+            system.check_package_bootstrap(&self.bridge)?;
+            let capture = system.capture_package_queries()?;
+            let native = capture
+                .domains()
+                .ok_or_else(|| failure("native domain lifecycle owner absent"))?;
+            let generation = capture.scan().version();
+            let previous = {
+                let mut state = self.state.lock().unwrap();
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+                let previous = state.receipts.clone();
+                state
+                    .receipts
+                    .record(generation, native.owner())
+                    .map_err(failure)?;
+                state.pending = true;
+                previous
+            };
+            // No state/publication/disk/install lock crosses this original RPC.
+            // A queued XML callback waits for the typed admission result below.
+            let result: Result<bool> = (|| {
+                let mut request = Parcel::new();
+                leaf::ReconcilePackages {
+                    expected_version: i64::try_from(generation)
+                        .map_err(|_| failure("domain lifecycle version exhausted"))?,
+                }
+                .write(&mut request);
+                let reply = self
+                    .leaf
+                    .transact(leaf::RECONCILE_PACKAGES, &request, false)
+                    .map_err(|status| failure(format!("domain lifecycle transport: {status}")))?;
+                leaf::read_reconcile_packages_reply(&mut reply.reader())
+                    .map_err(|status| failure(format!("domain lifecycle reply: {status}")))?
+            })();
+            {
+                let mut state = self.state.lock().unwrap();
+                if !matches!(result, Ok(true)) {
+                    state.receipts = previous;
+                }
+                if let Err(error) = &result {
+                    state.failure = Some(error.clone());
+                }
+                state.pending = false;
+                self.lifecycle_done.notify_all();
+            }
+            match result {
+                Ok(true) => return system.check_package_bootstrap(&self.bridge),
+                Ok(false) => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
+
     pub fn close(&self) -> Result<()> {
         if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return Ok(());
@@ -54,16 +103,23 @@ impl Runtime {
         leaf::read_close_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain close reply: {status}")))?
     }
-    fn apply(&self, bytes: &[u8]) -> Result<()> {
+    fn apply(&self, bytes: &[u8], lifecycle_version: u64) -> Result<()> {
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(failure("original domain owner closed"));
         }
         let desired = original_bridge::decode(bytes).map_err(failure)?;
         let mut state = self.state.lock().unwrap();
+        while state.pending {
+            state = self.lifecycle_done.wait(state).unwrap();
+        }
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
         let result: Result<()> = (|| {
+            state
+                .receipts
+                .validate_version(lifecycle_version)
+                .map_err(failure)?;
             let system = self
                 .system
                 .upgrade()
@@ -92,8 +148,13 @@ impl Runtime {
                 let native = capture
                     .domains()
                     .ok_or_else(|| failure("native domain owner missing"))?;
-                let next = original_bridge::merge(native.owner(), &state.before, desired.clone())
-                    .map_err(failure)?;
+                let next = original_bridge::merge_with_receipts(
+                    native.owner(),
+                    &state.before,
+                    desired.clone(),
+                    &state.receipts,
+                )
+                .map_err(failure)?;
                 if next.persisted() == native.owner().persisted() {
                     return Ok(());
                 }
@@ -119,6 +180,22 @@ impl Runtime {
         })();
         match result {
             Ok(()) => {
+                let current = self
+                    .system
+                    .upgrade()
+                    .ok_or_else(|| failure("original domain system stopped"))?
+                    .capture_package_queries()?;
+                state
+                    .receipts
+                    .acknowledge(
+                        lifecycle_version,
+                        &desired,
+                        current
+                            .domains()
+                            .ok_or_else(|| failure("native domain acknowledgement owner absent"))?
+                            .owner(),
+                    )
+                    .map_err(failure)?;
                 state.before = desired;
                 Ok(())
             }
@@ -149,7 +226,13 @@ impl aim_binder_host::local::Service for Changed {
             .settings
             .as_deref()
             .ok_or_else(|| failure("original domain state null"))
-            .and_then(|bytes| self.0.apply(bytes));
+            .and_then(|bytes| {
+                self.0.apply(
+                    bytes,
+                    u64::try_from(args.lifecycle_version)
+                        .map_err(|_| failure("negative original domain lifecycle version"))?,
+                )
+            });
         let mut reply = Parcel::new();
         match result {
             Ok(()) => reply.write_no_exception(),
@@ -198,8 +281,18 @@ impl System {
             leaf: owner,
             state: Mutex::new(State {
                 before,
+                pending: false,
+                receipts: {
+                    let mut receipts = original_bridge::AdmissionReceipts::default();
+                    receipts
+                        .record(capture.scan().version(), capture.domains().unwrap().owner())
+                        .map_err(failure)?;
+                    receipts
+                },
                 failure: None,
             }),
+            lifecycle: Mutex::new(()),
+            lifecycle_done: std::sync::Condvar::new(),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
         let callback = self.process.add_service(Arc::new(Changed(runtime.clone())));
@@ -224,7 +317,7 @@ impl System {
         let record = leaf::read_capture_reply(&mut reply.reader())
             .map_err(|status| failure(format!("domain export reply: {status}")))??
             .ok_or_else(|| failure("domain initial export null"))?;
-        runtime.apply(&record)?;
+        runtime.apply(&record, capture.scan().version())?;
         Ok(runtime)
     }
 }

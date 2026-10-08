@@ -326,7 +326,13 @@ public final class NativePackageEffectsBridge extends IPackageMutationBridge.Stu
         });
     }
     @Override public void packageAdded(String name, int user, boolean archived, int dataLoaderType, String predictionPackage) {
-        enforceNative(); clean(() -> added(name, user, archived, dataLoaderType, predictionPackage));
+        enforceNative();
+        try {
+            clean(() -> added(name, user, archived, dataLoaderType, predictionPackage));
+        } catch (RuntimeException failure) {
+            android.util.Slog.e("NativePackageEffects", "Original packageAdded failed: " + name + " user=" + user, failure);
+            throw failure;
+        }
     }
     private void added(String name, int user, boolean archived, int dataLoaderType, String predictionPackage) {
         Computer snapshot = snapshot();

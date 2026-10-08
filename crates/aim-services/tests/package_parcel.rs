@@ -48,18 +48,10 @@ fn assert_guest_success(boot: &Boot, output: &std::process::Output, stage: &str)
         String::from_utf8_lossy(&logs.stdout)
     );
 }
-#[test]
-#[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
-fn native_package_parcels_match_original_read_write() {
-    use std::collections::BTreeMap;
-    let dir = std::env::temp_dir().join(format!("aim-pm-parcels-{}", std::process::id()));
-    fs::create_dir(&dir).unwrap();
-    let data = Data(dir);
-    let java = aim_paths::fetched().join("java");
-    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
-    let classes = data.0.join("classes");
-    let stubs = data.0.join("stubs");
-    let dex = data.0.join("dex");
+fn compile_original_parcel_oracle(dir: &std::path::Path, jdk: &std::path::Path, java: &std::path::Path) -> std::path::PathBuf {
+    let classes = dir.join("classes");
+    let stubs = dir.join("stubs");
+    let dex = dir.join("dex");
     for path in [&classes, &stubs, &dex] {
         fs::create_dir(path).unwrap();
     }
@@ -82,8 +74,10 @@ fn native_package_parcels_match_original_read_write() {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/api/com/android/permission/persistence"),
         )));
+    let production = common::java::production_classes(dir, jdk, &stubs);
+    let classpath = std::env::join_paths([production.as_path(), stubs.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
-        .args(["--release", "17", "-d"])
+        .args(["--release", "17", "-Xmaxerrs", "1000", "-d"])
         .arg(&classes)
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -138,7 +132,7 @@ fn native_package_parcels_match_original_read_write() {
                 .join("tests/fixtures/CapturedSharedUserOracle.java"),
         )
         .arg("-classpath")
-        .arg(&stubs)
+        .arg(&classpath)
         .arg(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/PackageRoundTripOracle.java"),
@@ -295,10 +289,8 @@ fn native_package_parcels_match_original_read_write() {
                 .join("java/device-services/src/dev/aim/server/PackageSdkSandbox.java"),
         )
         .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/SdkDataOracle.java"))
-        .arg(common::java::bootstrap_aidl(&data.0))
-        .arg(common::java::resolver_identity_aidl(&data.0))
-        .arg(common::java::snapshot_aidl(&data.0))
-        .arg(common::java::computer_aidl(&data.0)));
+        .arg(aim_paths::root().join("crates/aim-services/tests/fixtures/PackageSnapshotConcurrencyOracle.java"))
+        .args(common::java::private_aidl_sources(&dir)));
     let mut pending = vec![classes.clone()];
     let mut class_files = Vec::new();
     while let Some(dir) = pending.pop() {
@@ -324,6 +316,8 @@ fn native_package_parcels_match_original_read_write() {
         ])
         .arg(&jdk)
         .arg("--classpath")
+        .arg(&production)
+        .arg("--classpath")
         .arg(&stubs)
         .arg("--output")
         .arg(&dex)
@@ -337,6 +331,30 @@ fn native_package_parcels_match_original_read_write() {
         ],
     )
     .unwrap();
+    dex
+}
+
+#[test]
+#[ignore = "requires pinned image, JDK and d8; compile-only, not an ART runtime pass"]
+fn package_parcel_oracle_compiles_against_original_api() {
+    let dir = std::env::temp_dir().join(format!("aim-pm-parcel-compile-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let data = Data(dir);
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    compile_original_parcel_oracle(&data.0, &jdk, &java);
+}
+
+#[test]
+#[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
+fn native_package_parcels_match_original_read_write() {
+    use std::collections::BTreeMap;
+    let dir = std::env::temp_dir().join(format!("aim-pm-parcels-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let data = Data(dir);
+    let java = aim_paths::fetched().join("java");
+    let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let dex = compile_original_parcel_oracle(&data.0, &jdk, &java);
     let boot = Boot {
         ctl: aim_paths::root().join("target/release/aimctl"),
         data: data.0.join("guest"),
@@ -529,7 +547,7 @@ fn native_package_parcels_match_original_read_write() {
             );
             let name = format!("{index}-{enriched}.native");
             fs::write(directory.join(&name), &entry.bytes).unwrap();
-            expected.push((name, pkg.package_name, entry));
+            expected.push((name, pkg.package_name, entry.bytes));
         }
     }
     // Boot-generated cache counts vary; every discovered object remains part
@@ -1287,7 +1305,7 @@ fn native_package_parcels_match_original_read_write() {
         pkg.signing_details = signing.package_details().unwrap();
         let facade = pkg.to_facade_entry(&signing).unwrap();
         fs::write(directory.join(name), &facade.cache.bytes).unwrap();
-        expected.push((name.to_owned(), pkg.package_name, facade.cache));
+        expected.push((name.to_owned(), pkg.package_name, facade.cache.bytes));
     }
     for loaded in snapshot.owner().loaded_packages().values() {
         let pkg = &loaded.package;
@@ -1760,7 +1778,7 @@ fn native_package_parcels_match_original_read_write() {
         );
         fs::write(directory.join(format!("{name}.seinfo")), label).unwrap();
         let mut metadata = Vec::new();
-        match facade.past_signing_certificates {
+        match &facade.past_signing_certificates {
             None => metadata.extend_from_slice(&(-1_i32).to_be_bytes()),
             Some(past) => {
                 metadata.extend_from_slice(&(past.len() as i32).to_be_bytes());
@@ -1772,9 +1790,9 @@ fn native_package_parcels_match_original_read_write() {
             }
         }
         fs::write(directory.join(format!("{name}.signing")), metadata).unwrap();
-        let entry = facade.cache;
+        let entry = &facade.cache;
         fs::write(directory.join(&name), &entry.bytes).unwrap();
-        expected.push((name, pkg.package_name.clone(), entry));
+        expected.push((name, pkg.package_name.clone(), entry.bytes.clone()));
     }
     let restore_cases = [
         "<packages><version sdkVersion='36' databaseVersion='3'/><package name='early' codePath='/data/early' sharedUserId='10050'><perms><item name='dropped'/></perms></package><shared-user name='group' userId='10050'><perms><item name='base' flags='17'/></perms></shared-user><package name='late' codePath='/data/late' sharedUserId='10050'><perms><item name='late'/></perms></package><updated-package name='late' codePath='/system/late' userId='10050'><perms><item name='factory'/></perms></updated-package><updated-package name='early' codePath='/system/early' sharedUserId='10050'><perms><item name='factory-shared'/></perms></updated-package><package name='standalone' codePath='/data/standalone' userId='10070'><signing-keyset><perms><item name='nested'/></perms></signing-keyset><unknown><perms><item name='ignored'/></perms></unknown></package></packages>",
@@ -4819,7 +4837,7 @@ fn native_package_parcels_match_original_read_write() {
         full_original, writer_expected,
         "complete original settings inventory differs"
     );
-    for (name, package, entry) in expected {
+    for (name, package, entry_bytes) in expected {
         if name.starts_with("scan-") {
             let original_settings = aim_services::package::settings::Settings::parse(
                 &aim_android_xml::read(
@@ -4904,7 +4922,7 @@ fn native_package_parcels_match_original_read_write() {
             assert_eq!(state.resolved_suspensions(10, true)[0].0, 0);
         }
         let original = fs::read(directory.join(format!("{name}.original"))).unwrap();
-        let mut native = AndroidPackage::read_cache_entry(&entry.bytes).unwrap();
+        let mut native = AndroidPackage::read_cache_entry(&entry_bytes).unwrap();
         let mut original = AndroidPackage::read_cache_entry(&original).unwrap();
         normalize_maps(&mut native);
         normalize_maps(&mut original);

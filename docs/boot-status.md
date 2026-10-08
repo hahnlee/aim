@@ -292,6 +292,33 @@ reboot verification and cleanup. Broader 66-module/app acceptance remains
 incomplete. Removal persistence lock order is also corrected (#1128): disk is
 locked before canonical snapshot publication and released before query callbacks;
 the actual four-publication regression passes without skips.
+C81 integrates that lock-order correction. PackageSetting device first-install
+time and code-path checks pass across both reboots; official XML records two
+passes, zero failures and done=true (2026.10.08_19.49.49). Original bugreport
+collection finishes after 380 seconds; this was not a proven deadlock. Its duplicate-uninstall warning is the original
+host cleanUp followed by automatic APK teardown; the first removal and absent
+package assertion pass. The separate WifiUtil postcheck install reports a blank
+original exception during committed package-added effects; this remains an open
+validation failure. Explicit retained Settings policy, native boot owner and
+signing transport gates each pass with zero skips after test owner initialization
+and keyed URI-group assertions are brought current. The full original-ART parcel
+oracle fixture compilation gaps are corrected (#1130): complete own AIDL and
+original compile-only API closure, immutable-cache ownership and duplicate methods
+are reconciled. The current compile gate passes; actual ART execution is pending.
+C82 adds package-added callback provenance and passes the Java/image build.
+An unchanged official WifiUtil install succeeds on the fresh runtime epoch, but
+current ParsingHost replay fails its first install: packageAdded cannot find the
+committed generated package in the query snapshot (actual NPE at the typed bridge
+state lookup). Original DVS subsequently rejects that same package as foreign and
+terminates SystemServer. The incomplete invocation is not a current module pass;
+the Java cache owner concurrency is corrected (#1129): only same-thread
+recursion retains an older graph, independent captures publish monotonically, and
+version/capture RPCs run outside the Store monitor. Domain lifecycle admissions
+carry exact captured generations and native receipts; unchanged queued removed
+records are accepted only until acknowledged absence, with foreign/altered states
+still rejected (eight owner regressions pass). The current native service suite
+passes 787 tests, zero failures, eight ignored; coherent original image and
+updated oracle compilation pass. Actual C83/ART replay is pending.
 C14 passed shared and nonshared APEX permission UID handling.
 The absent projection requires matching parsed APEX name/path and uid -1;
 ordinary missing owners still fail, and the focused regression passes.

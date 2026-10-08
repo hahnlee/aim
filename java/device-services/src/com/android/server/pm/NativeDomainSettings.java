@@ -20,6 +20,7 @@ public final class NativeDomainSettings extends IPackageDomainSettings.Stub {
     private boolean seeded;
     private NativeComputer retained;
     private boolean closed;
+    private long lifecycleVersion;
     public NativeDomainSettings(DomainVerificationService domains,Supplier<NativeComputer> computers,Handler handler){
         this.domains=Objects.requireNonNull(domains);this.computers=Objects.requireNonNull(computers);this.handler=Objects.requireNonNull(handler);
     }
@@ -38,7 +39,7 @@ public final class NativeDomainSettings extends IPackageDomainSettings.Stub {
             // These are the actual admitted native PackageState objects/UUIDs,
             // exactly the same lifecycle addPackage original PMS invokes.
             for(var state:snapshot.getPackageStates().values())if(state.getPkg()!=null&&state.getDomainSetId()!=null)domains.addPackage(state,null);
-            retained=snapshot;seeded=true;
+            retained=snapshot;lifecycleVersion=snapshot.domainCaptureVersion();seeded=true;
         }catch(IOException|org.xmlpull.v1.XmlPullParserException|RuntimeException failure){snapshot.close();throw new IllegalStateException("original domain settings import failed",failure);}
     }
     @Override public synchronized byte[] capture(){
@@ -53,10 +54,12 @@ public final class NativeDomainSettings extends IPackageDomainSettings.Stub {
             serializer.endTag(null,"packages");serializer.endDocument();return bytes.toByteArray();
         }catch(IOException failure){throw new IllegalStateException("original domain settings export failed",failure);}
     }
-    @Override public synchronized void reconcilePackages(){
+    @Override public synchronized boolean reconcilePackages(long expectedVersion){
         enforce();if(!seeded||closed)throw new IllegalStateException("original domain settings not seeded or closed");
         var next=computers.get();boolean applied=false;
         try{
+            if(next.domainCaptureVersion()!=expectedVersion)return false;
+            if(expectedVersion<lifecycleVersion)throw new IllegalStateException("domain lifecycle generation regressed");
             var old=retained.getPackageStates();var current=next.getPackageStates();
             for(String name:old.keySet())if(!current.containsKey(name))domains.clearPackage(name);
             for(var entry:current.entrySet()){
@@ -68,16 +71,16 @@ public final class NativeDomainSettings extends IPackageDomainSettings.Stub {
                     || previous.getPkg().getLongVersionCode()!=setting.getPkg().getLongVersionCode()
                     || !Objects.equals(previous.getPkg().getBaseApkPath(),setting.getPkg().getBaseApkPath()))domains.migrateState(previous,setting,null);
             }
-            retained.close();retained=next;applied=true;scheduleWrite();
+            retained.close();retained=next;lifecycleVersion=expectedVersion;applied=true;scheduleWrite();return true;
         }finally{if(!applied)next.close();}
     }
     @Override public synchronized void close(){enforce();closed=true;changes=null;if(retained!=null){retained.close();retained=null;}}
     public void scheduleWrite(){
         synchronized(this){if(!seeded||closed)throw new IllegalStateException("original domain settings not seeded or closed");}
         if(!handler.post(()->{
-            final byte[] record;final IPackageDomainSettingsChanged target;
-            synchronized(this){if(closed)return;record=captureState();target=Objects.requireNonNull(changes);}
-            try{target.changed(record);}catch(RemoteException failure){throw failure.rethrowFromSystemServer();}
+            final byte[] record;final IPackageDomainSettingsChanged target;final long version;
+            synchronized(this){if(closed)return;record=captureState();target=Objects.requireNonNull(changes);version=lifecycleVersion;}
+            try{target.changed(record,version);}catch(RemoteException failure){throw failure.rethrowFromSystemServer();}
         }))throw new IllegalStateException("domain persistence Handler stopped");
     }
 }

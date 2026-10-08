@@ -12,6 +12,7 @@ public final class DomainEnforcerOracle {
     }
     private static final class Identity implements com.android.server.pm.verify.domain.proxy.DomainVerificationProxy, com.android.server.pm.verify.domain.DomainVerificationEnforcer.Callback {
         int missing; boolean hidden, verifier;
+        public android.content.ComponentName getComponentName() { throw new AssertionError("unused verifier component owner"); }
         public boolean isCallerVerifier(int uid) { return verifier; }
         public boolean doesUserExist(int user) { return (user == 0 || user == 10) && user != missing; }
         public boolean filterAppAccess(String name, int uid, int user) { if (name != null && !"fixture.domains".equals(name)) throw new AssertionError("foreign domain visibility package"); return hidden; }

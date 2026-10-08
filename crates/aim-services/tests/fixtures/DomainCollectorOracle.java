@@ -1,6 +1,7 @@
 /** Executes the image's collector with explicitly controlled compatibility policy. */
 public final class DomainCollectorOracle {
     private static final class Compat extends com.android.server.compat.PlatformCompat {
+        @Override public boolean isChangeEnabledByUid(long changeId, int uid) { throw new AssertionError("unused UID compatibility owner"); }
         boolean restricted;
         boolean v2 = true;
         @Override public android.os.IBinder asBinder() { return this; }
