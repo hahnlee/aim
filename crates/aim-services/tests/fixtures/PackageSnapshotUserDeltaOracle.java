@@ -23,44 +23,66 @@ public final class PackageSnapshotUserDeltaOracle {
                 var parsed = code.getActivities().get(0);
                 var component = new android.content.ComponentName(parsed.getPackageName(), parsed.getName());
                 boolean disabled = oldUser.getDisabledComponents().contains(component.getClassName());
-                manager.setPackageStoppedState(original.getPackageName(), !stopped, 0);
-                try (var changed = store.computer()) {
-                    var update = java.util.Objects.requireNonNull(changed.getPackageStateInternal(original.getPackageName(), 1000));
-                    if (changed.getVersion() <= before.getVersion()
-                            || update.getUserStateOrDefault(0).isStopped() == stopped
-                            || original.getUserStateOrDefault(0).isStopped() != stopped)
-                        throw new AssertionError("stopped publication changed wrong user snapshot");
-                    unchangedCode(original, update);
-                    sharedMember(changed, update);
-                }
-                // Original DONT_KILL_APP is 1; mutate only this disposable guest's genuine component.
-                manager.setComponentEnabledSetting(component, disabled ? 1 : 2, 1, 0, "android");
-                try (var changed = store.computer()) {
-                    var update = java.util.Objects.requireNonNull(changed.getPackageStateInternal(original.getPackageName(), 1000));
-                    if (update.getUserStateOrDefault(0).getDisabledComponents().contains(component.getClassName()) == disabled
-                            || original.getUserStateOrDefault(0).getDisabledComponents().contains(component.getClassName()) != disabled)
-                        throw new AssertionError("component publication changed retained user snapshot");
-                    unchangedCode(original, update);
-                    sharedMember(changed, update);
-                }
-                var latest = source.capture();
+                // Exact NativeComputer.getComponentEnabledSettingInternal delegation.
+                int originalComponentState = before.getComponentEnabledSetting(component, 1000, 0, true);
+                Throwable primaryFailure = null;
                 try {
-                    byte[] changes = latest.getChangedUsersForMetadataBase(comparison);
-                    if (changes == null) throw new AssertionError("retained actual user-change comparison requires full fallback");
-                    var record = android.os.Parcel.obtain();
+                    manager.setPackageStoppedState(original.getPackageName(), !stopped, 0);
+                    try (var changed = store.computer()) {
+                        var update = java.util.Objects.requireNonNull(changed.getPackageStateInternal(original.getPackageName(), 1000));
+                        if (changed.getVersion() <= before.getVersion()
+                                || update.getUserStateOrDefault(0).isStopped() == stopped
+                                || original.getUserStateOrDefault(0).isStopped() != stopped)
+                            throw new AssertionError("stopped publication changed wrong user snapshot");
+                        unchangedCode(original, update);
+                        sharedMember(changed, update);
+                    }
+                    // Original DONT_KILL_APP is 1; mutate only this disposable guest's genuine component.
+                    manager.setComponentEnabledSetting(component, disabled ? 1 : 2, 1, 0, "android");
+                    try (var changed = store.computer()) {
+                        var update = java.util.Objects.requireNonNull(changed.getPackageStateInternal(original.getPackageName(), 1000));
+                        if (update.getUserStateOrDefault(0).getDisabledComponents().contains(component.getClassName()) == disabled
+                                || original.getUserStateOrDefault(0).getDisabledComponents().contains(component.getClassName()) != disabled)
+                            throw new AssertionError("component publication changed retained user snapshot");
+                        unchangedCode(original, update);
+                        sharedMember(changed, update);
+                    }
+                    var latest = source.capture();
                     try {
-                        record.unmarshall(changes, 0, changes.length); record.setDataPosition(0);
-                        if (record.readLong() != latest.getVersion()
-                                || record.readLong() != latest.getMetadataVersion()
-                                || record.readInt() != 1
-                                || !original.getPackageName().equals(record.readString())
-                                || record.readBoolean() || record.dataAvail() != 0)
-                            throw new AssertionError("user comparison returned wrong current record keys");
-                    } finally { record.recycle(); }
-                    baseline.close(); baseline = null;
-                    if (latest.getChangedUsersForMetadataBase(comparison) != null)
-                        throw new AssertionError("expired comparison capability remained usable");
-                } finally { latest.close(); }
+                        byte[] changes = latest.getChangedUsersForMetadataBase(comparison);
+                        if (changes == null) throw new AssertionError("retained actual user-change comparison requires full fallback");
+                        var record = android.os.Parcel.obtain();
+                        try {
+                            record.unmarshall(changes, 0, changes.length); record.setDataPosition(0);
+                            if (record.readLong() != latest.getVersion()
+                                    || record.readLong() != latest.getMetadataVersion()
+                                    || record.readInt() != 1
+                                    || !original.getPackageName().equals(record.readString())
+                                    || record.readBoolean() || record.dataAvail() != 0)
+                                throw new AssertionError("user comparison returned wrong current record keys");
+                        } finally { record.recycle(); }
+                        baseline.close(); baseline = null;
+                        if (latest.getChangedUsersForMetadataBase(comparison) != null)
+                            throw new AssertionError("expired comparison capability remained usable");
+                    } finally { latest.close(); }
+                } catch (Exception | Error failure) {
+                    primaryFailure = failure;
+                    throw failure;
+                } finally {
+                    Throwable cleanupFailure = null;
+                    try { manager.setComponentEnabledSetting(component, originalComponentState, 1, 0, "android"); }
+                    catch (Exception | Error failure) { cleanupFailure = failure; }
+                    try { manager.setPackageStoppedState(original.getPackageName(), stopped, 0); }
+                    catch (Exception | Error failure) {
+                        if (cleanupFailure == null) cleanupFailure = failure;
+                        else cleanupFailure.addSuppressed(failure);
+                    }
+                    if (cleanupFailure != null) {
+                        if (primaryFailure != null) primaryFailure.addSuppressed(cleanupFailure);
+                        else if (cleanupFailure instanceof Exception failure) throw failure;
+                        else throw (Error) cleanupFailure;
+                    }
+                }
             }
         } finally { if (baseline != null) baseline.close(); }
         System.out.println("NATIVE_USER_DELTA sharedUid="

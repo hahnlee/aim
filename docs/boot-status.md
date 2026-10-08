@@ -399,8 +399,10 @@ million before; Chrome still ANRs. Its actual main thread waits 3.5335s in
 registerReceiverWithFeature during the five-second FocusEvent window. C94 real native runtime scoped-user ART oracle passes at UID1000 using
 original public IPM on disposable Calculator: stopped/component changes, old/new
 state and code isolation, and expired comparison fallback complete with exit0.
-Calculator is nonshared, so the conditional changed-shared-UID branch remains
-unverified. C94 quiet cold launches take 1.34–1.56s but still reach FocusEvent ANR. C95
+C97 also passes the real shared-UID branch using original Downloads UI
+(shared android.media, UID10103): changed members rebind to the current record,
+old views stay isolated, comparison expiry holds and original stopped/component
+settings are restored. The process exits0 with member_rebound_verified. C94 quiet cold launches take 1.34–1.56s but still reach FocusEvent ANR. C95
 uses the same native image with pending/completed Binder tracing: its 8.69s
 registerReceiver call begins after the first timeout and therefore does not
 establish the cause of that timeout. A no-SIGQUIT pre-timeout host sample of
@@ -424,9 +426,10 @@ regression passes across canonical-before-query publication. Installation publis
 the APK but its subsequent bound-session close fails after registry retirement;
 live Binder session capabilities now retain the actual terminal owner/count
 through registry retirement with weak indexing and last-capability cleanup;
-two focused regressions pass, and actual install replay is pending. A separate actual FUSE path-walk
+two focused regressions pass, and C97 actual install replay is running. A separate actual FUSE path-walk
 LOOKUP reference leak is corrected (#1139); ten real protocol regressions pass,
-with runtime integration pending. Original PMS on a cloned native
+with C97 runtime integration underway. Latest whole native library verification
+passes 796/0, eleven ignored; the ignored cases are not counted as run. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0
