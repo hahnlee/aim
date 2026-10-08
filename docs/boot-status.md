@@ -667,6 +667,15 @@ traffic with supported inactive timers, and UDP bind/connected traffic. It also
 verifies that an unsupported TCP keepalive state returns EOPNOTSUPP without
 hiding the unrelated UDP inventory. The official seven baseline failures occur
 at the host file-pull assertion; this integration result is not their CTS replay.
+The original staged-install baseline also cannot execute its Linux x86_64
+deapexer helpers on Darwin (#1166). A nonboot build node now produces pinned
+original AOSP deapexer/protobuf with real Darwin arm64 debugfs and fsck.erofs,
+using isolated pinned source copies and statically linked compression libraries.
+Actual ext4 and EROFS LZ4/LZMA/ZSTD/deflate extraction preserves content, modes
+and symlinks; corrupt inputs reject, and an unchanged original APEX extracts
+successfully. Provenance and validation receipts retain input/output hashes.
+Official CTS harness selection and the affected test replay remain pending;
+no official CTS archive, JAR, APK or image is modified.
 The native network validation discrepancy exposes original DnsResolver socket
 fchown failing with EINVAL before its address-family source probe (#1162). Socket
 allocation now owns durable Linux sockfs UID/GID/mode keyed by the retained

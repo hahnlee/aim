@@ -52,6 +52,7 @@ pub enum Action {
     Image,
     AidlGen,
     Xsdc,
+    CtsHostTools,
     Art,
     BootImage,
     Angle,
