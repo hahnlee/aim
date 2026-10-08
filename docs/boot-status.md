@@ -667,6 +667,14 @@ traffic with supported inactive timers, and UDP bind/connected traffic. It also
 verifies that an unsupported TCP keepalive state returns EOPNOTSUPP without
 hiding the unrelated UDP inventory. The official seven baseline failures occur
 at the host file-pull assertion; this integration result is not their CTS replay.
+Original AppSecurity retains thirty fs-verity ENOTTY failures (#226). A shared
+storage core now streams Merkle construction, measures from a fixed header,
+authenticates returned bytes and binds durable metadata to actual inode
+incarnation. Nine focused checks plus a real short-read temporary cleanup
+regression pass; five actual writer/enable/alias/fork/crash/SCM lease checks pass.
+This core does not expose ENABLE ioctl success. Guest FD/Binder carriers, mmap
+page verification, native writer admission, signature policy and private descriptor
+lifetimes must be connected before activation or CTS acceptance.
 The original staged-install baseline also cannot execute its Linux x86_64
 deapexer helpers on Darwin (#1166). A nonboot build node now produces pinned
 original AOSP deapexer/protobuf with real Darwin arm64 debugfs and fsck.erofs,
