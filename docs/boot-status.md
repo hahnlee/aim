@@ -537,7 +537,12 @@ VersionInfo and commits SDK/database versions and original fingerprint updates
 at boot completion; pre-Q component migration follows the retained original
 lifecycle predicate for non-system user0 only. Actual persistence/reload and
 build-only-change regressions pass, and the combined PM library suite passes
-803/0 with eleven ignored. Strict original rollback replay remains pending. Donor/clone cleanup is verified and the clone is
+803/0 with eleven ignored. Strict original rollback replay remains pending. A standalone isolated template command now
+uses explicit existing image/immutable-host/display/empty inputs and an exclusive
+new output; it holds the image read lease, records hashes before boot, refuses
+protected-path overlap and checks drift before publication. Focused CLI isolation
+passes; the two native template builds and structural/runtime/BootStats parity
+have not yet run and remain required. Donor/clone cleanup is verified and the clone is
 retained. GMS idle traffic is not accepted: the fresh native boot also records a
 CrisisAlerts persistent-process fatal (#1155), under independent investigation. Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,

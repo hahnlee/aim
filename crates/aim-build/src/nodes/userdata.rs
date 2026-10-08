@@ -196,7 +196,7 @@ pub fn run_template(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         }
     }
 
-    let sku = first_boot(ctx, &work, &boot, &settings, &permissions, log)?;
+    let sku = first_boot(ctx, &work, &boot, &settings, &permissions, log, None)?;
     let identity = aim_android_image::identity::read_tree_identity(&aim_paths::derived_image())?
         .ok_or("the derived image has no identity")?;
     let name = data::template_name(&identity, sku.as_deref());
@@ -221,10 +221,165 @@ pub fn run_template(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         &out,
         &name,
         log,
+        &out.join(EMPTY_TEMPLATE),
     )?;
     from.detach()?;
     data::remove(&boot)?;
     force_remove(&work).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Explicit existing inputs and an exclusively owned output; never a graph build.
+pub struct IsolatedTemplate {
+    pub output: PathBuf,
+    pub image: PathBuf,
+    pub host_runtime: PathBuf,
+    pub display: PathBuf,
+    pub empty: PathBuf,
+}
+
+fn canonical_future(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return std::env::current_dir().map_err(|error| error.to_string());
+    }
+    if path.exists() {
+        return fs::canonicalize(path).map_err(|error| error.to_string());
+    }
+    let parent = path.parent().ok_or("output has no existing ancestor")?;
+    let name = path.file_name().ok_or("output has no name")?;
+    Ok(canonical_future(parent)?.join(name))
+}
+
+fn isolated_output(config: &IsolatedTemplate) -> Result<PathBuf, String> {
+    let output = canonical_future(&config.output)?;
+    for input in [
+        out(),
+        config.image.clone(),
+        config.host_runtime.clone(),
+        config.display.clone(),
+        config.empty.clone(),
+    ] {
+        let input = canonical_future(&input)?;
+        if output.starts_with(&input) || input.starts_with(&output) {
+            return Err(format!(
+                "isolated template output {} overlaps protected input {}",
+                output.display(),
+                input.display()
+            ));
+        }
+    }
+    Ok(output)
+}
+
+fn template_inputs(config: &IsolatedTemplate) -> Result<serde_json::Value, String> {
+    let hash = |path: &Path| {
+        crate::hash::sha256_file(path).map_err(|error| format!("{}: {error}", path.display()))
+    };
+    Ok(serde_json::json!({
+        "image": fs::canonicalize(&config.image).map_err(|error| error.to_string())?,
+        "identity": aim_android_image::identity::read_tree_identity(&config.image)?.ok_or("template image has no identity")?,
+        "overlay_receipt_sha256": hash(&config.image.join(".overlay-receipt"))?,
+        "host_runtime": fs::canonicalize(&config.host_runtime).map_err(|error| error.to_string())?,
+        "guest_init_sha256": hash(&config.host_runtime.join("guest-init"))?,
+        "linux_run_sha256": hash(&config.host_runtime.join("linux-run"))?,
+        "display_sha256": hash(&config.display)?, "empty_sha256": hash(&config.empty)?,
+    }))
+}
+
+pub fn run_isolated_template(ctx: &Ctx, config: &IsolatedTemplate) -> Result<(), String> {
+    let output = isolated_output(config)?;
+    let canonical = IsolatedTemplate {
+        output: output.clone(),
+        image: fs::canonicalize(&config.image).map_err(|error| error.to_string())?,
+        host_runtime: fs::canonicalize(&config.host_runtime).map_err(|error| error.to_string())?,
+        display: fs::canonicalize(&config.display).map_err(|error| error.to_string())?,
+        empty: fs::canonicalize(&config.empty).map_err(|error| error.to_string())?,
+    };
+    let config = &canonical;
+    if output.exists() {
+        return Err(format!("{}: isolated output must be new", output.display()));
+    }
+    for input in [
+        &config.empty,
+        &config.display,
+        &config.host_runtime.join("guest-init"),
+        &config.host_runtime.join("linux-run"),
+    ] {
+        if !input.is_file() {
+            return Err(format!(
+                "missing existing template input {}",
+                input.display()
+            ));
+        }
+    }
+    let _image_lease = aim_storage::system::ImageLease::read_root(&config.image)?;
+    let provenance = template_inputs(config)?;
+    let identity = provenance["identity"]
+        .as_str()
+        .ok_or("template identity missing")?
+        .to_owned();
+    fs::create_dir_all(output.parent().unwrap()).map_err(|error| error.to_string())?;
+    fs::create_dir(&output).map_err(|error| error.to_string())?;
+    let mut log = Log::create(output.join("build.log"), true)?;
+    fs::write(
+        output.join("inputs-before.json"),
+        serde_json::to_vec_pretty(&provenance).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let inputs = output.join("inputs");
+    fs::create_dir(&inputs).map_err(|error| error.to_string())?;
+    fs::copy(&config.empty, inputs.join(EMPTY_TEMPLATE)).map_err(|error| error.to_string())?;
+    let work = output.join("work");
+    let settings = work.join("settings");
+    let permissions = work.join("permissions");
+    let data = work.join("boot");
+    fs::create_dir_all(&settings).map_err(|error| error.to_string())?;
+    let sku = first_boot(
+        ctx,
+        &work,
+        &data,
+        &settings,
+        &permissions,
+        &mut log,
+        Some(config),
+    )?;
+    let name = data::template_name(&identity, sku.as_deref());
+    let from = DataImage::attach(&data, None)?;
+    let mut volume_files = vec![PathBuf::from(DALVIK_CACHE)];
+    volume_files.extend(check(from.dir(), &settings)?);
+    let settings_files: Vec<_> = SETTINGS
+        .iter()
+        .flat_map(|(file, reserve)| [Some(*file), *reserve])
+        .flatten()
+        .map(PathBuf::from)
+        .filter(|path| settings.join(path).exists())
+        .collect();
+    let permission_files: Vec<_> = PERMISSIONS.iter().map(PathBuf::from).collect();
+    if template_inputs(config)? != provenance {
+        return Err("isolated template inputs changed during boot".into());
+    }
+    publish(
+        &[
+            (from.dir(), &volume_files),
+            (&settings, &settings_files),
+            (&permissions, &permission_files),
+        ],
+        &work,
+        &output,
+        &name,
+        &mut log,
+        &inputs.join(EMPTY_TEMPLATE),
+    )?;
+    from.detach()?;
+    fs::write(
+        output.join("provenance.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "inputs": provenance, "sku": sku, "template": name,
+        }))
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    // Preserve the boot log and constructor captures as gate evidence.
     Ok(())
 }
 
@@ -236,9 +391,10 @@ fn publish(
     dest: &Path,
     name: &str,
     log: &mut Log,
+    empty: &Path,
 ) -> Result<(), String> {
     let template = work.join("template");
-    let to = DataImage::attach(&template, Some(&out().join(EMPTY_TEMPLATE)))?;
+    let to = DataImage::attach(&template, Some(empty))?;
     let mut files = Vec::new();
     for (from, paths) in sources {
         let paths: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
@@ -275,11 +431,36 @@ fn first_boot(
     settings: &Path,
     permissions: &Path,
     log: &mut Log,
+    isolated: Option<&IsolatedTemplate>,
 ) -> Result<Option<String>, String> {
     let output = fs::File::create(work.join("guest-init.log")).map_err(|e| e.to_string())?;
     let display_dir = DisplaySocketDir::new()?;
-    let display = boot::start_display(ctx, &display_dir.0, true)?;
-    let init = boot::guest_init(ctx, dir, &display_dir.0.join("display"))
+    let display = match isolated {
+        Some(config) => boot::start_display_binary(&config.display, &display_dir.0, true)?,
+        None => boot::start_display(ctx, &display_dir.0, true)?,
+    };
+    let mut command = match isolated {
+        Some(config) => {
+            let mut command = std::process::Command::new(config.host_runtime.join("guest-init"));
+            command
+                .arg("--image")
+                .arg(&config.image)
+                .arg("--data")
+                .arg(dir)
+                .arg("--run")
+                .arg("--gpu")
+                .arg(aim_paths::angle())
+                .arg("--vulkan")
+                .arg(aim_paths::moltenvk())
+                .arg("--display")
+                .arg(display_dir.0.join("display"))
+                .arg("--userdata")
+                .arg(config.output.join("inputs"));
+            command
+        }
+        None => boot::guest_init(ctx, dir, &display_dir.0.join("display")),
+    };
+    let init = command
         .arg("--quiet")
         .stdout(output.try_clone().map_err(|e| e.to_string())?)
         .stderr(output)
@@ -295,7 +476,10 @@ fn first_boot(
         }
     };
     let guest = Guest {
-        linux_run: ctx.workspace.host_bin("linux-run"),
+        linux_run: isolated.map_or_else(
+            || ctx.workspace.host_bin("linux-run"),
+            |config| config.host_runtime.join("linux-run"),
+        ),
         path_map: data::runtime_of(dir).join("path-map"),
         binder: format!("dev.aim.guest-init.{}.binder", session.init.id()),
         data: dir.join("data"),
@@ -305,6 +489,13 @@ fn first_boot(
             .run(&["/system/bin/getprop", name], Duration::from_secs(10))
             .map(|v| v.trim().to_string())
     };
+    if isolated.is_some() {
+        log.line(&format!(
+            "owned template guest-init pid={}, display pid={}",
+            session.init.id(),
+            session.display.id()
+        ));
+    }
     let start = Instant::now();
     let settings_files: Vec<&str> = SETTINGS
         .iter()
@@ -341,6 +532,25 @@ fn first_boot(
         granted.unwrap_or_default().as_secs_f64(),
     ));
     let sku = Some(getprop("ro.boot.product.vendor.sku")?).filter(|s| !s.is_empty());
+    if isolated.is_some() {
+        let events = guest.run(
+            &[
+                "/system/bin/logcat",
+                "-d",
+                "-b",
+                "events",
+                "-v",
+                "threadtime",
+            ],
+            Duration::from_secs(30),
+        )?;
+        fs::write(work.join("first-boot-events.log"), events).map_err(|error| error.to_string())?;
+        log.line(&format!(
+            "owned template guest-init pid={}, display pid={}",
+            session.init.id(),
+            session.display.id()
+        ));
+    }
     drop(session);
     Ok(sku)
 }
@@ -443,4 +653,37 @@ fn check(volume: &Path, settings: &Path) -> Result<Vec<PathBuf>, String> {
         stubs.push(dir);
     }
     Ok(stubs)
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    #[test]
+    fn protected_inputs_and_symlink_aliases_cannot_be_outputs() {
+        let directory =
+            std::env::temp_dir().join(format!("aim-template-isolation-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let image = directory.join("image");
+        fs::create_dir(&image).unwrap();
+        let alias = directory.join("alias");
+        std::os::unix::fs::symlink(&image, &alias).unwrap();
+        let mut config = IsolatedTemplate {
+            output: directory.join("new"),
+            image: image.clone(),
+            host_runtime: directory.join("host"),
+            display: directory.join("display"),
+            empty: directory.join("empty.asif"),
+        };
+        assert!(isolated_output(&config).is_ok());
+        config.output = out().join("must-not-create");
+        assert!(isolated_output(&config).is_err());
+        config.output = image.join("nested");
+        assert!(isolated_output(&config).is_err());
+        config.output = alias.join("nested");
+        assert!(isolated_output(&config).is_err());
+        config.output = directory.clone();
+        assert!(isolated_output(&config).is_err());
+        assert!(!image.join("nested").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

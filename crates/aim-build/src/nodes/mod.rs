@@ -15,7 +15,7 @@ mod oat;
 mod service_aidl;
 mod system_server;
 mod translation_cache;
-mod userdata;
+pub(crate) mod userdata;
 mod xsdc;
 
 use crate::graph::{Action, Ctx, Node};

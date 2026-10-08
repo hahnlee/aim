@@ -25,7 +25,7 @@ use graph::{Ctx, Graph, Options};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -49,6 +49,10 @@ commands:
                          target/aim/bench/<timestamp>.json (docs/perf-baseline.md)
   bench --compare A.json B.json
                          the change of every median from A to B
+  template --output NEWDIR --image EXISTING_ROOT --host-runtime BIN_DIR
+           --display-bin FILE --empty-template FILE
+                         isolated first-boot template from existing inputs;
+                         no graph build and no shared template replacement
   status [NODE...]       which nodes are stale, and why
   storage [DATA...]      what the system, derived and data images occupy on the
                          host, and what a data image could give back (docs/storage.md)
@@ -103,6 +107,7 @@ struct Args {
     runs: usize,
     keep: bool,
     compare: Vec<String>,
+    template_inputs: std::collections::HashMap<String, String>,
 }
 
 fn parse(args: Vec<String>) -> Result<Args, String> {
@@ -121,10 +126,22 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         runs: 1,
         keep: false,
         compare: Vec::new(),
+        template_inputs: std::collections::HashMap::new(),
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
         match arg.as_str() {
+            "--output" | "--image" | "--host-runtime" | "--display-bin" | "--empty-template"
+                if parsed.command == "template" =>
+            {
+                if parsed
+                    .template_inputs
+                    .insert(arg.clone(), value(&arg)?)
+                    .is_some()
+                {
+                    return Err(format!("duplicate {arg}"));
+                }
+            }
             "-v" | "--verbose" => parsed.verbose = true,
             "-j" | "--jobs" => {
                 parsed.jobs = value(&arg)?.parse().map_err(|_| "--jobs needs a number")?
@@ -207,6 +224,24 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let args = parse(args)?;
     let options = Options { jobs: args.jobs };
     match args.command.as_str() {
+        "template" => {
+            let input = |name: &str| {
+                args.template_inputs
+                    .get(name)
+                    .map(PathBuf::from)
+                    .ok_or_else(|| format!("template requires {name}"))
+            };
+            let config = nodes::userdata::IsolatedTemplate {
+                output: input("--output")?,
+                image: input("--image")?,
+                host_runtime: input("--host-runtime")?,
+                display: input("--display-bin")?,
+                empty: input("--empty-template")?,
+            };
+            let (_, ctx) = load(args.verbose)?;
+            nodes::userdata::run_isolated_template(&ctx, &config)?;
+            Ok(ExitCode::SUCCESS)
+        }
         "build" => {
             let (graph, ctx) = load(args.verbose)?;
             let targets = if args.names.is_empty() {
