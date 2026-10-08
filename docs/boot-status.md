@@ -354,7 +354,8 @@ including the 4,000-entry original Binder oracle, and keyset transport passes
 1/0/0 in 125.27s. The root-only crash child helper is not an independent gate.
 All seven meaningful originally excluded library gates have now been explicitly
 executed successfully. Actual ART pure-query and mapped-page usage-isolation gates now pass; the
-package-add concurrency fixture still has no genuine publication seam and is not run.
+package-add concurrency fixture now uses a real external APK installation; its
+C96 run fails a strict scan/Computer version assertion (#1140).
 C87 native ParsingHost campaign records 11/0 with module complete; the current
 original campaign records Parsing 11/0, Preferred 2/0 and PackageSetting 2/0.
 Both stop normally between modules before the next image revision. Chrome
@@ -374,8 +375,8 @@ query-only capture now retains unchanged validated metadata while updating the
 query version (eleven owner regressions pass). Existing binder-trace can now
 record non-destructive pending/returning nested transactions every 250ms
 (#1134, actual nested byte-protocol regression passes). C89 host build and actual live Binder trace capture complete; Chrome remains
-unverified because the captured runtime reaches ANR. Package-add concurrency fixture still
-has no genuine publication seam and remains not run.
+unverified because the captured runtime reaches ANR. Package-add concurrency now has a genuine external-install publication seam;
+the actual C96 run exposes a mixed scan/query lease (#1140).
 C89 trace captures 4,086,703 completed calls over 259.63s; 96.638% are
 ScanSnapshot/Computer metadata/lookup calls. The Chrome bindServiceInstance
 request is delivered in 1.792us yet waits up to 14.487s inside the service,
@@ -414,7 +415,16 @@ Two early cold attempts still ANR; a later quiet cold launch completes in 1810ms
 stays alive without observed ANR, opens the web URL in 449ms and actually renders
 the page (capture checked after dismissing the original Chrome notification prompt).
 This establishes the quiet app flow, not early-boot or complete app acceptance;
-remaining FUSE/path work and the full CTS/app/template gates are still pending. Original PMS on a cloned native
+remaining FUSE/path work and the full CTS/app/template gates are still pending.
+The actual package-add concurrency oracle now runs at UID1000 with an unchanged
+official CTS APK and catches new canonical metadata paired with an older Computer
+(#1140). Query-bound capture now retains the published query owner's own scan;
+raw boot metadata capture remains separate. A real System/ServiceHost Binder
+regression passes across canonical-before-query publication. Installation publishes
+the APK but its subsequent bound-session close fails after registry retirement;
+that session-owner correction is in progress. A separate actual FUSE path-walk
+LOOKUP reference leak is corrected (#1139); ten real protocol regressions pass,
+with runtime integration pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 The historical original campaigns each record Parsing 11/0, Preferred 2/0

@@ -549,3 +549,52 @@ fn metadata_comparison_capabilities_are_lease_bound_and_strictly_user_scoped() {
     drop(released);assert!(get(&current,released_id).is_none(),"dropping a lease also expires its comparison ID");
     assert!(base.scan().owner().scanned_user_states("p").unwrap()[&0].enabled_components.is_none());
 }
+
+#[test]
+fn service_host_lease_pairs_query_scan_across_durable_canonical_publication() {
+    use aim_service_aidl::{dev_aim_server_ipackagescansnapshot as scan_api,dev_aim_server_ipackagecomputer as computer_api};
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let old=publish(&fixture,&bridge);
+    let snapshots=fixture.system.package_bootstrap.lock().unwrap().current.as_ref().unwrap().snapshots.clone().unwrap();
+    let mut owner=old.scan().owner().clone();owner.settings.packages[0].category_hint=7;
+    let durable=fixture.root.join("data/committed-category");
+    let new=snapshots.publish_after(old.scan(),owner,old.scan().usage().clone(),|snapshot|{
+        std::fs::write(&durable,snapshot.owner().settings.packages[0].category_hint.to_string()).map_err(|error|crate::package::owner::WriteError{committed:false,message:error.to_string()})
+    }).unwrap();
+    assert_eq!(std::fs::read_to_string(&durable).unwrap(),"7");
+    assert!(Arc::ptr_eq(&fixture.system.capture_package_scan().unwrap(),&new));
+    let (paired,query)=fixture.system.capture_package_scan_and_queries().unwrap();
+    let query=query.unwrap();assert!(Arc::ptr_eq(&query,&old));assert!(Arc::ptr_eq(&paired,old.scan()));
+    assert_eq!(paired.version(),query.scan().version());
+    let original=fixture.original[0].clone();
+    let capture=||{
+        let mut request=Parcel::new();host::CapturePackageScan{}.write(&mut request);
+        let reply=original.strong(0).transact(host::CAPTURE_PACKAGE_SCAN,&request,false).unwrap();
+        let binder=host::read_capture_package_scan_reply(&mut reply.reader()).unwrap().unwrap().unwrap();
+        reply.retain_remote_binder(binder).unwrap()
+    };
+    let versions=|lease:&Strong|{
+        let mut request=Parcel::new();scan_api::GetVersion{}.write(&mut request);
+        let reply=lease.transact(scan_api::GET_VERSION,&request,false).unwrap();
+        let scan=scan_api::read_get_version_reply(&mut reply.reader()).unwrap().unwrap();
+        let mut request=Parcel::new();scan_api::GetComputer{}.write(&mut request);
+        let reply=lease.transact(scan_api::GET_COMPUTER,&request,false).unwrap();
+        let binder=scan_api::read_get_computer_reply(&mut reply.reader()).unwrap().unwrap().unwrap();
+        let computer=reply.retain_remote_binder(binder).unwrap();
+        let mut request=Parcel::new();computer_api::GetVersion{}.write(&mut request);
+        let reply=computer.transact(computer_api::GET_VERSION,&request,false).unwrap();
+        let query=computer_api::read_get_version_reply(&mut reply.reader()).unwrap().unwrap();
+        (scan,query)
+    };
+    let retained=capture();assert_eq!(versions(&retained),(old.scan().version() as i64,old.scan().version() as i64));
+    let next=old.prepare_committed_package_snapshot(new.clone()).unwrap();
+    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().queries=Some(next.clone());
+    let (paired,query)=fixture.system.capture_package_scan_and_queries().unwrap();
+    assert!(Arc::ptr_eq(&paired,&new));assert!(Arc::ptr_eq(&query.unwrap(),&next));
+    let current=capture();assert_eq!(versions(&current),(new.version() as i64,new.version() as i64));
+    assert_eq!(versions(&retained),(old.scan().version() as i64,old.scan().version() as i64),"old lease must keep its exact immutable query owner");
+    // Initial/raw boot metadata still exposes the real canonical Store when no
+    // finalized query owner has been published; it invents no Computer lease.
+    fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().queries=None;
+    let (paired,query)=fixture.system.capture_package_scan_and_queries().unwrap();
+    assert!(Arc::ptr_eq(&paired,&new));assert!(query.is_none());
+}

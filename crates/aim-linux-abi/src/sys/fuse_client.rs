@@ -35,7 +35,12 @@ pub fn getattr(route:&FuseRoute,node:u64,fh:Option<u64>)->Result<Vec<u8>,Errno>{
     let mut data=Vec::new();put32(&mut data,u32::from(fh.is_some()));put32(&mut data,0);put64(&mut data,fh.unwrap_or(0));
     let reply=request(route,3,node,&data)?;if reply.len()<104{return Err(EIO);}Ok(reply[16..104].to_vec())
 }
-struct LookupGuard{route:FuseRoute,node:u64,keep:bool}
+pub(crate) struct LookupGuard{route:FuseRoute,node:u64,keep:bool}
+impl LookupGuard {
+    pub(crate) fn transient(route: &FuseRoute, node: u64) -> Self {
+        Self { route: route.clone(), node, keep: false }
+    }
+}
 impl Drop for LookupGuard{fn drop(&mut self){if !self.keep{if let Err(error)=forget(&self.route,self.node,1){eprintln!("FUSE transient FORGET failed: {error}");}}}}
 pub struct Open {pub guest:String,pub route:FuseRoute,pub node:u64,pub fh:u64,pub flags:u32,pub open_flags:u32,pub broker_owned:bool,pub directory:bool,pub offset:std::sync::Mutex<u64>}
 impl Open{
@@ -139,6 +144,9 @@ pub fn getdents(fd:i32,buffer:u64,count:usize)->Option<i64>{let file=get(fd)?;if
 fn parent(route:&FuseRoute)->Result<(u64,Vec<u8>),Errno>{let(base,name)=route.relative.rsplit_once('/').unwrap_or(("",route.relative.as_str()));if name.is_empty(){return Err(EINVAL);}let mut parent=route.clone();parent.relative=base.into();let mut name=name.as_bytes().to_vec();name.push(0);Ok((lookup(&parent)?,name))}
 pub fn mkdir(route:&FuseRoute,mode:u32)->Result<(),Errno>{let(node,name)=parent(route)?;let _parent=LookupGuard{route:route.clone(),node,keep:false};let mut data=Vec::new();put32(&mut data,mode);put32(&mut data,current_umask());data.extend(name);request(route,9,node,&data).and_then(|reply|forget(route,u64_at(&reply,0)?,1))}
 pub fn unlink(route:&FuseRoute,directory:bool)->Result<(),Errno>{let(node,name)=parent(route)?;let _parent=LookupGuard{route:route.clone(),node,keep:false};request(route,if directory{11}else{10},node,&name).map(|_|())}
+pub(crate) fn readlink_node(route: &FuseRoute, node: u64) -> Result<Vec<u8>, Errno> {
+    request(route, 5, node, &[])
+}
 pub fn readlink(route:&FuseRoute)->Result<Vec<u8>,Errno>{let node=lookup(route)?;let result=request(route,5,node,&[]);let release=forget(route,node,1);match result{Ok(bytes)=>{release?;Ok(bytes)},Err(error)=>Err(error)}}
 pub fn access(route:&FuseRoute,mask:u32)->Result<(),Errno>{let node=lookup(route)?;let mut data=Vec::new();put32(&mut data,mask);put32(&mut data,0);let result=request(route,34,node,&data).map(|_|());let release=forget(route,node,1);result.and(release)}
 pub fn rename(old:&FuseRoute,new:&FuseRoute,flags:u32)->Result<(),Errno>{if old.session!=new.session{return Err(crate::errno::EXDEV);}let(oldparent,oldname)=parent(old)?;let _old=LookupGuard{route:old.clone(),node:oldparent,keep:false};let(newparent,newname)=parent(new)?;let _new=LookupGuard{route:new.clone(),node:newparent,keep:false};let mut data=Vec::new();put64(&mut data,newparent);if flags!=0{put32(&mut data,flags);put32(&mut data,0);}data.extend(oldname);data.extend(newname);request(old,if flags==0{12}else{45},oldparent,&data).map(|_|())}

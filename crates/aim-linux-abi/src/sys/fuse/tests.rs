@@ -166,3 +166,52 @@ fn fuse_transferred_mount_device_daemon_death_aborts_pending_lookup() {
     assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), Some(107));
     pending.join().unwrap();
 }
+
+#[test]
+fn vfs_path_walk_releases_lookup_references_on_success_and_errors() {
+ let (_guard, root) = crate::vfs::test_view();
+ let connection = Connection::new(); initialize(&connection);
+ let mount = "/mnt/aim-lookup-reference";
+ let anchor = root.join("lookup-reference-anchor"); fs::create_dir_all(&anchor).unwrap();
+ let options = super::super::fuse_mount::parse(b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other,").unwrap();
+ crate::vfs::add_fuse_mount(mount, connection.key.transport().to_owned(), anchor, "fuse", &options, false).unwrap();
+ let device = connection.fd;
+ let daemon = std::thread::spawn(move || {
+  let mut refs = std::collections::BTreeMap::<u64,i64>::new();
+  let mut lookups = 0; let mut forgets = 0;
+  loop {
+   let packet = next(device); let opcode = u32::from_le_bytes(packet[4..8].try_into().unwrap());
+   let node = u64::from_le_bytes(packet[16..24].try_into().unwrap());
+   match opcode {
+    1 => {
+     let name = &packet[40..];
+     let inode = match name { b"file\0" => 10, b"denied\0" => 11, b"link\0" => 12, _ => panic!("unexpected lookup {name:?}") };
+     *refs.entry(inode).or_default() += 1; lookups += 1;
+     let mut entry = vec![0;128]; entry[..8].copy_from_slice(&inode.to_le_bytes());
+     respond(device, &packet, 0, &entry);
+    }
+    3 => {
+     if node == 11 { respond(device, &packet, -crate::errno::EACCES, &[]); continue; }
+     let mut attr = vec![0;104]; attr[16..24].copy_from_slice(&node.to_le_bytes());
+     let mode:u32 = if node == 1 {0o040755} else if node == 12 {0o120777} else {0o100644};
+     attr[76..80].copy_from_slice(&mode.to_le_bytes()); respond(device, &packet, 0, &attr);
+    }
+    5 => { assert_eq!(node,12); assert_eq!(refs.get(&node),Some(&1)); respond(device, &packet, -crate::errno::EINVAL, &[]); }
+    FORGET => {
+     let count = u64::from_le_bytes(packet[40..48].try_into().unwrap());
+     *refs.entry(node).or_default() -= count as i64; forgets += count;
+     assert!(refs[&node] >= 0, "duplicate FORGET for {node}");
+    }
+    17 => { respond(device, &packet, 0, &[0;80]); break; }
+    _ => panic!("unexpected FUSE opcode {opcode}"),
+   }
+  }
+  assert_eq!(lookups,3); assert_eq!(forgets,3); assert!(refs.values().all(|count|*count==0));
+ });
+ assert!(crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD,format!("{mount}/file").as_bytes(),true).is_ok());
+ assert_eq!(crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD,format!("{mount}/denied").as_bytes(),true).err(),Some(crate::errno::EACCES));
+ assert_eq!(crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD,format!("{mount}/link").as_bytes(),true).err(),Some(crate::errno::EINVAL));
+ // A following real request makes the daemon drain all preceding no-reply FORGETs.
+ Client::from_key(&connection.key).unwrap().request(17,1,&[],0,0,1).unwrap();
+ daemon.join().unwrap(); assert!(crate::vfs::remove_mount(mount));
+}

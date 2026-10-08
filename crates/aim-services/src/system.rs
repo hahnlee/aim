@@ -1594,6 +1594,11 @@ impl System {
                 "package bootstrap unavailable",
             )
         })?;
+        // Installation prepares canonical metadata before publishing its query
+        // owner. A query-bound lease must retain that owner's exact scan.
+        if let Some(queries) = &current.queries {
+            return Ok((queries.scan().clone(), Some(queries.clone())));
+        }
         let snapshot = current
             .snapshots
             .as_ref()
@@ -1604,7 +1609,7 @@ impl System {
                 )
             })?
             .capture();
-        Ok((snapshot, current.queries.clone()))
+        Ok((snapshot, None))
     }
 
     pub fn capture_package_scan(&self) -> Result<Arc<crate::package::scan_snapshot::Snapshot>> {

@@ -879,10 +879,11 @@ fn resolve_inner(
         let current=join_guest(&done);
         if let Some(route)=fuse_route(&current){
             let node=match crate::sys::fuse_client::lookup(&route){Ok(node)=>node,Err(errno::ENOENT)if is_last=>continue,Err(error)=>return Err(error)};
+            let _lookup = crate::sys::fuse_client::LookupGuard::transient(&route, node);
             let stat=crate::sys::fuse_client::stat(&route,Some(node),None)?;
             if stat.st_mode&libc::S_IFMT!=libc::S_IFLNK{continue;}
             links+=1;if links>MAX_SYMLINKS{return Err(errno::ELOOP);}done.pop();
-            let target=crate::sys::fuse_client::readlink(&route)?;if target.first()==Some(&b'/'){done.clear();}
+            let target=crate::sys::fuse_client::readlink_node(&route,node)?;if target.first()==Some(&b'/'){done.clear();}
             for part in target.split(|byte|*byte==b'/').rev(){if !part.is_empty(){pending.push(part.to_vec());}}continue;
         }
         let (host, area) = lookup(&current);

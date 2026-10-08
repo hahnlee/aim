@@ -39,7 +39,7 @@ fn compile_original_query_oracle(data: &Data) -> std::path::PathBuf {
     let classpath = std::env::join_paths([production.as_path(), stubs.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"]).arg(&classes).arg("-classpath").arg(&classpath)
-        .args(["NativePackageQueryOracle.java", "PackageServiceQueryOracle.java", "PackageReceiverQueryOracle.java", "PackagePureQueryOracle.java", "PackageSnapshotUsageOracle.java", "PackageSnapshotUserDeltaOracle.java"]
+        .args(["NativePackageQueryOracle.java", "PackageServiceQueryOracle.java", "PackageReceiverQueryOracle.java", "PackagePureQueryOracle.java", "PackageSnapshotUsageOracle.java", "PackageSnapshotUserDeltaOracle.java", "PackageSnapshotConcurrencyOracle.java"]
             .map(|name| aim_paths::root().join("crates/aim-services/tests/fixtures").join(name))));
     let mut programs = Vec::new();
     let mut directories = vec![classes.clone()];

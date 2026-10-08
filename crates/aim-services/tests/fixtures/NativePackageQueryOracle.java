@@ -4,8 +4,8 @@ package dev.aim.server;
 public final class NativePackageQueryOracle {
     private static final class Owners implements PackageSnapshots.Source, PackageSnapshots.Owner, AutoCloseable {
         private final IServiceHost host;
-        private final java.util.Map<Long, IPackageComputer> filters = new java.util.HashMap<>();
-        private final java.util.Map<Long, java.util.Set<String>> active = new java.util.HashMap<>();
+        private final java.util.concurrent.ConcurrentMap<Long, IPackageComputer> filters = new java.util.concurrent.ConcurrentHashMap<>();
+        private final java.util.concurrent.ConcurrentMap<Long, java.util.Set<String>> active = new java.util.concurrent.ConcurrentHashMap<>();
         Owners(IServiceHost host) { this.host = java.util.Objects.requireNonNull(host); }
         public IPackageScanSnapshot capture() throws android.os.RemoteException {
             var scan = java.util.Objects.requireNonNull(host.capturePackageScan());
@@ -15,8 +15,8 @@ public final class NativePackageQueryOracle {
                 var computer = java.util.Objects.requireNonNull(scan.getComputer());
                 android.os.Binder.allowBlocking(computer.asBinder());
                 if (computer.getVersion() != version) throw new AssertionError("native filter capture version differs");
-                filters.put(version, computer);
-                active.put(version, java.util.Set.copyOf(java.util.Arrays.asList(scan.getPackageNames(false))));
+                active.putIfAbsent(version, java.util.Set.copyOf(java.util.Arrays.asList(scan.getPackageNames(false))));
+                if (filters.putIfAbsent(version, computer) != null) computer.close();
             }
             return scan;
         }
@@ -50,6 +50,30 @@ public final class NativePackageQueryOracle {
         var host = IServiceHost.Stub.asInterface(android.os.Binder.allowBlocking(java.util.Objects.requireNonNull(
                 android.os.ServiceManager.checkService(args.length > 1 ? args[1] : "host"))));
         try (var owners = new Owners(host)) {
+            if (args.length == 4 && args[0].equals("package-added")) {
+                String addedPackage = args[3];
+                try (var versions = new PackageVersionPage(java.util.Objects.requireNonNull(host.getPackageStateVersionPage()))) {
+                    PackageSnapshotConcurrencyOracle.verify(owners, owners, versions, () -> {
+                        System.out.println("READY_NATIVE_PACKAGE_INSTALL " + addedPackage);
+                        System.out.flush();
+                        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120);
+                        while (System.nanoTime() < deadline) {
+                            try {
+                                var scan = owners.capture();
+                                try {
+                                    if (java.util.Arrays.asList(scan.getPackageNames(false)).contains(addedPackage)) return;
+                                } finally { scan.close(); }
+                                Thread.sleep(50);
+                            } catch (android.os.RemoteException | InterruptedException failure) {
+                                throw new AssertionError("actual install publication wait failed", failure);
+                            }
+                        }
+                        throw new AssertionError("original public install did not publish " + addedPackage);
+                    }, addedPackage);
+                }
+                System.out.println("ORIGINAL_NATIVE_PACKAGE_ADDED_CONCURRENCY old reentry concurrent installed monotonic");
+                return;
+            }
             if (args.length > 0 && args[0].equals("user-delta")) {
                 var manager = android.content.pm.IPackageManager.Stub.asInterface(android.os.Binder.allowBlocking(
                         java.util.Objects.requireNonNull(android.os.ServiceManager.checkService(args.length > 2 ? args[2] : "query_package"))));

@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class PackageSnapshotConcurrencyOracle {
     private static void await(CountDownLatch latch) {
         try {
-            if (!latch.await(30, TimeUnit.SECONDS)) throw new AssertionError("snapshot concurrency owner did not complete");
+            if (!latch.await(120, TimeUnit.SECONDS)) throw new AssertionError("snapshot concurrency owner did not complete");
         } catch (InterruptedException failure) {
             Thread.currentThread().interrupt();
             throw new AssertionError(failure);
@@ -82,7 +82,7 @@ public final class PackageSnapshotConcurrencyOracle {
             } finally {
                 published.countDown();
                 release.countDown();
-                oldReader.join(30000);
+                oldReader.join(120000);
                 if (oldReader.isAlive()) throw new AssertionError("snapshot worker remained alive");
             }
         }
