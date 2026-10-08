@@ -158,8 +158,9 @@ fn open_on_key(key:&SessionKey,flags:i32,op:u32,payload:&[u8])->Result<RawFd,Err
 pub fn read_device(fd:RawFd,buffer:&mut[u8],nonblock:bool)->Result<usize,Errno>{
     if buffer.len()<HEADER_SIZE{return Err(EINVAL)}let(key,number)=descriptor(fd)?;let mut payload=Vec::new();payload.extend((buffer.len() as u64).to_le_bytes());payload.push(nonblock as u8);
     let stream=connect(&key)?;send_frame(stream.as_raw_fd(),DEVICE_READ,number,&payload)?;let body=read_reply(stream.as_raw_fd())?;
-    if body.len()>buffer.len(){return Err(EIO)}buffer[..body.len()].copy_from_slice(&body);write_all_fd(stream.as_raw_fd(),&[1])?;
-    drain_marker(fd);Ok(body.len())
+    if body.len()>buffer.len(){return Err(EIO)}buffer[..body.len()].copy_from_slice(&body);
+    // The broker re-arms level readiness only after this acknowledgement.
+    drain_marker(fd);write_all_fd(stream.as_raw_fd(),&[1])?;Ok(body.len())
 }
 pub fn write_device(fd:RawFd,buffer:&[u8])->Result<usize,Errno>{let(key,number)=descriptor(fd)?;let body=rpc(&key,DEVICE_WRITE,number,buffer)?;if body.len()!=8{return Err(EIO)}Ok(u64::from_le_bytes(body.try_into().unwrap()) as usize)}
 pub fn poll_device(fd:RawFd)->Result<u16,Errno>{let(key,number)=descriptor(fd)?;let body=rpc(&key,DEVICE_POLL,number,&[])?;if body.len()!=2{return Err(EIO)}Ok(u16::from_le_bytes(body.try_into().unwrap()))}

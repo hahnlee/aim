@@ -497,7 +497,14 @@ focused owner regression passes with UID ownership, rename retention, hidden
 and closed FDs, and symlink errors. Native-service and app policy replays
 remain pending for the corrected cohort. A subsequent full ABI run reports
 173 pass, one capability-registry EBADF failure under investigation, and five
-ignored entries; it is not counted as a clean full-suite pass. Path-only descriptor capabilities preserve
+ignored entries; it is not counted as a clean full-suite pass. The frozen original
+Install CTS preparation exposes a FUSE notification backpressure deadlock
+(#1151): broker send holds its connection mutex while daemon reads wait on it.
+The owner now coalesces level notifications, sends outside that mutex, and
+uses an explicitly nonblocking notification socket with a poll-based lifetime
+wait. Draining precedes packet acknowledgement and queued requests re-arm
+readiness. Eleven ACK/clone/death/abort regressions and the actual full-buffer
+backpressure test pass; the corrected runtime replay remains pending. Path-only descriptor capabilities preserve
 actual backing identity and ARM64 flags through SCM/Binder; guessed hidden
 kernel descriptors fail as nonexistent guest FDs. Typed import failure rejects
 the actual delivered transaction, closes descriptors and releases its buffer,

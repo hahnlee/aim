@@ -14,6 +14,23 @@ fn respond(fd:RawFd,request:&[u8],error:i32,body:&[u8]){let mut out=Vec::new();o
 fn initialize(connection:&Connection){Client::from_key(&connection.key).unwrap().mount().unwrap();let packet=next(connection.fd);assert_eq!(u32::from_le_bytes(packet[4..8].try_into().unwrap()),INIT);let mut out=vec![0;64];out[..4].copy_from_slice(&7u32.to_le_bytes());out[4..8].copy_from_slice(&39u32.to_le_bytes());out[20..24].copy_from_slice(&65536u32.to_le_bytes());respond(connection.fd,&packet,0,&out);}
 
 #[test]
+fn unread_device_notifications_are_coalesced_and_metadata_replies_remain_live(){
+ let connection=Connection::new();initialize(&connection);
+ let client=Client::from_key(&connection.key).unwrap();
+ for _ in 0..256{client.request_no_reply(FORGET,9,&1u64.to_le_bytes(),0,0,1).unwrap();}
+ // A stalled daemon may accumulate requests, but its readiness socket only
+ // needs one level notification, never one byte per queued request.
+ let mut markers=[0u8;512];let count=unsafe{libc::recv(connection.fd,markers.as_mut_ptr().cast(),markers.len(),libc::MSG_PEEK|libc::MSG_DONTWAIT)};
+ assert_eq!(count,1);
+ for _ in 0..256{let packet=next(connection.fd);assert_eq!(u32::from_le_bytes(packet[4..8].try_into().unwrap()),FORGET);}
+ let key=connection.key.clone();let(done,result)=mpsc::channel();
+ let metadata=std::thread::spawn(move||{done.send(Client::from_key(&key).unwrap().request(3,1,&[0;16],0,0,1).map(|reply|reply.body)).unwrap();});
+ let request=next(connection.fd);assert_eq!(u32::from_le_bytes(request[4..8].try_into().unwrap()),3);
+ let attributes=vec![7u8;104];respond(connection.fd,&request,0,&attributes);
+ assert_eq!(result.recv_timeout(Duration::from_secs(2)).unwrap().unwrap(),attributes);metadata.join().unwrap();
+}
+
+#[test]
 fn fuse_device_protocol_dup_clone_and_negative_reply(){
  let connection=Connection::new();initialize(&connection);
  assert_eq!(read_device(connection.fd,&mut [0;8192],true),Err(crate::errno::EAGAIN));
