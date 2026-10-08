@@ -458,7 +458,7 @@ impl Capture {
             scan_owner.settings.domain_verification = owner.xml_projection();
         }
         let store =
-            super::Store::new_replica_at_version(scan_owner, self.scan.usage().clone(), version)
+            super::Store::new_replica_after(&self.scan, scan_owner, self.scan.usage().clone(), version)
                 .map_err(|e| format!("domain scan validation: {e:?}"))?;
         let mut context = (*self.context).clone();
         context.scan_version = version;
@@ -536,7 +536,7 @@ impl Capture {
             users.retain(|entry| entry.id != user);
         }
         owner.transition_permission_user_inventory(user, created, bridge)?;
-        let store = super::Store::new_replica_at_version(owner, self.scan.usage().clone(), version)
+        let store = super::Store::new_replica_after(&self.scan, owner, self.scan.usage().clone(), version)
             .map_err(|error| format!("user transition scan: {error:?}"))?;
         let scan = store.capture();
         for ((name, factory), inputs) in &mut context.packages {
@@ -586,7 +586,7 @@ impl Capture {
         usage: crate::package::owner::usage::Usage,
     ) -> Result<PackageUpdate, String> {
         let version = self.scan.version().checked_add(1).ok_or("internal mutation generation exhausted")?;
-        let store = super::Store::new_replica_at_version(owner, usage, version)
+        let store = super::Store::new_replica_after(&self.scan, owner, usage, version)
             .map_err(|error| format!("internal mutation scan: {error:?}"))?;
         let mut context = (*self.context).clone();
         context.scan_version = version;
@@ -603,7 +603,7 @@ impl Capture {
             .version()
             .checked_add(1)
             .ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(owner, self.scan.usage().clone(), version)
+        let store = super::Store::new_replica_after(&self.scan, owner, self.scan.usage().clone(), version)
             .map_err(|error| format!("package mutation scan: {error:?}"))?;
         let mut context = (*self.context).clone();
         context.scan_version = version;
@@ -622,7 +622,7 @@ impl Capture {
             .version()
             .checked_add(1)
             .ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(
+        let store = super::Store::new_replica_after(&self.scan,
             self.scan.owner().clone(),
             self.scan.usage().clone(),
             version,
@@ -641,7 +641,7 @@ impl Capture {
         documents: &[(i32, Vec<u8>)],
     ) -> Result<PackageUpdate, String> {
         let version = self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(
+        let store = super::Store::new_replica_after(&self.scan,
             self.scan.owner().clone(), self.scan.usage().clone(), version,
         ).map_err(|error| format!("preferred publication: {error:?}"))?;
         let mut context = (*self.context).clone();
@@ -660,7 +660,7 @@ impl Capture {
         self: &Arc<Self>, owner: Arc<crate::package::app_metadata::Owner>,
     ) -> Result<PackageUpdate, String> {
         let version = self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(self.scan.owner().clone(), self.scan.usage().clone(), version)
+        let store = super::Store::new_replica_after(&self.scan, self.scan.owner().clone(), self.scan.usage().clone(), version)
             .map_err(|error| format!("app metadata publication: {error:?}"))?;
         let mut context = (*self.context).clone();
         context.scan_version = version;
@@ -745,7 +745,7 @@ impl Capture {
         self: &Arc<Self>, owner: Arc<crate::package::instant::Owner>,
     ) -> Result<PackageUpdate, String> {
         let version = self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(
+        let store = super::Store::new_replica_after(&self.scan,
             self.scan.owner().clone(), self.scan.usage().clone(), version,
         ).map_err(|error| format!("instant registry publication: {error:?}"))?;
         let mut context = (*self.context).clone();
@@ -1451,7 +1451,7 @@ impl Capture {
     pub(crate) fn prepare_visibility_update(self: &Arc<Self>, grants: crate::package::apps_filter::ImplicitAccess)
         -> Result<PackageUpdate, String> {
         let version = self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(self.scan.owner().clone(), self.scan.usage().clone(), version)
+        let store = super::Store::new_replica_after(&self.scan, self.scan.owner().clone(), self.scan.usage().clone(), version)
             .map_err(|error| format!("visibility mutation replica: {error:?}"))?;
         let mut context = (*self.context).clone();
         context.scan_version = version;
@@ -1467,7 +1467,7 @@ impl Capture {
     pub(crate) fn prepare_permission_refresh(self: &Arc<Self>, bridge: &crate::package::bootstrap::Bridge)
         -> Result<PackageUpdate, String> {
         let version = self.scan.version().checked_add(1).ok_or("package version exhausted")?;
-        let store = super::Store::new_replica_at_version(self.scan.owner().clone(), self.scan.usage().clone(), version)
+        let store = super::Store::new_replica_after(&self.scan, self.scan.owner().clone(), self.scan.usage().clone(), version)
             .map_err(|error| format!("permission refresh replica: {error:?}"))?;
         let mut context = (*self.context).clone();
         context.scan_version = version;

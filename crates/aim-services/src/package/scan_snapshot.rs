@@ -114,7 +114,9 @@ impl Store {
     pub(crate) fn prepare_usage_store(base: &Arc<Snapshot>, usage: Usage) -> Result<Self, Error> {
         if !base.replica_validated { return Err(Error::Invalid("usage base is not a validated replica".into())); }
         let mut owner = base.owner().clone();
-        owner.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+        if base.usage() != &usage {
+            owner.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+        }
         let version = base.version.checked_add(1).filter(|version| *version <= i64::MAX as u64).ok_or(Error::VersionExhausted)?;
         // Exact immutable validated owner plus a checked usage-only delta. Code,
         // settings, permissions and user inventories cannot have changed here.
@@ -143,13 +145,39 @@ impl Store {
         Self::create(owner, usage, true, version)
     }
 
+    /// A query epoch need not reconstruct unchanged original package metadata.
+    /// Compare every native owner field; normalize only the active usage rows
+    /// which the facade captures separately against the latest Computer lease.
+    pub(crate) fn new_replica_after(base: &Arc<Snapshot>, owner: SigningScan, usage: Usage, version: u64) -> Result<Self, Error> {
+        if version != base.version.checked_add(1).ok_or(Error::VersionExhausted)? {
+            return Err(Error::Invalid("metadata publication base version differs".into()));
+        }
+        if base.replica_validated && &owner == base.owner() && &usage == base.usage() {
+            return Self::prepare_unchanged_metadata_store(base);
+        }
+        let mut metadata = version;
+        if base.replica_validated && base.usage().names().eq(usage.names())
+            && base.usage().historical_available() == usage.historical_available() {
+            let mut normalized = base.owner().clone();
+            if base.usage() != &usage {
+                normalized.update_validated_replica_usage(base.usage(), &usage).map_err(Error::Invalid)?;
+            }
+            if normalized == owner { metadata = base.metadata_revision; }
+        }
+        Self::create_with_metadata_revision(owner, usage, true, version, metadata)
+    }
+
     fn create(
         owner: SigningScan,
         usage: Usage,
         replica: bool,
         version: u64,
     ) -> Result<Self, Error> {
-        if version == 0 || version > i64::MAX as u64 {
+        Self::create_with_metadata_revision(owner, usage, replica, version, version)
+    }
+
+    fn create_with_metadata_revision(owner: SigningScan, usage: Usage, replica: bool, version: u64, metadata_revision: u64) -> Result<Self, Error> {
+        if version == 0 || version > i64::MAX as u64 || metadata_revision == 0 || metadata_revision > version {
             return Err(Error::VersionExhausted);
         }
         validate(&owner, &usage)?;
@@ -158,7 +186,7 @@ impl Store {
             owner,
             usage,
             replica_validated: replica,
-            metadata_revision: version,
+            metadata_revision,
         });
         if replica {
             validate_replica(&snapshot)?;
@@ -455,6 +483,24 @@ mod tests {
             36,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn validated_empty_metadata_does_not_require_a_runtime_usage_owner() {
+        let mut owner=SigningScan::new(&Default::default(),&Settings::default(),36).unwrap();
+        let shared=owner.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();
+        owner.capture_legacy_permissions(&[0],Default::default(),shared).unwrap();
+        owner.capture_install_permissions_fixed(Default::default()).unwrap();
+        owner.rebuild_shared_processes_from_native_members().unwrap();
+        let store=Store::new_replica(owner,Usage::new([])).unwrap();let base=store.capture();
+        assert!(!base.owner().has_replica_runtime());
+        let same=Store::prepare_unchanged_metadata_store(&base).unwrap().capture();
+        assert_eq!(same.owner(),base.owner());assert_eq!(same.metadata_revision(),base.metadata_revision());
+        let mut changed=base.owner().clone();
+        changed.settings.versions.push(crate::package::settings::Version{sdk_version:36,..Default::default()});
+        let changed=Store::new_replica_after(&base,changed,base.usage().clone(),base.version()+1).unwrap().capture();
+        assert_eq!(changed.metadata_revision(),changed.version());
+        assert_eq!(changed.usage(),base.usage());
     }
 
     #[test]

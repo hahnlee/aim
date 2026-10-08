@@ -395,3 +395,47 @@ fn usage_metadata_revision_and_bounded_batch_preserve_exact_snapshot_contract() 
     assert!(generic.metadata_revision()>next.metadata_revision());
     assert_eq!(base.scan().usage().times("p").unwrap()[2],0);
 }
+
+
+#[test]
+fn query_epochs_retain_metadata_only_for_equal_complete_native_owners() {
+    use crate::package::scan_snapshot::Store;
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let base=publish(&fixture,&bridge);
+    let identical=base.prepare_package_update(base.scan().owner().clone()).unwrap();
+    assert_eq!(identical.capture.scan().metadata_revision(),base.scan().metadata_revision());
+    let mut grants=base.state().system.implicit_access.clone();grants.grant(10100,10101,true);
+    let visibility=base.prepare_visibility_update(grants).unwrap();
+    assert_eq!(visibility.capture.scan().metadata_revision(),base.scan().metadata_revision());
+    assert_ne!(visibility.capture.state().system.implicit_access,base.state().system.implicit_access);
+    let version=base.scan().version()+1;
+    let changes=|owner| {
+        let prepared=Store::new_replica_after(base.scan(),owner,base.scan().usage().clone(),version).unwrap();
+        assert_eq!(prepared.capture().metadata_revision(),version);
+    };
+    let mut owner=base.scan().owner().clone();owner.settings.packages[0].category_hint=7;changes(owner);
+    let mut owner=base.scan().owner().clone();let mut user=owner.scanned_user_states("p").unwrap()[&0].clone();
+    user.stopped=true;owner.set_user_state("p",0,user).unwrap();changes(owner);
+    let mut owner=base.scan().owner().clone();owner.capture_install_permissions_fixed(BTreeMap::from([(("p".into(),false),true)])).unwrap();changes(owner);
+    for library in [false,true] {
+        let mut owner=base.scan().owner().clone();let mut runtime=owner.replica_runtime("p",false).unwrap().unwrap().clone();
+        if library {runtime.library_files=vec![Some("/system/framework/captured.jar".into())];}
+        else {runtime.seinfo=Some("captured_label".into());}
+        owner.capture_replica_runtime(BTreeMap::from([(("p".into(),false),runtime)])).unwrap();changes(owner);
+    }
+    // Historical factory runtime cannot be normalized as active PackageUsage.
+    let mut owner=base.scan().owner().clone();let mut factory=owner.settings.packages[0].clone();factory.code_path="/system/p".into();
+    owner.settings.disabled_system_packages.push(factory);
+    let users=crate::package::scan::CapturedUsers{states:owner.scanned_user_states("p").unwrap().clone(),active_aliases:Default::default()};
+    owner.capture_user_states(BTreeMap::from([(("p".into(),false),users.clone()),(("p".into(),true),users)])).unwrap();
+    let shared=owner.identities.shared_users.keys().map(|name|(name.clone(),Default::default())).collect();
+    owner.capture_legacy_permissions(&[0],BTreeMap::from([(("p".into(),false),Default::default()),(("p".into(),true),Default::default())]),shared).unwrap();
+    owner.capture_install_permissions_fixed(BTreeMap::from([(("p".into(),false),false),(("p".into(),true),false)])).unwrap();
+    let runtime=base.scan().owner().replica_runtime("p",false).unwrap().unwrap().clone();
+    owner.capture_replica_runtime(BTreeMap::from([(("p".into(),false),runtime.clone()),(("p".into(),true),runtime.clone())])).unwrap();
+    let factory_store=Store::new_replica(owner,base.scan().usage().clone()).unwrap();let factory_base=factory_store.capture();
+    let mut owner=factory_base.owner().clone();let mut changed=runtime.clone();changed.usage[0]=123;
+    owner.capture_replica_runtime(BTreeMap::from([(("p".into(),false),runtime),(("p".into(),true),changed)])).unwrap();
+    let changed=Store::new_replica_after(&factory_base,owner,factory_base.usage().clone(),factory_base.version()+1).unwrap().capture();
+    assert_eq!(changed.metadata_revision(),changed.version());
+    assert_ne!(changed.metadata_revision(),factory_base.metadata_revision());
+}

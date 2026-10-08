@@ -375,7 +375,16 @@ query version (eleven owner regressions pass). Existing binder-trace can now
 record non-destructive pending/returning nested transactions every 250ms
 (#1134, actual nested byte-protocol regression passes). C89 host build passes;
 its live trace/app verification is pending. Package-add concurrency fixture still
-has no genuine publication seam and remains not run. Original PMS on a cloned native
+has no genuine publication seam and remains not run.
+C89 trace captures 4,086,703 completed calls over 259.63s; 96.638% are
+ScanSnapshot/Computer metadata/lookup calls. The Chrome bindServiceInstance
+request is delivered in 1.792us yet waits up to 14.487s inside the service,
+without evidence of driver delivery starvation. Base-aware query publication now
+compares the complete native owner, normalizing only active usage, and retains
+metadata revision only on exact equivalence. Real metadata changes still receive
+a new revision and full validation. A full-suite empty-graph regression exposed
+usage normalization on unchanged input; that boundary is corrected. Latest
+aggregate native tests pass 792/0, ten ignored; actual C90 replay is pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 Original 66-module CTS campaign is running with provenance-checked resume;
