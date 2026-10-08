@@ -534,7 +534,14 @@ render. Strict component parity is incomplete because native internal Version
 metadata is0/0 with missing fingerprints, making original PMS apply its pre-Q
 AppDetails migration (#1157). Donor/clone cleanup is verified and the clone is
 retained. GMS idle traffic is not accepted: the fresh native boot also records a
-CrisisAlerts persistent-process fatal (#1155), under independent investigation.
+CrisisAlerts persistent-process fatal (#1155), under independent investigation. Current Source has no aggregate
+cargo aim test --integration result. That command builds the complete graph,
+then runs normal test binaries; its48 ignored integration tests and explicit
+original ART/PM library gates require separate invocation. The two HAL client
+inputs in #1156 have existing graph owners but have not been built in Source;
+historical Main logs and old skip markers do not prove this cohort ran. Full
+integration waits for frozen build/image leases; no missing-input skip is counted
+as executed.
 Inherited capability refresh now pins
 each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
