@@ -725,6 +725,16 @@ through their lifetime and forwarding. Thirty-five host regressions pass, includ
 actual Binder reply-buffer and immediate final-reference writer release; the PM
 library suite passes829/0 with eleven ignored. Matching ABI installation/close,
 publication and a new coherent runtime remain required; C111 used wire3.
+The in-progress pager is now exercised by an actual NDK/original-bionic guest:
+normal mmap, closed source FD, private COW, growth/move, protection changes,
+MADV_DONTNEED revalidation, corrupt-page/EOF SIGBUS with exact address, shrink
+and fork COW isolation pass in the bounded fixture. These use genuine host-built
+Merkle proofs; ENABLE ioctl is not exposed. Shared page-cache ownership, prior
+mapping ENABLE transition and full runtime/CTS acceptance remain incomplete.
+A real SCM syscall fixture also verifies one-FD carrier queue/reexport/discard,
+actual writer lifetime and read-only access, with explicit synchronous drain
+before admission. Automatic production admission and coherent deployment remain
+required; neither result substitutes for the complete fs-verity gate.
 Original AppSecurity retains thirty fs-verity ENOTTY failures (#226). A shared
 storage core now streams Merkle construction, measures from a fixed header,
 authenticates returned bytes and binds durable metadata to actual inode
