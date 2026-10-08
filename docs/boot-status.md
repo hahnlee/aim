@@ -500,6 +500,14 @@ FDs and symlink errors. Later original SystemServer fails lchown of
 process, then dies with ProcessList's createProcessGroup assertion (#1153).
 The cgroup apps parent is actually guest system:system, mode0775. This ownership
 gap remains unresolved; reboot and complete app validation remain pending.
+C108 preserves a generic failure-boundary diagnostic: inode owner1000:1000,
+requested owner0:0, caller filesystem UID/GID1000:1000 and cap_eff1806897c20.
+The original same-owner operation without CAP_CHOWN passes its focused test;
+the discrepancy is in the ownership requested by processgroup, not evidence
+for a DAC exemption. SystemServer's actual identity/status and diagnostic log
+are retained. C108 also reproduces the death while initializing the real WebView
+provider; both diagnostic boot processes are normally stopped and the temporary
+logging code is removed from the runtime source.
 Inherited capability refresh now pins
 each open description and revalidates its actual kernel endpoint before managed
 FD publication; disappearing descriptors cannot abort binder initialization or
