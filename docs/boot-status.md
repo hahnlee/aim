@@ -740,6 +740,12 @@ A real SCM syscall fixture also verifies one-FD carrier queue/reexport/discard,
 actual writer lifetime and read-only access, with explicit synchronous drain
 before admission. Automatic production admission and coherent deployment remain
 required; neither result substitutes for the complete fs-verity gate.
+Prepared inode proofs now expose a complete authenticated read-only metadata
+view before publication, and commit publishes that same blob inode without a
+header/tree rebuild. Seven storage checks pass, including pre-publication reads,
+same-inode commit, abort cleanup, corruption and directory-sync rollback. This
+supports mapping transition transactions; cross-process admission and ENABLE
+activation remain pending.
 Original AppSecurity retains thirty fs-verity ENOTTY failures (#226). A shared
 storage core now streams Merkle construction, measures from a fixed header,
 authenticates returned bytes and binds durable metadata to actual inode

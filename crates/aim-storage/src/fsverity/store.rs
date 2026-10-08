@@ -11,6 +11,9 @@ pub struct Metadata{file:PrivateFile,identity:Identity,descriptor:Descriptor,tre
 impl Metadata {
  fn open(path:&Path,binding:&[u8;36])->Result<Self>{
   let file=PrivateFile::allocate(||File::options().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path))?;
+  Self::from_file(file,binding)
+ }
+ fn from_file(file:PrivateFile,binding:&[u8;36])->Result<Self>{
   let mut header=[0;HEADER as usize];tree::read_exact(&file,&mut header,0)?;
   if &header[..8]!=MAGIC||&header[8..44]!=binding||header[44..48].iter().any(|byte|*byte!=0)||header[416..].iter().any(|byte|*byte!=0)||Sha256::digest(&header[..384]).as_slice()!=&header[384..416]{return Err(Error::Linux(EIO));}
   let descriptor=Descriptor::from_bytes(header[48..304].try_into().unwrap())?;
@@ -71,34 +74,24 @@ impl Store{
  pub fn lookup(&self,identity:Identity)->Result<Option<Metadata>>{
   match Metadata::open(&self.path(identity),&binding(identity)){Ok(metadata)=>Ok(Some(metadata)),Err(Error::Io(error))if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(error)=>Err(error)}
  }
- /// Publish an already built private blob only under the caller's exclusive
- /// filesystem admission. This has no ioctl entrypoint or ENABLE success.
- fn publish(&self,identity:Identity,tree_file:&impl AsFd,descriptor:Descriptor,signature:&[u8])->Result<Metadata>{
-  self.publish_with_sync(identity,tree_file,descriptor,signature,|directory|PrivateFile::allocate(||File::open(directory))?.sync_all())
- }
- fn publish_with_sync(&self,identity:Identity,tree_file:&impl AsFd,descriptor:Descriptor,signature:&[u8],sync:impl FnOnce(&Path)->std::io::Result<()>)->Result<Metadata>{
-  if signature.len()>16128{return Err(Error::Linux(super::EMSGSIZE));}
-  let layout=descriptor.levels()?;let tree_len=layout.iter().try_fold(0u64,|sum,(_,length)|sum.checked_add(*length).ok_or(Error::Linux(EOVERFLOW)))?;
-  let mut header=[0;HEADER as usize];header[..8].copy_from_slice(MAGIC);header[8..44].copy_from_slice(&binding(identity));header[48..304].copy_from_slice(descriptor.bytes());header[304..312].copy_from_slice(&tree_len.to_le_bytes());header[312..320].copy_from_slice(&(signature.len()as u64).to_le_bytes());
-  let digest=descriptor.digest();header[320..320+digest.len()].copy_from_slice(&digest);let checksum=Sha256::digest(&header[..384]);header[384..416].copy_from_slice(&checksum);
-  let target=self.path(identity);let temporary=target.with_extension(format!("{}.tmp",nonce()?));
-  let mut published=false;
+ /// Publish the already validated, immutable prepared inode without copying
+ /// or reconstructing any descriptor/tree/signature bytes.
+ fn publish_with_sync(&self,identity:Identity,prepared:&Prepared,sync:impl FnOnce(&Path)->std::io::Result<()>)->Result<Metadata>{
+  let view=prepared.metadata_view()?;
+  if view.identity!=identity{return Err(Error::Linux(EIO));}
+  let blob=Identity::from_fd(prepared.file.as_fd())?;
+  let target=self.path(identity);let mut published=false;
   let result=(||{
-   let file=PrivateFile::allocate(||File::options().create_new(true).read(true).write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(&temporary))?;tree::write_all(&file,&header,0)?;
-   let mut buffer=vec![0;65536];let mut offset=0;while offset<tree_len{let n=(tree_len-offset).min(buffer.len()as u64)as usize;tree::read_exact(tree_file,&mut buffer[..n],HEADER+offset)?;tree::write_all(&file,&buffer[..n],HEADER+offset)?;offset+=n as u64;}
-   tree::write_all(&file,signature,HEADER+tree_len)?;file.sync_all()?;
-   // Atomic no-replace publication: a committed inode cannot be re-enabled.
-   match fs::hard_link(&temporary,&target){Ok(())=>published=true,Err(error)if error.kind()==std::io::ErrorKind::AlreadyExists=>return Err(Error::Linux(17)),Err(error)=>return Err(error.into())}
-   fs::remove_file(&temporary)?;
+   match fs::hard_link(&prepared._temporary.0,&target){Ok(())=>published=true,Err(error)if error.kind()==std::io::ErrorKind::AlreadyExists=>return Err(Error::Linux(17)),Err(error)=>return Err(error.into())}
+   let metadata=Metadata::open(&target,&binding(identity))?;
+   if Identity::from_fd(metadata.backing_descriptor())?!=blob{return Err(Error::Linux(EIO));}
    sync(&self.directory)?;
-   Metadata::open(&target,&binding(identity))
+   Ok(metadata)
   })();
-  if result.is_err(){
-   if published{fs::remove_file(&target)?;PrivateFile::allocate(||File::open(&self.directory))?.sync_all()?;}
-   match fs::remove_file(&temporary){Ok(())=>{},Err(error)if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return Err(error.into())}
-  }
+  if result.is_err()&&published{fs::remove_file(&target)?;PrivateFile::allocate(||File::open(&self.directory))?.sync_all()?;}
   result
  }
+
 }
 fn nonce()->Result<String>{
  static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
@@ -111,10 +104,12 @@ pub struct Admission{store:Store,inode:Inode,admission:crate::inode_lease::Admis
 pub struct EnableGuard{store:Store,inode:Inode,_slot:EnableSlot,_writers:ExclusiveLease}
 struct Temporary(PathBuf);
 impl Drop for Temporary{fn drop(&mut self){if let Err(error)=fs::remove_file(&self.0){if error.kind()!=std::io::ErrorKind::NotFound{eprintln!("fs-verity temporary cleanup: {error}");}}}}
-pub struct Prepared{file:PrivateFile,_temporary:Temporary,descriptor:Descriptor,signature:Vec<u8>,identity:Identity}
+pub struct Prepared{file:PrivateFile,_temporary:Temporary,descriptor:Descriptor,identity:Identity}
 impl Prepared{
  pub fn descriptor(&self)->&Descriptor{&self.descriptor}
  pub fn backing_descriptor(&self)->std::os::fd::BorrowedFd<'_>{self.file.as_fd()}
+ /// Complete read-only proof before publication, kept alive by its real inode.
+ pub fn metadata_view(&self)->Result<Metadata>{Metadata::from_file(self.file.try_clone()?,&binding(self.identity))}
 }
 impl Admission{
  pub fn identity(&self)->Identity{self.inode.identity()}
@@ -148,14 +143,21 @@ impl EnableGuard{
   if (before.st_size,before.st_mtime,before.st_mtime_nsec,before.st_ctime,before.st_ctime_nsec)!=(after.st_size,after.st_mtime,after.st_mtime_nsec,after.st_ctime,after.st_ctime_nsec){
    return Err(Error::Linux(EIO));
   }
-  Ok(Prepared{file,_temporary:temporary,descriptor,signature:signature.into(),identity:self.identity()})
+  let layout=descriptor.levels()?;let tree_len=layout.iter().try_fold(0u64,|sum,(_,length)|sum.checked_add(*length).ok_or(Error::Linux(EOVERFLOW)))?;
+  let mut header=[0;HEADER as usize];header[..8].copy_from_slice(MAGIC);header[8..44].copy_from_slice(&binding(self.identity()));header[48..304].copy_from_slice(descriptor.bytes());header[304..312].copy_from_slice(&tree_len.to_le_bytes());header[312..320].copy_from_slice(&(signature.len()as u64).to_le_bytes());
+  let digest=descriptor.digest();header[320..320+digest.len()].copy_from_slice(&digest);let checksum=Sha256::digest(&header[..384]);header[384..416].copy_from_slice(&checksum);
+  tree::write_all(&file,&header,0)?;tree::write_all(&file,signature,HEADER+tree_len)?;file.sync_all()?;
+  let blob=Identity::from_fd(file.as_fd())?;drop(file);
+  let metadata=Metadata::open(&temporary.0,&binding(self.identity()))?;
+  if Identity::from_fd(metadata.backing_descriptor())?!=blob{return Err(Error::Linux(EIO));}
+  Ok(Prepared{file:metadata.file,_temporary:temporary,descriptor,identity:self.identity()})
  }
  pub fn commit(self,prepared:Prepared)->Result<Metadata>{
   let _admission=self.inode.admission()?;
   if prepared.identity!=self.identity()||Identity::from_fd(self.inode.source())?!=self.identity(){return Err(Error::Linux(EIO));}
   let source=self.inode.source();
   if tree::stat(&source)?.st_size as u64!=prepared.descriptor.data_size(){return Err(Error::Linux(EIO));}
-  self.store.publish(self.identity(),&prepared.file,prepared.descriptor.clone(),&prepared.signature)
+  self.store.publish_with_sync(self.identity(),&prepared,|directory|PrivateFile::allocate(||File::open(directory))?.sync_all())
  }
 }
 
@@ -169,6 +171,36 @@ mod tests{
  fn proof(store:&Store,data:&File)->Metadata{
   let admission=store.lock_inode(data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
   let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![9],16384,4096).unwrap(),&[],||false).unwrap();guard.commit(prepared).unwrap()
+ }
+ #[test]
+ fn prepared_readonly_metadata_is_complete_and_commit_publishes_the_same_blob(){
+  use std::os::fd::AsRawFd;
+  let files=Data::new();let bytes=(0..8193).map(|index|(index%251)as u8).collect::<Vec<_>>();fs::write(files.0.join("data"),&bytes).unwrap();let data=files.data();let store=files.store();
+  let admission=store.lock_inode(&data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
+  let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![9],4096,4096).unwrap(),b"admitted signature",||false).unwrap();
+  let view=prepared.metadata_view().unwrap();assert!(store.lookup(guard.identity()).unwrap().is_none(),"a proof view is not ENABLE publication");
+  assert_eq!(view.read_metadata(2,0,256).unwrap(),prepared.descriptor().bytes());assert_eq!(view.read_metadata(3,0,100).unwrap(),b"admitted signature");
+  assert_eq!(view.verify_range(&data,4087,4106).unwrap(),bytes[4087..8193]);
+  let measured=view.measure(64).unwrap();let blob=Identity::from_fd(view.backing_descriptor()).unwrap();
+  let length=tree::stat(&view.file).unwrap().st_size as usize;let mut before=vec![0;length];tree::read_exact(&view.file,&mut before,0).unwrap();
+  for fd in [prepared.backing_descriptor(),view.backing_descriptor()]{
+   assert_eq!(unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_GETFL)}&libc::O_ACCMODE,libc::O_RDONLY);
+   assert_eq!(unsafe{libc::pwrite(fd.as_raw_fd(),b"X".as_ptr().cast(),1,0)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EBADF));
+  }
+  let committed=guard.commit(prepared).unwrap();assert_eq!(Identity::from_fd(committed.backing_descriptor()).unwrap(),blob);
+  let mut after=vec![0;length];tree::read_exact(&committed.file,&mut after,0).unwrap();assert_eq!(before,after);
+  assert_eq!(committed.measure(64).unwrap(),measured);assert_eq!(committed.verify_range(&data,4087,4106).unwrap(),bytes[4087..8193]);assert_eq!(view.measure(64).unwrap(),measured);
+  assert_eq!(fs::read_dir(&store.directory).unwrap().count(),1,"only the final immutable blob remains");
+ }
+ #[test]
+ fn abort_removes_private_prepared_path_without_revoking_retained_proof(){
+  let files=Data::new();fs::write(files.0.join("data"),b"private proof").unwrap();let data=files.data();let store=files.store();
+  let admission=store.lock_inode(&data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
+  let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![],4096,4096).unwrap(),&[],||false).unwrap();let view=prepared.metadata_view().unwrap();
+  assert_eq!(fs::read_dir(&store.directory).unwrap().count(),1);drop(prepared);
+  assert_eq!(fs::read_dir(&store.directory).unwrap().count(),0);assert!(store.lookup(guard.identity()).unwrap().is_none());
+  assert_eq!(view.verify_range(&data,0,13).unwrap(),b"private proof");assert_eq!(view.read_metadata(2,0,256).unwrap(),view.descriptor().bytes());drop(guard);
+  let admission=store.lock_inode(&data).unwrap();assert!(admission.begin_enable().is_ok(),"aborted proof releases both exclusive owners");
  }
  #[test]
  fn persistent_inode_binding_and_verified_range_survive_rename_and_restart(){
@@ -211,7 +243,7 @@ mod tests{
   let files=Data::new();fs::write(files.0.join("data"),b"unchanged original").unwrap();let data=files.data();let store=files.store();
   let admission=store.lock_inode(&data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
   let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![],4096,4096).unwrap(),b"stored signature",||false).unwrap();
-  let result=store.publish_with_sync(guard.identity(),&prepared.file,prepared.descriptor.clone(),&prepared.signature,|_|Err(std::io::Error::from_raw_os_error(libc::EIO)));
+  let result=store.publish_with_sync(guard.identity(),&prepared,|_|Err(std::io::Error::from_raw_os_error(libc::EIO)));
   assert!(matches!(result,Err(Error::Io(_))));assert!(store.lookup(guard.identity()).unwrap().is_none());
   assert_eq!(fs::read_dir(&store.directory).unwrap().count(),1,"only the still-owned Prepared build remains");assert_eq!(fs::read(files.0.join("data")).unwrap(),b"unchanged original");
   let metadata=guard.commit(prepared).unwrap();assert_eq!(metadata.read_metadata(3,0,100).unwrap(),b"stored signature");
