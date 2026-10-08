@@ -489,7 +489,10 @@ actual inode/seal owner rather than a diagnostic host pathname. C105 exposed
 the old classification as EROFS during gralloc ftruncate before SurfaceFlinger
 could start. The regression verifies actual memfd resize, shared mmap and
 write/readback, ordinary unmapped FD resize, and retained image EROFS; the
-new runtime boot replay remains pending. Path-only descriptor capabilities preserve
+C106 with the new host cohort passes the previous SurfaceFlinger allocator
+failure, but original zygote aborts before SystemServer: fchmodat of
+/sys/fs/cgroup/system/uid_1000/. returns ENOENT (#1150). Native-service and
+app policy replays are therefore not yet run for this cohort. Path-only descriptor capabilities preserve
 actual backing identity and ARM64 flags through SCM/Binder; guessed hidden
 kernel descriptors fail as nonexistent guest FDs. Typed import failure rejects
 the actual delivered transaction, closes descriptors and releases its buffer,
