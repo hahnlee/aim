@@ -613,7 +613,16 @@ published template is counted. A second identical build waits for the constructo
 output correction, then two completed builds still must satisfy the original
 structure and runtime parity gates. Donor/clone cleanup is verified and the clone is
 retained. GMS idle traffic is not accepted: the fresh native boot also records a
-CrisisAlerts persistent-process fatal (#1155), under independent investigation. Current Source has no aggregate
+CrisisAlerts persistent-process fatal (#1155), under independent investigation. The frozen original full66 campaign stops after module16 with all sixteen
+retained XML hashes verified:428 pass,84 fail,51 assumption and3 ignored; fifty
+modules are uninvoked. Ten campaign rows are recorded, not accepted/pass counts.
+All fifteen test-executing invocations retain SELinux/thread checker failures;
+clean invocation acceptance is zero. Shortcut completes9 pass/3 ignored but its
+wrapper exits127 after an in-place source script edit during Bash wait (#1178).
+Official body evidence remains intact; the original guest/display/logcat/runner
+exit normally and its image lease is released. Future harness scripts must use
+detached immutable generations before another acceptance campaign.
+Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,
 then runs normal test binaries; its 48 ignored integration tests and explicit
 original ART/PM library gates require separate invocation. The two HAL client
