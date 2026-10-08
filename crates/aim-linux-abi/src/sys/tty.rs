@@ -442,7 +442,7 @@ mod tests {
         let (_guard, root) = crate::vfs::test_view();
         let device = root.join("shell-pty-device");
         std::fs::create_dir_all(device.join("pts")).unwrap();
-        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "shell-pty-device", "tmpfs");
+        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "shell-pty-device", "tmpfs").unwrap();
         let mut shell = crate::sys::cred::current();
         shell.uid = [2000;4]; shell.gid = [2000;4]; shell.groups.clear();
         shell.cap_eff = 0; shell.cap_perm = 0;
@@ -502,7 +502,7 @@ mod tests {
         std::fs::remove_dir(&journal).unwrap();
         std::fs::rename(saved,journal).unwrap();
         assert_eq!(failed,-(crate::errno::EISDIR as i64));
-        assert!(crate::vfs::remove_mount("/dev"));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
         std::fs::remove_dir_all(device).unwrap();
     }
 
@@ -512,7 +512,7 @@ mod tests {
         let (_guard, root) = crate::vfs::test_view();
         let device = root.join("owned-pty-dev");
         std::fs::create_dir_all(&device).unwrap();
-        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "owned-pty-dev", "tmpfs");
+        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "owned-pty-dev", "tmpfs").unwrap();
         unsafe {
             let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             assert!(master >= 0);
@@ -526,7 +526,7 @@ mod tests {
             assert_eq!(open(), -(crate::errno::ENOENT as i64));
             std::fs::create_dir(device.join("pts")).unwrap();
             for imported in [false, true] {
-                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts); }
+                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts).unwrap(); }
                 let fd = open(); assert!(fd >= 0, "PTY slave open after import={imported}: {fd}");
                 let mut size: libc::winsize = std::mem::zeroed();
                 assert_eq!(libc::ioctl(fd as i32, libc::TIOCGWINSZ, &mut size), 0);
@@ -534,10 +534,10 @@ mod tests {
             }
             libc::close(master);
         }
-        assert!(crate::vfs::remove_mount("/dev"));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
         // The same-process import adds a second owned entry; the real exec
         // starts with only map entries, then imports its one inherited mount.
-        assert!(crate::vfs::remove_mount("/dev"));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
         std::fs::remove_dir_all(device).unwrap();
     }
 

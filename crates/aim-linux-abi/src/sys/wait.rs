@@ -97,6 +97,9 @@ pub(super) fn put_rusage_of(who: i32, out: u64) -> i64 {
 }
 
 pub fn wait4(a: [u64; 6]) -> i64 {
+    let mut a=a;
+    let pid=a[0] as i32;
+    a[0]=if pid < -1 {match super::pidns::syscall_pid(-pid){Ok(group)=>(-group) as u64,Err(error)=>return error}}else{match super::pidns::syscall_pid(pid){Ok(pid)=>pid as u64,Err(error)=>return error}};
     let (pid, status, options, rusage) = (a[0] as i32, a[1], a[2], a[3]);
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOTHREAD | WALL | WCLONE) != 0 {
         return -(EINVAL as i64);
@@ -149,7 +152,7 @@ pub fn wait4(a: [u64; 6]) -> i64 {
             put_rusage(&ru, rusage);
         }
     }
-    r as i64
+    if r>0 {super::pidns::guest_pid(r).map(|pid|pid as i64).unwrap_or(-(crate::errno::ESRCH as i64))} else {r as i64}
 }
 
 /// The Linux `siginfo_t` fields `waitid` writes.
@@ -163,7 +166,7 @@ fn put_wait_siginfo(out: u64, info: Option<(&libc::siginfo_t, u32)>) {
             } else {
                 signal_from_host(i.si_status)
             };
-            (LINUX_SIGCHLD, i.si_code, i.si_pid, uid, status)
+            (LINUX_SIGCHLD, i.si_code, super::pidns::guest_pid(i.si_pid).unwrap_or(0), uid, status)
         }
         _ => (0, 0, 0, 0, 0),
     };
@@ -186,14 +189,14 @@ pub fn waitid(a: [u64; 6]) -> i64 {
     let mut nohang = options & WNOHANG != 0;
     let (htype, hid) = match idtype {
         P_ALL => (libc::P_ALL, 0),
-        P_PID if (id as i32) > 0 => (libc::P_PID, id as u32),
+        P_PID if (id as i32) > 0 => (libc::P_PID,match super::pidns::syscall_pid(id as i32){Ok(pid)=>pid as u32,Err(error)=>return error}),
         P_PGID if (id as i32) >= 0 => (
             libc::P_PGID,
             if id == 0 {
                 // SAFETY: trivial.
                 unsafe { libc::getpgrp() as u32 }
             } else {
-                id as u32
+                match super::pidns::syscall_pid(id as i32){Ok(group)=>group as u32,Err(error)=>return error}
             },
         ),
         P_PIDFD => match pidfd_lookup(id as i32) {
@@ -390,6 +393,8 @@ fn pidfd_lookup(fd: i32) -> Option<(i32, bool)> {
 }
 
 pub fn pidfd_open(a: [u64; 6]) -> i64 {
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
     let (pid, flags) = (a[0] as i32, a[1]);
     if flags & !PIDFD_NONBLOCK != 0 || pid <= 0 {
         return -(EINVAL as i64);

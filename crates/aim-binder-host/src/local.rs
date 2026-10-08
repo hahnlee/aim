@@ -1020,6 +1020,41 @@ mod tests {
     }
 
     #[test]
+    fn native_namespace_init_identity_is_reported_on_real_driver_calls() {
+        struct CallerIdentity;
+        impl Service for CallerIdentity {
+            fn descriptor(&self)->&str{"test.INamespaceCallerIdentity"}
+            fn transact(&self,call:&mut Call<'_>)->Reply{
+                let mut reply=Parcel::new();reply.write_i32(call.sender_pid);reply.write_u32(call.sender_euid);Ok(reply)
+            }
+        }
+        let driver=Driver::new();let _manager=start_registry(&driver);
+        let actual_host=unsafe{libc::getpid()};assert_ne!(actual_host,1);
+        let init=open(&driver,1,1000);init.start();
+        let guest=open(&driver,97001,10123);guest.start();
+        let guest_node=guest.add_service(Arc::new(CallerIdentity));
+        let target=publish(&guest,&init,"namespace-init-call-target",guest_node);
+        let reply=target.transact(1,&Parcel::new(),false).unwrap();
+        let mut reader=reply.reader();assert_eq!(reader.read_i32(),Ok(1));assert_eq!(reader.read_u32(),Ok(1000));assert_eq!(reader.remaining(),0);
+        let init_node=init.add_service(Arc::new(CallerIdentity));
+        let remote=publish(&init,&guest,"namespace-init-debug-owner",init_node);
+        let reply=remote.transact(DEBUG_PID_TRANSACTION,&Parcel::new(),false).unwrap();
+        assert_eq!(reply.reader().read_i32(),Ok(1));
+        assert_eq!(unsafe{libc::getpid()},actual_host,"guest credential must not alter actual host process identity");
+        let port=crate::mach::new_port(true).unwrap();
+        let receiver=std::thread::spawn(move||{
+            let mut buffer=crate::mach::Buffer::default();let request=crate::mach::receive(&mut buffer,port).unwrap();
+            assert_eq!(request.pid,actual_host,"Mach audit identity must remain the actual host process");
+            assert_eq!(request.data,1i32.to_le_bytes());
+            crate::mach::reply(&mut buffer,request.reply,&crate::mach::Msg{id:78,ports:Vec::new(),data:request.pid.to_le_bytes().to_vec()});
+            crate::mach::drop_own_send(port);crate::mach::destroy_receive(port);
+        });
+        let reply_port=crate::mach::new_port(false).unwrap();let mut buffer=crate::mach::Buffer::default();
+        let reply=crate::mach::call(&mut buffer,port,reply_port,&crate::mach::Msg{id:77,ports:Vec::new(),data:1i32.to_le_bytes().to_vec()}).unwrap();
+        assert_eq!(reply.data,actual_host.to_le_bytes());crate::mach::destroy_receive(reply_port);receiver.join().unwrap();
+    }
+
+    #[test]
     fn debug_pid_intrinsic_returns_actual_node_owner_on_local_and_remote_calls() {
         let driver = Driver::new();
         let _manager = start_registry(&driver);

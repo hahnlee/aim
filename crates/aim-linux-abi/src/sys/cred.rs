@@ -895,10 +895,11 @@ pub fn capget(a: [u64; 6]) -> i64 {
     let (eff, perm, inh) = if is_self(pid) {
         read(|id| (id.cap_eff, id.cap_perm, id.cap_inh))
     } else {
-        if let Err(e) = super::pidns::check(pid) {
+        let host=match super::pidns::syscall_pid(pid){Ok(host)=>host,Err(error)=>return error};
+        if let Err(e) = super::pidns::check(host) {
             return e;
         }
-        let entry = identity_of(pid).unwrap_or_default();
+        let entry = identity_of(host).unwrap_or_default();
         (entry.cap_eff, entry.cap_perm, entry.cap_inh)
     };
     for i in 0..n {
@@ -1092,6 +1093,7 @@ pub fn prlimit(nr: u64, a: [u64; 6]) -> i64 {
 /// Darwin changes a process's limits only from inside it, so a new limit
 /// for another process is refused (EPERM).
 fn prlimit_other(pid: i32, res: u64, new: u64, old: u64) -> i64 {
+    let pid=match super::pidns::syscall_pid(pid){Ok(pid)=>pid,Err(error)=>return error};
     if let Err(e) = super::pidns::check(pid) {
         return e;
     }
@@ -1198,6 +1200,8 @@ fn process_nice(p: i32) -> Result<i32, i64> {
 /// of its threads') priority; the host's for another process, and the
 /// highest of a group's or user's processes.
 pub fn getpriority(a: [u64; 6]) -> i64 {
+    let mut a=a;
+    if a[0]==PRIO_PROCESS{a[1]=match super::pidns::syscall_pid(a[1] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}
     if a[0] > PRIO_USER {
         return -(EINVAL as i64);
     }
@@ -1280,6 +1284,8 @@ fn may_set_prio(p: i32, nice: i32) -> Result<(), i64> {
 /// setpriority (140). The calling thread's nice value also sets its host
 /// QoS (`process::host_qos`).
 pub fn setpriority(a: [u64; 6]) -> i64 {
+    let mut a=a;
+    if a[0]==PRIO_PROCESS{a[1]=match super::pidns::syscall_pid(a[1] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}
     let nice = (a[2] as i32).clamp(-20, 19);
     if a[0] > PRIO_USER {
         return -(EINVAL as i64);

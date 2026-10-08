@@ -332,6 +332,7 @@ fn start_native_services(
     data: &std::path::Path,
     properties: &std::path::Path,
     server: &Arc<Server>,
+    guest_pid:i32,
 ) -> Result<Option<Arc<NativeServices>>, String> {
     let Ok(list) = image.read(NATIVE_SERVICES) else {
         return Ok(None);
@@ -341,7 +342,7 @@ fn start_native_services(
         .into_iter()
         .map(|s| s.name)
         .collect();
-    let services = NativeServices::new(server.driver(), &names).map_err(|e| format!("native services: {e}"))?;
+    let services = NativeServices::new_for_namespace(server.driver(), &names,guest_pid).map_err(|e| format!("native services: {e}"))?;
     if names.iter().any(|name| name == "package") {
         services.configure_package_image(image.root(), data, &[])
             .map_err(|error| format!("native package image: {error}"))?;
@@ -529,6 +530,35 @@ impl Boot {
         layout.prepare_runtime().map_err(|e| e.to_string())?;
         let map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
+        if options.mode == RunMode::Run {
+            let process = aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
+                .map_err(|error| error.to_string())?;
+            let namespace = format!("init-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds);
+            aim_storage::mount_namespace::Namespace::open(layout.path_map_file().parent().ok_or("path-map has no owner directory")?,&namespace)
+                .and_then(|owner| owner.initialize(&map.to_file_text())).map_err(|error|error.to_string())?;
+            aim_storage::process_namespace::InitRegistration::register(&layout.identity_dir().join("by-pid"),process,&namespace)
+                .map_err(|error| error.to_string())?;
+            let identity=crate::identity::Identity{service:"init".into(),uid:0,gid:0,groups:Vec::new(),
+                capabilities:crate::identity::Capabilities::for_service(0,None),seclabel:"u:r:init:s0".into(),priority:0,oom_score_adjust:0,rlimits:Vec::new()};
+            let identity_file=layout.identity_dir().join("init.identity");
+            std::fs::write(&identity_file,identity.to_file_text()).map_err(|error|error.to_string())?;
+            std::os::unix::fs::symlink(&identity_file,layout.identity_dir().join("by-pid").join(process.host_pid.to_string())).map_err(|error|error.to_string())?;
+            aim_storage::process_namespace::register_mount_namespace(&layout.identity_dir().join("by-pid"),process,&namespace).map_err(|error|error.to_string())?;
+            let mut caught=0u64;
+            for host_signal in 1..32 {
+                let mut action:libc::sigaction=unsafe{std::mem::zeroed()};
+                if unsafe{libc::sigaction(host_signal,std::ptr::null(),&mut action)}<0{return Err(std::io::Error::last_os_error().to_string());}
+                if action.sa_sigaction!=libc::SIG_DFL&&action.sa_sigaction!=libc::SIG_IGN{
+                    let guest_signal=aim_storage::process_namespace::signal_from_host(host_signal);
+                    if guest_signal>0{caught|=1u64<<(guest_signal-1);}
+                }
+            }
+            aim_storage::process_namespace::register_init_signals(&layout.identity_dir().join("by-pid"),process,caught).map_err(|error|error.to_string())?;
+            // Publish only after the actual init, mount owner and signal
+            // dispositions are registered, before any native or guest service.
+            aim_storage::process_namespace::InitRegistration::read(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?
+                .activate_pid_mapping(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+        }
         mark("runtime layout prepared");
         let mut report = BootReport::default();
 
@@ -626,13 +656,24 @@ impl Boot {
             }
             _ => None,
         };
+        let table=layout.identity_dir().join("by-pid");
+        let ready=match std::fs::read(table.join("namespace-pid-ready")){
+            Ok(bytes)if bytes==b"AIMNS-PID-READY1\n"=>true,
+            Ok(_)=>return Err("invalid native init PID readiness record".into()),
+            Err(error)if error.kind()==std::io::ErrorKind::NotFound=>false,
+            Err(error)=>return Err(error.to_string()),
+        };
+        let native_pid=if ready{
+            let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
+            if init.process.host_pid!=unsafe{libc::getpid()}{return Err("native init registration names another process".into());}1
+        }else{unsafe{libc::getpid()}};
         let mut native_services = None;
         if let Some(server) = &binder {
             share_areas(&properties, server);
             if let Some(file) = &options.binder_trace {
                 trace_binder(server, file)?;
             }
-            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server)?;
+            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid)?;
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
                 let files = map.clone();
@@ -659,10 +700,10 @@ impl Boot {
                 );
                 // The Mac's Now Playing and screen capture consent, from
                 // the original media session and projection services.
-                aim_services::media::Bridge::start(server.driver(), display);
+                aim_services::media::Bridge::start_for_namespace(server.driver(), display,native_pid);
             }
             // Android's media volume is the Mac's output volume.
-            aim_services::volume::start(server.driver());
+            aim_services::volume::start_for_namespace(server.driver(),native_pid);
             mark("binder host and native services started");
         }
         let linux_run = LinuxRun {

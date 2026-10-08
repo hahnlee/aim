@@ -399,7 +399,7 @@ struct Cred {
 fn cred_of(pid: i32) -> Cred {
     let c = super::cred::peer(pid);
     Cred {
-        pid: c.pid,
+        pid: super::pidns::guest_pid(c.pid).unwrap_or(0),
         uid: c.uid,
         gid: c.gid,
     }

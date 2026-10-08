@@ -102,7 +102,7 @@ const SIG_IGN: u64 = 1;
 
 impl ExecState {
     /// Install this state in the new process, before the guest runs.
-    pub fn apply(&self) {
+    pub fn apply(&self) -> Result<(),String> {
         if let Some(cwd) = &self.cwd {
             vfs::set_cwd(cwd.clone());
         }
@@ -115,8 +115,9 @@ impl ExecState {
             }
         }
         super::pstate::set_personality(self.personality);
-        vfs::load_own_mounts(&self.mounts);
+        vfs::load_own_mounts(&self.mounts).map_err(|error|format!("exec mount namespace: errno {error}"))?;
         super::itimer::exec_restore(&self.itimers);
+        Ok(())
     }
 
     fn current() -> ExecState {

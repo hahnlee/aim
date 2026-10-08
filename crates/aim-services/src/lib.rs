@@ -88,11 +88,15 @@ impl NativeServices {
     /// Creates the services named `names` (the binder names of
     /// `image/native-services`) as nodes of a new binder process.
     pub fn new(driver: &Arc<Driver>, names: &[String]) -> Result<Self, String> {
+        Self::new_for_namespace(driver,names,std::process::id() as i32)
+    }
+    pub fn new_for_namespace(driver:&Arc<Driver>,names:&[String],guest_pid:i32)->Result<Self,String>{
+        if guest_pid<=0{return Err("invalid native service process identifier".into());}
         let process = LocalProcess::open(
             driver,
             Device::Binder,
             Credentials {
-                pid: std::process::id() as i32,
+                pid: guest_pid,
                 euid: SYSTEM_UID,
                 security_context: Some(SYSTEM_SERVER_CONTEXT.into()),
             },

@@ -17,7 +17,7 @@ pub fn setsid() -> i64 {
 fn member(pid: u64) -> Result<i32, i64> {
     match pid as i32 {
         0 => Ok(0),
-        p => super::pidns::check(p),
+        p => super::pidns::host_pid(p),
     }
 }
 
@@ -30,7 +30,7 @@ pub fn setpgid(a: [u64; 6]) -> i64 {
         Err(e) => return e,
     };
     // SAFETY: trivial.
-    errno::check(unsafe { libc::setpgid(pid, a[1] as i32) } as i64)
+    {let group=match super::pidns::syscall_pid(a[1] as i32){Ok(group)=>group,Err(error)=>return error};errno::check(unsafe { libc::setpgid(pid,group) } as i64)}
 }
 
 /// getpgid (155) and getsid (156): a group or session led from outside

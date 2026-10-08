@@ -141,6 +141,18 @@ impl FsOps {
     }
 
     /// Where the path map is written when a bind mount changes it.
+    fn publish_mount_owner(&self) -> Result<(),String> {
+        let Some(file) = &self.path_map_file else { return Ok(()); };
+        let Some(runtime) = file.parent() else { return Err("path-map has no owner directory".into()); };
+        let table = runtime.join("identity/by-pid");
+        match aim_storage::process_namespace::InitRegistration::read(&table) {
+            Ok(init) => aim_storage::mount_namespace::Namespace::open(runtime,&init.mount_namespace)
+                .and_then(|owner| owner.update_base(&self.map.to_file_text())).map(|_|()).map_err(|error|error.to_string()),
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     pub fn set_path_map_file(&mut self, file: PathBuf) {
         self.path_map_file = Some(file);
     }
@@ -192,6 +204,7 @@ impl FsOps {
             && let Some(file) = &self.path_map_file
         {
             fs::write(file, self.map.to_file_text()).map_err(|e| e.to_string())?;
+            self.publish_mount_owner()?;
         }
         Ok(Some(Effect::Applied(format!(
             "mount {source} {target} bind: path-map entry {} -> {}",
@@ -588,7 +601,7 @@ impl FsOps {
         let resolved = self.resolve(target, true)?;
         if let Some(kind)=options.iter().find(|option|matches!(option.as_str(),"shared"|"slave"|"private")){
             self.map.propagation(&resolved.guest,kind,options.iter().any(|option|option=="rec"));
-            if self.apply&&let Some(file)=&self.path_map_file{fs::write(file,self.map.to_file_text()).map_err(|error|error.to_string())?;}
+            if self.apply&&let Some(file)=&self.path_map_file{fs::write(file,self.map.to_file_text()).map_err(|error|error.to_string())?;self.publish_mount_owner()?;}
             return Ok(Effect::Applied(format!("mount propagation {} {kind}",resolved.guest)));
         }
 

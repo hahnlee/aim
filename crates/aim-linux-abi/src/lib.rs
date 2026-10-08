@@ -143,7 +143,8 @@ pub fn run(opts: RunOptions) -> String {
     sys::init_exec(opts.runtime_args);
     context::init_thread();
     diag::install_signal_handlers();
-    opts.state.apply();
+    if let Err(error)=opts.state.apply(){return error;}
+    if let Err(error)=vfs::publish_process_namespace(){return format!("process mount namespace: errno {error}");}
 
     let resolved = match vfs::resolve(vfs::LINUX_AT_FDCWD, opts.program.as_bytes(), true) {
         Ok(r) => r,

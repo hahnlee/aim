@@ -114,6 +114,8 @@ fn tracee_process(tid: i32, seize: bool) -> Result<i32, i64> {
 
 /// ptrace(request, pid, addr, data).
 pub fn ptrace(a: [u64; 6]) -> i64 {
+    let mut a=a;
+    a[1]=match pidns::syscall_pid(a[1] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
     let (req, tid, addr, data) = (a[0], a[1] as i32, a[2], a[3]);
     let pid = match tracee_process(tid, req == PTRACE_SEIZE) {
         Ok(p) => p,
@@ -279,6 +281,7 @@ fn notify(pid: i32, tid: i32) -> Result<Option<i32>, i64> {
 /// `process_vm_readv`/`writev` of another process `pid`: its ranges
 /// `remote`, and our buffers `local`. The count of bytes moved.
 pub fn remote_vm(write: bool, pid: i32, local: &[(u64, u64)], remote: &[(u64, u64)]) -> i64 {
+    let pid=match pidns::syscall_pid(pid){Ok(pid)=>pid,Err(error)=>return error};
     if let Err(e) = pidns::check(pid) {
         return e;
     }

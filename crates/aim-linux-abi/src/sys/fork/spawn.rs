@@ -1001,7 +1001,7 @@ fn become_child(h: Handover) -> String {
     let tp = r.u64();
     let scs = r.bytes();
     crate::vfs::set_cwd(r.str());
-    crate::vfs::load_own_mounts(&r.str());
+    if let Err(error)=crate::vfs::load_own_mounts(&r.str()){return format!("fork mount namespace: errno {error}");}
     if let Err(e) = map_regions(&mut r, &h.entries) {
         return e;
     }

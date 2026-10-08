@@ -86,6 +86,7 @@ fn mount_propagation(guest:&str)->Propagation{
         .unwrap_or(if PRIVATE_MOUNTS.load(Ordering::Acquire){Propagation::Private}else{Propagation::Shared})
 }
 pub fn set_mount_propagation(guest:&str,flags:u64)->Result<(),Errno>{
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get)&&mount_namespace_id().is_some(){return namespace_event(&format!("propagation-flags\t{guest}\t{flags}"));}
     let kind=if flags&(1<<19)!=0{Propagation::Slave}else if flags&(1<<20)!=0{Propagation::Shared}else{Propagation::Private};
     let mut rules=PROPAGATION_RULES.lock().unwrap();rules.retain(|(root,_)|root!=guest&&(!(flags&0x4000!=0)||(guest!="/"&&below(guest,root).is_none())));rules.push((guest.into(),kind));drop(rules);
     refresh_fuse_mounts()
@@ -141,6 +142,7 @@ fn publish_plain_mount(guest:&str,host:&Path,area:Area,source:&str,fstype:&str,b
     std::fs::File::open(path.parent().ok_or(errno::EIO)?).and_then(|directory|directory.sync_all()).map_err(|_|errno::EIO)
 }
 pub fn refresh_fuse_mounts()->Result<(),Errno>{
+    refresh_namespace()?;
     if fuse_table().is_none(){return Ok(());}
     let _lock=fuse_table_lock()?;let lines=fuse_table_lines()?;let mut mounts=vfs().mounts.write().unwrap();
     let old=mounts.iter().filter(|mount|mount.shared_fuse).map(|mount|(mount.guest.clone(),mount.seq)).collect::<HashMap<_,_>>();
@@ -158,12 +160,17 @@ pub fn refresh_fuse_mounts()->Result<(),Errno>{
             mounts.push(Mount{guest:fields[0].into(),host:PathBuf::from(fields[1]),area:Area::Writable,source:Some(fields[2].into()),fstype:Some("fuse".into()),own:true,seq:mount_seq,fuse:Some(FuseRoute{session:PathBuf::from(fields[3]),relative:fields[4].into(),uid:policy[0],gid:policy[1],allow_other:policy[2]!=0,default_permissions:policy[3]!=0,read_only:policy[4]!=0}),shared_fuse:true,bind_source:None,projected_fuse:false});
         }
     }
+    project_mounts(&mut mounts,mount_propagation);
+    mounts.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()).then(b.seq.cmp(&a.seq)));Ok(())
+}
+fn project_mounts(mounts:&mut Vec<Mount>,propagation:impl Fn(&str)->Propagation){
+    let mut seq=mounts.iter().map(|mount|mount.seq).max().unwrap_or(0);
     // Propagated parent events retain the bind mount's actual source subtree.
     // Iterate to cover installer -> storage aliases; no host path inference.
     for _ in 0..16{
         let aliases=mounts.iter().filter(|mount|mount.bind_source.is_some()&&!hidden(&mounts,mount)).cloned().collect::<Vec<_>>();
         let routes=mounts.iter().filter(|mount|mount.own&&!hidden(&mounts,mount)).cloned().collect::<Vec<_>>();let mut added=false;
-        for alias in aliases{let source=alias.bind_source.as_ref().unwrap();if mount_propagation(&alias.guest)==Propagation::Private{continue;}
+        for alias in aliases{let source=alias.bind_source.as_ref().unwrap();if propagation(&alias.guest)==Propagation::Private{continue;}
             for route in &routes{if below(&alias.guest,&route.guest).is_some(){continue;}let Some(relative)=below(source,&route.guest)else{continue;};if relative.is_empty(){continue;}
                 let guest=format!("{}/{relative}",alias.guest.trim_end_matches('/'));
                 if mounts.iter().any(|mount|mount.guest==guest&&!hidden(&mounts,mount)){continue;}
@@ -176,14 +183,83 @@ pub fn refresh_fuse_mounts()->Result<(),Errno>{
         }
         if !added{break;}
     }
-    mounts.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()).then(b.seq.cmp(&a.seq)));Ok(())
 }
 pub fn private_mount_namespace()->Result<(),Errno>{
     refresh_fuse_mounts()?;
     // CLONE_NEWNS copies propagation relationships; MS_PRIVATE/MS_SLAVE
     // subsequently changes them at the guest's explicit mount operation.
     if PROPAGATION_RULES.lock().unwrap().is_empty(){PROPAGATION_RULES.lock().unwrap().push(("/".into(),Propagation::Shared));}
+    let inherited=NAMESPACE_VIEW.lock().unwrap().as_ref().map(|view|view.owner.clone());
+    if let Some(owner)=inherited {
+        let id=format!("ns-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|errno::EIO)?.as_nanos());
+        let owner=owner.clone_to(&id).map_err(namespace_error)?;
+        let mut inheritance="namespace\tprivate\n".to_owned();
+        for(root,kind)in PROPAGATION_RULES.lock().unwrap().iter(){inheritance.push_str(&format!("propagation\t{root}\t{}\n",match kind{Propagation::Private=>"private",Propagation::Slave=>"slave",Propagation::Shared=>"shared"}));}
+        let state=owner.append(&inheritance).map_err(namespace_error)?;
+        let generation=state.generation;
+        *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:owner.generation().map_err(namespace_error)?,owner,generation});
+        publish_process_namespace()?;
+    }
     PRIVATE_MOUNTS.store(true,Ordering::Release);Ok(())
+}
+
+struct NamespaceView {owner:aim_storage::mount_namespace::Namespace,generation:u64,page:aim_storage::mount_namespace::Generation}
+static NAMESPACE_VIEW:Mutex<Option<NamespaceView>>=Mutex::new(None);
+static NAMESPACE_REFRESH:Mutex<()>=Mutex::new(());
+thread_local! {static REPLAYING_NAMESPACE:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+fn namespace_error(error:std::io::Error)->Errno{errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))}
+fn namespace_event(event:&str)->Result<(),Errno>{
+    if REPLAYING_NAMESPACE.with(std::cell::Cell::get){return Ok(());}
+    let owner=NAMESPACE_VIEW.lock().unwrap().as_ref().map(|view|view.owner.clone());
+    if let Some(owner)=owner{owner.append(event).map_err(namespace_error)?;refresh_namespace()?;}Ok(())
+}
+fn apply_namespace_state(state:aim_storage::mount_namespace::State)->Result<(),Errno>{
+    struct Replay;impl Drop for Replay{fn drop(&mut self){REPLAYING_NAMESPACE.with(|value|value.set(false));}}
+    REPLAYING_NAMESPACE.with(|value|value.set(true));let _replay=Replay;
+    PROPAGATION_RULES.lock().unwrap().clear();
+    PRIVATE_MOUNTS.store(false,Ordering::Release);
+    let(_,base)=parse_map(&state.base).map_err(|_|errno::EIO)?;
+    *PROPAGATION_RULES.lock().unwrap()=map_propagation(&state.base)?;
+    *vfs().mounts.write().unwrap()=base;
+    for event in state.events {
+        if let Some(guest)=event.strip_prefix("remove\t") { remove_mount(guest)?; }
+        else if let Some(rest)=event.strip_prefix("propagation-flags\t") {
+            let (guest,flags)=rest.rsplit_once('\t').ok_or(errno::EIO)?;set_mount_propagation(guest,flags.parse().map_err(|_|errno::EIO)?)?;
+        } else if let Some(rest)=event.strip_prefix("move\t") {
+            let(from,to)=rest.split_once('\t').ok_or(errno::EIO)?;move_mount(from,to)?;
+        } else if let Some(rest)=event.strip_prefix("policy\t") {
+            let fields=rest.split('\t').collect::<Vec<_>>();if fields.len()!=7{return Err(errno::EINVAL);}
+            let mut mounts=vfs().mounts.write().unwrap();let mount=mounts.iter_mut().find(|mount|mount.guest==fields[0]&&mount.own).ok_or(errno::ENOENT)?;
+            mount.bind_source=(!fields[1].is_empty()).then(||fields[1].into());
+            if !fields[2].is_empty(){let policy=fields[4].split(',').map(str::parse::<u32>).collect::<Result<Vec<_>,_>>().map_err(|_|errno::EINVAL)?;if policy.len()!=5{return Err(errno::EINVAL);}mount.fuse=Some(FuseRoute{session:fields[2].into(),relative:fields[3].into(),uid:policy[0],gid:policy[1],allow_other:policy[2]!=0,default_permissions:policy[3]!=0,read_only:policy[4]!=0});}
+            mount.shared_fuse=fields[5]=="1";mount.projected_fuse=fields[6]=="1";
+        } else { load_own_mounts(&event)?; }
+    }
+    Ok(())
+}
+fn publish_mount_policy(guest:&str)->Result<(),Errno>{
+    if REPLAYING_NAMESPACE.with(std::cell::Cell::get)||mount_namespace_id().is_none(){return Ok(());}
+    let mount=vfs().mounts.read().unwrap().iter().find(|mount|mount.guest==guest&&mount.own).cloned().ok_or(errno::ENOENT)?;
+    let(route,relative,policy)=mount.fuse.as_ref().map(|route|(route.session.display().to_string(),route.relative.clone(),format!("{},{},{},{},{}",route.uid,route.gid,u8::from(route.allow_other),u8::from(route.default_permissions),u8::from(route.read_only)))).unwrap_or_default();
+    namespace_event(&format!("policy\t{}\t{}\t{}\t{}\t{}\t{}\t{}",mount.guest,mount.bind_source.as_deref().unwrap_or(""),route,relative,policy,u8::from(mount.shared_fuse),u8::from(mount.projected_fuse)))
+}
+
+fn refresh_namespace()->Result<(),Errno>{
+    if REPLAYING_NAMESPACE.with(std::cell::Cell::get){return Ok(());}
+    let _refresh=NAMESPACE_REFRESH.lock().unwrap();
+    let owner=NAMESPACE_VIEW.lock().unwrap().as_ref().and_then(|view|(view.page.current()!=view.generation).then(||(view.owner.clone(),view.generation)));
+    if let Some((owner,generation))=owner {
+        let state=owner.read().map_err(namespace_error)?;
+        if state.generation!=generation {let next=state.generation;apply_namespace_state(state)?;if let Some(view)=NAMESPACE_VIEW.lock().unwrap().as_mut(){if view.owner.id()==owner.id(){view.generation=next;}}}
+    }Ok(())
+}
+pub fn mount_namespace_id()->Option<String>{NAMESPACE_VIEW.lock().unwrap().as_ref().map(|view|view.owner.id().to_owned())}
+
+pub(crate) fn publish_process_namespace()->Result<(),Errno>{
+    if let(Some(id),Some(table))=(mount_namespace_id(),crate::sys::cred::by_pid_dir()){
+        let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(namespace_error)?;
+        aim_storage::process_namespace::register_mount_namespace(table,process,&id).map_err(namespace_error)?;
+    }Ok(())
 }
 
 /// A FUSE mount owns a daemon session transport, never a raw-media path.
@@ -196,12 +272,8 @@ pub fn fuse_route(guest:&str)->Option<FuseRoute>{
     Some(route)
 }
 pub fn add_fuse_mount(guest:&str,session:PathBuf,host_anchor:PathBuf,source:&str,options:&crate::sys::fuse_mount::Options,read_only:bool)->Result<(),Errno>{
-    let route=FuseRoute{session:session.clone(),relative:String::new(),uid:options.uid,gid:options.gid,allow_other:options.allow_other,default_permissions:options.default_permissions,read_only};
-    publish_fuse_route(guest,&host_anchor,source,Some(&route))?;
-    add_mount(guest,host_anchor,Area::Writable,source,"fuse");
-    let mut mounts=vfs().mounts.write().unwrap();
-    if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.fuse=Some(route);mount.shared_fuse=mount_propagation(guest)==Propagation::Shared;}
-    Ok(())
+    let route=FuseRoute{session,relative:String::new(),uid:options.uid,gid:options.gid,allow_other:options.allow_other,default_permissions:options.default_permissions,read_only};
+    install_mount(guest,host_anchor,Area::Writable,source,"fuse",Some(route),None)
 }
 pub fn fuse_route_for_session(session:&Path)->Option<(String,FuseRoute)>{
     let mounts=vfs().mounts.read().unwrap();mounts.iter().filter(|mount|!hidden(&mounts,mount))
@@ -210,9 +282,9 @@ pub fn fuse_route_for_session(session:&Path)->Option<(String,FuseRoute)>{
 /// A bind aliases the same FUSE session and mount-relative node tree.
 pub fn bind_mount(source_guest:&str,target_guest:&str,host:PathBuf,area:Area,source:&str,fstype:&str)->Result<(),Errno>{
     refresh_fuse_mounts()?;
-    let mut route=fuse_route(source_guest);if area==Area::Image{if let Some(route)=&mut route{route.read_only=true;}}if let Some(route)=&route{publish_fuse_route(target_guest,&host,source,Some(route))?;}else{publish_plain_mount(target_guest,&host,area,source,fstype,Some(source_guest))?;}add_mount(target_guest,host,area,source,fstype);
-    {let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==target_guest&&mount.own){mount.bind_source=Some(source_guest.into());mount.shared_fuse=mount_propagation(target_guest)==Propagation::Shared;}}
-    if let Some(route)=route{let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==target_guest&&mount.own){mount.fuse=Some(route);mount.shared_fuse=mount_propagation(target_guest)==Propagation::Shared;}}
+    let mut route=fuse_route(source_guest);
+    if area==Area::Image{if let Some(route)=&mut route{route.read_only=true;}}
+    install_mount(target_guest,host,area,source,fstype,route,Some(source_guest.into()))?;
     Ok(())
 }
 
@@ -232,9 +304,7 @@ pub fn bind_mount_recursive(source_guest:&str,target_guest:&str,host:PathBuf,are
         let guest=format!("{}/{relative}",target_guest.trim_end_matches('/'));
         let child_area=if area==Area::Image{Area::Image}else{child.area};
         let mut route=child.fuse.clone();if child_area==Area::Image{if let Some(route)=&mut route{route.read_only=true;}}
-        if let Some(route)=&route{publish_fuse_route(&guest,&child.host,child.source.as_deref().unwrap_or("fuse"),Some(route))?;}else{publish_plain_mount(&guest,&child.host,child_area,child.source.as_deref().unwrap_or("bind"),child.fstype.as_deref().unwrap_or("bind"),child.bind_source.as_deref())?;}
-        add_mount(&guest,child.host,child_area,child.source.as_deref().unwrap_or("bind"),child.fstype.as_deref().unwrap_or("bind"));
-        {let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.fuse=route;mount.shared_fuse=mount_propagation(&guest)==Propagation::Shared;}}
+        install_mount(&guest,child.host,child_area,child.source.as_deref().unwrap_or("bind"),child.fstype.as_deref().unwrap_or("bind"),route,child.bind_source)?;
 
     }
     Ok(())
@@ -268,6 +338,14 @@ pub fn input_dir() -> Option<&'static Path> {
 
 /// Parse a path map file: `kind<TAB>guest<TAB>host` lines, kinds `root`,
 /// `rw` and `kernfs`; `#` starts a comment line.
+fn map_propagation(text:&str)->Result<Vec<(String,Propagation)>,Errno>{
+    text.lines().filter_map(|line|line.strip_prefix("propagation\t")).map(|line|{
+        let(guest,kind)=line.split_once('\t').ok_or(errno::EINVAL)?;
+        let kind=match kind{"private"=>Propagation::Private,"slave"=>Propagation::Slave,"shared"=>Propagation::Shared,_=>return Err(errno::EINVAL)};
+        Ok((guest.into(),kind))
+    }).collect()
+}
+
 fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
     let mut root = None;
     let mut mounts:Vec<Mount> = Vec::new();
@@ -281,9 +359,10 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
             if !source.starts_with('/')||source.contains(['\n','\t']){return Err(format!("line {}: invalid bind source",n+1));}
             mount.bind_source=Some((*source).into());continue;
         }
-        if let ["propagation",guest,kind]=f.as_slice(){
+        if let ["propagation",_guest,kind]=f.as_slice(){
             let propagation=match *kind{"slave"=>Propagation::Slave,"private"=>Propagation::Private,"shared"=>Propagation::Shared,_=>return Err(format!("line {}: invalid propagation",n+1))};
-            PROPAGATION_RULES.lock().unwrap().push(((*guest).into(),propagation));continue;
+            let _ = propagation;
+            continue;
         }
         let [kind, guest, host] = f[..] else {
             return Err(format!("line {}: expected 3 tab-separated fields", n + 1));
@@ -332,6 +411,7 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
             let text =
                 std::fs::read_to_string(map).map_err(|e| format!("{}: {e}", map.display()))?;
             let (r, m) = parse_map(&text).map_err(|e| format!("{}: {e}", map.display()))?;
+            *PROPAGATION_RULES.lock().unwrap()=map_propagation(&text).map_err(|error|format!("mount propagation: errno {error}"))?;
             (r, m, map.parent().map(Path::to_path_buf))
         }
         None => (None, Vec::new(), None),
@@ -365,6 +445,14 @@ pub fn init(root: &Path, map: Option<&Path>) -> Result<(), String> {
         runtime,
         cwd: Mutex::new("/".into()),
     });
+    if let Some(runtime)=runtime_dir() {
+        let table=runtime.join("identity/by-pid");
+        if let Ok(init)=aim_storage::process_namespace::InitRegistration::read(&table){
+            let owner=aim_storage::mount_namespace::Namespace::open(runtime,&init.mount_namespace).map_err(|error|error.to_string())?;
+            *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:owner.generation().map_err(|error|error.to_string())?,owner,generation:0});
+            refresh_namespace().map_err(|error|format!("mount namespace: errno {error}"))?;
+        } else if table.join("namespace-init").exists(){return Err("invalid native init registration".into());}
+    }
     Ok(())
 }
 
@@ -428,6 +516,54 @@ pub fn mount_points() -> Vec<MountPoint> {
             fstype: m.fstype.clone(),
         })
         .collect()
+}
+
+/// Read another registered namespace without changing the reader's mount view.
+pub fn namespace_mount_points(id:&str)->Result<Vec<MountPoint>,Errno>{
+    let runtime=runtime_dir().ok_or(errno::ENODEV)?;
+    let owner=aim_storage::mount_namespace::Namespace::open(runtime,id).map_err(namespace_error)?;
+    let state=owner.read().map_err(namespace_error)?;
+    let(_,mut mounts)=parse_map(&state.base).map_err(|_|errno::EIO)?;
+    let mut rules=map_propagation(&state.base)?;
+    let mut private=false;
+    for event in state.events {
+        if let Some(guest)=event.strip_prefix("remove\t"){
+            if let Some(index)=mounts.iter().position(|mount|mount.own&&mount.guest==guest){mounts.remove(index);}
+        }else if let Some(rest)=event.strip_prefix("move\t"){
+            let(from,to)=rest.split_once('\t').ok_or(errno::EINVAL)?;
+            for mount in mounts.iter_mut().filter(|mount|mount.own&&(mount.guest==from||below(from,&mount.guest).is_some())){mount.guest=format!("{to}{}",&mount.guest[from.len()..]);}
+        }else if let Some(rest)=event.strip_prefix("propagation-flags\t"){
+            let(guest,flags)=rest.rsplit_once('\t').ok_or(errno::EINVAL)?;
+            let flags=flags.parse::<u64>().map_err(|_|errno::EINVAL)?;
+            let kind=if flags&(1<<19)!=0{Propagation::Slave}else if flags&(1<<20)!=0{Propagation::Shared}else{Propagation::Private};
+            rules.retain(|(root,_)|root!=guest&&(flags&0x4000==0||guest!="/"&&below(guest,root).is_none()));rules.push((guest.into(),kind));
+        }else if event.starts_with("policy\t"){continue;}
+        else {
+            for line in event.lines(){
+                if line=="namespace\tprivate"{private=true;continue;}
+                if let Some(rest)=line.strip_prefix("propagation\t"){let(guest,kind)=rest.split_once('\t').ok_or(errno::EINVAL)?;rules.push((guest.into(),match kind{"private"=>Propagation::Private,"slave"=>Propagation::Slave,"shared"=>Propagation::Shared,_=>return Err(errno::EINVAL)}));continue;}
+                if let Some(guest)=line.strip_prefix("mount-shared\t"){if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.shared_fuse=true;}continue;}
+                let fields=line.split('\t').collect::<Vec<_>>();if fields.len()==3&&fields[0]=="bind-source"{if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==fields[1]&&mount.own){mount.bind_source=Some(fields[2].into());}continue;}if !matches!(fields.len(),5|8){return Err(errno::EINVAL);}
+                let area=match fields[0]{"ro"=>Area::Image,"rw"=>Area::Writable,"kernfs"=>Area::Kernfs,"host-device"=>Area::HostDevice,"input"=>Area::Input,_=>return Err(errno::EINVAL)};
+                let seq=mounts.iter().map(|mount|mount.seq).max().unwrap_or(0)+1;
+                let mount=Mount{guest:fields[1].into(),host:fields[2].into(),area,source:Some(fields[3].into()),fstype:Some(fields[4].into()),own:true,seq,fuse:None,shared_fuse:false,bind_source:None,projected_fuse:false};
+                let at=mounts.iter().position(|known|known.guest.len()<=mount.guest.len()).unwrap_or(mounts.len());mounts.insert(at,mount);
+            }
+        }
+    }
+    let propagation=|guest:&str|rules.iter().filter(|(root,_)|root=="/"||below(root,guest).is_some()).max_by_key(|(root,_)|root.len()).map(|(_,kind)|*kind).unwrap_or(if private{Propagation::Private}else{Propagation::Shared});
+    mounts.retain(|mount|!mount.shared_fuse||propagation(&mount.guest)==Propagation::Private);
+    for line in fuse_table_lines()?{
+        let fields=line.split('\t').collect::<Vec<_>>();if !matches!(fields.len(),6|7){return Err(errno::EIO);}
+        if propagation(fields[0])==Propagation::Private{continue;}
+        let(area,fstype)=if fields.len()==7{(if fields[4]=="ro"{Area::Image}else{Area::Writable},fields[5])}else{(Area::Writable,"fuse")};
+        let seq=mounts.iter().map(|mount|mount.seq).max().unwrap_or(0)+1;
+        mounts.push(Mount{guest:fields[0].into(),host:fields[1].into(),area,source:Some(fields[2].into()),fstype:Some(fstype.into()),own:true,seq,fuse:None,shared_fuse:true,bind_source:if fields.len()==7&&!fields[6].is_empty(){Some(fields[6].into())}else{None},projected_fuse:false});
+    }
+    project_mounts(&mut mounts,propagation);
+    mounts.sort_by(|a,b|b.guest.len().cmp(&a.guest.len()).then(b.seq.cmp(&a.seq)));
+    let(mut map,mut own):(Vec<_>,Vec<_>)=mounts.iter().filter(|mount|mount.own||mount.host.is_dir()).partition(|mount|!mount.own);map.reverse();own.reverse();
+    Ok(map.into_iter().chain(own).map(|mount|MountPoint{guest:mount.guest.clone(),area:mount.area,source:mount.source.clone(),fstype:mount.fstype.clone()}).collect())
 }
 
 /// Active guest mount roots, including file binds and mapped directory roots.
@@ -540,7 +676,21 @@ pub fn attr_key(guest: &str) -> String {
 
 /// Mount `host` (with `area`) at the normalized guest path `guest`, over
 /// whatever is there. `source` and `fstype` are what `/proc/mounts` shows.
-pub fn add_mount(guest: &str, host: PathBuf, area: Area, source: &str, fstype: &str) {
+pub fn add_mount(guest: &str, host: PathBuf, area: Area, source: &str, fstype: &str) -> Result<(),Errno> {
+    install_mount(guest,host,area,source,fstype,None,None)
+}
+fn install_mount(guest:&str,host:PathBuf,area:Area,source:&str,fstype:&str,route:Option<FuseRoute>,bind_source:Option<String>)->Result<(),Errno>{
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get)&&mount_namespace_id().is_some(){
+        let kind=match area{Area::Image=>"ro",Area::Writable=>"rw",Area::Kernfs=>"kernfs",Area::HostDevice=>"host-device",Area::Input=>"input"};
+        let shared=mount_propagation(guest)==Propagation::Shared;
+        let mut event=format!("{kind}\t{guest}\t{}\t{source}\t{fstype}",host.display());
+        if let Some(route)=&route{event.push_str(&format!("\t{}\t{}\t{},{},{},{},{}",route.session.display(),route.relative,route.uid,route.gid,u8::from(route.allow_other),u8::from(route.default_permissions),u8::from(route.read_only)));}
+        event.push('\n');if shared{event.push_str(&format!("mount-shared\t{guest}\n"));}
+        if let Some(source)=&bind_source{event.push_str(&format!("bind-source\t{guest}\t{source}\n"));}
+        namespace_event(&event)?;
+        if let Some(route)=&route{publish_fuse_route(guest,&host,source,Some(route))?;}else{publish_plain_mount(guest,&host,area,source,fstype,bind_source.as_deref())?;}
+        return Ok(());
+    }
     let guest = if guest == "/" {
         guest
     } else {
@@ -562,12 +712,18 @@ pub fn add_mount(guest: &str, host: PathBuf, area: Area, source: &str, fstype: &
             fstype: Some(fstype.to_string()),
             own: true,
             seq,
-            fuse: None,
-            shared_fuse: false,
-            bind_source: None,
+            fuse: route.clone(),
+            shared_fuse: (route.is_some()||bind_source.is_some())&&mount_propagation(guest)==Propagation::Shared,
+            bind_source: bind_source.clone(),
             projected_fuse: false,
         },
     );
+    drop(mounts);
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get){
+        if let Some(route)=&route{let mount=vfs().mounts.read().unwrap().iter().find(|mount|mount.guest==guest&&mount.own).cloned().ok_or(errno::ENOENT)?;publish_fuse_route(guest,&mount.host,source,Some(route))?;}
+        else if bind_source.is_some(){let mount=vfs().mounts.read().unwrap().iter().find(|mount|mount.guest==guest&&mount.own).cloned().ok_or(errno::ENOENT)?;publish_plain_mount(guest,&mount.host,area,source,fstype,bind_source.as_deref())?;}
+    }
+    Ok(())
 }
 
 /// The filesystem type of the mount that holds the normalized guest path.
@@ -600,28 +756,47 @@ pub fn remount_fuse(guest:&str,read_only:bool)->Result<bool,Errno>{
     let Some(mount)=mount else{return Ok(false)};
     let seq=mount.seq;let mut route=mount.fuse.unwrap();route.read_only=read_only;
     publish_fuse_route(guest,&mount.host,mount.source.as_deref().unwrap_or("fuse"),Some(&route))?;
-    let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.seq==seq){mount.fuse=Some(route);}Ok(true)
+    let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.seq==seq){mount.fuse=Some(route);}drop(mounts);publish_mount_policy(guest)?;Ok(true)
 }
 
 /// Remove the latest mount this process made at `guest`.
-pub fn remove_mount(guest: &str) -> bool {
-    if vfs().mounts.read().unwrap().iter().any(|mount|mount.guest==guest&&mount.shared_fuse)&&publish_fuse_route(guest,Path::new(""),"",None).is_err(){return false;}
+pub fn remove_mount(guest: &str) -> Result<bool,Errno> {
+    refresh_namespace()?;
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get)&&mount_namespace_id().is_some(){
+        if !vfs().mounts.read().unwrap().iter().any(|mount|mount.guest==guest&&mount.own){return Ok(false);}
+        namespace_event(&format!("remove\t{guest}"))?;
+        publish_fuse_route(guest,Path::new(""),"",None)?;return Ok(true);
+    }
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get)&&vfs().mounts.read().unwrap().iter().any(|mount|mount.guest==guest&&mount.shared_fuse){publish_fuse_route(guest,Path::new(""),"",None)?;}
     let mut mounts = vfs().mounts.write().unwrap();
     match mounts.iter().position(|m| m.guest == guest && m.own) {
         Some(i) => {
             mounts.remove(i);
-            true
+            Ok(true)
         }
-        None => false,
+        None => Ok(false),
     }
 }
 
 /// Move the latest mount at `from`, and this process's mounts below it, to
 /// `to`.
-pub fn move_mount(from: &str, to: &str) -> bool {
+pub fn move_mount(from: &str, to: &str) -> Result<bool,Errno> {
+    refresh_namespace()?;
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get)&&mount_namespace_id().is_some(){
+        let moved=vfs().mounts.read().unwrap().iter().filter(|mount|mount.own&&(mount.guest==from||below(from,&mount.guest).is_some())).cloned().collect::<Vec<_>>();
+        if !moved.iter().any(|mount|mount.guest==from){return Ok(false);}
+        namespace_event(&format!("move\t{from}\t{to}"))?;
+        for mount in moved{
+            if mount.shared_fuse{publish_fuse_route(&mount.guest,Path::new(""),"",None)?;}
+            let guest=format!("{to}{}",&mount.guest[from.len()..]);
+            if let Some(route)=&mount.fuse{publish_fuse_route(&guest,&mount.host,mount.source.as_deref().unwrap_or("fuse"),Some(route))?;}
+            else{publish_plain_mount(&guest,&mount.host,mount.area,mount.source.as_deref().unwrap_or(""),mount.fstype.as_deref().unwrap_or(""),mount.bind_source.as_deref())?;}
+        }
+        return Ok(true);
+    }
     let mut mounts = vfs().mounts.write().unwrap();
     let Some(i) = mounts.iter().position(|m| m.guest == from && m.own) else {
-        return false;
+        return Ok(false);
     };
     let mut moved = vec![mounts.remove(i)];
     let below = format!("{from}/");
@@ -635,11 +810,11 @@ pub fn move_mount(from: &str, to: &str) -> bool {
     for m in moved {
         let guest = format!("{to}{}", &m.guest[from.len()..]);
         let (source, fstype) = (m.source.unwrap_or_default(), m.fstype.unwrap_or_default());
-        let route=m.fuse;
-        add_mount(&guest, m.host, m.area, &source, &fstype);
-        if let Some(route)=route{let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.fuse=Some(route);}}
+        let shared=m.shared_fuse;let projected=m.projected_fuse;
+        install_mount(&guest,m.host,m.area,&source,&fstype,m.fuse,m.bind_source)?;
+        let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.shared_fuse=shared;mount.projected_fuse=projected;}
     }
-    true
+    Ok(true)
 }
 
 /// This process's own mounts, oldest first, as `--mounts` text for the
@@ -647,12 +822,14 @@ pub fn move_mount(from: &str, to: &str) -> bool {
 /// lines.
 pub fn own_mounts_text() -> String {
     let mounts = vfs().mounts.read().unwrap();
+    let namespace=mount_namespace_id();
     let mut out = if PRIVATE_MOUNTS.load(Ordering::Acquire){"namespace\tprivate\n".to_owned()}else{String::new()};
+    if let Some(id)=namespace{out.push_str(&format!("namespace-owner\t{id}\n"));}
     for(root,kind)in PROPAGATION_RULES.lock().unwrap().iter(){out.push_str(&format!("propagation\t{root}\t{}\n",match kind{Propagation::Private=>"private",Propagation::Slave=>"slave",Propagation::Shared=>"shared"}));}
     let mut own: Vec<&Mount> = mounts.iter().filter(|m| m.own).collect();
     own.reverse();
     for m in own {
-        let area = if m.area == Area::Image { "ro" } else { "rw" };
+        let area = match m.area{Area::Image=>"ro",Area::Writable=>"rw",Area::Kernfs=>"kernfs",Area::HostDevice=>"host-device",Area::Input=>"input"};
         out.push_str(&format!(
             "{area}\t{}\t{}\t{}\t{}",
             m.guest,
@@ -670,7 +847,19 @@ pub fn own_mounts_text() -> String {
 }
 
 /// Restore the mounts [`own_mounts_text`] described.
-pub fn load_own_mounts(text: &str) {
+pub fn load_own_mounts(text: &str) -> Result<(),Errno> {
+    if !REPLAYING_NAMESPACE.with(std::cell::Cell::get) {
+        if let Some(id)=text.lines().find_map(|line|line.strip_prefix("namespace-owner\t")){
+            if let Some(runtime)=runtime_dir(){
+                let owner=aim_storage::mount_namespace::Namespace::open(runtime,id).map_err(namespace_error)?;
+                let page=owner.generation().map_err(namespace_error)?;
+                *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{owner,generation:0,page});
+                refresh_namespace()?;
+                publish_process_namespace()?;
+                return Ok(());
+            }
+        }
+    }
     if text.lines().any(|line|line=="namespace\tprivate"){PRIVATE_MOUNTS.store(true,Ordering::Release);}
     for line in text.lines() {
         let f: Vec<&str> = line.split('\t').collect();
@@ -680,15 +869,12 @@ pub fn load_own_mounts(text: &str) {
         if let ["bind-source",guest,source]=f.as_slice(){let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==*guest&&mount.own){mount.bind_source=Some((*source).into());}continue;}
         if f.len()==5||f.len()==8 {
             let(area,guest,host,source,fstype)=(f[0],f[1],f[2],f[3],f[4]);
-            let area = if area == "ro" {
-                Area::Image
-            } else {
-                Area::Writable
-            };
-            add_mount(guest, PathBuf::from(host), area, source, fstype);
-            if f.len()==8{let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.fuse=Some(FuseRoute{session:PathBuf::from(f[5]),relative:f[6].into(),uid:f[7].split(',').next().and_then(|value|value.parse().ok()).unwrap_or(u32::MAX),gid:f[7].split(',').nth(1).and_then(|value|value.parse().ok()).unwrap_or(u32::MAX),allow_other:f[7].split(',').nth(2)==Some("1"),default_permissions:f[7].split(',').nth(3)==Some("1"),read_only:f[7].split(',').nth(4)==Some("1")});}}
+            let area = match area {"ro"=>Area::Image,"rw"=>Area::Writable,"kernfs"=>Area::Kernfs,"host-device"=>Area::HostDevice,"input"=>Area::Input,_=>return Err(errno::EINVAL)};
+            add_mount(guest, PathBuf::from(host), area, source, fstype)?;
+            if f.len()==8{let policy=f[7].split(',').map(str::parse::<u32>).collect::<Result<Vec<_>,_>>().map_err(|_|errno::EINVAL)?;if policy.len()!=5||policy[2..].iter().any(|value|*value>1){return Err(errno::EINVAL);}let mut mounts=vfs().mounts.write().unwrap();if let Some(mount)=mounts.iter_mut().find(|mount|mount.guest==guest&&mount.own){mount.fuse=Some(FuseRoute{session:PathBuf::from(f[5]),relative:f[6].into(),uid:policy[0],gid:policy[1],allow_other:policy[2]!=0,default_permissions:policy[3]!=0,read_only:policy[4]!=0});}}
         }
     }
+    Ok(())
 }
 
 /// One inverse namespace view for a generated procfs read. Host aliases are
@@ -958,6 +1144,111 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore="real upstream mutation helper exercised by namespace_process_probe"]
+    fn namespace_upstream_probe(){
+        use std::io::BufRead;
+        let mut input=std::io::BufReader::new(std::io::stdin());let mut lines=Vec::new();
+        for _ in 0..4{let mut line=String::new();input.read_line(&mut line).unwrap();lines.push(line.trim_end().to_owned());}
+        init(Path::new(&lines[0]),Some(Path::new(&lines[1]))).unwrap();
+        load_own_mounts(&format!("namespace-owner\t{}\n",lines[2])).unwrap();
+        add_mount("/data/live-upstream-owner",PathBuf::from(&lines[3]),Area::Writable,"actual-upstream-child","tmpfs").unwrap();
+    }
+
+    #[test]
+    #[ignore="subprocess helper exercised by separate_process_mount_owner_preserves_shared_and_private_state"]
+    fn namespace_process_probe(){
+        use std::io::BufRead;
+        let mut input=std::io::BufReader::new(std::io::stdin());
+        let mut lines=Vec::new();for _ in 0..4{let mut line=String::new();input.read_line(&mut line).unwrap();lines.push(line.trim_end().to_owned());}
+        init(Path::new(&lines[0]),Some(Path::new(&lines[1]))).unwrap();
+        load_own_mounts(&format!("namespace-owner\t{}\n",lines[2])).unwrap();
+        let host=PathBuf::from(&lines[3]);
+        add_mount("/data/live-shared-owner",host.clone(),Area::Writable,"actual-child","tmpfs").unwrap();
+        let inherited=own_mounts_text();
+        private_mount_namespace().unwrap();
+        set_mount_propagation("/",(1<<19)|0x4000).unwrap();
+        use std::io::Write;
+        struct Child(std::process::Child);
+        impl Drop for Child{fn drop(&mut self){if self.0.try_wait().ok().flatten().is_none(){let _=self.0.kill();}let _=self.0.wait();}}
+        let mut upstream=Child(std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","vfs::tests::namespace_upstream_probe","--ignored","--nocapture"]).stdin(std::process::Stdio::piped()).spawn().unwrap());
+        writeln!(upstream.0.stdin.take().unwrap(),"{}\n{}\n{}\n{}",lines[0],lines[1],lines[2],lines[3]).unwrap();
+        assert!(upstream.0.wait().unwrap().success());refresh_fuse_mounts().unwrap();
+        assert_eq!(lookup("/data/live-upstream-owner/file").0,host.join("file"));
+        add_mount("/data/live-slave-only",host.clone(),Area::Writable,"actual-slave-child","tmpfs").unwrap();
+        set_mount_propagation("/",(1<<18)|0x4000).unwrap();
+        add_mount("/data/live-private-owner",host.clone(),Area::Writable,"actual-private-child","tmpfs").unwrap();
+        refresh_fuse_mounts().unwrap();
+        assert_eq!(lookup("/data/live-private-owner/file").0,host.join("file"));
+        // Exec restores the shared owner, rather than a stale mount snapshot.
+        load_own_mounts(&inherited).unwrap();refresh_fuse_mounts().unwrap();
+        assert_ne!(lookup("/data/live-private-owner/file").0,host.join("file"));
+        assert_eq!(lookup("/data/live-shared-owner/file").0,host.join("file"));
+    }
+
+    #[test]
+    fn separate_process_mount_owner_preserves_shared_and_private_state(){
+        use std::io::Write;
+        struct Child(std::process::Child);
+        impl Drop for Child{fn drop(&mut self){if self.0.try_wait().ok().flatten().is_none(){let _=self.0.kill();}let _=self.0.wait();}}
+        let (_guard,root)=test_view();let runtime=runtime_dir().unwrap();
+        let old_rules=PROPAGATION_RULES.lock().unwrap().clone();let old_private=PRIVATE_MOUNTS.load(Ordering::Acquire);
+        let old_view=NAMESPACE_VIEW.lock().unwrap().take();
+        let table=fuse_table().unwrap();let old_table=std::fs::read(&table).ok();
+        let id=format!("live-process-{}",std::process::id());
+        let owner=aim_storage::mount_namespace::Namespace::open(runtime,&id).unwrap();
+        owner.initialize(&std::fs::read_to_string(runtime.join("path-map")).unwrap()).unwrap();
+        owner.append("propagation-flags\t/\t1064960").unwrap();
+        *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:owner.generation().unwrap(),owner:owner.clone(),generation:0});refresh_namespace().unwrap();
+        let host=root.join("live-process-host");std::fs::create_dir_all(&host).unwrap();
+        let mut child=Child(std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","vfs::tests::namespace_process_probe","--ignored","--nocapture"]).stdin(std::process::Stdio::piped()).spawn().unwrap());
+        writeln!(child.0.stdin.take().unwrap(),"{}\n{}\n{}\n{}",crate::vfs::root().display(),runtime.join("path-map").display(),id,host.display()).unwrap();
+        assert!(child.0.wait().unwrap().success());
+        refresh_fuse_mounts().unwrap();
+        assert_eq!(lookup("/data/live-shared-owner/file").0,host.join("file"));
+        assert_ne!(lookup("/data/live-private-owner/file").0,host.join("file"));
+        assert_ne!(lookup("/data/live-slave-only/file").0,host.join("file"));
+        assert_eq!(lookup("/data/live-upstream-owner/file").0,host.join("file"));
+        let inventory=namespace_mount_points(&id).unwrap();
+        assert!(inventory.iter().any(|mount|mount.guest=="/data/live-shared-owner"));
+        assert!(!inventory.iter().any(|mount|mount.guest=="/data/live-private-owner"));
+        *NAMESPACE_VIEW.lock().unwrap()=old_view;
+        *PROPAGATION_RULES.lock().unwrap()=old_rules;PRIVATE_MOUNTS.store(old_private,Ordering::Release);
+        let (_,base)=parse_map(&std::fs::read_to_string(runtime.join("path-map")).unwrap()).unwrap();*vfs().mounts.write().unwrap()=base;
+        if let Some(bytes)=old_table{std::fs::write(table,bytes).unwrap();}else{let _=std::fs::remove_file(table);}
+        std::fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
+    fn shared_namespace_generation_refreshes_mounts_and_unshare_keeps_private_owner() {
+        let (_guard,root)=test_view();
+        let runtime=runtime_dir().unwrap();
+        let id=format!("test-namespace-{}",std::process::id());
+        let owner=aim_storage::mount_namespace::Namespace::open(runtime,&id).unwrap();
+        owner.initialize(&std::fs::read_to_string(runtime.join("path-map")).unwrap()).unwrap();
+        let old_rules=PROPAGATION_RULES.lock().unwrap().clone();let old_private=PRIVATE_MOUNTS.load(Ordering::Acquire);
+        let previous=NAMESPACE_VIEW.lock().unwrap().take();
+        *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:owner.generation().unwrap(),owner:owner.clone(),generation:0});
+        refresh_namespace().unwrap();
+        set_mount_propagation("/",(1<<18)|0x4000).unwrap();
+        let host=root.join("shared-real-mount");std::fs::create_dir_all(&host).unwrap();
+        add_mount("/data/shared-owner-test",host.clone(),Area::Writable,"tmpfs","tmpfs").unwrap();
+        assert_eq!(lookup("/data/shared-owner-test/file").0,host.join("file"));
+        let external=aim_storage::mount_namespace::Namespace::open(runtime,&id).unwrap();
+        external.append("remove\t/data/shared-owner-test").unwrap();
+        refresh_fuse_mounts().unwrap();assert_ne!(lookup("/data/shared-owner-test/file").0,host.join("file"));
+        let inherited=own_mounts_text();
+        private_mount_namespace().unwrap();let private=mount_namespace_id().unwrap();assert_ne!(private,id);
+        add_mount("/data/private-owner-test",host.clone(),Area::Writable,"tmpfs","tmpfs").unwrap();
+        load_own_mounts(&inherited).unwrap();assert_eq!(mount_namespace_id().as_deref(),Some(id.as_str()));
+        assert_ne!(lookup("/data/private-owner-test/file").0,host.join("file"));
+        let clone=aim_storage::mount_namespace::Namespace::open(runtime,&private).unwrap();assert!(clone.read().unwrap().events.iter().any(|event|event.contains("private-owner-test")));
+        *NAMESPACE_VIEW.lock().unwrap()=previous;
+        *PROPAGATION_RULES.lock().unwrap()=old_rules;PRIVATE_MOUNTS.store(old_private,Ordering::Release);
+        let (_,base)=parse_map(&std::fs::read_to_string(runtime.join("path-map")).unwrap()).unwrap();*vfs().mounts.write().unwrap()=base;
+        std::fs::remove_dir_all(host).unwrap();
+    }
+
+    #[test]
     fn interrupted_mount_journal_lock_waits_for_its_owner() {
         use std::os::fd::AsRawFd;
         let (_view, dir) = test_view();
@@ -1017,19 +1308,19 @@ mod tests {
         let (_view, dir) = test_view(); let data = dir.join("data"); let nested = data.join("inverse-alias"); std::fs::create_dir_all(&nested).unwrap();
         let alias = dir.join("inverse-host-alias"); std::os::unix::fs::symlink(&data, &alias).unwrap();
         let canonical = nested.canonicalize().unwrap();
-        add_mount("/inverse-parent", data.canonicalize().unwrap(), Area::Writable, "tmpfs", "tmpfs");
-        add_mount("/inverse-short", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs");
-        add_mount("/inverse-long-name", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/inverse-parent", data.canonicalize().unwrap(), Area::Writable, "tmpfs", "tmpfs").unwrap();
+        add_mount("/inverse-short", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs").unwrap();
+        add_mount("/inverse-long-name", alias.join("inverse-alias"), Area::Writable, "tmpfs", "tmpfs").unwrap();
         assert_eq!(guest_path_of_host(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
         let read = HostPathView::capture().unwrap();
         assert_eq!(read.guest_path(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
         let hidden_host = dir.join("inverse-hidden"); std::fs::create_dir_all(&hidden_host).unwrap();
-        add_mount("/inverse-short", hidden_host, Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/inverse-short", hidden_host, Area::Writable, "tmpfs", "tmpfs").unwrap();
         assert_eq!(guest_path_of_host(&canonical.join("file")).as_deref(), Some("/inverse-long-name/file"));
         assert_eq!(read.guest_path(&canonical.join("file")).as_deref(), Some("/inverse-short/file"));
         let next_read = HostPathView::capture().unwrap();
         assert_eq!(next_read.guest_path(&canonical.join("file")).as_deref(), Some("/inverse-long-name/file"));
-        assert!(remove_mount("/inverse-short")); assert!(remove_mount("/inverse-short")); assert!(remove_mount("/inverse-long-name")); assert!(remove_mount("/inverse-parent"));
+        assert!(remove_mount("/inverse-short").unwrap()); assert!(remove_mount("/inverse-short").unwrap()); assert!(remove_mount("/inverse-long-name").unwrap()); assert!(remove_mount("/inverse-parent").unwrap());
         std::fs::remove_file(alias).unwrap(); std::fs::remove_dir_all(nested).unwrap();
     }
     #[test]
@@ -1041,7 +1332,7 @@ mod tests {
         std::fs::create_dir_all(&before).unwrap();
         std::fs::create_dir_all(&after).unwrap();
         std::os::unix::fs::symlink(&before, &alias).unwrap();
-        add_mount("/inverse-changing", alias.clone(), Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/inverse-changing", alias.clone(), Area::Writable, "tmpfs", "tmpfs").unwrap();
         let read = HostPathView::capture().unwrap();
         let before_file = before.canonicalize().unwrap().join("file");
         assert_eq!(read.guest_path(&before_file).as_deref(), Some("/inverse-changing/file"));
@@ -1050,7 +1341,7 @@ mod tests {
         assert_eq!(read.guest_path(&before_file).as_deref(), Some("/inverse-changing/file"));
         assert_eq!(guest_path_of_host(&after.canonicalize().unwrap().join("file")).as_deref(), Some("/inverse-changing/file"));
         assert!(guest_path_of_host(&before_file).is_none());
-        assert!(remove_mount("/inverse-changing"));
+        assert!(remove_mount("/inverse-changing").unwrap());
         std::fs::remove_file(alias).unwrap();
         std::fs::remove_dir(before).unwrap();
         std::fs::remove_dir(after).unwrap();
@@ -1080,7 +1371,7 @@ mod tests {
         let (data, tmp) = (dir.join("data"), dir.join("tmp"));
         std::fs::create_dir_all(&tmp).unwrap();
 
-        add_mount("/data/app", tmp.clone(), Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/data/app", tmp.clone(), Area::Writable, "tmpfs", "tmpfs").unwrap();
         assert_eq!(lookup("/data/app/x").0, tmp.join("x"));
         assert_eq!(lookup("/data/other").0, data.join("other"));
         assert!(
@@ -1089,15 +1380,15 @@ mod tests {
                 .any(|m| m.guest == "/data/app" && m.fstype.as_deref() == Some("tmpfs"))
         );
         let text = own_mounts_text();
-        assert!(move_mount("/data/app", "/data/moved"));
+        assert!(move_mount("/data/app", "/data/moved").unwrap());
         assert_eq!(lookup("/data/moved").0, tmp);
-        assert!(remove_mount("/data/moved"));
-        assert!(!remove_mount("/data/moved"));
-        assert!(!remove_mount("/data"), "path map entries are not unmounted");
+        assert!(remove_mount("/data/moved").unwrap());
+        assert!(!remove_mount("/data/moved").unwrap());
+        assert!(!remove_mount("/data").unwrap(), "path map entries are not unmounted");
 
-        load_own_mounts(&text);
+        load_own_mounts(&text).unwrap();
         assert_eq!(lookup("/data/app").0, tmp);
-        assert!(remove_mount("/data/app"));
+        assert!(remove_mount("/data/app").unwrap());
     }
 
     #[test]
@@ -1115,7 +1406,7 @@ mod tests {
             Some("/data/user/0/p")
         );
 
-        add_mount("/data/user", tmp.clone(), Area::Writable, "tmpfs", "tmpfs");
+        add_mount("/data/user", tmp.clone(), Area::Writable, "tmpfs", "tmpfs").unwrap();
         assert_eq!(lookup("/data/user/0").0, tmp.join("0"));
         assert_eq!(fstype("/data/user/0").as_deref(), Some("tmpfs"));
         assert_eq!(attr_key("/data/user/0"), format!("{}/0", tmp.display()));
@@ -1126,10 +1417,10 @@ mod tests {
             Area::Writable,
             "/data/data",
             "bind",
-        );
+        ).unwrap();
         assert_eq!(lookup("/data/user/0/p").0, data.join("data/p"));
-        assert!(remove_mount("/data/user/0"));
-        assert!(remove_mount("/data/user"));
+        assert!(remove_mount("/data/user/0").unwrap());
+        assert!(remove_mount("/data/user").unwrap());
         assert_eq!(lookup("/data/user/0/p").0, data.join("data/p"));
     }
 }
@@ -1143,7 +1434,7 @@ mod fuse_route_tests {
         let text=format!("root\t/\t{}\nrw\t/storage/aim-init-alias\t{}\nbind-source\t/storage/aim-init-alias\t/mnt/aim-init-user\npropagation\t/storage/aim-init-alias\tslave\n",root.display(),parent.display());
         let(_,entries)=parse_map(&text).unwrap();assert_eq!(entries[0].bind_source.as_deref(),Some("/mnt/aim-init-user"));vfs().mounts.write().unwrap().extend(entries);
         publish_plain_mount("/mnt/aim-init-user/emulated",&lower,Area::Writable,"lower","bind",None).unwrap();refresh_fuse_mounts().unwrap();assert_eq!(lookup("/storage/aim-init-alias/emulated/0").0,lower.join("0"));
-        let inherited=own_mounts_text();load_own_mounts(&inherited);refresh_fuse_mounts().unwrap();
+        let inherited=own_mounts_text();load_own_mounts(&inherited).unwrap();refresh_fuse_mounts().unwrap();
         assert_eq!(vfs().mounts.read().unwrap().iter().filter(|mount|mount.guest=="/mnt/aim-init-user/emulated"&&mount.shared_fuse).count(),1);
         assert_eq!(lookup("/storage/aim-init-alias/emulated/0").0,lower.join("0"));
         // An imported projection must remain an inherited event, not turn
@@ -1158,7 +1449,7 @@ mod fuse_route_tests {
     fn late_plain_pass_through_bind_propagates_actual_lower_into_slave_alias(){
         let(_guard,root)=test_view();let old_private=PRIVATE_MOUNTS.swap(false,Ordering::AcqRel);let old_rules=std::mem::take(&mut *PROPAGATION_RULES.lock().unwrap());
         let parent=root.join("plain-parent");let lower=root.join("plain-lower");std::fs::create_dir_all(&parent).unwrap();std::fs::create_dir_all(lower.join("0/Android/data")).unwrap();
-        add_mount("/mnt/aim-pass",parent.clone(),Area::Writable,"parent","bind");
+        add_mount("/mnt/aim-pass",parent.clone(),Area::Writable,"parent","bind").unwrap();
         bind_mount_recursive("/mnt/aim-pass","/storage/aim-pass-slave",parent.clone(),Area::Writable,true).unwrap();
         bind_mount_recursive("/mnt/aim-pass","/storage/aim-pass-private",parent.clone(),Area::Writable,true).unwrap();
         set_mount_propagation("/storage/aim-pass-slave",(1<<19)|0x4000).unwrap();set_mount_propagation("/storage/aim-pass-private",(1<<18)|0x4000).unwrap();
@@ -1168,14 +1459,14 @@ mod fuse_route_tests {
         assert_ne!(lookup("/storage/aim-pass-private/emulated/0/Android/data").0,lower.join("0/Android/data"));
         publish_fuse_route("/mnt/aim-pass/emulated",&lower,"",None).unwrap();refresh_fuse_mounts().unwrap();
         assert_ne!(lookup("/storage/aim-pass-slave/emulated/0/Android/data").0,lower.join("0/Android/data"));
-        for path in ["/storage/aim-pass-private","/storage/aim-pass-slave","/mnt/aim-pass"]{assert!(remove_mount(path));}
+        for path in ["/storage/aim-pass-private","/storage/aim-pass-slave","/mnt/aim-pass"]{assert!(remove_mount(path).unwrap());}
         *PROPAGATION_RULES.lock().unwrap()=old_rules;PRIVATE_MOUNTS.store(old_private,Ordering::Release);
     }
     #[test]
     fn early_parent_alias_projects_late_fuse_event_into_slave_but_not_private_view(){
         let(_guard,root)=test_view();let old_private=PRIVATE_MOUNTS.swap(false,Ordering::AcqRel);let old_rules=std::mem::take(&mut *PROPAGATION_RULES.lock().unwrap());
         let parent=root.join("late-source");std::fs::create_dir_all(&parent).unwrap();
-        add_mount("/mnt/aim-late-user",parent.clone(),Area::Writable,"user","bind");
+        add_mount("/mnt/aim-late-user",parent.clone(),Area::Writable,"user","bind").unwrap();
         bind_mount_recursive("/mnt/aim-late-user","/mnt/aim-late-installer",parent.clone(),Area::Writable,true).unwrap();
         bind_mount_recursive("/mnt/aim-late-installer","/storage/aim-late-slave",parent.clone(),Area::Writable,true).unwrap();
         bind_mount_recursive("/mnt/aim-late-installer","/storage/aim-late-private",parent.clone(),Area::Writable,true).unwrap();
@@ -1187,7 +1478,7 @@ mod fuse_route_tests {
         assert!(own_mounts_text().contains("bind-source\t/mnt/aim-late-installer\t/mnt/aim-late-user"));
         publish_fuse_route("/mnt/aim-late-user/emulated",&parent,"",None).unwrap();refresh_fuse_mounts().unwrap();
         assert!(fuse_route("/storage/aim-late-slave/emulated/0/Pictures").is_none());
-        for path in ["/storage/aim-late-private","/storage/aim-late-slave","/mnt/aim-late-installer","/mnt/aim-late-user"]{assert!(remove_mount(path));}
+        for path in ["/storage/aim-late-private","/storage/aim-late-slave","/mnt/aim-late-installer","/mnt/aim-late-user"]{assert!(remove_mount(path).unwrap());}
         *PROPAGATION_RULES.lock().unwrap()=old_rules;PRIVATE_MOUNTS.store(old_private,Ordering::Release);
     }
     #[test]
@@ -1196,10 +1487,10 @@ mod fuse_route_tests {
         let parent=root.join("recursive-source");let anchor=root.join("recursive-fuse-anchor");let android=root.join("recursive-android");
         for path in [&parent,&anchor,&android]{std::fs::create_dir_all(path).unwrap();}
         let options=crate::sys::fuse_mount::parse(b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other,").unwrap();
-        add_mount("/mnt/aim-rec-source",parent.clone(),Area::Writable,"source","bind");
+        add_mount("/mnt/aim-rec-source",parent.clone(),Area::Writable,"source","bind").unwrap();
         let session=root.join("recursive-session.sock");
         add_fuse_mount("/mnt/aim-rec-source/emulated",session.clone(),anchor,"fuse",&options,false).unwrap();
-        add_mount("/mnt/aim-rec-source/emulated/0/Android/data",android.clone(),Area::Writable,"android-data","bind");
+        add_mount("/mnt/aim-rec-source/emulated/0/Android/data",android.clone(),Area::Writable,"android-data","bind").unwrap();
         bind_mount_recursive("/mnt/aim-rec-source","/mnt/aim-nonrec",parent.clone(),Area::Writable,false).unwrap();
         assert!(fuse_route("/mnt/aim-nonrec/emulated/0/Documents").is_none());
         assert_ne!(lookup("/mnt/aim-nonrec/emulated/0/Android/data/pkg").0,android.join("pkg"));
@@ -1207,7 +1498,7 @@ mod fuse_route_tests {
         let route=fuse_route("/mnt/aim-rec-target/emulated/0/Documents").unwrap();assert_eq!(route.session,session);assert_eq!(route.relative,"0/Documents");assert!(route.allow_other);
         assert_eq!(lookup("/mnt/aim-rec-target/emulated/0/Android/data/pkg").0,android.join("pkg"));
         assert!(fuse_route("/mnt/aim-rec-target/emulated/0/Android/data/pkg").is_none());
-        for path in ["/mnt/aim-rec-target/emulated/0/Android/data","/mnt/aim-rec-target/emulated","/mnt/aim-rec-target","/mnt/aim-nonrec","/mnt/aim-rec-source/emulated/0/Android/data","/mnt/aim-rec-source/emulated","/mnt/aim-rec-source"]{assert!(remove_mount(path));}
+        for path in ["/mnt/aim-rec-target/emulated/0/Android/data","/mnt/aim-rec-target/emulated","/mnt/aim-rec-target","/mnt/aim-nonrec","/mnt/aim-rec-source/emulated/0/Android/data","/mnt/aim-rec-source/emulated","/mnt/aim-rec-source"]{assert!(remove_mount(path).unwrap());}
     }
     #[test]
     fn slave_namespace_imports_future_parent_fuse_routes_without_publishing_child_mounts(){
@@ -1225,7 +1516,7 @@ mod fuse_route_tests {
         bind_mount(parent,child,anchor.clone(),Area::Writable,"fuse","bind").unwrap();
         assert!(fuse_route(child).is_some());assert!(!fuse_table_lines().unwrap().iter().any(|line|line.split('\t').next()==Some(child)));
         PROPAGATION_RULES.lock().unwrap().clear();PRIVATE_MOUNTS.store(false,Ordering::Release);
-        publish_fuse_route(parent,&anchor,"",None).unwrap();remove_mount(child);refresh_fuse_mounts().unwrap();
+        publish_fuse_route(parent,&anchor,"",None).unwrap();remove_mount(child).unwrap();refresh_fuse_mounts().unwrap();
         *PROPAGATION_RULES.lock().unwrap()=old_rules;PRIVATE_MOUNTS.store(old_private,Ordering::Release);
     }
     #[test]
@@ -1239,7 +1530,7 @@ mod fuse_route_tests {
         let route=fuse_route("/storage/aim-fuse-test/Documents/a.txt").unwrap();
         assert_eq!(route.session,session);assert_eq!(route.relative,"user/0/Documents/a.txt");assert!(route.allow_other);
         let text=own_mounts_text();assert!(text.contains("fuse-session.sock"));
-        assert!(remove_mount("/storage/aim-fuse-test"));assert!(remove_mount(target));
+        assert!(remove_mount("/storage/aim-fuse-test").unwrap());assert!(remove_mount(target).unwrap());
         assert!(fuse_route("/storage/aim-fuse-test/Documents/a.txt").is_none());
     }
 }

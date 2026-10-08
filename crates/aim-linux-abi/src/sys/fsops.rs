@@ -1292,9 +1292,9 @@ mod tests {
         let host = view.join("run/cgroup-dot");
         std::fs::create_dir_all(host.join("system/uid_1000")).unwrap();
         let host = host.canonicalize().unwrap();
-        vfs::add_mount("/sys/fs/cgroup", host.clone(), vfs::Area::Writable, "none", "cgroup2");
+        vfs::add_mount("/sys/fs/cgroup", host.clone(), vfs::Area::Writable, "none", "cgroup2").unwrap();
         let proc_host = view.join("run/proc-dot"); std::fs::create_dir_all(&proc_host).unwrap();
-        vfs::add_mount("/proc", proc_host.canonicalize().unwrap(), vfs::Area::Kernfs, "proc", "proc");
+        vfs::add_mount("/proc", proc_host.canonicalize().unwrap(), vfs::Area::Kernfs, "proc", "proc").unwrap();
         let path = c("/sys/fs/cgroup/system/uid_1000/.");
         let id = super::super::cred::Identity::default();
         let resolved = resolve_metadata(vfs::LINUX_AT_FDCWD, path.as_bytes(), true, &id).unwrap();
@@ -1334,8 +1334,8 @@ mod tests {
         assert_eq!(fchmodat_as([AT,magic.as_ptr() as u64,0o777,0,0,0],&id),-(crate::errno::ELOOP as i64));
         assert_eq!(super::super::fs::close([link_fd as u64,0,0,0,0,0]),0);
         drop(anchor);
-        assert!(vfs::remove_mount("/sys/fs/cgroup"));
-        assert!(vfs::remove_mount("/proc"));
+        assert!(vfs::remove_mount("/sys/fs/cgroup").unwrap());
+        assert!(vfs::remove_mount("/proc").unwrap());
         std::fs::remove_dir_all(proc_host).unwrap();
         std::fs::remove_dir_all(host).unwrap();
     }
@@ -1481,11 +1481,11 @@ mod tests {
         let resolved = vfs::resolve(LINUX_AT_FDCWD, base.as_bytes(), true).unwrap();
         let bind_alias = format!("{base}-bind");
         vfs::add_mount(&bind_alias, std::path::PathBuf::from(std::ffi::OsStr::from_bytes(resolved.host.as_bytes())),
-            resolved.area, &base, "bind");
+            resolved.area, &base, "bind").unwrap();
         chmod(&base, 0o2750);
         create(&format!("{bind_alias}/through-bind"));
         assert_eq!(owner(&format!("{base}/through-bind")).1, inherited);
-        assert!(vfs::remove_mount(&bind_alias));
+        assert!(vfs::remove_mount(&bind_alias).unwrap());
         let resolved_alias = vfs::resolve(LINUX_AT_FDCWD, alias.as_bytes(), false).unwrap();
         std::fs::remove_file(std::path::Path::new(std::ffi::OsStr::from_bytes(resolved_alias.host.as_bytes()))).unwrap();
         std::fs::remove_dir_all(std::path::Path::new(std::ffi::OsStr::from_bytes(resolved.host.as_bytes()))).unwrap();
@@ -1668,14 +1668,14 @@ mod unlink_permission_tests {
             crate::vfs::Area::Writable,
             "bind",
             "bind",
-        );
+        ).unwrap();
         crate::vfs::add_mount(
             &file_guest,
             file.clone(),
             crate::vfs::Area::Writable,
             "bind",
             "bind",
-        );
+        ).unwrap();
         let id = super::super::cred::Identity::default();
         let invoke = |path: &str, flags| {
             let path = CString::new(path).unwrap();
@@ -1715,22 +1715,22 @@ mod unlink_permission_tests {
             crate::vfs::Area::Image,
             "bind",
             "bind",
-        );
+        ).unwrap();
         assert_eq!(invoke(&file_guest, 0), -crate::errno::EBUSY as i64);
-        assert!(crate::vfs::remove_mount(&file_guest));
+        assert!(crate::vfs::remove_mount(&file_guest).unwrap());
         crate::vfs::add_mount(
             &directory_guest,
             file.clone(),
             crate::vfs::Area::Writable,
             "bind",
             "bind",
-        );
+        ).unwrap();
         assert_eq!(invoke(&directory_guest, 0), -crate::errno::EBUSY as i64);
-        assert!(crate::vfs::remove_mount(&directory_guest));
+        assert!(crate::vfs::remove_mount(&directory_guest).unwrap());
         assert!(crate::vfs::is_mountpoint(&directory_guest));
-        assert!(crate::vfs::remove_mount(&directory_guest));
+        assert!(crate::vfs::remove_mount(&directory_guest).unwrap());
         assert!(!crate::vfs::is_mountpoint(&directory_guest));
-        assert!(crate::vfs::remove_mount(&file_guest));
+        assert!(crate::vfs::remove_mount(&file_guest).unwrap());
         std::fs::remove_dir_all(backing).unwrap();
         std::fs::remove_file(file).unwrap();
         std::fs::remove_dir_all(host).unwrap();

@@ -543,7 +543,10 @@ first official Parsing module completes with actual XML:11 passed,0 failed,
 done=true, SHA86d5e8020002161d5fa7d50b84582f7337acaa0e0a78fc0cb4f76d401aba8cdb.
 PreferredActivity also completes with official XML2/0, done=true, after two
 real Tradefed reboots; SHA0f6827de97f9eb7c4c51ce432046ca0a52ad79af3d64ba9b2c1f3f712e80e18b.
-Setting follows automatically; current full66 is2/66 complete, not accepted. The
+Setting also completes with official XML2/0, done=true,
+SHA5c278472e8b4437ca2273afb0b55f041199b0b564ca894d7f43c92089f90cfd1.
+Its second body has a device-unavailable detection warning, so only observed
+reboots are claimed. PackageManagerHost follows; current full66 is3/66 complete. The
 old failed C109/C110 cohorts remain NOT RUN evidence. A separate rollback on
 a clone of native-written data constructs original PMS (package owner PID equals
 SystemServer 50573), preserving five selected packages' UID/codepath/version,
@@ -5679,8 +5682,19 @@ the tombstone to `/data/tombstones/tombstone_NN` (an `O_TMPFILE` it names with
 - `/proc/self/fd` (and any synthesized `/proc` directory) has a link and
   `fstat` that match its path, so bionic's `realpath` works. prng_seeder's
   inherited-fd scan aborted.
-- `/proc/mounts`, `/proc/<pid>/mounts` and `mountinfo` describe the path
-  map.
+- `/proc/mounts`, `/proc/<pid>/mounts` and `mountinfo` read the actual target
+  process's registered mount owner. Source now registers native guest-init's
+  host incarnation as guest PID 1, retains host identities for authentication,
+  and translates public PID boundaries consistently (#1158). Separate-process
+  tests cover PID inputs/outputs, init signal immunity and real Binder/Mach
+  identity. Root combined verification passes ABI180/0 (seven ignored entries, three
+  subprocess helpers actually run), Binder driver7/0 and host30/0,
+  guest-init22/0, storage14/0 (its helper actually run), and PM805/0
+  (eleven ignored). A further invalid-signal precedence regression passes.
+  These source gates do not establish runtime conformance.
+  A fresh official Apex CTS run remains required; the frozen original
+  campaign's recorded failure is unchanged. Queued signals to native init return
+  EOPNOTSUPP rather than discard siginfo; its caught ordinary signals use Darwin.
 - `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)` is accepted.
 - A `#!` script as `linux-run`'s program runs its interpreter.
 - guest-init plays apexd more closely: `apex.all.ready` is set at
@@ -5711,8 +5725,8 @@ the tombstone to `/data/tombstones/tombstone_NN` (an `O_TMPFILE` it names with
   names a process, not only `/proc` (#341): `kill` (also `-1` and process
   groups), pidfds, the scheduler and priority calls and the rest reach
   guest processes only, and a Mac process is ESRCH. `getppid` and
-  `/proc/<pid>/stat` give 0 for a parent outside, such as guest-init
-  (#364), and `sysinfo` counts the namespace's processes (#366). A `linux-run` started without a table (tests, a debugging
+  `/proc/<pid>/stat` give 0 for a parent outside (#364), and the authenticated
+  native guest-init parent is exposed as PID 1 (#1158), and `sysinfo` counts the namespace's processes (#366). A `linux-run` started without a table (tests, a debugging
   shell) is alone in a private namespace with its descendants (#361);
   `--by-pid` joins a boot's. Signals, renicing and rescheduling another
   guest process follow the kernel's uid and capability rules (#362): an
@@ -5757,10 +5771,11 @@ memory pressure since #277, see "Memory pressure").
 - ART (`0005`): nterp's `new-instance`/`new-array` decode the class after
   the read-barrier mark entrypoint, and `ExecuteNterpWithClinitImpl` decodes
   the declaring class. libadbconnection is rebuilt (zygote loads it).
-- Mount namespaces are per-process path-map entries (`unshare`, bind,
-  tmpfs, move, `umount2`, carried over `execve`); init's own binds between
-  writable areas (the data mirrors for app data isolation) become path-map
-  entries for processes started later.
+- Mount namespaces use shared, generation-published owner journals. Fork and
+  exec inherit the owner; `unshare(CLONE_NEWNS)` clones its current mount state
+  and propagation settings. Shared/slave/private propagation, bind/FUSE policy,
+  tmpfs, move and `umount2` retain actual ownership. Native init's live path-map
+  changes update that owner, including writable data mirrors (#1158).
 - `--stdio-null`: services get `/dev/null` on fds 0–2 as init gives them,
   and the layer logs to a hidden descriptor (zygote refused its
   non-allowlisted stdout).

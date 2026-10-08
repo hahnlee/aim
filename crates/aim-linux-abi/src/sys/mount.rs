@@ -128,7 +128,7 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
     }
     if flags & MS_MOVE != 0 {
         let source = resolve(a[0], true)?;
-        return if vfs::move_mount(&source.guest, &target.guest) {
+        return if vfs::move_mount(&source.guest, &target.guest).map_err(|error|-(error as i64))? {
             Ok(())
         } else {
             Err(-(EINVAL as i64))
@@ -143,7 +143,7 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
             super::fuse::Client::from_key(&session).and_then(|client|client.mount()).map_err(|error|-(error as i64))?;
             let source=unsafe{super::guest_cstr(a[0])};let source=std::str::from_utf8(source).map_err(|_|-(EINVAL as i64))?;
             vfs::add_fuse_mount(&target.guest,session.transport().to_path_buf(),PathBuf::from(OsStr::from_bytes(target.host.as_bytes())),source,&options,flags&MS_RDONLY!=0).map_err(|error|-(error as i64))?;
-            match super::fuse_sysfs::mounted(&session){Ok(_)=>Ok(()),Err(error)=>{vfs::remove_mount(&target.guest);Err(-(error as i64))}}
+            match super::fuse_sysfs::mounted(&session){Ok(_)=>Ok(()),Err(error)=>{vfs::remove_mount(&target.guest).map_err(|error|-(error as i64))?;Err(-(error as i64))}}
         }
         b"tmpfs" => {
             // SAFETY: guest string (options), may be null.
@@ -154,7 +154,7 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
             } else {
                 Area::Writable
             };
-            vfs::add_mount(&target.guest, dir, area, "tmpfs", "tmpfs");
+            vfs::add_mount(&target.guest, dir, area, "tmpfs", "tmpfs").map_err(|error|-(error as i64))?;
             Ok(())
         }
         _ => Err(-(ENODEV as i64)),
@@ -172,7 +172,8 @@ pub fn umount2(a: [u64; 6]) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
-    if vfs::remove_mount(&target.guest) {
+    let removed=match vfs::remove_mount(&target.guest){Ok(removed)=>removed,Err(error)=>return -(error as i64)};
+    if removed {
         0
     } else if target.guest == "/" {
         -(EBUSY as i64)

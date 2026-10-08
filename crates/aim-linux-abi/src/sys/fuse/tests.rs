@@ -141,7 +141,7 @@ fn bind_mount_directory_checks_use_fuse_daemon_not_missing_anchor_children(){
  let anchor=root.join("bind-fuse-anchor");fs::create_dir_all(&anchor).unwrap();let lower=root.join("bind-fuse-lower");fs::create_dir_all(&lower).unwrap();
  let options=super::super::fuse_mount::parse(b"fd=17,rootmode=40000,user_id=0,group_id=0,allow_other,").unwrap();
  crate::vfs::add_fuse_mount("/mnt/aim-bind-fuse",connection.key.transport().to_owned(),anchor.clone(),"fuse",&options,false).unwrap();
- crate::vfs::add_mount("/mnt/aim-bind-lower",lower,crate::vfs::Area::Writable,"lower","bind");
+ crate::vfs::add_mount("/mnt/aim-bind-lower",lower,crate::vfs::Area::Writable,"lower","bind").unwrap();
  let source=std::ffi::CString::new("/mnt/aim-bind-lower").unwrap();let target=std::ffi::CString::new("/mnt/aim-bind-fuse/Android").unwrap();
  assert!(!anchor.join("Android").exists());
  let(done,completed)=mpsc::channel();
@@ -156,7 +156,7 @@ fn bind_mount_directory_checks_use_fuse_daemon_not_missing_anchor_children(){
   }
  }
  task.join().unwrap();assert!(!anchor.join("Android").exists());
- assert!(crate::vfs::remove_mount("/mnt/aim-bind-fuse/Android"));assert!(crate::vfs::remove_mount("/mnt/aim-bind-fuse"));assert!(crate::vfs::remove_mount("/mnt/aim-bind-lower"));
+ assert!(crate::vfs::remove_mount("/mnt/aim-bind-fuse/Android").unwrap());assert!(crate::vfs::remove_mount("/mnt/aim-bind-fuse").unwrap());assert!(crate::vfs::remove_mount("/mnt/aim-bind-lower").unwrap());
 }
 
 #[test]
@@ -230,5 +230,5 @@ fn vfs_path_walk_releases_lookup_references_on_success_and_errors() {
  assert_eq!(crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD,format!("{mount}/link").as_bytes(),true).err(),Some(crate::errno::EINVAL));
  // A following real request makes the daemon drain all preceding no-reply FORGETs.
  Client::from_key(&connection.key).unwrap().request(17,1,&[],0,0,1).unwrap();
- daemon.join().unwrap(); assert!(crate::vfs::remove_mount(mount));
+ daemon.join().unwrap(); assert!(crate::vfs::remove_mount(mount).unwrap());
 }

@@ -66,44 +66,11 @@ fn lowest(set: u64) -> i32 {
 }
 
 /// Linux -> Darwin signal numbers (0 when Darwin has no equivalent).
-pub fn to_host(sig: i32) -> i32 {
-    match sig {
-        1 => libc::SIGHUP,
-        2 => libc::SIGINT,
-        3 => libc::SIGQUIT,
-        4 => libc::SIGILL,
-        5 => libc::SIGTRAP,
-        6 => libc::SIGABRT,
-        7 => libc::SIGBUS,
-        8 => libc::SIGFPE,
-        9 => libc::SIGKILL,
-        10 => libc::SIGUSR1,
-        11 => libc::SIGSEGV,
-        12 => libc::SIGUSR2,
-        13 => libc::SIGPIPE,
-        14 => libc::SIGALRM,
-        15 => libc::SIGTERM,
-        17 => libc::SIGCHLD,
-        18 => libc::SIGCONT,
-        19 => libc::SIGSTOP,
-        20 => libc::SIGTSTP,
-        21 => libc::SIGTTIN,
-        22 => libc::SIGTTOU,
-        23 => libc::SIGURG,
-        24 => libc::SIGXCPU,
-        25 => libc::SIGXFSZ,
-        26 => libc::SIGVTALRM,
-        27 => libc::SIGPROF,
-        28 => libc::SIGWINCH,
-        29 => libc::SIGIO,
-        31 => libc::SIGSYS,
-        _ => 0,
-    }
-}
+pub fn to_host(sig:i32)->i32{aim_storage::process_namespace::signal_to_host(sig)}
 
 /// Darwin -> Linux signal numbers (0 for SIGEMT and SIGINFO).
 pub fn from_host(h: i32) -> i32 {
-    (1..32).find(|&s| to_host(s) == h).unwrap_or(0)
+    aim_storage::process_namespace::signal_from_host(h)
 }
 
 enum Default {
@@ -467,7 +434,7 @@ fn drain_external() {
             let mut info = Siginfo::from_sender(
                 sig,
                 code as u32 as i32,
-                super::pidns::vnr(pid),
+                super::pidns::guest_pid(super::pidns::vnr(pid)).unwrap_or(0),
                 sender_uid(pid),
             );
             info.fields[1] = code >> 32; // _sigchld.status
@@ -1151,7 +1118,7 @@ pub fn rt_sigtimedwait(a: [u64; 6]) -> i64 {
 fn sender(sig: i32, code: i32) -> Siginfo {
     // SAFETY: trivial.
     let pid = unsafe { libc::getpid() };
-    Siginfo::from_sender(sig, code, pid, super::cred::getuid(174) as u32)
+    Siginfo::from_sender(sig, code, super::pidns::guest_pid(pid).unwrap_or(0), super::cred::getuid(174) as u32)
 }
 
 fn my_pid() -> i64 {
@@ -1179,6 +1146,7 @@ pub(super) fn signal_process(p: i32, sig: i32, h: i32) -> i64 {
     if !(super::cred::may_signal(p) || sig == SIGCONT && same_session()) {
         return -(EPERM as i64);
     }
+    match super::pidns::init_signal_allowed(p,sig){Ok(true)=>{},Ok(false)=>return -(EPERM as i64),Err(error)=>return error}
     if sig != 0 && (h == 0 || SYNCHRONOUS & bit(sig) != 0) {
         return super::ptrace::remote_signal(p, 0, &sender(sig, sigframe::SI_USER));
     }
@@ -1209,6 +1177,9 @@ pub fn from_peer(tid: i32, info: Siginfo) -> i64 {
 /// kill(pid, sig). Other processes are signalled through Darwin, which has
 /// no real-time signals.
 pub fn kill(a: [u64; 6]) -> i64 {
+    if !(0..=NSIG).contains(&(a[1] as i32)) { return -(EINVAL as i64); }
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
     let (pid, sig) = (a[0] as i32 as i64, a[1] as i32);
     if !(0..=NSIG).contains(&sig) {
         return -(EINVAL as i64);
@@ -1250,7 +1221,15 @@ pub fn kill(a: [u64; 6]) -> i64 {
     // one member was signalled (`__kill_pgrp_info`); `kill(-1)` skips the
     // caller, ignores EPERM and fails only for want of a target.
     let me = my_pid() as i32;
-    let targets: Vec<i32> = targets.into_iter().filter(|&p| !all || p != me).collect();
+    let mut eligible=Vec::new();
+    for p in targets {
+        if all {
+            let init=match super::pidns::is_namespace_init(p){Ok(init)=>init,Err(error)=>return error};
+            if p==me||init{continue;}
+        }
+        eligible.push(p);
+    }
+    let targets=eligible;
     let mut sent = false;
     let mut err = if all && !targets.is_empty() {
         0
@@ -1279,6 +1258,11 @@ fn target(tgid: Option<i64>, tid: i64, sig: i32) -> Result<std::sync::Arc<Thread
 
 /// tkill(tid, sig) and tgkill(tgid, tid, sig).
 pub fn tgkill(nr: u64, a: [u64; 6]) -> i64 {
+    let sig = if nr == 131 { a[2] } else { a[1] } as i32;
+    if !(0..=NSIG).contains(&sig) || a[0] as i32 <= 0 || nr == 131 && a[1] as i32 <= 0 { return -(EINVAL as i64); }
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
+    if nr==131{a[1]=match super::pidns::syscall_pid(a[1] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}
     let (tgid, tid, sig) = if nr == 131 {
         (Some(a[0] as i32 as i64), a[1] as i32 as i64, a[2] as i32)
     } else {
@@ -1319,8 +1303,15 @@ fn peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
     if !super::cred::may_signal(pid) {
         return -(EPERM as i64);
     }
+    match super::pidns::init_signal_allowed(pid,info.signo){Ok(true)=>{},Ok(false)=>return -(EPERM as i64),Err(error)=>return error}
     if info.signo == 0 {
         return 0;
+    }
+    match super::pidns::is_namespace_init(pid){
+        // Darwin has no sigqueue transport. Native init does not run the
+        // guest ptrace signal agent; losing si_code/value is not delivery.
+        Ok(true)=>return -(crate::errno::EOPNOTSUPP as i64),
+        Ok(false)=>{},Err(error)=>return error,
     }
     super::ptrace::remote_signal(pid, tid, &info)
 }
@@ -1336,6 +1327,9 @@ fn queued_to_peer(pid: i32, tid: i32, info: Siginfo) -> i64 {
 
 /// rt_sigqueueinfo(tgid, sig, info).
 pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
+    if !valid(a[1] as i32 as u64) || a[0] as i32 <= 0 { return -(EINVAL as i64); }
+    let mut a=a;
+    a[0]=match super::pidns::syscall_pid(a[0] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};
     let (tgid, sig) = (a[0] as i32 as i64, a[1] as i32);
     if !valid(sig as u64) {
         return -(EINVAL as i64);
@@ -1351,6 +1345,9 @@ pub fn rt_sigqueueinfo(a: [u64; 6]) -> i64 {
 
 /// rt_tgsigqueueinfo(tgid, tid, sig, info).
 pub fn rt_tgsigqueueinfo(a: [u64; 6]) -> i64 {
+    if !valid(a[2] as i32 as u64) || a[0] as i32 <= 0 || a[1] as i32 <= 0 { return -(EINVAL as i64); }
+    let mut a=a;
+    for index in [0,1]{a[index]=match super::pidns::syscall_pid(a[index] as i32){Ok(pid)=>pid as u64,Err(error)=>return error};}
     let sig = a[2] as i32;
     if !valid(sig as u64) {
         return -(EINVAL as i64);
@@ -1567,5 +1564,19 @@ mod host_errno_tests {
         assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);
+    }
+}
+
+#[cfg(test)]
+mod namespace_argument_tests {
+    #[test]
+    fn invalid_signals_are_rejected_before_unregistered_init_resolution() {
+        let invalid = 65;
+        let expected = -(crate::errno::EINVAL as i64);
+        assert_eq!(super::kill([1, invalid, 0, 0, 0, 0]), expected);
+        assert_eq!(super::tgkill(131, [1, 1, invalid, 0, 0, 0]), expected);
+        assert_eq!(super::tgkill(130, [1, invalid, 0, 0, 0, 0]), expected);
+        assert_eq!(super::rt_sigqueueinfo([1, invalid, 0, 0, 0, 0]), expected);
+        assert_eq!(super::rt_tgsigqueueinfo([1, 1, invalid, 0, 0, 0]), expected);
     }
 }

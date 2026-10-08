@@ -1249,8 +1249,12 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
             F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
                 lock(fd, cmd, arg)
             }
-            F_GETOWN => errno::check(libc::fcntl(fd, libc::F_GETOWN) as i64),
-            F_SETOWN => errno::check(libc::fcntl(fd, libc::F_SETOWN, arg as i32) as i64),
+            F_GETOWN => {
+                *libc::__error()=0;let value=libc::fcntl(fd,libc::F_GETOWN);
+                if value == -1&&*libc::__error()!=0{return errno::check(-1);}
+                if value==0{0}else{let group=value<0;let host=if group{-value}else{value};match super::pidns::guest_pid(host){Ok(pid)=>if group{-(pid as i64)}else{pid as i64},Err(error)=>error}}
+            },
+            F_SETOWN => {let target=if arg as i32>0{match super::pidns::syscall_pid(arg as i32){Ok(pid)=>pid,Err(error)=>return error}}else if (arg as i32)<0{match super::pidns::syscall_pid(-(arg as i32)){Ok(group)=>-group,Err(error)=>return error}}else{0};errno::check(libc::fcntl(fd,libc::F_SETOWN,target) as i64)},
             // Pipe capacity is fixed on Darwin; report the request as met.
             F_SETPIPE_SZ | F_GETPIPE_SZ => {
                 if libc::fcntl(fd, libc::F_GETFD) < 0 {

@@ -209,7 +209,7 @@ pub fn restore(r: &mut Reader) -> bool {
     attrs::fork_restore(r);
     selinuxfs::fork_restore(r);
     wait::fork_restore(r);
-    crate::vfs::load_own_mounts(&r.str());
+    if let Err(error)=crate::vfs::load_own_mounts(&r.str()){eprintln!("fork mount namespace restore failed: errno={error}");return false;}
     fdtab::fork_restore(r);
     ptrace::fork_restore(r);
     sync_file::fork_restore(r);
