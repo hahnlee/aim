@@ -972,6 +972,13 @@ public final class DisplacedSnapshotOracle {
         @Override public boolean isNativeResolverReplaced() { throw new AssertionError("unexpected captured query: isNativeResolverReplaced"); }
     }
     private static final class Owner extends dev.aim.server.IPackageScanSnapshot.Stub {
+        private static final java.util.concurrent.atomic.AtomicLong COMPARISON_IDS = new java.util.concurrent.atomic.AtomicLong();
+        private final java.util.Map<Long, Long> comparisonIds = new java.util.HashMap<>();
+        public synchronized long getMetadataComparisonId() {
+            return comparisonIds.computeIfAbsent(getVersion(), ignored -> COMPARISON_IDS.incrementAndGet());
+        }
+        // Controlled owner has no native comparison registry: full capture is the contract fallback.
+        public byte[] getChangedUsersForMetadataBase(long comparisonId) { return null; }
         private final File directory;
         boolean omitOriginal;
         boolean failVersion;

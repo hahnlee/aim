@@ -1925,6 +1925,13 @@ public final class PackageRoundTripOracle {
     }
 
     private static final class PageOwner extends dev.aim.server.IPackageScanSnapshot.Stub {
+        private static final java.util.concurrent.atomic.AtomicLong COMPARISON_IDS = new java.util.concurrent.atomic.AtomicLong();
+        private final java.util.Map<Long, Long> comparisonIds = new java.util.HashMap<>();
+        public synchronized long getMetadataComparisonId() {
+            return comparisonIds.computeIfAbsent(getVersion(), ignored -> COMPARISON_IDS.incrementAndGet());
+        }
+        // Controlled owner has no native comparison registry: full capture is the contract fallback.
+        public byte[] getChangedUsersForMetadataBase(long comparisonId) { return null; }
         private final String name;
         private final byte[] bytes;
         private final byte[] usage;

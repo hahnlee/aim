@@ -38,10 +38,28 @@ public final class NativePackageQueryOracle {
             filters.clear(); active.clear();
         }
     }
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) throws Throwable {
+        try { run(args); }
+        catch (Throwable failure) {
+            failure.printStackTrace(System.out);
+            System.out.flush();
+            throw failure;
+        }
+    }
+    private static void run(String[] args) throws Exception {
         var host = IServiceHost.Stub.asInterface(android.os.Binder.allowBlocking(java.util.Objects.requireNonNull(
-                android.os.ServiceManager.checkService("host"))));
+                android.os.ServiceManager.checkService(args.length > 1 ? args[1] : "host"))));
         try (var owners = new Owners(host)) {
+            if (args.length > 0 && args[0].equals("user-delta")) {
+                var manager = android.content.pm.IPackageManager.Stub.asInterface(android.os.Binder.allowBlocking(
+                        java.util.Objects.requireNonNull(android.os.ServiceManager.checkService(args.length > 2 ? args[2] : "query_package"))));
+                try (var versions = new PackageVersionPage(java.util.Objects.requireNonNull(host.getPackageStateVersionPage()))) {
+                    PackageSnapshotUserDeltaOracle.verify(owners, owners, versions, manager,
+                            args.length > 3 ? args[3] : "android");
+                }
+                System.out.println("ORIGINAL_NATIVE_USER_DELTA stopped component expired isolation");
+                return;
+            }
             var intent = new android.content.Intent("android.intent.action.PACKAGE_CHANGED");
             PackageServiceQueryOracle.verify(owners, owners, intent, null, 0, 0, 1000, 0, false);
             PackageReceiverQueryOracle.verify(owners, owners, intent, null, 0, 0, 1000, 0, false);

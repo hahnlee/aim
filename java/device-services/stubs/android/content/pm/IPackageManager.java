@@ -6,6 +6,8 @@ import android.os.RemoteException;
 
 public interface IPackageManager extends android.os.IInterface {
 
+    void setPackageStoppedState(String packageName, boolean stopped, int userId) throws RemoteException;
+    void setComponentEnabledSetting(android.content.ComponentName component, int state, int flags, int userId, String callingPackage) throws RemoteException;
     int checkPermission(String permissionName,String packageName,int userId) throws RemoteException;
     PermissionGroupInfo getPermissionGroupInfo(String name, int flags) throws RemoteException;
     android.graphics.Bitmap getArchivedAppIcon(String name, android.os.UserHandle user, String callingPackage) throws RemoteException;

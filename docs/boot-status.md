@@ -395,8 +395,12 @@ checks; foreign, expired, factory or nonuser changes use full capture. Current
 whole native suite passes 794/0, eleven ignored and full Java builds pass. C93
 completed Binder calls fall to about 282,898 over 173.9s versus roughly four
 million before; Chrome still ANRs. Its actual main thread waits 3.5335s in
-registerReceiverWithFeature during the five-second FocusEvent window. Current
-ART scoped-user mutation and contemporaneous AMS holder proof remain pending. Original PMS on a cloned native
+registerReceiverWithFeature during the five-second FocusEvent window. C94 real native runtime scoped-user ART oracle passes at UID1000 using
+original public IPM on disposable Calculator: stopped/component changes, old/new
+state and code isolation, and expired comparison fallback complete with exit0.
+Calculator is nonshared, so the conditional changed-shared-UID branch remains
+unverified. Contemporary AMS holder proof and the full CTS/app/template gates
+remain pending. Original PMS on a cloned native
 data image boots, preserves Chrome/Calculator UIDs and APK paths/permissions,
 launches Chrome cold in 1517ms and renders example.com without observed ANR.
 Original 66-module CTS campaign is running with provenance-checked resume;
