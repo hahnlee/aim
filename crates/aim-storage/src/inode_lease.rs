@@ -83,6 +83,8 @@ impl Inode {
     pub fn adopt_private_writer(&self,carrier:PrivateFd)->io::Result<WriterLease>{
         let admission=self.admission()?;let expected=self.lock_file("writers")?;
         if Identity::from_fd(carrier.as_fd())?!=Identity::from_fd(expected.as_fd())?{return Err(io::Error::from_raw_os_error(libc::EINVAL));}
+        let denial=admission.inode.lock_file("denials")?;
+        locked(denial.as_fd(),libc::LOCK_EX|libc::LOCK_NB)?;
         locked(carrier.as_fd(),libc::LOCK_SH|libc::LOCK_NB)?;
         Ok(WriterLease{inode:admission.inode.clone(),descriptor:carrier})
     }
@@ -90,7 +92,18 @@ impl Inode {
 impl Admission {
     pub fn identity(&self)->Identity{self.inode.identity()}
     pub fn source(&self)->BorrowedFd<'_>{self.inode.source()}
-    pub fn writer(&self)->io::Result<WriterLease>{let descriptor=self.inode.lock_file("writers")?;locked(descriptor.as_fd(),libc::LOCK_SH|libc::LOCK_NB)?;Ok(WriterLease{inode:self.inode.clone(),descriptor})}
+    pub fn writer(&self)->io::Result<WriterLease>{
+        let denial=self.inode.lock_file("denials")?;locked(denial.as_fd(),libc::LOCK_EX|libc::LOCK_NB)?;
+        let descriptor=self.inode.lock_file("writers")?;locked(descriptor.as_fd(),libc::LOCK_SH|libc::LOCK_NB)?;
+        Ok(WriterLease{inode:self.inode.clone(),descriptor})
+    }
+    /// Linux deny_write_access permits concurrent readers while denying writers.
+    /// Admission serializes the probe and retained denial with writer admission.
+    pub fn deny_writers(&self)->io::Result<ExclusiveLease>{
+        let writers=self.inode.lock_file("writers")?;locked(writers.as_fd(),libc::LOCK_EX|libc::LOCK_NB)?;
+        let descriptor=self.inode.lock_file("denials")?;locked(descriptor.as_fd(),libc::LOCK_SH|libc::LOCK_NB)?;
+        Ok(ExclusiveLease{inode:self.inode.clone(),descriptor})
+    }
     pub fn enable_slot(&self)->io::Result<EnableSlot>{let descriptor=self.inode.lock_file("enable")?;locked(descriptor.as_fd(),libc::LOCK_EX|libc::LOCK_NB)?;Ok(ExclusiveLease{inode:self.inode.clone(),descriptor})}
     pub fn exclusive(&self)->io::Result<ExclusiveLease>{let descriptor=self.inode.lock_file("writers")?;locked(descriptor.as_fd(),libc::LOCK_EX|libc::LOCK_NB)?;Ok(ExclusiveLease{inode:self.inode.clone(),descriptor})}
 }
@@ -139,6 +152,18 @@ mod tests {
     fn byte(fd:i32,value:u8){assert_eq!(unsafe{libc::write(fd,(&value as *const u8).cast(),1)},1);}
     fn read_byte(fd:i32)->u8{let mut value=0;assert_eq!(unsafe{libc::read(fd,(&mut value as *mut u8).cast(),1)},1);value}
     fn pipe()->[OwnedFd;2]{let mut fds=[0;2];assert_eq!(unsafe{libc::pipe(fds.as_mut_ptr())},0);unsafe{[OwnedFd::from_raw_fd(fds[0]),OwnedFd::from_raw_fd(fds[1])]}}
+    #[test]
+    fn readonly_enablers_share_writer_denial_but_not_enable_slot(){
+        let fixture=Fixture::new();let admission=fixture.inode.admission().unwrap();
+        let first=admission.deny_writers().unwrap();let slot=admission.enable_slot().unwrap();drop(admission);
+        let admission=fixture.inode.admission().unwrap();let second=admission.deny_writers().unwrap();
+        busy(admission.enable_slot());assert_eq!(admission.writer().err().unwrap().raw_os_error(),Some(libc::EBUSY));drop(admission);
+        let alias=second.try_clone().unwrap();drop(first);drop(second);drop(slot);
+        assert_eq!(fixture.inode.admission().unwrap().writer().err().unwrap().raw_os_error(),Some(libc::EBUSY));
+        drop(alias);let writer=fixture.inode.admission().unwrap().writer().unwrap();
+        busy(fixture.inode.admission().unwrap().deny_writers());drop(writer);
+        assert!(fixture.inode.admission().unwrap().deny_writers().is_ok());
+    }
     #[test]
     fn actual_child_exit_and_crash_release_writer_only_on_final_close(){
         for crash in [false,true]{
