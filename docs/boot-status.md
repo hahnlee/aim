@@ -221,8 +221,16 @@ constructor capture (epoch 11/controller330000000), then its build fails
 because settings/data does not exist (#1260). The builder now creates its
 private copy root before copying; a focused filesystem test verifies all five
 nested files preserve bytes, actual and guest ownership, mode and mtime.
-Corrected producer execution and two published template comparisons remain
-unverified. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
+Two corrected-producer native697 template boots complete construction,
+permissions and boot at 242.6/233.4 seconds. Both copy all five sealed
+constructor files, but publication fails when normal volume detach is
+dissented by a scanning process (#532). No template publication is accepted.
+Storage now retries generic transient busy/dissent within the existing
+deadline, retaining persistent failure and never forcing eject; four focused
+retry tests pass. Real successful publication and two-template comparison
+remain unverified. The actual structure-capture tool also fails because
+Darwin Python lacks its os xattr APIs (#1261); fixture-only passes do not
+establish an actual capture. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
 pass in an isolated test. A separate unread-PTY exit test reproduces an
 unbounded terminal drain (#1259); this is not yet proved to cause svc delay.
 Both earlier interrupted full66
