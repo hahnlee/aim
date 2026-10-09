@@ -12,12 +12,18 @@ pub(super) struct Assignments {
     restoration: Option<crate::package::owner::legacy_permissions::Metadata>,
     install_fixed: Option<BTreeMap<(String, bool), bool>>,
     pub(super) installed_receipt: std::collections::BTreeSet<i32>,
+    pub(super) modern_receipts: BTreeMap<i32, State>,
 }
 
 impl SigningScan {
     pub fn installed_permission_receipt_uids(&self)->Result<&std::collections::BTreeSet<i32>,String>{
         self.validate_legacy_permissions()?;
         Ok(&self.legacy_permissions.as_ref().ok_or("legacy permission owner unavailable")?.installed_receipt)
+    }
+    pub fn installed_permission_state(&self, app_id: i32) -> Result<Option<&State>, String> {
+        self.validate_legacy_permissions()?;
+        Ok(self.legacy_permissions.as_ref().ok_or("legacy permission owner unavailable")?
+            .modern_receipts.get(&app_id))
     }
     /// UserManager supplies its real current inventory. This changes the
     /// projection scope only; it never grants, revokes or fabricates permission
@@ -76,6 +82,7 @@ impl SigningScan {
             restoration: None,
             install_fixed: None,
             installed_receipt: Default::default(),
+            modern_receipts: Default::default(),
         });
         Ok(())
     }
@@ -731,12 +738,46 @@ mod tests {
         let receipt=receipt.project(10100,&[0]).unwrap();
         owner.apply_installed_permission_states(&[0],[(10100,receipt.clone())].into()).unwrap();
         assert_eq!(owner.installed_permission_receipt_uids().unwrap(),&[10100].into());
-        assert_eq!(owner.legacy_permissions("target",false).unwrap().unwrap(),receipt);
+        assert_eq!(owner.installed_permission_state(10100).unwrap(),Some(&receipt));
+        assert!(owner.legacy_permissions("target",false).unwrap().unwrap().user(0).unwrap().permissions.is_empty());
         assert_eq!(owner.legacy_permissions("unrelated",false).unwrap().unwrap(),before);
         let mut live=Migration::default();live.put(0,crate::package::owner::legacy_permissions::Permission{name:Some("permission.unrelated".into()),runtime:true,granted:true,flags:9}).unwrap();
         assert_ne!(before.bytes(),live.project(10101,&[0]).unwrap().bytes());
         assert!(!owner.installed_permission_receipt_uids().unwrap().contains(&10101));
         let prior=owner.clone();assert!(owner.apply_installed_permission_states(&[0],[(10999,live.project(10999,&[0]).unwrap())].into()).is_err());assert_eq!(owner,prior);
+    }
+
+    #[test]
+    fn modern_receipts_preserve_fresh_and_restored_legacy_serialization() {
+        let settings = Settings { packages: vec![Package { name: "fresh".into(), app_id: 10100, ..Default::default() },
+            Package { name: "restored".into(), app_id: 10101, ..Default::default() }], ..Default::default() };
+        let mut owner = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let mut persisted = Migration::default();
+        persisted.put(0, Permission { name: Some("legacy.saved".into()), runtime: true, granted: false, flags: 8 }).unwrap();
+        let groups = owner.identities.shared_users.keys().map(|name| (name.clone(), Migration::default())).collect();
+        owner.capture_legacy_permissions(&[0], [(("fresh".into(), false), Migration::default()),
+            (("restored".into(), false), persisted)].into(), groups).unwrap();
+        owner.capture_install_permissions_fixed([(("fresh".into(), false), false), (("restored".into(), false), false)].into()).unwrap();
+        let users = [0].into();
+        let metadata = crate::package::owner::runtime_metadata::State::default();
+        let before = crate::package::internal_host::legacy_runtime_record_from_owners(&owner, &metadata, &users, 0).unwrap();
+        let mut live = Migration::default();
+        live.put(0, Permission { name: Some("modern.granted".into()), runtime: true, granted: true, flags: 0x34 }).unwrap();
+        let fresh = live.project(10100, &[0]).unwrap();
+        let restored = live.project(10101, &[0]).unwrap();
+        owner.apply_installed_permission_states(&[0], [(10100, fresh.clone()), (10101, restored.clone())].into()).unwrap();
+        assert_eq!(owner.installed_permission_state(10100).unwrap(), Some(&fresh));
+        assert_eq!(owner.installed_permission_state(10101).unwrap(), Some(&restored));
+        assert!(owner.installed_permission_state(10100).unwrap().unwrap().user(0).unwrap().permissions[0].granted);
+        assert_eq!(owner.installed_permission_state(10101).unwrap().unwrap().user(0).unwrap().permissions[0].flags, 0x34);
+        assert!(owner.legacy_permissions("fresh", false).unwrap().unwrap().user(0).unwrap().permissions.is_empty());
+        assert_eq!(owner.legacy_permissions("restored", false).unwrap().unwrap().user(0).unwrap().permissions[0].name.as_deref(), Some("legacy.saved"));
+        let after = crate::package::internal_host::legacy_runtime_record_from_owners(&owner, &metadata, &users, 0).unwrap();
+        assert_eq!(before, after, "modern query state changed actual persisted legacy XML inputs");
+        let mut reader = aim_binder_host::parcel::Reader::new(&after, &[]);
+        assert_eq!(reader.read_i32().unwrap(), 1); reader.read_i32().unwrap(); reader.read_string16().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 1, "fresh empty nonfixed SettingBase must not acquire a legacy package row");
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some("restored"));
     }
 
 }

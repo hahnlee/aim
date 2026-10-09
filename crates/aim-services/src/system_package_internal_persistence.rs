@@ -192,16 +192,9 @@ impl System {
         let base = self.capture_package_queries()?;
         let config = self.package_bootstrap.lock().unwrap().current.as_ref().and_then(|current| current.installer.as_ref().map(|(owner, _)| owner.system_config().clone()))
             .ok_or_else(|| illegal("permission read SystemConfig unavailable"))?;
-        let scan = base.scan().owner();
-        let users = base.state().users.keys().copied().collect::<Vec<_>>();
-        let ids = scan.settings.packages.iter().map(|setting| setting.app_id)
-            .chain(scan.identities.shared_users.values().map(|group| group.app_id))
-            .filter(|id| *id >= 0).collect::<std::collections::BTreeSet<_>>();
-        let mut live = BTreeMap::new();
-        for app_id in ids {
-            live.insert(app_id, bridge.legacy_permissions(app_id, &users)
-                .map_err(|error| illegal(format!("permission read current UID owner: {error:?}")))?);
-        }
+        // Original modern writeLegacyPermissionStateTEMP is a no-op. The
+        // native Settings read restores its actual persisted legacy objects;
+        // a computed live permission export is a separate query owner.
         let install = self.package_install_guard();
         let mut disk = disk.lock().unwrap();
         let mut state = self.package_bootstrap.lock().unwrap();
@@ -214,7 +207,6 @@ impl System {
             return Err(illegal("permission read UID/user inventory changed during original owner capture"));
         }
         let mut scan = latest.scan().owner().clone();
-        scan.apply_installed_permission_states(&users, live).map_err(illegal)?;
         let metadata = disk.read_permission_user(&mut scan, &config, id).map_err(|error| illegal(error.to_string()))?;
         let update = latest.prepare_package_update(scan).map_err(illegal)?;
         current.publish_snapshot(update.store); current.queries = Some(update.capture.clone());

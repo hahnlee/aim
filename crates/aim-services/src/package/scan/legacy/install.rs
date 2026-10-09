@@ -67,8 +67,9 @@ impl SigningScan {
         *self = candidate;
         Ok(runtime)
     }
-    /// Replace affected live UID projections without discarding saved restoration
-    /// metadata, factory inheritance, or installPermissionsFixed ownership.
+    /// Retain actual modern permission receipts independently of persisted
+    /// SettingBase migrations. The original modern TEMP read/write methods do
+    /// not copy these computed values into Settings legacy objects.
     pub fn apply_installed_permission_states(
         &mut self,
         users: &[i32],
@@ -77,32 +78,19 @@ impl SigningScan {
         self.validate_legacy_permissions()?;
         let owners = self.legacy_permissions.as_ref().ok_or("legacy permission owner unavailable")?;
         if owners.users != users { return Err("permission install user inventory changed".into()); }
-        let mut migrations = BTreeMap::new();
-        for (app_id, state) in states {
-            if app_id != state.app_id() || state.users().iter().map(|u| u.id).ne(users.iter().copied()) {
+
+        for (app_id, state) in &states {
+            if *app_id != state.app_id() || state.users().iter().map(|u| u.id).ne(users.iter().copied()) {
                 return Err("permission install UID projection differs".into());
             }
-            if !owners.packages.values().any(|(id, _, _)| *id == app_id)
-                && !owners.shared_users.values().any(|(id, _)| *id == app_id) {
+            if !owners.packages.values().any(|(id, _, _)| id == app_id)
+                && !owners.shared_users.values().any(|(id, _)| id == app_id) {
                 return Err("permission install contains unknown UID".into());
             }
-            let mut migration = Migration::default();
-            for user in state.users() {
-                migration.set_missing(user.id, user.missing)?;
-                for permission in &user.permissions { migration.put(user.id, permission.clone())?; }
-            }
-            migrations.insert(app_id, migration);
         }
         let owners = self.legacy_permissions.as_mut().unwrap();
-        owners.installed_receipt=migrations.keys().copied().collect();
-        for ((_, factory), (app_id, shared, migration)) in &mut owners.packages {
-            if !*factory && !*shared {
-                if let Some(replacement) = migrations.get(app_id) { *migration = replacement.clone(); }
-            }
-        }
-        for (app_id, migration) in owners.shared_users.values_mut() {
-            if let Some(replacement) = migrations.get(app_id) { *migration = replacement.clone(); }
-        }
+        owners.installed_receipt = states.keys().copied().collect();
+        owners.modern_receipts.extend(states);
         self.validate_legacy_permissions()
     }
 }

@@ -196,12 +196,10 @@ impl Builder {
                 let parsed=scan.loaded_packages().get(&setting.name).map(|code|code.runtime_package());
                 let Some(permission_id)=super::boot_context::permission_uid_owner(setting,parsed)? else {continue;};
                 if !receipt.contains(&permission_id){continue;}
-                let legacy=if let Some((name,_))=scan.identities.shared_users.iter().find(|(_,group)|group.app_id==permission_id) {
-                    scan.shared_legacy_permissions(name)?
-                } else {scan.legacy_permissions(&setting.name,false)?}
-                    .ok_or("post-install permission lifecycle projection unavailable")?;
+                let modern=scan.installed_permission_state(permission_id)?
+                    .ok_or("post-install modern permission receipt unavailable")?;
                 let live=permissions.get(&permission_id).ok_or("post-install live permission UID unavailable")?;
-                if legacy.app_id()!=permission_id || legacy.bytes()!=live.bytes() {
+                if modern.app_id()!=permission_id || modern.bytes()!=live.bytes() {
                     return Err(format!("post-install permission lifecycle/live owner differs: {}",setting.name));
                 }
             }
@@ -280,12 +278,9 @@ impl Builder {
                 continue;
             };
             let live=&permissions[&permission_id];
-            let state=live.user(*user).ok_or("install live permission user unavailable")?;
             let installed=stored.get(user).is_none_or(|state|state.installed);
-            let mut grants=Vec::new();
-            if installed {for permission in &state.permissions {if permission.granted {grants.push(permission.name.clone().ok_or("live granted permission has null identity")?);}}}
             let gids=self.bridge.permission_gids(permission_id,&[*user]).map_err(|error|format!("install live permission GIDs: {error:?}"))?.into_iter().map(|gid|gid as i32).collect();
-            inputs.insert(*user,UserInputs {gids,granted_permissions:grants,domain_selection:None});
+            inputs.insert(*user,live_user_inputs(live,*user,installed,gids)?);
         }
         let syncable_authorities=code.into_iter().flat_map(|code|code.providers.iter()).filter(|provider|provider.syncable)
             .filter_map(|provider|provider.authority.as_ref().map(|authority|(provider.main.component.name.clone(),authority.clone()))).collect();
@@ -293,5 +288,32 @@ impl Builder {
             installed_permissions:self.bridge.installed_permissions(&setting.name).map_err(|error|format!("install permission definitions: {error:?}"))?,
             filter_application_query:self.bridge.application_query_filtering(&setting.name,setting.target_sdk_version).map_err(|error|format!("install query compatibility: {error:?}"))?,
             users:inputs,syncable_authorities,domain_verification:None,uri_relative_filter_groups:Vec::new()})
+    }
+}
+
+fn live_user_inputs(live:&legacy_permissions::State,user:i32,installed:bool,gids:Vec<i32>)->Result<UserInputs,String>{
+    let state=live.user(user).ok_or("install live permission user unavailable")?;
+    let mut grants=Vec::new();
+    if installed {for permission in &state.permissions {if permission.granted {
+        grants.push(permission.name.clone().ok_or("live granted permission has null identity")?);
+    }}}
+    Ok(UserInputs {gids,granted_permissions:grants,domain_selection:None})
+}
+#[cfg(test)]
+mod permission_owner_tests {
+    use super::*;
+    #[test]
+    fn modern_context_preserves_grants_and_actual_gid_inputs_independent_of_legacy(){
+        let mut modern=legacy_permissions::Migration::default();
+        modern.put(0,legacy_permissions::Permission{name:Some("modern.grant".into()),runtime:true,granted:true,flags:0x34}).unwrap();
+        let modern=modern.project(10100,&[0]).unwrap();
+        let gids=vec![3003,10100,111];
+        let installed=live_user_inputs(&modern,0,true,gids.clone()).unwrap();
+        assert_eq!(installed.gids,gids);assert_eq!(installed.granted_permissions,vec!["modern.grant"]);
+        let absent=live_user_inputs(&modern,0,false,gids.clone()).unwrap();
+        assert_eq!(absent.gids,gids);assert!(absent.granted_permissions.is_empty());
+        assert!(modern.user(0).unwrap().permissions[0].granted);
+        assert_eq!(modern.user(0).unwrap().permissions[0].flags,0x34);
+        assert!(live_user_inputs(&modern,10,true,gids).is_err());
     }
 }
