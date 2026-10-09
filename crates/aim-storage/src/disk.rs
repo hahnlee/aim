@@ -224,16 +224,27 @@ pub fn detach(device: &str, patience: Duration) -> Result<(), String> {
     })
 }
 
-fn detach_with(device: &str, patience: Duration, mut eject: impl FnMut() -> Result<(), String>) -> Result<(), String> {
-    let deadline = Instant::now() + patience;
+fn detach_with(device: &str, patience: Duration, eject: impl FnMut() -> Result<(), String>) -> Result<(), String> {
+    detach_with_clock(device, patience, eject, Instant::now, std::thread::sleep)
+}
+
+fn detach_with_clock(
+    device: &str,
+    patience: Duration,
+    mut eject: impl FnMut() -> Result<(), String>,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Result<(), String> {
+    let deadline = now() + patience;
     loop {
         match eject() {
             Ok(()) => return Ok(()),
             Err(e) => {
-                if e.contains("dissented") || !e.contains("could not be unmounted") || Instant::now() >= deadline {
+                let busy = e.contains("dissented") || e.contains("could not be unmounted");
+                if !busy || now() >= deadline {
                     return Err(format!("refusing to force detach {device}: {e}"));
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                sleep(Duration::from_millis(500).min(deadline.saturating_duration_since(now())));
             }
         }
     }
@@ -242,18 +253,49 @@ fn detach_with(device: &str, patience: Duration, mut eject: impl FnMut() -> Resu
 #[cfg(test)]
 mod detach_tests {
     use super::*;
+    use std::cell::Cell;
+
     #[test]
-    fn a_live_dissenter_is_never_force_unmounted() {
+    fn transient_dissenter_is_retried_without_force() {
         let mut calls = 0;
-        let result = detach_with("fixture-device", Duration::from_secs(120), || {
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let result = detach_with_clock("fixture-device", Duration::from_secs(10), || {
             calls += 1;
-            Err("Unmount was dissented by PID 42 (linux-run); parent guest-init".into())
-        });
-        assert_eq!(calls, 1);
+            if calls == 1 { Err("Unmount was dissented by PID 42".into()) } else { Ok(()) }
+        }, || start + elapsed.get(), |delay| elapsed.set(elapsed.get() + delay));
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+        assert_eq!(elapsed.get(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn persistent_dissenter_expires_with_final_diagnostic() {
+        let mut calls = 0;
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let result = detach_with_clock("fixture-device", Duration::from_millis(750), || {
+            calls += 1;
+            Err(format!("Unmount was dissented by PID {}", 40 + calls))
+        }, || start + elapsed.get(), |delay| elapsed.set(elapsed.get() + delay));
+        assert_eq!(calls, 3);
+        assert_eq!(elapsed.get(), Duration::from_millis(750));
         let error = result.unwrap_err();
         assert!(error.contains("refusing to force detach"));
-        assert!(error.contains("PID 42"));
+        assert!(error.contains("PID 43"));
     }
+
+    #[test]
+    fn zero_patience_dissenter_is_not_retried() {
+        let mut calls = 0;
+        let result = detach_with("fixture-device", Duration::ZERO, || {
+            calls += 1;
+            Err("Unmount was dissented by PID 42".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
     #[test]
     fn unrelated_eject_error_is_not_retried_or_forced() {
         let mut calls = 0;
