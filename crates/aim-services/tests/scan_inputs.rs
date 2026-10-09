@@ -244,10 +244,15 @@ fn persisted_active_and_disabled_apks_are_parsed_and_verified() {
     state.settings.packages[0].name = "com.google.android.gsf".into();
 
     state.settings.packages[0].code_path = "/data/app/missing/base.apk".into();
+    let before = state.clone();
     let error = Inputs::load(&state, &apks).unwrap_err();
-    assert_eq!(error.package, "com.google.android.gsf");
-    assert_eq!(error.phase, "parse");
-    assert!(error.message.contains("not readable"));
+    assert_eq!(error, aim_services::package::scan::Error {
+        package: "com.google.android.gsf".into(),
+        path: "/data/app/missing/base.apk".into(),
+        phase: "parse",
+        message: "unsupported: /data/app/missing/base.apk: not mapped".into(),
+    });
+    assert_eq!(state, before);
 
     // Code disappearing after manifest parsing must fail verification;
     // a parsed manifest alone must never become a successful scan input.
@@ -1305,7 +1310,27 @@ fn new_system_scan_connects_uid_settings_signing_and_rejection_cleanup() {
         scan.settings.renamed_packages,
         vec![("incoming".into(), "old".into())]
     );
-    assert_eq!(scan.identities, snapshot.identities);
+    assert_eq!(scan.identities.ids.get(11000), Some(&Owner::DetachedPackage("old".into())));
+    let retained = scan.identities.ids.detached_setting(11000).unwrap();
+    assert_eq!(retained.package, old);
+    assert_eq!(retained.users, old_users);
+    assert!(retained.users.keys().all(|user| retained.aliases_user(*user)));
+    assert!(!retained.aliases_user(0));
+    assert_eq!(retained.legacy, None);
+    assert_eq!(retained.install_fixed, None);
+    assert_eq!(retained.runtime, None);
+    assert_eq!(snapshot.identities.ids.get(11000), Some(&Owner::Package("old".into())));
+    assert!(snapshot.identities.ids.detached_setting(11000).is_none());
+    // Normalize only the documented retained-setting transition; compare the
+    // entire Bootstrap, including allocation extent/cursor and shared order.
+    let mut normalized = scan.identities.clone();
+    normalized.ids.replace(11000, Owner::Package("old".into())).unwrap();
+    assert_eq!(normalized, snapshot.identities);
+    let mut before_ids = snapshot.identities.ids.clone();
+    let mut after_ids = scan.identities.ids.clone();
+    let next_id = before_ids.acquire(Owner::Package("probe".into())).unwrap();
+    assert_eq!(after_ids.acquire(Owner::Package("probe".into())).unwrap(), next_id);
+    assert_ne!(next_id, 11000);
     assert_eq!(
         scan.libraries
             .get("adopted.library", -1)
