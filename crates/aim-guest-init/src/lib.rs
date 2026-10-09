@@ -33,6 +33,7 @@ pub mod identity;
 pub mod launch;
 pub mod mac;
 pub mod mount;
+pub mod mount_namespace;
 pub mod paths;
 pub mod props;
 pub mod propsvc;

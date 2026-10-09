@@ -304,7 +304,7 @@ pub fn pin_guest(fd:i32)->Result<Pinned,crate::errno::Errno>{
 static TABLE: LazyLock<RwLock<HashMap<i32, Kind>>> = LazyLock::new(Default::default);
 
 #[cfg(test)]
-pub(super) fn isolated_kernel_test(name:&str)->bool{
+pub(crate) fn isolated_kernel_test(name:&str)->bool{
     const MARKER:&str="isolated-kernel-instance";
     if std::env::args().any(|arg|arg==MARKER){return false;}
     struct Child(std::process::Child);

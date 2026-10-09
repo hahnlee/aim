@@ -144,6 +144,9 @@ fn check(name: &str) {
 }
 
 #[test]
+fn new_mount_namespace_clone_preserves_parent_view(){check("clone_new_mount_namespace");}
+
+#[test]
 fn fork_returns_twice_and_wait4_reports_the_exit() {
     check("fork_wait");
 }

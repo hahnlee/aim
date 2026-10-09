@@ -104,6 +104,7 @@ fn trace_image(name: &str, i: &loader::Image) {
 /// only on failure.
 pub fn run_fork_child(opts: RunOptions) -> String {
     if let Err(error)=sys::fdtab::install_storage_registrar(){return error;}
+    if let Err(error)=vfs::inherit_fork_namespace(opts.path_map){return error;}
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }

@@ -919,12 +919,7 @@ const BLOCK_MOUNTS: &[&str] = &["/data", "/metadata", "/cache"];
 /// The mount table: the read-only image at `/` and the path map's areas.
 /// Each is `(source, target, fstype, options)`.
 fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, &'static str)> {
-    let mut out = vec![(
-        "/dev/root".into(),
-        "/".into(),
-        "erofs".into(),
-        "ro,relatime",
-    )];
+    let mut out = Vec::new();
     for mp in points {
         let guest = mp.guest;
         // A kernel filesystem of the path map (cgroup2, bpf) or a mount the
@@ -939,6 +934,7 @@ fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, &'s
             continue;
         }
         let (source, fstype, options) = match (mp.area, guest.as_str()) {
+            (vfs::Area::Image,_) => ("/dev/root".into(),"erofs","ro,relatime"),
             (vfs::Area::Kernfs, "/proc") => {
                 ("proc".into(), "proc", "rw,nosuid,nodev,noexec,relatime")
             }
@@ -968,31 +964,25 @@ fn mounts(points:Vec<vfs::MountPoint>) -> String {
         .collect()
 }
 
-/// `/proc/<pid>/mountinfo` (proc(5)): `/` is mount 1 and the parent of the
-/// others.
+/// The actual mount objects of the target process, including cloned IDs.
 fn mountinfo(points:Vec<vfs::MountPoint>) -> String {
-    mount_table(points)
-        .into_iter()
-        .enumerate()
-        .map(|(i, (source, target, fstype, options))| {
-            let id = i + 1;
-            let parent = if i == 0 { 0 } else { 1 };
-            let rw = options.split(',').next().unwrap_or("rw");
-            format!("{id} {parent} 0:{id} / {target} {options} - {fstype} {source} {rw}\n")
+    use std::os::unix::fs::MetadataExt;
+    points.into_iter().filter_map(|point|{
+        let id=point.id;let parent=point.parent;let root=point.root.clone();
+        let mut propagation=String::new();if point.shared!=0{propagation.push_str(&format!(" shared:{}",point.shared));}if point.master!=0{propagation.push_str(&format!(" master:{}",point.master));}
+        let device=std::fs::metadata(&point.host).map(|stat|stat.dev()).unwrap_or(0);
+        mount_table(vec![point]).into_iter().next().map(|(source,target,fstype,options)|{
+            let rw=options.split(',').next().unwrap_or("rw");
+            format!("{id} {parent} {}:{} {root} {target} {options}{propagation} - {fstype} {source} {rw}\n",(device>>24)&0xff,device&0xffffff)
         })
-        .collect()
+    }).collect()
 }
 
 fn process_mount_points(host_pid:i32)->Result<Vec<vfs::MountPoint>,Errno>{
-    if host_pid==pid(){vfs::refresh_fuse_mounts()?;return Ok(vfs::mount_points());}
+    if host_pid==pid(){vfs::refresh_fuse_mounts()?;return vfs::mount_points();}
     let table=super::cred::by_pid_dir().ok_or(errno::ESRCH)?;
     let process=aim_storage::process_namespace::ProcessIdentity::running(host_pid).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    let id=match aim_storage::process_namespace::InitRegistration::read(table){
-        Ok(init)if init.process==process=>init.mount_namespace,
-        Ok(_)=>aim_storage::process_namespace::mount_namespace_of(table,process).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?,
-        Err(error)if error.kind()==std::io::ErrorKind::NotFound=>aim_storage::process_namespace::mount_namespace_of(table,process).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?,
-        Err(error)=>return Err(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))),
-    };
+    let id=aim_storage::process_namespace::mount_namespace_of(table,process).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
     vfs::namespace_mount_points(&id)
 }
 
@@ -1868,6 +1858,23 @@ pub fn is_self_exe(path: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn real_registered_process_mountinfo_uses_current_namespace_and_stable_clone_ids(){
+        if super::super::fdtab::isolated_kernel_test("sys::procfs::tests::real_registered_process_mountinfo_uses_current_namespace_and_stable_clone_ids"){return;}
+        let(_view,root)=crate::vfs::test_view();let runtime=crate::vfs::runtime_dir().unwrap();let table=runtime.join("identity/by-pid");std::fs::create_dir_all(&table).unwrap();
+        let bootstrap_id=crate::vfs::mount_namespace_id().unwrap();let bootstrap=aim_storage::mount_namespace::Namespace::open(runtime,&bootstrap_id).unwrap();let default=bootstrap.clone_to("actual-default-render").unwrap();
+        let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
+        aim_storage::process_namespace::InitRegistration::register(&table,process,&bootstrap_id).unwrap();aim_storage::process_namespace::register_init_signals(&table,process,0).unwrap();aim_storage::process_namespace::InitRegistration::read(&table).unwrap().activate_pid_mapping(&table).unwrap();
+        super::super::cred::init(Default::default(),Some(table.clone()));
+        aim_storage::process_namespace::register_mount_namespace(&table,process,default.id()).expect("actual current namespace receipt");
+        crate::vfs::load_own_mounts(&format!("namespace-owner\t{}\n",default.id())).expect("actual current namespace view");
+        let child=std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){if self.0.try_wait().ok().flatten().is_none(){let _=self.0.kill();}let _=self.0.wait();}}let child=Child(child);
+        let child_identity=aim_storage::process_namespace::ProcessIdentity::running(child.0.id()as i32).unwrap();std::fs::write(table.join(child.0.id().to_string()),b"service\tactual-child\nuid\t0\ngid\t0\n").unwrap();aim_storage::process_namespace::register_mount_namespace(&table,child_identity,&bootstrap_id).unwrap();
+        let read_root=|pid:i32|{
+            let path=std::ffi::CString::new(format!("/proc/{pid}/mountinfo")).unwrap();let fd=super::super::fs::openat([crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr()as u64,0,0,0,0]);assert!(fd>=0,"actual mountinfo open {fd}");let mut bytes=vec![0u8;65536];let n=super::super::fs::read([fd as u64,bytes.as_mut_ptr()as u64,bytes.len()as u64,0,0,0]);assert!(n>0);assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);let text=std::str::from_utf8(&bytes[..n as usize]).unwrap();let fields=text.lines().find_map(|line|{let fields:Vec<_>=line.split(' ').collect();(fields[4]=="/").then_some(fields)}).unwrap();(fields[0].parse::<u64>().unwrap(),fields[1].parse::<u64>().unwrap())
+        };
+        let init=read_root(1);let early=read_root(child.0.id()as i32);assert_ne!(init.0,early.0);assert_eq!(init.0,init.1);assert_eq!(early.0,early.1);assert_eq!(init,read_root(1));assert!(root.is_dir());drop(child);
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 

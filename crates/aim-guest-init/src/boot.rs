@@ -576,7 +576,7 @@ impl Boot {
         } else {
             None
         };
-        let map = layout.path_map();
+        let mut map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
         if options.mode == RunMode::Run {
             let process = aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
@@ -656,6 +656,14 @@ impl Boot {
         let xml = apex::apex_info_list_xml(&apexes);
         std::fs::write(layout.apex_info_list(), &xml).map_err(|e| e.to_string())?;
         apex::write_bootstrap(&layout.bootstrap_apex_dir(), &apexes).map_err(|e| e.to_string())?;
+        let mount_namespaces=if options.mode==RunMode::Run{
+            // The pinned original apexd bootstrap vector includes virt
+            // (RELEASE_AVF_ENABLE_EARLY_VM, original ELF proof in #1228).
+            let(owner,bootstrap)=crate::mount_namespace::MountNamespaces::setup(&layout,&map,&apexes,true)?;
+            let(ids_bootstrap,ids_default)=owner.namespace_ids();
+            report.log.push(format!("native mount owners: bootstrap={ids_bootstrap}, default={ids_default}"));
+            map=bootstrap;Some(owner)
+        }else{None};
         mark("APEX list written");
 
         let ids = IdResolver::from_image(&image, &properties);
@@ -794,6 +802,7 @@ impl Boot {
         };
         let mut fs = FsOps::new(map, layout.fs_attrs_file(), options.mode == RunMode::Run);
         fs.set_path_map_file(layout.path_map_file());
+        if let Some(owner)=mount_namespaces{fs.set_mount_namespaces(owner);}
         let cgroup2 = cgroup2_hierarchy(&image);
         for root in cgroup_mount_points(&image)
             .iter()

@@ -1055,7 +1055,9 @@ impl GuestExecutor {
                 "file-based encryption keys: /data is a host directory without FBE".to_string(),
             ),
             Command::EnterDefaultMountNs => {
-                Effect::NoOp("one mount namespace; nothing to enter".to_string())
+                let effect=self.fs.enter_default_mount_namespace()?;
+                self.planner.map=self.fs.map.clone();
+                effect
             }
             Command::Ifup { interface } => Effect::NoOp(format!(
                 "ifup {interface}: networking is the replaced netd's (ADR 0012 appendix)"

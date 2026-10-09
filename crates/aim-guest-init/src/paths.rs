@@ -45,6 +45,7 @@ const MAX_SYMLINKS: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapKind {
+    ReadOnly,
     /// Reads and writes go to the host directory or file.
     Writable,
     /// `/proc` and `/sys`: the syscall layer synthesizes them; this tree
@@ -62,6 +63,7 @@ pub enum MapKind {
 impl MapKind {
     pub fn keyword(self) -> &'static str {
         match self {
+            MapKind::ReadOnly => "ro",
             MapKind::Writable => "rw",
             MapKind::Kernfs => "kernfs",
             MapKind::Cgroup2 => "cgroup2",
@@ -125,6 +127,7 @@ impl PathMap {
         }
     }
 
+    pub fn bind_source_of(&self,target:&str)->Option<&str>{self.bind_sources.get(target).map(String::as_str)}
     pub fn bind_source(&mut self,target:&str,source:&str){self.bind_sources.insert(target.into(),source.into());}
     pub fn propagation(&mut self,target:&str,kind:&str,recursive:bool){
         if recursive{let prefix=format!("{}/",target.trim_end_matches('/'));self.propagation.retain(|root,_|root!=target&&!(target=="/"||root.starts_with(&prefix)));}
@@ -144,6 +147,11 @@ impl PathMap {
         let propagation=std::mem::take(&mut self.propagation);
         *self = Self::new(std::mem::take(&mut self.image), entries);
         self.bind_sources=bind_sources;self.propagation=propagation;
+    }
+
+    pub fn retain_entries(&mut self,mut keep:impl FnMut(&MapEntry)->bool){
+        self.entries.retain(|entry|keep(entry));
+        self.bind_sources.retain(|target,_|self.entries.iter().any(|entry|entry.guest==*target));
     }
 
     pub fn entries(&self) -> &[MapEntry] {
@@ -174,6 +182,7 @@ impl PathMap {
                     MapKind::Writable | MapKind::Cgroup2 | MapKind::Bpf => Area::Writable {
                         prefix: entry.guest.clone(),
                     },
+                    MapKind::ReadOnly => Area::ReadOnlyImage,
                     MapKind::Kernfs => Area::Kernfs {
                         prefix: entry.guest.clone(),
                     },
@@ -316,10 +325,11 @@ impl PathMap {
             };
             match kind {
                 "root" => image = Some(PathBuf::from(host)),
-                "rw" | "kernfs" | "cgroup2" | "bpf" => entries.push(MapEntry {
+                "ro" | "rw" | "kernfs" | "cgroup2" | "bpf" => entries.push(MapEntry {
                     guest: guest.to_string(),
                     host: PathBuf::from(host),
                     kind: match kind {
+                        "ro" => MapKind::ReadOnly,
                         "rw" => MapKind::Writable,
                         "kernfs" => MapKind::Kernfs,
                         "cgroup2" => MapKind::Cgroup2,

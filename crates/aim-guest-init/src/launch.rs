@@ -578,22 +578,27 @@ impl Launcher for HostLauncher {
         if let Some((_,locator))=&self.posix {
             argv.splice(position..position,["--posix-control".into(),locator.display().to_string()]);
         }
-        let pid = spawn(&argv, &env, &passed, log.as_raw_fd(),self.posix.is_some())?;
-        if let Some((controller,_))=&self.posix {
+        let managed=match fs::symlink_metadata(self.layout.identity_dir().join("by-pid/namespace-init")){
+            Ok(_)=>true,Err(error)if error.kind()==io::ErrorKind::NotFound=>false,Err(error)=>return Err(error.to_string()),
+        };
+        let suspended=managed||self.posix.is_some();
+        let pid = spawn(&argv, &env, &passed, log.as_raw_fd(),suspended)?;
+        if suspended {
             let registered=(||{
                 let process=aim_storage::process_namespace::ProcessIdentity::running(pid as i32).map_err(|error|error.to_string())?;
                 let table=self.layout.identity_dir().join("by-pid");
                 let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
-                aim_storage::process_namespace::register_mount_namespace(&table,process,&init.mount_namespace).map_err(|error|error.to_string())?;
+                let current=aim_storage::process_namespace::mount_namespace_of(&table,init.process).map_err(|error|error.to_string())?;
+                aim_storage::process_namespace::register_mount_namespace(&table,process,&current).map_err(|error|error.to_string())?;
                 std::os::unix::fs::symlink(&spec.identity_file,table.join(pid.to_string())).map_err(|error|format!("native child identity publication: {error}"))?;
                 let guest_pid=if init.process==process{1}else{process.host_pid};
                 let owner=aim_storage::posix_control::Owner{process,guest_pid};
-                controller.register_guest(owner).map_err(|error|format!("POSIX child admission: {error}"))?;
+                if let Some((controller,_))=&self.posix{controller.register_guest(owner).map_err(|error|format!("POSIX child admission: {error}"))?;}
                 if unsafe{libc::kill(pid as i32,libc::SIGCONT)}!=0{return Err(io::Error::last_os_error().to_string());}
                 Ok::<_,String>(owner)
             })();
             match registered {
-                Ok(owner)=>{self.posix_children.insert(pid,owner);},
+                Ok(owner)=>{if self.posix.is_some(){self.posix_children.insert(pid,owner);}},
                 Err(failure)=>{
                     let killed=unsafe{libc::kill(pid as i32,libc::SIGKILL)};
                     if killed!=0&&io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH){return Err(format!("{failure}; child termination: {}",io::Error::last_os_error()));}
@@ -605,7 +610,7 @@ impl Launcher for HostLauncher {
             }
         }
         self.children.insert(pid);
-        if self.posix.is_none(){let _ = std::os::unix::fs::symlink(
+        if !suspended{let _ = std::os::unix::fs::symlink(
             &spec.identity_file,
             self.layout
                 .identity_dir()

@@ -257,6 +257,44 @@ static void random_writes(void) {
   printf("ok random_writes\n");
 }
 
+static long namespace_root_mount_id(void) {
+  FILE* f = fopen("/proc/self/mountinfo", "r");
+  CHECK(f != NULL, "open actual mountinfo");
+  char line[8192], target[4096]; long id, parent;
+  while (fgets(line, sizeof(line), f)) {
+    if (sscanf(line, "%ld %ld %*s %*s %4095s", &id, &parent, target) == 3 && !strcmp(target, "/")) {
+      fclose(f); return id;
+    }
+  }
+  fclose(f); CHECK(0, "actual root mount missing"); return -1;
+}
+struct namespace_clone_case { long parent; char source[256], target[256]; };
+static int namespace_clone_child(void* arg) {
+  struct namespace_clone_case* c = arg;
+  if (namespace_root_mount_id() == c->parent) return 2;
+  if (mount(c->source, c->target, "none", MS_BIND, NULL) != 0) return 3;
+  char path[300]; snprintf(path, sizeof(path), "%s/marker", c->target);
+  int fd = open(path, O_RDONLY); if (fd < 0) return 4;
+  char value[16] = {0}; int n = read(fd, value, sizeof(value)); close(fd);
+  return n == 7 && !memcmp(value, "private", 7) ? 0 : 5;
+}
+static void clone_new_mount_namespace(void) {
+  struct namespace_clone_case c = {.parent = namespace_root_mount_id()};
+  snprintf(c.source, sizeof(c.source), "/data/local/tmp/ns-source-%d", getpid());
+  snprintf(c.target, sizeof(c.target), "/data/local/tmp/ns-target-%d", getpid());
+  CHECK(mkdir(c.source, 0700) == 0 && mkdir(c.target, 0700) == 0, "namespace fixture dirs");
+  char marker[300]; snprintf(marker, sizeof(marker), "%s/marker", c.source);
+  int fd = open(marker, O_CREAT | O_WRONLY, 0600); CHECK(fd >= 0, "source marker"); CHECK(write(fd, "private", 7) == 7, "marker write"); close(fd);
+  void* stack = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); CHECK(stack != MAP_FAILED, "clone stack");
+  errno = 0; CHECK(clone(namespace_clone_child, (char*)stack + 65536, CLONE_NEWNS | CLONE_FS | SIGCHLD, &c) == -1 && errno == EINVAL, "NEWNS/FS conflict");
+  pid_t child = clone(namespace_clone_child, (char*)stack + 65536, CLONE_NEWNS | SIGCHLD, &c); CHECK(child > 0, "actual NEWNS clone %s", strerror(errno));
+  int st; CHECK(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 0, "NEWNS child status %#x", st);
+  CHECK(namespace_root_mount_id() == c.parent, "parent namespace unchanged");
+  snprintf(marker, sizeof(marker), "%s/marker", c.target); errno = 0; CHECK(open(marker, O_RDONLY) == -1 && errno == ENOENT, "child bind polluted parent");
+  snprintf(marker, sizeof(marker), "%s/marker", c.source); unlink(marker); rmdir(c.source); rmdir(c.target); munmap(stack, 65536);
+  printf("ok clone_new_mount_namespace\n");
+}
+
 static void fork_wait(void) {
   pid_t parent = getpid();
   int p[2];
@@ -1533,6 +1571,7 @@ int main(int argc, char** argv) {
   } checks[] = {
       {"socket_inode_owner_fork", socket_inode_owner_fork},
       {"default_sigchld_sigtimedwait", default_sigchld_sigtimedwait},
+      {"clone_new_mount_namespace", clone_new_mount_namespace},
       {"fork_wait", fork_wait},     {"fork_new_code", fork_new_code},
       {"pipe_echo", pipe_echo},     {"mount_ns", mount_ns},
       {"exec_image", exec_image},   {"exec_argv", exec_argv},

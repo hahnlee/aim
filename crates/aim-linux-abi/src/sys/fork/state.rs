@@ -172,7 +172,7 @@ impl<'a> Reader<'a> {
 }
 
 /// Every module's state, in restore order.
-pub fn save(w: &mut Writer) {
+pub fn save(w:&mut Writer,mounts:&str){
     w.u32(0x46444e02);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
@@ -189,7 +189,7 @@ pub fn save(w: &mut Writer) {
     attrs::fork_save(w);
     selinuxfs::fork_save(w);
     wait::fork_save(w);
-    w.str(&crate::vfs::own_mounts_text());
+    w.str(mounts);
     fdtab::fork_save(w);
     ptrace::fork_save(w);
     sync_file::fork_save(w);

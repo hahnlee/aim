@@ -377,6 +377,7 @@ mod registration_tests {
         let root=std::env::temp_dir().join(format!("aim-init-map-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));std::fs::create_dir(&root).unwrap();
         let actual=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
         aim_storage::process_namespace::InitRegistration::register(&root,actual,"actual-mount-owner").unwrap();
+        aim_storage::process_namespace::register_mount_namespace(&root,actual,"actual-mount-owner").unwrap();
         let runtime=root.parent().unwrap().join(format!("runtime-init-map-{}",std::process::id()));std::fs::create_dir_all(&runtime).unwrap();
         let image=runtime.join("image");std::fs::create_dir(&image).unwrap();let mount=runtime.join("actual-mount");std::fs::create_dir(&mount).unwrap();
         let map=runtime.join("path-map");let text=format!("root\t/\t{}\nrw\t/data\t{}\n",image.display(),runtime.display());std::fs::write(&map,&text).unwrap();
@@ -386,6 +387,8 @@ mod registration_tests {
         aim_storage::process_namespace::register_init_signals(&root,actual,1u64<<(15-1)).unwrap();
         aim_storage::process_namespace::InitRegistration::read(&root).unwrap().activate_pid_mapping(&root).unwrap();
         let mut child=Child(Command::new(std::env::current_exe().unwrap()).args(["--exact","sys::pidns::registration_tests::child_mapping_probe","--ignored","--nocapture"]).stdin(Stdio::piped()).spawn().unwrap());
+        let child_identity=aim_storage::process_namespace::ProcessIdentity::running(child.0.id()as i32).unwrap();
+        aim_storage::process_namespace::register_mount_namespace(&root,child_identity,"actual-mount-owner").unwrap();
         writeln!(child.0.stdin.take().unwrap(),"{}",root.display()).unwrap();assert!(child.0.wait().unwrap().success());
         std::fs::remove_dir_all(root).unwrap();std::fs::remove_dir_all(runtime).unwrap();
     }

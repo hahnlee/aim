@@ -68,6 +68,18 @@ preparation timeout (#1227) leave affected rows NOT RUN. Original zygote
 SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate failures.
 Neither campaign proves the acceptance gate.
 
+The isolated namespace owner now retains stable mount-object IDs, parent and
+shared/slave relations, clones real mount inventories, and separates native
+init bootstrap/default views (#1228). The pinned original apexd enables early
+virt bootstrap; its original ELF initializer and bootstrap use were checked.
+Fork publishes an authenticated child namespace before resuming it, including
+CLONE_NEWNS and parent exit; private APEX/linkerconfig changes stay isolated.
+Kernfs area encoding is retained instead of being imported as writable. Actual
+original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
+pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The
+combined ABI gate is not green: 243 pass and two Binder/socket failures remain
+under separate owner review. New image CTS and #1236 replay remain NOT RUN.
+
 Two native empty-data templates publish 70 guest files each and reach boot
 completion at 196.2 and 196.8 seconds under concurrent load. Parity is not
 accepted: preferred state differs (#1218), permission/role completion is missing

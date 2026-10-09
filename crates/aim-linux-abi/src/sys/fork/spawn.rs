@@ -499,6 +499,7 @@ pub fn own_fds() -> RwLockReadGuard<'static, ()> {
 
 /// What the forking `clone` asked for, as the child applies it.
 pub struct ChildSetup {
+    pub new_mount_namespace:bool,
     /// New stack pointer (0: the parent's).
     pub stack: u64,
     /// CLONE_SETTLS's thread pointer.
@@ -565,6 +566,7 @@ fn save_vfork(w:&mut Writer,pipe:Option<(i32,i32)>){w.opt(pipe,|w,(rd,wr)|{w.ret
 /// Fork the calling guest thread's process; the child's pid.
 pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Result<i32, i64> {
     let exe = super::super::exec::launch_exe().ok_or(-(libc::ENOEXEC as i64))?;
+    let mount_text=crate::vfs::fork_mounts_text(setup.new_mount_namespace).map_err(|error|-(error as i64))?;
     let mut w = Writer::default();
     w.u64(setup.stack);
     w.opt(setup.tls, |w, v| w.u64(v));
@@ -580,7 +582,7 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.u64(context::guest_tp());
     w.bytes(&shadow_stack());
     w.str(&crate::vfs::cwd());
-    w.str(&crate::vfs::own_mounts_text());
+    w.str(&mount_text);
     let tracked=super::super::verity_pager::tracked_identities().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
     let identity_count=tracked.len();
     let fork_lease=crate::verity_client().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|{crate::diag!("[linux-abi] fork mapping admission ({identity_count} identities): {error}");-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)})?;
@@ -591,7 +593,7 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     let fd_guard=fdtab::lifecycle();
     let writer_receipts=fdtab::fork_writer_receipts().map_err(|error|-(error as i64))?;
     let(fds,guest_receipts)=fdtab::fork_guest_snapshot().map_err(|error|-(error as i64))?;
-    state::save(&mut w);
+    state::save(&mut w,&mount_text);
     let diag=crate::diag::log_fd();if !fds.iter().any(|(fd,_)|*fd==diag){w.retain_private(diag);}
     let private_receipts=w.take_private().map_err(|error|-(error as i64))?;
     pager.write(&mut w).map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
@@ -611,8 +613,15 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
                 w.i32(*fd);
                 w.bool(*cloexec);
             });
+            if let Err(error)=crate::vfs::publish_fork_mounts(pid,&mount_text){
+                unsafe{libc::kill(pid,libc::SIGKILL);while libc::waitpid(pid,std::ptr::null_mut(),0)<0&&errno::last()==errno::EINTR{}}
+                return Err(-(error as i64));
+            }
             // Before the handover: the child keeps this entry.
             crate::sys::cred::note_child(pid);
+            if unsafe{libc::kill(pid,libc::SIGCONT)}!=0{
+                let error=errno::last();unsafe{libc::kill(pid,libc::SIGKILL);while libc::waitpid(pid,std::ptr::null_mut(),0)<0&&errno::last()==errno::EINTR{}}return Err(-(error as i64));
+            }
             pid
         }
         Err(e) => {
@@ -710,7 +719,7 @@ fn spawn(exe: &CString, runtime: &[CString], fds: &[(i32, bool)],private_fds:&[(
     argv.extend(runtime.iter().map(|a| a.as_ptr()));
     let fork_child = c"--fork-child";
     argv.extend([fork_child.as_ptr(), kqueues.as_ptr(), std::ptr::null()]);
-    spawn_program(exe,&argv,private_fds,port)
+    spawn_program_suspended(exe,&argv,private_fds,port,true)
 }
 fn reservation_text(kqueues:&[i32],fds:&[(i32,bool)],transfers:&[(i32,i32)])->Result<CString,i64>{
     validate_transfers(transfers)?;
@@ -719,7 +728,9 @@ fn reservation_text(kqueues:&[i32],fds:&[(i32,bool)],transfers:&[(i32,i32)])->Re
     let private=transfers.iter().filter(|(_,target)|!fds.iter().any(|(fd,_)|fd==target)).map(|(_,target)|target.to_string()).collect::<Vec<_>>().join(",");
     CString::new(format!("{queues};{relocations};{private}")).map_err(|_|-(crate::errno::EINVAL as i64))
 }
-fn spawn_program(exe:&CString,argv:&[*const libc::c_char],transfers:&[(i32,i32)],port:Port)->Result<i32,i64>{
+#[cfg(test)]
+fn spawn_program(exe:&CString,argv:&[*const libc::c_char],transfers:&[(i32,i32)],port:Port)->Result<i32,i64>{spawn_program_suspended(exe,argv,transfers,port,false)}
+fn spawn_program_suspended(exe:&CString,argv:&[*const libc::c_char],transfers:&[(i32,i32)],port:Port,suspended:bool)->Result<i32,i64>{
     validate_transfers(transfers)?;
     struct Setup{attr:libc::posix_spawnattr_t,actions:libc::posix_spawn_file_actions_t}
     impl Drop for Setup{fn drop(&mut self){unsafe{if !self.actions.is_null(){libc::posix_spawn_file_actions_destroy(&mut self.actions);}if !self.attr.is_null(){libc::posix_spawnattr_destroy(&mut self.attr);}}}}
@@ -729,7 +740,7 @@ fn spawn_program(exe:&CString,argv:&[*const libc::c_char],transfers:&[(i32,i32)]
         checked(libc::posix_spawnattr_init(&mut setup.attr))?;checked(libc::posix_spawn_file_actions_init(&mut setup.actions))?;
         let mut all:libc::sigset_t=0;libc::sigfillset(&mut all);let none:libc::sigset_t=0;
         checked(libc::posix_spawnattr_setsigdefault(&mut setup.attr,&all))?;checked(libc::posix_spawnattr_setsigmask(&mut setup.attr,&none))?;
-        checked(libc::posix_spawnattr_setflags(&mut setup.attr,(libc::POSIX_SPAWN_CLOEXEC_DEFAULT|libc::POSIX_SPAWN_SETSIGDEF|libc::POSIX_SPAWN_SETSIGMASK)as i16))?;
+        checked(libc::posix_spawnattr_setflags(&mut setup.attr,(libc::POSIX_SPAWN_CLOEXEC_DEFAULT|libc::POSIX_SPAWN_SETSIGDEF|libc::POSIX_SPAWN_SETSIGMASK|if suspended{0x80}else{0})as i16))?;
         let mut ports=[port];checked(posix_spawnattr_set_registered_ports_np(&mut setup.attr,ports.as_mut_ptr(),1))?;
         for &(source,target)in transfers{
             checked(if target>=10240{posix_spawn_file_actions_addinherit_np(&mut setup.actions,source)}else{libc::posix_spawn_file_actions_adddup2(&mut setup.actions,source,target)})?;
@@ -737,6 +748,42 @@ fn spawn_program(exe:&CString,argv:&[*const libc::c_char],transfers:&[(i32,i32)]
         checked(libc::posix_spawn(&mut pid,exe.as_ptr(),&setup.actions,&setup.attr,argv.as_ptr()as*const*mut libc::c_char,*_NSGetEnviron()as*const*mut libc::c_char))?;
     }
     Ok(pid)
+}
+
+#[cfg(test)]
+mod namespace_receipt_tests{
+    use super::*;
+    use std::{io::{Read,Write},os::unix::ffi::OsStrExt,path::PathBuf,process::{Command,Stdio}};
+    fn fields()->Vec<String>{std::env::args().find_map(|arg|arg.strip_prefix("PREBOUND_NAMESPACE=").map(str::to_owned)).expect("authenticated fixture arguments").split('|').map(str::to_owned).collect()}
+    #[test]
+    #[ignore="owned suspended child resumed after its publishing parent exits"]
+    fn published_child(){
+        let fields=fields();let map=PathBuf::from(&fields[1]);crate::vfs::inherit_fork_namespace(Some(&map)).unwrap();crate::vfs::init(std::path::Path::new(&fields[2]),Some(&map)).unwrap();
+        assert_eq!(crate::vfs::mount_namespace_id().as_deref(),Some("prebound-child"));
+        std::fs::write(&fields[3],b"ACTUAL_PARENT_EXIT_CHILD_EXECUTED").unwrap();
+    }
+    #[test]
+    #[ignore="physical parent publishes actual suspended child namespace then exits"]
+    fn publishing_parent(){
+        let fields=fields();let marker=std::env::args().find(|arg|arg.starts_with("PREBOUND_NAMESPACE=")).unwrap();
+        let exe=CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes()).unwrap();let args=[exe.clone(),CString::new("--exact").unwrap(),CString::new("sys::fork::spawn::namespace_receipt_tests::published_child").unwrap(),CString::new("--ignored").unwrap(),CString::new("--nocapture").unwrap(),CString::new("--skip").unwrap(),CString::new(marker).unwrap()];let mut argv=args.iter().map(|arg|arg.as_ptr()).collect::<Vec<_>>();argv.push(std::ptr::null());
+        let port=new_port().unwrap();let pid=spawn_program_suspended(&exe,&argv,&[],port,true).unwrap();
+        let process=aim_storage::process_namespace::ProcessIdentity::running(pid).unwrap();aim_storage::process_namespace::register_mount_namespace(std::path::Path::new(&fields[0]),process,"prebound-child").unwrap();
+        println!("SUSPENDED_CHILD:{pid}");std::io::stdout().flush().unwrap();
+        unsafe{mach_port_deallocate(task(),port);mach_port_mod_refs(task(),port,MACH_PORT_RIGHT_RECEIVE,-1);}
+    }
+    #[test]
+    fn published_receipt_survives_actual_parent_exit_before_child_resume(){
+        if fdtab::isolated_kernel_test("sys::fork::spawn::namespace_receipt_tests::published_receipt_survives_actual_parent_exit_before_child_resume"){return;}
+        let root=std::env::temp_dir().join(format!("aim-prebound-{}",std::process::id()));let _=std::fs::remove_dir_all(&root);let image=root.join("image");let runtime=root.join("run");let table=runtime.join("identity/by-pid");std::fs::create_dir_all(&image).unwrap();std::fs::create_dir_all(&table).unwrap();let map=runtime.join("path-map");let text=format!("root\t/\t{}\n",image.display());std::fs::write(&map,&text).unwrap();
+        let namespace=aim_storage::mount_namespace::Namespace::open(&runtime,"prebound-child").unwrap();namespace.initialize(&text).unwrap();let actual=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();aim_storage::process_namespace::InitRegistration::register(&table,actual,namespace.id()).unwrap();
+        let output=root.join("executed");let marker=format!("PREBOUND_NAMESPACE={}|{}|{}|{}",table.display(),map.display(),image.display(),output.display());
+        let parent=Command::new(std::env::current_exe().unwrap()).args(["--exact","sys::fork::spawn::namespace_receipt_tests::publishing_parent","--ignored","--nocapture","--skip",&marker]).stdout(Stdio::piped()).spawn().unwrap();
+        struct Parent(std::process::Child);impl Drop for Parent{fn drop(&mut self){if self.0.try_wait().ok().flatten().is_none(){let _=self.0.kill();}let _=self.0.wait();}}let mut parent=Parent(parent);let mut text=String::new();parent.0.stdout.take().unwrap().read_to_string(&mut text).unwrap();assert!(parent.0.wait().unwrap().success());let pid=text.lines().find_map(|line|line.strip_prefix("SUSPENDED_CHILD:")).unwrap().parse::<i32>().unwrap();
+        struct Owned(aim_storage::process_namespace::ProcessIdentity);impl Drop for Owned{fn drop(&mut self){if self.0.is_live(){unsafe{libc::kill(self.0.host_pid,libc::SIGKILL);}}let deadline=std::time::Instant::now()+std::time::Duration::from_secs(2);while self.0.is_live()&&std::time::Instant::now()<deadline{std::thread::sleep(std::time::Duration::from_millis(5));}}}let child=Owned(aim_storage::process_namespace::ProcessIdentity::running(pid).unwrap());
+        assert!(!output.exists());assert_eq!(unsafe{libc::kill(pid,libc::SIGCONT)},0);let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);while !output.exists(){assert!(std::time::Instant::now()<deadline,"prebound child did not resume after parent exit");std::thread::sleep(std::time::Duration::from_millis(5));}
+        assert_eq!(std::fs::read(&output).unwrap(),b"ACTUAL_PARENT_EXIT_CHILD_EXECUTED");drop(child);std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// Hand the child its state when it asks, on a host thread of the parent.

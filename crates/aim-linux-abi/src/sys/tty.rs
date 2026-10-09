@@ -535,9 +535,8 @@ mod tests {
             libc::close(master);
         }
         assert!(crate::vfs::remove_mount("/dev").unwrap());
-        // The same-process import adds a second owned entry; the real exec
-        // starts with only map entries, then imports its one inherited mount.
-        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        // Importing the same live namespace retains its one mount object.
+        assert!(!crate::vfs::remove_mount("/dev").unwrap());
         std::fs::remove_dir_all(device).unwrap();
     }
 
