@@ -97,6 +97,13 @@ external readiness instead failed with missing self admission (exit 127, #1243),
 a separate failure. APK installation remains NOT RUN. The original full-default
 linkerconfig was also not generated after the restricted bootstrap run; its
 causal relation to keystore2 requires a corrected replay.
+External managed-runtime commands now deliberately enter the live authenticated
+init namespace through `--mount-namespace-from-init` (#1243). The native POSIX
+owner separately admits the audited actor and creates its real lock holder;
+stale/foreign/missing records and absent capabilities fail. Actual process IPC
+and final lock-release checks pass, as do selected all-target compilation and
+shell syntax checks. Corrected boot readiness and CTS replay remain NOT RUN.
+
 The latest combined ABI gate passes 245 with zero failures and 19 ignored;
 controlled child entries run through their parents, and input-dependent/manual
 gates remain separate. Native create-user now forwards original pinned parser

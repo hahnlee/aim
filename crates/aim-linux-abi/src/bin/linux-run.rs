@@ -33,6 +33,7 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
 
   --root DIR             guest root directory (default /)
   --path-map FILE        guest filesystem view over the root
+  --mount-namespace-from-init  explicitly enter the running init current namespace
   --cache DIR            translation cache directory
   --no-cache             rewrite every file at load time
   --binder NAME          binder host serving the binder device nodes
@@ -132,6 +133,7 @@ fn main() {
     let mut vulkan: Option<PathBuf> = None;
     let mut display: Option<PathBuf> = None;
     let mut path_map: Option<PathBuf> = None;
+    let mut mount_namespace_from_init=false;
     let mut seclabel = None;
     let mut identity = Identity::default();
     let mut by_pid = None;
@@ -163,6 +165,7 @@ fn main() {
             "--exec-close-receipt"=>{let fd=value().to_string_lossy().parse::<i32>().unwrap_or_else(|_|usage());if fd<0{usage();}state.close_receipt=Some(fd);},
             "--guest-fds"=>{explicit_guest_fds=true;guest_fds=aim_linux_abi::sys::parse_guest_fds(&value().to_string_lossy()).unwrap_or_else(|error|{eprintln!("linux-run: invalid guest descriptor inventory: errno {error}");std::process::exit(2)});},
             "--path-map" => path_map = Some(PathBuf::from(value())),
+            "--mount-namespace-from-init"=>mount_namespace_from_init=true,
             "--posix-control"=>posix_control=Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
             "--gpu" => gpu = Some(PathBuf::from(value())),
@@ -270,6 +273,7 @@ fn main() {
             binder,
             identity,
             by_pid,
+        mount_namespace_from_init,
             state,
             runtime_args,
             guest_fds,
@@ -304,6 +308,7 @@ fn main() {
         binder,
         identity,
         by_pid,
+        mount_namespace_from_init,
         state,
         runtime_args,
         guest_fds,

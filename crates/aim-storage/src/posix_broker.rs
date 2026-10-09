@@ -116,12 +116,51 @@ impl State {
   if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop()?;return Ok(existing);}
   owners.insert(key(actor),holder.clone());Ok(holder)
  }
+ fn external_namespace(&self,actor:ProcessIdentity)->io::Result<String> {
+  use std::{io::Read,os::{fd::AsRawFd,unix::fs::OpenOptionsExt}};
+  let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?;
+  let init=crate::process_namespace::InitRegistration::read(&namespace.table)?;
+  if init.process!=self.controller||init.process!=namespace.init.process||init.mount_namespace!=namespace.init.mount_namespace{return Err(error(libc::EPERM));}
+  let current=crate::process_namespace::mount_namespace_of(&namespace.table,init.process)?;
+  if crate::process_namespace::mount_namespace_of(&namespace.table,actor)?!=current{return Err(error(libc::EPERM));}
+  crate::mount_namespace::Namespace::open(namespace.table.parent().and_then(std::path::Path::parent).ok_or_else(||error(libc::EPROTO))?,&current)?.read()?;
+  let mut record=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(namespace.table.join(actor.host_pid.to_string()))?;
+  if !record.metadata()?.is_file(){return Err(error(libc::EPROTO));}
+  loop{if unsafe{libc::flock(record.as_raw_fd(),libc::LOCK_SH)}==0{break;}let failure=io::Error::last_os_error();if failure.kind()!=io::ErrorKind::Interrupted{return Err(failure);}}
+  let mut text=String::new();record.by_ref().take(65537).read_to_string(&mut text)?;
+  if text.len()>65536{return Err(error(libc::EPROTO));}
+  let mut uid=None;let mut euid=None;let mut capabilities=None;
+  for line in text.lines(){let Some((name,value))=line.split_once('\t')else{continue;};match name{
+   "uid"=>{if uid.is_some(){return Err(error(libc::EPROTO));}uid=Some(value.parse::<u32>().map_err(|_|error(libc::EPROTO))?);},
+   "euid"=>{if euid.is_some(){return Err(error(libc::EPROTO));}euid=Some(value.parse::<u32>().map_err(|_|error(libc::EPROTO))?);},
+   "cap_effective"=>{if capabilities.is_some(){return Err(error(libc::EPROTO));}capabilities=Some(match value.strip_prefix("0x"){Some(value)=>u64::from_str_radix(value,16),None=>value.parse()}.map_err(|_|error(libc::EPROTO))?);},_=>{}
+  }}
+  // Namespace entry is a privileged operation; the native owner reads the
+  // retained guest identity, never UID or guest PID claims in a Mach frame.
+  uid.ok_or_else(||error(libc::EPROTO))?;
+  let capabilities=capabilities.ok_or_else(||error(libc::EPROTO))?;
+  if capabilities&(1<<21)==0{return Err(error(libc::EPERM));}
+  if !actor.is_live(){return Err(error(libc::ESRCH));}Ok(current)
+ }
+ fn admit_external(&self,actor:ProcessIdentity)->io::Result<Arc<Holder>> {
+  let namespace=self.external_namespace(actor)?;
+  let init=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?.init;
+  let guest_pid=if actor==init.process{1}else{actor.host_pid};
+  let holder=Holder::spawn(&self.config,Owner{process:actor,guest_pid},self.controller)?;
+  let validation=self.external_namespace(actor);
+  if !matches!(validation,Ok(ref current)if *current==namespace){holder.stop()?;return Err(validation.err().unwrap_or_else(||error(libc::EPERM)));}
+  let mut owners=self.owners.lock().unwrap();
+  if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop()?;return Ok(existing);}
+  // This native-created Holder is the revocable process capability. Its key
+  // includes the audited actor birth; retire_dead destroys its final lock owner.
+  owners.insert(key(actor),holder.clone());Ok(holder)
+ }
  fn begin(&self,request:Request)->io::Result<Option<Forwarded>> {
   self.retire_dead()?;
   let Request{frame,proof,actor,reply}=request;
   let holder=self.owners.lock().unwrap().get(&key(actor)).cloned();
-  let holder=if holder.is_none()&&frame.operation==Operation::Attach{match self.admit_fork(actor){Ok(holder)=>Some(holder),Err(failure)=>{let mut response=frame;response.host_pid=0;response.guest_pid=0;response.errno=failure.raw_os_error().unwrap_or(libc::EPERM);reply.send(response)?;return Ok(None)}}}else{holder};
-  if frame.operation==Operation::Attach {
+  let holder=if holder.is_none()&&matches!(frame.operation,Operation::Attach|Operation::ExternalAttach){match if frame.operation==Operation::ExternalAttach{self.admit_external(actor)}else{self.admit_fork(actor)}{Ok(holder)=>Some(holder),Err(failure)=>{let mut response=frame;response.host_pid=0;response.guest_pid=0;response.errno=failure.raw_os_error().unwrap_or(libc::EPERM);reply.send(response)?;return Ok(None)}}}else{holder};
+  if matches!(frame.operation,Operation::Attach|Operation::ExternalAttach) {
    let mut response=frame;response.host_pid=0;response.guest_pid=0;
    response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.process.is_live()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
    reply.send(response)?;return Ok(None);

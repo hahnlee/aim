@@ -53,6 +53,8 @@ pub struct RunOptions<'a> {
     /// The process table directory (`by-pid`) the process belongs to;
     /// None: a new, private one (`sys/pidns.rs`).
     pub by_pid: Option<PathBuf>,
+    /// Deliberate external entry into the authenticated init current namespace.
+    pub mount_namespace_from_init: bool,
     /// Authenticated native POSIX controller locator supplied by the launcher.
     pub posix_control: Option<PathBuf>,
     /// State carried over the guest's last exec.
@@ -125,7 +127,25 @@ pub fn run_fork_child(opts: RunOptions) -> String {
 
 /// Load `program` under `root` and run it on the current thread. Returns
 /// only on a load error; the guest ends the process with exit_group.
-pub fn run(opts: RunOptions) -> String {
+pub fn run(mut opts: RunOptions) -> String {
+    let _namespace_entry=if opts.mount_namespace_from_init {
+        match vfs::enter_init_namespace(opts.path_map,opts.by_pid.as_deref()){Ok(owner)=>Some(owner),Err(error)=>return error}
+    }else{None};
+    if let Some(owner)=&_namespace_entry {
+        opts.by_pid.get_or_insert_with(||owner.runtime().join("identity/by-pid"));
+        if opts.posix_control.is_none(){
+            let locator=owner.runtime().join("posix-control-owner");
+            match std::fs::symlink_metadata(&locator){
+                Ok(_)=>{
+                    use std::os::unix::ffi::OsStrExt;
+                    let path=match CString::new(locator.as_os_str().as_bytes()){Ok(path)=>path,Err(error)=>return error.to_string()};
+                    opts.runtime_args.extend([CString::new("--posix-control").unwrap(),path]);
+                    opts.posix_control=Some(locator);
+                },
+                Err(error)if error.kind()==std::io::ErrorKind::NotFound=>{},Err(error)=>return format!("external POSIX owner locator: {error}"),
+            }
+        }
+    }
     let inherited=opts.guest_fds.clone();
     if let Err(error)=sys::fdtab::install_storage_registrar(){return error;}
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
@@ -158,7 +178,8 @@ pub fn run(opts: RunOptions) -> String {
     diag::install_signal_handlers();
     if let Err(error)=opts.state.apply(){return error;}
     if let Err(error)=vfs::publish_process_namespace(){return format!("process mount namespace: errno {error}");}
-    if let Err(error)=sys::posix_locks::start(opts.posix_control.as_deref()){return format!("POSIX lock process admission: errno {error}");}
+    let posix_admission=if opts.mount_namespace_from_init{sys::posix_locks::start_external(opts.posix_control.as_deref())}else{sys::posix_locks::start(opts.posix_control.as_deref())};
+    if let Err(error)=posix_admission{return format!("POSIX lock process admission: errno {error}");}
     if let Err(error)=opts.state.apply_posix_closes(){return error;}
 
     let resolved = match vfs::resolve(vfs::LINUX_AT_FDCWD, opts.program.as_bytes(), true) {

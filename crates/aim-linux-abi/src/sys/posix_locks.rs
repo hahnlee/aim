@@ -241,6 +241,12 @@ pub fn attach_fork() -> Result<(), Errno> {
 /// Attach to the native-admitted owner. Namespace init and the Mach reply
 /// authenticate the controller; a host PID alone is never a guest PID claim.
 pub fn start(locator: Option<&std::path::Path>) -> Result<(), Errno> {
+    attach(locator,Operation::Attach)
+}
+pub(crate) fn start_external(locator: Option<&std::path::Path>) -> Result<(), Errno> {
+    attach(locator,Operation::ExternalAttach)
+}
+fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), Errno> {
     let Some(locator) = locator else {
         return Ok(());
     };
@@ -252,7 +258,7 @@ pub fn start(locator: Option<&std::path::Path>) -> Result<(), Errno> {
     }
     let process = ProcessIdentity::running(unsafe { libc::getpid() }).map_err(io)?;
     let control = posix_control::Client::lookup(&config.endpoint).map_err(io)?;
-    let frame = Frame::new(Operation::Attach, 1);
+    let frame = Frame::new(operation, 1);
     let reply = Client::reply(
         control
             .begin(frame, None)

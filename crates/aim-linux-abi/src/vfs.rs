@@ -429,6 +429,28 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
     Ok((root, mounts))
 }
 
+/// Explicit external entry, equivalent to selecting an authenticated namespace
+/// handle before loading guest code. Path-map access alone grants no membership.
+pub(crate) fn enter_init_namespace(map: Option<&Path>, by_pid: Option<&Path>) -> Result<aim_storage::mount_namespace::Namespace, String> {
+    let map=map.ok_or("--mount-namespace-from-init requires --path-map")?;
+    let map=map.canonicalize().map_err(|error|format!("mount namespace path-map: {error}"))?;
+    let runtime=map.parent().ok_or("mount namespace path-map has no runtime")?;
+    let table=runtime.join("identity/by-pid");
+    if let Some(requested)=by_pid {
+        if requested.canonicalize().map_err(|error|error.to_string())?!=table.canonicalize().map_err(|error|error.to_string())? {
+            return Err("mount namespace PID table belongs to another runtime".into());
+        }
+    }
+    std::fs::read_to_string(&map).and_then(|text|parse_map(&text).map(|_|()).map_err(std::io::Error::other)).map_err(|error|error.to_string())?;
+    let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|format!("mount namespace init admission: {error}"))?;
+    let id=aim_storage::process_namespace::mount_namespace_of(&table,init.process).map_err(|error|format!("mount namespace current owner: {error}"))?;
+    let owner=aim_storage::mount_namespace::Namespace::open(runtime,&id).map_err(|error|error.to_string())?;
+    owner.read().map_err(|error|format!("mount namespace inventory: {error}"))?;
+    let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(|error|error.to_string())?;
+    aim_storage::process_namespace::register_mount_namespace(&table,process,owner.id()).map_err(|error|format!("mount namespace membership: {error}"))?;
+    Ok(owner)
+}
+
 /// Native fork startup precedes VM restore. Inherit only the actual XNU
 /// parent's authenticated current namespace, never the init origin fallback.
 pub(crate) fn inherit_fork_namespace(map:Option<&Path>)->Result<(),String>{
@@ -1760,5 +1782,104 @@ mod fuse_route_tests {
         let text=own_mounts_text();assert!(text.contains("fuse-session.sock"));
         assert!(remove_mount("/storage/aim-fuse-test").unwrap());assert!(remove_mount(target).unwrap());
         assert!(fuse_route("/storage/aim-fuse-test/Documents/a.txt").is_none());
+    }
+}
+
+#[cfg(test)]
+mod external_namespace_entry_tests {
+    use super::*;
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+    const CHILD:&str="vfs::external_namespace_entry_tests::external_entry_child";
+    #[test]
+    #[ignore="actual child executed by explicit_external_entry_requires_live_authentic_owner"]
+    fn external_entry_child(){
+        let mut input=std::io::stdin().lock();let mut line=String::new();input.read_line(&mut line).unwrap();
+        let map=PathBuf::from(line.trim_end());let owner=enter_init_namespace(Some(&map),None).unwrap();
+        let current=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
+        assert_eq!(aim_storage::process_namespace::mount_namespace_of(&map.parent().unwrap().join("identity/by-pid"),current).unwrap(),owner.id());
+        crate::sys::cred::init(crate::sys::cred::Identity::default(),Some(map.parent().unwrap().join("identity/by-pid")));
+        assert_eq!(crate::sys::posix_locks::start(Some(&map.parent().unwrap().join("posix-control-owner"))),Err(crate::errno::EPERM));
+        assert!(crate::sys::posix_locks::current().is_err());
+        let table=map.parent().unwrap().join("identity/by-pid");let locator=map.parent().unwrap().join("posix-control-owner");
+        let mut denied=crate::sys::cred::Identity::default();denied.uid=[2000;4];denied.cap_eff=0;crate::sys::cred::init(denied,Some(table.clone()));
+        assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::EPERM));
+        crate::sys::cred::init(crate::sys::cred::Identity::default(),Some(table.clone()));
+        let receipt=table.join(format!("{}.mount-namespace",current.host_pid));let original=std::fs::read(&receipt).unwrap();
+        std::fs::write(&receipt,format!("AIMPROCNS1\t{}\t{}\t{}\t{}\n",current.host_pid,current.start_seconds+1,current.start_microseconds,owner.id())).unwrap();
+        assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::ESRCH));
+        std::fs::remove_file(&receipt).unwrap();assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::ENOENT));std::fs::write(&receipt,&original).unwrap();
+        let identity=table.join(current.host_pid.to_string());std::fs::write(&identity,b"cap_effective\t0x200000\n").unwrap();
+        assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(71));
+        let mut privileged=crate::sys::cred::Identity::default();privileged.uid=[2000;4];privileged.cap_eff=1<<21;crate::sys::cred::init(privileged,Some(table.clone()));
+        aim_storage::process_namespace::register_mount_namespace(&table,current,"foreign-owner").unwrap();
+        assert_eq!(crate::sys::posix_locks::start_external(Some(&locator)),Err(crate::errno::EPERM));
+        aim_storage::process_namespace::register_mount_namespace(&table,current,owner.id()).unwrap();
+        crate::sys::posix_locks::start_external(Some(&locator)).unwrap();
+        let client=crate::sys::posix_locks::current().unwrap();assert_eq!(client.owner.guest_pid,current.host_pid);
+        use std::os::fd::AsFd;
+        let file=std::fs::OpenOptions::new().read(true).write(true).open(map.parent().unwrap().join("actual-lock")).unwrap();
+        let lock=crate::sys::posix_locks::LinuxFlock{kind:1,whence:0,pad:0,start:0,len:1,pid:0,pad2:0};client.lock(file.as_fd(),6,lock,||false).unwrap();
+
+        println!("EXTERNAL_NAMESPACE_BOUND");std::io::stdout().flush().unwrap();
+        line.clear();input.read_line(&mut line).unwrap();assert_eq!(line.trim_end(),"close-lock");
+        client.close_inode(aim_storage::inode_lease::Identity::from_fd(file.as_fd()).unwrap()).unwrap();drop(file);
+        let final_file=std::fs::OpenOptions::new().read(true).write(true).open(map.parent().unwrap().join("actual-lock")).unwrap();
+        client.lock(final_file.as_fd(),6,lock,||false).unwrap();
+        println!("EXTERNAL_FINAL_LOCK_HELD");std::io::stdout().flush().unwrap();
+        line.clear();input.read_line(&mut line).unwrap();assert_eq!(line.trim_end(),"final-exit");
+    }
+    #[test]
+    #[ignore="actual init target executed by explicit_external_entry_requires_live_authentic_owner"]
+    fn admission_target_child(){
+        let mut input=std::io::stdin().lock();let mut line=String::new();input.read_line(&mut line).unwrap();
+        let table=PathBuf::from(line.trim_end());let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
+        let init=aim_storage::process_namespace::InitRegistration::register(&table,process,"actual-owner").unwrap();
+        aim_storage::process_namespace::register_mount_namespace(&table,process,"actual-owner").unwrap();
+        let holder=std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("aim-lock-holder");assert!(holder.is_file());
+        let controller=aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint:format!("dev.aim.external-admission.{}",process.host_pid),holder,startup_timeout:std::time::Duration::from_secs(5)}).unwrap();
+        controller.bind_namespace(&table,&init).unwrap();
+        controller.register_guest(aim_storage::posix_control::Owner{process,guest_pid:1}).unwrap();
+        controller.owner_config().unwrap().write(&table.parent().unwrap().parent().unwrap().join("posix-control-owner")).unwrap();
+        println!("ADMISSION_TARGET_READY");std::io::stdout().flush().unwrap();line.clear();input.read_line(&mut line).unwrap();
+    }
+    #[test]
+    fn explicit_external_entry_requires_live_authentic_owner(){
+        if crate::sys::fdtab::isolated_kernel_test("vfs::external_namespace_entry_tests::explicit_external_entry_requires_live_authentic_owner"){return;}
+        let root=std::env::temp_dir().join(format!("aim-external-namespace-{}",std::process::id()));std::fs::create_dir(&root).unwrap();
+        struct Directory(PathBuf);impl Drop for Directory{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}let _directory=Directory(root.clone());
+        let table=root.join("identity/by-pid");std::fs::create_dir_all(&table).unwrap();
+        std::fs::write(root.join("actual-lock"),b"native external lock").unwrap();
+        let map=root.join("path-map");let base=format!("root\t/\t{}\n",root.display());std::fs::write(&map,&base).unwrap();
+        let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
+        let owner=aim_storage::mount_namespace::Namespace::open(&root,"actual-owner").unwrap();owner.initialize(&base).unwrap();
+        aim_storage::process_namespace::InitRegistration::register(&table,process,owner.id()).unwrap();
+        aim_storage::process_namespace::register_mount_namespace(&table,process,owner.id()).unwrap();
+        assert!(enter_init_namespace(None,None).is_err());
+        assert!(enter_init_namespace(Some(&map),Some(&root)).is_err());
+        let init=std::fs::read(table.join("namespace-init")).unwrap();std::fs::write(table.join("namespace-init"),b"damaged").unwrap();assert!(enter_init_namespace(Some(&map),None).is_err());std::fs::write(table.join("namespace-init"),&init).unwrap();
+        let receipt=table.join(format!("{}.mount-namespace",process.host_pid));let original=std::fs::read(&receipt).unwrap();
+        std::fs::write(&receipt,format!("AIMPROCNS1\t{}\t{}\t{}\tactual-owner\n",process.host_pid,process.start_seconds+1,process.start_microseconds)).unwrap();assert!(enter_init_namespace(Some(&map),None).is_err());std::fs::write(&receipt,&original).unwrap();
+        struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){if self.0.try_wait().ok().flatten().is_none(){let _=self.0.kill();}let _=self.0.wait();}}
+        let mut target=Child(Command::new(std::env::current_exe().unwrap()).args(["--exact","vfs::external_namespace_entry_tests::admission_target_child","--ignored","--nocapture"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+        let mut target_input=target.0.stdin.take().unwrap();writeln!(target_input,"{}",table.display()).unwrap();
+        let mut target_output=std::io::BufReader::new(target.0.stdout.take().unwrap());let mut ready=String::new();loop{ready.clear();assert!(target_output.read_line(&mut ready).unwrap()>0);if ready.trim_end()=="ADMISSION_TARGET_READY"{break;}}
+        let mut child=Child(Command::new(std::env::current_exe().unwrap()).args(["--exact",CHILD,"--ignored","--nocapture"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+        let mut input=child.0.stdin.take().unwrap();writeln!(input,"{}",map.display()).unwrap();
+        let mut output=std::io::BufReader::new(child.0.stdout.take().unwrap());let mut line=String::new();loop{line.clear();assert!(output.read_line(&mut line).unwrap()>0);if line.trim_end()=="EXTERNAL_NAMESPACE_BOUND"{break;}}
+        use std::os::fd::AsFd;
+        enter_init_namespace(Some(&map),None).unwrap();crate::sys::cred::init(crate::sys::cred::Identity::default(),Some(table.clone()));
+        crate::sys::posix_locks::start_external(Some(&root.join("posix-control-owner"))).unwrap();
+        let file=std::fs::OpenOptions::new().read(true).write(true).open(root.join("actual-lock")).unwrap();let client=crate::sys::posix_locks::current().unwrap();
+        let query=crate::sys::posix_locks::LinuxFlock{kind:1,whence:0,pad:0,start:0,len:1,pid:0,pad2:0};
+        let held=client.lock(file.as_fd(),5,query,||false).unwrap();assert_eq!(held.kind,1);assert_eq!(held.pid,child.0.id()as i32);
+        writeln!(input,"close-lock").unwrap();loop{line.clear();assert!(output.read_line(&mut line).unwrap()>0);if line.trim_end()=="EXTERNAL_FINAL_LOCK_HELD"{break;}}
+        assert_eq!(client.lock(file.as_fd(),5,query,||false).unwrap().kind,1);
+        writeln!(input,"final-exit").unwrap();drop(input);assert!(child.0.wait().unwrap().success());
+        assert_eq!(client.lock(file.as_fd(),5,query,||false).unwrap().kind,2);
+        // Admission retains the actual namespace independently of the target receipt.
+        writeln!(target_input,"exit").unwrap();drop(target_input);assert!(target.0.wait().unwrap().success());
+        assert!(enter_init_namespace(Some(&map),None).is_err());
+        assert!(owner.read().unwrap().mounts.iter().any(|mount|mount.guest=="/"));
     }
 }

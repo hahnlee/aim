@@ -79,6 +79,7 @@ pub enum Operation {
     Close = 6,
     Exit = 7,
     Attach = 8,
+    ExternalAttach = 9,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
@@ -146,6 +147,7 @@ impl Frame {
             6 => Operation::Close,
             7 => Operation::Exit,
             8 => Operation::Attach,
+            9 => Operation::ExternalAttach,
             _ => return Err(error(libc::EPROTO)),
         };
         Ok(Self {

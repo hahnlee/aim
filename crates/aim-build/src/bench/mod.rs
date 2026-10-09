@@ -220,6 +220,7 @@ impl Guest {
         let mut child = Command::new(&self.linux_run)
             .arg("--root")
             .arg(aim_paths::derived_image())
+            .arg("--mount-namespace-from-init")
             .arg("--path-map")
             .arg(&self.path_map)
             .args(["--binder", &self.binder])

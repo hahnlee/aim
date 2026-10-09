@@ -39,5 +39,5 @@ if [[ -f "$runtime/environ" ]]; then
 fi
 [[ $# -gt 0 ]] && set -- -c "$*"
 exec env -i ${env[@]+"${env[@]}"} "$linux_run" ${inherit[@]+"${inherit[@]}"} --root "$root/target/aim/derived/root" \
-  --path-map "$runtime/path-map" --binder "dev.aim.guest-init.$guest_init.binder" \
+  --mount-namespace-from-init --path-map "$runtime/path-map" --binder "dev.aim.guest-init.$guest_init.binder" \
   --by-pid "$runtime/identity/by-pid" /system/bin/sh "$@"
