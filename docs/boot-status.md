@@ -266,8 +266,12 @@ The actual readiness-corrected original replay avoids the early Binder
 exit127, but still fails the unchanged300-second boot gate (#1263). Settings
 are captured at249.2 seconds; boot completion is not observed and permission
 capture is not attempted. Retained original PMS logs show285 system packages
-scanned in28.638 seconds, then zero non-system packages scanned in120.059
-seconds; the cause of that delay is not established. Logcat ends with an
+scanned in28.638 seconds, then a120.059-second non-system initialization
+phase with zero non-system packages. This phase includes installing the
+original compressed TrichromeLibrary, Chrome and WebView system stubs;
+their replacements complete before the phase's final timing log. It is
+not evidence of a120-second empty-directory scan or timeout. The remaining
+boot delay's cause is not established. Logcat ends with an
 unexpected-EOF diagnostic, so the partial log does not prove absence of later
 fatal errors. All owned processes and mounts are cleaned; original template
 publication and parity remain unverified. The pinned stub-output
