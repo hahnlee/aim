@@ -158,9 +158,13 @@ impl Cohort {
                     track(&mut bindings,file)?;
                 }
                 let declarations = fs::read_to_string(&files["native_services"].path).map_err(|e| e.to_string())?;
-                let has = |name| declarations.lines().any(|line| line.split('#').next().unwrap().trim() == name);
-                if variant == Variant::Original && (has("package") || has("package_native"))
-                    || variant == Variant::Native && (!has("package") || !has("package_native")) {
+                let mut services = BTreeMap::new();
+                for service in aim_android_image::system_server::parse_native_services(&declarations)
+                    .map_err(|error|format!("malformed native service declaration: {error}"))? {
+                    if services.insert(service.name,service.class).is_some() { return Err("duplicate native service declaration".into()); }
+                }
+                if variant == Variant::Original && services.contains_key("package")
+                    || variant == Variant::Native && services.get("package").map(String::as_str) != Some("com.android.server.pm.PackageManagerService") {
                     return Err("image variant does not match package service activation".into());
                 }
                 images.insert(variant, Image {root, receipt, files});
@@ -220,7 +224,7 @@ mod tests {
                 let path = root.join(format!("{name}.receipt")); let hash = make(&path,name.as_bytes()); text += &format!("image_receipt\t{name}\t{}\t{hash}\n",path.display());
                 for (label,relative) in IMAGE_FILES {
                     let path = image.join(relative); let bytes = if label == "native_services" {
-                        if variant == Variant::Native {b"package\npackage_native\n".as_slice()} else {b"clipboard\n".as_slice()}
+                        if variant == Variant::Native {b"package com.android.server.pm.PackageManagerService\n".as_slice()} else {b"clipboard com.android.server.clipboard.ClipboardService\n".as_slice()}
                     } else {relative.as_bytes()};
                     let hash = make(&path,bytes); text += &format!("image_file\t{name}\t{label}\t{}\t{hash}\n",path.display());
                 }
@@ -265,13 +269,24 @@ mod tests {
         assert!(Cohort::read(&path,&fixture.root,&"2".repeat(40)).unwrap_err().contains("workspace root/head"));
     }
     #[test]
+    fn native_service_schema_rejects_malformed_and_duplicate_declarations() {
+        for declarations in [b"package\n".as_slice(), b"package com.android.server.pm.PackageManagerService\npackage com.android.server.pm.PackageManagerService\n".as_slice()] {
+            let mut fixture = Fixture::new();
+            let path = fixture.root.join("native/system/etc/aim/native-services");
+            let old = sha(&path).unwrap(); fs::write(&path,declarations).unwrap();
+            fixture.text = fixture.text.replace(&old,&sha(&path).unwrap());
+            let error = fixture.read().unwrap_err();
+            assert!(error.contains("malformed native service") || error.contains("duplicate native service"), "{error}");
+        }
+    }
+    #[test]
     fn userdata_drift_and_wrong_activation_are_errors_not_successful_skips() {
         let fixture = Fixture::new(); let retained = fixture.read().unwrap();
         fs::write(fixture.root.join("userdata/extra.asif"),b"unrecorded").unwrap();
         assert!(retained.revalidate(false).unwrap_err().contains("userdata binding"));
         assert!(fixture.read().unwrap_err().contains("userdata tree pin"));
         let mut fixture = Fixture::new(); let path = fixture.root.join("original/system/etc/aim/native-services");
-        let old = sha(&path).unwrap(); fs::write(&path,b"package\npackage_native\n").unwrap(); let new = sha(&path).unwrap(); fixture.text = fixture.text.replace(&old,&new);
+        let old = sha(&path).unwrap(); fs::write(&path,b"package com.android.server.pm.PackageManagerService\n").unwrap(); let new = sha(&path).unwrap(); fixture.text = fixture.text.replace(&old,&new);
         assert!(fixture.read().unwrap_err().contains("service activation"));
         let fixture = Fixture::new();
         assert!(Cohort::read(&fixture.root.join("missing"),&fixture.root,&"1".repeat(40)).unwrap_err().starts_with("NOT RUN:"));
