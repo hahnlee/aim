@@ -412,7 +412,16 @@ The source now applies the validated global owners before keyset validation,
 retaining the full keyset and whole-document guards (#1271). A formal
 versioned-keyset fresh/restored Store regression reproduces the original
 failure and passes after this ordering change, preserving all keyset state
-on write and reopening. Android replay with this correction is not run.
+on write and reopening. Actual corrected42 replay now captures constructor
+epoch12/controller330000000, reaches boot237.9 seconds and permissions244.5
+seconds, and publishes70 required files. All70 source-copy bytes, modes,
+xattrs and mtimes match. Its actual packages.xml contains1492 permission
+definitions plus one permission tree, both domain sections and the actual
+default-apps container; post-boot runtime XML remains0 package/16 shared-user/
+0 permission rows. A new matched original/native pair is not run. Guest-init
+still dissents during DATA detach (#1266), and the producer detaches after
+it exits; shutdown acceptance remains failed despite the bootstrap fix.
+All owned processes and readonly mounts are normally cleaned.
 The earlier63-file publication remains invalid evidence. Actual b04 shutdown
 observation finds permission-directory/main/reserve descriptors still open
 before and after native stop and at self-dissent (#1266); the producer
