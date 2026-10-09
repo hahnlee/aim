@@ -283,8 +283,13 @@ measurements are distinct from the actual286.2-second boot result and do not
 alone attribute the whole boot-time difference. Original template publication
 is now verified. The matching corrected-runtime native pair also publishes70
 files each, with observed boot238.5/234.7 seconds and post-boot permission
-capture244.6/234.8 seconds. Strict pair/original comparison is in progress;
-runtime parity and consumer checks remain unverified. The filtered original
+capture244.6/234.8 seconds. All210 copied files preserve bytes, modes, xattrs
+and mtimes. Strict native comparison fails6 XML files; original structural
+correspondence fails8/10. Native1 and original HOME are dev.aim.home, while
+Native2 HOME is GoogleSdkSetup; its notification AppOp follows that role.
+This is an actual value difference, not incidental map order. All owned
+processes and attachments are normally cleaned. Runtime parity and consumer
+checks remain unverified. The filtered original
 alarm stack logs a non-protected UPDATE_CT_LOGS broadcast, not an established
 permission denial; no absence of Android errors is claimed. The pinned stub-output
 checker now accepts only the original decompression basenames and
@@ -319,6 +324,15 @@ fixtures and one NativeServices drop fixture pass, including concurrent
 shutdown, borrowed buffer lifetime, self-worker EDEADLK and safe FD reuse.
 The current template cohort uses the earlier frozen runtime; actual Android
 detach with this shutdown correction remains unverified.
+The source also prunes genuinely empty shared owners immediately after system
+scanning (#1267), retaining active, disabled and displaced members; three
+focused tests pass. Persisted legacy permission migrations are now separate
+from the original modern permission projection (#1219): nine focused tests
+preserve modern grants/GIDs and genuine fresh/restored legacy serialization.
+Neither correction is included in the frozen three-template cohort above.
+Twelve actual CE/DE directory references in its source boot images match
+their inode values through the real guest path-map; differing integer values
+are not ignored or rewritten. Consumer recreation/rebinding remains unverified.
 Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
