@@ -163,6 +163,13 @@ FUSE routes and restores prior state on failure. Exact fresh-start EIO is
 reproduced before the correction; corrected rollback/retry, 19 namespace/FUSE
 checks and actual FUSE protocol pass. Actual corrected ABB transport and APK
 installation remain unverified; native publication and boot are still incomplete.
+Native 52 repeatedly fails constructor finish with EEXIST and retains only
+pending copies, with no published capture or epoch (#1254). The copied
+directory host GIDs differ from the source although guest metadata and bytes
+match. Storage copy now preserves actual host UID/GID before mode/xattrs/times,
+propagating ownership errors; two strict constructor copy/seal tests and the
+generic copy test pass. First live seal failure and corrected native publication
+still require a new runtime replay; pending evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The

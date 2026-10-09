@@ -267,6 +267,37 @@ pub fn read(path: &Path) -> Result<Option<Capture>, String> {
 mod tests {
     use super::*;
     #[test]
+    fn strict_constructor_seal_preserves_real_source_group_and_setgid_directories() {
+        use std::{ffi::CString, os::unix::{ffi::OsStrExt, fs::PermissionsExt}};
+        let root=std::env::temp_dir().join(format!("aim-constructor-group-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();let data=root.join("data");fs::create_dir(&data).unwrap();
+        for file in FILES {
+            let path=data.join(file);fs::create_dir_all(path.parent().unwrap()).unwrap();fs::write(&path,b"constructor owner metadata").unwrap();
+            guest_inode::record(&path,GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o660)}).unwrap();
+        }
+        let sink=Sink::claim(&root.join("output")).unwrap();
+        let destination_gid=fs::metadata(&sink.path).unwrap().gid();
+        let count=unsafe{libc::getgroups(0,std::ptr::null_mut())};assert!(count>0,"Actual supplementary groups are required for this ownership proof");
+        let mut groups=vec![0 as libc::gid_t;count as usize];let count=unsafe{libc::getgroups(count,groups.as_mut_ptr())};assert!(count>=0);
+        let source_gid=*groups[..count as usize].iter().find(|&&group|group!=destination_gid).expect("A legitimate group different from the creator group is required; missing is not a pass");
+        for directory in DIRECTORIES {
+            let path=data.join(directory);let metadata=fs::metadata(&path).unwrap();let native=CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe{libc::chown(native.as_ptr(),metadata.uid(),source_gid)},0,"source chown: {}",std::io::Error::last_os_error());
+            fs::set_permissions(&path,fs::Permissions::from_mode(0o2770)).unwrap();
+            guest_inode::record(&path,GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o770)}).unwrap();
+        }
+        let before=read_entries(&data).unwrap();assert_ne!(source_gid,destination_gid);
+        let frozen=sink.freeze(&data,55,42).expect("actual UID/GID copy must satisfy the unchanged strict seal");
+        assert_eq!(read_entries(&frozen.directory).unwrap(),before);
+        for directory in DIRECTORIES {
+            let source=fs::metadata(data.join(directory)).unwrap();let copied=fs::metadata(frozen.directory.join(directory)).unwrap();
+            assert_eq!((copied.uid(),copied.gid()),(source.uid(),source_gid));assert_eq!(copied.mode()&0o7777,0o2770);
+        }
+        let capture=read(&sink.path).unwrap().unwrap();assert_eq!((capture.epoch,capture.controller_version),(55,42));
+        assert!(!sink.path.join("pending").exists());assert!(sink.freeze(&data,56,42).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn only_committed_immutable_constructor_can_be_consumed() {
         let root = std::env::temp_dir().join(format!(
             "aim-constructor-{}-{}",
