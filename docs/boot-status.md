@@ -385,8 +385,13 @@ An Original permission fixture then exposed a writable-data clone inheriting
 its immutable template's0444 mode and attaching read-only before Android
 started. The data owner now sets only the new private image to0600 before
 publication. A real disposable APFS image test passes write/sync/detach and
-preserves the template's hash, mode and inode. Original permission decisions
+preserves the template's hash, mode and inode (#1272). Original permission decisions
 and PID delegation remain not run until corrected-runtime replay.
+The Settings restrictions writer now emits its actual default-apps owner,
+including the empty container and pending browser, on initial and later
+writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
+with existing browser and extension state preserved. This correction also
+requires new runtime replay; earlier XML differences remain failure evidence.
 The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML

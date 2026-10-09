@@ -71,6 +71,7 @@ impl Store {
         self.validate_committed_scan(scan)?;
         if self.unread_restrictions.contains(&user) { return Err(WriteError::before("package restrictions not restored")); }
         let mut root = self.restrictions.get(&user).cloned().ok_or_else(|| WriteError::before("mutation user absent"))?;
+        self.ensure_default_apps_owner(&mut root,user)?;
         root.content.retain(|node| !matches!(node, Node::Element(entry) if entry.name == "pkg"));
         let mut states = Vec::new();
         for package in &scan.settings.packages {
