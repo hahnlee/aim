@@ -1578,6 +1578,8 @@ fn java_oracles_link_against_original_image() {
     let data = Data::new();
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
+    let android = aim_paths::sdk().expect("NOT RUN: pinned SDK missing").join("platforms/android-36/android.jar");
+    assert!(android.is_file(), "NOT RUN: pinned API36 android.jar missing");
     let classes = data.0.join("classes");
     let stubs = data.0.join("stubs");
     let dex = data.0.join("dex");
@@ -1595,13 +1597,13 @@ fn java_oracles_link_against_original_image() {
     let oracle_api = data.0.join("oracle-api");
     fs::create_dir(&oracle_api).unwrap();
     let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api");
-    let api_classpath = std::env::join_paths([production.as_path(), stubs.as_path()]).unwrap();
+    let api_classpath = std::env::join_paths([production.as_path(), stubs.as_path(), android.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"]).arg(&oracle_api)
         .arg("-classpath").arg(&api_classpath)
         .args(common::java::sources(&api.join("installer")))
         .args(common::java::sources(&api.join("com/android/permission/persistence"))));
-    let classpath = std::env::join_paths([oracle_api.as_path(), production.as_path(), stubs.as_path()]).unwrap();
+    let classpath = std::env::join_paths([oracle_api.as_path(), production.as_path(), stubs.as_path(), android.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-Xmaxerrs", "1000", "-d"])
         .arg(&classes)
@@ -1635,6 +1637,7 @@ fn java_oracles_link_against_original_image() {
             "--lib",
         ])
         .arg(&jdk)
+        .arg("--lib").arg(&android)
         .arg("--classpath").arg(&oracle_api)
         .arg("--classpath").arg(&production)
         .arg("--classpath").arg(&stubs)
