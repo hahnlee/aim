@@ -95,7 +95,7 @@ The coherent 7f837348 replay passed initial map parsing but failed boot after
 keystore2 exited with status 1 four times. Its actual namespace receipts exist;
 external readiness instead failed with missing self admission (exit 127, #1243),
 a separate failure. APK installation remains NOT RUN. The original full-default
-linkerconfig was also not generated after the restricted bootstrap run; its
+linkerconfig was also not generated after the restricted bootstrap run (#1245); its
 causal relation to keystore2 requires a corrected replay.
 External managed-runtime commands now deliberately enter the live authenticated
 init namespace through `--mount-namespace-from-init` (#1243). The native POSIX
@@ -6067,8 +6067,13 @@ waits for it (docs/storage.md). On a second boot (host load 26-31) the
 preparation takes 0.16 s, the attach ends at 0.50-0.53 s and the mount
 waits 0-0.07 s for it; `start zygote` runs at 1.58-1.60 s (a first
 and a second boot, host load 10) and `boot_progress_start` about 0.75 s
-later. linkerconfig runs once, at `perform_apex_config --bootstrap`:
-post-fs-data's run would see the same APEXes (#564). A first boot
+later. Linkerconfig runs for both `perform_apex_config --bootstrap` and
+post-fs-data's full APEX activation, as pinned init does. The native bootstrap
+and default mount owners select different APEX inventories; skipping the
+second helper left the default configuration at its one-byte placeholder in
+the failed `7f837348` boot (#1245, related to #1228). The owner regression now requires both
+helper invocations and propagates a failed second helper. A fresh boot has
+not yet verified the correction. A first boot
 clones the image from the template of the `userdata/template` node
 (docs/first-boot.md): its attach ends at 0.41-0.53 s and the mount waits
 0-0.07 s (host load 12-14; creating the image held the mount up by
