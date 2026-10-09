@@ -262,7 +262,15 @@ registration precede Binder startup. The builder now checks a bounded existing
 FILES response from the launched init, validates its audit PID and process
 birth before/after, then runs the real query (#1265). Two actual Mach tests
 pass; the existing300-second limit and nonzero-exit handling remain unchanged.
-Actual readiness-corrected original template replay remains required. The pinned stub-output
+The actual readiness-corrected original replay avoids the early Binder
+exit127, but still fails the unchanged300-second boot gate (#1263). Settings
+are captured at249.2 seconds; boot completion is not observed and permission
+capture is not attempted. Retained original PMS logs show285 system packages
+scanned in28.638 seconds, then zero non-system packages scanned in120.059
+seconds; the cause of that delay is not established. Logcat ends with an
+unexpected-EOF diagnostic, so the partial log does not prove absence of later
+fatal errors. All owned processes and mounts are cleaned; original template
+publication and parity remain unverified. The pinned stub-output
 checker now accepts only the original decompression basenames and
 ABI-selected lib directories and excludes top-level host-volume internals
 consistently (#1262). Thirteen focused tests pass; real six XML differences
