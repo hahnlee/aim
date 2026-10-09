@@ -20,6 +20,12 @@ impl MountNamespaces {
         let bootstrap = Namespace::open(&layout.runtime, &init.mount_namespace).map_err(|error| error.to_string())?;
         let mut base = map.clone();
         base.add(MapEntry{guest:"/apex".into(),host:map.lookup("/apex").0,kind:MapKind::ReadOnly});
+        for entry in entries {
+            let guest=format!("/apex/{}",entry.module_name);
+            let source=map.lookup(&guest).0;
+            if !source.is_dir(){return Err(format!("activated APEX {} is absent",entry.module_name));}
+            base.add(MapEntry{guest,host:source,kind:MapKind::ReadOnly});
+        }
         base.propagation("/", "shared", true);
         base.propagation("/apex", "private", true);
         base.propagation("/linkerconfig", "private", true);
@@ -155,6 +161,13 @@ mod tests{
         process_namespace::InitRegistration::register(&table,process,bootstrap.id()).unwrap();process_namespace::register_mount_namespace(&table,process,bootstrap.id()).unwrap();
         let(owner,map)=MountNamespaces::setup(&layout,&base,&entries,true).unwrap();let default=owner.default.clone();let bootstrap=owner.bootstrap.clone();
         let before=bootstrap.read().unwrap();assert_ne!(before.mounts[0].id,default.read().unwrap().mounts[0].id);
+        let default_before=default.read().unwrap();
+        for entry in &entries {
+            let guest=format!("/apex/{}",entry.module_name);
+            let mount=default_before.mounts.iter().find(|mount|mount.guest==guest).unwrap();
+            assert_eq!(mount.kind,"ro");assert_eq!(PathBuf::from(&mount.host),layout.image.join("apex").join(&entry.module_name));
+        }
+
         assert_eq!(fs::read(map.resolve("/apex/example.regular/content",true).unwrap().host).unwrap_err().kind(),std::io::ErrorKind::NotFound);assert_eq!(fs::read_to_string(map.resolve("/apex/com.android.virt/content",true).unwrap().host).unwrap(),"com.android.virt");
         use std::io::Write;
         let marker=format!("NATIVE_MOUNT_OWNER={}|{}",table.display(),layout.runtime.display());
@@ -164,6 +177,13 @@ mod tests{
         let mut ops=FsOps::new(map,root.join("attrs"),true);ops.set_path_map_file(layout.path_map_file());ops.set_mount_namespaces(owner);
         ops.enter_default_mount_namespace().unwrap();assert_eq!(process_namespace::mount_namespace_of(&table,process).unwrap(),default.id());assert_eq!(process_namespace::InitRegistration::read(&table).unwrap().mount_namespace,bootstrap.id());
         assert_eq!(fs::read_to_string(ops.map.resolve("/apex/example.regular/content",true).unwrap().host).unwrap(),"example.regular");
+        assert_eq!(ops.map.resolve("/apex/example.regular/content",true).unwrap().area,crate::paths::Area::ReadOnlyImage);
+        for entry in &entries {
+            let guest=format!("/apex/{}",entry.module_name);
+            let previous=default_before.mounts.iter().find(|mount|mount.guest==guest).unwrap();
+            assert_eq!(default.read().unwrap().mounts.iter().find(|mount|mount.guest==guest).unwrap().id,previous.id);
+        }
+
         fs::create_dir_all(data.join("shared-view")).unwrap();ops.mount("none","/data/alternate","/data/shared-view",&["bind".into()]).unwrap();
         let shared=PathMap::parse_file_text(&bootstrap.read().unwrap().base).unwrap();assert_eq!(shared.lookup("/data/shared-view").0,data.join("alternate"));
         ops.mount("none","/data/alternate","/apex/com.android.runtime",&["bind".into()]).unwrap();

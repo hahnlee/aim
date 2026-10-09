@@ -1492,6 +1492,25 @@ mod tests {
     }
 
     #[test]
+    fn default_apex_module_mount_keeps_actual_proc_fd_canonical_path() {
+        if crate::sys::fdtab::isolated_kernel_test("vfs::tests::default_apex_module_mount_keeps_actual_proc_fd_canonical_path"){return;}
+        let (_view,_dir)=test_view();let module=vfs().root.join("apex/actual.module");
+        std::fs::create_dir_all(module.join("lib64")).unwrap();std::fs::write(module.join("lib64/library.so"),b"actual readonly module").unwrap();
+        add_mount("/bootstrap-apex/actual.module",module.clone(),Area::Image,"apex","erofs").unwrap();
+        add_mount("/apex/actual.module",module.clone(),Area::Image,"apex","erofs").unwrap();
+        let path=CString::new("/apex/actual.module/lib64/library.so").unwrap();
+        let mut context:crate::context::GuestContext=unsafe{std::mem::zeroed()};context.x[8]=56;
+        context.x[..4].copy_from_slice(&[LINUX_AT_FDCWD as u64,path.as_ptr()as u64,0,0]);crate::sys::dispatch(&mut context);
+        let fd=context.x[0]as i64;assert!(fd>=0,"module open: {fd}");
+        let link=CString::new(format!("/proc/self/fd/{fd}")).unwrap();let mut answer=[0u8;4096];context.x[8]=78;
+        context.x[..4].copy_from_slice(&[LINUX_AT_FDCWD as u64,link.as_ptr()as u64,answer.as_mut_ptr()as u64,answer.len()as u64]);crate::sys::dispatch(&mut context);
+        let count=context.x[0]as i64;assert!(count>0,"module readlink: {count}");assert_eq!(&answer[..count as usize],b"/apex/actual.module/lib64/library.so");
+        context.x[8]=57;context.x[0]=fd as u64;crate::sys::dispatch(&mut context);assert_eq!(context.x[0],0);
+        context.x[8]=56;context.x[..4].copy_from_slice(&[LINUX_AT_FDCWD as u64,path.as_ptr()as u64,1,0]);crate::sys::dispatch(&mut context);assert_eq!(context.x[0]as i64,-(errno::EROFS as i64));
+        assert_eq!(std::fs::read(module.join("lib64/library.so")).unwrap(),b"actual readonly module");
+    }
+
+    #[test]
     fn inverse_root_bind_keeps_library_path_and_more_specific_mount() {
         use std::os::fd::{AsRawFd, IntoRawFd};
         let (_view, dir) = test_view();

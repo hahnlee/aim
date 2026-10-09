@@ -129,6 +129,11 @@ init bootstrap/default views (#1228). The pinned original apexd enables early
 virt bootstrap; its original ELF initializer and bootstrap use were checked.
 Fork publishes an authenticated child namespace before resuming it, including
 CLONE_NEWNS and parent exit; private APEX/linkerconfig changes stay isolated.
+The default namespace now records each actually activated APEX module as its
+own read-only mount (#1246). Actual module open/proc-fd readlink stays under
+`/apex`, writable opens return EROFS, and native bootstrap/default inventory
+and stable mount-ID proofs pass (two focused tests). Corrected default
+linkerconfig and boot success still require a fresh runtime replay.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The
