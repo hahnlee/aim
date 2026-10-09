@@ -274,7 +274,24 @@ fn refresh_namespace()->Result<(),Errno>{
     let owner=NAMESPACE_VIEW.lock().unwrap().as_ref().and_then(|view|(view.page.current()!=view.generation).then(||(view.owner.clone(),view.generation)));
     if let Some((owner,generation))=owner {
         let state=owner.read().map_err(namespace_error)?;
-        if state.generation!=generation {let next=state.generation;let records=std::sync::Arc::new(state.mounts.clone());apply_namespace_state(state)?;if let Some(view)=NAMESPACE_VIEW.lock().unwrap().as_mut(){if view.owner.id()==owner.id(){view.generation=next;view.records=records;}}}
+        if state.generation!=generation {
+            let next=state.generation;
+            let mounts=vfs().mounts.read().unwrap().clone();
+            let rules=PROPAGATION_RULES.lock().unwrap().clone();
+            let private=PRIVATE_MOUNTS.load(Ordering::Acquire);
+            let previous={let mut view=NAMESPACE_VIEW.lock().unwrap();let view=view.as_mut().ok_or(errno::ENODEV)?;
+                std::mem::replace(&mut view.records,std::sync::Arc::new(state.mounts.clone()))};
+            // Replay can import shared routes while applying propagation flags.
+            // Authenticate them against this same complete owner generation.
+            if let Err(error)=apply_namespace_state(state){
+                *vfs().mounts.write().unwrap()=mounts;
+                *PROPAGATION_RULES.lock().unwrap()=rules;
+                PRIVATE_MOUNTS.store(private,Ordering::Release);
+                if let Some(view)=NAMESPACE_VIEW.lock().unwrap().as_mut(){view.records=previous;}
+                return Err(error);
+            }
+            if let Some(view)=NAMESPACE_VIEW.lock().unwrap().as_mut(){if view.owner.id()==owner.id(){view.generation=next;}}
+        }
     }Ok(())
 }
 pub fn mount_namespace_id()->Option<String>{NAMESPACE_VIEW.lock().unwrap().as_ref().map(|view|view.owner.id().to_owned())}
@@ -1764,6 +1781,34 @@ mod fuse_route_tests {
         assert!(fuse_route("/mnt/aim-rec-target/emulated/0/Android/data/pkg").is_none());
         for path in ["/mnt/aim-rec-target/emulated/0/Android/data","/mnt/aim-rec-target/emulated","/mnt/aim-rec-target","/mnt/aim-nonrec","/mnt/aim-rec-source/emulated/0/Android/data","/mnt/aim-rec-source/emulated","/mnt/aim-rec-source"]{assert!(remove_mount(path).unwrap());}
     }
+    #[test]
+    fn fresh_namespace_replays_flags_with_authenticated_shared_fuse_route(){
+        if crate::sys::fdtab::isolated_kernel_test("vfs::fuse_route_tests::fresh_namespace_replays_flags_with_authenticated_shared_fuse_route"){return;}
+        let(_guard,root)=test_view();let source=NAMESPACE_VIEW.lock().unwrap().as_ref().unwrap().owner.clone();
+        let receiving=source.clone_to("fresh-receiving").unwrap();
+        receiving.append("propagation-flags\t/\t1048576").unwrap();
+        let lower=root.join("fresh-fuse-lower");std::fs::create_dir_all(&lower).unwrap();
+        let route=FuseRoute{session:root.join("real-route-session.sock"),relative:"actual/subtree".into(),uid:1000,gid:1000,allow_other:true,default_permissions:true,read_only:false};
+        actual_fuse_publication("/mnt/fresh-replay",&lower,"fuse",Some(&route)).unwrap();
+        *NAMESPACE_VIEW.lock().unwrap()=Some(NamespaceView{page:receiving.generation().unwrap(),owner:receiving.clone(),generation:0,records:Default::default()});
+        refresh_namespace().unwrap();
+        let imported=fuse_route("/mnt/fresh-replay/file").unwrap();assert_eq!(imported.session,route.session);assert_eq!(imported.relative,"actual/subtree/file");assert_eq!(imported.uid,1000);assert!(imported.default_permissions);
+        assert!(!fuse_table_lines().unwrap().iter().any(|line|line.contains("fresh-receiving")),"receiver must not republish source provenance");
+        let table=fuse_table().unwrap();let valid=std::fs::read(&table).unwrap();
+        let before=NAMESPACE_VIEW.lock().unwrap().as_ref().unwrap().generation;
+        let records=NAMESPACE_VIEW.lock().unwrap().as_ref().unwrap().records.clone();
+        let rules=PROPAGATION_RULES.lock().unwrap().clone();let private=PRIVATE_MOUNTS.load(Ordering::Acquire);
+        std::fs::write(&table,b"malformed provenance").unwrap();
+        receiving.append("propagation-flags\t/\t1048576").unwrap();
+        assert_eq!(refresh_namespace(),Err(errno::EIO));
+        {let view=NAMESPACE_VIEW.lock().unwrap();let view=view.as_ref().unwrap();assert_eq!(view.generation,before);assert!(std::sync::Arc::ptr_eq(&view.records,&records));}
+        assert!(PROPAGATION_RULES.lock().unwrap().iter().eq(rules.iter()));assert_eq!(PRIVATE_MOUNTS.load(Ordering::Acquire),private);
+        assert_eq!(vfs().mounts.read().unwrap().iter().find(|mount|mount.guest=="/mnt/fresh-replay").unwrap().fuse.as_ref().unwrap().session,route.session);
+        std::fs::write(&table,valid).unwrap();refresh_namespace().unwrap();
+        assert!(NAMESPACE_VIEW.lock().unwrap().as_ref().unwrap().generation>before);
+
+    }
+
     #[test]
     fn slave_namespace_imports_future_parent_fuse_routes_without_publishing_child_mounts(){
         if crate::sys::fdtab::isolated_kernel_test("vfs::fuse_route_tests::slave_namespace_imports_future_parent_fuse_routes_without_publishing_child_mounts"){return;}

@@ -155,7 +155,14 @@ bootstrap APEX view used symlink directory entries, which original libapexutil
 skips when scanning DT_DIR mountpoints. Native init now supplies real directory
 mountpoints with unchanged read-only module backing; actual enumeration and
 bootstrap/default namespace regression pass. Corrected linkerconfig scanning,
-boot completion and APK installation require a new image/runtime replay.
+The matched 52a67bf0 original replay reaches sys.boot_completed=1 at 272.7 s.
+Its actual APK install then fails before session creation with abb_exec closed
+and VFS namespace EIO, followed by adbd fd17 fdsan abort (#1252, #1221). Native
+namespace replay now installs receiving mount records before importing shared
+FUSE routes and restores prior state on failure. Exact fresh-start EIO is
+reproduced before the correction; corrected rollback/retry, 19 namespace/FUSE
+checks and actual FUSE protocol pass. Actual corrected ABB transport and APK
+installation remain unverified; native publication and boot are still incomplete.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The
