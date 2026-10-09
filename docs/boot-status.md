@@ -71,7 +71,18 @@ PermissionController version. The builder consumes its bytes, file and ancestor
 metadata and xattrs; the original image retains its existing capture path without
 claiming constructor provenance. Capture and permission-completion tests pass
 (one storage, two builder), and related all-target compilation passes. Actual new
-image/template replay and consumer checks remain necessary.
+image/template replay and consumer checks remain necessary. Native snapshot-profile
+now delegates to the original ArtManagerLocal shell owner with actual transferred
+PFDs and authenticated inbound caller identity (#1226). Three transport tests
+pass, including real driver forwarding of the shell caller, descriptor lifetime,
+and original exception/tail handling; complete Java/AIDL, D8 and original-image
+linkage pass. Actual profile creation and official CTS replay remain NOT RUN.
+The installer APEX authorization contract must ask the original live permission
+owner with the actual PID/UID instead of persisted grants (#1230). An uncached
+permission primitive retains that distinction from the package-info nonce.
+The separate original-PMS svc reproduction confirms actual Svc execution with
+no output or shell-v2 exit frame before the 140-second bound (#1227); it does not
+distinguish Binder wait from ART internal wait.
 
 Isolated acceptance fixes retain the running pair unchanged. The complete PM
 library gate passes 840 tests with zero failures and eleven ignored tests not

@@ -86,6 +86,27 @@ public final class NativePackageMaintenanceBridge extends IPackageMaintenanceBri
         if (current != null) profileOwner = current;
         return current;
     }
+    @Override public int handleArtShellCommand(android.os.ParcelFileDescriptor input,
+            android.os.ParcelFileDescriptor output, android.os.ParcelFileDescriptor error,
+            String[] arguments) {
+        try (input; output; error) {
+            int uid = Binder.getCallingUid();
+            if (uid != android.os.Process.ROOT_UID && uid != android.os.Process.SHELL_UID)
+                throw new SecurityException("ART Service shell commands require root or shell");
+            java.util.Objects.requireNonNull(input);
+            java.util.Objects.requireNonNull(output);
+            java.util.Objects.requireNonNull(error);
+            java.util.Objects.requireNonNull(arguments);
+            if (arguments.length == 0 || !"snapshot-profile".equals(arguments[0]))
+                throw new IllegalArgumentException("Unknown native ART shell command");
+            var owner = profileOwner();
+            if (owner == null) throw new IllegalStateException("ART Service is not ready. Please try again later");
+            return owner.handleShellCommand(this, input, output, error, arguments);
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
     @Override public void clearAppProfiles(String packageName) {
         enforceOwner();
         var owner = profileOwner();

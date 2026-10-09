@@ -790,6 +790,7 @@ pub mod events;
 
 pub mod shell;
 
+pub(crate) mod shell_profile;
 pub(crate) mod shell_read;
 pub(crate) mod shell_install;
 pub(crate) mod shell_mutation;

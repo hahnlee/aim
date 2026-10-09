@@ -622,21 +622,20 @@ impl System {
         self.cached(
             |p| &mut p.uids,
             key,
-            || {
-                let args = am::CheckPermission {
-                    permission: Some(permission.into()),
-                    pid,
-                    uid,
-                };
-                self.call(
-                    "activity",
-                    am::CHECK_PERMISSION,
-                    |p| args.write(p),
-                    am::read_check_permission_reply,
-                )
-                .map(|r| r == PERMISSION_GRANTED)
-            },
+            || self.check_permission_uncached(permission, pid, uid),
         )
+    }
+
+    /// Caller-specific checks include transient shell delegation and cannot use
+    /// the package-info nonce as their lifetime (#1230).
+    pub fn check_permission_uncached(
+        self: &Arc<Self>, permission: &str, pid: i32, uid: i32,
+    ) -> Result<bool> {
+        let args = am::CheckPermission { permission: Some(permission.into()), pid, uid };
+        self.call(
+            "activity", am::CHECK_PERMISSION, |p| args.write(p),
+            am::read_check_permission_reply,
+        ).map(|result| result == PERMISSION_GRANTED)
     }
 
     /// A permission check's answer: the one kept at the current
@@ -5489,6 +5488,8 @@ impl System {
 
 #[path="system_package_shell.rs"]
 mod package_shell;
+#[path="system_package_shell_art.rs"]
+mod shell_art;
 #[path="system_package_shell_read.rs"]
 mod package_shell_read;
 

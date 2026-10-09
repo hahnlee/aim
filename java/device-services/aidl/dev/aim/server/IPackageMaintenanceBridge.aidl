@@ -1,5 +1,6 @@
 package dev.aim.server;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.content.IntentSender;
 /** Independent original ART owners consuming the native retained package facade. */
 interface IPackageMaintenanceBridge {
@@ -25,4 +26,7 @@ interface IPackageMaintenanceBridge {
     void sendFreeStorageResult(in IntentSender sender, boolean success);
     void clearCacheFiles(String packageName, int userId, boolean canAccessInstantApps,
             int callingUid);
+    /** Original ART shell command; actual caller is preserved by the native Binder owner. */
+    int handleArtShellCommand(in ParcelFileDescriptor input, in ParcelFileDescriptor output,
+            in ParcelFileDescriptor error, in String[] arguments);
 }

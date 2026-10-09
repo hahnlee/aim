@@ -12,4 +12,8 @@ public final class ArtManagerLocal {
  public void onBoot(String reason,java.util.concurrent.Executor executor,java.util.function.Consumer<com.android.server.art.model.OperationProgress> callback){throw new RuntimeException("stub");}
  public void clearAppProfiles(com.android.server.pm.PackageManagerLocal.FilteredSnapshot snapshot,String name){throw new RuntimeException("stub");}
  public com.android.server.art.model.DeleteResult deleteDexoptArtifacts(com.android.server.pm.PackageManagerLocal.FilteredSnapshot snapshot,String name){throw new RuntimeException("stub");}
+ public int handleShellCommand(android.os.Binder target,android.os.ParcelFileDescriptor input,
+         android.os.ParcelFileDescriptor output,android.os.ParcelFileDescriptor error,String[] arguments) {
+     throw new RuntimeException("stub");
+ }
 }
