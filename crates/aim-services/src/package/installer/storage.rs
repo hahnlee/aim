@@ -2,6 +2,8 @@
 //! Original android-16.0.0_r1 AtomicFile/PackageInstallerSession protocol (AOSP, Apache-2.0).
 #[path = "storage/staged.rs"]
 mod staged;
+#[path = "storage/dex_metadata.rs"]
+mod dex_metadata;
 use super::{
     Parameters, Record, Session,
     codec::{Object, SessionParams},
@@ -830,6 +832,7 @@ impl Store {
         }
         crate::package::parse::lite::validate_install_splits(&parts).map_err(install_error)?;
         for (name, host) in copies {
+            dex_metadata::inherit(&host, &stage.join(&name))?;
             let mut source = fs::File::open(host).map_err(before)?;
             let mut target = self.write_target(session, record, &name, 0)?;
             target.set_len(0).map_err(before)?;
@@ -882,6 +885,7 @@ impl Store {
             }
             inputs.push((name, target));
         }
+        dex_metadata::normalize(&stage, session.id, &inputs)?;
         // Move every source aside first so a swap of incoming filenames cannot
         // overwrite another accepted APK. The stage remains sealed throughout.
         let mut staged = Vec::new();

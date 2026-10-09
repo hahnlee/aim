@@ -72,7 +72,8 @@ provenance.
 Isolated acceptance fixes retain the running pair unchanged. The complete PM
 library gate passes 840 tests with zero failures and eleven ignored tests not
 run. Visibility recapture passes five focused tests, loading completion three,
-shared-UID ABI inheritance three, and dex-metadata sidecar handling three.
+shared-UID ABI inheritance three, and dex-metadata sidecar handling six, including
+preflight of all temporary names and restoration after rename failure.
 Complete private Java/AIDL compilation, D8 conversion and strict original-image
 linkage pass. These source checks do not establish deployed Binder, template or
 CTS success. Close diagnostics reproduce a successful host close followed by
