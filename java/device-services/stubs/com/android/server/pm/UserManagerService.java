@@ -15,4 +15,8 @@ public class UserManagerService extends android.os.IUserManager.Stub {
     public android.content.pm.UserInfo getProfileParent(int userId) { throw new RuntimeException("stub"); }
     public int getCrossProfileIntentFilterAccessControl(int source, int target) { throw new RuntimeException("stub"); }
  public boolean isSameProfileGroup(int first,int second){throw new RuntimeException("stub");}
+    public android.content.pm.UserInfo createUserWithThrow(String name,String type,int flags){throw new RuntimeException("stub");}
+    public android.content.pm.UserInfo preCreateUserWithThrow(String type){throw new RuntimeException("stub");}
+    public android.content.pm.UserInfo createProfileForUserWithThrow(String name,String type,int flags,int user,String[] packages){throw new RuntimeException("stub");}
+    public android.content.pm.UserInfo createRestrictedProfileWithThrow(String name,int parent){throw new RuntimeException("stub");}
 }

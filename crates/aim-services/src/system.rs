@@ -5502,3 +5502,6 @@ mod package_shell_read;
 
 #[path="system_package_shell_install.rs"]
 mod package_shell_install;
+
+#[path = "system_package_shell_user.rs"]
+mod shell_user;

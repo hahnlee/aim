@@ -794,3 +794,5 @@ pub(crate) mod shell_profile;
 pub(crate) mod shell_read;
 pub(crate) mod shell_install;
 pub(crate) mod shell_mutation;
+
+pub(crate) mod shell_user;

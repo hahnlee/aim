@@ -39,4 +39,16 @@ public final class PackageShellPolicyBridge extends IPackageShellPolicyBridge.St
         for(String name:requested)if(dangerous.contains(Objects.requireNonNull(name)))result.add(name);
         return result.toArray(new String[0]);
     }
+    @Override public int handleCreateUserCommand(android.os.ParcelFileDescriptor input,
+            android.os.ParcelFileDescriptor output, android.os.ParcelFileDescriptor error,
+            String[] arguments) {
+        try (input; output; error) {
+            Objects.requireNonNull(input); Objects.requireNonNull(output); Objects.requireNonNull(error);
+            Objects.requireNonNull(arguments);
+            if (arguments.length == 0 || !"create-user".equals(arguments[0]))
+                throw new IllegalArgumentException("Unknown user shell command");
+            return new PackageShellCreateUserCommand().exec(this, input.getFileDescriptor(),
+                    output.getFileDescriptor(), error.getFileDescriptor(), arguments, null, null);
+        } catch (java.io.IOException failure) { throw new IllegalStateException(failure); }
+    }
 }

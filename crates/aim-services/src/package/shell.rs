@@ -106,6 +106,7 @@ pub fn dispatch(mut context:Context<'_>){
     context.finish(status);
 }
 fn run(context:&mut Context<'_>)->Result<Option<i32>,Exception>{
+    if let Some(status)=super::shell_user::run(context)?{return Ok(Some(status));}
     if let Some(status)=super::shell_profile::run(context)?{return Ok(Some(status));}
     if let Some(status)=super::shell_read::run(context)?{return Ok(Some(status));}
     if let Some(status)=super::shell_install::run(context)?{return Ok(Some(status));}

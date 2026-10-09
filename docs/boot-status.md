@@ -76,6 +76,13 @@ do not anchor peer EOF. Two owned-process Binder identity/payload/dup/EOF and
 multicast regressions pass; host library gate is 56 pass, zero fail, one ignored
 controlled helper. Binder wire version 5 requires a coherent runtime rebuild.
 Actual original APK installation with the correction remains NOT RUN.
+The latest combined ABI gate passes 245 with zero failures and 19 ignored;
+controlled child entries run through their parents, and input-dependent/manual
+gates remain separate. Native create-user now forwards original pinned parser
+options to the retained original UserManager, preserving actual caller and PFDs
+(#1238). Four focused dispatch/transport/caller tests and complete Java/AIDL,
+D8 and original API linkage pass; real user creation/removal and the relevant
+AppOps CTS setup remain NOT RUN.
 Instant caller query resolution now applies the original post-filter rather than
 throwing for every instant result (#725): retain its own package or visible
 non-instant activities, after existing web/split handling, with actual UID/user

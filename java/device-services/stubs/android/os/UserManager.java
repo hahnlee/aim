@@ -11,4 +11,9 @@ public class UserManager {
  public static boolean isHeadlessSystemUserMode(){throw new RuntimeException("stub");}
  public static final String DISALLOW_UNINSTALL_APPS="no_uninstall_apps";
  public boolean hasUserRestriction(String restriction,UserHandle user){throw new RuntimeException("stub");}
+    public static final String USER_TYPE_FULL_GUEST="android.os.usertype.full.GUEST";
+    public static final String USER_TYPE_FULL_DEMO="android.os.usertype.full.DEMO";
+    public static final String USER_TYPE_FULL_RESTRICTED="android.os.usertype.full.RESTRICTED";
+    public static final String USER_TYPE_PROFILE_MANAGED="android.os.usertype.profile.MANAGED";
+    public static boolean isUserTypeRestricted(String type){throw new RuntimeException("stub");}
 }
