@@ -1,6 +1,8 @@
 //! Genuine original AMS permission decisions with registered instrumentation delegation.
 use std::{fs, path::{Path,PathBuf}, process::{Command,Stdio}, time::{Duration,Instant}};
 mod common { pub mod java; pub mod runtime; }
+#[path = "../../aim-build/src/nodes/binder_ready.rs"]
+mod binder_ready;
 use common::runtime::{Boot,Data};
 struct OwnedChild(Option<std::process::Child>);
 impl Drop for OwnedChild {
@@ -77,7 +79,22 @@ fn original_allowed_denied_and_registered_pid_delegation(){
     println!("owned canonical fixture {}",fs::canonicalize(&data.0).unwrap().display());
     let boot=Boot::new(inputs.tools["aimctl"].path.clone(),data.0.join("g"));captured(boot.start_command().args(["start","--windows"]),&data.0,"boot-start",Duration::from_secs(270));
     let deadline=Instant::now()+Duration::from_secs(300);let mut n=0;
-    loop{let value=captured(boot.command().args(["shell","getprop","sys.boot_completed"]),&data.0,&format!("ready-{n}"),Duration::from_secs(15));if value.trim()=="1"{break}assert!(Instant::now()<deadline,"original boot incomplete");n+=1;std::thread::sleep(Duration::from_secs(1));}
+    let state=fs::read_to_string(format!("{}.aimctl/state",boot.data.display())).unwrap();
+    let guest_pid:i32=state.lines().find_map(|line|line.strip_prefix("guest=")).expect("actual init PID missing").parse().unwrap();
+    let init=aim_storage::process_namespace::ProcessIdentity::running(guest_pid).expect("actual init birth unavailable");
+    let runtime=aim_storage::data::runtime_of(&boot.data);
+    let binder=format!("dev.aim.guest-init.{guest_pid}.binder");
+    println!("owned init PID{guest_pid} birth {init:?}, authenticated Binder {binder}");
+    loop {
+        assert!(Instant::now()<deadline,"original boot incomplete");
+        let remaining=deadline.saturating_duration_since(Instant::now());
+        if binder_ready::poll(&runtime,init,&binder,remaining.as_millis().min(20) as u32).unwrap() {
+            let value=captured(boot.command().args(["shell","getprop","sys.boot_completed"]),&data.0,&format!("ready-{n}"),Duration::from_secs(15).min(remaining));
+            if value.trim()=="1" { break; }
+            n+=1;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let guest=boot.data.join("data/local/tmp/permission.apk");fs::copy(&apk,&guest).unwrap();
     let install=captured(boot.command().args(["shell","pm","install","/data/local/tmp/permission.apk"]),&data.0,"install",Duration::from_secs(90));assert!(install.contains("Success"),"{install}");
     let result=captured(boot.command().args(["shell","am","instrument","-w","dev.aim.test.permission/dev.aim.test.permission.OriginalPermissionInstrumentation"]),&data.0,"instrumentation",Duration::from_secs(90));
