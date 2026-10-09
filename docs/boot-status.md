@@ -808,8 +808,15 @@ actual read-only vdc trace waits for servicemanager.ready; all owned boot/displa
 processes are gone after the failed template. The separate long-runtime
 control owner now allocates a retained private short native directory (#1201);
 authenticated attach, admission, real ENABLE publication and explicit/Drop
-cleanup pass against a runtime path beyond SUN_LEN. Full image/CTS acceptance
-remains pending.
+cleanup pass against a runtime path beyond SUN_LEN. A separate bounded syscall-
+traced boot reaches zygote-start and launches 26 guest services, but an untraced
+readiness failure remains unresolved (#1203); tracing is not an acceptance fix.
+Its processes are reaped. Darwin terminal socket shutdown can return ENOTCONN
+without discarding queued rights (#1202). The native owner now drains actual
+recvmsg rights to EOF under private descriptor admission, with bounded retries
+only before consumption. The five-by-1,000 concurrent close regression passes;
+the full storage suite passes 53/0 with three ignored and the host suite 50/0.
+Full image/CTS acceptance remains pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains

@@ -215,12 +215,15 @@ pub(crate) mod tests {
     }
     #[test]
     fn scm_carrier_keeps_actual_open_description_after_sender_close(){
+        const MARKER:&str="INODE_SCM_LIFETIME_FIXTURE_EXECUTED";
+        if isolated_fork_fixture("inode_lease::tests::scm_carrier_keeps_actual_open_description_after_sender_close",MARKER){return;}
         let fixture=Fixture::new();let writer=fixture.inode.admission().unwrap().writer().unwrap();let mut sockets=[0;2];assert_eq!(unsafe{libc::socketpair(libc::AF_UNIX,libc::SOCK_STREAM,0,sockets.as_mut_ptr())},0);
         let sender=unsafe{OwnedFd::from_raw_fd(sockets[0])};let receiver=unsafe{OwnedFd::from_raw_fd(sockets[1])};
         let mut value=1u8;let mut iov=libc::iovec{iov_base:(&mut value as *mut u8).cast(),iov_len:1};let size=unsafe{libc::CMSG_SPACE(4)} as usize;let mut control=vec![0u8;size];let mut message:libc::msghdr=unsafe{std::mem::zeroed()};message.msg_iov=&mut iov;message.msg_iovlen=1;message.msg_control=control.as_mut_ptr().cast();message.msg_controllen=size as _;
         let header=unsafe{libc::CMSG_FIRSTHDR(&message)};unsafe{(*header).cmsg_level=libc::SOL_SOCKET;(*header).cmsg_type=libc::SCM_RIGHTS;(*header).cmsg_len=libc::CMSG_LEN(4);(libc::CMSG_DATA(header) as *mut i32).write_unaligned(writer.descriptor().as_raw_fd());}
         assert_eq!(unsafe{libc::sendmsg(sender.as_raw_fd(),&message,0)},1);drop(writer);busy(fixture.inode.admission().unwrap().exclusive());
         control.fill(0);message.msg_controllen=size as _;assert_eq!(unsafe{libc::recvmsg(receiver.as_raw_fd(),&mut message,0)},1);let fd=unsafe{(libc::CMSG_DATA(libc::CMSG_FIRSTHDR(&message)) as *const i32).read_unaligned()};let lease=fixture.inode.adopt_writer(unsafe{OwnedFd::from_raw_fd(fd)}).unwrap();busy(fixture.inode.admission().unwrap().exclusive());drop(lease);assert!(fixture.inode.admission().unwrap().exclusive().is_ok());
+        println!("{MARKER}");
     }
     #[test]
     fn offset_lock_parallel_readers_open_same_node_and_preserve_shared_position(){
