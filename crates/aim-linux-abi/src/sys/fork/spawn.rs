@@ -1060,18 +1060,20 @@ fn become_child(h: Handover) -> String {
         return e;
     }
     if !state::restore(&mut r) {
-        return "fork child: damaged state".into();
+        return format!("fork child: damaged state ({})",r.diagnostic());
     }
     let mut consumed=fdtab::take_restored_private_targets();
+    r.stage("verity-pager");
     match super::super::verity_pager::ForkSnapshot::restore(&mut r){Ok(targets)=>consumed.extend(targets),Err(error)=>return format!("fork verity pager: {error}")}
     consumed.sort_unstable();consumed.dedup();
     for fd in consumed{if let Err(error)=fdtab::close_fork_private(fd){return format!("fork private receipt close: errno {error}");}}
+    r.stage("descriptor-flags");
     for (fd, cloexec) in r.seq(|r| (r.i32(), r.bool())) {
         if unsafe{libc::fcntl(fd,libc::F_GETFD)}<0{return "fork inherited descriptor missing".into();}
         if unsafe{libc::fcntl(fd,libc::F_SETFD,if cloexec{libc::FD_CLOEXEC}else{0})}<0{return format!("fork descriptor flags: errno {}",crate::errno::last());}
     }
     if !r.ok() {
-        return "fork child: damaged state".into();
+        return format!("fork child: damaged state tail ({})",r.diagnostic());
     }
     if let Err(error)=super::super::verity_pager::restore_memberships(){return format!("fork restored mapping publication: {error}");}
     if let Err(error)=confirm_ready(h.parent,crate::verity_client().map(|client|client.member).unwrap_or(0)){return error;}

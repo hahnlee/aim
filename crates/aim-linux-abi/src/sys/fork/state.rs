@@ -84,12 +84,15 @@ impl Writer {
 /// and empties from the point of damage on, and [`Reader::ok`] turns false.
 pub struct Reader<'a> {
     buf: &'a [u8],
+    total: usize,
     bad: bool,
+    stage: &'static str,
+    failure: Option<(&'static str, usize)>,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, bad: false }
+        Reader { buf, total: buf.len(), bad: false, stage: "header", failure: None }
     }
 
     /// Whether everything read so far was there, and all of it was read.
@@ -101,11 +104,19 @@ impl<'a> Reader<'a> {
     pub fn intact(&self) -> bool {
         !self.bad
     }
-    pub fn invalidate(&mut self){self.bad=true;}
+    pub fn stage(&mut self, stage: &'static str) { self.stage = stage; }
+    pub fn diagnostic(&self) -> String {
+        let (stage, offset) = self.failure.unwrap_or((self.stage, self.total - self.buf.len()));
+        format!("stage={stage} offset={offset} total={} remaining={} invalid={}", self.total, self.buf.len(), self.bad)
+    }
+    pub fn invalidate(&mut self) {
+        if self.failure.is_none() { self.failure = Some((self.stage, self.total - self.buf.len())); }
+        self.bad = true;
+    }
 
     fn take(&mut self, n: usize) -> &'a [u8] {
         if self.bad || self.buf.len() < n {
-            self.bad = true;
+            self.invalidate();
             return &[];
         }
         let (a, b) = self.buf.split_at(n);
@@ -136,7 +147,7 @@ impl<'a> Reader<'a> {
     pub fn bytes(&mut self) -> Vec<u8> {
         let n = self.u64();
         if n > self.buf.len() as u64 {
-            self.bad = true;
+            self.invalidate();
             return Vec::new();
         }
         self.take(n as usize).to_vec()
@@ -144,7 +155,7 @@ impl<'a> Reader<'a> {
 
     pub fn str(&mut self) -> String {
         String::from_utf8(self.bytes()).unwrap_or_else(|_| {
-            self.bad = true;
+            self.invalidate();
             String::new()
         })
     }
@@ -201,28 +212,52 @@ pub fn save(w:&mut Writer,mounts:&str){
 /// Restore what [`save`] wrote, then rebuild the host objects the state
 /// names; false when the blob is damaged.
 pub fn restore(r: &mut Reader) -> bool {
-    if r.u32()!=0x46444e02{return false;}
+    r.stage("state-version");
+    let version=r.u32();
+    if version!=0x46444e02{eprintln!("fork state version: received={version:#x} expected=0x46444e02");r.invalidate();return false;}
+    r.stage("xrt");
     crate::xrt::fork_restore(r);
+    r.stage("diag");
     crate::diag::fork_restore(r);
+    r.stage("patch");
     crate::patch::fork_restore(r);
+    r.stage("vdso");
     crate::vdso::fork_restore(r);
+    r.stage("cred");
     cred::fork_restore(r);
+    r.stage("process");
     process::fork_restore(r);
+    r.stage("procfs");
     procfs::fork_restore(r);
+    r.stage("pstate");
     pstate::fork_restore(r);
+    r.stage("misc");
     misc::fork_restore(r);
+    r.stage("mem");
     mem::fork_restore(r);
+    r.stage("copies");
     copies::fork_restore(r);
+    r.stage("memfd");
     memfd::fork_restore(r);
+    r.stage("attrs");
     attrs::fork_restore(r);
+    r.stage("selinuxfs");
     selinuxfs::fork_restore(r);
+    r.stage("wait");
     wait::fork_restore(r);
+    r.stage("mount-namespace");
     if let Err(error)=crate::vfs::load_own_mounts(&r.str()){eprintln!("fork mount namespace restore failed: errno={error}");return false;}
+    r.stage("fdtab");
     fdtab::fork_restore(r);
+    r.stage("ptrace");
     ptrace::fork_restore(r);
+    r.stage("sync_file");
     sync_file::fork_restore(r);
+    r.stage("signal");
     signal::fork_restore(r);
+    r.stage("thread");
     thread::fork_restore(r);
+    r.stage("gpu");
     let gpu = r.bytes();
     if gpu != aim_host_gpu::fork_state() {
         crate::hostcall::mark_used();
@@ -234,6 +269,7 @@ pub fn restore(r: &mut Reader) -> bool {
     wait::after_fork_child();
     fdtab::after_fork_child();
     super::super::posix_locks::reset_fork();
+    r.stage("posix-admission");
     if let Err(error)=super::super::posix_locks::attach_fork(){eprintln!("fork POSIX owner admission: errno {error}");return false;}
     true
 }
@@ -241,6 +277,22 @@ pub fn restore(r: &mut Reader) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damage_diagnostics_retain_first_owner_and_exact_byte_boundary() {
+        let mut w=Writer::default();w.u64(7);w.str("abc");
+        let bytes=w.into_bytes();
+        let mut short=Reader::new(&bytes[..18]);short.stage("prefix");assert_eq!(short.u64(),7);
+        short.stage("names");assert_eq!(short.str(),"");assert!(!short.intact());
+        short.stage("later");short.u64();
+        assert_eq!(short.diagnostic(),"stage=names offset=16 total=18 remaining=2 invalid=true");
+        let mut invalid=Reader::new(&[1,0,0,0,0,0,0,0,255]);invalid.stage("utf8");assert_eq!(invalid.str(),"");
+        assert_eq!(invalid.diagnostic(),"stage=utf8 offset=9 total=9 remaining=0 invalid=true");
+        let mut tail=Reader::new(&[0;9]);tail.stage("descriptor-flags");tail.u64();assert!(tail.intact());assert!(!tail.ok());
+        assert_eq!(tail.diagnostic(),"stage=descriptor-flags offset=8 total=9 remaining=1 invalid=false");
+        let mut version=Reader::new(&[0;8]);assert!(!restore(&mut version));
+        assert_eq!(version.diagnostic(),"stage=state-version offset=8 total=8 remaining=0 invalid=true");
+    }
 
     #[test]
     fn values_round_trip_and_damage_is_noticed() {

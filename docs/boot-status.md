@@ -67,6 +67,13 @@ failure (#1222), concurrent XML association failure (#1223) and actual device
 preparation timeout (#1227) leave affected rows NOT RUN. Original zygote
 SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate failures.
 Neither campaign proves the acceptance gate.
+The retained b04 native logs also contain 45 adbd and one zygote
+`fork child: damaged state` failures (#1241). The next runtime now reports the
+first invalid fork-state module and byte offset, expected/received version, and
+distinguishes state restoration from unread or truncated final descriptor tails.
+Encoding and restore order are unchanged; one focused truncation, invalid UTF-8,
+version and tail regression passes. This adds diagnostics, not a verified fix;
+actual failing original-process replay with these diagnostics remains NOT RUN.
 Binder socket transfer now preserves the genuine allocation receipt and actual
 backing through native fileports (#1235), with strict class-5 metadata validation
 and no receiver-side allocation guess. The original install-write ENODATA was
