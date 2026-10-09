@@ -5,11 +5,13 @@ use super::{socket_inode, super::{binder, fdtab}};
 use aim_storage::private_fd::PrivateFd;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-pub(super) struct Export {
+pub(crate) struct Export {
     carrier: Option<PrivateFd>,
     _source: socket_inode::Export,
 }
 impl Export {
+    pub(crate) fn backing(&self)->i32{self._source.backing_fd}
+    pub(crate) fn receipt(&self)->aim_storage::socket_inode::Receipt{self._source.receipt}
     pub(super) fn fd(&self) -> i32 { self.carrier.as_ref().unwrap().as_raw_fd() }
 }
 impl Drop for Export {
@@ -145,7 +147,7 @@ pub(crate) fn classify(fd: i32) -> Result<u32, Errno> {
     if reply.descriptor.is_some() { return Err(71); }
     Ok(reply.class)
 }
-pub(super) fn export(source: socket_inode::Export) -> Result<Export, Errno> {
+pub(crate) fn export(source: socket_inode::Export) -> Result<Export, Errno> {
     let mut reply = exchange(|channel| aim_binder_host::socket_scm::request_create(channel, source.backing_fd, source.receipt))?;
     if reply.class != aim_binder_host::socket_scm::CLASS || reply.receipt != Some(source.receipt) { return Err(71); }
     let carrier = reply.descriptor.take().ok_or(71)?;

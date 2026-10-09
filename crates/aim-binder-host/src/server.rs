@@ -22,7 +22,7 @@ use crate::mach::{self, Buffer, Msg, Port, Received};
 use crate::wire::{self, Ioctl, IoctlReply, Reader, SharedFile, Writer};
 
 /// A fileport as the driver's opaque `File`.
-struct FilePort(Port, u32, Option<RegularPorts>);
+struct FilePort(Port, u32, Option<RegularPorts>, Option<aim_storage::socket_inode::Receipt>);
 struct RegularPorts { metadata: wire::RegularMetadata, writer: Option<Port> }
 impl Drop for RegularPorts { fn drop(&mut self) { if let Some(port) = self.writer { mach::release_send(port); } } }
 
@@ -38,7 +38,11 @@ impl Drop for FilePort {
 pub fn file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
     use std::os::fd::AsRawFd;
     let class = registered_descriptor_class(fd.as_raw_fd()).ok()?;
-    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, class, None)) as File)
+    if class==crate::socket_scm::CLASS{
+        let(backing,receipt)=crate::socket_scm::binder_from_carrier(fd).ok()?;
+        return mach::fd_to_port(backing.as_raw_fd()).map(|port|Arc::new(FilePort(port,class,None,Some(receipt)))as File);
+    }
+    mach::fd_to_port(fd.as_raw_fd()).map(|port| Arc::new(FilePort(port, class, None,None)) as File)
 }
 
 /// Export a native proxy capability with an explicit versioned Binder class.
@@ -48,7 +52,7 @@ pub fn proxy_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
         return None;
     }
     mach::fd_to_port(fd.as_raw_fd())
-        .map(|port| Arc::new(FilePort(port, crate::proxy_file::CLASS, None)) as File)
+        .map(|port| Arc::new(FilePort(port, crate::proxy_file::CLASS, None,None)) as File)
 }
 
 fn path_creation_errno(error: std::io::Error) -> Errno {
@@ -142,7 +146,7 @@ pub fn path_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
         return None;
     }
     mach::fd_to_port(fd.as_raw_fd())
-        .map(|port| Arc::new(FilePort(port, crate::path_file::CLASS, None)) as File)
+        .map(|port| Arc::new(FilePort(port, crate::path_file::CLASS, None,None)) as File)
 }
 
 /// Capture the actual regular backing and writer descriptions together. They
@@ -155,7 +159,7 @@ pub fn regular_file_from_fd(backing: std::os::fd::BorrowedFd<'_>, writer: Option
         Some(writer) => match mach::fd_to_port(writer.as_raw_fd()) { Some(port) => Some(port), None => { mach::release_send(backing); return Err(errno::EBADF); } },
         None => None,
     };
-    Ok(Arc::new(FilePort(backing, crate::regular_file::CLASS, Some(RegularPorts { metadata, writer }))) as File)
+    Ok(Arc::new(FilePort(backing, crate::regular_file::CLASS, Some(RegularPorts { metadata, writer }),None)) as File)
 }
 
 pub fn file_class(file: &File) -> Option<u32> {
@@ -619,7 +623,7 @@ fn valid_exported_files(io: &Ioctl, ports: &[Port]) -> bool {
     let count = io.fds.len() + io.regular.iter().flatten().filter(|metadata| metadata.writer).count();
     if count != ports.len() { return false; }
     let mut ports = ports.iter().copied();
-    io.file_classes.iter().zip(&io.regular).all(|(class, regular)| {
+    io.file_classes.iter().zip(&io.regular).zip(&io.sockets).all(|((class, regular),socket)| {
         use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
         let Some(backing) = ports.next().and_then(mach::port_to_fd) else { return false; };
         let backing = unsafe { OwnedFd::from_raw_fd(backing) };
@@ -629,6 +633,8 @@ fn valid_exported_files(io: &Ioctl, ports: &[Port]) -> bool {
                 Some(unsafe { OwnedFd::from_raw_fd(fd) })
             } else { None };
             *class == crate::regular_file::CLASS && crate::regular_file::validate(backing.as_fd(), writer.as_ref().map(AsFd::as_fd), metadata).is_ok()
+        } else if let Some(receipt)=socket{
+            *class==crate::socket_scm::CLASS&&crate::socket_scm::validate_binder_backing(backing.as_fd(),*receipt).is_ok()
         } else {
             registered_descriptor_class(backing.as_raw_fd()).is_ok_and(|actual| actual == *class)
         }
@@ -654,16 +660,18 @@ impl Worker {
     fn run(self) {
         OUTBOX.with(|o| *o.borrow_mut() = Some(Vec::new()));
         let mut buf = Buffer::default();
-        // The previous answer goes out in the same mach_msg that waits for
-        // the next request.
+        // Replies without retained files combine send and receive.
         let mut answer: Option<Answer> = None;
         loop {
             let next = match answer.take() {
-                Some(a) => {
-                    let r = mach::reply_and_receive(&mut buf, a.to, &a.msg, self.0.set);
-                    drop(a.files);
-                    r
+                Some(a) if !a.files.is_empty() => {
+                    // COPY_SEND takes its queue reference during send. Release
+                    // the owner before waiting for an unrelated next request.
+                    mach::reply(&mut buf,a.to,&a.msg);
+                    drop(a);
+                    mach::receive(&mut buf,self.0.set)
                 }
+                Some(a) => mach::reply_and_receive(&mut buf,a.to,&a.msg,self.0.set),
                 None => mach::receive(&mut buf, self.0.set),
             };
             let Ok(req) = next else { continue };
@@ -739,7 +747,8 @@ impl Worker {
                 let writer = if metadata.writer { Some(ports.next().unwrap()) } else { None };
                 RegularPorts { metadata, writer }
             });
-            (*fd, Arc::new(FilePort(backing, io.file_classes[index], regular)) as File)
+            let file=Arc::new(FilePort(backing, io.file_classes[index], regular,io.sockets[index])) as File;
+            (*fd,file)
         }).collect();
         let guest = Gathered {
             segments: io.segments,
@@ -937,7 +946,7 @@ impl GuestProcess for Gathered {
             return Err(24);
         }
         let next = file.downcast_ref::<FilePort>().unwrap();
-        if (next.1 == crate::regular_file::CLASS) != next.2.is_some() { return Err(wire::EPROTO); }
+        if (next.1 == crate::regular_file::CLASS) != next.2.is_some() || (next.1==crate::socket_scm::CLASS)!=next.3.is_some(){return Err(wire::EPROTO);}
         let ports: usize = self.installed.iter().map(|file| 1 + file.downcast_ref::<FilePort>().unwrap().2.as_ref().is_some_and(|regular| regular.writer.is_some()) as usize).sum();
         let next = file.downcast_ref::<FilePort>().unwrap();
         if ports + 1 + next.2.as_ref().is_some_and(|regular| regular.writer.is_some()) as usize > mach::MAX_PORTS { return Err(24); }
@@ -947,6 +956,7 @@ impl GuestProcess for Gathered {
             .file_classes
             .push(file.downcast_ref::<FilePort>().unwrap().1);
         self.reply.regular.push(file.downcast_ref::<FilePort>().unwrap().2.as_ref().map(|regular| regular.metadata.clone()));
+        self.reply.sockets.push(file.downcast_ref::<FilePort>().unwrap().3);
         self.installed.push(file);
         Ok(fd)
     }
@@ -985,6 +995,35 @@ mod path_carrier_tests {
             mach::destroy_receive(self.port);mach::release_send(self.port);
             if let Some(thread)=self.thread.take(){if thread.join().is_err(){eprintln!("SCM fixture service unwound");}}
         }
+    }
+    #[test]
+    fn binder_socket_authority_retains_actual_backing_and_rejects_foreign_receipts(){
+        const MARKER:&str="BINDER_SOCKET_AUTHORITY_EXECUTED";
+        if crate::socket_scm::tests::isolated_exec_fixture("server::path_carrier_tests::binder_socket_authority_retains_actual_backing_and_rejects_foreign_receipts",MARKER){return;}
+        let service=crate::socket_scm::Service::start().unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let channel=std::os::unix::net::UnixStream::connect(std::path::Path::new(std::ffi::OsStr::from_bytes(&service.endpoint().path))).unwrap();
+        let queue=aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap();
+        crate::socket_scm::authenticate(channel.as_raw_fd(),service.endpoint()).unwrap();
+        let(backing,peer)=std::os::unix::net::UnixStream::pair().unwrap();let receipt=aim_storage::socket_inode::Receipt::mint(backing.as_raw_fd()).unwrap();
+        crate::socket_scm::request_create(channel.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();
+        let carrier=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap().descriptor.unwrap();
+        let port=mach::fd_to_port(backing.as_raw_fd()).unwrap();
+        let mut io=Ioctl{fds:vec![8],file_classes:vec![crate::socket_scm::CLASS],regular:vec![None],sockets:vec![Some(receipt)],..Default::default()};
+        assert!(valid_exported_files(&io,&[port]));
+        io.sockets[0].as_mut().unwrap().generation[0]^=1;assert!(!valid_exported_files(&io,&[port]));
+        io.sockets[0]=Some(receipt);let foreign=mach::fd_to_port(peer.as_raw_fd()).unwrap();assert!(!valid_exported_files(&io,&[foreign]));mach::release_send(foreign);
+        io.sockets[0]=None;assert!(!valid_exported_files(&io,&[port]));io.sockets[0]=Some(receipt);io.file_classes[0]=0;assert!(!valid_exported_files(&io,&[port]));mach::release_send(port);
+        let file=file_from_fd(carrier.as_fd()).unwrap();assert_eq!(file_class(&file),Some(crate::socket_scm::CLASS));
+        let queued=file.clone();drop(file);drop(backing);drop(carrier);
+        crate::socket_scm::request_drain(channel.as_raw_fd()).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();drop(crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap());
+        let received=file_fd(&queued).unwrap();receipt.validate(received.as_raw_fd()).unwrap();
+        assert_eq!(queued.downcast_ref::<FilePort>().unwrap().3,Some(receipt));
+        let mut duplicate=received.try_clone().unwrap();drop(queued);drop(received);
+        use std::io::{Read,Write};let mut peer=peer;peer.write_all(b"queued payload").unwrap();let mut bytes=[0;14];duplicate.read_exact(&mut bytes).unwrap();assert_eq!(&bytes,b"queued payload");
+        let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},-1);
+        drop(duplicate);assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0,"last B/fileport reference releases peer EOF");
+        queue.prepare_last_close(channel.as_fd()).unwrap();drop(channel);drop(queue);drop(service);println!("{MARKER}");
     }
     #[test]
     fn actual_client_socket_scm_rpc_repeated_resolve_preserves_receipt_and_exact_eof(){
@@ -1042,7 +1081,7 @@ mod path_carrier_tests {
         let writer=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("writers")).unwrap();
         let backing=mach::fd_to_port(source.as_raw_fd()).unwrap();let lock=mach::fd_to_port(writer.as_raw_fd()).unwrap();
         let metadata=wire::RegularMetadata {flags:2,uid:1000,gid:1001,identity:crate::regular_file::identity(source.as_fd()).unwrap(),writer:true};
-        let mut io=Ioctl {fds:vec![9],file_classes:vec![crate::regular_file::CLASS],regular:vec![Some(metadata)],..Default::default()};
+        let mut io=Ioctl {fds:vec![9],file_classes:vec![crate::regular_file::CLASS],regular:vec![Some(metadata)],sockets:vec![None],..Default::default()};
         assert!(valid_exported_files(&io,&[backing,lock]));
         assert!(!valid_exported_files(&io,&[backing]));
         assert!(!valid_exported_files(&io,&[backing,lock,lock]));
@@ -1194,7 +1233,7 @@ mod ioctl_only_tests {
         let path=std::env::temp_dir().join(format!("aim-ioctl-only-{}",std::process::id()));
         let backing=std::fs::File::options().read(true).write(true).create_new(true).open(&path).unwrap();
         let metadata=wire::RegularMetadata{flags:3,uid:1000,gid:1001,identity:crate::regular_file::identity(backing.as_fd()).unwrap(),writer:false};
-        let message=wire::Ioctl{fds:vec![7],file_classes:vec![crate::regular_file::CLASS],regular:vec![Some(metadata.clone())],..Default::default()};
+        let message=wire::Ioctl{fds:vec![7],file_classes:vec![crate::regular_file::CLASS],regular:vec![Some(metadata.clone())],sockets:vec![None],..Default::default()};
         assert!(message.validate().is_ok());assert_eq!(wire::Ioctl::decode(&message.encode()).unwrap(),message);
         let owner=regular_file_from_fd(backing.as_fd(),None,metadata).unwrap();let mut file=file_fd(&owner).unwrap();
         assert_eq!(file.read(&mut[0]).unwrap_err().raw_os_error(),Some(libc::EBADF));

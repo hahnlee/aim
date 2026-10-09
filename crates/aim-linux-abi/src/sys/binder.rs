@@ -95,6 +95,7 @@ fn lookup(fd: i32) -> Option<BinderFile> {
 struct Guest {
     exported: Vec<super::fdtab::ExportedFd>,
     regular: Vec<(i32, super::fdtab::RegularExport)>,
+    sockets: Vec<(i32,super::net::BinderSocketExport)>,
 }
 
 /// Nothing maps below 4 GiB on macOS arm64 (`__PAGEZERO`), so a pointer
@@ -142,16 +143,21 @@ impl UserMemory for Guest {
         }
     }
     fn export_fd(&mut self, fd: i32) -> Result<i32,i32> {
-        if let Some(regular) = super::fdtab::export_regular(fd)? {
-            let number = regular.backing_fd;
-            self.regular.push((fd,regular));
-            return Ok(number);
+        match super::fdtab::export_scm(fd)?{
+            super::fdtab::ScmExport::Regular(regular)=>{let number=regular.backing_fd;self.regular.push((fd,regular));Ok(number)},
+            super::fdtab::ScmExport::Socket(source)=>{let socket=super::net::export_binder_socket(source)?;let number=socket.backing();self.sockets.push((fd,socket));Ok(number)},
+            super::fdtab::ScmExport::Other(exported)=>{let number=exported.fd;self.exported.push(exported);Ok(number)},
         }
-        let exported = super::fdtab::export_fd(fd)?;
-        let number = exported.fd;
-        self.exported.push(exported);
-        Ok(number)
     }
+    fn socket_export(&mut self,fd:i32)->Result<Option<aim_storage::socket_inode::Receipt>,i32>{
+        Ok(self.sockets.iter().find(|(original,_)|*original==fd).map(|(_,socket)|socket.receipt()))
+    }
+    fn install_socket(&mut self,fd:i32,receipt:aim_storage::socket_inode::Receipt)->Result<(),i32>{
+        self.installed(fd);
+        super::net::install_socket_receipt(fd,receipt)?;
+        super::fdtab::publish_guest(fd)
+    }
+
     fn regular_export(&mut self, fd:i32) -> Result<Option<aim_binder_host::regular_file::Export>,i32> {
         Ok(self.regular.iter().find(|(original,_)| *original==fd).map(|(_,regular)| aim_binder_host::regular_file::Export {
             metadata:regular.transport.metadata.clone(), writer_fd:regular.transport.writer_fd,
@@ -163,12 +169,14 @@ impl UserMemory for Guest {
         super::fdtab::publish_guest(fd)
     }
     fn install_typed(&mut self, fd:i32, class:u32) -> Result<(),i32> {
+        if class == aim_binder_host::socket_scm::CLASS{return Err(71);}
         if class == aim_binder_host::path_file::CLASS { super::fdtab::install_path(fd)?; }
         else { self.installed_typed(fd,class); }
         super::fdtab::publish_guest(fd)
     }
     fn file_class(&mut self, fd: i32) -> u32 {
-        if self.regular.iter().any(|(original,_)| *original==fd) {
+        if self.sockets.iter().any(|(original,_)|*original==fd){aim_binder_host::socket_scm::CLASS}
+        else if self.regular.iter().any(|(original,_)| *original==fd) {
             aim_binder_host::regular_file::CLASS
         } else if matches!(super::fdtab::get(fd),Some(Kind::Path(_))) {
             aim_binder_host::path_file::CLASS
@@ -309,5 +317,53 @@ pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: i32) -> Option<i64> 
 pub fn poll(fd: i32) {
     if let Some(file) = lookup(fd) {
         let _ = file.poll(super::process::gettid() as i32);
+    }
+}
+
+#[cfg(test)]
+mod socket_receipt_tests {
+    use super::*;
+    use aim_binder_driver::uapi::*;
+    use std::{io::{Read,Write},process::{Child,Command,Stdio},time::{Duration,Instant}};
+    fn ioctl(file:&BinderFile,tid:i32,code:u32,arg:&mut[u8]){file.ioctl(tid,code,arg.as_mut_ptr()as u64,&mut Guest::default()).unwrap();}
+    fn command(out:&mut Vec<u8>,code:u32,bytes:&[u8]){out.extend(code.to_le_bytes());out.extend(bytes);}
+    fn exchange(file:&BinderFile,tid:i32,write:&[u8],read:bool)->Vec<u8>{
+        let mut bytes=vec![0u8;if read{512}else{0}];let mut request=WriteRead{write_size:write.len()as u64,write_buffer:write.as_ptr()as u64,read_size:bytes.len()as u64,read_buffer:bytes.as_mut_ptr()as u64,..Default::default()}.encode();
+        ioctl(file,tid,BINDER_WRITE_READ,&mut request);let done=WriteRead::decode(&request);assert_eq!(done.write_consumed,write.len()as u64);bytes.truncate(done.read_consumed as usize);bytes
+    }
+    fn transaction(read:&[u8],wanted:u32)->Option<TransactionData>{let mut at=0;while at+4<=read.len(){let code=u32::from_le_bytes(read[at..at+4].try_into().unwrap());at+=4;if code==wanted{return Some(TransactionData::decode(&read[at..]));}at+=ioc_size(code);}None}
+    fn wait_transaction(file:&BinderFile,tid:i32,mut read:Vec<u8>,code:u32)->TransactionData{loop{if let Some(tr)=transaction(&read,code){return tr;}read=exchange(file,tid,&[],true);}}
+    fn status(fd:i32)->(u32,u32,u32,u64){let mut bytes=[0u8;128];assert_eq!(super::super::fs::fstat([fd as u64,bytes.as_mut_ptr()as u64,0,0,0,0]),0);(u32::from_ne_bytes(bytes[24..28].try_into().unwrap()),u32::from_ne_bytes(bytes[28..32].try_into().unwrap()),u32::from_ne_bytes(bytes[16..20].try_into().unwrap()),u64::from_ne_bytes(bytes[8..16].try_into().unwrap()))}
+    fn dup(fd:i32)->i32{let copy=super::super::fs::dup([fd as u64,0,0,0,0,0]);assert!(copy>=0);copy as i32}
+    fn close(fd:i32){assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);}
+    fn payload(fd:i32,stat:(u32,u32,u32,u64))->Vec<u8>{let mut data=vec![0;64];data[0..4].copy_from_slice(&0x1235u32.to_le_bytes());data[8..12].copy_from_slice(&BINDER_TYPE_FD.to_le_bytes());data[16..20].copy_from_slice(&fd.to_le_bytes());data[32..36].copy_from_slice(&stat.0.to_le_bytes());data[36..40].copy_from_slice(&stat.1.to_le_bytes());data[40..44].copy_from_slice(&stat.2.to_le_bytes());data[48..56].copy_from_slice(&stat.3.to_le_bytes());data}
+    fn received(tr:&TransactionData)->(i32,(u32,u32,u32,u64)){assert_eq!(tr.data_size,64);let bytes=unsafe{std::slice::from_raw_parts(tr.buffer as*const u8,64)};assert_eq!(&bytes[..4],&0x1235u32.to_le_bytes());let fd=i32::from_ne_bytes(bytes[16..20].try_into().unwrap());let expected=(u32::from_ne_bytes(bytes[32..36].try_into().unwrap()),u32::from_ne_bytes(bytes[36..40].try_into().unwrap()),u32::from_ne_bytes(bytes[40..44].try_into().unwrap()),u64::from_ne_bytes(bytes[48..56].try_into().unwrap()));assert_eq!(status(fd),expected);(fd,expected)}
+    fn free(file:&BinderFile,tid:i32,buffer:u64){let mut out=vec![];command(&mut out,BC_FREE_BUFFER,&buffer.to_le_bytes());exchange(file,tid,&out,false);}
+    struct OwnedChild(Child);
+    impl Drop for OwnedChild{fn drop(&mut self){if self.0.try_wait().unwrap().is_none(){self.0.kill().unwrap();}self.0.wait().unwrap();}}
+    fn child(role:&str,root:&std::path::Path,name:&str)->OwnedChild{let mut child=Command::new(std::env::current_exe().unwrap()).args(["--exact","sys::binder::socket_receipt_tests::binder_socket_controlled_child","--ignored","--nocapture"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();writeln!(child.stdin.take().unwrap(),"{role}\n{}\n{name}",root.display()).unwrap();OwnedChild(child)}
+    fn finish(child:&mut OwnedChild){let deadline=Instant::now()+Duration::from_secs(20);while child.0.try_wait().unwrap().is_none(){if Instant::now()>=deadline{child.0.kill().unwrap();let mut err=String::new();child.0.stderr.take().unwrap().read_to_string(&mut err).unwrap();panic!("owned Binder child exceeded deadline: {err}");}std::thread::sleep(Duration::from_millis(10));}let mut out=String::new();let mut err=String::new();child.0.stdout.take().unwrap().read_to_string(&mut out).unwrap();child.0.stderr.take().unwrap().read_to_string(&mut err).unwrap();assert!(child.0.wait().unwrap().success(),"{out}\n{err}");assert!(out.contains("BINDER_SOCKET_CHILD_EXECUTED"),"{out}");}
+    #[test]
+    fn two_process_binder_socket_receipt_preserves_identity_payload_duplicates_and_final_eof(){
+        let(_view,root)=crate::vfs::test_view();let name=format!("dev.aim.test.binder-socket.{}",std::process::id());let _server=aim_binder_host::server::Server::start(&name).unwrap();let ready=root.join("binder-socket-ready");let _=std::fs::remove_file(&ready);
+        let mut receiver=child("receiver",root,&name);let deadline=Instant::now()+Duration::from_secs(10);while !ready.exists(){assert!(receiver.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}
+        let mut sender=child("sender",root,&name);finish(&mut sender);finish(&mut receiver);std::fs::remove_file(ready).unwrap();
+    }
+    #[test]
+    #[ignore="controlled process body, executed by its owning two-process test"]
+    fn binder_socket_controlled_child(){
+        let mut input=String::new();std::io::stdin().read_to_string(&mut input).unwrap();let mut lines=input.lines();let role=lines.next().unwrap();let root=std::path::PathBuf::from(lines.next().unwrap());let name=lines.next().unwrap();
+        crate::vfs::init(&root.join("root"),Some(&root.join("run/path-map"))).unwrap();let mut id=super::super::cred::Identity::default();id.uid=[if role=="sender"{1073}else{10151};4];id.gid=[1234;4];super::super::cred::init(id,None);init(name).unwrap();let client=Client::connect(name).unwrap();let file=client.open(Device::Binder,false,true,super::super::cred::current().uid[1],"u:r:shell:s0").unwrap();
+        let map=unsafe{libc::mmap(std::ptr::null_mut(),1<<20,libc::PROT_NONE,libc::MAP_PRIVATE|libc::MAP_ANON,-1,0)};assert_ne!(map,libc::MAP_FAILED);file.mmap(map as u64,1<<20).unwrap();let tid=std::process::id()as i32;
+        if role=="receiver"{
+            let mut object=FlatBinderObject{kind:BINDER_TYPE_BINDER,flags:FLAT_BINDER_FLAG_ACCEPTS_FDS,binder:0x1235,cookie:0x5678}.encode();ioctl(&file,tid,BINDER_SET_CONTEXT_MGR_EXT,&mut object);
+            let mut enter=vec![];command(&mut enter,BC_ENTER_LOOPER,&[]);exchange(&file,tid,&enter,false);std::fs::write(root.join("binder-socket-ready"),b"ready").unwrap();
+            let tr=wait_transaction(&file,tid,exchange(&file,tid,&[],true),BR_TRANSACTION);let(fd,expected)=received(&tr);assert_eq!((expected.0,expected.1,expected.2&0o777),(1073,1234,0o777));let duplicate=dup(fd);assert_eq!(status(duplicate),expected);
+            let data=payload(duplicate,expected);let offsets=8u64.to_le_bytes();let reply=TransactionData{data_size:data.len()as u64,offsets_size:8,buffer:data.as_ptr()as u64,offsets:offsets.as_ptr()as u64,..Default::default()};let mut write=vec![];command(&mut write,BC_REPLY,&reply.encode());exchange(&file,tid,&write,false);free(&file,tid,tr.buffer);close(fd);close(duplicate);
+        }else{
+            let mut pair=[-1;2];assert_eq!(super::super::net::socketpair([1,1,0,pair.as_mut_ptr()as u64,0,0]),0);let expected=status(pair[0]);let data=payload(pair[0],expected);let offsets=8u64.to_le_bytes();let tr=TransactionData{flags:TF_ACCEPT_FDS,data_size:data.len()as u64,offsets_size:8,buffer:data.as_ptr()as u64,offsets:offsets.as_ptr()as u64,..Default::default()};let mut write=vec![];command(&mut write,BC_TRANSACTION,&tr.encode());let reply=wait_transaction(&file,tid,exchange(&file,tid,&write,true),BR_REPLY);let(fd,got)=received(&reply);assert_eq!(got,expected);let duplicate=dup(fd);free(&file,tid,reply.buffer);close(fd);close(pair[0]);
+            assert_eq!(super::super::fs::write([pair[1]as u64,b"payload".as_ptr()as u64,7,0,0,0]),7);let mut bytes=[0u8;7];assert_eq!(super::super::fs::read([duplicate as u64,bytes.as_mut_ptr()as u64,7,0,0,0]),7);assert_eq!(&bytes,b"payload");close(duplicate);super::super::net::drain_socket_carriers().unwrap();let mut byte=0u8;assert_eq!(super::super::fs::read([pair[1]as u64,&mut byte as*mut u8 as u64,1,0,0,0]),0);close(pair[1]);
+        }
+        assert_eq!(unsafe{libc::close(file.fd)},0);println!("BINDER_SOCKET_CHILD_EXECUTED {role}");
     }
 }

@@ -37,6 +37,8 @@ pub trait UserMemory {
     fn regular_export(&mut self, _fd: i32) -> Result<Option<crate::regular_file::Export>, Errno> { Ok(None) }
     /// The receiving ABI must validate/adopt the actual writer open description.
     fn install_regular(&mut self, _fd: i32, _metadata: &wire::RegularMetadata, _writer: Option<crate::regular_file::WriterPort>) -> Result<(), Errno> { Err(95) }
+    fn socket_export(&mut self,_fd:i32)->Result<Option<aim_storage::socket_inode::Receipt>,Errno>{Ok(None)}
+    fn install_socket(&mut self,_fd:i32,_receipt:aim_storage::socket_inode::Receipt)->Result<(),Errno>{Err(95)}
     fn file_class(&mut self, _fd: i32) -> u32 {
         0
     }
@@ -435,6 +437,7 @@ impl BinderFile {
         let fds = std::mem::take(&mut io.fds);
         io.file_classes.clear();
         io.regular.clear();
+        io.sockets.clear();
         let exports = fds
             .iter()
             .map(|fd| mem.export_fd(*fd as i32))
@@ -445,7 +448,9 @@ impl BinderFile {
                 Ok(regular) => regular,
                 Err(error) => { for (port, _) in ports { mach::release_send(port); } return Err(error); }
             };
+            let socket=match mem.socket_export(fd as i32){Ok(socket)=>socket,Err(error)=>{for(port,_)in ports{mach::release_send(port);}return Err(error);}};
             let class = mem.file_class(fd as i32);
+            if (class==crate::socket_scm::CLASS)!=socket.is_some(){for(port,_)in ports{mach::release_send(port);}return Err(wire::EPROTO);}
             if (class == crate::regular_file::CLASS) != regular.is_some() { for (port, _) in ports { mach::release_send(port); } return Err(wire::EPROTO); }
             let needed = 1 + regular.as_ref().is_some_and(|regular| regular.metadata.writer) as usize;
             if ports.len() + needed > mach::MAX_PORTS { break; }
@@ -467,6 +472,7 @@ impl BinderFile {
                 io.fds.push(fd);
                 io.file_classes.push(class);
                 io.regular.push(regular.map(|regular| regular.metadata));
+                io.sockets.push(socket);
                 ports.push((p, mach::MOVE_SEND));
                 if let Some(writer) = writer { ports.push((writer, mach::MOVE_SEND)); }
             }
@@ -524,9 +530,11 @@ impl BinderFile {
             Ok((reply, writers))
         })??;
         for (index, (fd, writer)) in reply.installs.iter().zip(writers).enumerate() {
-            let result = match &reply.regular[index] {
-                Some(metadata) => mem.install_regular(*fd as i32, metadata, writer),
-                None => mem.install_typed(*fd as i32, reply.file_classes[index]),
+            let result = match (&reply.regular[index],reply.sockets[index]) {
+                (None,Some(receipt))=>mem.install_socket(*fd as i32,receipt),
+                (Some(metadata),None) => mem.install_regular(*fd as i32, metadata, writer),
+                (None,None) => mem.install_typed(*fd as i32, reply.file_classes[index]),
+                _=>Err(wire::EPROTO),
             };
             if let Err(error) = result {
                 for fd in reply.installs.iter().chain(&reply.closes) {

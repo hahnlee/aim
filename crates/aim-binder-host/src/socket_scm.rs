@@ -28,6 +28,20 @@ fn resolve_native(carrier:BorrowedFd<'_>)->io::Result<NativeReply>{
  let fd=unsafe{libc::fcntl(entry.backing.as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};if fd<0{return Err(io::Error::last_os_error());}
  Ok(NativeReply{descriptor:Some(unsafe{OwnedFd::from_raw_fd(fd)}),receipt:Some(entry.receipt),class:CLASS,_registry:registry})
 }
+/// The source retains its genuine C while Binder captures B. Receipt bytes
+/// alone do not authorize a foreign or no-longer-registered socket allocation.
+pub(crate) fn validate_binder_backing(fd:BorrowedFd<'_>,receipt:Receipt)->io::Result<()>{
+    receipt.validate(fd.as_raw_fd())?;
+    let registry=REGISTRY.lock().unwrap();
+    for entry in registry.values().filter(|entry|entry.receipt==receipt){
+        if !entry.reader.eof()?{return entry.receipt.validate(entry.backing.as_raw_fd());}
+    }
+    Err(error(libc::ENOENT))
+}
+pub(crate) fn binder_from_carrier(carrier:BorrowedFd<'_>)->io::Result<(OwnedFd,Receipt)>{
+    let mut reply=resolve_native(carrier)?;
+    Ok((reply.descriptor.take().ok_or_else(||error(libc::EPROTO))?,reply.receipt.ok_or_else(||error(libc::EPROTO))?))
+}
 fn drain_native()->io::Result<NativeReply>{let mut registry=REGISTRY.lock().unwrap();prune(&mut registry)?;Ok(NativeReply{descriptor:None,receipt:None,class:0,_registry:registry})}
 /// Mach discovery carries address/authentication bytes only; actual socket
 /// descriptors travel exclusively through the authenticated Unix channel.

@@ -67,6 +67,15 @@ failure (#1222), concurrent XML association failure (#1223) and actual device
 preparation timeout (#1227) leave affected rows NOT RUN. Original zygote
 SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate failures.
 Neither campaign proves the acceptance gate.
+Binder socket transfer now preserves the genuine allocation receipt and actual
+backing through native fileports (#1235), with strict class-5 metadata validation
+and no receiver-side allocation guess. The original install-write ENODATA was
+reproduced on an incoming socket that had lost this receipt. File-carrying reply
+references now release after send, before waiting for the next request, so they
+do not anchor peer EOF. Two owned-process Binder identity/payload/dup/EOF and
+multicast regressions pass; host library gate is 56 pass, zero fail, one ignored
+controlled helper. Binder wire version 5 requires a coherent runtime rebuild.
+Actual original APK installation with the correction remains NOT RUN.
 Instant caller query resolution now applies the original post-filter rather than
 throwing for every instant result (#725): retain its own package or visible
 non-instant activities, after existing web/split handling, with actual UID/user

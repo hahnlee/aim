@@ -44,6 +44,7 @@ mod socket_inode;
 mod regular_scm;
 mod socket_scm;
 pub(crate) use socket_scm::{classify as classify_socket_scm, reset as reset_socket_scm, init as init_socket_carriers, drain as drain_socket_carriers};
+pub(crate) use socket_scm::{Export as BinderSocketExport, export as export_binder_socket};
 pub(crate) use socket_inode::stat as socket_inode_stat;
 pub(crate) use socket_inode::install as install_socket_receipt;
 pub(crate) use socket_inode::{Export as SocketExport, export_pinned as export_socket_pinned};
@@ -3041,10 +3042,10 @@ mod tests {
 
     #[test]
     fn multicast_all_is_recorded_per_socket() {
-        // SAFETY: a host socket this test owns.
-        let fd = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_DGRAM, 0) };
-        assert!(fd >= 0);
-        adopt(fd); fdtab::publish_guest(fd).unwrap();
+        if fdtab::isolated_kernel_test("sys::net::tests::multicast_all_is_recorded_per_socket"){return;}
+        let (_view,_directory)=crate::vfs::test_view();
+        let fd=socket([L_AF_INET6 as u64,L_SOCK_DGRAM,0,0,0,0])as i32;
+        assert!(fd>=0);
         let get = || {
             let (mut v, mut l) = (-1i32, 4u32);
             let r = getsockopt([
