@@ -73,11 +73,8 @@ fn allocation_matches_the_original_runtime() {
         ],
     )
     .unwrap();
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
@@ -468,7 +465,7 @@ fn allocation_matches_the_original_runtime() {
     for saved in &state.settings.packages {
         assert_eq!(merged.ids.get(saved.app_id), restored.get(saved.app_id));
     }
-    let image = aim_paths::derived_image();
+    let image = common::runtime::cohort::original_image();
     let mut platform =
         aim_services::package::parse::Platform::load(&image, Default::default()).unwrap();
     let density =

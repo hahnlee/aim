@@ -358,11 +358,8 @@ fn native_package_parcels_match_original_read_write() {
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
     let dex = compile_original_parcel_oracle(&data.0, &jdk, &java);
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
@@ -476,9 +473,9 @@ fn native_package_parcels_match_original_read_write() {
         }
     }
     let framework =
-        aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
+        aim_services::package::system_config::Framework::load(&common::runtime::cohort::original_image()).unwrap();
     let system = aim_services::package::system_config::system(
-        &aim_paths::derived_image(),
+        &common::runtime::cohort::original_image(),
         &|_| None,
         &framework,
     )
@@ -6294,7 +6291,7 @@ fn verify_native_module_resources(directory: &std::path::Path, cache_files: &[st
         }
     }
     let links = ApexLinks::from_scan(&results, &inventory, &registrations).unwrap();
-    let root = aim_paths::derived_image();
+    let root = common::runtime::cohort::original_image();
     let platform = Platform::load(&root, Default::default()).unwrap();
     let source = cached
         .iter()
@@ -6495,7 +6492,7 @@ fn verify_page_size_compat(directory: &std::path::Path) {
         page_size_compat::{Owner, enabled},
         parse::{Platform, resources::Config},
     };
-    let platform = Platform::load(&aim_paths::derived_image(), Default::default()).unwrap();
+    let platform = Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap();
     let owner = Owner::load(
         &platform,
         Config {

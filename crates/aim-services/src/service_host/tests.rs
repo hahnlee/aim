@@ -1,4 +1,6 @@
 //! Synchronous native package bootstrap, independent of late-service listeners.
+#[path = "../../tests/common/cohort.rs"]
+mod cohort;
 use crate::{
     package::{owner::permission_gids::PermissionGidError, system_config::SystemConfig},
     service_host::ServiceHost,
@@ -3246,7 +3248,7 @@ fn verify_boot_scan(
     let mutation_seed = crate::package::owner::Store::create(&data.0.join("native-mutations"), &[0, 10]).unwrap();
     let mut context = query_context_for(&complete, base.version() + 1)
         .with_uninstall_blocks(mutation_seed.state())
-        .with_boot_classpath(&aim_paths::derived_image())
+        .with_boot_classpath(&cohort::load().expect("NOT RUN: pinned native image required").image(cohort::Variant::Native).to_path_buf())
         .unwrap();
     use crate::package::domain_verification::owner::Owner as DomainOwner;
     let boot_domains = bridge.boot_domains(&complete, config).unwrap();

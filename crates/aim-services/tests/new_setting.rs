@@ -82,11 +82,8 @@ fn compare_new_settings(original_only: bool) {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
@@ -1301,7 +1298,7 @@ fn compare_new_settings(original_only: bool) {
     assert_eq!(cases, 96);
     assert_eq!(original.next(), None);
     eprintln!("native ABI lifecycle matches original helper/setter routes in {cases} cases");
-    let inventory = aim_paths::derived_image();
+    let inventory = common::runtime::cohort::original_image();
     let bundled_apks = aim_services::package::write::Apks {
         signing_overrides: None,
         platform: aim_services::package::parse::Platform::load(&inventory, Default::default())
@@ -1521,11 +1518,11 @@ fn compare_new_settings(original_only: bool) {
     }
     assert_eq!(path_cases, 72);
     eprintln!("native/original library paths match {path_cases} selected-ABI cases");
-    let config = SystemConfig::read(&aim_paths::derived_image(), &|p| properties.get(p).cloned());
+    let config = SystemConfig::read(&common::runtime::cohort::original_image(), &|p| properties.get(p).cloned());
     let framework =
-        aim_services::package::system_config::Framework::load(&aim_paths::derived_image()).unwrap();
+        aim_services::package::system_config::Framework::load(&common::runtime::cohort::original_image()).unwrap();
     let app_system = aim_services::package::system_config::system(
-        &aim_paths::derived_image(),
+        &common::runtime::cohort::original_image(),
         &|p| properties.get(p).cloned(),
         &framework,
     )

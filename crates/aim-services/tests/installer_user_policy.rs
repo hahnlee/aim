@@ -85,11 +85,8 @@ fn installer_user_policy_record_matches_original_parcel() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot {
-        ctl: repo.join("target/release/aimctl"),
-        data: data.0.join("g"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("g"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot

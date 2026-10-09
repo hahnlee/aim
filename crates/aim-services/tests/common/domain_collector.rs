@@ -549,8 +549,8 @@ pub fn verify_uri_dto(directory: &Path) {
         }
     }
     assert_eq!(reader.remaining(), 0);
-    let jars = aim_android_image::classpath::jars(&aim_paths::derived_image(), "bootclasspath.pb", aim_android_image::classpath::BOOTCLASSPATH).unwrap();
-    let classes = aim_android_image::linkage::ClassPath::read(&aim_paths::derived_image(), &jars).unwrap().hierarchy().unwrap();
+    let jars = aim_android_image::classpath::jars(&super::runtime::cohort::original_image(), "bootclasspath.pb", aim_android_image::classpath::BOOTCLASSPATH).unwrap();
+    let classes = aim_android_image::linkage::ClassPath::read(&super::runtime::cohort::original_image(), &jars).unwrap().hierarchy().unwrap();
     let bytes = fs::read(directory.join("uri-class-bundles.original")).unwrap(); let mut reader = Reader::new(&bytes, &[]);
     let count = reader.read_i32().unwrap();
     for _ in 0..count {

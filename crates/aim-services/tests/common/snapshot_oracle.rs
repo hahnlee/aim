@@ -185,18 +185,15 @@ pub fn verify(directory: &Path) {
         .arg("--output")
         .arg(&dex)
         .args(class_files));
-    let system_jars = aim_android_image::classpath::jars(&aim_paths::derived_image(),
+    let system_jars = aim_android_image::classpath::jars(&super::runtime::cohort::original_image(),
         "systemserverclasspath.pb", aim_android_image::classpath::SYSTEMSERVERCLASSPATH).unwrap();
     let system_jars = system_jars.iter().map(String::as_str).collect::<Vec<_>>();
     java::check_linkage(&dex.join("classes.dex"), &system_jars).unwrap();
     let boot_data = Data(std::env::temp_dir().join(format!("aim-dsp-{}", std::process::id())));
     fs::create_dir(&boot_data.0).unwrap();
     let boot_dir = boot_data.0.join("g");
-    let boot = Boot {
-        ctl: repo.join("target/release/aimctl"),
-        data: boot_dir.clone(),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(repo.join("target/release/aimctl"), boot_dir.clone());
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
@@ -333,11 +330,8 @@ pub fn verify(directory: &Path) {
             fs::read(system.join("packages.xml")).unwrap()
         );
         mounted.detach().unwrap();
-        let reboot = Boot {
-            ctl: repo.join("target/release/aimctl"),
-            data: boot_dir.clone(),
-        };
-        run(reboot.command().args(["start", "--windows"]));
+        let reboot = Boot::new(repo.join("target/release/aimctl"), boot_dir.clone());
+        run(reboot.start_command().args(["start", "--windows"]));
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             let output = reboot

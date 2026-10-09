@@ -165,11 +165,8 @@ fn original_art_consumes_native_installer_proxy_capability() {
                 .map(|entry| entry.unwrap().path()),
         ));
     common::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
-    let boot = Boot {
-        ctl: repo.join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
@@ -273,8 +270,11 @@ fn original_art_consumes_native_installer_proxy_capability() {
     let owners = NativeOwners::open(
         sessions.clone(),
         Arc::new(move || Ok(state.clone())),
-        Arc::new(|_, _| {
+        Arc::new(|_, _, _| {
             Ok(DevicePolicy {
+                permissions: aim_services::package::installer::policy::CallingPermissions::new(Arc::new(|_, _, _| {
+                    Err(aim_binder_host::parcel::Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, "fixture requires its original permission owner"))
+                })),
                 debuggable: false,
                 apex_supported: false,
                 rollback_lifetime: true,

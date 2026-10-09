@@ -9,7 +9,7 @@ mod common {
 use common::runtime::{Boot, Data, run};
 
 fn start(boot: &Boot) {
-    run(boot.command().args(["start", "--windows"]));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let result = boot
@@ -35,10 +35,7 @@ fn original_pms_boots_with_native_keyset_registration() {
     let dir = std::env::temp_dir().join(format!("aim-keyr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     start(&boot);
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -168,10 +165,7 @@ fn original_pms_boots_with_native_library_metadata_persistence() {
     let dir = std::env::temp_dir().join(format!("aim-libr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     start(&boot);
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -265,10 +259,7 @@ fn original_pms_boots_with_native_signature_persistence() {
     let dir = std::env::temp_dir().join(format!("aim-sigr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     start(&boot);
     let original = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
     assert_eq!(original.settings.packages.len(), 243);
@@ -399,7 +390,7 @@ fn migration_apk(dir: &std::path::Path, version: i32, leaving: bool) -> std::pat
         .args(["link", "--manifest"])
         .arg(&manifest)
         .arg("-I")
-        .arg(aim_paths::derived_image().join("system/framework/framework-res.apk"))
+        .arg(common::runtime::cohort::original_image().join("system/framework/framework-res.apk"))
         .arg("-o")
         .arg(&unsigned));
     run(Command::new(jdk.join("bin/java"))
@@ -427,10 +418,7 @@ fn original_pms_reboots_with_native_update_owner_clearing() {
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let apk = migration_apk(&data.0, 1, false);
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     start(&boot);
     let guest = boot.data.join("data/local/tmp/update-owner.apk");
     fs::copy(apk, &guest).unwrap();
@@ -542,10 +530,7 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     let data = Data(dir);
     let old = migration_apk(&data.0, 1, false);
     let leaving = migration_apk(&data.0, 2, true);
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     start(&boot);
     for apk in [old, leaving] {
         let output = run(boot.command().arg("install").arg(apk));
@@ -666,7 +651,7 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     let apks = Apks {
         signing_overrides: None,
         files: Box::new(move |p| Some(guest.join(p.trim_start_matches('/')))),
-        platform: Platform::load(&aim_paths::derived_image(), Default::default()).unwrap(),
+        platform: Platform::load(&common::runtime::cohort::original_image(), Default::default()).unwrap(),
     };
     let inputs = Inputs::load_verified_code(&input, &apks).unwrap();
     assert!(inputs.active[NAME].parsed.is(booleans::LEAVING_SHARED_UID));

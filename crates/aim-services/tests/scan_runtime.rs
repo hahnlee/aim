@@ -75,11 +75,8 @@ fn saved_scan_libraries_match_original_pms() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let result = boot
@@ -129,7 +126,7 @@ fn saved_scan_libraries_match_original_pms() {
     let stop_system_packages: bool = boot_policy.next().unwrap().parse().unwrap();
     let initial_non_stopped: std::collections::BTreeSet<_> =
         boot_policy.map(str::to_owned).collect();
-    let image = aim_paths::derived_image();
+    let image = common::runtime::cohort::original_image();
     let config = SystemConfig::read(&image, &|name| properties.get(name).cloned());
     assert_eq!(
         config.initial_non_stopped_system_packages,

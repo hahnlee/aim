@@ -1,13 +1,14 @@
 //! FallbackCategoryProvider's newly created AssetManager includes the
 //! pinned image's system assets and their static overlays.
 
+mod common { pub mod runtime; }
 use aim_apps::apk::Apk;
 use aim_services::package::{parse::Platform, system_config};
 
 #[test]
 #[ignore = "requires the pinned derived image"]
 fn fallback_categories_use_original_system_assets() {
-    let image = aim_paths::derived_image();
+    let image = common::runtime::cohort::original_image();
     let platform = Platform::load(&image, Default::default()).unwrap();
     let expected = Apk::open(&image.join("product/overlay/GoogleConfigOverlay.apk"))
         .unwrap()

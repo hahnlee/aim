@@ -107,7 +107,7 @@ fn publish_fixture_domains(system: &Arc<System>, bridge: &Arc<crate::package::bo
             .collect();
         candidate.complete_shared_processes(orders).unwrap();
         let previous = system.capture_package_queries().unwrap();
-        let mut context = super::query_context_for(&candidate, base.version() + 1).with_boot_classpath(&aim_paths::derived_image()).unwrap();
+        let mut context = super::query_context_for(&candidate, base.version() + 1).with_boot_classpath(&runtime::cohort::load().expect("NOT RUN: pinned native image required").image(runtime::cohort::Variant::Native).to_path_buf()).unwrap();
         context.system.uninstall_blocks = previous.context().system.uninstall_blocks.clone();
         system
             .complete_package_scan_with_domains(
@@ -199,11 +199,8 @@ fn original_art_reads_large_native_domain_query_over_binder() {
     java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
     let name = format!("dev.aim.test.domain-info.{}", std::process::id());
     let server = aim_binder_host::server::Server::start(&name).unwrap();
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot

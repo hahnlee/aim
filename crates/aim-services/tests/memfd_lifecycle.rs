@@ -10,7 +10,7 @@ use std::{
 };
 
 fn ready(boot: &Boot) {
-    run(boot.command().args(["start", "--windows"]));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
@@ -43,10 +43,7 @@ fn stop_and_crash_start_reclaim_memfd_backings() {
         .args(["-O1", "-Wall", "-Werror", "-o"])
         .arg(&program)
         .arg(&source));
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("g"),
-    };
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     ready(&boot);
     fs::copy(&program, boot.data.join("data/local/tmp/memfd-probe")).unwrap();
     struct ChildGuard(std::process::Child);

@@ -1,4 +1,6 @@
 //! Actual original property clients across short and deep host socket paths.
+#[path = "../../aim-services/tests/common/cohort.rs"]
+mod cohort;
 use aim_android_init::{
     ImageRoot,
     props::{
@@ -103,24 +105,9 @@ fn success(output: Output) -> String {
 #[test]
 #[ignore = "requires pinned original Android image, NDK and explicitly selected immutable runtime"]
 fn original_property_clients_share_short_and_deep_native_owners() {
-    let inputs = aim_paths::input(
-        aim_paths::out().join("property-path-proof.inputs"),
-        "immutable runtime input receipt",
-    )
-    .expect("NOT RUN: missing explicit property-path proof inputs");
-    let text = fs::read_to_string(inputs).unwrap();
-    let field = |name: &str| {
-        text.lines()
-            .find_map(|line| {
-                line.split_once('\t')
-                    .filter(|(key, _)| *key == name)
-                    .map(|(_, value)| value.to_string())
-            })
-            .expect("required input receipt field")
-    };
-    let runtime = aim_paths::input(field("runtime").into(), "immutable runtime")
-        .expect("NOT RUN: missing runtime");
-    let expected_sha = field("runtime_sha256");
+    let inputs = cohort::load().expect("NOT RUN: missing explicit pinned M4 cohort");
+    let runtime = inputs.runtime["linux-run"].path.clone();
+    let expected_sha = inputs.runtime["linux-run"].sha256.clone();
     assert_eq!(sha(&runtime), expected_sha);
     let image = aim_paths::original_image_with("system/bin/setprop")
         .expect("NOT RUN: missing original setprop");

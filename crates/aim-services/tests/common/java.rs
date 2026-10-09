@@ -99,7 +99,7 @@ pub fn check_linkage(dex: &Path, classpath: &[&str]) -> Result<(), String> {
     use aim_android_image::classpath::{self, BOOTCLASSPATH};
     use aim_android_image::linkage::ClassPath;
 
-    let image = aim_paths::derived_image();
+    let image = super::runtime::cohort::original_image();
     let mut jars = classpath::jars(&image, "bootclasspath.pb", BOOTCLASSPATH)?;
     jars.extend(classpath.iter().map(|jar| (*jar).to_owned()));
     let bytes = fs::read(dex).map_err(|e| format!("{}: {e}", dex.display()))?;

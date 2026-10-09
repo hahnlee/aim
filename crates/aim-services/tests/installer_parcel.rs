@@ -70,11 +70,8 @@ fn installer_parcels_match_original_framework() {
         .arg(&dex)
         .arg(classes.join("InstallerCodecOracle.class")));
     common::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
-    let boot = Boot {
-        ctl: repo.join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot

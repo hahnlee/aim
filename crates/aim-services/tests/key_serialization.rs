@@ -99,11 +99,8 @@ fn public_keys_match_and_deserialize_on_the_original_runtime() {
         .arg(&classes)
         .args(["PublicKeySerialization", "generate"])
         .arg(&inputs));
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot

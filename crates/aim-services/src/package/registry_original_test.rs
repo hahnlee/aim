@@ -47,11 +47,8 @@ fn original_provider_registration_matches_native_runtime_views() {
             ),
     );
     java::check_linkage(&dex.join("classes.dex"), &["/system/framework/services.jar"]).unwrap();
-    let boot = Boot {
-        ctl: aim_paths::root().join("target/release/aimctl"),
-        data: data.0.join("guest"),
-    };
-    run(boot.command().args(["start", "--windows"]));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let output = boot
