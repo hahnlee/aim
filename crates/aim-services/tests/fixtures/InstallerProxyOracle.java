@@ -62,13 +62,21 @@ public final class InstallerProxyOracle {
     public static void main(String[] args) {
         try {
             if (args.length == 4 && "permission-check".equals(args[0])) {
+                System.err.println("PERMISSION_PHASE main pid=" + android.os.Process.myPid() + " uid=" + android.os.Process.myUid());
+                System.err.flush();
                 if (android.os.Process.myUid() != 1000 || android.os.Binder.getCallingUid() != 1000
                         || android.os.Binder.getCallingPid() != android.os.Process.myPid()) {
                     throw new IllegalStateException("original permission caller credentials differ");
                 }
+                System.err.println("PERMISSION_PHASE getService pid=" + android.os.Process.myPid() + " uid=" + android.os.Process.myUid());
+                System.err.flush();
                 var activity = android.app.ActivityManager.getService();
                 if (activity == null) throw new IllegalStateException("original activity permission owner unavailable");
+                System.err.println("PERMISSION_PHASE checkPermission pid=" + android.os.Process.myPid() + " uid=" + android.os.Process.myUid());
+                System.err.flush();
                 int status = activity.checkPermission(args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]));
+                System.err.println("PERMISSION_PHASE reply pid=" + android.os.Process.myPid() + " uid=" + android.os.Process.myUid() + " status=" + status);
+                System.err.flush();
                 if (status != 0 && status != -1) throw new IllegalStateException("invalid original permission status " + status);
                 System.out.println("PERMISSION_RESULT " + status);
                 return;

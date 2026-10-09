@@ -416,7 +416,11 @@ authored NDK launcher compilation pass. The corrected099 runtime replay
 now reaches original boot and actual native Binder with UID10100/PID35009.
 Credential proofs confirm UID/GID10100 for the app and1000 for the original
 permission reader, with empty groups and capabilities. The original reader
-then exceeds its15-second bound, so proxy semantic acceptance still fails.
+then exceeds its15-second bound, so proxy semantic acceptance still fails
+(#1287). The authored reader now flushes main/getService/checkPermission/reply
+phase receipts with actual PID/UID; the native reader accepts only the exact
+complete receipt bound to its credential proof and actual permission result.
+Java/D8 linkage and Rust compilation pass; traced Android replay is unrun.
 Cleanup preserves the original error and data without a double panic; all
 owned PIDs and image attachments are gone. The kernel admission guard
 remains unchanged.

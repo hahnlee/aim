@@ -154,11 +154,21 @@ fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
     let out=String::from_utf8(output.stdout).map_err(|e|failure(e.to_string()))?;
     let err=String::from_utf8(output.stderr).map_err(|e|failure(e.to_string()))?;
     if !output.status.success() {return Err(failure(format!("original permission status{}; stdout:{out}; stderr:{err}",output.status)));}
-    if !err.is_empty(){return Err(failure(format!("original permission unexpected stderr:{err}")));}
-    match out.as_str() {
-        "PERMISSION_RESULT 0\n" => Ok(true), "PERMISSION_RESULT -1\n" => Ok(false),
-        _ => Err(failure(format!("original permission reply malformed:{out}"))),
+    let allowed=match out.as_str() {
+        "PERMISSION_RESULT 0\n" => true, "PERMISSION_RESULT -1\n" => false,
+        _ => return Err(failure(format!("original permission reply malformed:{out}"))),
+    };
+    let reader_pid=proof.lines().find(|line|line.starts_with("post "))
+        .and_then(|line|line.split_whitespace().find_map(|part|part.strip_prefix("pid=")))
+        .and_then(|value|value.parse::<i32>().ok()).filter(|pid|*pid>0)
+        .ok_or_else(||failure("original permission proof PID missing".into()))?;
+    let mut expected=String::new();
+    for phase in ["main","getService","checkPermission"] {
+        expected.push_str(&format!("PERMISSION_PHASE {phase} pid={reader_pid} uid=1000\n"));
     }
+    expected.push_str(&format!("PERMISSION_PHASE reply pid={reader_pid} uid=1000 status={}\n",if allowed{0}else{-1}));
+    if err!=expected{return Err(failure(format!("original permission phase receipt differs:{err}")));}
+    Ok(allowed)
 }
 
 fn compile_credential_launcher(data:&Data,repo:&std::path::Path)->std::path::PathBuf {
