@@ -249,9 +249,9 @@ retains unknown/ordered records;16 focused tests pass. It reduces the actual
 comparison to two roles.xml/reserve differences in packagesHash. The original
 hash uses live installed paths, component iteration and owner/demo/wallet
 inputs not fully captured, so its binding and full structure remain unproven.
-A matched original template fails300 seconds without observed boot1 (#1263).
-Permission capture was not attempted before boot; missing permission files
-are not inferred. The command helper previously discarded stderr and treated
+The current matched original template completes the unchanged300-second
+boot gate after the regular-file owner correction (#1263). Earlier failed
+attempts and their absent boot/permission capture remain preserved. The command helper previously discarded stderr and treated
 nonzero exits other than SIGKILL as successful stdout (#1264). It now retains
 all exit/signal/output failures, bounds nonblocking pipe capture and reaps only
 its directly started child PID; two real-process regressions pass. Actual
@@ -262,31 +262,28 @@ registration precede Binder startup. The builder now checks a bounded existing
 FILES response from the launched init, validates its audit PID and process
 birth before/after, then runs the real query (#1265). Two actual Mach tests
 pass; the existing300-second limit and nonzero-exit handling remain unchanged.
-The actual readiness-corrected original replay avoids the early Binder
-exit127, but still fails the unchanged300-second boot gate (#1263). Settings
-are captured at249.2 seconds; boot completion is not observed and permission
-capture is not attempted. Retained original PMS logs show285 system packages
-scanned in28.638 seconds, then a120.059-second non-system initialization
-phase with zero non-system packages. This phase includes installing the
-original compressed TrichromeLibrary, Chrome and WebView system stubs;
-their replacements complete before the phase's final timing log. It is
-not evidence of a120-second empty-directory scan or timeout. The retained
-log continues into original first-boot dexopt:133 packages requested,
-56 skipped and16 performed results recorded before the final Chrome
-ART work. Dexopt completion is not recorded; the log's last entry is
-artd opening Chrome output files, after UpdatePackagesIfNeeded.
+The current corrected runtime retains the authenticated startup guard and
+completes original boot at286.2 seconds, captures permissions after observed
+boot completion at286.2 seconds, and publishes70 files with producer exit0.
+Original settings use the documented legacy early-file capture at185.8
+seconds; immutable native constructor provenance is not claimed. Filtered
+main/events logs show original system scan29.486 seconds and the following
+data-scan-start to scan-end bracket64.813 seconds. This bracket includes
+compressed TrichromeLibrary, Chrome and WebView stub installation; it is not
+an empty-directory wait. Earlier retained initialization timing120.059 seconds
+is a corresponding but separately measured phase, not the same marker pair.
 An actual regular-file owner fixture confirms a cost candidate: three1MiB
 512-byte read samples have a440ms median before retained inode admission
 and338ms afterward. The owner now retains the exact store/inode capability
 while reacquiring the real cross-process lock and current proof on each I/O;
 it does not cache metadata or remove writer checks. Focused actual-file
 tests preserve shared offsets, pread position, writer exclusion, proof enabled
-after open, and EIO for corrupted data or metadata. These host measurements
-do not prove an Android boot-time improvement; corrected runtime replay
-remains required. The remaining boot delay's cause is not established. Logcat ends with an
-unexpected-EOF diagnostic, so the partial log does not prove absence of later
-fatal errors. All owned processes and mounts are cleaned; original template
-publication and parity remain unverified. The pinned stub-output
+after open, and EIO for corrupted data or metadata. The host fixture
+measurements are distinct from the actual286.2-second boot result and do not
+alone attribute the whole boot-time difference. Original template publication
+is now verified; strict original/native structure, runtime parity and consumer
+checks remain unverified. Cleanup and filtered-log diagnostics are being
+finalized without a claim that all Android errors are absent. The pinned stub-output
 checker now accepts only the original decompression basenames and
 ABI-selected lib directories and excludes top-level host-volume internals
 consistently (#1262). Thirteen focused tests pass; real six XML differences
