@@ -105,6 +105,37 @@ mod tests {
     }
 
     #[test]
+    fn system_admission_completes_factory_before_disable_copy_and_preserves_live_incremental_progress() {
+        let admitted = admitted(&[("factory", 0.0), ("incremental", 0.375)]);
+        // Constructor-retained, verified code; no unfinished scan candidate.
+        let mut owner = SigningScan::new(&Default::default(), &admitted.settings, 36).unwrap();
+        owner.loaded = admitted.loaded;
+        Arc::make_mut(owner.loaded.get_mut("factory").unwrap()).package.booleans2 |= crate::package::pkg::booleans2::STUB;
+        assert_eq!(Package::default().loading_progress, 0.0);
+        let before = owner.clone();
+        let incremental = owner.settings.packages[1].code_path.clone();
+        owner.scanned_users.insert("factory".into(), [(0, Default::default())].into());
+        let backing = |path: &str| Ok(path == incremental);
+        owner.complete_boot_loading(&backing).unwrap();
+        assert_eq!(owner.settings.packages[0].loading_progress, 1.0);
+        assert_eq!(owner.settings.packages[1].loading_progress, 0.375);
+        assert!(owner.disable_system_package("factory").unwrap());
+        let factory = owner.settings.disabled_system_packages[0].clone();
+        assert_eq!(factory.loading_progress, 1.0);
+        assert!(!factory.is_loading());
+        assert_eq!(before.settings.packages[0].loading_progress, 0.0);
+        owner.settings.packages[1].set_loading_progress(0.5);
+        let live = owner.settings.packages[1].clone();
+        // The existing late pass still admits ordinary data code without
+        // overriding the real incremental producer or the retained factory.
+        owner.complete_boot_loading(&backing).unwrap();
+        assert_eq!(owner.settings.packages[1], live);
+        assert!(owner.settings.packages[1].is_loading());
+        assert_eq!(owner.settings.disabled_system_packages[0], factory);
+        assert!(owner.settings.packages[0].transient.updated_system_app);
+    }
+
+    #[test]
     fn accepted_ordinary_code_completes_without_changing_incremental_or_saved_owners() {
         let mut owner = admitted(&[("ordinary", 0.0), ("incremental", 0.375)]);
         let ordinary = owner.settings.packages[0].clone();

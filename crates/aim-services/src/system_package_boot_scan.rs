@@ -217,6 +217,7 @@ impl System {
             (owner,system.system,system.apex)
         };
         owner.prune_system_shared_users().map_err(|error|failure(format!("system shared owner pruning: {error}")))?;
+        owner.complete_boot_loading(is_incremental).map_err(|error|failure(format!("system loading completion: {error:?}")))?;
         let mut retained_runtime=factory_retention::capture_saved_factories(&owner,
             crate::package::scan::SeInfoScan{policy:policy.seinfo,compatibility:bridge.as_ref()},bridge)?;
         let signing=owner.loaded_packages().get("android").ok_or_else(||failure("actual platform package absent"))?.collected_signing.clone();
