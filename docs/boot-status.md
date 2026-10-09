@@ -365,8 +365,13 @@ the original16 shared-user rows and zero items. The separate runtime XML writer
 now uses validated persisted package/shared legacy owners instead of the
 computed modern permission projection, retaining modern query grants/GIDs.
 Two focused serialization tests pass for fresh/restored rows, metadata and
-identity rejection; actual runtime/template replay with this correction is
-not yet run, so the observed2984-item difference remains unresolved evidence.
+identity rejection. Actual corrected-runtime replay now reaches boot244.1
+seconds/post-boot permissions244.2 seconds and publishes70 required files.
+Its actual post-boot runtime XML has zero package rows,16 shared-user rows
+and zero permission items, matching the original row shape; version0 and the
+PermissionController fingerprint remain. The earlier2984-item difference is
+preserved as failure evidence. Full permission semantics, copy verification
+for this replay and complete template parity are not yet accepted.
 The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML
