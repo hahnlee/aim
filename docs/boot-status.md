@@ -428,6 +428,13 @@ default-apps container; post-boot runtime XML remains0 package/16 shared-user/
 still dissents during DATA detach (#1266), and the producer detaches after
 it exits; shutdown acceptance remains failed despite the bootstrap fix.
 All owned processes and readonly mounts are normally cleaned.
+The archive factory also held strong installer backreferences through its
+removal policy and Drafts operations, forming NativeOwners/Archiver/Removal
+cycles that retain the actual Settings Store (#1266). Those backreferences
+now use explicit Weak ownership and report a typed closed-owner error after
+retirement. A real graph fixture passes live policy/draft operations, retired
+errors and Store/three claim-FD release with an external System reference.
+Actual Android detach with this additional correction is not yet run.
 The earlier63-file publication remains invalid evidence. Actual b04 shutdown
 observation finds permission-directory/main/reserve descriptors still open
 before and after native stop and at self-dissent (#1266); the producer

@@ -2108,6 +2108,95 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn archive_graph_backreferences_release_actual_store_and_reject_retired_installer() {
+        use crate::package::{owner::Store, owner::usage::Usage, scan::SigningScan, installer::{archiver, removal}};
+        use std::{fs, os::unix::fs::MetadataExt};
+        fn illegal(message:&str)->Exception { Exception::new(EX_ILLEGAL_STATE,message) }
+        struct NoMemory;
+        impl aim_binder_driver::GuestProcess for NoMemory {
+            fn copy_from_user(&mut self,_:u64,_:&mut[u8])->Result<(),aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EFAULT)}
+            fn copy_to_user(&mut self,_:u64,_:&[u8])->Result<(),aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EFAULT)}
+            fn get_file(&mut self,_:u32)->Result<aim_binder_driver::File,aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EBADF)}
+            fn install_file(&mut self,_:aim_binder_driver::File)->Result<u32,aim_binder_driver::Errno>{Err(aim_binder_driver::errno::EBADF)}
+            fn close_fd(&mut self,_:u32){panic!("descriptor-only fixture exchanges no files")}
+        }
+        struct Effects;
+        impl Service for Effects {
+            fn descriptor(&self)->&str {aim_service_aidl::dev_aim_server_ipackagemutationbridge::DESCRIPTOR}
+            fn transact(&self,call:&mut Call<'_>)->aim_binder_host::local::Reply {
+                if call.code != u32::from_be_bytes(*b"_NTF") { return Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION); }
+                assert_eq!(call.data.remaining(),0);
+                let mut reply=Parcel::new();reply.write_string16(Some(self.descriptor()));Ok(reply)
+            }
+        }
+        struct UnconfiguredInstall;
+        impl super::super::pipeline::Owners for UnconfiguredInstall {
+            fn prepare(&self,_:Vec<super::super::pipeline::VerifiedCode>)->Result<Box<dyn super::super::pipeline::PreparedInstall>,super::super::pipeline::Failure>{Err(super::super::pipeline::Failure{legacy_status:-110,committed:false,message:"fixture has no install pipeline".into()})}
+            fn confirm_publication(&self,_:&super::super::pipeline::PublishedInstall)->Result<(),super::super::pipeline::Failure>{Err(super::super::pipeline::Failure{legacy_status:-110,committed:false,message:"fixture has no install pipeline".into()})}
+            fn finish(&self,_:super::super::pipeline::PublishedInstall)->Result<(),Exception>{Err(illegal("fixture has no install pipeline"))}
+        }
+        let data=Data::new();fs::write(data.0.join("system/packages.xml"),b"<packages/>").unwrap();
+        fs::create_dir_all(data.0.join("system/users/0")).unwrap();
+        fs::write(data.0.join("system/users/0/package-restrictions.xml"),b"<package-restrictions/>").unwrap();
+        let mut store=Store::open(&data.0,&[0]).unwrap().unwrap();store.claim_runtime_permission_inventory(&[0]).unwrap();
+        store.commit_runtime_permissions(0,&crate::package::permissions::RuntimePermissions::default(),aim_storage::guest_inode::GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o600)}).unwrap();
+        let paths=[data.0.join("misc_de/0/apexdata/com.android.permission"),data.0.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml"),data.0.join("misc_de/0/apexdata/com.android.permission/runtime-permissions.xml.reservecopy")];
+        let identities=paths.map(|path|{let meta=fs::metadata(path).unwrap();(meta.dev(),meta.ino())});
+        let held=|identity:(u64,u64)|fs::read_dir("/dev/fd").unwrap().filter_map(|e|e.ok()).filter_map(|e|e.file_name().to_str().and_then(|n|n.parse::<i32>().ok())).filter(|fd|{let mut stat=std::mem::MaybeUninit::<libc::stat>::uninit();unsafe{libc::fstat(*fd,stat.as_mut_ptr())==0&&{let stat=stat.assume_init();(stat.st_dev as u64,stat.st_ino as u64)==identity}}}).count();
+        for id in identities {assert_eq!(held(id),1);}
+        let scan=SigningScan::new(&Default::default(),&store.state().settings,36).unwrap();
+        let disk=Arc::new(Mutex::new(store));let weak_disk=Arc::downgrade(&disk);
+        let native_store=Arc::new(removal::NativeStore{snapshots:Arc::new(crate::package::scan_snapshot::Store::new(scan,Usage::new(std::iter::empty::<&str>())).unwrap()),disk,publish:Arc::new(|_,_|Err(illegal("fixture has no publication"))),invalidate:Arc::new(||Err(illegal("fixture has no cache owner")))});
+        let owner=make_owner(&data,Arc::new(Sessions::default()),Arc::new(Mutex::new(Vec::new())),Arc::new(Mutex::new(Vec::new())));
+        let weak_owner=Arc::downgrade(&owner);
+        let driver=aim_binder_driver::Driver::new();
+        let process=LocalProcess::open(&driver,aim_binder_driver::Device::Binder,aim_binder_driver::Credentials{pid:77750,euid:1000,security_context:None});
+        struct Shutdown(Arc<LocalProcess>);
+        impl Drop for Shutdown { fn drop(&mut self) { self.0.shutdown().unwrap(); } }
+        let _shutdown=Shutdown(process.clone());
+        let Binder::Local(pointer)=process.add_service(Arc::new(Effects)) else {panic!("local effects")};
+        use aim_binder_driver::uapi::*;
+        let mut object=FlatBinderObject{kind:BINDER_TYPE_BINDER,flags:0,binder:pointer,cookie:pointer}.encode();
+        driver.ioctl(process.proc_handle(),77751,BINDER_SET_CONTEXT_MGR_EXT,&mut object,&mut NoMemory).unwrap();process.start();
+        let client=LocalProcess::open(&driver,aim_binder_driver::Device::Binder,aim_binder_driver::Credentials{pid:77752,euid:1000,security_context:None});client.start();
+        let _client_shutdown=Shutdown(client.clone());
+        let external=removal::External::new(client.strong(0),process.clone());
+        let policy_owner=Arc::downgrade(&owner);
+        let policy:removal::PolicySource=Arc::new(move|_,request|{
+            let device=policy_owner.upgrade().ok_or_else(||illegal("native archive installer owner closed"))?.archiver_device_policy(request.uid,request.user)?;
+            Ok(removal::Policy{device,can_silently_install:false,emergency_installer:false,system_protection_role:false,pinned:false,admins:Default::default(),protected:Default::default(),uninstall_restricted:Default::default(),users:vec![0],child_users:Default::default(),verifier_packages:vec![],uninstaller_package:None,storage_manager_package:None,keep_uninstalled:false,sdk_library_independence:false})
+        });
+        let controller=Arc::new(removal::Controller{store:native_store.clone(),source:owner.source.clone(),resolver:Default::default(),effects:crate::package::effects::Owner::new(client.strong(0)).unwrap(),external:external.clone(),policy,publisher:owner.publisher.clone(),factory_restore:Arc::new(|_|Err(illegal("fixture has no factory"))),preferred_removal:Arc::new(|_,_,_|Err(illegal("fixture has no preferred owner"))),gate:Arc::new(Mutex::new(())),keystore:Arc::new(crate::package::owner::keystore::KeystoreCleanup::new(process.clone()))});
+        let save_owner=Arc::downgrade(&owner);
+        let drafts=archiver::Drafts::new(owner.sessions.clone(),Arc::new(|_,_,_,_|Err(illegal("fixture has no draft params"))),Arc::new(move||save_owner.upgrade().ok_or_else(||illegal("native archive installer owner closed"))?.archiver_save_sessions()),Arc::downgrade(&(owner.clone() as Arc<dyn super::super::SessionOperations>)));
+        let archive=Arc::new(archiver::Owner{store:native_store.clone(),external,removal:controller.clone(),drafts,install:Arc::new(UnconfiguredInstall),archived_record:Arc::new(|_,_,_,_|Err(illegal("fixture has no archive record"))),prepare_archived_session:Arc::new(|_,_,_|Err(illegal("fixture has no archive stage")))});
+        let retained_drafts=archive.drafts.clone();
+        // Supply complete internal draft records, including their history owner.
+        // Public normalization strips the reserved bit; this fixture covers the
+        // internal operations lease rather than public session admission.
+        let (mut record,permission)=owner.normalize(0,77,request(),Some("fixture".into()),None,0).unwrap();
+        record.params.install_flags|=archiver::DRAFT|archiver::UNARCHIVE;
+        let live_draft=owner.sessions.create_record(record.clone(),permission).unwrap();
+        let draft_id=owner.sessions.create_record(record,permission).unwrap();
+        retained_drafts.expire(live_draft).unwrap();
+        assert!(owner.sessions.snapshot(live_draft).unwrap().destroyed,"live operations must delegate actual native abandonment");
+        let retired_policy=controller.policy.clone();
+        owner.configure_archiver(archive).unwrap();
+        let state=state();let resolver=crate::package::resolve::Resolver::default();let resolution=resolver.resolution(&state).unwrap();
+        let query=crate::package::query::Query{state:&state,filter:&resolution.apps_filter,calling_uid:1000};
+        let request=removal::Request{package:"fixture".into(),version:-1,caller_package:None,user:0,flags:0,uid:1000,pid:77,existing_only:false};
+        assert!((controller.policy)(&query,&request).is_ok(),"live weak policy must reach actual NativeOwners");
+        let retained_system=crate::system::System::new(process.clone(),&[]);
+        drop(native_store);drop(controller);drop(owner);
+        assert!(weak_owner.upgrade().is_none(),"real NativeOwners/Archiver/Drafts graph must be acyclic");
+        assert_eq!((retired_policy)(&query,&request).err().unwrap().code,EX_ILLEGAL_STATE);
+        assert_eq!(retained_drafts.expire(draft_id).unwrap_err().code,EX_ILLEGAL_STATE);
+        drop(retained_drafts);
+        assert!(weak_disk.upgrade().is_none(),"native archive graph must release the actual Settings Store");
+        for id in identities {assert_eq!(held(id),0);}
+        assert!(retained_system.process().shutdown().is_ok());
+    }
     fn request() -> SessionParams {
         SessionParams {
             mode: 1,

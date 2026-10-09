@@ -67,10 +67,10 @@ impl System {
         });
         let keep = self.package_customization()?;
         let policy_external = external.clone();
-        let policy_installer = installer.clone();
+        let policy_installer = Arc::downgrade(&installer);
         let retained_keep = keep.clone();
         let policy: removal::PolicySource = Arc::new(move |query, request| {
-            let device = policy_installer.archiver_device_policy(request.uid, request.user)?;
+            let device = policy_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_device_policy(request.uid, request.user)?;
             let users = policy_external.users()?;
             let mut admins = BTreeSet::new();
             let mut protected = BTreeSet::new();
@@ -186,7 +186,7 @@ impl System {
                 self.process.clone(),
             )),
         });
-        let draft_installer = installer.clone();
+        let draft_installer = Arc::downgrade(&installer);
         let draft_source = source.clone();
         let draft_query = query_owner.clone();
         let draft_leaf = leaf.clone();
@@ -241,22 +241,22 @@ impl System {
                     objects: parcel.objects().to_vec(),
                 });
             }
-            draft_installer.archiver_record(params, store, user)
+            draft_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_record(params, store, user)
         });
-        let save_installer = installer.clone();
-        let save = Arc::new(move || save_installer.archiver_save_sessions());
+        let save_installer = Arc::downgrade(&installer);
+        let save = Arc::new(move || save_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_save_sessions());
         let drafts =
-            archiver::Drafts::new(installer.sessions.clone(), create, save, installer.clone());
-        let record_installer = installer.clone();
+            archiver::Drafts::new(installer.sessions.clone(), create, save, Arc::downgrade(&(installer.clone() as Arc<dyn crate::package::installer::SessionOperations>)));
+        let record_installer = Arc::downgrade(&installer);
         let archived_record = Arc::new(move |params, store: &str, user, uid| {
-            record_installer.archived_install_record(params, store, user, uid)
+            record_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archived_install_record(params, store, user, uid)
         });
-        let stage_installer = installer.clone();
+        let stage_installer = Arc::downgrade(&installer);
         let prepare = Arc::new(
             move |session: &crate::package::installer::Session,
                   record: &crate::package::installer::Record,
                   _archived: &archiver::ArchivedPackage| {
-                stage_installer.archiver_prepare_stage(session, record)
+                stage_installer.upgrade().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE, "native archive installer owner closed"))?.archiver_prepare_stage(session, record)
             },
         );
         let archiver = Arc::new(archiver::Owner {

@@ -5,7 +5,7 @@ use super::{codec::{Object, SessionParams}, preapproval::IntentSender, removal::
 use crate::package::{apps_filter, intent::ComponentName, intent_filter::Plain, pkg, query::Query, restrictions::{ArchiveActivity, ArchiveState}, sign};
 use aim_binder_host::parcel::{BAD_VALUE, EX_ILLEGAL_ARGUMENT, EX_ILLEGAL_STATE, EX_NULL_POINTER, Exception, Parcel, Reader};
 use aim_service_aidl::{ReadParcelable, WriteParcelable, read_byte_array, read_typed, read_typed_list};
-use std::{collections::BTreeMap, sync::{Arc, Mutex}};
+use std::{collections::BTreeMap, sync::{Arc, Mutex, Weak}};
 
 pub const ARCHIVED: i32 = 1 << 27;
 pub const DRAFT: i32 = 1 << 29;
@@ -131,22 +131,26 @@ struct Unarchive {
 }
 pub struct Drafts {
     sessions: Arc<Sessions>, entries: Mutex<BTreeMap<i32, Unarchive>>, create: DraftRecord, save: SaveSessions,
-    operations: Arc<dyn super::SessionOperations>,
+    operations: Weak<dyn super::SessionOperations>,
     timer: super::archive_timer::Timer,
 }
 impl Drafts {
+    fn operations(&self) -> Result<Arc<dyn super::SessionOperations>, Exception> {
+        self.operations.upgrade().ok_or_else(|| illegal("native archive installer owner closed"))
+    }
     /// Called by the installer handler's 120-second draft cleanup timer.
     /// A claimed session has had DRAFT cleared and is not abandoned here.
     pub fn expire(&self, id: i32) -> Result<(), Exception> {
         let session = self.sessions.snapshot(id)?;
         if session.parameters.install_flags & DRAFT != 0 {
-            self.operations.abandon_session(id, session.installer_uid)?;
+            self.operations()?.abandon_session(id, session.installer_uid)?;
             (self.save)()?;
             self.entries.lock().unwrap().remove(&id);
         }
         Ok(())
     }
-    pub fn new(sessions: Arc<Sessions>, create: DraftRecord, save: SaveSessions, operations: Arc<dyn super::SessionOperations>) -> Arc<Self> {
+    /// Borrow operations from the actual installer parent; drafts never own it.
+    pub fn new(sessions: Arc<Sessions>, create: DraftRecord, save: SaveSessions, operations: Weak<dyn super::SessionOperations>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self { sessions, entries: Mutex::new(BTreeMap::new()), create, save, operations, timer: super::archive_timer::Timer::new(weak.clone()) })
     }
     fn attach(&self, record: Record, package: &str, installer: &str, title: &str, receiver: IntentSender, external: &External) -> Result<i32, Exception> {
@@ -184,7 +188,7 @@ impl Drafts {
         if entry.status != UNSET { return Err(illegal(format!("Unarchival status for ID {id} has already been set or a session has been created for it already by the caller."))) }
         entry.status = status; let entry = entry.clone(); drop(entries);
         for listener in entry.listeners { external.unarchive_status(listener.sender, &entry.package, &entry.installer, &entry.title, user, status, required, action)?; }
-        if status != OK { self.operations.abandon_session(id, entry.installer_uid)?; (self.save)()?; self.entries.lock().unwrap().remove(&id); }
+        if status != OK { self.operations()?.abandon_session(id, entry.installer_uid)?; (self.save)()?; self.entries.lock().unwrap().remove(&id); }
         Ok(())
     }
 }
@@ -207,7 +211,7 @@ fn caller(query: &Query<'_>, name: &str, user: i32) -> Result<(), Exception> {
 }
 impl Owner {
     fn failed_install(&self, receiver: IntentSender, id: i32, name: &str, status: i32, message: &str) -> Result<(), Exception> {
-        self.drafts.operations.abandon_session(id, 1000)?;
+        self.drafts.operations()?.abandon_session(id, 1000)?;
         (self.drafts.save)()?;
         self.external.install_status(receiver, id, name, status, Some(message))
     }
@@ -265,7 +269,7 @@ impl Owner {
         let stage = (self.prepare_archived_session)(&session, &record, &archived)?;
         self.drafts.sessions.prepared(id)?;
         self.drafts.sessions.open(id, 1000)?;
-        self.drafts.operations.seal_session(id, 1000)?;
+        self.drafts.operations()?.seal_session(id, 1000)?;
         (self.drafts.save)()?;
         let session = self.drafts.sessions.snapshot(id)?;
         let code = super::pipeline::VerifiedCode { session, record, package: archived.package(&stage), signing: archived.collected_signing()? };
