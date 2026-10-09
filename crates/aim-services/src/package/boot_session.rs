@@ -245,6 +245,7 @@ impl Session {
                 {
                     Ok(services) => services,
                     Err(mut error) => {
+                        eprintln!("native package publication failed: {}", error.message);
                         let mut state = self.state.lock().unwrap();
                         if !self.closed.load(Ordering::Acquire) {
                             state.phase = Phase::Failed;
@@ -272,6 +273,7 @@ impl Session {
                 Ok(())
             }
             Err(mut error) => {
+                eprintln!("native package construction failed: {}", error.message);
                 let mut state = self.state.lock().unwrap();
                 if !self.closed.load(Ordering::Acquire) {
                     state.phase = Phase::Failed;
