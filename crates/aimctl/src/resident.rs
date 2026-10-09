@@ -334,7 +334,7 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         std::thread::sleep(Duration::from_millis(100));
     };
     drop(children);
-    let cleanup = Command::new(program("linux-run"))
+    let cleanup = Command::new(state.inputs.program("linux-run"))
         .arg("--sweep-memfds")
         .output()
         .map_err(|error| format!("memfd cleanup: {error}"))?;
