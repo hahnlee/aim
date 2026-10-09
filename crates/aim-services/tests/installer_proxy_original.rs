@@ -44,8 +44,40 @@ impl GuestProcess for Inline {
         unreachable!()
     }
 }
+struct FixtureData {inner:std::mem::ManuallyDrop<Data>,failed:Arc<std::sync::atomic::AtomicBool>}
+impl std::ops::Deref for FixtureData {type Target=Data;fn deref(&self)->&Data{&self.inner}}
+impl FixtureData {fn finish(&self)->std::io::Result<()> {
+    fs::remove_dir_all(&self.inner.0).inspect_err(|_|self.failed.store(true,std::sync::atomic::Ordering::Release))
+}}
+impl Drop for FixtureData {fn drop(&mut self){
+    if std::thread::panicking()||self.failed.load(std::sync::atomic::Ordering::Acquire){eprintln!("preserved failed owned fixture {}",self.inner.0.display());return;}
+    if self.inner.0.exists(){eprintln!("preserved unfinished owned fixture {}",self.inner.0.display());}
+}}
+struct BootStop {boot:Arc<Boot>,failed:Arc<std::sync::atomic::AtomicBool>,done:std::cell::Cell<bool>}
+impl BootStop {fn finish(&self)->std::io::Result<()> {
+    let output=capture_client(self.boot.command().arg("stop"),self.boot.data.parent().unwrap(),"boot-stop",Duration::from_secs(60))?;
+    if !output.status.success(){return Err(std::io::Error::other(format!("owned boot stop {}: {}",output.status,String::from_utf8_lossy(&output.stderr))));}
+    self.done.set(true);Ok(())
+}}
+impl Drop for BootStop {fn drop(&mut self){
+    if self.done.get(){return;}
+    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||self.finish()));
+    if !matches!(result,Ok(Ok(()))){self.failed.store(true,std::sync::atomic::Ordering::Release);eprintln!("owned boot stop failed during cleanup: {result:?}; preserved failure and data");}
+}}
+struct NativeStop {owners:Arc<NativeOwners>,process:Arc<LocalProcess>,failed:Arc<std::sync::atomic::AtomicBool>,done:std::cell::Cell<bool>}
+impl NativeStop {fn finish(&self)->Result<(),String> {
+    let external=self.owners.close_external().map_err(|error|format!("native installer close: {error:?}"));
+    self.owners.shutdown_callbacks();self.owners.shutdown_io();
+    let process=self.process.shutdown().map_err(|error|format!("native Binder shutdown: {error}"));
+    external?;process?;self.done.set(true);Ok(())
+}}
+impl Drop for NativeStop {fn drop(&mut self){
+    if self.done.get(){return;}
+    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||self.finish()));
+    if !matches!(result,Ok(Ok(()))){self.failed.store(true,std::sync::atomic::Ordering::Release);eprintln!("native owner cleanup failed: {result:?}; preserved failure and data");}
+}}
 fn isolated_client(boot: &Boot, name: &str) -> Command {
-    let original = boot.client(10100);
+    let original = boot.client(0);
     let mut client = Command::new(original.get_program());
     client.env_clear();
     for (key, value) in original.get_envs() {
@@ -108,14 +140,17 @@ fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
     use aim_binder_host::parcel::{Exception, EX_ILLEGAL_STATE};
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let failure = |message: String| Exception::new(EX_ILLEGAL_STATE,message);
-    let mut command = boot.checked_client(1000).map_err(failure)?;
-    command.args(["/system/bin/app_process", "-Djava.class.path=/data/local/tmp/proxy-oracle.dex",
+    let mut command = boot.checked_client(0).map_err(failure)?;
+    let ticket = NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    command.args(["/data/local/tmp/credential-drop", "1000", &format!("/data/local/tmp/permission-proof-{ticket}"), "/system/bin/app_process", "-Djava.class.path=/data/local/tmp/proxy-oracle.dex",
         "/system/bin", "InstallerProxyOracle", "permission-check", permission,
         &pid.to_string(), &uid.to_string()]);
-    let ticket = NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
     let label=format!("permission-{ticket}");
     let output=capture_client(command.stdin(Stdio::null()),boot.data.parent().unwrap(),&label,Duration::from_secs(15))
         .map_err(|e|failure(format!("original permission capture: {e}")))?;
+    let proof=fs::read_to_string(boot.data.join(format!("data/local/tmp/permission-proof-{ticket}"))).map_err(|e|failure(format!("permission credential proof: {e}")))?;
+    if !proof.contains("uid=1000 euid=1000 suid=1000 gid=1000 egid=1000 sgid=1000 groups=0 caps=0") {return Err(failure(format!("permission credential drop differs: {proof}")));}
+    println!("actual original permission credential proof {proof}");
     let out=String::from_utf8(output.stdout).map_err(|e|failure(e.to_string()))?;
     let err=String::from_utf8(output.stderr).map_err(|e|failure(e.to_string()))?;
     if !output.status.success() {return Err(failure(format!("original permission status{}; stdout:{out}; stderr:{err}",output.status)));}
@@ -126,6 +161,19 @@ fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
     }
 }
 
+fn compile_credential_launcher(data:&Data,repo:&std::path::Path)->std::path::PathBuf {
+    let launcher=data.0.join("credential-drop");
+    let clang=aim_paths::ndk_clang(35).expect("NOT RUN: pinned NDK clang missing");
+    let built=capture_client(Command::new(clang).args(["-Wall","-Wextra","-Werror","-O2"]).arg(repo.join("crates/aim-services/tests/fixtures/credential_drop_launcher.c")).arg("-o").arg(&launcher),&data.0,"launcher-build",Duration::from_secs(30)).unwrap();
+    assert!(built.status.success(),"{}",String::from_utf8_lossy(&built.stderr));
+    launcher
+}
+#[test]
+#[ignore="host-only: pinned NDK compiler required"]
+fn authored_credential_drop_launcher_compiles(){
+    let dir=std::env::temp_dir().join(format!("aim-cred-build-{}",std::process::id()));fs::create_dir(&dir).unwrap();let data=Data(dir);
+    let path=compile_credential_launcher(&data,&aim_paths::root());let bytes=fs::read(path).unwrap();assert_eq!(&bytes[..4],b"\x7fELF");assert_eq!(u16::from_le_bytes(bytes[18..20].try_into().unwrap()),183);
+}
 fn compile_oracle(data: &Data, repo: &std::path::Path) -> std::path::PathBuf {
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
@@ -229,8 +277,9 @@ fn permission_oracle_compiles_and_links_against_original_framework() {
 fn original_art_consumes_native_installer_proxy_capability() {
     let directory = std::env::temp_dir().join(format!("ap-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
-    let data = Data(directory);
+    let data = FixtureData {inner:std::mem::ManuallyDrop::new(Data(directory)),failed:Arc::new(std::sync::atomic::AtomicBool::new(false))};
     let repo = aim_paths::root();
+    let launcher=compile_credential_launcher(&data,&repo);
     let dex = compile_oracle(&data, &repo);
     common::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
     let boot = Arc::new(Boot::new(repo.join("target/release/aimctl"), data.0.join("g")));
@@ -240,6 +289,7 @@ fn original_art_consumes_native_installer_proxy_capability() {
     for socket in ["display","display.input/event0","display.input/event1","display.input/event2"] {
         let path=canonical.join(socket);assert!(path.as_os_str().as_bytes().len()<address.sun_path.len()-1,"NOT RUN: fixture socket exceeds SUN_LEN: {}",path.display());
     }
+    let boot_stop=BootStop {boot:boot.clone(),failed:data.failed.clone(),done:std::cell::Cell::new(false)};
     let started=capture_client(boot.start_command().args(["start","--windows"]),&data.0,"boot-start",Duration::from_secs(270)).unwrap();
     assert!(started.status.success(),"{} {}",started.status,String::from_utf8_lossy(&started.stderr));
     let deadline=Instant::now()+Duration::from_secs(300);
@@ -263,6 +313,9 @@ fn original_art_consumes_native_installer_proxy_capability() {
         boot.data.join("data/local/tmp/proxy-oracle.dex"),
     )
     .unwrap();
+    fs::copy(&launcher,boot.data.join("data/local/tmp/credential-drop")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(boot.data.join("data/local/tmp/credential-drop"),fs::Permissions::from_mode(0o755)).unwrap();
     let name = format!("dev.aim.proxy-oracle.{}", std::process::id());
     let server = aim_binder_host::server::Server::start(&name).unwrap();
     let process = LocalProcess::open(
@@ -345,11 +398,15 @@ fn original_art_consumes_native_installer_proxy_capability() {
     )
     .unwrap();
     let publisher = process.clone();
-    let permission_boot = boot.clone();
+    let permission_boot = Arc::downgrade(&boot);
+    let calling_identities=Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_callers=calling_identities.clone();
     let owners = NativeOwners::open(
         sessions.clone(),
         Arc::new(move || Ok(state.clone())),
         Arc::new(move |caller_uid, caller_pid, _user| {
+            captured_callers.lock().unwrap().push((caller_uid,caller_pid));
+            println!("actual native Binder caller uid={caller_uid} pid={caller_pid}");
             let retained = permission_boot.clone();
             Ok(DevicePolicy {
                 permissions: aim_services::package::installer::policy::CallingPermissions::new(Arc::new(move |permission, pid, uid| {
@@ -359,7 +416,8 @@ fn original_art_consumes_native_installer_proxy_capability() {
                         }
                         caller_pid
                     } else { pid };
-                    original_permission(&retained, permission, pid, uid)
+                    let boot=retained.upgrade().ok_or_else(||aim_binder_host::parcel::Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"original boot owner expired"))?;
+                    original_permission(&boot, permission, pid, uid)
                 })),
                 debuggable: false,
                 apex_supported: false,
@@ -384,6 +442,7 @@ fn original_art_consumes_native_installer_proxy_capability() {
         process.clone(),
     )
     .unwrap();
+    let native_stop=NativeStop {owners:owners.clone(),process:process.clone(),failed:data.failed.clone(),done:std::cell::Cell::new(false)};
     let callback = owners.take_callback_worker().unwrap();
     owners
         .configure_writer(
@@ -425,6 +484,7 @@ fn original_art_consumes_native_installer_proxy_capability() {
     let output = original_client(
         isolated_client(&boot, &name)
             .args([
+                "/data/local/tmp/credential-drop", "10100", "/data/local/tmp/proxy-proof",
                 "/system/bin/app_process",
                 "-Djava.class.path=/data/local/tmp/proxy-oracle.dex",
                 "/system/bin",
@@ -462,12 +522,28 @@ fn original_art_consumes_native_installer_proxy_capability() {
             .iter()
             .all(|(session, _)| session.destroyed)
     );
+    let callers=calling_identities.lock().unwrap();
+    assert!(!callers.is_empty(),"native Binder caller identities not captured");
+    assert!(callers.iter().all(|(uid,pid)|*uid==10100 && *pid>0),"actual app Binder identities: {callers:?}");
+    drop(callers);
+    let proof=fs::read_to_string(boot.data.join("data/local/tmp/proxy-proof")).unwrap();
+    assert!(proof.contains("uid=10100 euid=10100 suid=10100 gid=10100 egid=10100 sgid=10100 groups=0 caps=0"),"{proof}");
+    let pid:i32=proof.lines().find(|line|line.starts_with("post ")).and_then(|line|line.split_whitespace().find_map(|part|part.strip_prefix("pid="))).expect("post-drop PID proof missing").parse().unwrap();
+    assert!(calling_identities.lock().unwrap().iter().all(|(_,caller_pid)|*caller_pid==pid),"native Binder PID differs from actual dropped process {pid}");
+    println!("actual credential proof {proof}");
     owners.shutdown_callbacks();
     owners.shutdown_io();
     drop(io);
     drop(callback);
     assert!(owners.take_errors().is_empty());
+    native_stop.finish().expect("actual native owner shutdown");
+    boot_stop.finish().expect("actual original boot stop");
+    drop(native_stop);
+    drop(owners);
+    drop(process);
+    drop(boot_stop);
     drop(boot);
+    data.finish().expect("actual owned fixture data removal");
 }
 #[test]
 fn file_capture_finishes_while_an_owned_descendant_retains_the_writer() {
@@ -497,4 +573,22 @@ fn file_capture_preserves_error_status_and_bounds_timeout_and_output() {
     let pid_file=data.0.join("timeout.pid");let result=capture_client(Command::new("/bin/sh").args(["-c","echo $$ > \"$1\"; exec /bin/sleep 20","fixture"]).arg(&pid_file),&data.0,"timeout",Duration::from_millis(100));assert_eq!(result.unwrap_err().kind(),std::io::ErrorKind::TimedOut);
     let pid:i32=fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();let mut status=0;assert_eq!(unsafe{libc::waitpid(pid,&mut status,libc::WNOHANG)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ECHILD));
     assert_eq!(capture_client(&mut Command::new(data.0.join("absent")),&data.0,"spawn-error",Duration::from_secs(2)).unwrap_err().kind(),std::io::ErrorKind::NotFound);
+}
+#[test]
+fn fixture_lifecycle_preserves_original_unwind_without_data_double_panic() {
+    let dir=std::env::temp_dir().join(format!("aim-proxy-unwind-{}",std::process::id()));fs::create_dir(&dir).unwrap();fs::write(dir.join("failure-evidence"),b"original failure").unwrap();
+    let caught=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{let _owned=FixtureData{inner:std::mem::ManuallyDrop::new(Data(dir.clone())),failed:Arc::new(std::sync::atomic::AtomicBool::new(false))};panic!("original fixture error");}));
+    assert_eq!(caught.unwrap_err().downcast_ref::<&str>(),Some(&"original fixture error"));assert_eq!(fs::read(dir.join("failure-evidence")).unwrap(),b"original failure");fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn fixture_lifecycle_shutdown_releases_actual_native_publisher_cycle() {
+    use aim_binder_host::local::{Service,Call,Reply};
+    use std::sync::atomic::{AtomicBool,Ordering};
+    struct Retained {process:Arc<LocalProcess>,dropped:Arc<AtomicBool>}
+    impl Service for Retained {fn descriptor(&self)->&str{"fixture.retained"}fn transact(&self,_:&mut Call<'_>)->Reply{Err(aim_binder_host::parcel::UNKNOWN_TRANSACTION)}}
+    impl Drop for Retained {fn drop(&mut self){assert!(Arc::strong_count(&self.process)>0);self.dropped.store(true,Ordering::Release);}}
+    let name=format!("dev.aim.proxy-lifetime.{}",std::process::id());let server=aim_binder_host::server::Server::start(&name).unwrap();
+    let process=LocalProcess::open(server.driver(),Device::Binder,Credentials{pid:std::process::id()as i32,euid:1000,security_context:None});
+    let dropped=Arc::new(AtomicBool::new(false));process.add_service(Arc::new(Retained{process:process.clone(),dropped:dropped.clone()}));process.start();
+    assert!(!dropped.load(Ordering::Acquire));process.shutdown().unwrap();assert!(dropped.load(Ordering::Acquire));assert_eq!(Arc::strong_count(&process),1);
 }

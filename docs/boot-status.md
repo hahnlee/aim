@@ -407,9 +407,13 @@ boot and then fails before its proxy/permission assertions: its UID10100
 external namespace entry correctly lacks CAP_SYS_ADMIN and returns EPERM
 (#1282). Retained Boot references then cause a Data destructor double panic
 (#1283); the fixture reports SIGABRT. Its frozen controller subsequently
-stops the guest normally, with no owned PID or mounted volume left. Authentic
-privileged namespace entry followed by real UID dropping and explicit
-fixture lifetime cleanup are required; the kernel admission guard remains.
+stops the guest normally, with no owned PID or mounted volume left. The fixture now enters through an authenticated
+privileged launcher, drops actual UID/GID/groups/capabilities before executing
+original app_process, and checks the resulting Binder caller identity. Weak
+Boot capture and ordered native/boot/data cleanup prevent the retained-owner
+cycle and preserve original failure evidence. Two lifecycle tests and the
+authored NDK launcher compilation pass; actual Android replay is not run.
+The kernel admission guard remains unchanged.
 Full49/10 gates remain unrun.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
