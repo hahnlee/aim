@@ -233,7 +233,20 @@ with 70 files, constructor epoch11/controller330000000 and SKU light_hinge.
 A real capture and source-copy receipt verify all 70 files retain bytes,
 manifest hashes, host modes, all xattrs and mtimes. A concurrent second
 build times out at300 seconds before permissions and boot completion; it
-is not accepted. A fresh quiet second build remains pending. The structure
+is not accepted. A fresh quiet second build completes boot at240.2 seconds
+and permission capture at245.6 seconds, then publishes another70-file
+template. Both file-copy receipts pass, but strict structure comparison
+retains six XML differences in roles, runtime access state and package
+restrictions; compiled and original/runtime parity remain unverified.
+The first template captured permissions before boot completion
+(247.8 versus258.0 seconds), while the second captured afterward. The
+builder now requires observed boot completion before freezing permission
+files (#1219); its real-file lifecycle regression passes. Fresh template
+comparison after this correction remains required. The pinned stub-output
+checker now accepts only the original decompression basenames and
+ABI-selected lib directories and excludes top-level host-volume internals
+consistently (#1262). Thirteen focused tests pass; real six XML differences
+are not normalized away. The structure
 capture tool now reads real Darwin xattrs with libc NOFOLLOW calls (#1261);
 12 tests include actual local-file capture and error propagation. Compiled
 code validity, two-template structure and original/runtime parity remain
