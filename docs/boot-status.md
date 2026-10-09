@@ -75,7 +75,11 @@ references now release after send, before waiting for the next request, so they
 do not anchor peer EOF. Two owned-process Binder identity/payload/dup/EOF and
 multicast regressions pass; host library gate is 56 pass, zero fail, one ignored
 controlled helper. Binder wire version 5 requires a coherent runtime rebuild.
-Actual original APK installation with the correction remains NOT RUN.
+The coherent aa0c8884 original-PMS replay failed before installation because
+initial path-map parsing rejected the bootstrap read-only `ro` entries (#1242).
+The parser now retains them as image areas; a fresh-process initialization test
+passes actual read access and EROFS on writes without changing the backing.
+Actual original boot and APK installation with this correction remain NOT RUN.
 The latest combined ABI gate passes 245 with zero failures and 19 ignored;
 controlled child entries run through their parents, and input-dependent/manual
 gates remain separate. Native create-user now forwards original pinned parser

@@ -1780,3 +1780,32 @@ mod retained_socket_io_tests {
         for fd in [original[0],original[1],replacement[0],replacement[1]]{closed(fd);}
     }
 }
+
+#[cfg(test)]
+mod read_only_map_tests {
+    use super::*;
+    #[test]
+    fn initial_read_only_map_preserves_read_access_and_rejects_writes() {
+        if crate::sys::fdtab::isolated_kernel_test("sys::fs::read_only_map_tests::initial_read_only_map_preserves_read_access_and_rejects_writes") { return; }
+        let dir = std::env::temp_dir().join(format!("aim-vfs-ro-map-{}", std::process::id()));
+        let root = dir.join("root");
+        let apex = dir.join("apex");
+        std::fs::create_dir_all(root.join("bootstrap-apex")).unwrap();
+        std::fs::create_dir_all(&apex).unwrap();
+        std::fs::write(apex.join("payload"), b"original").unwrap();
+        let map = dir.join("path-map");
+        let text = format!("root\t/\t{}\nro\t/bootstrap-apex/example\t{}\n", root.display(), apex.display());
+        std::fs::write(&map, &text).unwrap();
+        vfs::init(&root, Some(&map)).unwrap();
+        assert_eq!(vfs::lookup("/bootstrap-apex/example/payload"), (apex.join("payload"), vfs::Area::Image));
+        let path = CString::new("/bootstrap-apex/example/payload").unwrap();
+        let args = |flags| [(-100i64) as u64, path.as_ptr() as u64, flags, 0, 0, 0];
+        let fd = super::openat(args(0));
+        assert!(fd >= 0, "read-only open: {fd}");
+        assert_eq!(super::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(super::openat(args(1)), -(errno::EROFS as i64));
+        assert_eq!(std::fs::read(apex.join("payload")).unwrap(), b"original");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+}

@@ -361,7 +361,7 @@ pub fn input_dir() -> Option<&'static Path> {
 }
 
 /// Parse a path map file: `kind<TAB>guest<TAB>host` lines, kinds `root`,
-/// `rw` and `kernfs`; `#` starts a comment line.
+/// `ro`, `rw` and `kernfs`; `#` starts a comment line.
 fn map_propagation(text:&str)->Result<Vec<(String,Propagation)>,Errno>{
     text.lines().filter_map(|line|line.strip_prefix("propagation\t")).map(|line|{
         let(guest,kind)=line.split_once('\t').ok_or(errno::EINVAL)?;
@@ -396,6 +396,7 @@ fn parse_map(text: &str) -> Result<(Option<PathBuf>, Vec<Mount>), String> {
                 root = Some(PathBuf::from(host));
                 continue;
             }
+            "ro" => Area::Image,
             "rw" | "cgroup2" | "bpf" => Area::Writable,
             "kernfs" => Area::Kernfs,
             other => return Err(format!("line {}: unknown kind '{other}'", n + 1)),
