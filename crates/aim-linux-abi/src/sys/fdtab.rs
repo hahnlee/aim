@@ -271,7 +271,15 @@ impl Pinned{
     pub fn kind(&self)->Option<&Kind>{self.kind.as_ref()}
     pub fn socket_allowed(&self)->bool{self.socket_allowed}
 }
-impl Drop for Pinned{fn drop(&mut self){use std::os::fd::AsRawFd;let fd=self.descriptor().as_raw_fd();if let Some(file)=&self.fuse{super::fuse_client::remove_private_alias(fd,file);}let previous=TABLE.write().unwrap().remove(&fd);retire(previous);drop(self.descriptor.take());if matches!(self.kind,Some(Kind::Sock(_))){super::close_effects::note_socket_close();}}}
+impl Drop for Pinned{fn drop(&mut self){
+    use std::os::fd::AsRawFd;
+    let fd=self.descriptor().as_raw_fd();
+    if let Some(file)=&self.fuse{super::fuse_client::remove_private_alias(fd,file);}
+    let (previous,last_socket)={let mut table=TABLE.write().unwrap();let previous=table.remove(&fd);let last=match &self.kind{Some(Kind::Sock(socket))=>!table.values().any(|kind|matches!(kind,Kind::Sock(other) if Arc::ptr_eq(socket,other))),_=>false};(previous,last)};
+    retire(previous);drop(self.descriptor.take());
+    // A pin can outlive the public alias and discard its actual receive queue.
+    if last_socket{super::close_effects::note_socket_close();}
+}}
 
 pub fn pin_guest(fd:i32)->Result<Pinned,crate::errno::Errno>{
     use std::os::fd::FromRawFd;

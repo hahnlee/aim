@@ -268,25 +268,41 @@ fn open_permissions(r: &vfs::Resolved, flags: u64, creating: bool, id: &super::c
 }
 
 pub fn close(a: [u64; 6]) -> i64 {
-    super::close_effects::run(||close_inner(a))
+    let mut inner=0;let mut evidence=None;
+    let result=super::close_effects::run(||{inner=close_inner(a,&mut evidence);inner});
+    if result!=inner{if let Some(evidence)=evidence{evidence.failure("close-wrapper",result,if inner==0{0}else{i32::MIN},0);}}
+    result
 }
-fn close_inner(a: [u64; 6]) -> i64 {
+struct CloseEvidence{fd:i32,visible:bool,hidden:bool,fd_flags:i32,file_flags:i32,mode:u32,kind:&'static str}
+impl CloseEvidence{
+    fn capture(fd:i32)->Self{
+        let saved=unsafe{*libc::__error()};let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+        let mode=if unsafe{libc::fstat(fd,&mut stat)}==0{stat.st_mode as u32}else{0};
+        let kind=match fdtab::get(fd){None=>"plain",Some(Kind::Sock(_))=>"socket",Some(Kind::Regular(_))=>"regular",Some(Kind::Dir(_))=>"directory",Some(Kind::Event(_))=>"event",Some(Kind::Timer(_))=>"timer",Some(Kind::Epoll(_))=>"epoll",Some(Kind::Inotify(_))=>"inotify",Some(Kind::Path(_))=>"path",Some(_)=>"other-typed"};
+        let evidence=Self{fd,kind,visible:fdtab::visible(fd),hidden:fdtab::is_hidden(fd),fd_flags:unsafe{libc::fcntl(fd,libc::F_GETFD)},file_flags:unsafe{libc::fcntl(fd,libc::F_GETFL)},mode};
+        unsafe{*libc::__error()=saved;}evidence
+    }
+    fn failure(&self,stage:&str,result:i64,native_ret:i32,native_errno:i32){super::close_effects::diagnostic(format_args!("stage={stage} fd={} visible={} hidden={} fd_flags={} file_flags={} mode={:#x} kind={} result={result} native_ret={native_ret} native_errno={native_errno}",self.fd,self.visible,self.hidden,self.fd_flags,self.file_flags,self.mode,self.kind));}
+}
+fn close_inner(a: [u64; 6],capture:&mut Option<CloseEvidence>) -> i64 {
     let fd=a[0] as i32;
-    let guard=fdtab::lifecycle();
-    if let Err(error)=fdtab::require_guest_visible(fd){return -(error as i64);}
+    let guard=fdtab::lifecycle();*capture=Some(CloseEvidence::capture(fd));let evidence=capture.as_ref().unwrap();
+    if let Err(error)=fdtab::require_guest_visible(fd){evidence.failure("pre-visibility",-(error as i64),i32::MIN,0);return -(error as i64);}
     let retained=fdtab::get(fd);let file=super::fuse_client::get(fd);
     let socket=matches!(retained,Some(Kind::Sock(_)));
-    let posix=match fdtab::guest_close_owner(fd){Ok(owner)=>owner,Err(error)=>return -(error as i64)};
-    if let Err(error)=fdtab::withdraw_guest(fd){return -(error as i64);}
+    let posix=match fdtab::guest_close_owner(fd){Ok(owner)=>owner,Err(error)=>{evidence.failure("prepare-posix",-(error as i64),i32::MIN,0);return -(error as i64)}};
+    if let Err(error)=fdtab::withdraw_guest(fd){evidence.failure("withdraw",-(error as i64),i32::MIN,0);return -(error as i64);}
     fdtab::on_close(fd);
-    let result=errno::check(unsafe{libc::close(fd)} as i64);
+    let native_ret=unsafe{libc::close(fd)};let native_errno=if native_ret<0{unsafe{*libc::__error()}}else{0};
+    let result=if native_ret<0{-(errno::from_darwin(native_errno)as i64)}else{native_ret as i64};
+    if result<0{evidence.failure("native-close",result,native_ret,native_errno);}
     drop(guard);
     let posix=if result==0{fdtab::finish_guest_close(posix)}else{Ok(())};
     let flush=file.as_ref().map(|file|super::fuse_cache::flush_file(file).and_then(|_|super::fuse_client::flush(file)));
     drop(retained);drop(file);
     if result==0&&socket{super::close_effects::note_socket_close();}
-    if let Err(error)=posix{return -(error as i64);}
-    match flush{Some(Err(error))if result==0=>-(error as i64),_=>result}
+    if let Err(error)=posix{evidence.failure("finish-posix",-(error as i64),native_ret,native_errno);return -(error as i64);}
+    match flush{Some(Err(error))if result==0=>{evidence.failure("finish-fuse",-(error as i64),native_ret,native_errno);-(error as i64)},_=>result}
 }
 
 /// The first non-empty buffer of an iovec list.

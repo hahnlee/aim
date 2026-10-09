@@ -83,9 +83,18 @@ linkage pass. These source checks do not establish deployed Binder, template or
 CTS success. The corrected official-XML collector passes three actual paired-XML
 regressions and six comparison tests; it binds exact command, device and wrapper
 lifetime and retains ambiguity as an error. Current frozen campaign association
-failures remain NOT RUN until a fresh campaign uses the correction. Close diagnostics reproduce a successful host close followed by
-carrier-error return overrides; they do not establish the actual Perfetto or
-adbd abort cause (#1207, #1221).
+failures remain NOT RUN until a fresh campaign uses the correction. The carrier retirement owner now retains failed retirement until a real ACK,
+without replacing a completed syscall result (#1229). A new actual release
+triggers synchronous retirement; socket observations cross its owner barrier,
+while pipe-only readiness and getpid retain their results. Actual lease/discard/
+reconnect/EOF and dead-service noninterference regressions pass. The complete ABI
+library gate passes 242 with zero failures and 16 ignored; controlled helper
+entries execute through their parents, and the two standalone performance benches
+remain not run. Its FUSE CLI helper input is the hash-pinned frozen b04 executable,
+not proof of a newly deployed runtime. The poll FD fixture is process-isolated
+from other tests' global FD state. Actual Perfetto/adbd crash replay remains
+unverified (#1207, #1221); abrupt cross-process final-carrier death is a separate
+owner-lifecycle proof still under investigation (#1191).
 
 The inactive UM redirect gate verifies all 14 original PMS
 call sites. An isolated experimental C worktree has built redirected services.jar and its

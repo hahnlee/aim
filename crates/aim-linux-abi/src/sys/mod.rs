@@ -183,8 +183,9 @@ pub fn dispatch(ctx: &mut GuestContext) {
     // A syscall a host signal interrupted is restarted when no guest
     // handler is to run for it.
     let r = loop {
+        let release=close_effects::release_checkpoint();
         let r = handle(ctx, nr, a);
-        let r=match close_effects::flush(){Ok(())=>r,Err(error)=>-(error as i64)};
+        let r=close_effects::after_release(release,r);
         if !signal::after_syscall(ctx, nr, &a, r) {
             break r;
         }

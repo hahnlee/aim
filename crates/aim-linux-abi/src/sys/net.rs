@@ -253,6 +253,7 @@ impl<'a> SocketInput<'a> {
             return Err(-ENOTSOCK);
         }
         is_socket(input.fd())?;
+        super::close_effects::observe_socket().map_err(|error|-(error as i64))?;
         Ok(input)
     }
     fn fd(&self) -> i32 {

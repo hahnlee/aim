@@ -138,6 +138,9 @@ pub fn ppoll(a: [u64; 6]) -> i64 {
         host.push(libc::pollfd { fd, events: to_host(entry.events), revents: 0 });
         pins.push(pin);
     }
+    if pins.iter().flatten().any(super::close_effects::observes){
+        if let Err(error)=super::close_effects::observe_socket(){return -(error as i64);}
+    }
     let t0 = now_ns();
     loop {
         let left = if ms < 0 {
@@ -212,6 +215,9 @@ pub fn pselect6(a: [u64; 6]) -> i64 {
         // SAFETY: guest struct.
         unsafe { (sig as *const u64).read_unaligned() }
     };
+    if pins.iter().any(super::close_effects::observes){
+        if let Err(error)=super::close_effects::observe_socket(){return -(error as i64);}
+    }
     let t0 = now_ns();
     let n = host_poll(&mut host, ms, mask);
     if n < 0 {
@@ -251,6 +257,7 @@ mod pin_tests {
 
     #[test]
     fn poll_keeps_unknown_and_negative_fd_semantics_and_select_guest_indexes() {
+        if super::super::fdtab::isolated_kernel_test("sys::poll::pin_tests::poll_keeps_unknown_and_negative_fd_semantics_and_select_guest_indexes") { return; }
         let (_view, _root) = crate::vfs::test_view();
         let mut raw = [0; 2];
         assert_eq!(unsafe { libc::pipe(raw.as_mut_ptr()) }, 0);

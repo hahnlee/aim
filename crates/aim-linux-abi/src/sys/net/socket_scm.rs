@@ -244,7 +244,12 @@ mod tests {
         // Retiring a broken control channel must not turn configured drain
         // into a no-op while this actual queued carrier keeps B alive.
         assert!(classify(-1).is_err());
-        close(discard[1]);
+        fdtab::close_owned_guest(discard[1],false).unwrap();
+        assert!(super::super::super::close_effects::pending());
+        // The shared owner survives a thread boundary. Only DRAIN is issued
+        // after reconnect; already-consumed CREATE/RESOLVE are not replayed.
+        std::thread::spawn(super::super::super::close_effects::flush).join().unwrap().unwrap();
+        assert!(!super::super::super::close_effects::pending());
         let mut byte=0u8;
         let eof=unsafe{libc::recv(subject[1],(&mut byte as *mut u8).cast(),1,libc::MSG_DONTWAIT)};
         if eof != 0 {
@@ -259,6 +264,14 @@ mod tests {
             }
         }
         assert_eq!(eof,0,"no native registry backing may defer real peer EOF");
-        for fd in [subject[1],first[0],first[1],second[0],second[1],discard[0]] {close(fd);}
+        let direct_subject=pair(L_SOCK_NONBLOCK);let direct_queue=pair(0);
+        transfer(direct_queue[0],direct_subject[0]);close(direct_subject[0]);live(direct_subject[1],"direct release queued lease");
+        let checkpoint=super::super::super::close_effects::release_checkpoint();
+        fdtab::close_owned_guest(direct_queue[1],false).unwrap();
+        assert!(super::super::super::close_effects::pending());
+        assert_eq!(super::super::super::close_effects::after_release(checkpoint,0),0);
+        assert!(!super::super::super::close_effects::pending(),"direct owner close must receive real retirement ACK");
+        assert_eq!(unsafe{libc::recv(direct_subject[1],(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0,"release epilogue closes real backing before peer EOF observation");
+        for fd in [direct_subject[1],direct_queue[0],subject[1],first[0],first[1],second[0],second[1],discard[0]] {close(fd);}
     }
 }

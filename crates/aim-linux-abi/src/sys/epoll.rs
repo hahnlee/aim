@@ -262,6 +262,12 @@ fn bits(k: &libc::kevent, i: &Interest) -> u32 {
     b
 }
 
+pub(super) fn observes_sockets(ep:&Epoll,epfd:i32,seen:&mut std::collections::HashSet<usize>)->bool{
+    if !seen.insert(ep as*const Epoll as usize){return false;}
+    let interests:Vec<(i32,Interest)>=ep.interest.lock().unwrap().iter().filter_map(|(fd,interest)|(!interest.disabled&&(interest.wants_read()||interest.wants_write())).then_some((*fd,*interest))).collect();
+    interests.into_iter().any(|(fd,interest)|registered(epfd,fd,&interest)&&match fdtab::get(fd){Some(Kind::Sock(_))=>true,Some(Kind::Epoll(child))=>observes_sockets(&child,fd,seen),_=>false})
+}
+
 fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>, mask: u64) -> i64 {
     let ep = match epoll_of(epfd) {
         Ok(e) => e,
@@ -269,6 +275,9 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
     };
     if maxevents <= 0 || maxevents > i32::MAX / 16 {
         return -(EINVAL as i64);
+    }
+    if observes_sockets(&ep,epfd,&mut std::collections::HashSet::new()){
+        if let Err(error)=super::close_effects::observe_socket(){return -(error as i64);}
     }
     let mut kevs: Vec<libc::kevent> = Vec::with_capacity(maxevents as usize);
     let deadline = timeout.map(|t| now_ns() + t.tv_sec * 1_000_000_000 + t.tv_nsec);
