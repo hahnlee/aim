@@ -161,8 +161,8 @@ and VFS namespace EIO, followed by adbd fd17 fdsan abort (#1252, #1221). Native
 namespace replay now installs receiving mount records before importing shared
 FUSE routes and restores prior state on failure. Exact fresh-start EIO is
 reproduced before the correction; corrected rollback/retry, 19 namespace/FUSE
-checks and actual FUSE protocol pass. Actual corrected ABB transport and APK
-installation remain unverified; native publication and boot are still incomplete.
+checks and actual FUSE protocol pass. The later matched DA6 replay below verifies corrected ABB transport and real
+APK installation, as well as native publication and boot.
 Native 52 repeatedly fails constructor finish with EEXIST and retains only
 pending copies, with no published capture or epoch (#1254). The copied
 directory host GIDs differ from the source although guest metadata and bytes
@@ -178,10 +178,12 @@ checks. These checkpoints are verified; full conformance remains incomplete.
 Later original SystemServer exits with SIGKILL and fresh full66 startup helpers
 are also killed. The unchanged, validly signed DA6 linux-run --help terminates
 with SIGKILL before guest startup; an exact-path/SHA Exosphere execution event
-is timestamped inside that invocation (#232, #902). No execution-policy bypass
-is attempted. Administrator allowlisting is required before current runtime
-CTS/apps/template/rollback gates can proceed. Both new full66 attempts invoke
-zero tests; all 66 modules remain NOT RUN, and owned processes are cleaned.
+is timestamped inside that invocation (#232, #902). After explicit user
+approval, the official Exosphere UI applies a file-content hash exception for
+that exact DA6 binary. The same unchanged file now executes --help with exit
+zero. Fresh matched original/native boots and unfiltered full66 validation
+resume; no new CTS result is yet accepted. Both earlier interrupted full66
+attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The
