@@ -370,8 +370,11 @@ seconds/post-boot permissions244.2 seconds and publishes70 required files.
 Its actual post-boot runtime XML has zero package rows,16 shared-user rows
 and zero permission items, matching the original row shape; version0 and the
 PermissionController fingerprint remain. The earlier2984-item difference is
-preserved as failure evidence. Full permission semantics, copy verification
-for this replay and complete template parity are not yet accepted.
+preserved as failure evidence. All70 files in this replay preserve source
+bytes, modes, xattrs and mtimes; its owned processes and readonly mounts are
+normally cleaned. Full permission semantics and complete template parity
+are not yet accepted. Diagnostic comparison against the earlier original
+still differs in six XML files; a new matched original/native pair is not run.
 The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML
