@@ -90,6 +90,7 @@ public final class NativeComputer implements com.android.server.pm.Computer, Aut
     }
     @Override public void close() { preferred.close(); lease.clean(); }
     @Override public int getVersion() { return (int) snapshot.getVersion(); }
+    public long captureVersion() { return snapshot.getVersion(); }
     public long domainCaptureVersion() { return snapshot.getVersion(); }
     @Override public Computer use() { used.incrementAndGet(); return this; }
     @Override public int getUsed() { return used.get(); }

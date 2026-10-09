@@ -9,6 +9,7 @@ use super::{
 };
 use std::collections::BTreeMap;
 
+mod loading;
 mod code_projection;
 pub use code_projection::Projection as CodeProjection;
 mod apex;
@@ -388,3 +389,7 @@ mod tests {
 mod factory_retention_tests;
 
 pub mod permission_admissions;
+
+#[cfg(test)]
+#[path = "installer/visibility_capture_tests.rs"]
+mod installer_visibility_tests;

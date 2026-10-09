@@ -47,24 +47,39 @@ reused data image, 20-25 s; fresh data images 50-52 s, then a cold
 Settings start in 11.9 and 13.8 s); SystemUI and Gboard, which listen to the
 clipboard, run without errors, and CTS's 36 clipboard tests pass. An empty list gives the original clipboard back.
 
-PackageManager still runs original. The inactive D1 source now includes
-`NativePackageManagerService` and
-`image/m4-package-switch/system-server-redirects.inactive`: native construction,
-original UserManager and ART adapters, lifecycle barriers and display metrics.
-`NativePackageBootstrap` assembles the native snapshot, mutation, user,
-permission and observer adapters using a retained typed bootstrap bridge.
-The stable native PackageManagerInternal is registered before original permission
-owners are constructed. BootSession initially owns only actual SystemConfig
-facts; original UserManager creates its user roster before native Settings
-recovery, lifecycle binding and raw scan. Raw queries then serve permission
-projection before full capture and runtime construction. The native Rust assembly builds and controlled C boots reach native raw scan. Failed epochs close their native
-workers and snapshots and propagate SystemServer startup failure.
-Its native boot-session backend and original constructor inputs still require
-integration; the ten redirected calls and two retained guarded calls remain
-inactive in the default image pending C acceptance. The consolidated native unit gate
-now passes 756 tests with zero failures; eight ignored tests remain not run.
-Java compilation, DEX generation and strict linkage against the original
-image now pass. The inactive UM redirect gate verifies all 14 original PMS
+PackageManager remains original in the default image. Controlled slice C images
+redirect native construction, UserManager/ART adapters and lifecycle calls;
+`package` and `package_native` identify the native guest-init owner. All 298
+planned methods are implemented; this is not conformance acceptance.
+
+The frozen b04c9e67 original/native pair is running the same 66-module CTS
+campaign with pinned runtime and harness inputs. Native parsing reports 9 pass /
+2 fail against original 11 / 0 (#1110). Native setting reports 2 / 0 and
+UsesLibrary 3 / 0. Native DexMetadata reports 1 / 9 (#1225, #1226). Host classpath
+failure (#1222), concurrent XML association failure (#1223) and actual device
+preparation timeout (#1227) leave affected campaign rows NOT RUN. Original
+zygote SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate
+runtime failures. Neither campaign has completed or passed the acceptance gate.
+
+Two native empty-data templates publish 70 guest files each and reach boot
+completion at 196.2 and 196.8 seconds under concurrent load. Parity is not
+accepted: preferred state differs (#1218), permission/role completion is missing
+(#1219), loading state is incomplete (#1220), and shared-UID ABI inheritance is
+missing (#810). Constructor-time immutable capture, actual template replay and
+consumer checks remain necessary; post-boot file sampling is not constructor
+provenance.
+
+Isolated acceptance fixes retain the running pair unchanged. The complete PM
+library gate passes 840 tests with zero failures and eleven ignored tests not
+run. Visibility recapture passes five focused tests, loading completion three,
+shared-UID ABI inheritance three, and dex-metadata sidecar handling three.
+Complete private Java/AIDL compilation, D8 conversion and strict original-image
+linkage pass. These source checks do not establish deployed Binder, template or
+CTS success. Close diagnostics reproduce a successful host close followed by
+carrier-error return overrides; they do not establish the actual Perfetto or
+adbd abort cause (#1207, #1221).
+
+The inactive UM redirect gate verifies all 14 original PMS
 call sites. An isolated experimental C worktree has built redirected services.jar and its
 matching oat/vdex and derived image; the default image remains original. Experimental C boots now reach the redirected native PM main.
 The first attempts exposed startup ordering defects: native image mapping

@@ -87,6 +87,14 @@ impl SharedUser {
             .map(|(name, setting)| (name.as_str(), setting.as_ref()))
             .chain(self.retained_instances.iter().map(|setting|(setting.package.name.as_str(),setting.as_ref())))
     }
+    pub(in crate::package) fn apply_retained_primary_abi(&mut self, primary: &Option<String>) {
+        for value in self.retained.values_mut().chain(self.retained_instances.iter_mut()) {
+            if value.package.primary_cpu_abi.is_none() && primary.is_some() {
+                std::sync::Arc::make_mut(value).package.primary_cpu_abi = primary.clone();
+            }
+        }
+    }
+
     pub fn retained_setting(&self, name: &str) -> Option<&super::app_ids::DetachedSetting> {
         self.retained.get(name).map(std::sync::Arc::as_ref)
     }

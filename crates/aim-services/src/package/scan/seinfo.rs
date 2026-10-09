@@ -162,6 +162,8 @@ impl SigningScan {
         compatibility: &mut dyn FnMut(&AndroidPackage) -> Result<i32, String>,
     ) -> Result<(), String> {
         let mut candidate = self.clone();
+        let abi = candidate.reconcile_shared_user_abis()?;
+        for mismatch in &abi.mismatches { eprintln!("shared UID ABI mismatch at boot: {mismatch:?}"); }
         candidate.fix_shared_seinfo_target_sdks_at_boot()?;
         let inputs = inputs(&candidate)?;
         let mut labels = BTreeMap::new();

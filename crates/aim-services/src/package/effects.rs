@@ -76,10 +76,13 @@ impl Owner {
                 error
             })
     }
-    pub fn capture_post_install_visibility(&self,setting:&super::settings::Package,users:&[i32])->Result<Vec<i32>,Exception>{
-        self.call(api::CAPTURE_POST_INSTALL_VISIBILITY,|p|api::CapturePostInstallVisibility{
+    pub fn capture_post_install_visibility(&self,setting:&super::settings::Package,users:&[i32])->Result<(u64,Vec<i32>),Exception>{
+        let values=self.call(api::CAPTURE_POST_INSTALL_VISIBILITY,|p|api::CapturePostInstallVisibility{
             name:Some(setting.name.clone()),app_id:setting.uid_owner_id(),code_path:Some(setting.code_path.clone()),version:setting.version_code,users:Some(users.to_vec()),
-        }.write(p),aim_service_aidl::read_int_array)?.ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"original prior visibility reply null"))
+        }.write(p),aim_service_aidl::read_int_array)?.ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"original prior visibility reply null"))?;
+        if values.len()<3||values[0]!=0x56495331{return Err(Exception::new(EX_ILLEGAL_STATE,"original prior visibility capture header invalid"));}
+        let version=((values[1] as u32 as u64)<<32)|(values[2] as u32 as u64);
+        Ok((version,values[3..].to_vec()))
     }
     pub fn post_install(&self, plan:&super::installer::post_install::Plan)->Result<(),Exception>{
         self.call(api::POST_INSTALL_PACKAGE,|p|api::PostInstallPackage{

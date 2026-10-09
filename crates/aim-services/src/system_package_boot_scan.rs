@@ -239,6 +239,7 @@ impl System {
         }else{restored_runtime_metadata.ok_or_else(||failure("restored runtime metadata owner unavailable"))?};
         owner.finish_boot_settings(&begin.lifecycle.current_version, &begin.lifecycle.owner).map_err(failure)?;
         let mut owner=self.complete_package_owner(bridge,owner,&usage,retained_runtime)?;
+        owner.complete_boot_loading(is_incremental).map_err(|error|failure(format!("native loading completion: {error:?}")))?;
         owner.rebuild_shared_processes_from_native_members().map_err(failure)?;
         // Persist the completed native boot owner on every boot. Restored
         // reconciliation changes Settings too; existing resolver/browser owner

@@ -52,6 +52,7 @@ pub fn uid_owner_registry(snapshot: &Snapshot) -> Result<Vec<u8>, String> {
 }
 
 impl Snapshot {
+    pub(in crate::package) fn same_lineage(&self, other: &Self) -> bool { Arc::ptr_eq(&self.lineage, &other.lineage) }
     pub(in crate::package) fn replica_runtime(&self,name:&str,factory:bool)->Result<Option<&crate::package::scan::ReplicaRuntime>,String>{
         // Store::create/publish validate the complete runtime/seinfo/library
         // graph once before this owner becomes immutable. Check this record's

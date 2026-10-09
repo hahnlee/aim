@@ -213,14 +213,56 @@ fn copy_tree(source: &Path, target: &Path, config: &Config) -> Result<(), Failur
         .and_then(|file| file.sync_all())
         .map_err(|error| failure(-4, error))
 }
+pub(crate) fn capture_visibility_checked(
+    base:&Arc<Snapshot>,snapshots:&crate::package::scan_snapshot::Store,names:&[String],
+    mut users:impl FnMut()->Result<Vec<i32>,Failure>,
+    mut capture:impl FnMut(&crate::package::settings::Package,&[i32])->Result<(u64,Vec<i32>),Failure>,
+)->Result<Vec<Vec<i32>>,Failure>{
+    let targets=names.iter().cloned().collect();
+    for _ in 0..8 {
+        let current=snapshots.capture();
+        if !base.same_lineage(&current){return Err(failure(-110,"pre-install visibility capture lineage changed"));}
+        let mut checked=base.owner().clone();
+        if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+            base,&current,&mut checked,&targets).map_err(|error|failure(-110,error))? {
+            return Err(failure(-110,format!("pre-install visibility owner changed: base={} current={} metadata={}->{}: {conflict}",
+                base.version(),current.version(),base.metadata_revision(),current.metadata_revision())));
+        }
+        let all_users=users()?;let mut values=Vec::with_capacity(names.len());let mut coherent=true;
+        for name in names {
+            if let Some(setting)=current.owner().settings.packages.iter().find(|setting|&setting.name==name){
+                let(version,allowlist)=capture(setting,&all_users)?;
+                super::post_install::validate_visibility(&all_users,&allowlist).map_err(|error|failure(-110,error.message))?;
+                if version!=current.version(){coherent=false;break;}
+                values.push(allowlist);
+            }else{values.push(Vec::new());}
+        }
+        if coherent&&Arc::ptr_eq(&current,&snapshots.capture())&&users()?==all_users{return Ok(values);}
+        // Only the read-only policy capture repeats; code/app-data/permission
+        // preparation and the original admission base retain their ownership.
+    }
+    let current=snapshots.capture();
+    Err(failure(-110,format!("pre-install visibility capture did not stabilize: base={} current={} metadata={}->{}",
+        base.version(),current.version(),base.metadata_revision(),current.metadata_revision())))
+}
+
 impl pipeline::Environment for Owner {
     fn reserve(
         &self,
         code: Vec<VerifiedCode>,
         base: &Arc<Snapshot>,
     ) -> Result<Box<dyn pipeline::Reservation>, Failure> {
-        if !Arc::ptr_eq(base, &self.config.snapshots.capture()) {
-            return Err(failure(-110, "Installation base generation changed"));
+        let current=self.config.snapshots.capture();
+        if !base.same_lineage(&current){return Err(failure(-110,"Installation base lineage changed"));}
+        if !Arc::ptr_eq(base,&current) {
+            let targets=code.iter().map(|member|if member.package.static_shared_library_name.is_some(){
+                format!("{}_{}",member.package.package_name,member.package.static_shared_lib_version)
+            }else{member.package.package_name.clone()}).collect();
+            let mut checked=base.owner().clone();
+            if let Some(conflict)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(
+                base,&current,&mut checked,&targets).map_err(|error|failure(-110,error))? {
+                return Err(failure(-110,format!("Installation base owner changed: {conflict}")));
+            }
         }
         let mut reserved = Reserved {
             config: self.config.clone(),
@@ -370,16 +412,16 @@ impl pipeline::Environment for Owner {
             }
             prepare_native_libraries(member, &self.config)?;
         }
-        let all_users=(self.config.post_install_users)().map_err(|error|failure(-110,error.message))?;
-        for member in &mut reserved.members {
-            let name=if member.code.package.static_shared_library_name.is_some(){format!("{}_{}",member.code.package.package_name,member.code.package.static_shared_lib_version)}else{member.code.package.package_name.clone()};
-            if let Some(setting)=base.owner().settings.packages.iter().find(|setting|setting.name==name) {
-                member.prior_visibility=self.config.effects.capture_post_install_visibility(setting,&all_users)
-                    .map_err(|error|failure(-110,format!("Original pre-install visibility: {}",error.message)))?;
-                super::post_install::validate_visibility(&all_users,&member.prior_visibility).map_err(|error|failure(-110,error.message))?;
-            }
-        }
-        if !Arc::ptr_eq(base,&self.config.snapshots.capture()){return Err(failure(-110,"pre-install visibility capture generation changed"));}
+        let names=reserved.members.iter().map(|member| {
+            if member.code.package.static_shared_library_name.is_some() {
+                format!("{}_{}",member.code.package.package_name,member.code.package.static_shared_lib_version)
+            } else { member.code.package.package_name.clone() }
+        }).collect::<Vec<_>>();
+        let visibility=capture_visibility_checked(base,&self.config.snapshots,&names,
+            ||(self.config.post_install_users)().map_err(|error|failure(-110,error.message)),
+            |setting,users|self.config.effects.capture_post_install_visibility(setting,users)
+                .map_err(|error|failure(-110,format!("Original pre-install visibility: {}",error.message))))?;
+        for(member,values)in reserved.members.iter_mut().zip(visibility){member.prior_visibility=values;}
         Ok(Box::new(reserved))
     }
     fn publish_queries(&self, snapshot: &Arc<Snapshot>) -> Result<(), String> {

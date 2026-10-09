@@ -3,6 +3,8 @@
 //! Copyright (C) The Android Open Source Project, Apache License 2.0.
 use crate::package::pkg::AndroidPackage;
 mod alignment;
+mod shared_user;
+pub use shared_user::SharedUserAbiReconciliation;
 mod page_size;
 pub use page_size::PageSizeCompatPolicy;
 mod package_copy;
