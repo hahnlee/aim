@@ -192,7 +192,8 @@ fn main() {
     }
     println!("triggers: {}", report.triggers.join(" "));
     println!("{}", report.summary());
-    if report.fatal.is_some() {
+    if let Some(fatal)=report.fatal.as_deref() {
+        eprintln!("guest-init: native boot fatal: {fatal}");
         std::process::exit(1);
     }
     // A reboot restarts the device: the kernel's reboot(2) is this
@@ -205,6 +206,7 @@ fn main() {
             .as_deref()
             .is_some_and(|command| command.starts_with("reboot"))
     {
+        eprintln!("guest-init: native reboot requested: {}",report.shutdown.as_deref().unwrap());
         let _ = std::io::stdout().flush();
         let error = std::env::current_exe()
             .map(|exe| Command::new(exe).args(std::env::args_os().skip(1)).exec())

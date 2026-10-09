@@ -811,7 +811,16 @@ authenticated attach, admission, real ENABLE publication and explicit/Drop
 cleanup pass against a runtime path beyond SUN_LEN. A separate bounded syscall-
 traced boot reaches zygote-start and launches 26 guest services, but an untraced
 readiness failure remains unresolved (#1203); tracing is not an acceptance fix.
-Its processes are reaped. Darwin terminal socket shutdown can return ENOTCONN
+Its processes are reaped. The coherent corrected host rebuild completes five
+nodes with four fresh nodes and no failures in 63.1 seconds. A detached common
+runtime records all five actual binary hashes. Its fresh long-output native
+template still times out at 300 seconds before readiness; no terminal socket
+cleanup errors occur. Short raw runs can progress without syscall tracing, so
+trace alone is not the distinguishing cause. Their multiple complete/partial
+boot reports are consistent with native init's explicit same-PID reboot exec.
+The CLI now reports the actual reboot request and fatal reason even in quiet
+mode; the new runtime replay must identify that request (#1203). No template
+is published or counted from these diagnostics. Darwin terminal socket shutdown can return ENOTCONN
 without discarding queued rights (#1202). The native owner now drains actual
 recvmsg rights to EOF under private descriptor admission, with bounded retries
 only before consumption. The five-by-1,000 concurrent close regression passes;
