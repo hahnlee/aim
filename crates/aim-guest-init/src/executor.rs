@@ -523,6 +523,7 @@ impl GuestExecutor {
                         pid,
                     });
                     return if exit.is_success() {
+                        crate::service_namespace::linker_config_completed(&self.planner.layout.runtime)?;
                         Ok(())
                     } else {
                         Err(format!("linkerconfig {exit}"))
@@ -720,7 +721,13 @@ impl GuestExecutor {
                 names.len()
             )));
         }
-        self.update_linker_config()
+        self.update_linker_config()?;
+        if !bootstrap {
+            let mut failures=Vec::new();
+            for name in self.supervisor.take_delayed(){match self.start_service(&name){Ok(effect)=>self.effect(effect),Err(error)=>{let message=format!("delayed service '{name}': {error}");self.log.push(message.clone());failures.push(message);}}}
+            if !failures.is_empty(){return Err(failures.join("; "));}
+        }
+        Ok(())
     }
 
     /// Runs `onrestart` commands (`Action::ExecuteAllCommands` on the

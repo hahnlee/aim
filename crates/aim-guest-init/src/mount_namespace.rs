@@ -71,6 +71,7 @@ impl MountNamespaces {
         default.update_base(&default_map.to_file_text()).map_err(|error| error.to_string())?;
         bootstrap.update_base(&bootstrap_map.to_file_text()).map_err(|error| error.to_string())?;
         let owner = Self { bootstrap, default, process, table, path_map: layout.path_map_file() };
+        crate::service_namespace::Catalog{owner:process,bootstrap:owner.bootstrap.id().into(),default:owner.default.id().into(),ready:false}.publish(&layout.runtime)?;
         owner.publish_current(&bootstrap_map, owner.bootstrap.id())?;
         Ok((owner, bootstrap_map))
     }

@@ -619,9 +619,14 @@ the remaining original daemons use, evdev, and memfd/ashmem.
   filled in from the syscall layer, which sees every socket operation.
   Settled in P3: maps and pins work, programs and BTF load, and nothing
   runs yet (#224).
-- **Mount namespaces** are per-process entries of the path map (bind,
-  tmpfs, move, `umount2`); init's own binds are entries every later process
-  gets. There is no propagation between processes.
+- **Mount namespaces** retain authenticated per-process owner inventories,
+  stable mount IDs and private/shared/slave propagation. Native init has
+  bootstrap and default owners. Its pinned original per-service selection
+  rules are explicit image data in
+  `image/vendor/etc/aim/init-mount-namespace-policy.conf`, with source provenance;
+  the launcher applies typed namespace choices and retains service selections
+  across restarts (#1228, #1247). Transient helpers inherit the actual current
+  owner; the default becomes ready after its original linkerconfig succeeds.
 - **The pid namespace** is the process table (`by-pid`, which guest-init
   and every fork write): `/proc` and every call that names a process
   (`kill` and its group and `-1` forms, `tgkill`, pidfds, `sched_*`,

@@ -140,7 +140,15 @@ namespace receipts and a 238499-byte full default linkerconfig. The original
 BPF loader exits zero and sets bpf.progs_loaded=1. Original SystemServer then
 dies in HintManagerService after Power HAL discovery returns no SupportInfo
 (#1247); actual HAL addService failures and init namespace selection remain
-under investigation. Boot completion and APK installation are not accepted.
+under investigation. The original-init prerequisite mismatch is verified:
+ServiceManager was admitted to bootstrap before default readiness, hiding
+active vendor VINTF inputs. Native init now consumes the pinned original
+service policy from explicit image configuration, preserving per-service
+restart choices, typed transient helpers and updatable-service deferral. An
+actual selected-default child reads the unchanged original Power VINTF bytes;
+five focused tests and the full guest-init library pass (33 pass, two controlled
+helpers ignored and exercised by their parents). Corrected HAL registration,
+boot completion and APK installation still require a new image/runtime replay.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The

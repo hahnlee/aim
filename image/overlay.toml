@@ -1054,3 +1054,8 @@ reason = "lmkd kills by PSI and memcg pressure, which Darwin does not report; th
 [[include]]
 source = "target/aim/oat/overlay.toml"
 reason = "oat files compiled for the ART exception's runtime and boot image, whose checksums the originals' code names"
+
+[[add]]
+path = "/vendor/etc/aim/init-mount-namespace-policy.conf"
+source = "image/vendor/etc/aim/init-mount-namespace-policy.conf"
+reason = "pinned original init per-service namespace selection as explicit native-init image policy; original services and rc files remain unchanged"

@@ -39,6 +39,7 @@ pub mod props;
 pub mod propsvc;
 pub mod sku;
 pub mod supervisor;
+pub mod service_namespace;
 pub mod unixsock;
 
 pub use boot::{Boot, BootOptions, BootReport, RunMode};

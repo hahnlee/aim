@@ -56,6 +56,8 @@ pub struct FileSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub service: String,
+    pub origin: crate::service_namespace::LaunchOrigin,
+    pub mount_namespace: Option<String>,
     /// Starts of this service so far, including this one.
     pub generation: u64,
     /// Guest argv after property expansion; `argv[0]` is the program.
@@ -588,8 +590,7 @@ impl Launcher for HostLauncher {
                 let process=aim_storage::process_namespace::ProcessIdentity::running(pid as i32).map_err(|error|error.to_string())?;
                 let table=self.layout.identity_dir().join("by-pid");
                 let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
-                let current=aim_storage::process_namespace::mount_namespace_of(&table,init.process).map_err(|error|error.to_string())?;
-                aim_storage::process_namespace::register_mount_namespace(&table,process,&current).map_err(|error|error.to_string())?;
+                crate::service_namespace::admit(&self.layout.runtime,process,spec.mount_namespace.as_deref())?;
                 std::os::unix::fs::symlink(&spec.identity_file,table.join(pid.to_string())).map_err(|error|format!("native child identity publication: {error}"))?;
                 let guest_pid=if init.process==process{1}else{process.host_pid};
                 let owner=aim_storage::posix_control::Owner{process,guest_pid};
