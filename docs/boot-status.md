@@ -831,9 +831,16 @@ had already captured a guest-authorized pin but passed its private alias through
 a second guest-FD admission. Socket read/write now borrow that retained pin,
 without publishing private aliases. Two actual scalar/vector/offset-minus-one
 and close/reuse checks pass, including hidden-FD rejection; the full default-
-parallel ABI suite passes 234/0 with thirteen ignored. Actual original
-short/deep property transport and native boot replay still require the rebuilt
-runtime. Full image/CTS acceptance remains pending.
+parallel ABI suite passes 234/0 with thirteen ignored. The rebuilt immutable runtime passes the original, untraced setprop/getprop
+and bionic serial proof at both 81-byte and 280-byte socket paths: real peer
+PID/UID, publication, response and file/guest values/serials agree. The fresh
+long-output native template now advances to the BPF stage but repeatedly
+requests reboot,bpfloader-failed (#1206). The original netbpfload launches
+successfully, then aborts via bionic fdsan when a returned BPF object FD is
+rejected by generic close as EBADF. A bounded original trace verifies OBJ_GET
+returns FD11, no intervening close, then close(11) fails and fdsan reports
+double-close. BPF FD producers lack guest publication; the owning fix and
+actual boot replay remain pending. Full image/CTS acceptance remains pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains
