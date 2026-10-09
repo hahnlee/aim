@@ -153,6 +153,13 @@ fn render(state:&State,args:&[String],capture_permissions:impl FnOnce(&[String])
             if ps.shared_user_app_id.is_none() && ps.app_id>=0 {
                 runtime_permissions(&mut out,"      ",permissions.get(&ps.app_id).ok_or_else(||Exception::new(EX_ILLEGAL_STATE,"package dump live permission owner absent"))?,id,package.is_some())?;
             }
+            for (label, components) in [("disabledComponents", &user.disabled_components),
+                ("enabledComponents", &user.enabled_components)] {
+                if !components.is_empty() {
+                    let _=writeln!(out,"      {label}:");
+                    for component in components { let _=writeln!(out,"        {component}"); }
+                }
+            }
         }
     }
     let shared=selected.iter().filter_map(|ps|ps.shared_user_app_id).collect::<std::collections::BTreeSet<_>>();
@@ -295,6 +302,35 @@ mod tests {
         sdk_versions(&mut text, &setting);
         assert_eq!(text, "    versionCode=41 targetSdk=35\n");
     }
+    #[test]
+    fn component_override_sections_preserve_captured_user_set_order() {
+        let mut state = State::default();
+        state.system.diagnostic_dates = Some(Arc::new(Dates { format: Arc::new(|millis| Ok(millis.to_string())) }));
+        state.packages.insert("p.one".into(), super::super::model::PackageState {
+            name: "p.one".into(), app_id: 10001,
+            users: [(0, super::super::model::PackageUserState {
+                disabled_components: vec!["p.one.BB".into(), "p.one.Aa".into()],
+                enabled_components: vec!["p.one.EnabledB".into(), "p.one.EnabledA".into()],
+                ..Default::default()
+            }), (10, Default::default())].into(), ..Default::default()
+        });
+        let captured = Arc::new(state.clone());
+        state.packages.get_mut("p.one").unwrap().users.get_mut(&0).unwrap().disabled_components.clear();
+        let expected = "      disabledComponents:\n        p.one.BB\n        p.one.Aa\n      enabledComponents:\n        p.one.EnabledB\n        p.one.EnabledA\n";
+        for args in [vec![], vec!["p.one".into()]] {
+            let text = render_fixture(&captured, &args).unwrap();
+            assert!(text.contains(expected));
+            let (_, second_user) = text.split_once("    User 10:").unwrap();
+            assert!(!second_user.contains("disabledComponents:"));
+            assert!(!second_user.contains("enabledComponents:"));
+            assert_eq!(text.matches("disabledComponents:").count(), 1);
+            assert_eq!(text.matches("enabledComponents:").count(), 1);
+        }
+        let latest = render_fixture(&state, &["p.one".into()]).unwrap();
+        assert!(!latest.contains("disabledComponents:"));
+        assert!(render_fixture(&captured, &["p.one".into()]).unwrap().contains(expected));
+    }
+
     #[test]
     fn package_argument_reads_actual_native_package_and_user_state() {
         let mut state=State::default();
