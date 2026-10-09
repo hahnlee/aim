@@ -270,8 +270,12 @@ scanned in28.638 seconds, then a120.059-second non-system initialization
 phase with zero non-system packages. This phase includes installing the
 original compressed TrichromeLibrary, Chrome and WebView system stubs;
 their replacements complete before the phase's final timing log. It is
-not evidence of a120-second empty-directory scan or timeout. The remaining
-boot delay's cause is not established. Logcat ends with an
+not evidence of a120-second empty-directory scan or timeout. The retained
+log continues into original first-boot dexopt:133 packages requested,
+56 skipped and16 performed results recorded before the final Chrome
+ART work. Dexopt completion is not recorded; the log's last entry is
+artd opening Chrome output files, after UpdatePackagesIfNeeded.
+The remaining boot delay's cause is not established. Logcat ends with an
 unexpected-EOF diagnostic, so the partial log does not prove absence of later
 fatal errors. All owned processes and mounts are cleaned; original template
 publication and parity remain unverified. The pinned stub-output
