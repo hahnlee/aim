@@ -307,8 +307,7 @@ fn write(
             ctx.command.eprintln("Error: must specify an APK size");
             return Ok(1);
         }
-        let fd =
-            aim_binder_host::server::file_from_fd(file.as_fd()).ok_or_else(|| wire(BAD_VALUE))?;
+        let fd = file.into_file_owner();
         let mut p = Parcel::new();
         session::Write {
             name: Some(name),
@@ -1010,4 +1009,78 @@ pub fn run(ctx: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         _ => unreachable!(),
     };
     Ok(Some(result))
+}
+
+#[cfg(test)]
+mod retained_install_file_tests {
+    use super::*;
+    use aim_binder_host::{local::LocalProcess, server, wire::RegularMetadata};
+    use std::{fs::OpenOptions, io::{Read, Seek, SeekFrom, Write}, os::fd::AsRawFd, sync::Weak};
+    struct Incoming(u32);
+    impl ReadParcelable for Incoming {
+        fn read_from(reader: &mut Reader<'_>) -> aim_binder_host::parcel::Result<Self> {
+            if reader.read_i32()? != 0 { return Err(BAD_VALUE); }
+            Ok(Self(reader.read_fd()?))
+        }
+    }
+    struct SessionLeaf(Weak<LocalProcess>);
+    impl Service for SessionLeaf {
+        fn descriptor(&self) -> &str { session::DESCRIPTOR }
+        fn accepts_fds(&self) -> bool { true }
+        fn transact(&self, call: &mut Call<'_>) -> aim_binder_host::local::Reply {
+            assert_eq!(call.code, session::WRITE);
+            let input = session::Write::<Incoming>::read(&mut call.data)?;
+            assert_eq!(call.data.remaining(), 0);
+            let process = self.0.upgrade().unwrap();
+            let file = process.file(input.fd.unwrap().0).unwrap();
+            assert_eq!(server::file_class(&file), Some(aim_binder_host::regular_file::CLASS));
+            let retained = server::file_fd(&file).unwrap();
+            // Production sizes the actual APK before consuming its retained owner.
+            assert_eq!(retained.metadata().unwrap().len() as i64, input.length_bytes);
+            let mut reply = Parcel::new();
+            reply.write_file(retained.into_file_owner());
+            Ok(reply)
+        }
+    }
+    #[test]
+    fn real_install_leaf_reexport_retains_regular_identity_and_writer() {
+        let root=std::env::temp_dir().join(format!("aim-install-retained-file-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let mut source=OpenOptions::new().read(true).write(true).create_new(true).open(root.join("apk")).unwrap();
+        source.write_all(b"real transfer payload").unwrap();
+        let writer=OpenOptions::new().read(true).write(true).create_new(true).open(root.join("writer")).unwrap();
+        let contender=OpenOptions::new().read(true).write(true).open(root.join("writer")).unwrap();
+        assert_eq!(unsafe {libc::flock(writer.as_raw_fd(),libc::LOCK_SH)},0);
+        let metadata=RegularMetadata { flags:2,uid:2000,gid:2000,
+            identity:aim_binder_host::regular_file::identity(source.as_fd()).unwrap(), writer:true };
+        let original=server::regular_file_from_fd(source.as_fd(),Some(writer.as_fd()),metadata).unwrap();
+        let retained=server::file_fd(&original).unwrap();
+        assert_eq!(retained.metadata().unwrap().len(), b"real transfer payload".len() as u64);
+        let downgraded=server::file_from_fd(retained.as_fd()).unwrap();
+        assert_ne!(server::file_class(&downgraded),Some(aim_binder_host::regular_file::CLASS));
+        drop(downgraded);
+        let mut request=Parcel::new();
+        session::Write { name:Some("base.apk".into()),offset_bytes:0,length_bytes:b"real transfer payload".len() as i64,
+            fd:Some(Fd(retained.into_file_owner())) }.write(&mut request);
+        let driver=aim_binder_driver::Driver::new();
+        let process=LocalProcess::open(&driver,aim_binder_driver::Device::Binder,
+            aim_binder_driver::Credentials{pid:194123,euid:1000,security_context:None});
+        let Binder::Local(ptr)=process.add_service(Arc::new(SessionLeaf(Arc::downgrade(&process)))) else {panic!("local session")};
+        let reply=process.local_service(ptr).unwrap().transact(session::WRITE,&request,false).unwrap();
+        let file=process.file(reply.reader().read_fd().unwrap()).unwrap();
+        assert_eq!(server::file_class(&file),Some(aim_binder_host::regular_file::CLASS));
+        // The exact allocation capability carries its metadata and writer receipt.
+        assert!(Arc::ptr_eq(&file,&original));
+        let mut held=server::file_fd(&file).unwrap();
+        assert_eq!(aim_binder_host::regular_file::identity(held.as_fd()).unwrap(),aim_binder_host::regular_file::identity(source.as_fd()).unwrap());
+        drop(reply);drop(request);drop(original);drop(source);drop(writer);drop(file);
+        held.seek(SeekFrom::Start(0)).unwrap();let mut actual=Vec::new();held.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual,b"real transfer payload");
+        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},-1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));
+        drop(held);
+        assert_eq!(unsafe {libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
+        drop(contender);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

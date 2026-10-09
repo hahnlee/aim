@@ -94,6 +94,11 @@ options to the retained original UserManager, preserving actual caller and PFDs
 (#1238). Four focused dispatch/transport/caller tests and complete Java/AIDL,
 D8 and original API linkage pass; real user creation/removal and the relevant
 AppOps CTS setup remain NOT RUN.
+Shell install now passes the retained incoming APK file owner directly after
+actual sizing (#1239), preserving allocation metadata and writer lifetime
+through the generated session WRITE transaction. One actual Binder leaf
+regression passes; the frozen Attribution setup failure has no stderr/session
+receipt proving this cause, and actual corrected installation remains NOT RUN.
 Instant caller query resolution now applies the original post-filter rather than
 throwing for every instant result (#725): retain its own package or visible
 non-instant activities, after existing web/split handling, with actual UID/user
