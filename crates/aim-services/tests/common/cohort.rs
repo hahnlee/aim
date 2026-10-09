@@ -52,7 +52,7 @@ const IMAGE_FILES: [(&str, &str); 4] = [
     ("native_services", "system/etc/aim/native-services"),
     ("namespace_policy", "vendor/etc/aim/init-mount-namespace-policy.conf"),
 ];
-const TOOLS: [&str; 8] = ["aimctl", "java", "javac", "aidl", "d8", "aapt2", "apksigner", "ndk_clang35"];
+const TOOLS: [&str; 9] = ["aimctl", "aim-apps", "java", "javac", "aidl", "d8", "aapt2", "apksigner", "ndk_clang35"];
 fn digest_valid(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 fn sha(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -140,6 +140,12 @@ impl Cohort {
                 if runtime[name].path.parent() != Some(parent) || runtime[name].path.file_name().and_then(|n|n.to_str()) != Some(name) { return Err("mixed runtime sibling cohort".into()); }
             }
             for name in TOOLS { track(&mut bindings,tools.get(name).ok_or_else(|| format!("missing tool {name}"))?)?; }
+            let ctl = &tools["aimctl"].path; let apps = &tools["aim-apps"].path;
+            if ctl.parent() != apps.parent()
+                || fs::canonicalize(ctl).map_err(|e|e.to_string())?.parent() != fs::canonicalize(apps).map_err(|e|e.to_string())?.parent()
+                || apps.file_name().and_then(|name|name.to_str()) != Some("aim-apps") {
+                return Err("controller window helper is not the pinned aimctl sibling".into());
+            }
             let mut images = BTreeMap::new();
             for variant in [Variant::Original, Variant::Native] {
                 let root = roots.remove(&variant).ok_or("missing image variant")?;
@@ -249,6 +255,12 @@ mod tests {
         assert!(fixture.read().unwrap_err().contains("mixed runtime sibling"));
         let mut fixture = Fixture::new(); fixture.text = fixture.text.lines().filter(|l|!l.starts_with("tool\taidl\t")).collect::<Vec<_>>().join("\n");
         assert!(fixture.read().unwrap_err().contains("missing tool aidl"));
+        let mut fixture = Fixture::new();
+        let old = fixture.root.join("tools/aim-apps");
+        let new = fixture.root.join("other-tools/aim-apps");
+        fs::create_dir_all(new.parent().unwrap()).unwrap(); fs::copy(&old,&new).unwrap();
+        fixture.text = fixture.text.replace(old.to_str().unwrap(),new.to_str().unwrap());
+        assert!(fixture.read().unwrap_err().contains("pinned aimctl sibling"));
         let fixture = Fixture::new(); let path = fixture.root.join("inputs"); fs::write(&path,&fixture.text).unwrap();
         assert!(Cohort::read(&path,&fixture.root,&"2".repeat(40)).unwrap_err().contains("workspace root/head"));
     }

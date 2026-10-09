@@ -39,36 +39,25 @@ impl Boot {
     }
     /// Start a client with the Linux credentials its original daemon requires.
     pub fn client(&self, uid: u32) -> Command {
-        let state = fs::read_to_string(PathBuf::from(format!(
-            "{}.aimctl/state",
-            self.data.display()
-        )))
-        .unwrap();
-        let guest: u32 = state
-            .lines()
-            .find_map(|line| line.strip_prefix("guest="))
-            .unwrap()
-            .parse()
-            .unwrap();
+        self.checked_client(uid).expect("NOT RUN: authenticated original client unavailable")
+    }
+    pub fn checked_client(&self, uid: u32) -> Result<Command,String> {
+        let state = fs::read_to_string(PathBuf::from(format!("{}.aimctl/state",self.data.display())))
+            .map_err(|e|format!("original boot state: {e}"))?;
+        let guest: u32 = state.lines().find_map(|line|line.strip_prefix("guest="))
+            .ok_or("original guest PID unavailable")?.parse().map_err(|e|format!("original guest PID: {e}"))?;
         let runtime = PathBuf::from(format!("{}.run", self.data.display()));
-        let environ = fs::read_to_string(runtime.join("environ")).unwrap();
-        let inputs = self.inputs();
-        inputs.revalidate(false).expect("NOT RUN: pinned cohort binding changed");
+        let environ = fs::read_to_string(runtime.join("environ")).map_err(|e|format!("original environment: {e}"))?;
+        let inputs = self.inputs.get().ok_or("original boot has no retained input owner")?;
+        inputs.revalidate(false)?;
         let mut command = Command::new(&inputs.runtime["linux-run"].path);
-        command
-            .env_clear()
-            .envs(environ.lines().filter_map(|line| line.split_once('=')))
-            .arg("--inherit-env")
-            .arg("--root")
-            .arg(inputs.image(cohort::Variant::Original))
-            .arg("--mount-namespace-from-init")
-            .arg("--path-map")
-            .arg(runtime.join("path-map"))
-            .arg("--by-pid")
-            .arg(runtime.join("identity/by-pid"))
-            .args(["--binder", &format!("dev.aim.guest-init.{guest}.binder")])
-            .args(["--identity-text", &format!("uid\t{uid}\ngid\t{uid}\n")]);
-        command
+        command.env_clear().envs(environ.lines().filter_map(|line|line.split_once('=')))
+            .arg("--inherit-env").arg("--root").arg(inputs.image(cohort::Variant::Original))
+            .arg("--mount-namespace-from-init").arg("--path-map").arg(runtime.join("path-map"))
+            .arg("--by-pid").arg(runtime.join("identity/by-pid"))
+            .args(["--binder",&format!("dev.aim.guest-init.{guest}.binder")])
+            .args(["--identity-text",&format!("uid\t{uid}\ngid\t{uid}\n")]);
+        Ok(command)
     }
     pub fn start_command(&self) -> Command {
         let inputs = self.inputs();

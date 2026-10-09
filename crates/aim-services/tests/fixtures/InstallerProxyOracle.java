@@ -61,6 +61,14 @@ public final class InstallerProxyOracle {
     }
     public static void main(String[] args) {
         try {
+            if (args.length == 4 && "permission-check".equals(args[0])) {
+                var activity = android.app.ActivityManager.getService();
+                if (activity == null) throw new IllegalStateException("original activity permission owner unavailable");
+                int status = activity.checkPermission(args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]));
+                if (status != 0 && status != -1) throw new IllegalStateException("invalid original permission status " + status);
+                System.out.println("PERMISSION_RESULT " + status);
+                return;
+            }
             String installerDescriptor = "android.content.pm.IPackageInstaller";
             String sessionDescriptor = "android.content.pm.IPackageInstallerSession";
             IBinder installer = com.android.internal.os.BinderInternal.getContextObject();

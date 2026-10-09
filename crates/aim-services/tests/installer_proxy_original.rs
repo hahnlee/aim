@@ -91,13 +91,58 @@ fn original_client(command: &mut Command) -> std::process::Output {
     }
     guard.0.take().unwrap().wait_with_output().unwrap()
 }
-#[test]
-#[ignore = "requires rebuilt wire-v2 runtime, pinned image, aimctl, JDK and d8; explicit true-mode test owner"]
-fn original_art_consumes_native_installer_proxy_capability() {
-    let directory = std::env::temp_dir().join(format!("aim-proxy-original-{}", std::process::id()));
-    fs::create_dir(&directory).unwrap();
-    let data = Data(directory);
-    let repo = aim_paths::root();
+fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
+    -> Result<bool, aim_binder_host::parcel::Exception> {
+    use aim_binder_host::parcel::{Exception, EX_ILLEGAL_STATE};
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let failure = |message: String| Exception::new(EX_ILLEGAL_STATE,message);
+    let mut command = boot.checked_client(1000).map_err(failure)?;
+    command.args(["/system/bin/app_process", "-Djava.class.path=/data/local/tmp/proxy-oracle.dex",
+        "/system/bin", "InstallerProxyOracle", "permission-check", permission,
+        &pid.to_string(), &uid.to_string()]);
+    let ticket = NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+    let stdout = boot.data.parent().ok_or_else(||failure("permission output parent missing".into()))?
+        .join(format!("permission-{ticket}.stdout"));
+    let stderr = stdout.with_extension("stderr");
+    let out = fs::File::create(&stdout).map_err(|e|failure(e.to_string()))?;
+    let err = fs::File::create(&stderr).map_err(|e|failure(e.to_string()))?;
+    let child = command.stdin(Stdio::null()).stdout(out).stderr(err).spawn()
+        .map_err(|e|failure(format!("original permission spawn: {e}")))?;
+    let mut guard = ClientGuard(Some(child)); let actual_pid = guard.0.as_ref().unwrap().id();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut timed_out = false;
+    let status = loop {
+        match guard.0.as_mut().unwrap().try_wait().map_err(|e|failure(e.to_string()))? {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            None => {
+                timed_out = true;
+                unsafe { libc::kill(actual_pid as i32,libc::SIGTERM) };
+                let grace = Instant::now() + Duration::from_secs(1);
+                let terminal = loop {
+                    if let Some(status) = guard.0.as_mut().unwrap().try_wait().map_err(|e|failure(e.to_string()))? { break status; }
+                    if Instant::now() >= grace { guard.0.as_mut().unwrap().kill().map_err(|e|failure(e.to_string()))?; break guard.0.as_mut().unwrap().wait().map_err(|e|failure(e.to_string()))?; }
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                break terminal;
+            }
+        }
+    };
+    if let Some(mut child)=guard.0.take(){child.wait().map_err(|e|failure(e.to_string()))?;}
+    let read = |path: &std::path::Path| -> Result<String,Exception> {
+        if fs::metadata(path).map_err(|e|failure(e.to_string()))?.len()>65536 {return Err(failure("original permission output exceeds64KiB".into()));}
+        fs::read_to_string(path).map_err(|e|failure(e.to_string()))
+    };
+    let out = read(&stdout)?; let err = read(&stderr)?;
+    if timed_out || !status.success() {return Err(failure(format!("original permission pid{actual_pid} status{status} timeout={timed_out}; stdout:{out}; stderr:{err}")));}
+    if !err.is_empty(){return Err(failure(format!("original permission unexpected stderr:{err}")));}
+    match out.as_str() {
+        "PERMISSION_RESULT 0\n" => Ok(true), "PERMISSION_RESULT -1\n" => Ok(false),
+        _ => Err(failure(format!("original permission reply malformed:{out}"))),
+    }
+}
+
+fn compile_oracle(data: &Data, repo: &std::path::Path) -> std::path::PathBuf {
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
     let classes = data.0.join("classes");
@@ -113,6 +158,10 @@ fn original_art_consumes_native_installer_proxy_capability() {
             &repo.join("java/device-services/stubs"),
         )));
     let api = data.0.join("api/android");
+    let app_api = api.join("app");
+    fs::create_dir_all(&app_api).unwrap();
+    fs::write(app_api.join("ActivityManager.java"), "package android.app; public class ActivityManager { public static IActivityManager getService() { throw new RuntimeException(\"compile-only\"); } }").unwrap();
+    fs::write(app_api.join("IActivityManager.java"), "package android.app; public interface IActivityManager { int checkPermission(String permission,int pid,int uid) throws android.os.RemoteException; }").unwrap();
     fs::create_dir_all(api.join("os")).unwrap();
     fs::create_dir_all(api.join("system")).unwrap();
     fs::create_dir_all(api.join("content/pm")).unwrap();
@@ -120,8 +169,17 @@ fn original_art_consumes_native_installer_proxy_capability() {
     let internal = data.0.join("api/com/android/internal/os");
     fs::create_dir_all(&internal).unwrap();
     fs::write(internal.join("BinderInternal.java"), "package com.android.internal.os; public final class BinderInternal { public static android.os.IBinder getContextObject() { throw new RuntimeException(); } }").unwrap();
-    let pfd = fs::read_to_string(repo.join("java/device-services/stubs/android/os/ParcelFileDescriptor.java")).unwrap().replace("    public static class AutoCloseInputStream", "    public static class AutoCloseOutputStream extends java.io.FileOutputStream { public AutoCloseOutputStream(ParcelFileDescriptor fd) { super(fd.getFileDescriptor()); } }\n    public static class AutoCloseInputStream");
-    let pfd = pfd.replace("    public FileDescriptor getFileDescriptor()", "    public int getFd() { throw new RuntimeException(); }\n    public int detachFd() { throw new RuntimeException(); }\n    public static ParcelFileDescriptor adoptFd(int fd) { throw new RuntimeException(); }\n    public FileDescriptor getFileDescriptor()");
+    let mut pfd = fs::read_to_string(repo.join("java/device-services/stubs/android/os/ParcelFileDescriptor.java")).unwrap();
+    if !pfd.contains("class AutoCloseOutputStream") {
+        pfd = pfd.replace("    public static class AutoCloseInputStream", "    public static class AutoCloseOutputStream extends java.io.FileOutputStream { public AutoCloseOutputStream(ParcelFileDescriptor fd) { super(fd.getFileDescriptor()); } }\n    public static class AutoCloseInputStream");
+    }
+    for (signature, declaration) in [
+        ("int getFd()", "    public int getFd() { throw new RuntimeException(); }\n"),
+        ("int detachFd()", "    public int detachFd() { throw new RuntimeException(); }\n"),
+        ("ParcelFileDescriptor adoptFd(", "    public static ParcelFileDescriptor adoptFd(int fd) { throw new RuntimeException(); }\n"),
+    ] {
+        if !pfd.contains(signature) { pfd = pfd.replace("    public FileDescriptor getFileDescriptor()", &format!("{declaration}    public FileDescriptor getFileDescriptor()")); }
+    }
     fs::write(api.join("os/ParcelFileDescriptor.java"), pfd).unwrap();
     fs::write(
         api.join("system/StructStat.java"),
@@ -164,8 +222,34 @@ fn original_art_consumes_native_installer_proxy_capability() {
                 .unwrap()
                 .map(|entry| entry.unwrap().path()),
         ));
+    dex
+}
+
+#[test]
+#[ignore = "host-only: requires pinned original image, JDK and d8"]
+fn permission_oracle_compiles_and_links_against_original_framework() {
+    use aim_android_image::{classpath::{self, BOOTCLASSPATH}, linkage::ClassPath};
+    let directory = std::env::temp_dir().join(format!("aim-permission-link-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let data = Data(directory);
+    let dex = compile_oracle(&data, &aim_paths::root());
+    let image = aim_paths::original_image();
+    let jars = classpath::jars(&image,"bootclasspath.pb",BOOTCLASSPATH).unwrap();
+    let bytes = fs::read(dex.join("classes.dex")).unwrap();
+    let missing = ClassPath::read(&image,&jars).unwrap().unresolved(&bytes).unwrap();
+    assert!(missing.is_empty(), "original framework linkage: {missing:?}");
+}
+
+#[test]
+#[ignore = "requires rebuilt wire-v2 runtime, pinned image, aimctl, JDK and d8; explicit true-mode test owner"]
+fn original_art_consumes_native_installer_proxy_capability() {
+    let directory = std::env::temp_dir().join(format!("aim-proxy-original-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let data = Data(directory);
+    let repo = aim_paths::root();
+    let dex = compile_oracle(&data, &repo);
     common::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
-    let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Arc::new(Boot::new(repo.join("target/release/aimctl"), data.0.join("guest")));
     run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
@@ -267,13 +351,21 @@ fn original_art_consumes_native_installer_proxy_capability() {
     )
     .unwrap();
     let publisher = process.clone();
+    let permission_boot = boot.clone();
     let owners = NativeOwners::open(
         sessions.clone(),
         Arc::new(move || Ok(state.clone())),
-        Arc::new(|_, _, _| {
+        Arc::new(move |caller_uid, caller_pid, _user| {
+            let retained = permission_boot.clone();
             Ok(DevicePolicy {
-                permissions: aim_services::package::installer::policy::CallingPermissions::new(Arc::new(|_, _, _| {
-                    Err(aim_binder_host::parcel::Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, "fixture requires its original permission owner"))
+                permissions: aim_services::package::installer::policy::CallingPermissions::new(Arc::new(move |permission, pid, uid| {
+                    let pid = if pid == 0 {
+                        if caller_pid <= 0 || uid != caller_uid as i32 {
+                            return Err(aim_binder_host::parcel::Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"authenticated caller PID unavailable"));
+                        }
+                        caller_pid
+                    } else { pid };
+                    original_permission(&retained, permission, pid, uid)
                 })),
                 debuggable: false,
                 apex_supported: false,
