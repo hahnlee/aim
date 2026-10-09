@@ -1,4 +1,4 @@
-//! Settings runtime maps projected from the current permission producer.
+//! Settings compatibility runtime maps projected from retained SettingBase owners.
 //! Ported from Android 16 Settings, Copyright (C) The Android Open Source
 //! Project, Apache License 2.0.
 use super::Bridge;
@@ -8,9 +8,11 @@ use crate::package::{
 };
 
 impl Bridge {
-    /// Version/fingerprint belong to the persistence owner. Live permission
-    /// appId states are fetched here, never substituted with saved migration
-    /// records. UID-less settings retain their scoped SettingBase state instead.
+    /// Android 16 Settings.RuntimePermissionPersistence reads the SettingBase
+    /// legacy maps after writeLegacyPermissionStateTEMP. PermissionService's
+    /// TEMP method is a no-op; its computed modern getter is not this file's
+    /// persistence owner. Live grants/GIDs continue through the separate exporter.
+    /// Version/fingerprint remain supplied by the runtime metadata owner.
     pub fn runtime_permissions(
         &self,
         capture: &Capture,
@@ -22,23 +24,6 @@ impl Bridge {
         if user < 0 || !model.users.contains_key(&user) {
             return Err("runtime permission user is outside the captured inventory".into());
         }
-        let current = |app_id| -> Result<Vec<RuntimePermission>, String> {
-            let state = self
-                .legacy_permissions(app_id, &[user])
-                .map_err(|error| format!("live runtime permission owner: {error:?}"))?;
-            let state = state
-                .user(user)
-                .ok_or("missing live runtime permission user")?;
-            Ok(state
-                .permissions
-                .iter()
-                .map(|p| RuntimePermission {
-                    name: p.name.clone(),
-                    granted: p.granted,
-                    flags: p.flags,
-                })
-                .collect())
-        };
         let mut packages: Vec<_> = capture.scan().owner().settings.packages.iter().collect();
         packages.sort_by_key(|p| crate::package::info::java_hash(&p.name));
         let mut output = RuntimePermissions {
@@ -54,57 +39,149 @@ impl Bridge {
             if ps.shared_user.is_some() {
                 continue;
             }
-            let permissions = setting_permissions(ps.app_id,user,||{
-                capture.scan().owner().validated_legacy_permissions(&ps.name,false)?
-                    .ok_or_else(||format!("missing UID-less SettingBase permission owner: {}",ps.name))
-            },&current)?;
-            if !permissions.is_empty() || ps.is.install_permissions_fixed {
-                output.packages.push((Some(ps.name.clone()), permissions));
-            }
+            let state = capture
+                .scan()
+                .owner()
+                .validated_legacy_permissions(&ps.name, false)?
+                .ok_or_else(|| {
+                    format!(
+                        "missing persisted SettingBase permission owner: {}",
+                        ps.name
+                    )
+                })?;
+            let permissions = persisted_permissions(&state, ps.app_id, user)?;
+            append_package(
+                &mut output,
+                &ps.name,
+                ps.is.install_permissions_fixed,
+                permissions,
+            );
         }
         let mut groups: Vec<_> = model.shared_users.values().collect();
         groups.sort_by_key(|g| crate::package::info::java_hash(&g.name));
         for group in groups {
-            output
-                .shared_users
-                .push((Some(group.name.clone()), current(group.app_id)?));
+            output.shared_users.push((
+                Some(group.name.clone()),
+                persisted_permissions(
+                    &capture
+                        .scan()
+                        .owner()
+                        .shared_legacy_permissions(&group.name)?
+                        .ok_or_else(|| {
+                            format!("missing persisted shared permission owner: {}", group.name)
+                        })?,
+                    group.app_id,
+                    user,
+                )?,
+            ));
         }
         Ok(output)
     }
 }
 
-/// Settings.RuntimePermissionPersistence reads each SettingBase's own legacy
-/// map. Process.INVALID_UID settings (APEX containers and UID-less SDK libraries)
-/// have no live PermissionService appId slot. Their detached constructor/scan
-/// owner remains authoritative; regular/system UIDs always use the live service.
-fn setting_permissions(
-    app_id:i32,user:i32,detached:impl FnOnce()->Result<crate::package::owner::legacy_permissions::State,String>,
-    live:&impl Fn(i32)->Result<Vec<RuntimePermission>,String>,
-)->Result<Vec<RuntimePermission>,String>{
-    if app_id!=-1{return live(app_id);}
-    let state=detached()?;
-    if state.app_id()!=app_id{return Err("UID-less permission SettingBase identity differs".into());}
-    let state=state.user(user).ok_or("UID-less permission user is not captured")?;
-    Ok(state.permissions.iter().map(|permission|RuntimePermission{name:permission.name.clone(),granted:permission.granted,flags:permission.flags}).collect())
+fn append_package(
+    output: &mut RuntimePermissions,
+    name: &str,
+    fixed: bool,
+    permissions: Vec<RuntimePermission>,
+) {
+    if !permissions.is_empty() || fixed {
+        output.packages.push((Some(name.into()), permissions));
+    }
+}
+
+fn persisted_permissions(
+    state: &crate::package::owner::legacy_permissions::State,
+    app_id: i32,
+    user: i32,
+) -> Result<Vec<RuntimePermission>, String> {
+    if state.app_id() != app_id {
+        return Err("persisted permission SettingBase identity differs".into());
+    }
+    let state = state
+        .user(user)
+        .ok_or("persisted permission user is not captured")?;
+    Ok(state
+        .permissions
+        .iter()
+        .map(|permission| RuntimePermission {
+            name: permission.name.clone(),
+            granted: permission.granted,
+            flags: permission.flags,
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::package::owner::legacy_permissions::Migration;
+    use crate::package::owner::legacy_permissions::{Migration, Permission};
     #[test]
-    fn uidless_runtime_projection_uses_scoped_setting_and_keeps_live_uid_boundary(){
-        let detached=Migration::default().project(-1,&[0]).unwrap();
-        let values=setting_permissions(-1,0,||Ok(detached),&|_|panic!("UID-less setting must not query live application permission slot")).unwrap();
-        assert!(values.is_empty());
-        for app_id in [1000,10100]{
-            let values=setting_permissions(app_id,0,||panic!("positive UID must not substitute saved SettingBase state"),&|called|{
-                assert_eq!(called,app_id);Ok(vec![RuntimePermission{name:Some("fixture.live".into()),granted:true,flags:3}])
-            }).unwrap();
-            assert_eq!(values[0].name.as_deref(),Some("fixture.live"));assert_eq!(values[0].flags,3);
+    fn fresh_runtime_xml_omits_empty_packages_and_keeps_shared_owners_and_metadata() {
+        let fingerprint = "fixture.partition?pc_version=330000000";
+        let mut output = RuntimePermissions {
+            version: 7,
+            fingerprint: Some(fingerprint.into()),
+            packages: Vec::new(),
+            shared_users: Vec::new(),
+        };
+        let fresh = Migration::default().project(10100, &[0]).unwrap();
+        append_package(
+            &mut output,
+            "fresh",
+            false,
+            persisted_permissions(&fresh, 10100, 0).unwrap(),
+        );
+        append_package(
+            &mut output,
+            "fixed",
+            true,
+            persisted_permissions(&fresh, 10100, 0).unwrap(),
+        );
+        let shared = Migration::default().project(1000, &[0]).unwrap();
+        output.shared_users.push((
+            Some("shared".into()),
+            persisted_permissions(&shared, 1000, 0).unwrap(),
+        ));
+        let bytes = output.serialize().unwrap();
+        let root = aim_android_xml::read(&bytes).unwrap();
+        let parsed = RuntimePermissions::parse(&root).unwrap();
+        assert_eq!(parsed, output);
+        assert_eq!(parsed.version, 7);
+        assert_eq!(parsed.fingerprint.as_deref(), Some(fingerprint));
+        assert_eq!(parsed.packages.len(), 1);
+        assert_eq!(parsed.packages[0].0.as_deref(), Some("fixed"));
+        assert_eq!(parsed.shared_users.len(), 1);
+        assert!(parsed.shared_users[0].1.is_empty());
+    }
+    #[test]
+    fn persisted_runtime_rows_retain_restored_state_without_modern_receipts() {
+        for app_id in [-1, 1000, 10100] {
+            let mut saved = Migration::default();
+            saved
+                .put(
+                    0,
+                    Permission {
+                        name: Some("saved.permission".into()),
+                        runtime: true,
+                        granted: true,
+                        flags: 0x23,
+                    },
+                )
+                .unwrap();
+            let state = saved.project(app_id, &[0, 10]).unwrap();
+            let rows = persisted_permissions(&state, app_id, 0).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].name.as_deref(), Some("saved.permission"));
+            assert!(rows[0].granted);
+            assert_eq!(rows[0].flags, 0x23);
+            assert!(persisted_permissions(&state, app_id, 10)
+                .unwrap()
+                .is_empty());
+            assert!(persisted_permissions(&state, app_id, 11).is_err());
+            assert!(persisted_permissions(&state, 10101, 0).is_err());
+            let fresh = Migration::default().project(app_id, &[0]).unwrap();
+            assert!(persisted_permissions(&fresh, app_id, 0).unwrap().is_empty());
         }
-        assert!(setting_permissions(10100,0,||panic!("live failure must not use saved state"),&|_|Err("live owner failed".into())).is_err());
-        assert!(setting_permissions(-1,10,||Ok(Migration::default().project(-1,&[0]).unwrap()),&|_|panic!("no live UID-less fallback")).is_err());
-        assert!(setting_permissions(-1,0,||Ok(Migration::default().project(10100,&[0]).unwrap()),&|_|panic!("identity mismatch must fail")).is_err());
     }
 }
