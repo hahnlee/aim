@@ -82,10 +82,8 @@ impl Drop for EventFd {
 }
 
 fn close_peer(peer: &AtomicI32) {
-    let fd = peer.load(Ordering::Relaxed);
-    fdtab::unhide(fd);
-    // SAFETY: the hidden peer end is ours.
-    unsafe { libc::close(fd) };
+    let fd=peer.swap(-1,Ordering::Relaxed);
+    if fd>=0{if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("event private peer close: errno {error}");}}
 }
 
 impl EventFd {
@@ -265,7 +263,7 @@ fn poke() {
 
 /// Fork: an eventfd is its hidden peer (inherited) and its mode.
 pub(super) fn save_event(e: &EventFd, w: &mut super::fork_state::Writer) {
-    w.i32(e.peer.load(Ordering::Relaxed));
+    let peer=e.peer.load(Ordering::Relaxed);w.retain_private(peer);w.i32(peer);
     w.bool(e.semaphore);
 }
 
@@ -281,7 +279,7 @@ pub(super) fn load_event(r: &mut super::fork_state::Reader) -> Arc<EventFd> {
 /// Fork: a timerfd is its hidden peer and its settings (Linux children
 /// share the timer with the parent; here each process has a copy).
 pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
-    w.i32(t.peer.load(Ordering::Relaxed));
+    let peer=t.peer.load(Ordering::Relaxed);w.retain_private(peer);w.i32(peer);
     w.u32(t.base.index());
     let s = t.state.lock().unwrap();
     w.u64(s.next);

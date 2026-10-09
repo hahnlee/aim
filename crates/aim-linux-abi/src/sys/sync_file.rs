@@ -184,14 +184,14 @@ fn file_info(fd: i32, arg: u64) -> i64 {
 /// The fds this process keeps for its pending fences, which a fork child
 /// inherits.
 pub(super) fn fork_save(w: &mut Writer) {
-    w.seq(aim_sync_file::inherited().into_iter(), |w, fd| w.i32(fd));
+    w.seq(aim_sync_file::inherited().into_iter(), |w, fd| {w.retain_private(fd);w.i32(fd)});
 }
 
 /// A fork child closes the parent's pending-fence fds: the parent signals
 /// those fences.
 pub(super) fn fork_restore(r: &mut Reader) {
     init();
-    aim_sync_file::close_inherited(&r.seq(|r| r.i32()));
+    for fd in r.seq(|r|r.i32()){if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("fork sync private close: errno {error}");r.invalidate();return;}}
 }
 
 #[cfg(test)]

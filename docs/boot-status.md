@@ -917,7 +917,19 @@ to the delivered original Java dexopt callback; sampled native PM delivery is
 sub-millisecond rather than a saturated native queue. This does not establish
 idle GMS stability, functional Settings checks, comparative performance,
 matched CTS or template acceptance. Both owned diagnostic boots and displays
-terminate and are reaped normally. Original Perfetto traced_probes
+terminate and are reaped normally. Fork inheritance now captures only canonical
+guest descriptors and explicit private owner receipts instead of enumerating
+every host descriptor. Spawn aliases stay below Darwin OPEN_MAX; high private
+targets are restored before runtime allocation, with fallible actions and
+rollback. Event/timer/inotify, ptrace, sync-fence and vfork private endpoints
+retain their actual owners; closing them clears visibility before slot reuse.
+An inotify watch now owns and closes its watch/entry descriptors on Drop.
+Two actual spawned-child tests verify private high-slot IO, guest flags/close,
+event/timer/inotify behavior, pending fences, closed-slot reuse and vfork parent
+blocking until real child exec/exit. Both parents verify child completion
+receipts. The coherent default-parallel ABI suite passes 241/0 with fifteen
+ignored, including two controlled helpers executed by their parent tests.
+The rebuilt runtime and full matched acceptance remain pending. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.

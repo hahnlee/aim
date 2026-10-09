@@ -66,7 +66,6 @@ const VM_FLAGS_ANYWHERE: i32 = 1;
 const VM_FLAGS_OVERWRITE: i32 = 0x4000;
 const VM_INHERIT_SHARE: u32 = 0;
 const VM_INHERIT_COPY: u32 = 1;
-const PROX_FDTYPE_KQUEUE: u32 = 5;
 
 /// The id of the child's request message.
 const HELLO:i32=0x666f_726b;
@@ -486,51 +485,14 @@ fn map_jit(start: u64, len: u64, src: Option<Port>) -> Result<(), String> {
 
 // ---- descriptors --------------------------------------------------------------------
 
-/// A fork lists every open fd and passes it to the child, including one a
-/// host thread of the layer has open for a moment. A child given a
-/// description that holds a `flock` (netif's state file) would hold the
-/// lock for its life, so a thread holds this while it has such an fd open,
-/// and a fork waits for it.
+/// Native operations may hold process-owned lock descriptions while a fork
+/// captures its explicit owner receipts. Keep those operations out of that
+/// capture; unrelated host descriptors are never selected for inheritance.
 static OWN_FDS: RwLock<()> = RwLock::new(());
 
 /// Keep forks out while the layer has a locked fd of its own open.
 pub fn own_fds() -> RwLockReadGuard<'static, ()> {
     OWN_FDS.read().unwrap_or_else(|e| e.into_inner())
-}
-
-/// The open fds `posix_spawn` can pass (all but kqueues), with their
-/// close-on-exec flags.
-fn inheritable_fds() -> Vec<(i32, bool)> {
-    // SAFETY: sizing call, then a buffer of that size.
-    let fds: Vec<libc::proc_fdinfo> = unsafe {
-        let pid = libc::getpid();
-        let n = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
-        if n <= 0 {
-            return Vec::new();
-        }
-        let sz = std::mem::size_of::<libc::proc_fdinfo>();
-        let mut v: Vec<libc::proc_fdinfo> = Vec::with_capacity(n as usize / sz + 16);
-        let n = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDLISTFDS,
-            0,
-            v.as_mut_ptr().cast(),
-            (v.capacity() * sz) as i32,
-        );
-        if n <= 0 {
-            return Vec::new();
-        }
-        v.set_len(n as usize / sz);
-        v
-    };
-    fds.iter()
-        .filter(|f| f.proc_fdtype != PROX_FDTYPE_KQUEUE)
-        .filter_map(|f| {
-            // SAFETY: plain fcntl; a closed fd is skipped.
-            let fl = unsafe { libc::fcntl(f.proc_fd, libc::F_GETFD) };
-            (fl >= 0).then_some((f.proc_fd, fl & libc::FD_CLOEXEC != 0))
-        })
-        .collect()
 }
 
 // ---- the parent ---------------------------------------------------------------------
@@ -599,6 +561,7 @@ fn shadow_stack() -> Vec<u8> {
     }
 }
 
+fn save_vfork(w:&mut Writer,pipe:Option<(i32,i32)>){w.opt(pipe,|w,(rd,wr)|{w.retain_private(rd);w.retain_private(wr);w.i32(rd);w.i32(wr)});}
 /// Fork the calling guest thread's process; the child's pid.
 pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Result<i32, i64> {
     let exe = super::super::exec::launch_exe().ok_or(-(libc::ENOEXEC as i64))?;
@@ -607,10 +570,7 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.opt(setup.tls, |w, v| w.u64(v));
     w.u64(setup.set_tid);
     w.u64(setup.clear_tid);
-    w.opt(setup.vfork, |w, (rd, wr)| {
-        w.i32(rd);
-        w.i32(wr);
-    });
+    save_vfork(&mut w,setup.vfork);
     w.opt(setup.traced, |w, (tracer, options)| {
         w.i32(tracer);
         w.u64(options);
@@ -625,27 +585,26 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     let identity_count=tracked.len();
     let fork_lease=crate::verity_client().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|{crate::diag!("[linux-abi] fork mapping admission ({identity_count} identities): {error}");-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)})?;
     let pager=super::super::verity_pager::ForkSnapshot::capture().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
-    let writer_receipts=fdtab::fork_writer_receipts().map_err(|error|-(error as i64))?;
-    let mut private_fds=pager.private_fds();
-    {use std::os::fd::AsRawFd;private_fds.extend(writer_receipts.iter().map(|receipt|(receipt.source().as_raw_fd(),receipt.target())));}
     let snap = snapshot()?;
     save_regions(&mut w, &snap.regions);
+    let own=OWN_FDS.write().unwrap_or_else(|e|e.into_inner());
+    let fd_guard=fdtab::lifecycle();
+    let writer_receipts=fdtab::fork_writer_receipts().map_err(|error|-(error as i64))?;
+    let(fds,guest_receipts)=fdtab::fork_guest_snapshot().map_err(|error|-(error as i64))?;
     state::save(&mut w);
+    let diag=crate::diag::log_fd();if !fds.iter().any(|(fd,_)|*fd==diag){w.retain_private(diag);}
+    let private_receipts=w.take_private().map_err(|error|-(error as i64))?;
     pager.write(&mut w).map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
-
+    let mut transfers=pager.private_fds();
+    {use std::os::fd::AsRawFd;
+     for receipt in writer_receipts.iter().chain(private_receipts.iter()).chain(guest_receipts.iter()){
+      if !transfers.iter().any(|(_,target)|*target==receipt.target()){transfers.push((receipt.source().as_raw_fd(),receipt.target()));}
+     }
+    }
     let port = new_port()?;
-    // Another thread may close an fd between the listing and the spawn,
-    // which then fails with EBADF.
-    let mut tries = 0;
-    let own = OWN_FDS.write().unwrap_or_else(|e| e.into_inner());
-    let spawned = loop {
-        let fds=inheritable_fds().into_iter().filter(|(fd,_)|!private_fds.iter().any(|(source,_)|source==fd)).collect::<Vec<_>>();
-        match spawn(exe, runtime, &fds, &private_fds,port) {
-            Err(e) if e == -(libc::EBADF as i64) && tries < 3 => tries += 1,
-            r => break r.map(|pid| (pid, fds)),
-        }
-    };
-    drop(own);
+    let spawned=spawn(exe,runtime,&fds,&transfers,port).map(|pid|(pid,fds));
+    drop(fd_guard);drop(own);
+
     let pid = match spawned {
         Ok((pid, fds)) => {
             w.seq(fds.iter(), |w, (fd, cloexec)| {
@@ -746,57 +705,36 @@ fn new_port() -> Result<Port, i64> {
 fn spawn(exe: &CString, runtime: &[CString], fds: &[(i32, bool)],private_fds:&[(i32,i32)], port: Port) -> Result<i32, i64> {
     let mut kqueues: Vec<i32> = fdtab::kqueue_fds();
     kqueues.extend(super::super::wait::pidfd_fds());
-    let kqueues: Vec<String> = kqueues.iter().map(|fd| fd.to_string()).collect();
-    let kqueues = CString::new(kqueues.join(",")).unwrap_or_default();
+    let kqueues=reservation_text(&kqueues,fds,private_fds)?;
     let mut argv: Vec<*const libc::c_char> = vec![exe.as_ptr()];
     argv.extend(runtime.iter().map(|a| a.as_ptr()));
     let fork_child = c"--fork-child";
     argv.extend([fork_child.as_ptr(), kqueues.as_ptr(), std::ptr::null()]);
-    let mut pid = 0;
-    // SAFETY: attribute and file action objects initialized and destroyed
-    // here; NULL-terminated argument arrays that outlive the call.
-    let e = unsafe {
-        let mut attr: libc::posix_spawnattr_t = std::ptr::null_mut();
-        let mut actions: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
-        libc::posix_spawnattr_init(&mut attr);
-        libc::posix_spawn_file_actions_init(&mut actions);
-        let mut all: libc::sigset_t = 0;
-        libc::sigfillset(&mut all);
-        let none: libc::sigset_t = 0;
-        libc::posix_spawnattr_setsigdefault(&mut attr, &all);
-        libc::posix_spawnattr_setsigmask(&mut attr, &none);
-        libc::posix_spawnattr_setflags(
-            &mut attr,
-            (libc::POSIX_SPAWN_CLOEXEC_DEFAULT
-                | libc::POSIX_SPAWN_SETSIGDEF
-                | libc::POSIX_SPAWN_SETSIGMASK) as i16,
-        );
-        let mut ports = [port];
-        posix_spawnattr_set_registered_ports_np(&mut attr, ports.as_mut_ptr(), 1);
-        for &(fd, _) in fds {
-            if posix_spawn_file_actions_addinherit_np(&mut actions, fd) != 0 {
-                crate::diag!("[linux-abi] fork: fd {fd} cannot be passed to the child");
-            }
+    spawn_program(exe,&argv,private_fds,port)
+}
+fn reservation_text(kqueues:&[i32],fds:&[(i32,bool)],transfers:&[(i32,i32)])->Result<CString,i64>{
+    validate_transfers(transfers)?;
+    let queues=kqueues.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let relocations=transfers.iter().filter(|(_,target)|*target>=10240).map(|(source,target)|format!("{source}:{target}")).collect::<Vec<_>>().join(",");
+    let private=transfers.iter().filter(|(_,target)|!fds.iter().any(|(fd,_)|fd==target)).map(|(_,target)|target.to_string()).collect::<Vec<_>>().join(",");
+    CString::new(format!("{queues};{relocations};{private}")).map_err(|_|-(crate::errno::EINVAL as i64))
+}
+fn spawn_program(exe:&CString,argv:&[*const libc::c_char],transfers:&[(i32,i32)],port:Port)->Result<i32,i64>{
+    validate_transfers(transfers)?;
+    struct Setup{attr:libc::posix_spawnattr_t,actions:libc::posix_spawn_file_actions_t}
+    impl Drop for Setup{fn drop(&mut self){unsafe{if !self.actions.is_null(){libc::posix_spawn_file_actions_destroy(&mut self.actions);}if !self.attr.is_null(){libc::posix_spawnattr_destroy(&mut self.attr);}}}}
+    let mut setup=Setup{attr:std::ptr::null_mut(),actions:std::ptr::null_mut()};let mut pid=0;
+    let checked=|error:i32|if error==0{Ok(())}else{Err(-(errno::from_darwin(error)as i64))};
+    unsafe{
+        checked(libc::posix_spawnattr_init(&mut setup.attr))?;checked(libc::posix_spawn_file_actions_init(&mut setup.actions))?;
+        let mut all:libc::sigset_t=0;libc::sigfillset(&mut all);let none:libc::sigset_t=0;
+        checked(libc::posix_spawnattr_setsigdefault(&mut setup.attr,&all))?;checked(libc::posix_spawnattr_setsigmask(&mut setup.attr,&none))?;
+        checked(libc::posix_spawnattr_setflags(&mut setup.attr,(libc::POSIX_SPAWN_CLOEXEC_DEFAULT|libc::POSIX_SPAWN_SETSIGDEF|libc::POSIX_SPAWN_SETSIGMASK)as i16))?;
+        let mut ports=[port];checked(posix_spawnattr_set_registered_ports_np(&mut setup.attr,ports.as_mut_ptr(),1))?;
+        for &(source,target)in transfers{
+            checked(if target>=10240{posix_spawn_file_actions_addinherit_np(&mut setup.actions,source)}else{libc::posix_spawn_file_actions_adddup2(&mut setup.actions,source,target)})?;
         }
-        for &(source,target)in private_fds{
-            let error=libc::posix_spawn_file_actions_adddup2(&mut actions,source,target);
-            if error!=0{libc::posix_spawn_file_actions_destroy(&mut actions);libc::posix_spawnattr_destroy(&mut attr);return Err(-(crate::errno::from_darwin(error)as i64));}
-        }
-        let e = libc::posix_spawn(
-            &mut pid,
-            exe.as_ptr(),
-            &actions,
-            &attr,
-            argv.as_ptr() as *const *mut libc::c_char,
-            *_NSGetEnviron() as *const *mut libc::c_char,
-        );
-        libc::posix_spawn_file_actions_destroy(&mut actions);
-        libc::posix_spawnattr_destroy(&mut attr);
-        e
-    };
-    if e != 0 {
-        crate::diag!("[linux-abi] fork: posix_spawn failed (errno {e})");
-        return Err(-(errno::from_darwin(e) as i64));
+        checked(libc::posix_spawn(&mut pid,exe.as_ptr(),&setup.actions,&setup.attr,argv.as_ptr()as*const*mut libc::c_char,*_NSGetEnviron()as*const*mut libc::c_char))?;
     }
     Ok(pid)
 }
@@ -985,23 +923,55 @@ fn receive() -> Result<Handover, String> {
 /// Hold the fd numbers the guest's kqueues had (a comma-separated list)
 /// with /dev/null until they are rebuilt, so nothing the runtime opens
 /// meanwhile takes them. First thing in a `linux-run --fork-child`.
-pub fn reserve_fds(list: &str) {
-    // SAFETY: opening /dev/null and duplicating it onto free fd numbers.
-    unsafe {
-        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        if null < 0 {
-            return;
-        }
-        for fd in list.split(',').filter_map(|n| n.parse::<i32>().ok()) {
-            if fd != null {
-                libc::dup2(null, fd);
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-        }
-        if !list.split(',').any(|n| n.parse() == Ok(null)) {
-            libc::close(null);
-        }
+fn validate_transfers(transfers:&[(i32,i32)])->Result<(),i64>{
+    let mut sources=std::collections::HashSet::new();let mut targets=std::collections::HashSet::new();
+    for &(source,target)in transfers{
+        if source<3||source>=10240||target<0||!sources.insert(source)||!targets.insert(target)||unsafe{libc::fcntl(source,libc::F_GETFD)}<0{return Err(-(crate::errno::EBADF as i64));}
     }
+    if transfers.iter().any(|(_,target)|sources.contains(target)){return Err(-(crate::errno::EINVAL as i64));}
+    Ok(())
+}
+pub fn reserve_fds(list: &str)->Result<(),crate::errno::Errno>{
+    use std::os::fd::{FromRawFd,OwnedFd};
+    let fields=list.split(';').collect::<Vec<_>>();if fields.len()>3{return Err(crate::errno::EINVAL);}
+    let queues=fdtab::parse_guest_fds(fields[0])?;let relocations=fields.get(1).copied().unwrap_or("");
+    let private=fdtab::parse_guest_fds(fields.get(2).copied().unwrap_or(""))?;
+    if private.iter().any(|fd|queues.contains(fd)){return Err(crate::errno::EINVAL);}
+    let mut transfers=Vec::new();
+    if !relocations.is_empty(){for record in relocations.split(','){
+        let(source,target)=record.split_once(':').ok_or(crate::errno::EINVAL)?;
+        let source=source.parse::<i32>().map_err(|_|crate::errno::EINVAL)?;let target=target.parse::<i32>().map_err(|_|crate::errno::EINVAL)?;
+        if target<10240||queues.contains(&target){return Err(crate::errno::EINVAL);}transfers.push((source,target));
+    }}
+    validate_transfers(&transfers).map_err(|error|(-error)as i32)?;
+    if private.iter().any(|fd|*fd>=10240&&!transfers.iter().any(|(_,target)|target==fd)){return Err(crate::errno::EINVAL);}
+    for &(_,target)in &transfers{if unsafe{libc::fcntl(target,libc::F_GETFD)}>=0{return Err(crate::errno::EBADF);}}
+    let mut installed=Vec::<OwnedFd>::new();
+    for &(source,target)in &transfers{
+        if unsafe{libc::dup2(source,target)}<0{return Err(crate::errno::last());}
+        installed.push(unsafe{OwnedFd::from_raw_fd(target)});
+        if unsafe{libc::fcntl(target,libc::F_SETFD,libc::FD_CLOEXEC)}<0{return Err(crate::errno::last());}
+    }
+    if !queues.is_empty(){
+        let raw=unsafe{libc::open(c"/dev/null".as_ptr(),libc::O_RDONLY|libc::O_CLOEXEC)};if raw<0{return Err(crate::errno::last());}
+        let null=unsafe{OwnedFd::from_raw_fd(raw)};
+        for fd in &queues{
+            if *fd==raw{continue;}
+            if unsafe{libc::fcntl(*fd,libc::F_GETFD)}>=0{return Err(crate::errno::EBADF);}
+            if unsafe{libc::dup2(raw,*fd)}<0{return Err(crate::errno::last());}
+            installed.push(unsafe{OwnedFd::from_raw_fd(*fd)});
+            if unsafe{libc::fcntl(*fd,libc::F_SETFD,libc::FD_CLOEXEC)}<0{return Err(crate::errno::last());}
+        }
+        if queues.contains(&raw){installed.push(null);}
+    }
+    for &fd in &private{let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::EBADF);}if unsafe{libc::fcntl(fd,libc::F_SETFD,flags|libc::FD_CLOEXEC)}<0{return Err(crate::errno::last());}}
+    // No target is made guest-visible here. A malformed/failed receipt closes
+    // only targets installed by this operation; existing child slots are never replaced.
+    let mut marked=Vec::new();
+    for &fd in &private{if let Err(error)=super::super::fd_visibility::hide(fd){for fd in marked{super::super::fd_visibility::private_closed(fd);}return Err(error);}marked.push(fd);}
+    for &fd in &private{fdtab::keep_hidden(fd);}
+    for &(source,_)in &transfers{if unsafe{libc::close(source)}<0{return Err(crate::errno::last());}}
+    for fd in installed{use std::os::fd::IntoRawFd;let _=fd.into_raw_fd();}Ok(())
 }
 
 /// Become the child of the fork that spawned this process: map the
@@ -1050,7 +1020,8 @@ fn become_child(h: Handover) -> String {
     consumed.sort_unstable();consumed.dedup();
     for fd in consumed{if let Err(error)=fdtab::close_fork_private(fd){return format!("fork private receipt close: errno {error}");}}
     for (fd, cloexec) in r.seq(|r| (r.i32(), r.bool())) {
-        if unsafe{libc::fcntl(fd,libc::F_GETFD)}>=0{fdtab::set_flags(fd,false,cloexec);}
+        if unsafe{libc::fcntl(fd,libc::F_GETFD)}<0{return "fork inherited descriptor missing".into();}
+        if unsafe{libc::fcntl(fd,libc::F_SETFD,if cloexec{libc::FD_CLOEXEC}else{0})}<0{return format!("fork descriptor flags: errno {}",crate::errno::last());}
     }
     if !r.ok() {
         return "fork child: damaged state".into();
@@ -1060,7 +1031,7 @@ fn become_child(h: Handover) -> String {
     drop(h);
     if let Some((rd, _)) = vfork {
         // SAFETY: the parent's end of its wait pipe, inherited.
-        unsafe { libc::close(rd) };
+        if let Err(error)=fdtab::close_fork_private(rd){return format!("vfork reader close: errno {error}");}
     }
 
     // The forking thread, now this process's main thread.
@@ -1194,4 +1165,86 @@ mod tests {
             assert!(refaults < rounds * 2, "{refaults} refaults");
         }
     }
+}
+
+#[cfg(test)]
+mod fd_owner_tests{
+ use super::*;
+ use std::{fs::File,io::{Read,Write},os::{fd::{AsFd,AsRawFd,FromRawFd},unix::ffi::OsStrExt}};
+ const CHILD:&str="sys::fork::spawn::fd_owner_tests::receipt_child";
+ #[test]
+ #[ignore="actual subprocess of canonical_guest_and_explicit_private_receipts_survive_actual_spawn"]
+ fn receipt_child(){
+  let argument=std::env::args().find(|arg|arg.starts_with("FORK_FD_OWNER=")).unwrap();let fields=argument.strip_prefix("FORK_FD_OWNER=").unwrap().split('|').collect::<Vec<_>>();assert_eq!(fields.len(),10);
+  let guest=fields[0].parse::<i32>().unwrap();let high=fields[1].parse::<i32>().unwrap();let unrelated=fields[2].parse::<i32>().unwrap();let event=fields[3].parse::<i32>().unwrap();let timer=fields[4].parse::<i32>().unwrap();let ino=fields[7].parse::<i32>().unwrap();let fence=fields[8].parse::<i32>().unwrap();let retired=fields[9].parse::<i32>().unwrap();
+  reserve_fds(fields[5]).unwrap();assert!(!fdtab::visible(high));assert!(fdtab::is_hidden(high));assert_ne!(unsafe{libc::fcntl(high,libc::F_GETFD)}&libc::FD_CLOEXEC,0);
+  assert_eq!(unsafe{libc::fcntl(unrelated,libc::F_GETFD)},-1,"unrelated native private fd inherited");assert!(!fdtab::is_hidden(unrelated));
+  let mut blob=Vec::new();File::open(fields[6]).unwrap().read_to_end(&mut blob).unwrap();let mut reader=Reader::new(&blob);fdtab::fork_restore(&mut reader);crate::sys::sync_file::fork_restore(&mut reader);assert!(reader.intact());assert_eq!(unsafe{libc::fcntl(retired,libc::F_GETFD)},-1);assert!(!fdtab::is_hidden(retired));let replaced=unsafe{libc::dup2(1,retired)};assert_eq!(replaced,retired);fdtab::publish_guest(retired).unwrap();assert_eq!(crate::sys::fs::close([retired as u64,0,0,0,0,0]),0);fdtab::after_fork_child();
+  for(fd,cloexec)in reader.seq(|r|(r.i32(),r.bool())){assert_eq!(unsafe{libc::fcntl(fd,libc::F_SETFD,if cloexec{libc::FD_CLOEXEC}else{0})},0);}assert!(reader.ok());
+  assert!(fdtab::visible(guest));assert!(!fdtab::visible(high));assert!(fdtab::is_hidden(high));
+  let mut bytes=[0u8;32];assert_eq!(crate::sys::fs::read([guest as u64,bytes.as_mut_ptr()as u64,32,0,0,0]),12);assert_eq!(&bytes[..12],b"actual bytes");assert_eq!(crate::sys::fs::close([guest as u64,0,0,0,0,0]),0);assert!(!fdtab::visible(guest));
+  let mut private_bytes=[0u8;12];assert_eq!(unsafe{libc::pread(high,private_bytes.as_mut_ptr().cast(),12,0)},12);assert_eq!(&private_bytes,b"actual bytes");
+  assert_eq!(crate::sys::fs::close([high as u64,0,0,0,0,0]),-9);
+  assert_eq!(crate::sys::event::read(event,bytes.as_mut_ptr()as u64,8),Some(8));assert_eq!(u64::from_ne_bytes(bytes[..8].try_into().unwrap()),3);
+  let mut spec=[0u8;32];spec[16..24].copy_from_slice(&1i64.to_le_bytes());assert_eq!(crate::sys::event::timerfd_settime([timer as u64,0,spec.as_ptr()as u64,0,0,0]),0);
+  assert_eq!(crate::sys::fs::close([event as u64,0,0,0,0,0]),0);assert_eq!(crate::sys::fs::close([timer as u64,0,0,0,0,0]),0);
+  let watch_file=std::path::Path::new(fields[6]).parent().unwrap().join("watch-location");let host=std::fs::read_to_string(watch_file).unwrap();File::options().append(true).open(host).unwrap().write_all(b"changed").unwrap();
+  let mut event_bytes=[0u8;128];assert!(crate::sys::inotify::read(ino,event_bytes.as_mut_ptr()as u64,128).unwrap()>0);
+  assert_eq!(crate::sys::fs::close([ino as u64,0,0,0,0,0]),0);
+  assert!(matches!(aim_sync_file::state(unsafe{std::os::fd::BorrowedFd::borrow_raw(fence)}),aim_sync_file::State::Active));assert_eq!(crate::sys::fs::close([fence as u64,0,0,0,0,0]),0);
+  fdtab::close_fork_private(high).unwrap();
+  let recycled=unsafe{libc::fcntl(1,libc::F_DUPFD_CLOEXEC,high)};assert_eq!(recycled,high);fdtab::publish_guest(recycled).unwrap();assert_eq!(crate::sys::fs::close([recycled as u64,0,0,0,0,0]),0);
+  std::fs::write(std::path::Path::new(fields[6]).parent().unwrap().join("child-verified"),b"FORK_FD_OWNER_CHILD_EXECUTED").unwrap();println!("FORK_FD_OWNER_CHILD_EXECUTED");
+ }
+ #[test]
+ fn canonical_guest_and_explicit_private_receipts_survive_actual_spawn(){
+  if fdtab::isolated_kernel_test("sys::fork::spawn::fd_owner_tests::canonical_guest_and_explicit_private_receipts_survive_actual_spawn"){return;}
+  fdtab::install_storage_registrar().unwrap();
+  let directory=std::env::temp_dir().join(format!("aim-fork-owner-{}",std::process::id()));std::fs::create_dir(&directory).unwrap();
+  let data=directory.join("data");std::fs::write(&data,b"actual bytes").unwrap();let guest=File::open(&data).unwrap();fdtab::publish_guest(guest.as_raw_fd()).unwrap();
+  let unrelated=aim_storage::private_fd::PrivateFile::allocate(||File::open("/dev/null")).unwrap();let unrelated_fd=unrelated.as_raw_fd();
+  let raw=unsafe{libc::fcntl(guest.as_raw_fd(),libc::F_DUPFD_CLOEXEC,11000)};assert!(raw>=11000);let high=unsafe{std::os::fd::OwnedFd::from_raw_fd(raw)};crate::sys::fd_visibility::hide(raw).unwrap();fdtab::keep_hidden(raw);
+  let event=crate::sys::event::eventfd2([3,0,0,0,0,0])as i32;assert!(event>=0);let timer=crate::sys::event::timerfd_create([1,0,0,0,0,0])as i32;assert!(timer>=0);
+  let(_vfs,view)=crate::vfs::test_view();let watch_host=view.join("data/watch");std::fs::write(&watch_host,b"watched").unwrap();std::fs::write(directory.join("watch-location"),watch_host.to_str().unwrap()).unwrap();
+  let ino=crate::sys::inotify::inotify_init1([0,0,0,0,0,0])as i32;assert!(ino>=0);let watch=CString::new("/data/watch").unwrap();assert!(crate::sys::inotify::inotify_add_watch([ino as u64,watch.as_ptr()as u64,2,0,0,0])>=0);
+  crate::sys::sync_file::init();let(fence,producer)=aim_sync_file::pair().unwrap();let fence=aim_sync_file::give_to_guest(fence).unwrap();let retired=aim_sync_file::inherited()[0];
+  let mut writer=Writer::default();let guard=fdtab::lifecycle();let(fds,guest_owners)=fdtab::fork_guest_snapshot().unwrap();fdtab::fork_save(&mut writer);crate::sys::sync_file::fork_save(&mut writer);writer.seq(fds.iter(),|w,(fd,cloexec)|{w.i32(*fd);w.bool(*cloexec)});let private=writer.take_private().unwrap();let explicit=fdtab::hold_fork_private(high.as_fd()).unwrap();let stdout=fdtab::hold_fork_private(unsafe{std::os::fd::BorrowedFd::borrow_raw(1)}).unwrap();let stderr=fdtab::hold_fork_private(unsafe{std::os::fd::BorrowedFd::borrow_raw(2)}).unwrap();
+  let mut transfers=Vec::new();for owner in guest_owners.iter().chain(private.iter()).chain([&explicit,&stdout,&stderr]){transfers.push((owner.source().as_raw_fd(),owner.target()));}
+  let reservation=reservation_text(&fdtab::kqueue_fds(),&fds,&transfers).unwrap();drop(guard);
+  let blob=directory.join("state");File::create(&blob).unwrap().write_all(&writer.into_bytes()).unwrap();
+  let marker=format!("FORK_FD_OWNER={}|{}|{}|{}|{}|{}|{}|{}|{}|{}",guest.as_raw_fd(),raw,unrelated_fd,event,timer,reservation.to_str().unwrap(),blob.display(),ino,fence,retired);
+  let executable=CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes()).unwrap();let arguments=[executable.clone(),CString::new("--exact").unwrap(),CString::new(CHILD).unwrap(),CString::new("--ignored").unwrap(),CString::new("--nocapture").unwrap(),CString::new("--skip").unwrap(),CString::new(marker).unwrap()];let mut argv=arguments.iter().map(|arg|arg.as_ptr()).collect::<Vec<_>>();argv.push(std::ptr::null());
+  let port=new_port().unwrap();let pid=spawn_program(&executable,&argv,&transfers,port).unwrap();
+  struct Child(Option<i32>);impl Drop for Child{fn drop(&mut self){if let Some(pid)=self.0{unsafe{libc::kill(pid,libc::SIGKILL);libc::waitpid(pid,std::ptr::null_mut(),0);}}}}
+  let mut child=Child(Some(pid));let mut status=0;assert_eq!(unsafe{libc::waitpid(pid,&mut status,0)},pid);child.0=None;assert!(libc::WIFEXITED(status));assert_eq!(libc::WEXITSTATUS(status),0);assert_eq!(std::fs::read(directory.join("child-verified")).unwrap(),b"FORK_FD_OWNER_CHILD_EXECUTED");
+  unsafe{mach_port_deallocate(task(),port);mach_port_mod_refs(task(),port,MACH_PORT_RIGHT_RECEIVE,-1);}
+  assert_eq!(crate::sys::fs::close([guest.as_raw_fd()as u64,0,0,0,0,0]),0);std::mem::forget(guest);
+  assert_eq!(crate::sys::fs::close([event as u64,0,0,0,0,0]),0);assert_eq!(crate::sys::fs::close([timer as u64,0,0,0,0,0]),0);assert_eq!(crate::sys::fs::close([ino as u64,0,0,0,0,0]),0);assert_eq!(crate::sys::fs::close([fence as u64,0,0,0,0,0]),0);drop(producer);
+  drop(high);fdtab::unhide(raw);crate::sys::fd_visibility::private_closed(raw);std::fs::remove_dir_all(directory).unwrap();
+ }
+ #[test]
+ #[ignore="actual subprocess of private_vfork_writer_keeps_parent_blocked_until_exec_or_exit"]
+ fn vfork_receipt_child(){
+  let marker=std::env::args().find(|arg|arg.starts_with("VFORK_OWNER=")).unwrap();let fields=marker.strip_prefix("VFORK_OWNER=").unwrap().split('|').collect::<Vec<_>>();assert_eq!(fields.len(),7);
+  let rd=fields[0].parse::<i32>().unwrap();let wr=fields[1].parse::<i32>().unwrap();let ready=fields[2].parse::<i32>().unwrap();let command=fields[3].parse::<i32>().unwrap();reserve_fds(fields[4]).unwrap();fdtab::close_fork_private(rd).unwrap();assert_eq!(unsafe{libc::fcntl(wr,libc::F_GETFD)}&libc::FD_CLOEXEC,libc::FD_CLOEXEC);
+  assert_eq!(unsafe{libc::write(ready,b"r".as_ptr().cast(),1)},1);let mut byte=0u8;assert_eq!(unsafe{libc::read(command,(&mut byte as*mut u8).cast(),1)},1);
+  std::fs::write(fields[6],b"VFORK_OWNER_CHILD_EXECUTED").unwrap();
+  if fields[5]=="exec"{use std::os::unix::process::CommandExt;let error=std::process::Command::new("/usr/bin/true").exec();panic!("actual vfork writer exec failed: {error}");}
+  assert_eq!(fields[5],"exit");
+ }
+ #[test]
+ fn private_vfork_writer_keeps_parent_blocked_until_exec_or_exit(){
+  if fdtab::isolated_kernel_test("sys::fork::spawn::fd_owner_tests::private_vfork_writer_keeps_parent_blocked_until_exec_or_exit"){return;}
+  fdtab::install_storage_registrar().unwrap();
+  fn pipe()->[std::os::fd::OwnedFd;2]{let mut fds=[0;2];assert_eq!(unsafe{libc::pipe(fds.as_mut_ptr())},0);unsafe{[std::os::fd::OwnedFd::from_raw_fd(fds[0]),std::os::fd::OwnedFd::from_raw_fd(fds[1])]}}
+  for mode in ["exec","exit"]{
+   let done=pipe();let ready=pipe();let command=pipe();let mut writer=Writer::default();save_vfork(&mut writer,Some((done[0].as_raw_fd(),done[1].as_raw_fd())));writer.retain_private(ready[1].as_raw_fd());writer.retain_private(command[0].as_raw_fd());writer.retain_private(2);let owners=writer.take_private().unwrap();let transfers=owners.iter().map(|owner|(owner.source().as_raw_fd(),owner.target())).collect::<Vec<_>>();let spec=reservation_text(&[],&[],&transfers).unwrap();
+   let completion=std::env::temp_dir().join(format!("aim-vfork-owner-{}-{mode}",std::process::id()));
+   let marker=format!("VFORK_OWNER={}|{}|{}|{}|{}|{mode}|{}",done[0].as_raw_fd(),done[1].as_raw_fd(),ready[1].as_raw_fd(),command[0].as_raw_fd(),spec.to_str().unwrap(),completion.display());let exe=CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes()).unwrap();let args=[exe.clone(),CString::new("--exact").unwrap(),CString::new("sys::fork::spawn::fd_owner_tests::vfork_receipt_child").unwrap(),CString::new("--ignored").unwrap(),CString::new("--nocapture").unwrap(),CString::new("--skip").unwrap(),CString::new(marker).unwrap()];let mut argv=args.iter().map(|arg|arg.as_ptr()).collect::<Vec<_>>();argv.push(std::ptr::null());let port=new_port().unwrap();let pid=spawn_program(&exe,&argv,&transfers,port).unwrap();
+   struct Child(Option<i32>);impl Drop for Child{fn drop(&mut self){if let Some(pid)=self.0{unsafe{libc::kill(pid,libc::SIGKILL);libc::waitpid(pid,std::ptr::null_mut(),0);}}}}let mut child=Child(Some(pid));drop(owners);let[done_reader,done_writer]=done;drop(done_writer);let mut event=libc::pollfd{fd:ready[0].as_raw_fd(),events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut event,1,2000)},1);let mut byte=0u8;assert_eq!(unsafe{libc::read(ready[0].as_raw_fd(),(&mut byte as*mut u8).cast(),1)},1);
+   event.fd=done_reader.as_raw_fd();event.revents=0;assert_eq!(unsafe{libc::poll(&mut event,1,0)},0,"parent resumed before child exec/exit");assert_eq!(unsafe{libc::write(command[1].as_raw_fd(),b"go".as_ptr().cast(),1)},1);assert_eq!(unsafe{libc::poll(&mut event,1,2000)},1);assert_eq!(unsafe{libc::read(done_reader.as_raw_fd(),(&mut byte as*mut u8).cast(),1)},0);
+   let mut status=0;assert_eq!(unsafe{libc::waitpid(pid,&mut status,0)},pid);child.0=None;assert!(libc::WIFEXITED(status));assert_eq!(libc::WEXITSTATUS(status),0);assert_eq!(std::fs::read(&completion).unwrap(),b"VFORK_OWNER_CHILD_EXECUTED");std::fs::remove_file(completion).unwrap();unsafe{mach_port_deallocate(task(),port);mach_port_mod_refs(task(),port,MACH_PORT_RIGHT_RECEIVE,-1);}
+  }
+ }
+
 }

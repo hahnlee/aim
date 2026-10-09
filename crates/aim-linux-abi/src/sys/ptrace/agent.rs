@@ -633,14 +633,12 @@ fn vm(r: &mut Reader) -> Vec<u8> {
 /// Fork: this process's sockets, which the child closes.
 pub fn fork_save(w: &mut Writer) {
     let own = lock(&OWN).clone();
-    w.seq(own.into_iter(), |w, fd| w.i32(fd));
+    w.seq(own.into_iter(), |w, fd| {w.retain_private(fd);w.i32(fd)});
 }
 
 pub fn fork_restore(r: &mut Reader) {
     for fd in r.seq(|r| r.i32()) {
-        fdtab::unhide(fd);
-        // SAFETY: the parent's socket, inherited and not ours.
-        unsafe { libc::close(fd) };
+        if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("fork ptrace private close: errno {error}");r.invalidate();return;}
     }
     start();
 }

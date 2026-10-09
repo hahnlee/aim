@@ -148,7 +148,7 @@ fn main() {
             // The child of a guest fork (`sys::fork`), after the runtime
             // options; the value lists the fds to hold for it.
             let kqueues = args.next().unwrap_or_else(|| usage());
-            aim_linux_abi::sys::reserve_fork_fds(&kqueues.to_string_lossy());
+            if let Err(error)=aim_linux_abi::sys::reserve_fork_fds(&kqueues.to_string_lossy()){eprintln!("linux-run: fork descriptor reservation: errno {error}");std::process::exit(127);}
             break None;
         }
         let mut value = || args.next().unwrap_or_else(|| usage());

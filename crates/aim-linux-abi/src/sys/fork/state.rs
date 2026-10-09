@@ -19,9 +19,14 @@ use crate::sys::{
 };
 
 #[derive(Default)]
-pub struct Writer(Vec<u8>);
+pub struct Writer(Vec<u8>,Vec<fdtab::ForkPrivateFd>,Option<crate::errno::Errno>);
 
 impl Writer {
+    pub fn retain_private(&mut self,fd:i32){
+        if self.1.iter().any(|owner|owner.target()==fd)||self.2.is_some(){return;}
+        match fdtab::hold_fork_private(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)}){Ok(owner)=>self.1.push(owner),Err(error)=>self.2=Some(error)}
+    }
+    pub fn take_private(&mut self)->Result<Vec<fdtab::ForkPrivateFd>,crate::errno::Errno>{if let Some(error)=self.2.take(){return Err(error);}Ok(std::mem::take(&mut self.1))}
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }

@@ -169,29 +169,53 @@ pub(super) fn finish_guest_close(owner:CloseOwner)->Result<(),crate::errno::Errn
     if let Some((client,identity))=owner{client.close_inode(identity)?;}Ok(())
 }
 
-pub struct ForkPrivateFd{held:aim_storage::private_fd::PrivateFd,target:i32}
+pub struct ForkPrivateFd{held:Option<std::os::fd::OwnedFd>,target:i32}
 impl ForkPrivateFd{
-    pub fn source(&self)->std::os::fd::BorrowedFd<'_>{use std::os::fd::AsFd;self.held.as_fd()}
+    pub fn source(&self)->std::os::fd::BorrowedFd<'_>{use std::os::fd::AsFd;self.held.as_ref().unwrap().as_fd()}
     pub fn target(&self)->i32{self.target}
 }
+impl Drop for ForkPrivateFd{fn drop(&mut self){
+    use std::os::fd::AsRawFd;
+    let close=|held:std::os::fd::OwnedFd|{let fd=held.as_raw_fd();drop(held);unhide(fd);super::fd_visibility::private_closed(fd);};
+    let held=self.held.take().unwrap();
+    if RETIRED.with(|owners|owners.borrow().is_some()){close(held);}else{let _guard=lifecycle();close(held);}
+}}
 pub(crate) fn fork_writer_receipts()->Result<Vec<ForkPrivateFd>,crate::errno::Errno>{
-    let mut receipts=Vec::new();
-    for(_,kind)in fds_where(|kind|matches!(kind,Kind::Regular(_))){
-        if let Kind::Regular(description)=kind{if let Some(writer)=&description.writer{receipts.push(hold_fork_private(writer.descriptor())?);}}
+    let mut receipts=Vec::new();let mut targets=std::collections::HashSet::new();
+    for(fd,kind)in fds_where(|kind|matches!(kind,Kind::Regular(_))){
+        if !visible(fd){continue;}
+        if let Kind::Regular(description)=kind{if let Some(writer)=&description.writer{use std::os::fd::AsRawFd;if targets.insert(writer.descriptor().as_raw_fd()){receipts.push(hold_fork_private(writer.descriptor())?);}}}
     }Ok(receipts)
 }
 thread_local!{static RESTORED_PRIVATE:std::cell::RefCell<Vec<i32>>=const{std::cell::RefCell::new(Vec::new())};}
 pub(crate) fn take_restored_private_targets()->Vec<i32>{RESTORED_PRIVATE.with(|targets|std::mem::take(&mut*targets.borrow_mut()))}
 pub(crate) fn close_fork_private(fd:i32)->Result<(),crate::errno::Errno>{
-    let _guard=lifecycle();if visible(fd){return Err(crate::errno::EBADF);}
-    let result=unsafe{libc::close(fd)};if result<0{return Err(crate::errno::last());}
-    unhide(fd);super::fd_visibility::private_closed(fd);Ok(())
+    fn close(fd:i32)->Result<(),crate::errno::Errno>{if visible(fd){return Err(crate::errno::EBADF);}let result=unsafe{libc::close(fd)};if result<0{return Err(crate::errno::last());}unhide(fd);super::fd_visibility::private_closed(fd);Ok(())}
+    if RETIRED.with(|owners|owners.borrow().is_some()){return close(fd);}let _guard=lifecycle();close(fd)
 }
 pub fn hold_fork_private(fd:std::os::fd::BorrowedFd<'_>)->Result<ForkPrivateFd,crate::errno::Errno>{
-    use std::os::fd::AsRawFd;
-    let target=fd.as_raw_fd();
-    let held=aim_storage::private_fd::PrivateFd::allocate(||fd.try_clone_to_owned()).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    Ok(ForkPrivateFd{held,target})
+    if RETIRED.with(|owners|owners.borrow().is_some()){return hold_fork_private_locked(fd);}
+    let _guard=lifecycle();hold_fork_private_locked(fd)
+}
+fn hold_fork_private_locked(fd:std::os::fd::BorrowedFd<'_>)->Result<ForkPrivateFd,crate::errno::Errno>{
+    use std::os::fd::{AsRawFd,FromRawFd};
+    let target=fd.as_raw_fd();let held=unsafe{libc::fcntl(target,libc::F_DUPFD_CLOEXEC,3)};
+    if held<0{return Err(crate::errno::last());}
+    // spawn.h accepts only sources below OPEN_MAX; do not relocate these aliases
+    // through the general high-slot private registrar.
+    if held>=10240{unsafe{libc::close(held);}return Err(crate::errno::from_darwin(libc::EMFILE));}
+    if let Err(error)=super::fd_visibility::hide(held){unsafe{libc::close(held);}return Err(error);}
+    keep_hidden(held);Ok(ForkPrivateFd{held:Some(unsafe{std::os::fd::OwnedFd::from_raw_fd(held)}),target})
+}
+pub(crate) fn fork_guest_snapshot()->Result<(Vec<(i32,bool)>,Vec<ForkPrivateFd>),crate::errno::Errno>{
+    let mut flags=Vec::new();let mut owners=Vec::new();
+    let mut kqueues=kqueue_fds();kqueues.extend(super::wait::pidfd_fds());
+    for fd in super::fd_visibility::visible(){
+        let value=unsafe{libc::fcntl(fd,libc::F_GETFD)};if value<0{return Err(crate::errno::last());}
+        flags.push((fd,value&libc::FD_CLOEXEC!=0));
+        if !kqueues.contains(&fd){owners.push(hold_fork_private(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)})?);}
+    }
+    Ok((flags,owners))
 }
 
 pub type RegularExport=super::regular_file::Export;
@@ -517,7 +541,7 @@ pub fn anon_name(fd: i32) -> Option<String> {
 /// again on the same numbers.
 pub fn kqueue_fds() -> Vec<i32> {
     fds_where(|k| matches!(k, Kind::Epoll(_) | Kind::Inotify(_)))
-        .into_iter()
+        .into_iter().filter(|(fd,_)|visible(*fd))
         .map(|(fd, _)| fd)
         .collect()
 }
@@ -797,7 +821,9 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
             Kind::Content | Kind::Knob(_) | Kind::Evdev(_) | Kind::Binder(_) => unreachable!(),
         }
     });
-    w.seq(HIDDEN.lock().unwrap().iter(), |w, fd| w.i32(*fd));
+    // Private targets are installed from the explicit fork receipt before the
+    // runtime starts. Parent-only guards and transient pins are not inherited.
+    w.seq(std::iter::empty::<i32>(),|w,fd|w.i32(fd));
     w.seq(super::fd_visibility::visible().into_iter(),|w,fd|w.i32(fd));
 }
 
