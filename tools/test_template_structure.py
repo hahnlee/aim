@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Pure inventory fixtures; no Android, volume attachment, or boot."""
 import copy
+import ctypes
+import errno
+import json
+import os
+import struct
+import sys
+import tempfile
 import hashlib
 import importlib.util
 from pathlib import Path
@@ -129,6 +136,80 @@ class TemplateStructure(unittest.TestCase):
         self.assertTrue(audit.compare(a, b, {'fixture.permission': {'owner.one', 'owner.two'}})['structure_pass'])
         with self.assertRaises(ValueError):
             audit.compare(a, b, {'fixture.permission': {'owner.one', 'owner.other'}})
+
+
+class DarwinCapture(unittest.TestCase):
+    def setUp(self):
+        if sys.platform != 'darwin':
+            raise RuntimeError('actual Darwin capture fixture NOT RUN on this platform')
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.setxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+                                     ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        self.libc.setxattr.restype = ctypes.c_int
+
+    def put(self, path, name, value):
+        buffer = ctypes.create_string_buffer(value)
+        if self.libc.setxattr(os.fsencode(path), os.fsencode(name), buffer, len(value), 0, 1) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), str(path))
+
+    def test_actual_darwin_capture_preserves_all_bytes_and_metadata(self):
+        with tempfile.TemporaryDirectory(prefix='aim-template-xattr-') as directory:
+            base = Path(directory)
+            root = base / 'volume'
+            (root / 'data').mkdir(parents=True)
+            file = root / 'data/payload'
+            file.write_bytes(b'actual-native-capture')
+            file.chmod(0o604)
+            os.utime(file, ns=(1000000001, 1000000037))
+            raw = b'DAGI\x01\x07\x00\x00' + struct.pack('<III', 10007, 20007, 0o640)
+            attributes = {'dev.aim.guest-inode': raw,
+                          'dev.aim.xattr.security.selinux': b'u:object_r:system_data_file:s0\0',
+                          'dev.aim.unknown-capture': b'\x00\xff\x80unknown\x00',
+                          'dev.aim.empty-capture': b''}
+            for name, value in attributes.items():
+                self.put(file, name, value)
+            provenance = base / 'provenance.json'
+            provenance.write_text(json.dumps({'capture': 'owned-disposable-fixture'}))
+            before = file.stat()
+            result = audit.capture(root, provenance)['inventory']['data/payload']
+            for name, value in attributes.items():
+                self.assertEqual(result['xattrs'][name], value.hex())
+            self.assertEqual(result['guest'], {'uid': 10007, 'gid': 20007, 'mode': '0o640'})
+            self.assertEqual(result['host_mode'], '0o604')
+            self.assertEqual((result['host_uid'], result['host_gid']), (before.st_uid, before.st_gid))
+            self.assertEqual(result['mtime_ns'], before.st_mtime_ns)
+            self.assertEqual(result['sha256'], hashlib.sha256(file.read_bytes()).hexdigest())
+
+    def test_actual_nofollow_and_missing_path_errors(self):
+        with tempfile.TemporaryDirectory(prefix='aim-template-xattr-') as directory:
+            base = Path(directory)
+            target = base / 'target'
+            target.write_bytes(b'target')
+            self.put(target, 'dev.aim.target-only', b'not-the-link')
+            link = base / 'link'
+            link.symlink_to(target)
+            self.assertNotIn('dev.aim.target-only', audit.xattrs(link))
+            dangling = base / 'dangling'
+            dangling.symlink_to(base / 'absent-target')
+            self.assertIsInstance(audit.xattrs(dangling), dict)
+            with self.assertRaises(OSError) as failure:
+                audit.xattrs(base / 'missing')
+            self.assertEqual(failure.exception.errno, errno.ENOENT)
+
+    def test_actual_corrupt_dagi_is_not_defaulted(self):
+        with tempfile.TemporaryDirectory(prefix='aim-template-xattr-') as directory:
+            base = Path(directory)
+            root = base / 'volume'
+            root.mkdir()
+            file = root / 'corrupt'
+            file.write_bytes(b'payload')
+            provenance = base / 'provenance.json'
+            provenance.write_text('{}')
+            for malformed in (b'bad', b''):
+                self.put(file, 'dev.aim.guest-inode', malformed)
+                with self.assertRaisesRegex(ValueError, 'invalid guest inode metadata'):
+                    audit.capture(root, provenance)
 
 
 if __name__ == '__main__':

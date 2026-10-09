@@ -9,6 +9,8 @@ parity, official CTS, BootStats and app checks are separate gates.
 import argparse
 import base64
 import collections
+import ctypes
+import errno
 import copy
 import hashlib
 import json
@@ -365,15 +367,54 @@ def compare(left, right, permission_owners):
             'runtime_parity': 'NOT_RUN'}
 
 
+def xattrs(path):
+    if sys.platform != 'darwin':
+        if not hasattr(os, 'listxattr') or not hasattr(os, 'getxattr'):
+            raise OSError(errno.ENOSYS, 'native xattr capture unavailable', os.fspath(path))
+        return {name: os.getxattr(path, name, follow_symlinks=False).hex()
+                for name in os.listxattr(path, follow_symlinks=False)}
+    # Darwin sys/xattr.h: ssize_t results, position=0, XATTR_NOFOLLOW=0x0001.
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.listxattr.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    libc.listxattr.restype = ctypes.c_ssize_t
+    libc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+                             ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    libc.getxattr.restype = ctypes.c_ssize_t
+    encoded = os.fsencode(path)
+    if b'\0' in encoded:
+        raise ValueError('NUL in xattr path')
+    def checked(result):
+        if result < 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), os.fspath(path))
+        return result
+    length = checked(libc.listxattr(encoded, None, 0, 1))
+    names = ctypes.create_string_buffer(max(length, 1))
+    if checked(libc.listxattr(encoded, names, length, 1)) != length:
+        raise OSError(errno.EIO, 'xattr name list changed during capture', os.fspath(path))
+    raw = names.raw[:length]
+    if raw and not raw.endswith(b'\0'):
+        raise OSError(errno.EIO, 'unterminated native xattr list', os.fspath(path))
+    result = {}
+    for name in raw.split(b'\0'):
+        if not name:
+            continue
+        size = checked(libc.getxattr(encoded, name, None, 0, 0, 1))
+        value = ctypes.create_string_buffer(max(size, 1))
+        if checked(libc.getxattr(encoded, name, value, size, 0, 1)) != size:
+            raise OSError(errno.EIO, 'xattr value changed during capture', os.fspath(path))
+        result[os.fsdecode(name)] = value.raw[:size].hex()
+    return result
+
+
 def capture(root, provenance):
     result = {'inputs': json.loads(provenance.read_text()), 'inventory': {}, 'xml': {}, 'texts': {}}
     for path in sorted(root.rglob('*')):
         meta = path.lstat()
-        attrs = {name: os.getxattr(path, name, follow_symlinks=False).hex()
-                 for name in os.listxattr(path, follow_symlinks=False)}
+        attrs = xattrs(path)
         raw = attrs.get('dev.aim.guest-inode')
         guest = None
-        if raw:
+        if raw is not None:
             raw = bytes.fromhex(raw)
             if len(raw) != 20 or raw[:5] != b'DAGI\1' or raw[5] & ~7 or raw[6:8] != b'\0\0':
                 raise ValueError('invalid guest inode metadata')
