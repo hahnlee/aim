@@ -12,6 +12,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 import importlib.util
 _host_spec = importlib.util.spec_from_file_location('cts_host_tools', Path(__file__).parent / 'lib/cts_host_tools.py')
@@ -107,20 +108,40 @@ def summarize(path, data=None):
     return {'path': str(path), 'release': tree.attrib['suite_version'],
             'command': tree.attrib.get('command_line_args'), 'modules': rows,
             'counts': dict(collections.Counter(test['result'] for module in rows for test in module['tests'])),
-            'complete': xml_complete(rows)}
+            'complete': xml_complete(rows),
+            'invocation': {'devices': [device.strip() for device in tree.attrib.get('devices', '').split(',') if device.strip()],
+                           'start_ms': int(tree.attrib['start']) if tree.attrib.get('start', '').isdigit() else None,
+                           'end_ms': int(tree.attrib['end']) if tree.attrib.get('end', '').isdigit() else None,
+                           'build_commands': [build.attrib['command_line_args'] for build in tree.findall('Build')
+                                              if 'command_line_args' in build.attrib]}}
 
 
-def result_for(module, before):
+def result_for(module, before, scope):
+    """Bind official results to this wrapper's command, device and lifetime."""
+    if scope['finished_ms'] < scope['started_ms']:
+        raise ValueError('wrapper invocation clock moved backwards')
     candidates = []
     for path in (HARNESS / 'results').glob('*/test_result.xml'):
         if path.parent.is_symlink() or str(path.parent) in before:
             continue
-        result = summarize(path)
-        args = shlex.split(result['command'] or '')
-        if any(args[i] in ('-m', '--module') and i + 1 < len(args) and args[i + 1] == module for i in range(len(args))):
-            candidates.append(path)
+        try:
+            result = summarize(path)
+        except (ValueError, ET.ParseError) as error:
+            raise ValueError(f'{module}: cannot bind new official XML {path}: {error}') from error
+        if shlex.split(result['command'] or '') != scope['command']:
+            continue
+        invocation = result['invocation']
+        if invocation['devices'] != [scope['serial']]:
+            continue
+        start, end = invocation['start_ms'], invocation['end_ms']
+        if (start is None or end is None or end < start
+                or start < scope['started_ms'] or end > scope['finished_ms']):
+            continue
+        if any(shlex.split(command) != scope['command'] for command in invocation['build_commands']):
+            continue
+        candidates.append(path)
     if len(candidates) != 1:
-        raise ValueError(f'{module}: expected one new official XML, found {len(candidates)}')
+        raise ValueError(f"{module}: expected one new official XML for {scope['serial']}, found {len(candidates)}")
     return candidates[0]
 
 
@@ -151,10 +172,14 @@ def campaign_provenance(args):
     return provenance
 
 
+def invocation_command(module, args):
+    return ['cts', '-s', f'127.0.0.1:{args.port}', '--skip-device-info',
+            '--skip-preconditions', '-m', module, *args.cts_args,
+            *cts_host_tools.arguments(getattr(args, 'host_tool_selection', None), module)]
+
+
 def validate_result(result, module, args):
-    expected = ['cts', '-s', f'127.0.0.1:{args.port}', '--skip-device-info',
-                '--skip-preconditions', '-m', module, *args.cts_args,
-                *cts_host_tools.arguments(getattr(args, 'host_tool_selection', None), module)]
+    expected = invocation_command(module, args)
     if shlex.split(result['command'] or '') != expected:
         raise ValueError(f'{module}: official XML command differs from the full campaign invocation')
     rows = result['modules']
@@ -269,19 +294,26 @@ def run(args):
             row['attempts'] = history
             state['runs'] = [r for r in state['runs'] if r['module'] != module] + [row]
             save(args.output / 'campaign.json', state)
+        scope = {'command': invocation_command(module, args), 'serial': f'127.0.0.1:{args.port}',
+                 'started_ms': time.time_ns() // 1_000_000}
+        row['invocation_scope'] = scope
         with log.open('x') as output:
             child = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+            scope['wrapper_pid'] = child.pid
             try:
                 code = child.wait(timeout=args.timeout)
             except (subprocess.TimeoutExpired, KeyboardInterrupt):
                 # Only our wrapper PID; its trap cleans its own harness group.
                 child.send_signal(signal.SIGTERM)
                 child.wait()
+                scope['finished_ms'] = time.time_ns() // 1_000_000
+                row['wrapper_exit'] = child.returncode
                 record()
                 raise
+        scope['finished_ms'] = time.time_ns() // 1_000_000
         row['wrapper_exit'] = code
         try:
-            xml = result_for(module, before)
+            xml = result_for(module, before, scope)
             result = summarize(xml)
             copied = args.output / (stem + '.xml')
             with copied.open('xb') as output:

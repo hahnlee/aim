@@ -76,7 +76,10 @@ shared-UID ABI inheritance three, and dex-metadata sidecar handling six, includi
 preflight of all temporary names and restoration after rename failure.
 Complete private Java/AIDL compilation, D8 conversion and strict original-image
 linkage pass. These source checks do not establish deployed Binder, template or
-CTS success. Close diagnostics reproduce a successful host close followed by
+CTS success. The corrected official-XML collector passes three actual paired-XML
+regressions and six comparison tests; it binds exact command, device and wrapper
+lifetime and retains ambiguity as an error. Current frozen campaign association
+failures remain NOT RUN until a fresh campaign uses the correction. Close diagnostics reproduce a successful host close followed by
 carrier-error return overrides; they do not establish the actual Perfetto or
 adbd abort cause (#1207, #1221).
 
