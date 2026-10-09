@@ -67,6 +67,11 @@ failure (#1222), concurrent XML association failure (#1223) and actual device
 preparation timeout (#1227) leave affected rows NOT RUN. Original zygote
 SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate failures.
 Neither campaign proves the acceptance gate.
+The inverse VFS view now compares the implicit root with bind aliases (#1236),
+so binding `/` under the pre-reboot dexopt path cannot rename ordinary library
+paths. Actual syscall readlink through an open file, nested mount precedence,
+alias retargeting and user/storage mirror checks pass (four tests). The terminal
+original campaign cannot be counted as corrected; a new replay remains needed.
 The retained b04 native logs also contain 45 adbd and one zygote
 `fork child: damaged state` failures (#1241). The next runtime now reports the
 first invalid fork-state module and byte offset, expected/received version, and

@@ -1002,19 +1002,20 @@ impl HostPathView {
         let canonical = self.canonical_mounts.get_or_init(|| self.mounts.iter()
             .filter_map(|(guest, path)| path.canonicalize().ok().map(|path| (guest.clone(), path)))
             .collect());
-        for (guest, prefix) in self.mounts.iter().chain(canonical.iter()) {
+        // The implicit root competes with bind aliases of the same host tree;
+        // a later alias cannot rename ordinary paths already rooted at `/`.
+        let root = self.canonical_root.get_or_init(|| self.root.canonicalize().unwrap_or_else(|_| self.root.clone()));
+        let roots = [("/".to_owned(), self.root.clone()), ("/".to_owned(), root.clone())];
+        for (guest, prefix) in self.mounts.iter().chain(canonical.iter()).chain(roots.iter()) {
             let Ok(rest) = host.strip_prefix(prefix) else { continue; };
             let len = prefix.as_os_str().len();
             if best.as_ref().is_none_or(|b| len > b.0 || (len == b.0 && guest.len() < b.1)) {
                 let path = if rest.as_os_str().is_empty() { guest.clone() }
-                    else { format!("{}/{}", guest, rest.display()) };
+                    else { format!("{}/{}", guest.trim_end_matches('/'), rest.display()) };
                 best = Some((len, guest.len(), path));
             }
         }
-        if let Some((_, _, guest)) = best { return Some(guest); }
-        let root = self.canonical_root.get_or_init(|| self.root.canonicalize().unwrap_or_else(|_| self.root.clone()));
-        let rel = host.strip_prefix(root).ok()?;
-        Some(format!("/{}", rel.display()))
+        best.map(|(_, _, guest)| guest)
     }
 }
 
@@ -1466,6 +1467,50 @@ mod tests {
         unsafe { libc::close(pipe[0]); libc::close(pipe[1]); }
         std::fs::remove_file(path).unwrap();
         assert_eq!(lock_mount_table(-1), Err(errno::EBADF));
+    }
+
+    #[test]
+    fn inverse_root_bind_keeps_library_path_and_more_specific_mount() {
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        let (_view, dir) = test_view();
+        let root = vfs().root.clone();
+        let library = root.join("system/lib64/inverse-root-library.so");
+        std::fs::create_dir_all(library.parent().unwrap()).unwrap();
+        std::fs::write(&library, b"actual library path owner").unwrap();
+        let file = std::fs::File::open(&library).unwrap();
+        let mut path = [0u8; libc::PATH_MAX as usize];
+        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, path.as_mut_ptr()) }, 0);
+        let host = PathBuf::from(std::ffi::OsStr::from_bytes(&path[..path.iter().position(|byte| *byte == 0).unwrap()]));
+        assert_eq!(guest_path_of_host(&host).as_deref(), Some("/system/lib64/inverse-root-library.so"));
+        let alias = "/inverse-reboot-root/mount_tmp";
+        bind_mount_recursive("/", alias, root.clone(), Area::Image, false).unwrap();
+        assert_eq!(lookup(&format!("{alias}/system/lib64/inverse-root-library.so")).0, library);
+        assert_eq!(guest_path_of_host(&host).as_deref(), Some("/system/lib64/inverse-root-library.so"));
+        assert_eq!(guest_path_of_host(&root).as_deref(), Some("/"));
+        let fd = file.into_raw_fd();
+        crate::sys::fdtab::publish_guest(fd).unwrap();
+        let link = CString::new(format!("/proc/self/fd/{fd}")).unwrap();
+        let mut answer = [0u8; libc::PATH_MAX as usize];
+        let mut context: crate::context::GuestContext = unsafe { std::mem::zeroed() };
+        context.x[8] = 78;
+        context.x[..4].copy_from_slice(&[LINUX_AT_FDCWD as u64, link.as_ptr() as u64, answer.as_mut_ptr() as u64, answer.len() as u64]);
+        crate::sys::dispatch(&mut context);
+        let count = context.x[0] as i64;
+        assert!(count > 0, "actual proc-fd readlink: {count}");
+        assert_eq!(&answer[..count as usize], b"/system/lib64/inverse-root-library.so");
+        context.x[8] = 57;
+        context.x[0] = fd as u64;
+        crate::sys::dispatch(&mut context);
+        assert_eq!(context.x[0] as i64, 0);
+        let nested = dir.join("inverse-specific-library");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("library.so"), b"actual nested mount").unwrap();
+        add_mount("/system/lib64/inverse-specific", nested.clone(), Area::Writable, "tmpfs", "tmpfs").unwrap();
+        assert_eq!(guest_path_of_host(&nested.canonicalize().unwrap().join("library.so")).as_deref(), Some("/system/lib64/inverse-specific/library.so"));
+        assert!(remove_mount("/system/lib64/inverse-specific").unwrap());
+        assert!(remove_mount(alias).unwrap());
+        std::fs::remove_file(library).unwrap();
+        std::fs::remove_dir_all(nested).unwrap();
     }
 
     #[test]
