@@ -247,5 +247,39 @@ impl Drop for NativeServices {
             }
             self.package_runtime.get_mut().unwrap().take();
         }
+        if let Err(error) = self.system.process().shutdown() {
+            eprintln!("native Binder shutdown: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::{fs, os::fd::AsRawFd};
+
+    struct DataKeeper(Arc<fs::File>);
+    impl aim_binder_host::local::Service for DataKeeper {
+        fn descriptor(&self) -> &str { "test.IDataKeeper" }
+        fn transact(&self, _: &mut aim_binder_host::local::Call<'_>) -> aim_binder_host::local::Reply {
+            let _ = self.0.metadata().unwrap();
+            Ok(aim_binder_host::parcel::Parcel::new())
+        }
+    }
+
+    #[test]
+    fn native_services_drop_releases_its_registered_data_file() {
+        let path = std::env::temp_dir().join(format!("aim-native-services-stop-{}", std::process::id()));
+        fs::write(&path, b"owned service data").unwrap();
+        let file = Arc::new(fs::File::open(&path).unwrap());
+        let fd = file.as_raw_fd();
+        let weak = Arc::downgrade(&file);
+        let services = NativeServices::new(&Driver::new(), &[]).unwrap();
+        services.system.process().add_service(Arc::new(DataKeeper(file)));
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        drop(services);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        fs::remove_file(path).unwrap();
     }
 }

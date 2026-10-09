@@ -21,8 +21,8 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use aim_binder_driver::uapi::*;
 use aim_binder_driver::{
@@ -197,6 +197,20 @@ pub struct LocalProcess {
     next_cookie: AtomicU64,
     files: Mutex<FileTable>,
     this: Weak<LocalProcess>,
+    _memory: Arc<HeapReceiveMemory>,
+    stopping: AtomicBool,
+    loopers: Mutex<Loopers>,
+    stopped: Condvar,
+}
+
+#[derive(Default)]
+struct Loopers {
+    workers: Vec<std::thread::JoinHandle<()>>,
+    ids: Vec<std::thread::ThreadId>,
+    tids: Vec<i32>,
+    owner: Option<std::thread::ThreadId>,
+    finished: bool,
+    failed: bool,
 }
 
 /// A received reply; its buffer goes back to the driver when dropped.
@@ -281,6 +295,9 @@ pub struct LocalService {
 }
 impl LocalService {
     pub fn transact(&self, code: u32, data: &Parcel, oneway: bool) -> Result<Received, StatusCode> {
+        if self.process.stopping.load(Ordering::Acquire) {
+            return Err(DEAD_OBJECT);
+        }
         let request = self.process.owned_reply(data);
         if !request.owned_fds.is_empty() && !self.service.accepts_fds() {
             return Err(FAILED_TRANSACTION);
@@ -389,6 +406,10 @@ impl LocalProcess {
                 next: 3,
             }),
             this: this.clone(),
+            _memory: memory.clone(),
+            stopping: AtomicBool::new(false),
+            loopers: Mutex::new(Loopers::default()),
+            stopped: Condvar::new(),
         });
         let tid = process.tid();
         process
@@ -447,7 +468,7 @@ impl LocalProcess {
         let tid = self.tid();
         loop {
             match self.ioctl(tid, BINDER_WRITE_READ, &mut arg) {
-                Err(errno::EINTR) => continue,
+                Err(errno::EINTR) if !self.stopping.load(Ordering::Acquire) => continue,
                 Err(e) => return Err(e),
                 Ok(()) => {
                     let bwr = WriteRead::decode(&arg);
@@ -502,8 +523,12 @@ impl LocalProcess {
     }
 
     fn spawn_looper(&self, registered: bool) {
+        let mut loopers = self.loopers.lock().unwrap();
+        if self.stopping.load(Ordering::Acquire) {
+            return;
+        }
         let process = self.arc();
-        let _ = std::thread::Builder::new()
+        if let Ok(worker) = std::thread::Builder::new()
             .name("binder-local".into())
             .spawn(move || {
                 let mut out = Commands::default();
@@ -512,8 +537,73 @@ impl LocalProcess {
                 } else {
                     BC_ENTER_LOOPER
                 });
+                // Register before publishing the tid: interrupt must find a
+                // driver thread even if shutdown precedes its first read.
+                process.write(&out.0);
+                out.0.clear();
+                {
+                    let mut loopers = process.loopers.lock().unwrap();
+                    if process.stopping.load(Ordering::Acquire) {
+                        return;
+                    }
+                    loopers.tids.push(process.tid());
+                }
                 let _ = process.wait(&mut out.0, Until::Forever);
-            });
+            })
+        {
+            loopers.ids.push(worker.thread().id());
+            loopers.workers.push(worker);
+        }
+    }
+
+    /// Stop this native Binder process and release its owned keepers (#1266).
+    /// Borrowed transaction buffers remain mapped until their receivers drop.
+    pub fn shutdown(&self) -> std::io::Result<()> {
+        let current = std::thread::current().id();
+        let mut loopers = self.loopers.lock().unwrap();
+        if loopers.ids.contains(&current) || loopers.owner == Some(current) {
+            return Err(std::io::Error::from_raw_os_error(libc::EDEADLK));
+        }
+        while self.stopping.load(Ordering::Acquire) && !loopers.finished {
+            loopers = self.stopped.wait(loopers).unwrap();
+        }
+        if loopers.finished {
+            return if loopers.failed {
+                Err(std::io::Error::other("native Binder looper panicked"))
+            } else {
+                Ok(())
+            };
+        }
+        self.stopping.store(true, Ordering::Release);
+        loopers.owner = Some(current);
+        let workers = std::mem::take(&mut loopers.workers);
+        let tids = std::mem::take(&mut loopers.tids);
+        drop(loopers);
+        for tid in tids {
+            self.driver.interrupt(self.handle, tid);
+        }
+        let mut failed = false;
+        for worker in workers {
+            failed |= worker.join().is_err();
+        }
+        // Release only after callbacks finish; release invalidates the
+        // driver's receive allocator while callbacks may still read it.
+        self.driver.release(self.handle);
+        let services = std::mem::take(&mut *self.services.lock().unwrap());
+        let files = std::mem::take(&mut self.files.lock().unwrap().files);
+        let deaths = std::mem::take(&mut *self.deaths.lock().unwrap());
+        drop((services, files, deaths));
+        let mut loopers = self.loopers.lock().unwrap();
+        loopers.failed = failed;
+        loopers.finished = true;
+        loopers.owner = None;
+        loopers.ids.clear();
+        self.stopped.notify_all();
+        if failed {
+            Err(std::io::Error::other("native Binder looper panicked"))
+        } else {
+            Ok(())
+        }
     }
 
     /// Takes a strong reference to a received handle, so that it outlives
@@ -684,6 +774,9 @@ impl LocalProcess {
     /// looper's.
     fn wait(&self, out: &mut Vec<u8>, until: Until) -> Result<Option<TransactionData>, StatusCode> {
         loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(DEAD_OBJECT);
+            }
             let Some((cmd, payload)) = self.input(|input| input.pop_front()) else {
                 self.read(out).map_err(|e| -e)?;
                 continue;
@@ -975,6 +1068,146 @@ mod tests {
                 security_context: None,
             },
         )
+    }
+
+    struct FileKeeper(Arc<std::fs::File>);
+
+    impl Service for FileKeeper {
+        fn descriptor(&self) -> &str { "test.IFileKeeper" }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            let _ = self.0.metadata().unwrap();
+            Ok(Parcel::new())
+        }
+    }
+
+    #[test]
+    fn shutdown_releases_service_files_and_does_not_close_reused_fd() {
+        // Isolate the numeric FD reuse from other tests opening files.
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local::tests::shutdown_file_fixture", "--ignored", "--nocapture"])
+            .output().unwrap();
+        assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr));
+        assert!(String::from_utf8_lossy(&result.stdout)
+            .contains("local::tests::shutdown_file_fixture ... ok"));
+    }
+
+    #[test]
+    #[ignore = "run by the isolated FD ownership test"]
+    fn shutdown_file_fixture() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let path = std::env::temp_dir().join(format!("aim-native-binder-file-{}", std::process::id()));
+        std::fs::write(&path, b"native service data").unwrap();
+        let file = Arc::new(std::fs::File::open(&path).unwrap());
+        let fd = file.as_raw_fd();
+        let weak_file = Arc::downgrade(&file);
+        let driver = Driver::new();
+        let process = open(&driver, 410, 1000);
+        process.add_service(Arc::new(FileKeeper(file.clone())));
+        process.files.lock().unwrap().install(file);
+        process.start();
+        let weak_process = Arc::downgrade(&process);
+        drop(process);
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        let process = weak_process.upgrade().expect("the looper retains its process");
+        process.shutdown().unwrap();
+        assert!(weak_file.upgrade().is_none());
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        let replacement = std::fs::File::open(&path).unwrap();
+        let reused = if replacement.as_raw_fd() == fd { replacement } else {
+            let reused = unsafe { libc::fcntl(replacement.as_raw_fd(), libc::F_DUPFD_CLOEXEC, fd) };
+            assert_eq!(reused, fd);
+            std::fs::File::from(unsafe { OwnedFd::from_raw_fd(reused) })
+        };
+        process.shutdown().unwrap();
+        drop(process);
+        assert!(unsafe { libc::fcntl(reused.as_raw_fd(), libc::F_GETFD) } >= 0);
+        drop(reused);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    struct BlockingFileCall {
+        file: Arc<std::fs::File>,
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+    impl Service for BlockingFileCall {
+        fn descriptor(&self) -> &str { "test.IBlockingFileCall" }
+        fn transact(&self, call: &mut Call<'_>) -> Reply {
+            self.entered.send(()).unwrap();
+            self.resume.lock().unwrap().recv().unwrap();
+            assert_eq!(call.data.read_i32(), Ok(1266));
+            assert!(self.file.metadata().is_ok());
+            Ok(Parcel::new())
+        }
+    }
+
+    #[test]
+    fn shutdown_waits_for_inflight_calls_before_releasing_buffers_and_files() {
+        let path = std::env::temp_dir().join(format!("aim-native-binder-call-{}", std::process::id()));
+        std::fs::write(&path, b"inflight data").unwrap();
+        let file = Arc::new(std::fs::File::open(&path).unwrap());
+        let weak_file = Arc::downgrade(&file);
+        let driver = Driver::new();
+        let manager = start_registry(&driver);
+        let server = open(&driver, 411, 1000);
+        let client = open(&driver, 412, 2000);
+        let (entered, waiting) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let service = server.add_service(Arc::new(BlockingFileCall {
+            file, entered, resume: Mutex::new(resumed),
+        }));
+        server.start();
+        let handle = publish(&server, &client, "inflight", service);
+        let caller = std::thread::spawn(move || {
+            let mut request = Parcel::new(); request.write_i32(1266);
+            let _ = handle.transact(1, &request, false);
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let owner = server.clone();
+        let shutdown = std::thread::spawn(move || owner.shutdown());
+        while !server.stopping.load(Ordering::Acquire) { std::thread::yield_now(); }
+        let owner = server.clone();
+        let concurrent = std::thread::spawn(move || owner.shutdown());
+        assert!(!shutdown.is_finished());
+        assert!(!concurrent.is_finished());
+        assert!(weak_file.upgrade().is_some());
+        resume.send(()).unwrap();
+        shutdown.join().unwrap().unwrap();
+        concurrent.join().unwrap().unwrap();
+        caller.join().unwrap();
+        assert!(weak_file.upgrade().is_none());
+        client.shutdown().unwrap(); manager.shutdown().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    struct SelfShutdown(Weak<LocalProcess>);
+    impl Service for SelfShutdown {
+        fn descriptor(&self) -> &str { "test.ISelfShutdown" }
+        fn transact(&self, _: &mut Call<'_>) -> Reply {
+            let error = self.0.upgrade().unwrap().shutdown().unwrap_err();
+            let mut reply = Parcel::new(); reply.write_i32(error.raw_os_error().unwrap());
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn shutdown_from_own_worker_returns_deadlock_error() {
+        let driver = Driver::new();
+        let manager = start_registry(&driver);
+        let server = open(&driver, 413, 1000);
+        let client = open(&driver, 414, 2000);
+        let service = server.add_service(Arc::new(SelfShutdown(Arc::downgrade(&server))));
+        let local = server.local_service(match service { Binder::Local(ptr) => ptr, _ => unreachable!() }).unwrap();
+        server.start();
+        let handle = publish(&server, &client, "self-stop", service);
+        let reply = handle.transact(1, &Parcel::new(), false).unwrap();
+        assert_eq!(reply.reader().read_i32(), Ok(libc::EDEADLK));
+        server.shutdown().unwrap(); client.shutdown().unwrap(); manager.shutdown().unwrap();
+        assert_eq!(local.transact(PING_TRANSACTION, &Parcel::new(), false).err(), Some(DEAD_OBJECT));
+        // A received reply still owns its mapped bytes after process retirement.
+        assert_eq!(reply.reader().read_i32(), Ok(libc::EDEADLK));
     }
 
     fn name(n: &str) -> Parcel {
