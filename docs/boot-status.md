@@ -204,7 +204,17 @@ before any test body (#1227); its XML declares zero tests and done=false.
 The other 62 modules remain unattempted. Both partial campaigns are stopped
 and all owned processes, listeners and leases are cleaned; full acceptance
 remains unproven. Corrected runtime638 builds and its unchanged-file --help
-preflight exits zero; actual fresh ADB lifecycle replay is pending.
+preflight exits zero. A fresh production-style native638 boot completes.
+Actual adb shell svc help prints its original help but does not deliver an
+ADB terminal response within 180 seconds; only the owned ADB client is
+terminated, so svc exit acceptance remains unproven (#1227). Actual adb reboot
+returns zero, takes adbd offline and removes the original SystemServer; the
+restarted device returns online, with boot completion still pending (#1255).
+The optional constructor export is independent: its existing output directory
+cannot be reclaimed on automatic reboot. Init now consumes only capture
+option/value positions recorded by the initial parser, preserving the first
+immutable output and all other arguments. Two focused argument tests pass;
+actual capture-enabled reboot replay is still required (#1257).
 Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
