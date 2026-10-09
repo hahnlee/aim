@@ -909,7 +909,15 @@ after boot. A cold original Settings launch returns `Status: timeout` after
 21.284 seconds; the original ActivityTaskManager subsequently reports it
 displayed and fully drawn after 23.598 seconds. Media and Google companion
 processes also report ANRs. This is observed rendering, not a passing bounded
-launch or functional app acceptance. App/template/CTS acceptance remains pending. Original Perfetto traced_probes
+launch or functional app acceptance. A second fresh managed C diagnostic with
+the existing Binder trace enabled reaches boot completion and cold-launches
+Settings with `Status: ok` (TotalTime 14.291 seconds, WaitTime 14.294 seconds).
+Its actual transaction graph attributes the 15-second startup lifecycle wait
+to the delivered original Java dexopt callback; sampled native PM delivery is
+sub-millisecond rather than a saturated native queue. This does not establish
+idle GMS stability, functional Settings checks, comparative performance,
+matched CTS or template acceptance. Both owned diagnostic boots and displays
+terminate and are reaped normally. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
