@@ -503,6 +503,13 @@ fn take(th: &Thread) -> Option<Taken> {
 /// For the layer's own blocking calls: whether a guest handler is to run,
 /// so the call must return EINTR. Signals without a handler are consumed
 /// here and do not interrupt, as on Linux.
+/// Linux fatal_signal_pending tests SIGKILL without consuming other signals.
+/// Native SIGKILL terminates immediately; queued kernel state uses this mask.
+pub fn fatal_pending(th:&Thread)->bool {
+    let mask=bit(SIGKILL);
+    th.sig.own.load(SeqCst)&mask!=0 || lock(&th.sig.pending).set&mask!=0 || process().set&mask!=0
+}
+
 pub fn interrupted(th: &Thread) -> bool {
     // A stashed signal keeps the flag set until it is delivered.
     if th.sig.attn.load(SeqCst) == 0 {
@@ -733,6 +740,70 @@ unsafe fn act_now(ctx: *mut GuestContext, m: &mut DarwinMcontext) {
     }
 }
 
+struct VerityFaultSlot {
+    busy: AtomicBool,
+    intent: std::cell::UnsafeCell<Option<super::verity_pager::FaultIntent>>,
+    esr: std::cell::Cell<u64>,
+}
+thread_local! {
+    static VERITY_FAULT: VerityFaultSlot = const { VerityFaultSlot {
+        busy: AtomicBool::new(false), intent: std::cell::UnsafeCell::new(None),
+        esr: std::cell::Cell::new(0),
+    } };
+}
+/// Every main, clone, and spawned fork thread binds before running guest code.
+pub(crate) fn initialize_verity_fault_slot() { VERITY_FAULT.with(|_| {}); }
+
+fn defer_verity_fault(ctx: *mut GuestContext, si_addr: u64, m: &mut DarwinMcontext) -> bool {
+    let Some(ctx) = (unsafe { ctx.as_mut() }) else { return false; };
+    if ctx.in_host != 0 || context::region(m.pc) != context::Region::Other { return false; }
+    let ec = m.esr >> 26;
+    let address = if matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) { m.far } else { si_addr };
+    let access = if matches!(ec, 0x20 | 0x21) || address == m.pc { super::verity_pager::Access::Execute }
+        else if matches!(ec, 0x24 | 0x25) && m.esr & (1 << 6) != 0 { super::verity_pager::Access::Write }
+        else { super::verity_pager::Access::Read };
+    let Some(intent) = super::verity_pager::fault_intent(address, access) else { return false; };
+    let accepted = VERITY_FAULT.with(|slot| {
+        if slot.busy.swap(true, SeqCst) { return false; }
+        unsafe { *slot.intent.get() = Some(intent); }
+        slot.esr.set(m.esr as u64);
+        true
+    });
+    if !accepted { return false; }
+    Cpu::from_mc(m).to_ctx(ctx);
+    ctx.in_host = 1;
+    m.pc = finish_verity_fault as usize as u64;
+    m.sp = ctx.host_sp;
+    m.fp = 0; m.lr = 0;
+    true
+}
+
+extern "C" fn finish_verity_fault() -> ! {
+    let (intent, esr) = VERITY_FAULT.with(|slot| {
+        (unsafe { (*slot.intent.get()).take().expect("retained verity fault") }, slot.esr.get())
+    });
+    let address = intent.address();
+    let result=match intent.jit_request(){
+        Ok(Some(request))=>{drop(intent);super::verity_pager::resolve_jit(request)},
+        Ok(None)=>{let result=super::verity_pager::resolve(&intent);drop(intent);result},
+        Err(_)=>{drop(intent);super::verity_pager::FaultResult::Bus{address}},
+    };
+    VERITY_FAULT.with(|slot| slot.busy.store(false, SeqCst));
+    let ctx = unsafe { &mut *context::current_ctx() };
+    let info = match result {
+        super::verity_pager::FaultResult::Verified | super::verity_pager::FaultResult::Retry => context::resume_trap(),
+        super::verity_pager::FaultResult::Bus { address } => Siginfo::fault(sigframe::SIGBUS, 2, address),
+        super::verity_pager::FaultResult::Permission => Siginfo::fault(sigframe::SIGSEGV, 2, address),
+        super::verity_pager::FaultResult::Unowned => Siginfo::fault(sigframe::SIGSEGV, 1, address),
+    };
+    let Some(th) = thread_of(ctx) else { die(info.signo); };
+    let act = action(info.signo); let mask = th.sig.mask();
+    if act.handler == SIG_DFL || act.handler == SIG_IGN || mask & bit(info.signo) != 0 { die(info.signo); }
+    let cpu = Cpu::from_ctx(ctx);
+    frame(th, &cpu, &Taken { info, act }, mask, esr, address).to_ctx(ctx);
+    context::resume_trap()
+}
+
 // ---- host signal handler --------------------------------------------------------
 
 struct HostErrno(i32);
@@ -782,7 +853,12 @@ unsafe fn host_signal(hsig: i32, si: &libc::siginfo_t, uc: *mut libc::c_void) ->
     ) && si.si_code > 0
         && si.si_code < 0x10000;
     if fault {
+        // A resident MAP_JIT page may fault only to switch its per-thread
+        // write/execute view; PROT_NONE demand reservations are not JIT pages.
         if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) && super::jit::fault(ctx, m) {
+            return None;
+        }
+        if matches!(hsig, libc::SIGSEGV | libc::SIGBUS) && defer_verity_fault(ctx, si.si_addr as u64, m) {
             return None;
         }
         let host_fault = Some(from_host(hsig));
@@ -1533,6 +1609,37 @@ mod host_errno_tests {
 
     #[test]
     fn signal_handler_preserves_interrupted_host_errno() {
+        const CHILD: &str = "__isolated_host_errno_fork";
+        if !std::env::args().any(|argument| argument == CHILD) {
+            use std::os::unix::process::CommandExt;
+            struct ChildGroup(std::process::Child);
+            impl Drop for ChildGroup {
+                fn drop(&mut self) {
+                    if self.0.try_wait().ok().flatten().is_none() {
+                        unsafe { libc::killpg(self.0.id() as i32, libc::SIGKILL); }
+                        let _ = self.0.wait();
+                    }
+                }
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sys::signal::host_errno_tests::signal_handler_preserves_interrupted_host_errno", "--skip", CHILD, "--nocapture"])
+                .process_group(0).spawn().unwrap();
+            let mut child = ChildGroup(child);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    assert!(status.success(), "isolated raw-fork fixture: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    unsafe { libc::killpg(child.0.id() as i32, libc::SIGKILL); }
+                    child.0.wait().unwrap();
+                    panic!("isolated raw-fork fixture exceeded ten seconds");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            return;
+        }
         extern "C" fn handler(_: i32) {
             let _errno = HostErrno::save();
             unsafe { libc::close(-1); }

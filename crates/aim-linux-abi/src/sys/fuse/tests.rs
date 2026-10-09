@@ -9,6 +9,12 @@ impl Connection{
  }
 }
 impl Drop for Connection{fn drop(&mut self){if self.fd>=0{unsafe{libc::close(self.fd);}self.fd=-1;}if let Some(worker)=self.worker.take(){worker.join().unwrap().unwrap();}}}
+struct GuestDevice(Connection);
+impl GuestDevice {
+ fn new()->Self{let connection=Connection::new();super::super::fdtab::publish_typed_guest(connection.fd).unwrap();Self(connection)}
+}
+impl std::ops::Deref for GuestDevice{type Target=Connection;fn deref(&self)->&Connection{&self.0}}
+impl Drop for GuestDevice{fn drop(&mut self){super::super::fdtab::withdraw_guest(self.0.fd).unwrap();super::super::fdtab::on_close(self.0.fd);}}
 fn next(fd:RawFd)->Vec<u8>{let mut bytes=vec![0;8192];let size=read_device(fd,&mut bytes,false).unwrap();bytes.truncate(size);bytes}
 fn respond(fd:RawFd,request:&[u8],error:i32,body:&[u8]){let mut out=Vec::new();out.extend(((16+body.len()) as u32).to_le_bytes());out.extend(error.to_le_bytes());out.extend(&request[8..16]);out.extend(body);assert_eq!(write_device(fd,&out).unwrap(),out.len());}
 fn initialize(connection:&Connection){Client::from_key(&connection.key).unwrap().mount().unwrap();let packet=next(connection.fd);assert_eq!(u32::from_le_bytes(packet[4..8].try_into().unwrap()),INIT);let mut out=vec![0;64];out[..4].copy_from_slice(&7u32.to_le_bytes());out[4..8].copy_from_slice(&39u32.to_le_bytes());out[20..24].copy_from_slice(&65536u32.to_le_bytes());respond(connection.fd,&packet,0,&out);}
@@ -88,10 +94,10 @@ fn fuse_negotiated_chunks_notifications_and_borrowed_inode_lifetime(){
 
 #[test]
 fn fuse_device_guest_syscall_vectors_clone_poll_and_character_metadata(){
- let connection=Connection::new();initialize(&connection);super::super::fuse_device::adopt(connection.fd);
+ let connection=GuestDevice::new();initialize(&connection);super::super::fuse_device::adopt(connection.fd);
  let fd=connection.fd;let client=Client::from_key(&connection.key).unwrap();let task=std::thread::spawn(move||client.request(1,1,b"image\0",10123,10124,42));
  let mut one=[0u8;17];let mut two=[0u8;8192];let mut vectors=[libc::iovec{iov_base:one.as_mut_ptr().cast(),iov_len:one.len()},libc::iovec{iov_base:two.as_mut_ptr().cast(),iov_len:two.len()}];
- let size=super::super::fs::readv([fd as u64,vectors.as_mut_ptr() as u64,2,0,0,0]);assert!(size>40);
+ let size=super::super::fs::readv([fd as u64,vectors.as_mut_ptr() as u64,2,0,0,0]);assert!(size>40,"published FUSE device readv returned {size}");
  let mut packet=one.to_vec();packet.extend(&two[..size as usize-one.len()]);assert_eq!(u32::from_le_bytes(packet[4..8].try_into().unwrap()),1);
  let mut response=Vec::new();response.extend(16u32.to_le_bytes());response.extend((-2i32).to_le_bytes());response.extend(&packet[8..16]);
  let mut reply_vectors=[libc::iovec{iov_base:response.as_mut_ptr().cast(),iov_len:9},libc::iovec{iov_base:unsafe{response.as_mut_ptr().add(9)}.cast(),iov_len:7}];
@@ -101,7 +107,7 @@ fn fuse_device_guest_syscall_vectors_clone_poll_and_character_metadata(){
  assert_eq!(u32::from_ne_bytes(stat[16..20].try_into().unwrap())&0o170000,0o020000);
  let rdev=u64::from_ne_bytes(stat[32..40].try_into().unwrap());assert_eq!(rdev,((10u64)<<8)|229);
  let mut poll=libc::pollfd{fd,events:4,revents:0};let timeout=libc::timespec{tv_sec:0,tv_nsec:0};assert_eq!(super::super::poll::ppoll([&mut poll as *mut _ as u64,1,&timeout as *const _ as u64,0,0,0]),1);assert_eq!(poll.revents&4,4);
- let destination=Connection::new();let source=fd;assert_eq!(super::super::fs::ioctl([destination.fd as u64,FUSE_DEV_IOC_CLONE,&source as *const i32 as u64,0,0,0]),0);assert_eq!(session_for_fd(destination.fd).unwrap(),connection.key);
+ let destination=GuestDevice::new();let source=fd;assert_eq!(super::super::fs::ioctl([destination.fd as u64,FUSE_DEV_IOC_CLONE,&source as *const i32 as u64,0,0,0]),0);assert_eq!(session_for_fd(destination.fd).unwrap(),connection.key);
  let mut value=0i32;let mut length=4u32;assert_eq!(super::super::net::getsockopt([fd as u64,1,3,&mut value as *mut _ as u64,&mut length as *mut _ as u64,0]),-88);
 }
 

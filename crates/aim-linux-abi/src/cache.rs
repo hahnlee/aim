@@ -172,6 +172,7 @@ fn meta_text(key: &str, sha: &str, size: u64, outcome: &Outcome, r: &Report) -> 
     kv("original_size", size.to_string());
     if let Outcome::Translated(o) = outcome {
         kv("translated_size", o.len().to_string());
+        kv("output_sha256", xlate::sha256_hex(&o.to_bytes()));
     }
     kv("ctr_el0", format!("{:#x}", r.ctr_el0));
     for k in crate::a64::Kind::ALL {
@@ -218,7 +219,7 @@ pub fn member_path(host_path: &Path, offset: u64) -> PathBuf {
 }
 
 /// 16 bytes per site: offset, kind and register (little-endian).
-fn encode_sites(sites: &[Site]) -> Vec<u8> {
+pub(crate) fn encode_sites(sites: &[Site]) -> Vec<u8> {
     let mut out = Vec::with_capacity(sites.len() * 16);
     for &(offset, kind, rt) in sites {
         out.extend_from_slice(&offset.to_le_bytes());
@@ -413,6 +414,49 @@ impl Cache {
             None => 0,
         };
         Some(Entry { key, kind, ctr_el0 })
+    }
+
+    /// Protected-source admission compares cached output with a kernel witness
+    /// from the pure translator. Stat summaries and mutable claimed hashes are
+    /// discovery hints only. Obsolete recipe entries are ordinary cache misses.
+    pub(crate) fn verify_derivative_candidate(&self, digest:&str, ctr:u32,
+        expected:Option<&[u8]>, identity:bool)->Result<(),crate::errno::Errno>{
+        use crate::errno::EIO;
+        let directory=self.entry_dir(&xlate::key_for_digest(digest));
+        let meta=match fs::read_to_string(directory.join("meta")){
+            Ok(meta)=>meta,Err(error)if error.kind()==io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(EIO),
+        };
+        let fields=parse_meta(&meta);let get=|name|fields.iter().find(|(key,_)|*key==name).map(|(_,value)|*value);
+        let version=get("version").and_then(|value|value.parse::<u32>().ok()).ok_or(EIO)?;
+        if version!=xlate::VERSION{return Ok(());}
+        if get("sha256")!=Some(digest)||get("key")!=Some(xlate::key_for_digest(digest).as_str()){return Err(EIO);}
+        if get("ctr_el0").and_then(|value|u32::from_str_radix(value.trim_start_matches("0x"),16).ok())!=Some(ctr){return Err(EIO);}
+        match (get("outcome"),expected,identity){
+            (Some("identity"),None,true)=>Ok(()),
+            (Some("unsupported"),None,false)=>Ok(()),
+            (Some("translated"),Some(expected),false)=>{
+                let output=fs::read(directory.join("elf")).map_err(|_|EIO)?;
+                if output!=expected{return Err(EIO);}
+                if let Some(claimed)=get("output_sha256"){
+                    if claimed!=xlate::sha256_hex(expected){return Err(EIO);}
+                }
+                Ok(())
+            },_=>Err(EIO),
+        }
+    }
+
+    pub(crate) fn verify_sites_candidate(&self,digest:&str,expected:&[Site])->Result<(),crate::errno::Errno>{
+        use crate::errno::EIO;
+        let directory=self.entry_dir(&sites_key(digest));
+        let meta=match fs::read_to_string(directory.join("meta")){
+            Ok(meta)=>meta,Err(error)if error.kind()==io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(EIO),
+        };
+        let fields=parse_meta(&meta);let get=|name|fields.iter().find(|(key,_)|*key==name).map(|(_,value)|*value);
+        let version=get("version").and_then(|value|value.parse::<u32>().ok()).ok_or(EIO)?;
+        if version!=xlate::VERSION{return Ok(());}
+        if get("sha256")!=Some(digest)||get("key")!=Some(sites_key(digest).as_str())||get("outcome")!=Some("sites"){return Err(EIO);}
+        let bytes=fs::read(directory.join("sites")).map_err(|_|EIO)?;
+        if bytes!=encode_sites(expected){return Err(EIO);}Ok(())
     }
 
     /// Publish an entry atomically. Returns false if it already existed.

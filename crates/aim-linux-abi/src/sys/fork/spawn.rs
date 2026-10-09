@@ -69,7 +69,15 @@ const VM_INHERIT_COPY: u32 = 1;
 const PROX_FDTYPE_KQUEUE: u32 = 5;
 
 /// The id of the child's request message.
-const HELLO: i32 = 0x666f_726b;
+const HELLO:i32=0x666f_726b;
+const READY:i32=0x666f_726c;
+const READY_ACK:i32=0x666f_726d;
+#[repr(C,packed(4))]
+#[derive(Default)]
+struct ReadyAck{header:Header,error:i32}
+#[repr(C,packed(4))]
+#[derive(Default)]
+struct Ready{header:Header,member:u64}
 /// How long the child has to ask for its state.
 const HANDOVER_TIMEOUT_MS: u32 = 60_000;
 
@@ -613,9 +621,16 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.bytes(&shadow_stack());
     w.str(&crate::vfs::cwd());
     w.str(&crate::vfs::own_mounts_text());
+    let tracked=super::super::verity_pager::tracked_identities().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
+    let fork_lease=crate::verity_client().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
+    let pager=super::super::verity_pager::ForkSnapshot::capture().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
+    let writer_receipts=fdtab::fork_writer_receipts().map_err(|error|-(error as i64))?;
+    let mut private_fds=pager.private_fds();
+    {use std::os::fd::AsRawFd;private_fds.extend(writer_receipts.iter().map(|receipt|(receipt.source().as_raw_fd(),receipt.target())));}
     let snap = snapshot()?;
     save_regions(&mut w, &snap.regions);
     state::save(&mut w);
+    pager.write(&mut w).map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
 
     let port = new_port()?;
     // Another thread may close an fd between the listing and the spawn,
@@ -623,8 +638,8 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     let mut tries = 0;
     let own = OWN_FDS.write().unwrap_or_else(|e| e.into_inner());
     let spawned = loop {
-        let fds = inheritable_fds();
-        match spawn(exe, runtime, &fds, port) {
+        let fds=inheritable_fds().into_iter().filter(|(fd,_)|!private_fds.iter().any(|(source,_)|source==fd)).collect::<Vec<_>>();
+        match spawn(exe, runtime, &fds, &private_fds,port) {
             Err(e) if e == -(libc::EBADF as i64) && tries < 3 => tries += 1,
             r => break r.map(|pid| (pid, fds)),
         }
@@ -669,7 +684,7 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     *lock(&HANDOVERS.0) += 1;
     let started = std::thread::Builder::new()
         .name("fork-handover".into())
-        .spawn(move || serve(port, snap, blob));
+        .spawn(move || serve(port,snap,blob,fork_lease));
     if let Err(e) = started {
         // The child finds no parent port and ends.
         crate::diag!("[linux-abi] fork: no handover thread: {e}");
@@ -727,7 +742,7 @@ fn new_port() -> Result<Port, i64> {
 /// `posix_spawn` `linux-run --fork-child KQUEUES` with the fds and `port`.
 /// KQUEUES are the fd numbers of the guest's kqueues, which the child holds
 /// with placeholders from its start until it has rebuilt them.
-fn spawn(exe: &CString, runtime: &[CString], fds: &[(i32, bool)], port: Port) -> Result<i32, i64> {
+fn spawn(exe: &CString, runtime: &[CString], fds: &[(i32, bool)],private_fds:&[(i32,i32)], port: Port) -> Result<i32, i64> {
     let mut kqueues: Vec<i32> = fdtab::kqueue_fds();
     kqueues.extend(super::super::wait::pidfd_fds());
     let kqueues: Vec<String> = kqueues.iter().map(|fd| fd.to_string()).collect();
@@ -762,6 +777,10 @@ fn spawn(exe: &CString, runtime: &[CString], fds: &[(i32, bool)], port: Port) ->
                 crate::diag!("[linux-abi] fork: fd {fd} cannot be passed to the child");
             }
         }
+        for &(source,target)in private_fds{
+            let error=libc::posix_spawn_file_actions_adddup2(&mut actions,source,target);
+            if error!=0{libc::posix_spawn_file_actions_destroy(&mut actions);libc::posix_spawnattr_destroy(&mut attr);return Err(-(crate::errno::from_darwin(error)as i64));}
+        }
         let e = libc::posix_spawn(
             &mut pid,
             exe.as_ptr(),
@@ -782,7 +801,7 @@ fn spawn(exe: &CString, runtime: &[CString], fds: &[(i32, bool)], port: Port) ->
 }
 
 /// Hand the child its state when it asks, on a host thread of the parent.
-fn serve(port: Port, mut snap: Snapshot, blob: Vec<u8>) {
+fn serve(port:Port,mut snap:Snapshot,blob:Vec<u8>,mut fork_lease:Option<aim_storage::verity_control::ForkLease>){
     let mut hello: Received<Header> = Received {
         msg: Header::default(),
         trailer: [0; 128],
@@ -840,12 +859,25 @@ fn serve(port: Port, mut snap: Snapshot, blob: Vec<u8>) {
         };
         if kr == 0 {
             snap.entries.clear();
+            let mut ready=Received{msg:Ready::default(),trailer:[0;128]};
+            let result=unsafe{mach_msg(&mut ready.msg.header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,std::mem::size_of::<Received<Ready>>()as u32,port,HANDOVER_TIMEOUT_MS,0)};
+            let valid=result==0&&ready.msg.header.id==READY&&ready.msg.header.remote!=0;
+            let verified=if let Some(lease)=fork_lease.take(){
+                if valid&&ready.msg.member!=0{lease.child_published(ready.msg.member)}else{let cleanup=lease.abort();cleanup.and_then(|_|Err(std::io::Error::from_raw_os_error(libc::EPROTO)))}
+            }else if valid{Ok(())}else{Err(std::io::Error::from_raw_os_error(libc::EPROTO))};
+            if valid{
+                let error=verified.err().map(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))).unwrap_or(0);
+                let mut ack=ReadyAck{header:Header{bits:MACH_MSG_TYPE_MOVE_SEND_ONCE,size:std::mem::size_of::<ReadyAck>()as u32,remote:ready.msg.header.remote,id:READY_ACK,..Header::default()},error};
+                let sent=unsafe{mach_msg(&mut ack.header,MACH_SEND_MSG,std::mem::size_of::<ReadyAck>()as u32,0,0,0,0)};
+                if sent!=0{crate::diag!("[linux-abi] fork ready acknowledgement: kr {sent:#x}");}
+            }
         } else {
             crate::diag!("[linux-abi] fork: cannot send the child its state (kr {kr:#x})");
         }
     } else if kr != 0 {
         crate::diag!("[linux-abi] fork: the child never asked for its state (kr {kr:#x})");
     }
+    if let Some(lease)=fork_lease.take(){if let Err(error)=lease.abort(){crate::diag!("[linux-abi] fork verity abort: {error}");}}
     // SAFETY: dropping our receive right; the child's send right dies.
     unsafe { mach_port_mod_refs(task(), port, MACH_PORT_RIGHT_RECEIVE, -1) };
     handover_done();
@@ -855,12 +887,14 @@ fn serve(port: Port, mut snap: Snapshot, blob: Vec<u8>) {
 
 /// The parent's state, received by a `linux-run --fork-child`.
 struct Handover {
+    parent:Port,
     blob: Vec<u8>,
     entries: Vec<Port>,
 }
 
 impl Drop for Handover {
     fn drop(&mut self) {
+        unsafe{mach_port_deallocate(task(),self.parent);}
         for &e in &self.entries {
             // SAFETY: our send rights to the memory entries.
             unsafe { mach_port_deallocate(task(), e) };
@@ -913,8 +947,8 @@ fn receive() -> Result<Handover, String> {
             0,
             0,
         );
-        mach_port_deallocate(task(), parent);
         if kr != 0 {
+            mach_port_deallocate(task(),parent);
             return Err(format!("fork child: cannot reach the parent (kr {kr:#x})"));
         }
         let kr = mach_msg(
@@ -929,10 +963,12 @@ fn receive() -> Result<Handover, String> {
         mach_port_deallocate(task(), reply);
         mach_port_mod_refs(task(), reply, MACH_PORT_RIGHT_RECEIVE, -1);
         if kr != 0 {
+            mach_port_deallocate(task(),parent);
             return Err(format!("fork child: no state from the parent (kr {kr:#x})"));
         }
         let m = got.msg;
         if m.header.bits & MACH_MSGH_BITS_COMPLEX == 0 || m.descriptors != 2 {
+            mach_port_deallocate(task(),parent);
             return Err("fork child: malformed state message".into());
         }
         let (ea, en) = (m.entries.address, m.entries.count as usize);
@@ -941,7 +977,7 @@ fn receive() -> Result<Handover, String> {
         let (ba, bn) = (m.blob.address, m.blob.size as usize);
         let blob = std::slice::from_raw_parts(ba as *const u8, bn).to_vec();
         mach_vm_deallocate(task(), ba, bn as u64);
-        Ok(Handover { blob, entries })
+        Ok(Handover{parent,blob,entries})
     }
 }
 
@@ -1008,12 +1044,18 @@ fn become_child(h: Handover) -> String {
     if !state::restore(&mut r) {
         return "fork child: damaged state".into();
     }
+    let mut consumed=fdtab::take_restored_private_targets();
+    match super::super::verity_pager::ForkSnapshot::restore(&mut r){Ok(targets)=>consumed.extend(targets),Err(error)=>return format!("fork verity pager: {error}")}
+    consumed.sort_unstable();consumed.dedup();
+    for fd in consumed{if let Err(error)=fdtab::close_fork_private(fd){return format!("fork private receipt close: errno {error}");}}
     for (fd, cloexec) in r.seq(|r| (r.i32(), r.bool())) {
-        fdtab::set_flags(fd, false, cloexec);
+        if unsafe{libc::fcntl(fd,libc::F_GETFD)}>=0{fdtab::set_flags(fd,false,cloexec);}
     }
     if !r.ok() {
         return "fork child: damaged state".into();
     }
+    if let Err(error)=super::super::verity_pager::restore_memberships(){return format!("fork restored mapping publication: {error}");}
+    if let Err(error)=confirm_ready(h.parent,crate::verity_client().map(|client|client.member).unwrap_or(0)){return error;}
     drop(h);
     if let Some((rd, _)) = vfork {
         // SAFETY: the parent's end of its wait pipe, inherited.
@@ -1034,9 +1076,36 @@ fn become_child(h: Handover) -> String {
     unsafe { context::resume(ctx) }
 }
 
+fn confirm_ready(parent:Port,member:u64)->Result<(),String>{
+    let ready_reply=new_port().map_err(|error|format!("fork child ready reply: {error}"))?;
+    let mut ready=Ready{header:Header{bits:MACH_MSG_TYPE_COPY_SEND|MACH_MSG_TYPE_MAKE_SEND_ONCE<<8,size:std::mem::size_of::<Ready>()as u32,remote:parent,local:ready_reply,id:READY,..Header::default()},member};
+    let sent=unsafe{mach_msg(&mut ready.header,MACH_SEND_MSG,std::mem::size_of::<Ready>()as u32,0,0,0,0)};
+    let mut ack=Received{msg:ReadyAck::default(),trailer:[0;128]};
+    let received=if sent==0{unsafe{mach_msg(&mut ack.msg.header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,std::mem::size_of::<Received<ReadyAck>>()as u32,ready_reply,HANDOVER_TIMEOUT_MS,0)}}else{sent};
+    unsafe{mach_port_deallocate(task(),ready_reply);mach_port_mod_refs(task(),ready_reply,MACH_PORT_RIGHT_RECEIVE,-1);}
+    if received!=0||ack.msg.header.id!=READY_ACK{return Err(format!("fork child ready acknowledgement: kr {received:#x}"));}
+    let error=ack.msg.error;if error!=0{return Err(format!("fork child verity handoff rejected: errno {error}"));}
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_native_ready_ack_cannot_reach_resume(){
+        let port=new_port().unwrap();
+        let receiver=std::thread::spawn(move||{
+            let mut message=Received{msg:Ready::default(),trailer:[0;128]};
+            let result=unsafe{mach_msg(&mut message.msg.header,MACH_RCV_MSG|MACH_RCV_TIMEOUT,0,std::mem::size_of::<Received<Ready>>()as u32,port,HANDOVER_TIMEOUT_MS,0)};
+            assert_eq!(result,0);assert_eq!(message.msg.header.id,READY);
+            let mut ack=ReadyAck{header:Header{bits:MACH_MSG_TYPE_MOVE_SEND_ONCE,size:std::mem::size_of::<ReadyAck>()as u32,remote:message.msg.header.remote,id:READY_ACK,..Header::default()},error:crate::errno::EPERM};
+            assert_eq!(unsafe{mach_msg(&mut ack.header,MACH_SEND_MSG,std::mem::size_of::<ReadyAck>()as u32,0,0,0,0)},0);
+        });
+        let result=confirm_ready(port,77);receiver.join().unwrap();
+        assert!(result.unwrap_err().contains("errno 1"));
+        unsafe{mach_port_deallocate(task(),port);mach_port_mod_refs(task(),port,MACH_PORT_RIGHT_RECEIVE,-1);}
+    }
 
     fn faults() -> i64 {
         // SAFETY: getrusage into a local.

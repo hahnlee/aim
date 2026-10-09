@@ -172,11 +172,22 @@ pub fn fd_to_port(fd: i32) -> Option<Port> {
     (unsafe { fileport_makeport(fd, &mut p) } == 0).then_some(p)
 }
 
-/// A new fd for a fileport (the right is kept).
+/// A private fd for a fileport (the right is kept). The ABI explicitly
+/// installs guest descriptor flags when publishing a public recipient fd.
 pub fn port_to_fd(p: Port) -> Option<i32> {
-    // SAFETY: plain call.
-    let fd = unsafe { fileport_makefd(p) };
-    (fd >= 0).then_some(fd)
+    // SAFETY: the fresh descriptor is exclusively owned until returned.
+    unsafe {
+        let fd = fileport_makefd(p);
+        if fd < 0 { return None; }
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+            let error = *libc::__error();
+            libc::close(fd);
+            *libc::__error() = error;
+            return None;
+        }
+        Some(fd)
+    }
 }
 
 const VM_FLAGS_ANYWHERE: i32 = 1;

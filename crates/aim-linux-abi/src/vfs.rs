@@ -930,8 +930,16 @@ pub fn guest_path_of_host(host: &Path) -> Option<String> {
 
 /// Guest path of an open directory fd.
 fn guest_path_of_fd(fd: i32) -> Result<String, Errno> {
-    if crate::sys::fdtab::is_hidden(fd) { return Err(errno::EBADF); }
-    if let Some(file)=crate::sys::fuse_client::get(fd){return Ok(file.guest.clone());}
+    use std::os::fd::AsRawFd;
+    let pin = crate::sys::fdtab::pin_guest(fd)?;
+    let fd = pin.descriptor().as_raw_fd();
+    if let Some(file)=crate::sys::fuse_client::get(fd) {
+        if !file.directory { return Err(errno::ENOTDIR); }
+        return Ok(file.guest.clone());
+    }
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } < 0 { return Err(errno::last()); }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR { return Err(errno::ENOTDIR); }
     if let Some(p) = crate::sys::synthesized_dir_path(fd) {
         return Ok(p);
     }
@@ -1133,6 +1141,12 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
             ),
         )
         .unwrap();
+        let proofs = dir.join("fs-verity");
+        std::fs::create_dir(&proofs).unwrap();
+        let proofs = std::fs::canonicalize(proofs).unwrap();
+        let mut locator = b"AIMVRTROOT01\0".to_vec();
+        locator.extend_from_slice(proofs.as_os_str().as_bytes());
+        std::fs::write(dir.join("run/fs-verity-root"), locator).unwrap();
         init(&root, Some(&map)).unwrap();
         dir
     });
@@ -1141,6 +1155,31 @@ pub(crate) fn test_view() -> (std::sync::MutexGuard<'static, ()>, &'static Path)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relative_dirfd_requires_a_published_directory_and_absolute_path_ignores_it() {
+        const MARKER:&str="aim-dirfd-publication-owned-child";
+        if !std::env::args().any(|argument|argument==MARKER){
+            let mut child=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","vfs::tests::relative_dirfd_requires_a_published_directory_and_absolute_path_ignores_it","--nocapture","--skip",MARKER]).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);
+            let status=loop{if let Some(status)=child.try_wait().unwrap(){break status;}if std::time::Instant::now()>=deadline{child.kill().unwrap();child.wait().unwrap();panic!("owned dirfd fixture exceeded deadline");}std::thread::sleep(std::time::Duration::from_millis(5));};
+            use std::io::Read;let mut output=String::new();child.stdout.take().unwrap().read_to_string(&mut output).unwrap();
+            assert!(status.success(),"{output}");assert!(output.contains("DIRFD_PUBLICATION_EXECUTED"));return;
+        }
+        println!("DIRFD_PUBLICATION_EXECUTED");
+        use std::os::fd::AsRawFd;
+        let (_view, root) = super::test_view();
+        let dir = std::fs::File::open(root.join("data")).unwrap();
+        assert!(matches!(super::resolve(dir.as_raw_fd(), b"item", false), Err(crate::errno::EBADF)));
+        crate::sys::fdtab::publish_guest(dir.as_raw_fd()).unwrap();
+        assert_eq!(super::resolve(dir.as_raw_fd(), b"item", false).unwrap().guest, "/data/item");
+        crate::sys::fdtab::withdraw_guest(dir.as_raw_fd()).unwrap();
+        let path = root.join("data/plain"); std::fs::write(&path, b"data").unwrap();
+        let file = std::fs::File::open(path).unwrap();
+        crate::sys::fdtab::publish_guest(file.as_raw_fd()).unwrap();
+        assert!(matches!(super::resolve(file.as_raw_fd(), b"item", false), Err(crate::errno::ENOTDIR)));
+        assert_eq!(super::resolve(file.as_raw_fd(), b"/data/item", false).unwrap().guest, "/data/item");
+        crate::sys::fdtab::withdraw_guest(file.as_raw_fd()).unwrap();
+    }
     use super::*;
 
     #[test]
@@ -1250,6 +1289,37 @@ mod tests {
 
     #[test]
     fn interrupted_mount_journal_lock_waits_for_its_owner() {
+        const CHILD: &str = "__isolated_mount_lock_fork";
+        if !std::env::args().any(|argument| argument == CHILD) {
+            use std::os::unix::process::CommandExt;
+            struct ChildGroup(std::process::Child);
+            impl Drop for ChildGroup {
+                fn drop(&mut self) {
+                    if self.0.try_wait().ok().flatten().is_none() {
+                        unsafe { libc::killpg(self.0.id() as i32, libc::SIGKILL); }
+                        let _ = self.0.wait();
+                    }
+                }
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "vfs::tests::interrupted_mount_journal_lock_waits_for_its_owner", "--skip", CHILD, "--nocapture"])
+                .process_group(0).spawn().unwrap();
+            let mut child = ChildGroup(child);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    assert!(status.success(), "isolated raw-fork fixture: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    unsafe { libc::killpg(child.0.id() as i32, libc::SIGKILL); }
+                    child.0.wait().unwrap();
+                    panic!("isolated raw-fork fixture exceeded ten seconds");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            return;
+        }
         use std::os::fd::AsRawFd;
         let (_view, dir) = test_view();
         let path = dir.join("interrupted-mount-lock");

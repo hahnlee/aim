@@ -32,7 +32,9 @@ pub fn validate(backing: BorrowedFd<'_>, writer: Option<BorrowedFd<'_>>, metadat
     }
     let flags = unsafe { libc::fcntl(backing.as_raw_fd(), libc::F_GETFL) };
     if flags < 0 { return Err(io::Error::last_os_error()); }
-    if flags & libc::O_EVTONLY != 0 || metadata.flags & crate::path_file::O_PATH as u64 != 0 || flags & libc::O_ACCMODE != (metadata.flags & 3) as i32 || (flags & libc::O_ACCMODE != libc::O_RDONLY) != metadata.writer {
+    let mode=metadata.flags&3;
+    let physical=if mode==3{libc::O_RDWR}else{mode as i32};
+    if flags & libc::O_EVTONLY != 0 || metadata.flags & crate::path_file::O_PATH as u64 != 0 || flags & libc::O_ACCMODE != physical || matches!(mode,1|2) != metadata.writer {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
     if let Some(writer) = writer { identity(writer)?; }

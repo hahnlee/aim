@@ -85,6 +85,8 @@ mod tests {
  fn busy(fd:i32){assert_eq!(unsafe{libc::flock(fd,libc::LOCK_EX|libc::LOCK_NB)},-1);assert_eq!(io::Error::last_os_error().raw_os_error(),Some(libc::EWOULDBLOCK));}
  #[test]
  fn queued_scm_rights_keep_writer_and_one_guest_descriptor_until_actual_last_close(){
+  const MARKER:&str="REGULAR_SCM_QUEUE_LIFETIME_FIXTURE_EXECUTED";
+  if crate::socket_scm::tests::isolated_exec_fixture("regular_scm::tests::queued_scm_rights_keep_writer_and_one_guest_descriptor_until_actual_last_close",MARKER){return;}
   let fixture=Fixture::new();let carrier=fixture.carrier();
   let Fixture{path,backing,writer,contender,metadata}=fixture;drop(writer);drop(backing);
   let (sender,receiver)=UnixStream::pair().unwrap();
@@ -98,10 +100,12 @@ mod tests {
   assert_eq!(crate::regular_file::identity(actual_backing.as_fd()).unwrap(),metadata.identity);
   drop(resolved);drop(carrier);drain(&metadata.identity).unwrap();busy(contender.as_raw_fd());
   drop(actual_backing);drop(actual_writer);assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
-  std::fs::remove_dir_all(path).unwrap();
+  std::fs::remove_dir_all(path).unwrap();println!("{MARKER}");
  }
  #[test]
  fn paused_export_serializes_receiver_death_and_temporary_writer_drop_before_drain(){
+  const MARKER:&str="REGULAR_SCM_EXPORT_LIFETIME_FIXTURE_EXECUTED";
+  if crate::socket_scm::tests::isolated_exec_fixture("regular_scm::tests::paused_export_serializes_receiver_death_and_temporary_writer_drop_before_drain",MARKER){return;}
   let fixture=Fixture::new();let carrier=fixture.carrier();let Fixture{path,backing,writer,contender,metadata}=fixture;drop(writer);drop(backing);
   let (ready,started)=mpsc::channel();let (finish,wait)=mpsc::channel();
   let exporter=std::thread::spawn(move||{let reply=resolve(carrier.as_fd()).unwrap();drop(carrier);ready.send(()).unwrap();wait.recv().unwrap();drop(reply);});
@@ -109,7 +113,7 @@ mod tests {
   let identity=metadata.identity;let (done,completed)=mpsc::channel();
   let draining=std::thread::spawn(move||{drain(&identity).unwrap();done.send(()).unwrap();});
   finish.send(()).unwrap();completed.recv_timeout(std::time::Duration::from_secs(5)).unwrap();exporter.join().unwrap();draining.join().unwrap();
-  assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0,"no temporary writer refs remain after drain returns");std::fs::remove_dir_all(path).unwrap();
+  assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0,"no temporary writer refs remain after drain returns");std::fs::remove_dir_all(path).unwrap();println!("{MARKER}");
  }
  #[test]
  fn unrelated_native_socket_is_not_a_carrier(){
@@ -123,6 +127,8 @@ mod reply_failure_tests {
  use std::{fs::OpenOptions,os::fd::{AsFd,FromRawFd}};
  #[test]
  fn regular_scm_bounded_reply_to_dead_receiver_drops_temporary_writer_refs(){
+  const MARKER:&str="REGULAR_SCM_DEAD_REPLY_FIXTURE_EXECUTED";
+  if crate::socket_scm::tests::isolated_exec_fixture("regular_scm::reply_failure_tests::regular_scm_bounded_reply_to_dead_receiver_drops_temporary_writer_refs",MARKER){return;}
   let path=std::env::temp_dir().join(format!("aim-scm-dead-reply-{}",std::process::id()));std::fs::create_dir(&path).unwrap();
   let backing=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();
   let writer=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("writers")).unwrap();
@@ -142,6 +148,6 @@ mod reply_failure_tests {
   assert!(mach::reply_bounded(&mut buffer,mach::NULL,&message,1).is_err(),"invalid destinations return genuine send failure");
   drop(export);
   drain(&metadata.identity).unwrap();assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
-  mach::release_send(reply_port);mach::drop_own_send(service);mach::destroy_receive(service);std::fs::remove_dir_all(path).unwrap();
+  mach::release_send(reply_port);mach::drop_own_send(service);mach::destroy_receive(service);std::fs::remove_dir_all(path).unwrap();println!("{MARKER}");
  }
 }

@@ -9,7 +9,7 @@
 //! module's `after_fork_child`.
 //!
 //! The encoding is private to one `linux-run` binary talking to itself:
-//! little-endian integers and length-prefixed bytes, no versioning.
+//! Versioned little-endian integers and length-prefixed bytes.
 
 use std::path::PathBuf;
 
@@ -96,6 +96,7 @@ impl<'a> Reader<'a> {
     pub fn intact(&self) -> bool {
         !self.bad
     }
+    pub fn invalidate(&mut self){self.bad=true;}
 
     fn take(&mut self, n: usize) -> &'a [u8] {
         if self.bad || self.buf.len() < n {
@@ -167,6 +168,7 @@ impl<'a> Reader<'a> {
 
 /// Every module's state, in restore order.
 pub fn save(w: &mut Writer) {
+    w.u32(0x46444e02);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
     crate::patch::fork_save(w);
@@ -194,6 +196,7 @@ pub fn save(w: &mut Writer) {
 /// Restore what [`save`] wrote, then rebuild the host objects the state
 /// names; false when the blob is damaged.
 pub fn restore(r: &mut Reader) -> bool {
+    if r.u32()!=0x46444e02{return false;}
     crate::xrt::fork_restore(r);
     crate::diag::fork_restore(r);
     crate::patch::fork_restore(r);
@@ -225,6 +228,8 @@ pub fn restore(r: &mut Reader) -> bool {
     }
     wait::after_fork_child();
     fdtab::after_fork_child();
+    super::super::posix_locks::reset_fork();
+    if let Err(error)=super::super::posix_locks::attach_fork(){eprintln!("fork POSIX owner admission: errno {error}");return false;}
     true
 }
 

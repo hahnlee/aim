@@ -27,7 +27,10 @@ pub mod fsverity;
 
 pub mod private_fd;
 
+pub mod verity_control;
 
 pub mod posix_control;
 
 pub mod posix_broker;
+
+pub mod socket_queue_root;

@@ -18,9 +18,14 @@ mod epoll;
 mod evdev;
 mod event;
 mod exec;
+mod exec_fd_receipt;
 pub(crate) mod fdtab;
+mod fd_visibility;
+pub(crate) mod regular_file;
+pub(crate) mod verified_source;
 mod fork;
 mod fs;
+mod fsverity_ioctl;
 mod fsops;
 mod futex;
 mod genfs;
@@ -29,6 +34,10 @@ mod itimer;
 mod jit;
 mod knob;
 mod mem;
+mod verity_pager;
+pub(crate) use verity_pager::{register_segment as verity_segment,Derivative as VerityDerivative,RewritePages as VerityRewritePages,ComposedPages as VerityComposedPages,register_composed as verity_composed};
+pub(crate) mod verity_control;
+pub(crate) mod posix_locks;
 mod memfd;
 mod misc;
 mod mount;
@@ -53,12 +62,15 @@ mod selinuxfs;
 mod sharedfile;
 mod sigframe;
 mod signal;
+pub(crate) use signal::initialize_verity_fault_slot;
 pub(crate) mod space;
 mod sync_file;
 mod thread;
 mod tmpfile;
 pub(crate) mod tty;
 mod uevent;
+pub(crate) mod user_memory;
+pub(crate) mod close_effects;
 mod uplink;
 mod vmmap;
 mod wait;
@@ -77,6 +89,7 @@ pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
 pub use fdtab::adopt as adopt_fd;
 pub use fdtab::init as init_fds;
+pub use fdtab::{parse_guest_fds,parse_socket_receipts};
 pub use fork::spawn::{child_main as become_fork_child, reserve_fds as reserve_fork_fds};
 pub(crate) use fork::state as fork_state;
 pub use mem::init_brk;
@@ -120,16 +133,9 @@ extern "C" fn linux_abi_dispatch(ctx: *mut GuestContext) {
     }
 }
 
-/// Read a NUL-terminated guest string.
-///
-/// # Safety
-/// `p` must point to readable guest memory.
-pub(crate) unsafe fn guest_cstr<'a>(p: u64) -> &'a [u8] {
-    if p == 0 {
-        return b"";
-    }
-    // SAFETY: caller contract.
-    unsafe { std::ffi::CStr::from_ptr(p as *const libc::c_char).to_bytes() }
+/// Copy a bounded NUL-terminated guest pathname into kernel-owned memory.
+pub(crate) fn guest_cstr(p: u64) -> Result<Vec<u8>, crate::errno::Errno> {
+    user_memory::read_cstr(p, user_memory::PATH_MAX)
 }
 
 /// Syscalls whose first or second argument is a path, for tracing.
@@ -157,11 +163,10 @@ pub fn dispatch(ctx: &mut GuestContext) {
                 line.push_str(", ");
             }
             if path_arg(nr) == Some(i) && nr != 17 {
-                // SAFETY: path arguments point at guest strings.
-                line.push_str(&format!(
-                    "\"{}\"",
-                    String::from_utf8_lossy(unsafe { guest_cstr(*v) })
-                ));
+                match guest_cstr(*v){
+                    Ok(path)=>line.push_str(&format!("\"{}\"",String::from_utf8_lossy(&path))),
+                    Err(error)=>line.push_str(&format!("<errno {error}>")),
+                }
             } else if (*v as i64) < 0 && (*v as i64) > -4096 {
                 line.push_str(&format!("{}", *v as i64));
             } else {
@@ -177,6 +182,7 @@ pub fn dispatch(ctx: &mut GuestContext) {
     // handler is to run for it.
     let r = loop {
         let r = handle(ctx, nr, a);
+        let r=match close_effects::flush(){Ok(())=>r,Err(error)=>-(error as i64)};
         if !signal::after_syscall(ctx, nr, &a, r) {
             break r;
         }

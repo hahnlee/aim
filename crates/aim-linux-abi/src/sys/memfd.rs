@@ -46,7 +46,6 @@ use std::sync::{Mutex, OnceLock};
 use super::fdtab::{self, Kind};
 use super::vmmap;
 use crate::errno::{self, EINVAL, EPERM};
-use crate::sys::guest_cstr;
 
 const MFD_CLOEXEC: u64 = 1;
 const MFD_ALLOW_SEALING: u64 = 2;
@@ -287,7 +286,8 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest string.
-    let name = unsafe { guest_cstr(a[0]) };
+    let owned_name=match super::user_memory::read_cstr(a[0],250){Ok(bytes)=>bytes,Err(36)=>return -(EINVAL as i64),Err(error)=>return -(error as i64)};
+    let name=owned_name.as_slice();
     if name.len() > 249 {
         return -(EINVAL as i64);
     }
@@ -345,6 +345,10 @@ pub fn memfd_create(a: [u64; 6]) -> i64 {
     let k = key_of(&st);
     with(|m| m.insert(k, Memfd::new(String::from_utf8_lossy(name).into_owned())));
     fdtab::insert(fd, Kind::Memfd(k));
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -379,6 +383,10 @@ pub fn reopen(fd: i32, host_flags: i32) -> Option<i64> {
     hold(new);
     know(key_of(&st), fd);
     fdtab::insert(new, Kind::Memfd(key_of(&st)));
+    if let Err(error) = fdtab::publish_guest(new) {
+        fdtab::on_close(new); unsafe { libc::close(new); }
+        return Some(-(error as i64));
+    }
     Some(new as i64)
 }
 

@@ -729,14 +729,27 @@ A current-source guest fixture now runs with the actual authenticated native
 coordinator and strict fork Ready ACK. Its owned protected ELF includes explicit
 TLS instructions, is asserted to translate, and produces authenticated derivative
 page-cache entries. Actual translated execution, pre/post-fork TLS, private COW,
-SIGBUS/address, data/BSS and corrupt-original EIO checks pass. This does not
-establish image CTS/app acceptance or complete ENABLE ioctl activation.
+SIGBUS/address, data/BSS and corrupt-original EIO checks pass. The current ABI
+also compiles across all targets, including test and executable initializers.
+The owned protected fixture declaring 4KiB alignment now retains valid
+16KiB-congruent load offsets and separate code/RELRO pages; actual original
+linker execution passes TLS, private COW, fork, SIGBUS and authenticated composed
+page checks. Its former packed main-executable layout is rejected with EINVAL:
+the RX load offset is not 16KiB aligned, and the original linker would remove
+EXEC while protecting the overlapping RELRO page. Genuine packed 4KiB DSO
+compatibility remains unrun. Kernel user-buffer copies now resolve cold verified
+pages before Mach copies; three real memory/proof/error checks pass. These
+results do not establish image CTS/app acceptance.
 The in-progress pager is now exercised by an actual NDK/original-bionic guest:
 normal mmap, closed source FD, private COW, growth/move, protection changes,
 MADV_DONTNEED revalidation, corrupt-page/EOF SIGBUS with exact address, shrink
 and fork COW isolation pass in the bounded fixture. These use genuine host-built
-Merkle proofs; ENABLE ioctl is not exposed. Shared page-cache ownership, prior
-mapping ENABLE transition and full runtime/CTS acceptance remain incomplete.
+Merkle proofs. A real native ENABLE issuer now performs authenticated remote
+prepare, durable publication and queries, with verified reads, writable-open
+refusal and repeated-ENABLE rejection. The same fixture retains an ioctl-only
+mode3 descriptor through ENABLE, verifies logical access flags, and rejects
+read/write/truncate/allocation/mmap access. The complete new image/CTS replay and
+native writer coverage remain incomplete.
 Five native SCM owner checks now pass, including actual Client/server Mach
 create/resolve/drain RPCs, kernel-queued rights, bounded reply failure and final
 writer release. The authenticated one-descriptor carrier uses synchronous EOF
@@ -750,8 +763,45 @@ Prepared inode proofs now expose a complete authenticated read-only metadata
 view before publication, and commit publishes that same blob inode without a
 header/tree rebuild. Seven storage checks pass, including pre-publication reads,
 same-inode commit, abort cleanup, corruption and directory-sync rollback. This
-supports mapping transition transactions; cross-process admission and ENABLE
-activation remain pending.
+supports mapping transition transactions. Actual authenticated remote transitions
+pass two-pager preparation/publication, unpublished-receipt rejection and failure
+after durable publication. Production startup now joins the real data mount before
+the first guest, constructs the same persistent proof store, and starts both the
+native coordinator and process worker with that store. The guest-init compile
+check passes; this startup ordering has not yet been booted. Corrupt or mismatched
+metadata recovery now quarantines prepared mappings instead of restoring
+unverified pages. Two actual subprocess checks pass for corrupt and valid but
+mismatched metadata after EOF: dirty and clean mappings both resolve to SIGBUS,
+and each worker exits within its three-second bound. A separate pager check
+confirms retained private COW bytes through a private Mach alias, blocked guest
+access, bounded waiter wakeup and released VM epoch. Separate inode leases now
+let read-only ENABLE callers share write denial while competing for the distinct
+ENABLE slot; eight primitive tests pass with writer/alias/SCM lifetime checks.
+Native ENABLE dispatch is implemented and its real issuer checks pass. The
+complete image/CTS gate remains pending.
+Native POSIX lock startup now has an explicit `host/aim-lock-holder` dependency
+under `host/guest-init`; isolated template inputs require and hash that same
+helper beside the frozen linux-run/guest-init binaries. The actual build graph
+loads both nodes and compile-checks successfully; the explicit helper build
+completes in 3.0 seconds with no failures. The Source release helper exists,
+while C staging and the common frozen-runtime receipt remain pending (#1193).
+The full newly integrated boot, syscall lifecycle and CTS checks remain pending.
+Darwin GC also flushes message-only socket references behind live unregistered
+receive queues under concurrency (#1191). The class5 carrier now uses a regular
+inode/OFD lease; the native backing is retained exactly while that lease remains
+in an actual queued/imported descriptor. Completed synchronous drain releases
+retired backing. Native host tests pass 50/0, and the focused guest syscall
+fixture passes real 4-by-4 concurrent init/refresh, I/O, reexport and immediate
+EOF after queued discard. The full ABI default-parallel suite passes 231/0
+with thirteen ignored definitions. Each invoked subprocess helper verifies its
+actual execution; unexecuted ignored definitions remain not run.
+Private SCM receivers and Mach fileport conversions now set CLOEXEC before
+retaining their descriptors; real exec-child checks prove final backing/writer
+release while that child is still alive (#1194). The source host all-targets
+compile check passes. The storage default-parallel suite passes 50/0 with three ignored definitions;
+controlled helpers are checked for actual execution. Raw-fork ownership fixtures
+create their resources in separate exec processes so unrelated tests cannot
+inherit socket/lease references. No test-suite serialization was used.
 Concurrent verified reads exposed native lock-node openat(O_CREAT) returning
 ENOENT during simultaneous opens of a retained existing directory (#1186).
 Atomic existing-open/create-exclusive admission with a bounded EEXIST reopen

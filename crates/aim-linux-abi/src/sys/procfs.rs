@@ -1310,6 +1310,16 @@ struct Pool(Mutex<Vec<i32>>);
 /// A file holding `data`, positioned at 0. Closing it gives the file back
 /// to the pool ([`recycle`]).
 pub(super) fn content_fd(data: &[u8], cloexec: bool) -> i64 {
+    let fd = content_fd_unpublished(data, cloexec);
+    if fd >= 0 {
+        if let Err(error)=fdtab::publish_guest(fd as i32){
+            fdtab::on_close(fd as i32);unsafe{libc::close(fd as i32);}return -(error as i64);
+        }
+    }
+    fd
+}
+
+pub(super) fn content_fd_unpublished(data: &[u8], cloexec: bool) -> i64 {
     let fd = match POOL.reuse(data, cloexec) {
         Some(fd) => fd,
         None => match fresh(data) {
@@ -1499,6 +1509,10 @@ fn dir_fd(guest: &str, list: Vec<Entry>, cloexec: bool) -> i64 {
             all,
         )))),
     );
+if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -1545,6 +1559,12 @@ const O_CREAT: u64 = 0o100;
 const O_CLOEXEC: u64 = 0o2000000;
 
 /// openat of a guest path under /proc or /sys. None: not ours.
+fn publish_plain_open(fd: i32) -> i64 {
+    if fd < 0 { return -(errno::last() as i64); }
+    if let Err(error)=fdtab::publish_guest(fd){unsafe{libc::close(fd);}return -(error as i64);}
+    fd as i64
+}
+
 pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     if let Some(result)=super::fuse_sysfs::open(guest,flags){return Some(result);}
     if !is_kernfs(guest) {
@@ -1561,18 +1581,14 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     {
         let c = CString::new(host.as_os_str().as_encoded_bytes()).ok()?;
         // SAFETY: opening the recorded value file.
-        return Some(errno::check(
-            unsafe { libc::open(c.as_ptr(), host_flags, 0o644) } as i64,
-        ));
+        return Some(publish_plain_open(unsafe { libc::open(c.as_ptr(), host_flags, 0o644) }));
     }
     let canon = canonical(guest);
 
     if canon.ends_with("/tracing/trace_marker") && node(&canon).is_some() {
         // Trace events are not collected: writes are discarded.
         // SAFETY: opening the host's null device.
-        return Some(errno::check(
-            unsafe { libc::open(c"/dev/null".as_ptr(), host_flags) } as i64,
-        ));
+        return Some(publish_plain_open(unsafe { libc::open(c"/dev/null".as_ptr(), host_flags) }));
     }
     if let Some(tid) = comm_tid(&canon) {
         let name = thread_comm(pid(), tid).unwrap_or_else(|| comm(pid()));

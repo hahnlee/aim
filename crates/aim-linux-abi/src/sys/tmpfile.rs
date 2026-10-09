@@ -91,6 +91,9 @@ pub fn open(dir: &Resolved, excl: bool, hflags: i32, mode: u64) -> i64 {
         // SAFETY: the name just made.
         unsafe { libc::unlink(host.as_ptr()) };
     }
+    if let Err(error)=super::fdtab::publish_guest(fd){
+        unsafe{libc::close(fd);libc::unlink(host.as_ptr());}return -(error as i64);
+    }
     fd as i64
 }
 

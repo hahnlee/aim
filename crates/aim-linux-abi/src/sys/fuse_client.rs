@@ -77,6 +77,19 @@ pub fn adopt(fd:i32)->Result<bool,Errno>{
     let file=std::sync::Arc::new(file);super::fuse_cache::register_file(&file)?;FILES.lock().unwrap().insert(fd,file);if let Some(slow)=super::fdtab::SLOW.get(fd as usize){slow.store(1,std::sync::atomic::Ordering::Relaxed);}Ok(true)
 }
 pub fn get(fd:i32)->Option<std::sync::Arc<Open>>{FILES.lock().unwrap().get(&fd).cloned()}
+/// A central pinned I/O guard retains this owner on its private duplicate.
+/// The alias is never a guest-visible publication or a new FUSE open.
+pub(super) fn install_private_alias(fd:i32,file:std::sync::Arc<Open>)->Result<(),Errno>{
+    if !super::fdtab::is_hidden(fd)||unsafe{libc::fcntl(fd,libc::F_GETFD)}<0{return Err(crate::errno::EBADF);}
+    let mut files=FILES.lock().unwrap();
+    if files.contains_key(&fd){return Err(crate::errno::EBUSY);}
+    files.insert(fd,file);Ok(())
+}
+pub(super) fn remove_private_alias(fd:i32,expected:&std::sync::Arc<Open>)->bool{
+    let mut files=FILES.lock().unwrap();
+    if !files.get(&fd).is_some_and(|file|std::sync::Arc::ptr_eq(file,expected)){return false;}
+    let removed=files.remove(&fd);drop(files);drop(removed);true
+}
 pub fn inherited_error(fd:i32)->Option<Errno>{if super::fuse::marker(fd)==Some(super::fuse::FILE_MARKER)&&get(fd).is_none(){return adopt(fd).err();}None}
 pub fn close(fd:i32){let removed=FILES.lock().unwrap().remove(&fd);if removed.is_some(){if let Some(slow)=super::fdtab::SLOW.get(fd as usize){slow.store(0,std::sync::atomic::Ordering::Relaxed);}}drop(removed);}
 pub fn dup(old:i32,new:i32){let mut files=FILES.lock().unwrap();let removed=files.remove(&new);if let Some(file)=files.get(&old).cloned(){files.insert(new,file);if let Some(slow)=super::fdtab::SLOW.get(new as usize){slow.store(1,std::sync::atomic::Ordering::Relaxed);}}drop(files);drop(removed);}
@@ -103,7 +116,8 @@ pub fn open_fd(route:FuseRoute,guest:String,flags:u32,mode:u32)->Result<i32,Errn
     let file=std::sync::Arc::new(opened);
     if let Err(error)=super::fuse_cache::register_file(&file){unsafe{libc::close(fd);}return Err(error);}
     if fd<0{return Err(EIO);}FILES.lock().unwrap().insert(fd,file);
-    if let Some(slow)=super::fdtab::SLOW.get(fd as usize){slow.store(1,std::sync::atomic::Ordering::Relaxed);}Ok(fd)
+    if let Some(slow)=super::fdtab::SLOW.get(fd as usize){slow.store(1,std::sync::atomic::Ordering::Relaxed);}
+    if let Err(error)=super::fdtab::publish_typed_guest(fd){super::fdtab::on_close(fd);unsafe{libc::close(fd);}return Err(error);}Ok(fd)
 }
 pub fn rw(fd:i32,iov:&[libc::iovec],position:Option<i64>,write:bool)->Option<i64>{
     let file=get(fd)?;if file.flags&0o10000000!=0{return Some(-(crate::errno::EBADF as i64));}if file.directory{return Some(-(crate::errno::EISDIR as i64));}
@@ -170,15 +184,15 @@ pub fn xattr(route:&FuseRoute,node:Option<u64>,opcode:u32,name:&[u8],value:&[u8]
 pub fn xattr_syscall(nr:u64,args:[u64;6])->Option<i64>{
     let fd=matches!(nr,7|10|13|16);let follow=!matches!(nr,6|9|12|15);
     let(route,node)=if fd{let file=get(args[0] as i32)?;(file.route.clone(),Some(file.node))}else{
-        let path=unsafe{super::guest_cstr(args[0])};let resolved=match crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD,path,follow){Ok(resolved)=>resolved,Err(error)=>return Some(-(error as i64))};(crate::vfs::fuse_route(&resolved.guest)?,None)
+        let path=match super::guest_cstr(args[0]){Ok(bytes)=>bytes,Err(error)=>return Some(-(error as i64))};let resolved=match crate::vfs::resolve(crate::vfs::LINUX_AT_FDCWD,&path,follow){Ok(resolved)=>resolved,Err(error)=>return Some(-(error as i64))};(crate::vfs::fuse_route(&resolved.guest)?,None)
     };
     let opcode=match nr{5..=7=>21,8..=10=>22,11..=13=>23,14..=16=>24,_=>return Some(-(EINVAL as i64))};
-    let name=if opcode==23{&[][..]}else{unsafe{super::guest_cstr(args[1])}};
+    let name=if opcode==23{Vec::new()}else{match super::guest_cstr(args[1]){Ok(bytes)=>bytes,Err(error)=>return Some(-(error as i64))}};
     if opcode!=23&&(name.is_empty()||name.len()>255){return Some(-(crate::errno::ERANGE as i64));}
     let(size,buffer)=if opcode==23{(args[2],args[1])}else{(args[3],args[2])};
     if size>65536{return Some(-(crate::errno::E2BIG as i64));}
     let value=if opcode==21&&size!=0{unsafe{std::slice::from_raw_parts(buffer as *const u8,size as usize)}}else{&[]};
-    match xattr(&route,node,opcode,name,value,size as u32,args[4] as u32){
+    match xattr(&route,node,opcode,&name,value,size as u32,args[4] as u32){
         Err(error)=>Some(-(error as i64)),Ok(bytes)=>{
             if opcode==21||opcode==24{return Some(0);}
             if size==0{return Some(match u32_at(&bytes,0){Ok(size)=>size as i64,Err(error)=>-(error as i64)});}
@@ -215,6 +229,28 @@ pub fn tmpfile(route:FuseRoute,guest:String,flags:u32,mode:u32)->Result<i32,Errn
     let reply=request(&route,51,parent,&payload)?;let node=u64_at(&reply,0)?;let fh=u64_at(&reply,128)?;let open_flags=u32_at(&reply,136)?;
     let mut opened=Open{guest,route,node,fh,flags,open_flags,broker_owned:false,directory:false,offset:std::sync::Mutex::new(0)};
     let identity=super::cred::current();let fd=super::fuse::open_description(&SessionKey::from_transport(opened.route.session.clone()),node,fh,flags,false,&opened.route.relative,&opened.guest,open_flags,&super::fuse::MountPolicy{uid:opened.route.uid,gid:opened.route.gid,allow_other:opened.route.allow_other,default_permissions:opened.route.default_permissions,read_only:opened.route.read_only},identity.uid[3],identity.gid[3],super::process::getpid() as u32)?;
-    opened.broker_owned=true;let file=std::sync::Arc::new(opened);if let Err(error)=super::fuse_cache::register_file(&file){unsafe{libc::close(fd);}return Err(error);}FILES.lock().unwrap().insert(fd,file);if let Some(slow)=super::fdtab::SLOW.get(fd as usize){slow.store(1,std::sync::atomic::Ordering::Relaxed);}Ok(fd)
+    opened.broker_owned=true;let file=std::sync::Arc::new(opened);if let Err(error)=super::fuse_cache::register_file(&file){unsafe{libc::close(fd);}return Err(error);}FILES.lock().unwrap().insert(fd,file);if let Some(slow)=super::fdtab::SLOW.get(fd as usize){slow.store(1,std::sync::atomic::Ordering::Relaxed);}
+    if let Err(error)=super::fdtab::publish_typed_guest(fd){super::fdtab::on_close(fd);unsafe{libc::close(fd);}return Err(error);}Ok(fd)
 }
 pub fn flush(file:&Open)->Result<(),Errno>{if file.flags&0o10000000!=0{return Ok(());}let mut payload=Vec::new();put64(&mut payload,file.fh);put32(&mut payload,0);put32(&mut payload,0);put64(&mut payload,super::process::getpid() as u64);request(&file.route,25,file.node,&payload).map(|_|())}
+
+#[cfg(test)]
+mod private_alias_tests {
+    use super::*;
+    #[test]
+    fn retained_private_alias_survives_original_close_and_does_not_type_reused_slot() {
+        use std::os::fd::IntoRawFd;
+        let (stream,peer)=std::os::unix::net::UnixStream::pair().unwrap();let original=stream.into_raw_fd();
+        let file=std::sync::Arc::new(Open{guest:"/fixture".into(),route:FuseRoute{session:"unused-registry-only".into(),relative:String::new(),uid:0,gid:0,allow_other:false,default_permissions:false,read_only:false},node:1,fh:2,flags:0,open_flags:0,broker_owned:true,directory:false,offset:std::sync::Mutex::new(0)});
+        let weak=std::sync::Arc::downgrade(&file);FILES.lock().unwrap().insert(original,file);let retained=get(original).unwrap();
+        let alias=super::super::fdtab::hide(unsafe{libc::dup(original)});
+        install_private_alias(alias,retained.clone()).unwrap();assert!(!super::super::fdtab::visible(alias));
+        close(original);unsafe{libc::close(original);}
+        let replacement=std::fs::File::open("/dev/null").unwrap();
+        unsafe{libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&replacement),original);}
+        assert!(get(original).is_none());assert!(std::sync::Arc::ptr_eq(&get(alias).unwrap(),&retained));
+        assert!(weak.upgrade().is_some());assert!(remove_private_alias(alias,&retained));assert!(get(alias).is_none());
+        drop(retained);assert!(weak.upgrade().is_none());
+        super::super::fdtab::unhide(alias);unsafe{libc::close(alias);if std::os::fd::AsRawFd::as_raw_fd(&replacement)!=original{libc::close(original);}}drop(peer);
+    }
+}

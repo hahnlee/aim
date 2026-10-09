@@ -126,6 +126,11 @@ pub struct Client {
 impl Client {
     #[cfg(test)]
     pub(crate) fn from_service_port(service:Port)->Self{Self{service}}
+    pub fn socket_scm_endpoint(&self)->Result<crate::socket_scm::Endpoint,Errno>{
+        let request=Msg{id:wire::SOCKET_SCM_CHANNEL,ports:vec![],data:vec![]};let reply=with_thread(|thread|call(thread,self.service,&request))??;
+        let result=(||{let mut reader=status(&reply)?;let endpoint=crate::socket_scm::Endpoint::decode(&mut reader)?;if reader.remaining()!=0||!reply.ports.is_empty(){return Err(wire::EPROTO);}Ok(endpoint)})();
+        for port in reply.ports{mach::release_send(port);}result
+    }
     /// Return an opaque carrier fileport. The ABI materializes it privately.
     pub fn create_regular_scm(&self,backing:i32,writer:Option<i32>,metadata:&wire::RegularMetadata)->Result<crate::regular_scm::FilePort,Errno>{
         if metadata.writer!=writer.is_some(){return Err(wire::EPROTO);}

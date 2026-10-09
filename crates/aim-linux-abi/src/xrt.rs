@@ -16,6 +16,10 @@
 //!   ([`Cache::publish_sites`]), so only the first process to map an ELF's
 //!   code analyzes it.
 
+#[path = "xrt_verified.rs"]
+pub mod verified;
+pub use verified::{DerivationBinding, SitesRewritePlan, VerifiedArtifact, VerifiedExecPlan, prepare_verified_exec, prepare_verified_member};
+
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::unix::ffi::OsStrExt;
@@ -179,7 +183,9 @@ pub fn open_translated(host: &CStr, guest: &str, host_flags: i32) -> Option<i32>
     let FileState::HasTranslation(path) = s else {
         return None;
     };
-    open_published(&path, guest, host_flags & libc::O_CLOEXEC)
+    let fd = open_published(&path, guest, host_flags & libc::O_CLOEXEC)?;
+    if let Err(error)=crate::sys::fdtab::publish_guest(fd){unsafe{libc::close(fd);}return Some(-error);}
+    Some(fd)
 }
 
 /// Called after the guest opened `host` as `fd` with Darwin flags

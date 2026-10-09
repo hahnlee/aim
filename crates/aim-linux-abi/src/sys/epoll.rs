@@ -178,6 +178,10 @@ pub fn epoll_create1(a: [u64; 6]) -> i64 {
             interest: Mutex::new(HashMap::new()),
         })),
     );
+    if let Err(error) = fdtab::publish_guest(kq) {
+        fdtab::on_close(kq); unsafe { libc::close(kq); }
+        return -(error as i64);
+    }
     kq as i64
 }
 

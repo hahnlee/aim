@@ -51,7 +51,8 @@ pub fn unshare(a: [u64; 6]) -> i64 {
 
 fn resolve(path: u64, follow: bool) -> Result<vfs::Resolved, i64> {
     // SAFETY: guest string.
-    let path = unsafe { super::guest_cstr(path) };
+    let owned_path = super::guest_cstr(path).map_err(|error|-(error as i64))?;
+    let path=owned_path.as_slice();
     vfs::resolve(LINUX_AT_FDCWD, path, follow).map_err(|e| -(e as i64))
 }
 
@@ -135,20 +136,20 @@ fn do_mount(a: [u64; 6]) -> Result<(), i64> {
         };
     }
     // SAFETY: guest strings.
-    let fstype = unsafe { super::guest_cstr(a[2]) };
-    match fstype {
+    let fstype = super::guest_cstr(a[2]).map_err(|error|-(error as i64))?;
+    match fstype.as_slice() {
         b"fuse"|b"fuse.media"=>{
-            let data=unsafe{super::guest_cstr(a[4])};let options=super::fuse_mount::parse(data).map_err(|error|-(error as i64))?;
+            let data=if a[4]==0{Vec::new()}else{super::user_memory::read_cstr(a[4],16384).map_err(|error|-(error as i64))?};let options=super::fuse_mount::parse(&data).map_err(|error|-(error as i64))?;
             let session=super::fuse::session_for_fd(options.fd).map_err(|error|-(error as i64))?;
             super::fuse::Client::from_key(&session).and_then(|client|client.mount()).map_err(|error|-(error as i64))?;
-            let source=unsafe{super::guest_cstr(a[0])};let source=std::str::from_utf8(source).map_err(|_|-(EINVAL as i64))?;
+            let source=super::guest_cstr(a[0]).map_err(|error|-(error as i64))?;let source=std::str::from_utf8(&source).map_err(|_|-(EINVAL as i64))?;
             vfs::add_fuse_mount(&target.guest,session.transport().to_path_buf(),PathBuf::from(OsStr::from_bytes(target.host.as_bytes())),source,&options,flags&MS_RDONLY!=0).map_err(|error|-(error as i64))?;
             match super::fuse_sysfs::mounted(&session){Ok(_)=>Ok(()),Err(error)=>{vfs::remove_mount(&target.guest).map_err(|error|-(error as i64))?;Err(-(error as i64))}}
         }
         b"tmpfs" => {
             // SAFETY: guest string (options), may be null.
-            let data = unsafe { super::guest_cstr(a[4]) };
-            let dir = tmpfs_dir(data)?;
+            let data = if a[4]==0{Vec::new()}else{super::user_memory::read_cstr(a[4],16384).map_err(|error|-(error as i64))?};
+            let dir = tmpfs_dir(&data)?;
             let area = if flags & MS_RDONLY != 0 {
                 Area::Image
             } else {

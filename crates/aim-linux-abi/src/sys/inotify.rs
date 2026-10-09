@@ -232,6 +232,10 @@ pub fn inotify_init1(a: [u64; 6]) -> i64 {
             }),
         })),
     );
+    if let Err(error) = fdtab::publish_guest(kq) {
+        fdtab::on_close(kq); unsafe { libc::close(kq); }
+        return -(error as i64);
+    }
     kq as i64
 }
 
@@ -254,7 +258,8 @@ pub fn inotify_add_watch(a: [u64; 6]) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: guest path.
-    let path = unsafe { guest_cstr(a[1]) };
+    let owned_path=match guest_cstr(a[1]){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let path=owned_path.as_slice();
     let r = match vfs::resolve(vfs::LINUX_AT_FDCWD, path, mask & IN_DONT_FOLLOW == 0) {
         Ok(r) => r,
         Err(e) => return -(e as i64),

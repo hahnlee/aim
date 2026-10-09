@@ -65,6 +65,7 @@ name = "aim-binder-host"
 version = "0.1.0"
 dependencies = [
  "aim-binder-driver",
+ "aim-storage",
  "libc",
 ]
 

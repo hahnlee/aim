@@ -24,6 +24,7 @@ pub const REJECT_DELIVERY: i32 = 0x6264_000b;
 pub const INTERRUPT: i32 = 0x6264_0006;
 pub const FILES: i32 = 0x6264_0007;
 pub const FILE_CLASS: i32 = 0x6264_0009;
+pub const SOCKET_SCM_CHANNEL:i32=0x6264_0011;
 pub const CREATE_REGULAR_SCM:i32=0x6264_000c;
 pub const RESOLVE_REGULAR_SCM:i32=0x6264_000d;
 pub const DRAIN_REGULAR_SCM:i32=0x6264_000e;
@@ -60,7 +61,7 @@ fn validate_metadata(classes: &[u32], regular: &[Option<RegularMetadata>], count
     if classes.len() != count || regular.len() != count { return Err(EPROTO); }
     for (class, regular) in classes.iter().zip(regular) {
         if !valid_class(*class) || (*class == crate::regular_file::CLASS) != regular.is_some() { return Err(EPROTO); }
-        if regular.as_ref().is_some_and(|metadata| metadata.flags & 3 == 3 || (metadata.flags & 3 != 0) != metadata.writer) { return Err(EPROTO); }
+        if regular.as_ref().is_some_and(|metadata| matches!(metadata.flags & 3, 1 | 2) != metadata.writer) { return Err(EPROTO); }
     }
     Ok(())
 }

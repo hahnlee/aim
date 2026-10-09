@@ -305,6 +305,9 @@ pub struct Boot {
     /// Run mode: the system services implemented natively (ADR 0013),
     /// registered once servicemanager is ready.
     native_services: Option<Arc<NativeServices>>,
+    /// Drops after executor's HostLauncher has killed and reaped its children.
+    _verity_control: Option<aim_storage::verity_control::RunningServer>,
+    _posix_control: Option<Arc<aim_storage::posix_broker::Controller>>,
     /// The native status bar runs (`start_status_bar`).
     status_bar: bool,
     pub report: BootReport,
@@ -528,6 +531,20 @@ impl Boot {
         let data_mount = Rc::new(RefCell::new(data_mount));
         let sweep = layout.sweep_runtime().map_err(|e| e.to_string())?;
         layout.prepare_runtime().map_err(|e| e.to_string())?;
+        let verity_control = if options.mode == RunMode::Run {
+            data_mount.borrow_mut().mount()?;
+            let endpoint = layout.runtime.join("vc/ctl");
+            let store = Arc::new(aim_storage::fsverity::Store::new(
+                &layout.data.join("fs-verity"), &layout.runtime.join("fs-verity-leases"),
+            ).map_err(|error| format!("verity store: {error:?}"))?);
+            let owner = aim_storage::verity_control::RunningServer::start_with_store(&endpoint, Duration::from_secs(5), store)
+                .map_err(|error| error.to_string())?;
+            aim_storage::verity_control::OwnerConfig { endpoint, process: owner.process }
+                .write(&layout.runtime.join("verity-control-owner")).map_err(|error| error.to_string())?;
+            Some(owner)
+        } else {
+            None
+        };
         let map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
         if options.mode == RunMode::Run {
@@ -643,6 +660,22 @@ impl Boot {
         mark("init scripts loaded");
 
         let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
+        let posix_control=if options.mode==RunMode::Run {
+            let process=aim_storage::process_namespace::ProcessIdentity::running(std::process::id()as i32).map_err(|error|error.to_string())?;
+            let endpoint=format!("dev.aim.posix.{}.{}.{}",process.host_pid,process.start_seconds,process.start_microseconds);
+            let holder=std::fs::canonicalize(linux_run_binary.with_file_name("aim-lock-holder")).map_err(|error|format!("configured POSIX lock holder: {error}"))?;
+            let controller=Arc::new(aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint,holder,startup_timeout:Duration::from_secs(5)}).map_err(|error|error.to_string())?);
+            let table=std::fs::canonicalize(layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+            for entry in map.entries(){
+                let host=match std::fs::canonicalize(&entry.host){Ok(host)=>host,Err(error)if error.kind()==std::io::ErrorKind::NotFound=>entry.host.clone(),Err(error)=>return Err(error.to_string())};
+                if table.starts_with(&host)||layout.runtime.join("posix-control-owner").starts_with(&host){return Err("native POSIX identity receipts or locator overlap a guest mount".into());}
+            }
+            let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
+            controller.bind_namespace(&table,&init).map_err(|error|error.to_string())?;
+            controller.register_guest(aim_storage::posix_control::Owner{process,guest_pid:1}).map_err(|error|error.to_string())?;
+            controller.owner_config().and_then(|owner|owner.write(&layout.runtime.join("posix-control-owner"))).map_err(|error|error.to_string())?;
+            Some(controller)
+        }else{None};
         let linux_run_options = match options.mode {
             RunMode::DryRun => LinuxRunOptions::CONTRACT,
             RunMode::Run => LinuxRunOptions::detect(&linux_run_binary),
@@ -725,7 +758,7 @@ impl Boot {
         }
         let launcher: Box<dyn Launcher> = match options.mode {
             RunMode::DryRun => Box::new(DryRunLauncher::new(linux_run.clone())),
-            RunMode::Run => Box::new(HostLauncher::new(linux_run.clone(), layout.clone())),
+            RunMode::Run => Box::new(HostLauncher::new(linux_run.clone(), layout.clone()).with_posix(posix_control.as_ref().unwrap().clone(),layout.runtime.join("posix-control-owner"))),
         };
         let planner = Planner {
             layout: layout.clone(),
@@ -792,6 +825,8 @@ impl Boot {
             _sockets: sockets,
             binder,
             native_services,
+            _verity_control: verity_control,
+            _posix_control: posix_control,
             status_bar: false,
             data: data_mount,
             _sweep: sweep,

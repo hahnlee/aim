@@ -123,14 +123,17 @@ fn serve_regular_control(req:&mach::Received,buffer:&mut Buffer){
     drop(guard);
 }
 
-fn registered_descriptor_class(fd: i32) -> std::io::Result<u32> {
+pub(crate) fn socket_scm_errno(error:std::io::Error)->i32{path_creation_errno(error)}
+pub(crate) fn socket_scm_darwin_errno(errno:i32)->i32{match errno{71=>libc::EPROTO,11=>libc::EAGAIN,88=>libc::ENOTSOCK,104=>libc::ECONNRESET,other=>other}}
+pub(crate) fn registered_descriptor_class(fd: i32) -> std::io::Result<u32> {
     let proxy = crate::proxy_file::registered_class_result(fd)?;
     if proxy != 0 {
         return Ok(proxy);
     }
     let path=crate::path_file::registered_class_result(fd)?;
     if path!=0{return Ok(path);}
-    crate::regular_scm::registered_class(fd)
+    let regular=crate::regular_scm::registered_class(fd)?;if regular!=0{return Ok(regular);}
+    crate::socket_scm::registered_class(fd)
 }
 
 pub fn path_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {
@@ -164,10 +167,17 @@ pub fn file_class(file: &File) -> Option<u32> {
 /// metadata; a regular writer lease cannot be separated from its backing.
 pub struct RetainedFd { backing: std::fs::File, owner: File }
 impl RetainedFd {
+    fn access(&self,write:bool)->std::io::Result<()>{
+        if let Some(metadata)=self.owner.downcast_ref::<FilePort>().and_then(|file|file.2.as_ref()).map(|regular|&regular.metadata){
+            let mode=metadata.flags&3;
+            if !(if write{matches!(mode,1|2)}else{matches!(mode,0|2)}){return Err(std::io::Error::from_raw_os_error(libc::EBADF));}
+        }
+        Ok(())
+    }
     pub fn into_file_owner(self) -> File { self.owner }
     pub fn try_clone(&self) -> std::io::Result<Self> { Ok(Self { backing:self.backing.try_clone()?, owner:self.owner.clone() }) }
     pub fn metadata(&self) -> std::io::Result<std::fs::Metadata> { self.backing.metadata() }
-    pub fn set_len(&self, length:u64) -> std::io::Result<()> { self.backing.set_len(length) }
+    pub fn set_len(&self, length:u64) -> std::io::Result<()> { self.access(true)?;self.backing.set_len(length) }
     pub fn sync_all(&self) -> std::io::Result<()> { self.backing.sync_all() }
     pub fn into_owned_fd(self) -> std::io::Result<std::os::fd::OwnedFd> {
         if self.owner.downcast_ref::<FilePort>().is_some_and(|file| file.1==crate::regular_file::CLASS) {
@@ -178,15 +188,15 @@ impl RetainedFd {
 }
 impl std::os::fd::AsRawFd for RetainedFd { fn as_raw_fd(&self)->i32 { std::os::fd::AsRawFd::as_raw_fd(&self.backing) } }
 impl std::os::fd::AsFd for RetainedFd { fn as_fd(&self)->std::os::fd::BorrowedFd<'_> { std::os::fd::AsFd::as_fd(&self.backing) } }
-impl std::io::Read for RetainedFd { fn read(&mut self, bytes:&mut[u8])->std::io::Result<usize> { std::io::Read::read(&mut self.backing,bytes) } }
+impl std::io::Read for RetainedFd { fn read(&mut self, bytes:&mut[u8])->std::io::Result<usize> { self.access(false)?;std::io::Read::read(&mut self.backing,bytes) } }
 impl std::io::Write for RetainedFd {
-    fn write(&mut self, bytes:&[u8])->std::io::Result<usize> { std::io::Write::write(&mut self.backing,bytes) }
+    fn write(&mut self, bytes:&[u8])->std::io::Result<usize> { self.access(true)?;std::io::Write::write(&mut self.backing,bytes) }
     fn flush(&mut self)->std::io::Result<()> { std::io::Write::flush(&mut self.backing) }
 }
 impl std::io::Seek for RetainedFd { fn seek(&mut self, position:std::io::SeekFrom)->std::io::Result<u64> { std::io::Seek::seek(&mut self.backing,position) } }
 impl std::os::unix::fs::FileExt for RetainedFd {
-    fn read_at(&self, bytes:&mut[u8], offset:u64)->std::io::Result<usize> { std::os::unix::fs::FileExt::read_at(&self.backing,bytes,offset) }
-    fn write_at(&self, bytes:&[u8], offset:u64)->std::io::Result<usize> { std::os::unix::fs::FileExt::write_at(&self.backing,bytes,offset) }
+    fn read_at(&self, bytes:&mut[u8], offset:u64)->std::io::Result<usize> { self.access(false)?;std::os::unix::fs::FileExt::read_at(&self.backing,bytes,offset) }
+    fn write_at(&self, bytes:&[u8], offset:u64)->std::io::Result<usize> { self.access(true)?;std::os::unix::fs::FileExt::write_at(&self.backing,bytes,offset) }
 }
 
 pub fn file_fd(file: &File) -> Option<RetainedFd> {
@@ -282,6 +292,7 @@ impl OpenFile {
 type ControlReply = (Vec<(Port, u32)>, Vec<u8>);
 
 pub struct Server {
+    socket_service:crate::socket_scm::Service,
     driver: Arc<Driver>,
     service: Port,
     set: Port,
@@ -328,6 +339,7 @@ impl Server {
             return Err("kqueue failed".into());
         }
         let server = Arc::new(Self {
+            socket_service:crate::socket_scm::Service::start().map_err(|error|format!("socket SCM listener: {error}"))?,
             driver,
             service,
             set,
@@ -365,7 +377,9 @@ impl Server {
             if req.local==self.service&&matches!(req.id,wire::CREATE_REGULAR_SCM|wire::RESOLVE_REGULAR_SCM|wire::DRAIN_REGULAR_SCM){
                 serve_regular_control(&req,&mut buf);continue;
             }
-            let result = if req.local == self.service && req.id == wire::CREATE_PATH {
+            let result = if req.local==self.service&&req.id==wire::SOCKET_SCM_CHANNEL {
+                if !req.ports.is_empty()||!req.data.is_empty(){Err(wire::EPROTO)}else{Ok((Vec::new(),self.socket_service.endpoint().encode()))}
+            } else if req.local == self.service && req.id == wire::CREATE_PATH {
                 if req.ports.len() != 1 || req.data.len() != 4 {
                     Err(wire::EPROTO)
                 } else {
@@ -973,7 +987,22 @@ mod path_carrier_tests {
         }
     }
     #[test]
+    fn actual_client_socket_scm_rpc_repeated_resolve_preserves_receipt_and_exact_eof(){
+        use std::os::unix::ffi::OsStrExt;
+        let(backing,peer)=std::os::unix::net::UnixStream::pair().unwrap();let receipt=aim_storage::socket_inode::Receipt::mint(backing.as_raw_fd()).unwrap();let socket_service=crate::socket_scm::Service::start().unwrap();
+        let service=mach::new_port(true).unwrap();let descriptor=socket_service.endpoint().clone();let worker=std::thread::spawn(move||{
+            let mut buffer=Buffer::default();let request=mach::receive(&mut buffer,service).unwrap();assert_eq!(request.id,wire::SOCKET_SCM_CHANNEL);assert!(request.ports.is_empty());
+            let mut data=0i32.to_le_bytes().to_vec();data.extend(descriptor.encode());let message=Msg{id:wire::REPLY,ports:vec![],data};mach::reply_bounded(&mut buffer,request.reply,&message,1000).unwrap();
+        });let mut worker=FiniteScmService{port:service,thread:Some(worker)};let client=crate::client::Client::from_service_port(service);
+        let endpoint=client.socket_scm_endpoint().unwrap();let channel=std::os::unix::net::UnixStream::connect(std::path::Path::new(std::ffi::OsStr::from_bytes(&endpoint.path))).unwrap();let _channel_root=aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap();crate::socket_scm::authenticate(channel.as_raw_fd(),&endpoint).unwrap();worker.join();drop(worker);
+        crate::socket_scm::request_create(channel.as_raw_fd(),backing.as_raw_fd(),receipt).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();let reply=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap();let carrier=reply.descriptor.unwrap();assert_eq!(reply.receipt,Some(receipt));drop(backing);
+        for _ in 0..2{crate::socket_scm::request_resolve(channel.as_raw_fd(),carrier.as_raw_fd()).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();let reply=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap();assert_eq!(reply.receipt,Some(receipt));let imported=reply.descriptor.unwrap();receipt.validate(imported.as_raw_fd()).unwrap();drop(imported);}
+        drop(carrier);crate::socket_scm::request_drain(channel.as_raw_fd()).unwrap();crate::socket_scm::wait_reply(channel.as_raw_fd()).unwrap();let drained=crate::socket_scm::receive_reply(channel.as_raw_fd()).unwrap();assert_eq!(drained.class,0);assert!(drained.descriptor.is_none());assert!(drained.receipt.is_none());_channel_root.prepare_last_close(channel.as_fd()).unwrap();drop(channel);drop(_channel_root);drop(socket_service);let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0);
+    }
+    #[test]
     fn actual_client_regular_scm_control_rpc_preserves_identity_writer_and_drains_eof(){
+        const MARKER:&str="REGULAR_SCM_RPC_LIFETIME_FIXTURE_EXECUTED";
+        if crate::socket_scm::tests::isolated_exec_fixture("server::path_carrier_tests::actual_client_regular_scm_control_rpc_preserves_identity_writer_and_drains_eof",MARKER){return;}
         use std::fs::OpenOptions;
         let path=std::env::temp_dir().join(format!("aim-scm-control-{}",std::process::id()));std::fs::create_dir(&path).unwrap();
         let backing=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();
@@ -1002,7 +1031,7 @@ mod path_carrier_tests {
         drop(resolved);drop(carrier);drop(data);drop(lease);
         client.drain_regular_scm(&metadata.identity).unwrap();owner.join();
         assert_eq!(unsafe{libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)},0);
-        drop(owner);std::fs::remove_dir_all(path).unwrap();
+        drop(owner);std::fs::remove_dir_all(path).unwrap();println!("{MARKER}");
     }
     #[test]
     fn regular_sidecar_count_and_backing_incarnation_are_checked_before_driver_adoption() {
@@ -1076,6 +1105,8 @@ mod path_carrier_tests {
     }
     #[test]
     fn regular_fileport_keeps_exact_writer_lock_until_final_reference_closes() {
+        const MARKER:&str="REGULAR_FILEPORT_LIFETIME_FIXTURE_EXECUTED";
+        if crate::socket_scm::tests::isolated_exec_fixture("server::path_carrier_tests::regular_fileport_keeps_exact_writer_lock_until_final_reference_closes",MARKER){return;}
         use std::fs::OpenOptions;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!("aim-binder-regular-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
@@ -1093,11 +1124,13 @@ mod path_carrier_tests {
         let stored = queued.downcast_ref::<FilePort>().unwrap();
         assert_eq!(stored.2.as_ref().unwrap().metadata,metadata);
         let received = unsafe { OwnedFd::from_raw_fd(mach::port_to_fd(stored.2.as_ref().unwrap().writer.unwrap()).unwrap()) };
+        let flags=unsafe{libc::fcntl(received.as_raw_fd(),libc::F_GETFD)};assert!(flags>=0);assert_ne!(flags&libc::FD_CLOEXEC,0);
         drop(queued);
         assert_eq!(unsafe { libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB) },-1);
         drop(received);
         assert_eq!(unsafe { libc::flock(contender.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB) },0,"last real fileport/fd close must release the writer immediately");
         std::fs::remove_dir_all(path).unwrap();
+        println!("{MARKER}");
     }
     #[test]
     fn path_fileport_creation_preserves_kernel_descriptor_and_linux_error_contract() {
@@ -1149,5 +1182,25 @@ mod path_carrier_tests {
         );
         let file = file_from_fd(carrier.as_fd()).unwrap();
         assert_eq!(file_class(&file), Some(crate::path_file::CLASS));
+    }
+}
+
+#[cfg(test)]
+mod ioctl_only_tests {
+    use super::*;
+    use std::{io::{Read,Write},os::fd::AsFd};
+    #[test]
+    fn ioctl_only_regular_transport_preserves_metadata_and_denies_data_io(){
+        let path=std::env::temp_dir().join(format!("aim-ioctl-only-{}",std::process::id()));
+        let backing=std::fs::File::options().read(true).write(true).create_new(true).open(&path).unwrap();
+        let metadata=wire::RegularMetadata{flags:3,uid:1000,gid:1001,identity:crate::regular_file::identity(backing.as_fd()).unwrap(),writer:false};
+        let message=wire::Ioctl{fds:vec![7],file_classes:vec![crate::regular_file::CLASS],regular:vec![Some(metadata.clone())],..Default::default()};
+        assert!(message.validate().is_ok());assert_eq!(wire::Ioctl::decode(&message.encode()).unwrap(),message);
+        let owner=regular_file_from_fd(backing.as_fd(),None,metadata).unwrap();let mut file=file_fd(&owner).unwrap();
+        assert_eq!(file.read(&mut[0]).unwrap_err().raw_os_error(),Some(libc::EBADF));
+        assert_eq!(file.write(b"x").unwrap_err().raw_os_error(),Some(libc::EBADF));
+        assert_eq!(file.set_len(1).unwrap_err().raw_os_error(),Some(libc::EBADF));
+        assert_eq!(file.metadata().unwrap().len(),0);
+        drop(file);drop(owner);drop(backing);std::fs::remove_file(path).unwrap();
     }
 }

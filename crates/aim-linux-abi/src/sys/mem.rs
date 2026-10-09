@@ -90,31 +90,18 @@ fn trace_stats(what: &str, addr: u64, len: u64, stats: &patch::PatchStats) {
 
 /// Fill `[b, b+len)` from `fd` at `off`.
 fn populate(b: u64, len: u64, fd: i32, off: u64) -> Result<(), i64> {
-    let mut done = 0u64;
-    while done < len {
-        // SAFETY: b..b+len is freshly mapped RW.
-        let n = unsafe {
-            libc::pread(
-                fd,
-                (b + done) as *mut _,
-                (len - done) as usize,
-                (off + done) as i64,
-            )
-        };
-        if n < 0 {
-            return Err(-(errno::last() as i64));
-        }
-        if n == 0 {
-            break;
-        }
-        done += n as u64;
-    }
-    Ok(())
+    use std::os::fd::BorrowedFd;
+    let borrowed=unsafe{BorrowedFd::borrow_raw(fd)};
+    let description=super::regular_file::adopt_kernel(borrowed,0).map_err(|error|-(error as i64))?;
+    let source=super::verified_source::VerifiedSource::from_descriptor(borrowed,description).map_err(|error|-(error as i64))?;
+    let available=source.len().map_err(|error|-(error as i64))?.saturating_sub(off).min(len);
+    let mut bytes=vec![0;available as usize];source.read_exact_at(&mut bytes,off).map_err(|error|-(error as i64))?;
+    unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),b as*mut u8,bytes.len());}Ok(())
 }
 
 /// Rewrite a freshly populated private file mapping (not executable yet)
 /// using the file's sites, or a scan when there is no metadata.
-fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
+fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) -> Result<(),i64> {
     let stats = match source {
         ExecSource::LoadTime(Some(a)) => {
             let abs: Vec<_> = a
@@ -125,13 +112,13 @@ fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
                 .collect();
             let stats = patch::rewrite_sites(&abs, b, b + len, true);
             if let Some(m) = &a.fips {
-                rehash_fips(m, b, len, fd, off);
+                rehash_fips(m, b, len, fd, off)?;
             }
             stats
         }
         // Already translated (or nothing to rewrite): a scan would only hit
         // words the translator identified as data.
-        ExecSource::Shared => return,
+        ExecSource::Shared => return Ok(()),
         ExecSource::LoadTime(None) => patch::rewrite_region(b, len),
     };
     // Every file that takes this path is named, sites or not: no cache
@@ -145,6 +132,7 @@ fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
         );
     }
     trace_stats("rewrote", b, len, &stats);
+    Ok(())
 }
 
 /// After the copy at `b` (file offset `off`) holding the module text was
@@ -152,21 +140,20 @@ fn rewrite_file_copy(b: u64, len: u64, fd: i32, off: u64, source: &ExecSource) {
 /// rewritten, so it comes from the file. The hash is in `.rodata` (or, in
 /// static builds, after the text), which linker64 has mapped by now: it maps
 /// segments in program header order.
-fn rehash_fips(m: &fips::Module, b: u64, len: u64, fd: i32, off: u64) {
+fn rehash_fips(m: &fips::Module, b: u64, len: u64, fd: i32, off: u64) -> Result<(),i64> {
     let text_len = m.text.1 - m.text.0;
     if m.text_offset < off || m.text_offset + text_len > off + len {
-        return;
+        return Ok(());
     }
     let text_addr = b + (m.text_offset - off);
     let rodata = match m.rodata {
         Some((lo, hi)) => {
             let mut v = vec![0u8; (hi - lo) as usize];
-            // SAFETY: reading into our buffer.
-            let n =
-                unsafe { libc::pread(fd, v.as_mut_ptr().cast(), v.len(), m.rodata_offset as i64) };
-            if n != v.len() as isize {
-                return;
-            }
+            use std::os::fd::BorrowedFd;
+            let borrowed=unsafe{BorrowedFd::borrow_raw(fd)};
+            let description=super::regular_file::adopt_kernel(borrowed,0).map_err(|error|-(error as i64))?;
+            let source=super::verified_source::VerifiedSource::from_descriptor(borrowed,description).map_err(|error|-(error as i64))?;
+            source.read_exact_at(&mut v,m.rodata_offset).map_err(|error|-(error as i64))?;
             Some(v)
         }
         None => None,
@@ -178,6 +165,7 @@ fn rehash_fips(m: &fips::Module, b: u64, len: u64, fd: i32, off: u64) {
     if !store_hash(hash_addr, &m.original, &new) {
         crate::diag!("[linux-abi] FIPS module hash at {hash_addr:#x} is not mapped from this file");
     }
+    Ok(())
 }
 
 /// Replace `original` with `new` at `addr` in an anonymous copy of the
@@ -207,7 +195,87 @@ fn store_hash(addr: u64, original: &fips::Hash, new: &fips::Hash) -> bool {
     true
 }
 
-pub fn mmap(a: [u64; 6]) -> i64 {
+pub fn mmap(mut a: [u64; 6]) -> i64 {
+    if a[3] & MAP_ANONYMOUS != 0 {
+        let _epoch=super::verity_pager::mutation();
+        let result=mmap_owned(a);
+        if result>=0&&let Err(error)=super::verity_pager::reconcile_memberships(){return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+        return result;
+    }
+    use std::os::fd::AsRawFd;
+    let held = match super::fdtab::pin_guest(a[4] as i32) {
+        Ok(held) => held, Err(error) => return -(error as i64),
+    };
+    if matches!(held.kind(), Some(super::fdtab::Kind::Path(_))) { return -(crate::errno::EBADF as i64); }
+    let client=crate::verity_client();
+    let identity=match held.kind(){Some(super::fdtab::Kind::Regular(description))=>Some(description.identity),_=>None};
+    // Begin before the VM epoch: an enable transaction may need its exclusive
+    // epoch while admission waits. Proof lookup below happens after this ACK.
+    let admission=match (&client,identity){
+        (Some(client),Some(identity))=>match client.admission(identity.to_bytes()){
+            Ok(admission)=>Some(admission),Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64),
+        },_=>None,
+    };
+    let _epoch=super::verity_pager::mutation();
+    if a[3]&MAP_FIXED!=0 {super::verity_pager::wait_pending(a[0],page_up(a[1]));}
+    a[4] = held.descriptor().as_raw_fd() as u64;
+    let result=mmap_pinned(a,&held);
+    if let Some(admission)=admission {
+        let finish=if result>=0 {super::verity_pager::publish_membership(identity.unwrap(),admission)}else{admission.abort()};
+        if let Err(error)=finish {
+            if result>=0 {let _=super::verity_pager::forget(result as u64,page_up(a[1]));window::unmap(result as u64,page_up(a[1]));}
+            return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);
+        }
+    }
+    if result>=0&&let Err(error)=super::verity_pager::reconcile_memberships(){return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+    result
+}
+fn mmap_pinned(a:[u64;6],held:&super::fdtab::Pinned)->i64 {
+    use std::os::fd::AsRawFd;
+    if let Some(super::fdtab::Kind::Regular(description)) = held.kind() {
+        if !matches!(description.flags & 3,0|2) { return -(errno::EACCES as i64); }
+        let proof = match description.store.lookup(description.identity) {
+            Ok(proof) => proof,
+            Err(_) => return -(errno::EIO as i64),
+        };
+        if let Some(proof) = proof {
+            use std::os::fd::FromRawFd;
+            let source = match aim_storage::private_fd::PrivateFd::allocate(|| {
+                let fd=unsafe{libc::fcntl(held.descriptor().as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};
+                if fd<0 {return Err(std::io::Error::last_os_error());}
+                Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(fd)})
+            }) { Ok(data)=>std::sync::Arc::new(super::verity_pager::Source{data,proof:Some(std::sync::Arc::new(proof)),description:Some(description.clone()),cache:match super::verity_pager::MappingCache::runtime(){Ok(cache)=>cache,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)},extent:None,derivative:None}), Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64) };
+            let shared=matches!(a[3]&MAP_TYPE,MAP_SHARED|MAP_SHARED_VALIDATE);
+            if shared&&a[2]&PROT_WRITE!=0{return -(errno::EACCES as i64);}
+            let result=mmap_owned([a[0],a[1],0,(a[3]&!MAP_TYPE)|MAP_PRIVATE|MAP_ANONYMOUS,u64::MAX,0]);
+            if result<0{return result;}
+            let base=result as u64;let length=page_up(a[1]);
+            match super::verity_pager::register(base,length,a[5],host_prot(a[2]),shared,source) {
+                Ok(mapping)=>{super::verity_pager::retain(mapping);return result;}
+                Err(error)=>{window::unmap(base,length);return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+            }
+        }
+    }
+    let result=mmap_owned(a);
+    if result>=0 && let Some(super::fdtab::Kind::Regular(description))=held.kind() {
+        use std::os::fd::FromRawFd;
+        let data=match aim_storage::private_fd::PrivateFd::allocate(||{let fd=unsafe{libc::fcntl(held.descriptor().as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};if fd<0{return Err(std::io::Error::last_os_error());}Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(fd)})}){Ok(data)=>data,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)};
+        let cache=match super::verity_pager::MappingCache::runtime(){Ok(cache)=>cache,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)};
+        let source=std::sync::Arc::new(super::verity_pager::Source{data,proof:None,description:Some(description.clone()),cache,extent:None,derivative:None});
+        if let Err(error)=super::verity_pager::track_existing(result as u64,page_up(a[1]),a[5],host_prot(a[2]),matches!(a[3]&MAP_TYPE,MAP_SHARED|MAP_SHARED_VALIDATE),source){window::unmap(result as u64,page_up(a[1]));return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+    }
+    result
+}
+
+/// Kernel callers retain their authenticated private descriptor separately.
+/// This entry never treats a hidden kernel carrier as a guest descriptor.
+fn mmap_owned(a: [u64; 6]) -> i64 {
+    if a[3]&MAP_FIXED!=0&&super::verity_pager::overlaps(a[0],page_up(a[1])) {
+        return super::verity_pager::replace_range(a[0],page_up(a[1]),||mmap_kernel(a));
+    }
+    mmap_kernel(a)
+}
+fn mmap_kernel(a: [u64; 6]) -> i64 {
     let (addr, len, prot, flags, fd, off) = (
         a[0],
         a[1],
@@ -216,9 +284,6 @@ pub fn mmap(a: [u64; 6]) -> i64 {
         a[4] as i32,
         a[5],
     );
-    if flags & MAP_ANONYMOUS == 0 && (super::fs::is_path_fd(fd) || super::fdtab::is_hidden(fd)) {
-        return -(crate::errno::EBADF as i64);
-    }
     if flags & MAP_ANONYMOUS == 0 && super::proxy_file::is_proxy(fd) {
         return -(crate::errno::ENODEV as i64);
     }
@@ -231,7 +296,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
             Ok(cache) => cache,
             Err(error) => return -(error as i64),
         };
-        let result = mmap([addr, len, prot, flags, cache.fd() as u64, off]);
+        let result = mmap_owned([addr, len, prot, flags, cache.fd() as u64, off]);
         if result >= 0 {
             if let Err(error)=super::fuse_cache::note(cache,result as u64,page_up(len),off,shared){
                 window::unmap(result as u64,page_up(len));
@@ -401,7 +466,7 @@ pub fn mmap(a: [u64; 6]) -> i64 {
                 if exec {
                     crate::diag::register_fd_module(b, len, fd, off);
                     let source = source.unwrap_or_else(|| xrt::exec_source(fd, off));
-                    rewrite_file_copy(b, len, fd, off, &source);
+                    if let Err(error)=rewrite_file_copy(b,len,fd,off,&source){window::unmap(b,len);return error;}
                 }
             } else if exec && !fresh_jit {
                 // Fresh anonymous code: nothing written yet, but scan anyway so
@@ -459,6 +524,8 @@ pub fn mmap(a: [u64; 6]) -> i64 {
 /// execve in place: the old image's memory goes, the whole guest range,
 /// with what is recorded about it; the heap window is reserved again.
 pub fn exec_reset() {
+    let _epoch=super::verity_pager::mutation();
+    if let Err(error) = super::verity_pager::clear() { eprintln!("verity mapping retirement before exec failed: {error}"); }
     if let Err(error)=super::fuse_cache::shutdown_writeback(){
         eprintln!("FUSE writeback before exec failed: {error}");
     }
@@ -503,7 +570,9 @@ thread_local! {
 /// the calling thread's own stack and then calls `exit`, so an munmap that
 /// covers that frame is deferred to thread exit (ADR 0012, "Platform probes").
 pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
+    let _epoch=super::verity_pager::mutation();
     let (addr, len) = (a[0], page_up(a[1]));
+    super::verity_pager::wait_pending(addr,len);
     if addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
     }
@@ -512,21 +581,27 @@ pub fn munmap(ctx: &GuestContext, a: [u64; 6]) -> i64 {
         DEFERRED_UNMAPS.with(|d| d.borrow_mut().push((addr, len)));
         return 0;
     }
+    if let Err(error) = super::verity_pager::forget(addr, len) { return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64); }
     copies::forget(addr, addr + len);
     if let Err(error) = super::fuse_cache::flush_range(addr, len) {
         return -(error as i64);
     }
     let result = window::unmap(addr, len);
-    if result == 0 { super::fuse_cache::forget(addr, len); }
+    if result == 0 {
+        super::fuse_cache::forget(addr,len);
+        if let Err(error)=super::verity_pager::reconcile_memberships(){return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+    }
     result
 }
 
 /// Run the munmaps deferred by [`munmap`]; called on the host stack when the
 /// thread exits.
 pub fn run_deferred_unmaps() -> usize {
+    let _epoch=super::verity_pager::mutation();
     DEFERRED_UNMAPS.with(|d| {
         let v = std::mem::take(&mut *d.borrow_mut());
         for &(addr, len) in &v {
+            if let Err(error)=super::verity_pager::forget(addr,len){eprintln!("verity deferred mapping retirement failed: {error}");continue;}
             if let Err(error) = super::fuse_cache::flush_range(addr, len) {
                 eprintln!("FUSE deferred unmap writeback failed: {error}");
             }
@@ -534,6 +609,7 @@ pub fn run_deferred_unmaps() -> usize {
             // SAFETY: the guest asked for this unmap; its thread is exiting.
             unsafe { libc::munmap(addr as *mut _, len as usize) };
         }
+        if let Err(error)=super::verity_pager::reconcile_memberships(){eprintln!("verity deferred membership retirement failed: {error}");}
         v.len()
     })
 }
@@ -583,12 +659,42 @@ fn file_backed(addr: u64) -> bool {
 ///   readable if needed, scanned and rewritten (a private file mapping
 ///   gets its own copy of each page written), then protected.
 pub fn mprotect(a: [u64; 6]) -> i64 {
+    let _epoch=super::verity_pager::exclusive_mutation();
+    if super::verity_pager::failed_range(a[0],page_up(a[1])){return -(errno::EIO as i64);}
+    mprotect_owned(a)
+}
+fn mprotect_owned(a:[u64;6])->i64 {
     let (addr, len, prot) = (a[0], page_up(a[1]), a[2] & !(PROT_BTI | PROT_MTE));
+    super::verity_pager::wait_pending(addr,len);
     if addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
     }
     if window::touches_reserved(addr, addr + len) {
         return -(ENOMEM as i64);
+    }
+    let ranges = super::verity_pager::covered(addr, len);
+    if !ranges.is_empty() {
+        if let Err(error)=super::verity_pager::validate_protection(addr,len,host_prot(prot)) {
+            return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);
+        }
+        let mut previous = Vec::new();
+        for region in vmmap::regions(addr, addr + len) {
+            previous.push((region.start.max(addr), region.end.min(addr + len), region.prot));
+        }
+        let mut cursor = addr;
+        for &(lo, hi) in &ranges {
+            if cursor < lo {
+                let result = mprotect_owned([cursor, lo-cursor, prot, 0, 0, 0]);
+                if result < 0 { return result; }
+            }
+            cursor = hi;
+        }
+        if cursor < addr + len { let result=mprotect_owned([cursor,addr+len-cursor,prot,0,0,0]);if result<0{return result;} }
+        if let Err(error) = super::verity_pager::protect_range(addr, len, host_prot(prot)) {
+            for (lo,hi,old) in previous { if !super::verity_pager::overlaps(lo,hi-lo) { host_mprotect(lo,hi-lo,old as i32); } }
+            return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)) as i64);
+        }
+        return 0;
     }
     let rwx = prot & (PROT_WRITE | PROT_EXEC) == PROT_WRITE | PROT_EXEC;
     if prot & PROT_EXEC != 0 {
@@ -621,6 +727,7 @@ pub fn mprotect(a: [u64; 6]) -> i64 {
         return super::jit::protect_rwx(addr, len);
     }
     let r = host_mprotect(addr, len, host_prot(prot));
+    if r==0{super::verity_pager::note_protection(addr,len,host_prot(prot));}
     if r == -(errno::EACCES as i64) {
         // JIT pages keep their protection.
         return super::jit::protect_around(addr, len, host_prot(prot));
@@ -638,6 +745,7 @@ use patch::vm::{
 };
 
 unsafe extern "C" {
+    fn sys_icache_invalidate(start:*mut libc::c_void,len:usize);
     fn mach_vm_allocate(task: libc::mach_port_t, address: *mut u64, size: u64, flags: i32) -> i32;
     fn mach_vm_inherit(task: libc::mach_port_t, address: u64, size: u64, inheritance: u32) -> i32;
     fn mach_vm_read_overwrite(
@@ -680,6 +788,91 @@ pub(super) fn remap_shared(dst: u64, src: u64, len: u64) -> Result<(), i64> {
             inherit_shared(dst + (r.start - src), r.end - r.start);
         }
     }
+    Ok(())
+}
+
+/// The caller holds the exclusive VM epoch and validated the mapping generation.
+/// No unfilled executable memory is visible to another guest pthread.
+pub(super) fn publish_verified_jit_page(dst:u64,bytes:&[u8])->std::io::Result<()> {
+    unsafe{libc::pthread_jit_write_protect_np(1);}
+    let _placement=arena::placing_exclusive();
+    let outcome=super::thread::with_guest_threads_quiescent(||{
+        if unsafe{libc::munmap(dst as*mut _,bytes.len())}!=0{return Err(errno::last());}
+        let protection=libc::PROT_READ|libc::PROT_WRITE|libc::PROT_EXEC;
+        let mapped=unsafe{libc::mmap(dst as*mut _,bytes.len(),protection,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_JIT,-1,0)};
+        let failure=if mapped==libc::MAP_FAILED{Some(errno::last())}else if mapped as u64!=dst{unsafe{libc::munmap(mapped,bytes.len());}Some(errno::ENOMEM)}else{None};
+        if let Some(failure)=failure{
+            let restored=unsafe{libc::mmap(dst as*mut _,bytes.len(),libc::PROT_NONE,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_FIXED,-1,0)};
+            if restored==libc::MAP_FAILED{return Err(errno::last());}return Err(failure);
+        }
+        unsafe{libc::pthread_jit_write_protect_np(0);std::ptr::copy_nonoverlapping(bytes.as_ptr(),mapped.cast::<u8>(),bytes.len());libc::pthread_jit_write_protect_np(1);sys_icache_invalidate(mapped,bytes.len());}
+        Ok(())
+    }).map_err(std::io::Error::from_raw_os_error)?;
+    outcome.map_err(std::io::Error::from_raw_os_error)
+}
+
+/// Change an owned resident page without losing its private COW bytes. JIT
+/// entries cannot be overwritten with Mach remap on this host kernel.
+pub(super) fn reprotect_verified_page(address:u64,length:u64,protection:i32)->std::io::Result<()> {
+    let current=vmmap::info_at(address).ok_or_else(||std::io::Error::from_raw_os_error(libc::ENOMEM))?.prot as i32&7;
+    let rwx=libc::PROT_READ|libc::PROT_WRITE|libc::PROT_EXEC;
+    if current!=rwx&&protection!=rwx{return if unsafe{libc::mprotect(address as*mut _,length as usize,protection)}==0{Ok(())}else{Err(std::io::Error::last_os_error())};}
+    if current==protection{return Ok(());}
+    let mut bytes=vec![0;length as usize];unsafe{libc::pthread_jit_write_protect_np(1);}let _placement=arena::placing_exclusive();
+    let result=super::thread::with_guest_threads_quiescent(||{
+        unsafe{std::ptr::copy_nonoverlapping(address as*const u8,bytes.as_mut_ptr(),bytes.len());}
+        unsafe{libc::munmap(address as*mut _,bytes.len());}
+        let flags=libc::MAP_PRIVATE|libc::MAP_ANON|if protection==rwx{libc::MAP_JIT}else{libc::MAP_FIXED};
+        let initial=if protection==rwx{rwx}else{libc::PROT_READ|libc::PROT_WRITE};
+        let mapped=unsafe{libc::mmap(address as*mut _,bytes.len(),initial,flags,-1,0)};
+        let failure=if mapped==libc::MAP_FAILED{Some(errno::last())}else if mapped as u64!=address{unsafe{libc::munmap(mapped,bytes.len());}Some(errno::ENOMEM)}else{
+            unsafe{if protection==rwx{libc::pthread_jit_write_protect_np(0);}std::ptr::copy_nonoverlapping(bytes.as_ptr(),mapped.cast::<u8>(),bytes.len());if protection==rwx{libc::pthread_jit_write_protect_np(1);}sys_icache_invalidate(mapped,bytes.len());}
+            if protection!=rwx&&unsafe{libc::mprotect(mapped,bytes.len(),protection)}!=0{Some(errno::last())}else{None}
+        };
+        if let Some(failure)=failure{
+            unsafe{libc::munmap(address as*mut _,bytes.len());}
+            let flags=libc::MAP_PRIVATE|libc::MAP_ANON|if current==rwx{libc::MAP_JIT}else{libc::MAP_FIXED};
+            let restored=unsafe{libc::mmap(address as*mut _,bytes.len(),if current==rwx{rwx}else{libc::PROT_READ|libc::PROT_WRITE},flags,-1,0)};
+            if restored as u64!=address{if restored!=libc::MAP_FAILED{unsafe{libc::munmap(restored,bytes.len());}}return Err(errno::ENOMEM);}
+            unsafe{if current==rwx{libc::pthread_jit_write_protect_np(0);}std::ptr::copy_nonoverlapping(bytes.as_ptr(),restored.cast::<u8>(),bytes.len());if current==rwx{libc::pthread_jit_write_protect_np(1);}sys_icache_invalidate(restored,bytes.len());}
+            if current!=rwx&&unsafe{libc::mprotect(restored,bytes.len(),current)}!=0{return Err(errno::last());}return Err(failure);
+        }
+        Ok(())
+    }).map_err(std::io::Error::from_raw_os_error)?;
+    result.map_err(std::io::Error::from_raw_os_error)
+}
+
+/// Publish a fully verified staging object without a guest-visible writable
+/// interval. RWX staging first publishes fully initialized non-executable
+/// bytes; execute permission is added only after the owned fixed remap.
+pub(super) fn remap_verified_page(dst: u64, src: u64, len: u64, protection: i32, private: bool) -> std::io::Result<()> {
+    let rwx=libc::PROT_READ|libc::PROT_WRITE|libc::PROT_EXEC;
+    let jit=if private&&protection&rwx==rwx {
+        let staging=unsafe{libc::mmap(std::ptr::null_mut(),len as usize,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_JIT,-1,0)};
+        if staging==libc::MAP_FAILED{return Err(std::io::Error::last_os_error());}
+        unsafe{libc::pthread_jit_write_protect_np(0);std::ptr::copy_nonoverlapping(src as*const u8,staging.cast::<u8>(),len as usize);libc::pthread_jit_write_protect_np(1);sys_icache_invalidate(staging,len as usize);}
+        Some(staging as u64)
+    }else{
+        if unsafe{libc::mprotect(src as*mut _,len as usize,protection)}!=0{return Err(std::io::Error::last_os_error());}
+        None
+    };
+    let source=jit.unwrap_or(src);
+    let (mut addr, mut current, mut maximum) = (dst, 0, 0);
+    let result = unsafe { mach_vm_remap(task(), &mut addr, len, 0,
+        VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, task(), source, i32::from(private&&jit.is_none()),
+        &mut current, &mut maximum, if private { VM_INHERIT_COPY } else { VM_INHERIT_SHARE }) };
+    if let Some(staging)=jit{unsafe{libc::munmap(staging as*mut _,len as usize);}}
+    if result!=0{return Err(std::io::Error::other(format!("Mach verified remap: kr {result:#x}")));}
+    if jit.is_some(){
+        if unsafe{libc::mprotect(dst as*mut _,len as usize,protection)}!=0{
+            let failure=std::io::Error::last_os_error();
+            if unsafe{libc::mprotect(dst as*mut _,len as usize,libc::PROT_NONE)}!=0{return Err(std::io::Error::other(format!("JIT publish {failure}; protection rollback {}",std::io::Error::last_os_error())));}
+            return Err(failure);
+        }
+        current=protection;
+    }
+
+    if addr!=dst||current&protection!=protection{return Err(std::io::Error::other(format!("Mach verified remap protections {current:#x}/{maximum:#x}, requested {protection:#x}")));}
     Ok(())
 }
 
@@ -742,50 +935,51 @@ fn discard_private(addr: u64, len: u64) -> i64 {
             return e;
         }
         if r.file.is_none() {
-            refill_copy(lo, n, prot);
+            if let Err(error)=refill_copy(lo,n,prot){return error;}
         }
     }
     0
 }
 
 /// Reload the file contents of copied pages in fresh `[lo, lo+n)`.
-fn refill_copy(lo: u64, n: u64, prot: i32) {
-    let mut cur = lo;
-    while cur < lo + n {
-        let Some((c, off)) = copies::find(cur) else {
-            cur += PAGE;
-            continue;
-        };
-        let end = c.end.min(lo + n);
-        let Ok(p) = std::ffi::CString::new(c.host.as_os_str().as_bytes()) else {
-            cur = end;
-            continue;
-        };
-        // SAFETY: refilling our fresh private pages from the file they copy.
-        unsafe {
-            let fd = libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-            if fd >= 0 {
-                if prot & libc::PROT_WRITE == 0 {
-                    libc::mprotect(cur as *mut _, (end - cur) as usize, prot | libc::PROT_WRITE);
-                }
-                let _ = populate(cur, end - cur, fd, off);
-                if prot & libc::PROT_WRITE == 0 {
-                    libc::mprotect(cur as *mut _, (end - cur) as usize, prot);
-                }
-                libc::close(fd);
-            }
-        }
-        cur = end;
+fn refill_copy(lo: u64, n: u64, prot: i32) -> Result<(),i64> {
+    let mut cur=lo;
+    while cur<lo+n {
+        let Some((copy,offset))=copies::find(cur)else{cur+=PAGE;continue;};
+        let end=copy.end.min(lo+n);
+        let path=std::ffi::CString::new(copy.host.as_os_str().as_bytes()).map_err(|_|-(errno::EINVAL as i64))?;
+        let source=super::verified_source::VerifiedSource::open(&path,false).map_err(|error|-(error as i64))?;
+        let mut bytes=vec![0;(end-cur)as usize];
+        source.read_exact_at(&mut bytes,offset).map_err(|error|-(error as i64))?;
+        if prot&libc::PROT_WRITE==0&&host_mprotect(cur,end-cur,prot|libc::PROT_WRITE)<0{return Err(-(errno::last()as i64));}
+        unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),cur as*mut u8,bytes.len());}
+        if prot&libc::PROT_WRITE==0&&host_mprotect(cur,end-cur,prot)<0{return Err(-(errno::last()as i64));}
+        cur=end;
     }
+    Ok(())
 }
 
 pub fn madvise(a: [u64; 6]) -> i64 {
+    let _epoch=super::verity_pager::mutation();
+    if super::verity_pager::failed_range(a[0],page_up(a[1])){return -(errno::EIO as i64);}
     let (addr, len, advice) = (a[0], page_up(a[1]), a[2]);
+    super::verity_pager::wait_pending(addr,len);
     if addr & (PAGE - 1) != 0 {
         return -(EINVAL as i64);
     }
     match advice {
-        MADV_DONTNEED | MADV_REMOVE => discard_private(addr, len),
+        MADV_DONTNEED | MADV_REMOVE => {
+            let ranges=super::verity_pager::covered(addr,len);
+            if ranges.is_empty() { return discard_private(addr,len); }
+            let mut cursor=addr;
+            for &(lo,hi) in &ranges {
+                if cursor<lo { let result=discard_private(cursor,lo-cursor);if result<0{return result;} }
+                cursor=hi;
+            }
+            if cursor<addr+len { let result=discard_private(cursor,addr+len-cursor);if result<0{return result;} }
+            super::verity_pager::discard_range(addr,len).map(|_|0)
+                .unwrap_or_else(|error|-(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))
+        },
         MADV_FREE => {
             // SAFETY: advisory only.
             unsafe { libc::madvise(addr as *mut _, len as usize, libc::MADV_FREE) };
@@ -866,7 +1060,7 @@ fn map_file_at(
         return Err(-(errno::last() as i64));
     }
     let kind = if shared { MAP_SHARED } else { MAP_PRIVATE };
-    let r = mmap([addr, len, prot, kind | MAP_FIXED, fd as u64, off]);
+    let r = mmap_owned([addr, len, prot, kind | MAP_FIXED, fd as u64, off]);
     // SAFETY: our temporary fd.
     unsafe { libc::close(fd) };
     if r < 0 { Err(r) } else { Ok(()) }
@@ -884,7 +1078,7 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
     }
     if keep_old {
         // MREMAP_DONTUNMAP: the old range stays mapped, empty.
-        discard_private(old, old_len);
+        let result=discard_private(old,old_len);if result<0{return Err(result);}
     } else {
         // The old pages now live at `new`.
         window::unmap(old, old_len);
@@ -893,7 +1087,42 @@ fn move_to(old: u64, old_len: u64, new: u64, new_len: u64, keep_old: bool) -> Re
 }
 
 pub fn mremap(a: [u64; 6]) -> i64 {
+    let _epoch=super::verity_pager::mutation();
+    let result=mremap_guest(a);
+    if result>=0&&let Err(error)=super::verity_pager::reconcile_memberships(){return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+    result
+}
+fn mremap_guest(a:[u64;6])->i64 {
+    if super::verity_pager::failed_range(a[0],page_up(a[1])){return -(errno::EIO as i64);}
     let (old, old_len, new_len, flags, new_addr) = (a[0], page_up(a[1]), page_up(a[2]), a[3], a[4]);
+    super::verity_pager::wait_pending(old,old_len);
+    if flags&MREMAP_FIXED!=0{super::verity_pager::wait_pending(new_addr,new_len);}
+    if !super::verity_pager::covered(old,old_len).is_empty() {
+        if old%PAGE!=0 || new_len==0 || flags&!(MREMAP_MAYMOVE|MREMAP_FIXED|MREMAP_DONTUNMAP)!=0
+            || flags&(MREMAP_FIXED|MREMAP_DONTUNMAP)!=0&&flags&MREMAP_MAYMOVE==0
+            || flags&MREMAP_DONTUNMAP!=0&&old_len!=new_len { return -(EINVAL as i64); }
+        let fixed=flags&MREMAP_FIXED!=0;let keep=flags&MREMAP_DONTUNMAP!=0;
+        let destination=if fixed {
+            if new_addr%PAGE!=0 || new_addr<old+old_len&&old<new_addr+new_len{return -(EINVAL as i64);}
+            new_addr
+        } else if !keep&&new_len<=old_len { old }
+        else {
+            if flags&MREMAP_MAYMOVE==0{return -(ENOMEM as i64);}
+            match arena::map_anon(new_len,libc::PROT_NONE){Ok(address)=>address,Err(error)=>return error}
+        };
+        let result=super::verity_pager::remap(old,old_len,destination,new_len,keep,|| {
+            if destination==old {
+                if new_len<old_len&&window::unmap(old+new_len,old_len-new_len)<0{return Err(std::io::Error::from_raw_os_error(libc::ENOMEM));}
+            } else {
+                if fixed { let reservation=unsafe{libc::mmap(destination as*mut _,new_len as usize,libc::PROT_NONE,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_FIXED,-1,0)};if reservation==libc::MAP_FAILED{return Err(std::io::Error::last_os_error());} }
+                remap_shared(destination,old,old_len.min(new_len)).map_err(|error|std::io::Error::from_raw_os_error((-error)as i32))?;
+                if keep {let blank=unsafe{libc::mmap(old as*mut _,old_len as usize,libc::PROT_NONE,libc::MAP_PRIVATE|libc::MAP_ANON|libc::MAP_FIXED,-1,0)};if blank==libc::MAP_FAILED{return Err(std::io::Error::last_os_error());}}
+                else if window::unmap(old,old_len)<0{return Err(std::io::Error::from_raw_os_error(libc::ENOMEM));}
+            }
+            Ok(())
+        });
+        return match result {Ok(true)=>destination as i64,Ok(false)=>-(libc::EFAULT as i64),Err(error)=>-(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)};
+    }
     let owner = match super::fuse_cache::remap_owner(old, old_len) {
         Ok(owner) => owner,
         Err(error) => return -(error as i64),
@@ -906,7 +1135,11 @@ pub fn mremap(a: [u64; 6]) -> i64 {
             return -(error as i64);
         }
     }
+    let tracked=super::verity_pager::mapping_view(old,old_len);
     let result = mremap_inner(a);
+    if result>=0&&let Some(view)=tracked {
+        if let Err(error)=super::verity_pager::moved_existing(view,result as u64,new_len,flags&MREMAP_DONTUNMAP!=0){return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+    }
     if result >= 0 && let Some(owner) = owner {
         super::fuse_cache::remapped(owner, old, old_len, result as u64, new_len, flags & MREMAP_DONTUNMAP != 0);
     }

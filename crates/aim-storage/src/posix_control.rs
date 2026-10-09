@@ -78,6 +78,7 @@ pub enum Operation {
     Cancel = 5,
     Close = 6,
     Exit = 7,
+    Attach = 8,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Frame {
@@ -144,6 +145,7 @@ impl Frame {
             5 => Operation::Cancel,
             6 => Operation::Close,
             7 => Operation::Exit,
+            8 => Operation::Attach,
             _ => return Err(error(libc::EPROTO)),
         };
         Ok(Self {
@@ -528,12 +530,26 @@ impl Client {
     }
 }
 impl Pending {
-    pub fn wait(&self, timeout: Duration) -> io::Result<Frame> {
+    pub fn wait_authenticated(
+        &self,
+        timeout: Duration,
+        controller: ProcessIdentity,
+    ) -> io::Result<Frame> {
         let incoming = receive(self.reply.0, timeout)?;
+        if authenticate_actor(incoming.pid, incoming.pid_version)? != controller {
+            return Err(error(libc::EPERM));
+        }
+        self.frame(incoming)
+    }
+    fn frame(&self, incoming: Incoming) -> io::Result<Frame> {
         if incoming.frame.request != self.request || incoming.proof.is_some() {
             return Err(error(libc::EPROTO));
         }
         Ok(incoming.frame)
+    }
+    pub fn wait(&self, timeout: Duration) -> io::Result<Frame> {
+        let incoming = receive(self.reply.0, timeout)?;
+        self.frame(incoming)
     }
 }
 struct Backing {
@@ -1023,6 +1039,34 @@ mod tests {
     fn request() -> u64 {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+    #[test]
+    fn attach_reply_rejects_another_actual_process_as_controller() {
+        let helper = Holder::new();
+        let expected = ProcessIdentity::running(helper.pid).unwrap();
+        let endpoint =
+            Endpoint::register(&format!("com.aim.posix-wrong-reply.{}", std::process::id()))
+                .unwrap();
+        let client =
+            Client::lookup(&format!("com.aim.posix-wrong-reply.{}", std::process::id())).unwrap();
+        let request = Frame::new(Operation::Attach, request());
+        let pending = client.begin(request, None).unwrap();
+        let message = endpoint.receive(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            message.actor,
+            ProcessIdentity::running(unsafe { libc::getpid() }).unwrap()
+        );
+        let mut response = message.frame;
+        response.guest_pid = unsafe { libc::getpid() };
+        message.reply.send(response).unwrap();
+        assert_eq!(
+            pending
+                .wait_authenticated(Duration::from_secs(1), expected)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EPERM)
+        );
+        helper.stop();
     }
     fn register(holder: &Holder, file: &std::fs::File) -> u64 {
         use std::os::fd::AsFd;

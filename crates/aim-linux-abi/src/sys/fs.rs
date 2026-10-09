@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::ffi::CString;
+use std::os::unix::{ffi::OsStrExt,fs::OpenOptionsExt};
 
 use super::fdtab::{self, Kind};
 use super::{attrs, dir, event, inotify, memfd, net, space};
@@ -26,7 +27,7 @@ const O_NOFOLLOW: u64 = 0o100000;
 const O_LARGEFILE: u64 = 0o400000;
 pub(super) const O_CLOEXEC: u64 = 0o2000000;
 const O_SYNC: u64 = 0o4010000;
-const O_PATH: u64 = 0o10000000;
+pub(super) const O_PATH: u64 = 0o10000000;
 const O_TMPFILE: u64 = 0o20000000;
 
 // Linux *at() flags.
@@ -90,6 +91,14 @@ pub(super) fn check_writable(r: &vfs::Resolved) -> Result<(), i64> {
     if r.read_only() { Err(-EROFS) } else { Ok(()) }
 }
 
+/// Loader-owned read capability: enforce the original guest's path/DAC view,
+/// then keep the actual descriptor private rather than publishing a guest FD.
+pub(crate) fn open_kernel_authorized(guest:&[u8],id:&super::cred::Identity)->Result<aim_storage::private_fd::PrivateFile,errno::Errno>{
+    let resolved=resolve_as(vfs::LINUX_AT_FDCWD,guest,true,id,attrs::FS)?;
+    open_permissions(&resolved,0,false,id)?;
+    aim_storage::private_fd::PrivateFile::allocate(||std::fs::File::open(std::path::Path::new(std::ffi::OsStr::from_bytes(resolved.host.as_bytes())))).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))
+}
+
 pub fn openat(a: [u64; 6]) -> i64 {
     openat_as(a, &super::cred::current())
 }
@@ -100,10 +109,19 @@ fn resolve_as(dirfd: i32, path: &[u8], follow: bool, id: &super::cred::Identity,
 }
 
 pub(super) fn openat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
+    let result=openat_owned(a,id);
+    if result>=0{
+        let _guard=fdtab::lifecycle();
+        if let Err(error)=fdtab::publish_guest(result as i32){fdtab::on_close(result as i32);unsafe{libc::close(result as i32);}return -(error as i64);}
+    }
+    result
+}
+fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     let (dirfd, mut flags, mode) = (a[0] as i32, a[2], a[3]);
     if flags & O_PATH != 0 { flags &= O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW; }
     // SAFETY: guest path pointer.
-    let path = unsafe { guest_cstr(a[1]) };
+    let path = match guest_cstr(a[1]){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let path=path.as_slice();
     if flags & O_TMPFILE != 0 {
         // open(2): O_TMPFILE comes with O_DIRECTORY, without O_CREAT, and
         // with write access.
@@ -177,7 +195,7 @@ pub(super) fn openat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         return fd as i64;
     }
     // SAFETY: host path from the resolver.
-    let fd = unsafe { libc::open(r.host.as_ptr(), hflags, mode as libc::c_uint) };
+    let fd = unsafe { libc::open(r.host.as_ptr(), hflags&!libc::O_TRUNC, mode as libc::c_uint) };
     if fd < 0 {
         return -(errno::last() as i64);
     }
@@ -194,6 +212,33 @@ pub(super) fn openat_as(a: [u64; 6], id: &super::cred::Identity) -> i64 {
         }
     }
     if flags & O_PATH != 0 { fdtab::insert(fd, Kind::Path(fdtab::PathDescription::new(flags))); }
+    else{
+        let description=match super::regular_file::adopt(fd,flags){Ok(description)=>description,Err(error)=>{unsafe{libc::close(fd);}return -(error as i64);}};
+        if flags&O_TRUNC!=0{
+            let writable_anchor=if flags&O_ACCMODE==0{
+                match aim_storage::private_fd::PrivateFile::allocate(||std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(std::path::Path::new(std::ffi::OsStr::from_bytes(r.host.as_bytes())))){
+                    Ok(anchor)=>Some(anchor),Err(error)=>{unsafe{libc::close(fd);}return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
+                }
+            }else{None};
+            use std::os::fd::{AsFd,AsRawFd};
+            let target=writable_anchor.as_ref().map(|anchor|anchor.as_raw_fd()).unwrap_or(fd);
+            if let Some(anchor)=&writable_anchor{
+                let original=unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)};
+                match(aim_storage::inode_lease::Identity::from_fd(original),aim_storage::inode_lease::Identity::from_fd(anchor.as_fd())){
+                    (Ok(original),Ok(actual))if original==actual=>{},_=>{unsafe{libc::close(fd);}return -(errno::from_darwin(libc::ESTALE)as i64);}
+                }
+            }
+            let truncation=if let Some(description)=&description{
+                let source=unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)};
+                match description.store.lock_inode(&source){
+                    Ok(admission)=>match admission.writer_lease(){Ok(_lease)=>errno::check(unsafe{libc::ftruncate(target,0)}as i64),Err(error)=>-(match error{aim_storage::fsverity::Error::Linux(error)=>error,aim_storage::fsverity::Error::Io(error)=>errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))}as i64)},
+                    Err(error)=>-(match error{aim_storage::fsverity::Error::Linux(error)=>error,aim_storage::fsverity::Error::Io(error)=>errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))}as i64),
+                }
+            }else{errno::check(unsafe{libc::ftruncate(target,0)}as i64)};
+            if truncation<0{unsafe{libc::close(fd);}return truncation;}
+        }
+        if let Some(description)=description{fdtab::insert(fd,Kind::Regular(description));}
+    }
     // Or it is replaced by the translated file here.
     crate::xrt::on_open(fd, &r.host, &r.guest, hflags);
     if matches!(r.guest.as_str(), "/dev/random" | "/dev/urandom") {
@@ -223,14 +268,24 @@ fn open_permissions(r: &vfs::Resolved, flags: u64, creating: bool, id: &super::c
 }
 
 pub fn close(a: [u64; 6]) -> i64 {
-    let fd = a[0] as i32;
-    if fdtab::is_hidden(fd) {
-        return -(EBADF as i64);
-    }
-    let flush=super::fuse_client::get(fd).map(|file|super::fuse_cache::flush_file(&file).and_then(|_|super::fuse_client::flush(&file)));
+    super::close_effects::run(||close_inner(a))
+}
+fn close_inner(a: [u64; 6]) -> i64 {
+    let fd=a[0] as i32;
+    let guard=fdtab::lifecycle();
+    if let Err(error)=fdtab::require_guest_visible(fd){return -(error as i64);}
+    let retained=fdtab::get(fd);let file=super::fuse_client::get(fd);
+    let socket=matches!(retained,Some(Kind::Sock(_)));
+    let posix=match fdtab::guest_close_owner(fd){Ok(owner)=>owner,Err(error)=>return -(error as i64)};
+    if let Err(error)=fdtab::withdraw_guest(fd){return -(error as i64);}
     fdtab::on_close(fd);
-    // SAFETY: closing a guest fd.
-    let result=errno::check(unsafe { libc::close(fd) } as i64);
+    let result=errno::check(unsafe{libc::close(fd)} as i64);
+    drop(guard);
+    let posix=if result==0{fdtab::finish_guest_close(posix)}else{Ok(())};
+    let flush=file.as_ref().map(|file|super::fuse_cache::flush_file(file).and_then(|_|super::fuse_client::flush(file)));
+    drop(retained);drop(file);
+    if result==0&&socket{super::close_effects::note_socket_close();}
+    if let Err(error)=posix{return -(error as i64);}
     match flush{Some(Err(error))if result==0=>-(error as i64),_=>result}
 }
 
@@ -247,8 +302,42 @@ pub(super) fn is_path_fd(fd: i32) -> bool {
 }
 
 /// read/readv on an fd with Linux state. None: a plain host fd.
-fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    if fdtab::is_hidden(fd) { return Some(-(EBADF as i64)); }
+fn special_read(fd:i32,iov:&[libc::iovec])->Option<i64>{
+    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
+    if let Err(error)=prepare_iov(&pin,iov,false){return Some(-(error as i64));}
+    use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
+    Some(special_read_kernel(actual,iov).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,iov.as_ptr(),iov.len() as i32)} as i64)))
+}
+fn special_write(fd:i32,iov:&[libc::iovec])->Option<i64>{
+    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
+    if let Err(error)=prepare_iov(&pin,iov,true){return Some(-(error as i64));}
+    use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
+    if let Some(Kind::Regular(description))=pin.kind(){
+        if let Err(error)=description.check_write(){return Some(-(error as i64));}
+        let iov=match charge_iov(actual,iov){Ok(iov)=>iov,Err(error)=>return Some(error)};
+        return Some(description.rw(pin.descriptor(),&iov,None,true));
+    }
+    Some(special_write_kernel(actual,iov).unwrap_or_else(||{
+        let iov=match charge_iov(actual,iov){Ok(iov)=>iov,Err(error)=>return error};
+        errno::check(unsafe{libc::writev(actual,iov.as_ptr(),iov.len() as i32)} as i64)
+    }))
+}
+fn special_pio(fd:i32,buf:u64,len:usize,pos:i64,write:bool)->Option<i64>{
+    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
+    if let Err(error)=prepare_iov(&pin,&one(buf,len),write){return Some(-(error as i64));}
+    use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
+    if let Some(Kind::Regular(description))=pin.kind(){
+        if write{if let Err(error)=description.check_write(){return Some(-(error as i64));}}
+        let len=if write{match space::charge(actual,len as u64){Ok(len)=>len as usize,Err(error)=>return Some(error)}}else{len};
+        return Some(description.rw(pin.descriptor(),&one(buf,len),Some(pos),write));
+    }
+    Some(special_pio_kernel(actual,buf,len,pos,write).unwrap_or_else(||{
+        let len=if write{match space::charge(actual,len as u64){Ok(len)=>len as usize,Err(error)=>return error}}else{len};
+        errno::check(unsafe{if write{libc::pwrite(actual,buf as *const _,len,pos)}else{libc::pread(actual,buf as *mut _,len,pos)}} as i64)
+    }))
+}
+
+fn special_read_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     if is_path_fd(fd) { return Some(-(EBADF as i64)); }
     if let Some(result)=super::fuse_device::rw(fd,iov,false){return Some(result);}
     if let Some(error)=super::fuse_client::inherited_error(fd){return Some(-(error as i64));}
@@ -256,6 +345,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     let k = fdtab::get(fd)?;
     let (buf, len) = first(iov);
     match k {
+        Kind::Regular(description) => Some(description.rw(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},iov,None,false)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, false)),
         Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
@@ -283,8 +373,7 @@ fn special_read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     }
 }
 
-fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    if fdtab::is_hidden(fd) { return Some(-(EBADF as i64)); }
+fn special_write_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     if is_path_fd(fd) { return Some(-(EBADF as i64)); }
     if let Some(result)=super::fuse_device::rw(fd,iov,true){return Some(result);}
     if let Some(error)=super::fuse_client::inherited_error(fd){return Some(-(error as i64));}
@@ -292,6 +381,7 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     let k = fdtab::get(fd)?;
     let (buf, len) = first(iov);
     match k {
+        Kind::Regular(description) => Some(description.rw(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},iov,None,true)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, true)),
         Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
@@ -322,12 +412,12 @@ fn special_write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 }
 
 /// pread/pwrite on an fd with Linux state. None: a plain host fd.
-fn special_pio(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i64> {
-    if fdtab::is_hidden(fd) { return Some(-(EBADF as i64)); }
+fn special_pio_kernel(fd: i32, buf: u64, len: usize, pos: i64, write: bool) -> Option<i64> {
     if is_path_fd(fd) { return Some(-(EBADF as i64)); }
     if super::fuse_device::is_device(fd){return Some(-29);}
     if let Some(result)=super::fuse_client::rw(fd,&one(buf,len),Some(pos),write){return Some(result);}
     match fdtab::get(fd)? {
+        Kind::Regular(description) => Some(description.rw(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},&one(buf,len),Some(pos),write)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, &one(buf, len), Some(pos), write)),
         Kind::Memfd(_) => {
@@ -401,16 +491,26 @@ pub fn pwrite64(a: [u64; 6]) -> i64 {
     errno::check(unsafe { libc::pwrite(a[0] as i32, a[1] as *const _, len, a[3] as i64) } as i64)
 }
 
-fn iovs(ptr: u64, n: u64) -> Result<&'static [libc::iovec], i64> {
+fn iovs(ptr: u64, n: u64) -> Result<Vec<libc::iovec>, i64> {
     if n > 1024 {
         return Err(-(EINVAL as i64));
     }
     if n == 0 {
-        return Ok(&[]);
+        return Ok(Vec::new());
     }
     // SAFETY: guest iovec array; struct iovec is { void *base; size_t len; }
     // on both kernels.
-    Ok(unsafe { std::slice::from_raw_parts(ptr as *const libc::iovec, n as usize) })
+    let bytes=super::user_memory::read_exact(ptr,n as usize*16).map_err(|error|-(error as i64))?;
+    Ok(bytes.chunks_exact(16).map(|bytes|libc::iovec{iov_base:u64::from_le_bytes(bytes[..8].try_into().unwrap())as *mut _,iov_len:u64::from_le_bytes(bytes[8..].try_into().unwrap())as usize}).collect())
+}
+fn prepare_iov(pin:&fdtab::Pinned,iov:&[libc::iovec],write:bool)->Result<(),errno::Errno>{
+    if matches!(pin.kind(),Some(Kind::Path(_))){return Err(EBADF);}
+    if !write&&matches!(pin.kind(),Some(Kind::Dir(_))){return Err(EISDIR as errno::Errno);}
+    if let Some(Kind::Regular(description))=pin.kind(){let mode=description.flags&3;if mode==3||write&&mode==0||!write&&mode==1{return Err(EBADF);}}
+    else{use std::os::fd::AsRawFd;let flags=unsafe{libc::fcntl(pin.descriptor().as_raw_fd(),libc::F_GETFL)};if flags<0{return Err(errno::last());}let mode=flags&libc::O_ACCMODE;if write&&mode==libc::O_RDONLY||!write&&mode==libc::O_WRONLY{return Err(EBADF);}}
+    let length=iov.iter().try_fold(0usize,|sum,vector|sum.checked_add(vector.iov_len)).filter(|length|*length<=isize::MAX as usize).ok_or(EINVAL)?;
+    if length==0{return Ok(());}
+    for vector in iov{if write{super::user_memory::prepare_read(vector.iov_base as u64,vector.iov_len)?;}else{super::user_memory::prepare_write(vector.iov_base as u64,vector.iov_len)?;}}Ok(())
 }
 
 pub fn readv(a: [u64; 6]) -> i64 {
@@ -418,6 +518,7 @@ pub fn readv(a: [u64; 6]) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
+    let v=v.as_slice();
     if let Some(r) = special_read(a[0] as i32, v) {
         return r;
     }
@@ -430,6 +531,7 @@ pub fn writev(a: [u64; 6]) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
+    let v=v.as_slice();
     if let Some(r) = special_write(a[0] as i32, v) {
         return r;
     }
@@ -471,55 +573,41 @@ fn charge_iov(fd: i32, v: &[libc::iovec]) -> Result<Cow<'_, [libc::iovec]>, i64>
 }
 
 /// preadv/pwritev (69/70) and preadv2/pwritev2 (286/287; flags ignored).
-pub fn preadv(write: bool, a: [u64; 6]) -> i64 {
-    let (fd, pos) = (a[0] as i32, a[3] as i64);
-    let v = match iovs(a[1], a[2]) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    if pos == -1 {
-        return if write { writev(a) } else { readv(a) };
+pub fn preadv(write:bool,a:[u64;6])->i64{
+    let fd=a[0]as i32;let pos=a[3]as i64;
+    let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    let vectors=match iovs(a[1],a[2]){Ok(vectors)=>vectors,Err(error)=>return error};
+    let vectors=vectors.as_slice();
+    if let Err(error)=prepare_iov(&pin,vectors,write){return -(error as i64);}
+    if let Some(Kind::Regular(description))=pin.kind(){
+        if write{if let Err(error)=description.check_write(){return -(error as i64);}}
+        let vectors=if write{match charge_iov(pin.descriptor().as_raw_fd(),vectors){Ok(vectors)=>vectors,Err(error)=>return error}}else{Cow::Borrowed(vectors)};
+        return description.rw(pin.descriptor(),&vectors,(pos!=-1).then_some(pos),write);
     }
-    if super::proxy_file::is_proxy(fd) {
-        return super::proxy_file::rw(fd, v, Some(pos), write);
-    }
-    if fdtab::get(fd).is_some_and(|k| !matches!(k, Kind::Content)) {
-        let mut total = 0i64;
-        for io in v {
-            let r = match special_pio(fd, io.iov_base as u64, io.iov_len, pos + total, write) {
-                Some(r) => r,
-                None => break,
-            };
-            if r < 0 {
-                return if total > 0 { total } else { r };
-            }
-            total += r;
-            if (r as usize) < io.iov_len {
-                break;
-            }
-        }
-        return total;
-    }
-    let v = if write {
-        match charge_iov(fd, v) {
-            Ok(v) => v,
-            Err(e) => return e,
-        }
-    } else {
-        Cow::Borrowed(v)
-    };
-    // SAFETY: guest iovec array.
-    errno::check(unsafe {
-        if write {
-            libc::pwritev(fd, v.as_ptr(), v.len() as i32, pos)
-        } else {
-            libc::preadv(fd, v.as_ptr(), v.len() as i32, pos)
-        }
-    } as i64)
+    use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
+    let plain=matches!(pin.kind(),None|Some(Kind::Content)|Some(Kind::Random))
+        &&super::fuse_client::get(actual).is_none()&&!super::fuse_device::is_device(actual);
+    let vectors=if write&&plain{match charge_iov(actual,vectors){Ok(vectors)=>vectors,Err(error)=>return error}}else{Cow::Borrowed(vectors)};
+    let vectors=&*vectors;
+    if pos==-1{return if write{special_write_kernel(actual,vectors).unwrap_or_else(||errno::check(unsafe{libc::writev(actual,vectors.as_ptr(),vectors.len()as i32)}as i64))}else{special_read_kernel(actual,vectors).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,vectors.as_ptr(),vectors.len()as i32)}as i64))};}
+    let mut total=0i64;
+    for vector in vectors{
+        let result=special_pio_kernel(actual,vector.iov_base as u64,vector.iov_len,pos+total,write).unwrap_or_else(||errno::check(unsafe{if write{libc::pwrite(actual,vector.iov_base,vector.iov_len,pos+total)}else{libc::pread(actual,vector.iov_base,vector.iov_len,pos+total)}}as i64));
+        if result<0{return if total>0{total}else{result};}total+=result;if (result as usize)<vector.iov_len{break;}
+    }total
 }
 
 pub fn lseek(a: [u64; 6]) -> i64 {
-    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
+    let pin=match fdtab::pin_guest(a[0]as i32){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    use std::os::fd::AsRawFd;
+    if let Some(Kind::Regular(description))=pin.kind(){
+        let whence=match a[2]as i32{3=>4,4=>3,whence=>whence};
+        return description.seek(pin.descriptor(),a[1]as i64,whence);
+    }
+    let mut a=a;a[0]=pin.descriptor().as_raw_fd()as u64;
+    lseek_kernel(a)
+}
+fn lseek_kernel(a:[u64;6])->i64{
     if is_path_fd(a[0] as i32) { return -(EBADF as i64); }
     if super::fuse_device::is_device(a[0] as i32){return -29;}
     if let Some(result)=super::fuse_client::seek(a[0] as i32,a[1] as i64,a[2] as u32){return result;}
@@ -572,7 +660,12 @@ fn linux_dev(d: i32) -> u64 {
     (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12) | ((major & !0xfff) << 32)
 }
 
-fn put_stat(st: &libc::stat, out: u64) {
+fn put_user_struct<T>(value:&T,out:u64)->i64{
+    let bytes=unsafe{std::slice::from_raw_parts((value as*const T).cast::<u8>(),std::mem::size_of::<T>())};
+    super::user_memory::write_exact(out,bytes).map(|_|0).unwrap_or_else(|error|-(error as i64))
+}
+
+fn put_stat(st: &libc::stat, out: u64)->i64 {
     let l = LinuxStat {
         st_dev: linux_dev(st.st_dev),
         st_ino: st.st_ino,
@@ -595,7 +688,7 @@ fn put_stat(st: &libc::stat, out: u64) {
         ..Default::default()
     };
     // SAFETY: guest stat buffer.
-    unsafe { (out as *mut LinuxStat).write_unaligned(l) };
+    put_user_struct(&l,out)
 }
 
 /// The host inode of a resolved path, whose attributes `attrs` reads.
@@ -608,8 +701,11 @@ fn attrs_host(r: &vfs::Resolved) -> attrs::Host<'_> {
 }
 
 /// Host stat of an fd, with the guest's ownership view.
-fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
-    if fdtab::is_hidden(fd) { return Err(-(EBADF as i64)); }
+fn stat_fd(fd:i32)->Result<libc::stat,i64>{
+    let pin=fdtab::pin_guest(fd).map_err(|error|-(error as i64))?;
+    use std::os::fd::AsRawFd;stat_fd_kernel(pin.descriptor().as_raw_fd())
+}
+pub(super) fn stat_fd_kernel(fd:i32)->Result<libc::stat,i64>{
     if let Some(stat)=super::fuse_device::stat(fd){return Ok(stat);}
     if let Some(file)=super::fuse_client::get(fd){return super::fuse_client::stat(&file.route,Some(file.node),(file.flags as u64&O_PATH==0).then_some(file.fh)).map_err(|error|-(error as i64));}
     if super::proxy_file::is_proxy(fd) {
@@ -663,8 +759,7 @@ fn stat_fd(fd: i32) -> Result<libc::stat, i64> {
 pub fn fstat(a: [u64; 6]) -> i64 {
     match stat_fd(a[0] as i32) {
         Ok(st) => {
-            put_stat(&st, a[1]);
-            0
+            put_stat(&st, a[1])
         }
         Err(e) => e,
     }
@@ -719,11 +814,11 @@ fn stat_at_as(dirfd: i32, path: &[u8], flags: u64, id: &super::cred::Identity) -
 
 pub fn newfstatat(a: [u64; 6]) -> i64 {
     // SAFETY: guest path pointer.
-    let path = unsafe { guest_cstr(a[1]) };
+    let path = match guest_cstr(a[1]){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let path=path.as_slice();
     match stat_at(a[0] as i32, path, a[3]) {
         Ok(st) => {
-            put_stat(&st, a[2]);
-            0
+            put_stat(&st, a[2])
         }
         Err(e) => e,
     }
@@ -764,13 +859,15 @@ const STATX_ALL: u32 = 0x7ff | 0x800;
 pub fn statx(a: [u64; 6]) -> i64 {
     let (dirfd, flags, out) = (a[0] as i32, a[2], a[4]);
     // SAFETY: guest path pointer.
-    let path = unsafe { guest_cstr(a[1]) };
+    let path = match guest_cstr(a[1]){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let path=path.as_slice();
     let st = match stat_at(dirfd, path, flags) {
         Ok(st) => st,
         Err(e) => return e,
     };
     let dev = st.st_dev as u32;
     let rdev = st.st_rdev as u32;
+    let verity=match super::regular_file::verity_stat(&st){Ok(verity)=>verity,Err(error)=>return -(error as i64)};
     // Timestamps are { i64 sec; u32 nsec; i32 pad }.
     let ts = |s: i64, ns: i64| [s, ns & 0xffff_ffff];
     let x = Statx {
@@ -783,6 +880,8 @@ pub fn statx(a: [u64; 6]) -> i64 {
         ino: st.st_ino,
         size: st.st_size as u64,
         blocks: st.st_blocks as u64,
+        attributes: if verity==Some(true){super::fsverity_ioctl::VERITY_ATTRIBUTE}else{0},
+        attributes_mask: if verity.is_some(){super::fsverity_ioctl::VERITY_ATTRIBUTE}else{0},
         atime: ts(st.st_atime, st.st_atime_nsec),
         btime: ts(st.st_birthtime, st.st_birthtime_nsec),
         ctime: ts(st.st_ctime, st.st_ctime_nsec),
@@ -793,9 +892,8 @@ pub fn statx(a: [u64; 6]) -> i64 {
         dev_minor: dev & 0xff_ffff,
         ..Default::default()
     };
-    // SAFETY: guest statx buffer.
-    unsafe { (out as *mut Statx).write_unaligned(x) };
-    0
+    let bytes=unsafe{std::slice::from_raw_parts((&x as*const Statx).cast::<u8>(),std::mem::size_of::<Statx>())};
+    super::fsverity_ioctl::write(out,bytes).map(|_|0).unwrap_or_else(|error|-(error as i64))
 }
 
 /// Linux arm64 `struct statfs` (asm-generic, 64-bit fields), 120 bytes.
@@ -833,11 +931,11 @@ fn kernel_fs_magic(fstype: &str) -> Option<u64> {
     })
 }
 
-fn put_statfs(s: &libc::statfs, out: u64) {
-    put_statfs_as(s, EXT4_SUPER_MAGIC, out);
+fn put_statfs(s: &libc::statfs, out: u64)->i64 {
+    put_statfs_as(s, EXT4_SUPER_MAGIC, out)
 }
 
-fn put_statfs_as(s: &libc::statfs, f_type: u64, out: u64) {
+fn put_statfs_as(s: &libc::statfs, f_type: u64, out: u64)->i64 {
     let mut flags = 0;
     if s.f_flags & libc::MNT_RDONLY as u32 != 0 {
         flags |= ST_RDONLY;
@@ -861,7 +959,7 @@ fn put_statfs_as(s: &libc::statfs, f_type: u64, out: u64) {
         ..Default::default()
     };
     // SAFETY: guest statfs buffer.
-    unsafe { (out as *mut LinuxStatfs).write_unaligned(l) };
+    put_user_struct(&l,out)
 }
 
 fn put_fuse_statfs(route:&vfs::FuseRoute,out:u64)->i64{
@@ -869,9 +967,11 @@ fn put_fuse_statfs(route:&vfs::FuseRoute,out:u64)->i64{
     if bytes.len()<48{return -(crate::errno::EIO as i64);}
     let q=|at|u64::from_le_bytes(bytes[at..at+8].try_into().unwrap());let d=|at|u32::from_le_bytes(bytes[at..at+4].try_into().unwrap())as u64;
     let stat=LinuxStatfs{f_type:0x65735546,f_blocks:q(0),f_bfree:q(8),f_bavail:q(16),f_files:q(24),f_ffree:q(32),f_bsize:d(40),f_namelen:d(44),f_frsize:if bytes.len()>=52{d(48)}else{d(40)},f_flags:u64::from(route.read_only),..Default::default()};
-    unsafe{(out as *mut LinuxStatfs).write_unaligned(stat);}0
+    put_user_struct(&stat,out)
 }
 pub fn fstatfs(a: [u64; 6]) -> i64 {
+    let pin=match fdtab::pin_guest(a[0]as i32){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    use std::os::fd::AsRawFd;let mut a=a;a[0]=pin.descriptor().as_raw_fd()as u64;
     if let Some(file)=super::fuse_client::get(a[0] as i32){return put_fuse_statfs(&file.route,a[1]);}
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: local buffer.
@@ -879,13 +979,13 @@ pub fn fstatfs(a: [u64; 6]) -> i64 {
         return -(errno::last() as i64);
     }
     space::adjust(&mut s);
-    put_statfs(&s, a[1]);
-    0
+    put_statfs(&s, a[1])
 }
 
 pub fn statfs(a: [u64; 6]) -> i64 {
     // SAFETY: guest path pointer.
-    let p = unsafe { guest_cstr(a[0]) };
+    let p = match guest_cstr(a[0]){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let p=p.as_slice();
     let r = match vfs::resolve(vfs::LINUX_AT_FDCWD, p, true) {
         Ok(r) => r,
         Err(e) => return -(e as i64),
@@ -900,8 +1000,7 @@ pub fn statfs(a: [u64; 6]) -> i64 {
             ..Default::default()
         };
         // SAFETY: guest statfs buffer.
-        unsafe { (a[1] as *mut LinuxStatfs).write_unaligned(l) };
-        return 0;
+        return put_user_struct(&l,a[1]);
     }
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: host path, local buffer.
@@ -913,14 +1012,14 @@ pub fn statfs(a: [u64; 6]) -> i64 {
     }
     space::adjust(&mut s);
     let magic = vfs::fstype(&r.guest).and_then(|t| kernel_fs_magic(&t));
-    put_statfs_as(&s, magic.unwrap_or(EXT4_SUPER_MAGIC), a[1]);
-    0
+    put_statfs_as(&s, magic.unwrap_or(EXT4_SUPER_MAGIC), a[1])
 }
 
 pub fn readlinkat(a: [u64; 6]) -> i64 {
     let (dirfd, buf, size) = (a[0] as i32, a[2], a[3] as usize);
     // SAFETY: guest path pointer.
-    let path = unsafe { guest_cstr(a[1]) };
+    let path = match guest_cstr(a[1]){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let path=path.as_slice();
     if size == 0 {
         return -(EINVAL as i64);
     }
@@ -928,7 +1027,7 @@ pub fn readlinkat(a: [u64; 6]) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
-    if let Some(route)=vfs::fuse_route(&r.guest){return match super::fuse_client::readlink(&route){Ok(bytes)=>{let count=bytes.len().min(a[3] as usize);unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),a[2] as *mut u8,count);}count as i64},Err(error)=>-(error as i64)};}
+    if let Some(route)=vfs::fuse_route(&r.guest){return match super::fuse_client::readlink(&route){Ok(bytes)=>{let count=bytes.len().min(a[3] as usize);super::user_memory::write_exact(a[2],&bytes[..count]).map(|_|count as i64).unwrap_or_else(|error|-(error as i64))},Err(error)=>-(error as i64)};}
     let target: Vec<u8> = if let Some(t) = procfs::readlink(r.guest.as_bytes()) {
         match t {
             Ok(t) => t,
@@ -946,8 +1045,7 @@ pub fn readlinkat(a: [u64; 6]) -> i64 {
     };
     let n = target.len().min(size);
     // SAFETY: guest buffer of `size` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(target.as_ptr(), buf as *mut u8, n) };
-    n as i64
+    super::user_memory::write_exact(buf,&target[..n]).map(|_|n as i64).unwrap_or_else(|error|-(error as i64))
 }
 
 const R_OK: u64 = 4;
@@ -955,7 +1053,8 @@ const W_OK: u64 = 2;
 
 pub fn faccessat(dirfd: u64, path: u64, mode: u64, flags: u64) -> i64 {
     // SAFETY: guest path pointer.
-    let p = unsafe { guest_cstr(path) };
+    let p = match guest_cstr(path){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let p=p.as_slice();
     if mode & !7 != 0 {
         return -(EINVAL as i64);
     }
@@ -1021,11 +1120,8 @@ pub fn getcwd(a: [u64; 6]) -> i64 {
         return -(ERANGE as i64);
     }
     // SAFETY: guest buffer of a[1] bytes.
-    unsafe {
-        std::ptr::copy_nonoverlapping(cwd.as_ptr(), a[0] as *mut u8, cwd.len());
-        (a[0] as *mut u8).add(cwd.len()).write(0);
-    }
-    (cwd.len() + 1) as i64
+    let mut bytes=cwd.into_bytes();bytes.push(0);
+    super::user_memory::write_exact(a[0],&bytes).map(|_|bytes.len()as i64).unwrap_or_else(|error|-(error as i64))
 }
 
 fn set_cwd_checked(r: vfs::Resolved) -> i64 {
@@ -1048,7 +1144,8 @@ fn set_cwd_checked(r: vfs::Resolved) -> i64 {
 
 pub fn chdir(a: [u64; 6]) -> i64 {
     // SAFETY: guest path pointer.
-    let p = unsafe { guest_cstr(a[0]) };
+    let p = match guest_cstr(a[0]){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let p=p.as_slice();
     let id = super::cred::current();
     match resolve_as(vfs::LINUX_AT_FDCWD,p,true,&id,attrs::FS) {
         Ok(r) => match attrs::search(&r.guest,&id,attrs::FS) { Ok(()) => set_cwd_checked(r), Err(error) => -(error as i64) },
@@ -1056,48 +1153,48 @@ pub fn chdir(a: [u64; 6]) -> i64 {
     }
 }
 
-pub fn fchdir(a: [u64; 6]) -> i64 {
-    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
-    let id = super::cred::current();
-    match resolve_as(a[0] as i32,b".",true,&id,attrs::FS) {
-        Ok(r) => match attrs::search(&r.guest,&id,attrs::FS) { Ok(()) => set_cwd_checked(r), Err(error) => -(error as i64) },
-        Err(e) => -(e as i64),
-    }
+pub fn fchdir(a:[u64;6])->i64{
+    let pin=match fdtab::pin_guest(a[0]as i32){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    use std::os::fd::AsRawFd;let fd=pin.descriptor().as_raw_fd();
+    let mut stat:libc::stat=unsafe{std::mem::zeroed()};if unsafe{libc::fstat(fd,&mut stat)}<0{return -(errno::last()as i64);}
+    if stat.st_mode&libc::S_IFMT!=libc::S_IFDIR{return -(errno::ENOTDIR as i64);}
+    let guest=dir::synthesized_path(fd).or_else(||super::fuse_client::get(fd).map(|file|file.guest.clone())).or_else(||crate::xrt::fd_path(fd).and_then(|path|vfs::guest_path_of_host(std::path::Path::new(&path))));
+    let Some(guest)=guest else{return -(ENOENT as i64)};
+    let id=super::cred::current();
+    if let Err(error)=attrs::search(&guest,&id,attrs::FS){return -(error as i64);}
+    vfs::set_cwd(guest);0
 }
 
 pub fn dup(a: [u64; 6]) -> i64 {
-    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
-    // SAFETY: plain dup.
-    let r = unsafe { libc::dup(a[0] as i32) };
-    if r < 0 {
-        return -(errno::last() as i64);
-    }
-    fdtab::on_dup(a[0] as i32, r);
-    r as i64
+    let _guard=fdtab::lifecycle();let fd=a[0] as i32;
+    if let Err(error)=fdtab::require_guest_visible(fd){return -(error as i64);}
+    let result=unsafe{libc::dup(fd)};if result<0{return -(errno::last() as i64);}
+    fdtab::on_dup(fd,result);
+    if let Err(error)=fdtab::publish_guest(result){fdtab::on_close(result);unsafe{libc::close(result);}return -(error as i64);}
+    result as i64
 }
 
 pub fn dup3(a: [u64; 6]) -> i64 {
-    if fdtab::is_hidden(a[0] as i32) || fdtab::is_hidden(a[1] as i32) { return -(EBADF as i64); }
-    let (old, new, flags) = (a[0] as i32, a[1] as i32, a[2]);
-    if old == new || flags & !O_CLOEXEC != 0 {
-        return -(EINVAL as i64);
-    }
-    if fdtab::is_hidden(old) {
-        return -(EBADF as i64);
-    }
-    if fdtab::is_hidden(new) {
-        event::relocate_hidden(new);
-    }
-    // SAFETY: plain dup2/fcntl.
-    let r = unsafe { libc::dup2(old, new) };
-    if r < 0 {
-        return -(errno::last() as i64);
-    }
-    fdtab::on_dup(old, new);
-    if flags & O_CLOEXEC != 0 {
-        unsafe { libc::fcntl(new, libc::F_SETFD, libc::FD_CLOEXEC) };
-    }
-    r as i64
+    super::close_effects::run(||dup3_inner(a))
+}
+fn dup3_inner(a: [u64; 6]) -> i64 {
+    let(old,new,flags)=(a[0] as i32,a[1] as i32,a[2]);
+    if old==new||flags&!O_CLOEXEC!=0{return -(EINVAL as i64);}
+    let guard=fdtab::lifecycle();
+    if let Err(error)=fdtab::require_guest_visible(old){return -(error as i64);}
+    if fdtab::is_hidden(new)||(!fdtab::visible(new)&&unsafe{libc::fcntl(new,libc::F_GETFD)}>=0){return -(EBADF as i64);}
+    let retained=fdtab::get(new);let retained_fuse=super::fuse_client::get(new);
+    let socket=matches!(retained,Some(Kind::Sock(_)));
+    let posix=match fdtab::guest_close_owner(new){Ok(owner)=>owner,Err(error)=>return -(error as i64)};
+    let was_visible=fdtab::visible(new);
+    if was_visible{if let Err(error)=fdtab::withdraw_guest(new){return -(error as i64);}}
+    let result=unsafe{libc::dup2(old,new)};
+    if result<0{let error=errno::last();let restored=if was_visible{fdtab::publish_guest(new)}else{Ok(())};drop(guard);drop(retained);drop(retained_fuse);return -(restored.err().unwrap_or(error)as i64);}
+    fdtab::on_dup(old,new);
+    let result=if flags&O_CLOEXEC!=0&&unsafe{libc::fcntl(new,libc::F_SETFD,libc::FD_CLOEXEC)}<0{-(errno::last() as i64)}else{fdtab::publish_guest(new).map(|_|new as i64).unwrap_or_else(|error|-(error as i64))};
+    drop(guard);drop(retained);drop(retained_fuse);
+    if socket{super::close_effects::note_socket_close();}
+    match fdtab::finish_guest_close(posix){Ok(())=>result,Err(error)=>-(error as i64)}
 }
 
 pub fn pipe2(a: [u64; 6]) -> i64 {
@@ -1106,6 +1203,7 @@ pub fn pipe2(a: [u64; 6]) -> i64 {
     if flags & !(O_CLOEXEC | O_NONBLOCK | O_DIRECT) != 0 {
         return -(EINVAL as i64);
     }
+    if let Err(error)=super::user_memory::prepare_write(out,8){return -(error as i64);}
     let mut fds = [0i32; 2];
     // SAFETY: pipe into a local array.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
@@ -1114,8 +1212,10 @@ pub fn pipe2(a: [u64; 6]) -> i64 {
     for fd in fds {
         fdtab::set_flags(fd, flags & O_NONBLOCK != 0, flags & O_CLOEXEC != 0);
     }
-    // SAFETY: guest int[2].
-    unsafe { (out as *mut [i32; 2]).write_unaligned(fds) };
+    let mut bytes=[0;8];bytes[..4].copy_from_slice(&fds[0].to_le_bytes());bytes[4..].copy_from_slice(&fds[1].to_le_bytes());
+    if let Err(error)=super::user_memory::write_exact(out,&bytes){for fd in fds{unsafe{libc::close(fd);}}return -(error as i64);}
+    let _guard=fdtab::lifecycle();
+    for fd in fds{if let Err(error)=fdtab::publish_guest(fd){for fd in fds{if fdtab::visible(fd){let _=fdtab::withdraw_guest(fd);}unsafe{libc::close(fd);}}return -(error as i64);}}
     0
 }
 
@@ -1159,8 +1259,17 @@ struct LinuxFlock {
 }
 
 fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
+    if matches!(cmd,F_GETLK|F_SETLK|F_SETLKW){
+        let mut bytes=match super::fsverity_ioctl::read::<32>(arg){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+        if cmd!=F_GETLK&&i16::from_le_bytes(bytes[..2].try_into().unwrap())!=2&&matches!(fdtab::get(fd),Some(Kind::Regular(description))if description.flags&3==3){return -(EBADF as i64);}
+        let result=super::posix_locks::dispatch(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},cmd,bytes.as_mut_ptr()as u64);
+        if result==0&&cmd==F_GETLK{return super::fsverity_ioctl::write(arg,&bytes).map(|_|0).unwrap_or_else(|error|-(error as i64));}
+        return result;
+    }
     // SAFETY: guest struct flock.
-    let mut l = unsafe { (arg as *const LinuxFlock).read_unaligned() };
+    let bytes=match super::fsverity_ioctl::read::<32>(arg){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let mut l = unsafe { (bytes.as_ptr()as *const LinuxFlock).read_unaligned() };
+    if cmd!=F_OFD_GETLK&&l.l_type!=2&&matches!(fdtab::get(fd),Some(Kind::Regular(description))if description.flags&3==3){return -(EBADF as i64);}
     let ty = match l.l_type {
         0 => libc::F_RDLCK,
         1 => libc::F_WRLCK,
@@ -1197,12 +1306,14 @@ fn lock(fd: i32, cmd: u64, arg: u64) -> i64 {
         l.l_whence = h.l_whence;
         l.l_pid = if cmd == F_OFD_GETLK { -1 } else { h.l_pid };
         // SAFETY: guest struct flock.
-        unsafe { (arg as *mut LinuxFlock).write_unaligned(l) };
+        return put_user_struct(&l,arg);
     }
     0
 }
 
 fn dup_from(fd: i32, min: i32, cloexec: bool) -> i64 {
+    let _guard=fdtab::lifecycle();
+    if let Err(error)=fdtab::require_guest_visible(fd){return -(error as i64);}
     let cmd = if cloexec {
         libc::F_DUPFD_CLOEXEC
     } else {
@@ -1213,13 +1324,16 @@ fn dup_from(fd: i32, min: i32, cloexec: bool) -> i64 {
     if r < 0 {
         return -(errno::last() as i64);
     }
-    fdtab::on_dup(fd, r);
-    r as i64
+    fdtab::on_dup(fd,r);
+    fdtab::publish_guest(r).map(|_|r as i64).unwrap_or_else(|error|{fdtab::on_close(r);unsafe{libc::close(r);}-(error as i64)})
 }
 
 pub fn fcntl(a: [u64; 6]) -> i64 {
-    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
-    let (fd, cmd, arg) = (a[0] as i32, a[1], a[2]);
+    let(original,cmd,arg)=(a[0]as i32,a[1],a[2]);
+    if matches!(cmd,F_DUPFD|F_DUPFD_CLOEXEC){return dup_from(original,arg as i32,cmd==F_DUPFD_CLOEXEC);}
+    if matches!(cmd,F_GETFD|F_SETFD){let _guard=fdtab::lifecycle();if let Err(error)=fdtab::require_guest_visible(original){return -(error as i64);}return errno::check(unsafe{if cmd==F_GETFD{libc::fcntl(original,libc::F_GETFD)}else{libc::fcntl(original,libc::F_SETFD,arg as i32&libc::FD_CLOEXEC)}}as i64);}
+    let pin=match fdtab::pin_guest(original){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    use std::os::fd::AsRawFd;let fd=pin.descriptor().as_raw_fd();
     if let Some(Kind::Path(path)) = fdtab::get(fd) {
         if cmd == F_GETFL { return path.flags as i64; }
         if !matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC | F_GETFD | F_SETFD) { return -(EBADF as i64); }
@@ -1239,7 +1353,9 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
                 if r < 0 {
                     -(errno::last() as i64)
                 } else {
-                    open_flags_from_host(r) as i64
+                    let mut flags=open_flags_from_host(r);
+                    if let Some(Kind::Regular(description))=fdtab::get(fd){flags=(flags&!O_ACCMODE)|(description.flags&O_ACCMODE);}
+                    flags as i64
                 }
             }
             F_SETFL => errno::check(libc::fcntl(
@@ -1284,11 +1400,24 @@ const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
 const FIOCLEX: u64 = 0x5451;
 
-pub fn ioctl(a: [u64; 6]) -> i64 {
-    if fdtab::is_hidden(a[0] as i32) { return -(EBADF as i64); }
-    if is_path_fd(a[0] as i32) { return -(EBADF as i64); }
-    let (fd, req, arg) = (a[0] as i32, a[1], a[2]);
-    if super::fuse_device::is_device(fd){if req!=super::fuse::FUSE_DEV_IOC_CLONE{return -(crate::errno::ENOTTY as i64);}let source=unsafe{(arg as *const i32).read_unaligned()};return super::fuse::ioctl_clone(fd,source).map(|_|0).unwrap_or_else(|error|-(error as i64));}
+pub fn ioctl(a:[u64;6])->i64{
+    if matches!(a[1],FIOCLEX|FIONCLEX){
+        let _guard=fdtab::lifecycle();let fd=a[0]as i32;
+        if let Err(error)=fdtab::require_guest_visible(fd){return -(error as i64);}
+        if is_path_fd(fd){return -(EBADF as i64);}
+        return errno::check(unsafe{libc::fcntl(fd,libc::F_SETFD,if a[1]==FIOCLEX{libc::FD_CLOEXEC}else{0})}as i64);
+    }
+    let pin=match fdtab::pin_guest(a[0]as i32){Ok(pin)=>pin,Err(error)=>return -(error as i64)};
+    use std::os::fd::AsRawFd;let fd=pin.descriptor().as_raw_fd();
+    if is_path_fd(fd){return -(EBADF as i64);}
+    let(req,arg)=(a[1],a[2]);
+    if let Some(result)=super::fsverity_ioctl::ioctl(&pin,req,arg){return result;}
+    if super::fuse_device::is_device(fd){
+        if req!=super::fuse::FUSE_DEV_IOC_CLONE{return -(crate::errno::ENOTTY as i64);}
+        let source=match super::fsverity_ioctl::read::<4>(arg){Ok(bytes)=>i32::from_le_bytes(bytes),Err(error)=>return -(error as i64)};
+        let source=match fdtab::pin_guest(source){Ok(source)=>source,Err(error)=>return -(error as i64)};
+        return super::fuse::ioctl_clone(fd,source.descriptor().as_raw_fd()).map(|_|0).unwrap_or_else(|error|-(error as i64));
+    }
     if let Some(file)=super::fuse_client::get(fd){return super::fuse_client::ioctl(&file,req as u32,arg).map(|result|result as i64).unwrap_or_else(|error|-(error as i64));}
     if let Some(r) = super::binder::ioctl(fd, req, arg) {
         return r;
@@ -1309,7 +1438,7 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
     unsafe {
         // Linux resolves the fd before the request (`ksys_ioctl`). The
         // device handlers above answer only their own open fds.
-        if fdtab::is_hidden(fd) || libc::fcntl(fd, libc::F_GETFD) < 0 {
+        if libc::fcntl(fd, libc::F_GETFD) < 0 {
             return -(EBADF as i64);
         }
         if let Some(r) = super::tty::ioctl(fd, req, arg) {
@@ -1327,11 +1456,10 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
                         n
                     }
                 };
-                (arg as *mut i32).write_unaligned(n);
-                0
+                super::user_memory::write_exact(arg,&n.to_le_bytes()).map(|_|0).unwrap_or_else(|error|-(error as i64))
             }
             FIONBIO => {
-                let on = (arg as *const i32).read_unaligned() != 0;
+                let on=match super::fsverity_ioctl::read::<4>(arg){Ok(bytes)=>i32::from_le_bytes(bytes)!=0,Err(error)=>return -(error as i64)};
                 let fl = libc::fcntl(fd, libc::F_GETFL);
                 if fl < 0 {
                     return -(errno::last() as i64);
@@ -1343,28 +1471,17 @@ pub fn ioctl(a: [u64; 6]) -> i64 {
                 };
                 errno::check(libc::fcntl(fd, libc::F_SETFL, fl) as i64)
             }
-            FIOCLEX | FIONCLEX => errno::check(libc::fcntl(
-                fd,
-                libc::F_SETFD,
-                if req == FIOCLEX { libc::FD_CLOEXEC } else { 0 },
-            ) as i64),
             _ => -(ENOTTY as i64),
         }
     }
 }
 
-/// close_range(first, last, flags): CLOSE_RANGE_CLOEXEC (4) marks instead
-/// of closing; CLOSE_RANGE_UNSHARE (2) has nothing to unshare.
 /// execve in place: every guest fd marked close-on-exec is closed, as
 /// `close` would.
-pub fn close_on_exec() {
-    for fd in fdtab::open_fds() {
-        // SAFETY: plain fcntl; a closed fd reads as -1.
-        if !fdtab::is_hidden(fd) && unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC > 0
-        {
-            close([fd as u64, 0, 0, 0, 0, 0]);
-        }
-    }
+pub fn close_on_exec()->Result<(),errno::Errno>{
+    for fd in super::fd_visibility::visible(){
+        match fdtab::close_guest_cloexec(fd){Ok(())|Err(EBADF)=>{},Err(error)=>return Err(error)}
+    }Ok(())
 }
 
 pub fn close_range(a: [u64; 6]) -> i64 {
@@ -1372,12 +1489,14 @@ pub fn close_range(a: [u64; 6]) -> i64 {
     if flags & !6 != 0 || lo > hi {
         return -(EINVAL as i64);
     }
-    for fd in fdtab::open_fds() {
+    if flags&2!=0&&!super::thread::alone(){return -95;}
+    for fd in super::fd_visibility::visible() {
         let u = fd as u32;
-        if u < lo || u > hi || fdtab::is_hidden(fd) {
+        if u < lo || u > hi {
             continue;
         }
         if flags & 4 != 0 {
+            let _guard=fdtab::lifecycle();if !fdtab::visible(fd){continue;}
             // SAFETY: plain fcntl on a guest fd.
             unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
         } else {
@@ -1407,19 +1526,21 @@ mod dac_tests {
         let path = CString::new(guest).unwrap();
         openat_as([vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,flags,mode,0,0],id)
     }
+    #[track_caller]
     fn closed(fd: i64) {
         assert!(fd >= 0, "open failed {fd}");
         assert_eq!(close([fd as u64,0,0,0,0,0]),0);
     }
     #[test]
     fn typed_path_fileport_import_preserves_roles_flags_and_duplicate_lifetime() {
+        if fdtab::isolated_kernel_test("sys::fs::dac_tests::typed_path_fileport_import_preserves_roles_flags_and_duplicate_lifetime"){return;}
         use std::os::fd::{AsRawFd,FromRawFd,OwnedFd};
         let (_guard,root)=vfs::test_view(); let path=root.join("typed-path-import");
         fs::write(&path,b"path-only").unwrap();
         let native=CString::new(path.as_os_str().as_bytes()).unwrap();
         let backing=unsafe{OwnedFd::from_raw_fd(libc::open(native.as_ptr(),libc::O_EVTONLY|libc::O_CLOEXEC))};
         assert!(backing.as_raw_fd()>=0);
-        let before=stat_fd(backing.as_raw_fd()).unwrap();
+        let before=stat_fd_kernel(backing.as_raw_fd()).unwrap();
         let flags=(O_PATH|O_NOFOLLOW) as u32;
         let capability=aim_binder_host::path_file::create(backing,flags).unwrap();
         assert_eq!(aim_binder_host::path_file::registered_class_result(capability.carrier.as_raw_fd()).unwrap(),aim_binder_host::path_file::CLASS);
@@ -1427,6 +1548,7 @@ mod dac_tests {
         let incoming=aim_binder_host::mach::port_to_fd(port).unwrap(); aim_binder_host::mach::release_send(port);
         assert_eq!(unsafe{libc::fcntl(incoming,libc::F_SETFD,libc::FD_CLOEXEC)},0);
         fdtab::install_path(incoming).unwrap();
+        fdtab::publish_guest(incoming).unwrap();
         let after=stat_fd(incoming).unwrap(); assert_eq!((after.st_dev,after.st_ino,after.st_mode),(before.st_dev,before.st_ino,before.st_mode));
         assert_eq!(fcntl([incoming as u64,3,0,0,0,0]),flags as i64);
         assert_eq!(fcntl([incoming as u64,1,0,0,0,0]),libc::FD_CLOEXEC as i64);
@@ -1473,6 +1595,7 @@ mod dac_tests {
 
     #[test]
     fn guest_dac_enforces_search_file_access_and_create_flags() {
+        if fdtab::isolated_kernel_test("sys::fs::dac_tests::guest_dac_enforces_search_file_access_and_create_flags"){return;}
         let (_guard, _root) = vfs::test_view();
         let base = "/data/aim-dac-regression";
         // /data uses the test view's data root, irrespective of this helper's root return.
@@ -1540,7 +1663,7 @@ mod dac_tests {
         closed(directory_path);
         assert_eq!(open(&private,O_PATH|O_DIRECTORY,0,&outsider),-(errno::ENOTDIR as i64));
         // An already-open dirfd begins the walk there, without checking its ancestors again.
-        let dir = unsafe{libc::open(CString::new(host.join("owner").as_os_str().as_bytes()).unwrap().as_ptr(),libc::O_RDONLY|libc::O_DIRECTORY)};
+        let dir=open(&format!("{base}/owner"),O_DIRECTORY,0,&owner);
         assert!(dir>=0); record(base,1000,1000,0o700);
         let relative=CString::new("public").unwrap();
         closed(openat_as([dir as u64,relative.as_ptr() as u64,0,0,0,0],&outsider));
@@ -1549,4 +1672,30 @@ mod dac_tests {
         fs::remove_dir_all(&host).unwrap();
 
     }
+}
+
+#[cfg(test)]
+mod regular_admission_tests{
+ use super::*;
+ use std::{fs,os::fd::{AsFd,AsRawFd},sync::Arc};
+ #[test]
+ fn readonly_truncate_uses_writable_inode_admission_and_verity_preserves_data(){
+  let(_guard,root)=vfs::test_view();fdtab::install_storage_registrar().unwrap();
+  let name=std::ffi::CString::new("/data/readonly-truncate-owner").unwrap();let path=vfs::lookup(name.to_str().unwrap()).0;
+  fs::write(&path,b"truncate this exact inode").unwrap();
+  let fd=openat([vfs::LINUX_AT_FDCWD as u64,name.as_ptr()as u64,O_TRUNC,0,0,0]);assert!(fd>=0,"readonly truncate fd {fd}");
+  assert_eq!(fs::metadata(&path).unwrap().len(),0);
+  let byte=b'x';assert_eq!(write([fd as u64,(&byte as*const u8)as u64,1,0,0,0]),-9);
+  assert_eq!(close([fd as u64,0,0,0,0,0]),0);
+  fs::write(&path,b"unchanged verity data").unwrap();let data=std::fs::File::open(&path).unwrap();
+  let mut locator=fs::read(vfs::runtime_dir().unwrap().join("fs-verity-root")).unwrap();let store_root=std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&locator.split_off(b"AIMVRTROOT01\0".len())));
+  let store=Arc::new(aim_storage::fsverity::Store::new(&store_root,&vfs::runtime_dir().unwrap().join("fs-verity-leases")).unwrap());
+  let admission=store.lock_inode(&data).unwrap();let enable=admission.begin_enable().unwrap();drop(admission);
+  let prepared=enable.build(aim_storage::fsverity::BuildOptions::new(1,4096,vec![],16384,4096).unwrap(),&[],||false).unwrap();enable.commit(prepared).unwrap();
+  assert_eq!(openat([vfs::LINUX_AT_FDCWD as u64,name.as_ptr()as u64,O_TRUNC,0,0,0]),-(errno::EPERM as i64));
+  assert_eq!(fs::read(&path).unwrap(),b"unchanged verity data");
+  let fd=openat([vfs::LINUX_AT_FDCWD as u64,name.as_ptr()as u64,0,0,0,0]);assert!(fd>=0);
+  let mut bytes=[0u8;32];let n=read([fd as u64,bytes.as_mut_ptr()as u64,bytes.len()as u64,0,0,0]);assert_eq!(&bytes[..n as usize],b"unchanged verity data");
+  assert_eq!(close([fd as u64,0,0,0,0,0]),0);drop(data);fs::remove_file(path).unwrap();let _=root;
+ }
 }

@@ -145,6 +145,26 @@ fn with_table_mut<R>(f: impl FnOnce(&mut HashMap<i32, Arc<Thread>>) -> R) -> R {
     f(&mut THREADS.write().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// Stop only registered guest pthreads while their table prevents exit or new
+/// admission. The caller must acquire VM and placement leases before entering;
+/// the stopped closure may only publish already prepared memory bytes.
+pub fn with_guest_threads_quiescent<T>(operation:impl FnOnce()->T)->Result<T,i32> {
+    unsafe extern "C"{fn thread_suspend(port:u32)->i32;fn thread_resume(port:u32)->i32;}
+    struct Stopped(Vec<u32>);
+    impl Stopped {
+        fn finish(&mut self)->Result<(),i32>{let mut failure=None;self.0.retain(|&port|{let result=unsafe{thread_resume(port)};if result!=0{failure=Some(result);true}else{false}});if let Some(error)=failure{Err(error)}else{Ok(())}}
+    }
+    impl Drop for Stopped{fn drop(&mut self){if self.finish().is_err(){std::process::abort();}}}
+    with_table(|table|{
+        let current=unsafe{libc::pthread_mach_thread_np(libc::pthread_self())};let mut ports=Vec::with_capacity(table.len());
+        for thread in table.values(){let pthread=thread.pthread.load(SeqCst);if pthread==0{return Err(crate::errno::EAGAIN);}
+            let port=unsafe{libc::pthread_mach_thread_np(pthread as libc::pthread_t)};if port==0{return Err(crate::errno::ESRCH);}if port!=current{ports.push(port);}}
+        let mut stopped=Stopped(Vec::with_capacity(ports.len()));
+        for &port in &ports{let result=unsafe{thread_suspend(port)};if result!=0{stopped.finish()?;return Err(result);}stopped.0.push(port);}
+        let result=operation();stopped.finish()?;Ok(result)
+    })
+}
+
 pub fn find(tid: i32) -> Option<Arc<Thread>> {
     with_table(|t| t.get(&tid).cloned())
 }

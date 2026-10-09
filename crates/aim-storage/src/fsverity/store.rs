@@ -113,6 +113,7 @@ fn binding(identity:Identity)->[u8;36]{identity.to_bytes()}
 
 pub struct Admission{store:Store,inode:Inode,admission:crate::inode_lease::Admission}
 pub struct EnableGuard{store:Store,inode:Inode,_slot:EnableSlot,_writers:ExclusiveLease}
+pub struct WriterExclusion{inode:Inode,writers:ExclusiveLease}
 struct Temporary(PathBuf);
 impl Drop for Temporary{fn drop(&mut self){if let Err(error)=fs::remove_file(&self.0){if error.kind()!=std::io::ErrorKind::NotFound{eprintln!("fs-verity temporary cleanup: {error}");}}}}
 pub struct Prepared{file:PrivateFile,_temporary:Temporary,descriptor:Descriptor,identity:Identity}
@@ -130,14 +131,21 @@ impl Admission{
   self.admission.writer().map_err(|error|if error.raw_os_error()==Some(libc::EBUSY){Error::Linux(26)}else{error.into()})
  }
  pub fn begin_enable(&self)->Result<EnableGuard>{
-  if self.enabled()?.is_some(){return Err(Error::Linux(17));}
+  self.begin_enable_excluded(self.exclude_writers()?)
+ }
+ pub fn exclude_writers(&self)->Result<WriterExclusion>{
   use std::os::fd::AsRawFd;
   let flags=unsafe{libc::fcntl(self.inode.source().as_raw_fd(),libc::F_GETFL)};
   if flags<0{return Err(std::io::Error::last_os_error().into());}
   if flags&libc::O_ACCMODE!=libc::O_RDONLY{return Err(Error::Linux(26));}
+  let writers=self.admission.deny_writers().map_err(|error|if error.raw_os_error()==Some(libc::EBUSY){Error::Linux(26)}else{error.into()})?;
+  Ok(WriterExclusion{inode:self.inode.clone(),writers})
+ }
+ pub fn begin_enable_excluded(&self,exclusion:WriterExclusion)->Result<EnableGuard>{
+  if exclusion.inode.identity()!=self.identity()||exclusion.inode.directory()!=self.inode.directory(){return Err(Error::Linux(EINVAL));}
+  if self.enabled()?.is_some(){return Err(Error::Linux(17));}
   let slot=self.admission.enable_slot().map_err(|error|if error.raw_os_error()==Some(libc::EBUSY){Error::Linux(16)}else{error.into()})?;
-  let writers=self.admission.exclusive().map_err(|error|if error.raw_os_error()==Some(libc::EBUSY){Error::Linux(26)}else{error.into()})?;
-  Ok(EnableGuard{store:self.store.clone(),inode:self.inode.clone(),_slot:slot,_writers:writers})
+  Ok(EnableGuard{store:self.store.clone(),inode:self.inode.clone(),_slot:slot,_writers:exclusion.writers})
  }
 }
 impl EnableGuard{
@@ -284,5 +292,15 @@ mod tests{
   let other=store.lock_inode(&data).unwrap();assert!(matches!(other.begin_enable(),Err(Error::Linux(16))));assert!(matches!(other.writer_lease(),Err(Error::Linux(26))));drop(other);
   let prepared=guard.build(super::super::BuildOptions::new(1,4096,vec![],4096,4096).unwrap(),&[],||false).unwrap();guard.commit(prepared).unwrap();
   let admission=store.lock_inode(&data).unwrap();assert!(matches!(admission.begin_enable(),Err(Error::Linux(17))));assert!(matches!(admission.writer_lease(),Err(Error::Linux(1))));
+ }
+ #[test]
+ fn exclusion_cannot_authorize_a_different_inode_or_lease_domain(){
+  let files=Data::new();fs::write(files.0.join("data"),b"content").unwrap();fs::write(files.0.join("other"),b"content").unwrap();
+  let data=files.data();let other=File::open(files.0.join("other")).unwrap();let store=files.store();
+  let admission=store.lock_inode(&data).unwrap();let exclusion=admission.exclude_writers().unwrap();drop(admission);
+  let wrong=store.lock_inode(&other).unwrap();assert!(matches!(wrong.begin_enable_excluded(exclusion),Err(Error::Linux(EINVAL))));drop(wrong);
+  let admission=store.lock_inode(&data).unwrap();let exclusion=admission.exclude_writers().unwrap();drop(admission);
+  let foreign=Store::new(&files.0.join("foreign-proof"),&files.0.join("foreign-runtime")).unwrap();
+  let wrong=foreign.lock_inode(&data).unwrap();assert!(matches!(wrong.begin_enable_excluded(exclusion),Err(Error::Linux(EINVAL))));
  }
 }

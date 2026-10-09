@@ -7,7 +7,7 @@ fn posix_broker_guest_child(){
  let stdin=std::io::stdin();let mut lines=stdin.lock().lines();let endpoint=lines.next().unwrap().unwrap();let path=lines.next().unwrap().unwrap();
  let client=Client::lookup(&endpoint).unwrap();let file=std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap();let identity=Identity::from_fd(file.as_fd()).unwrap();
  let mut ticket=0;let mut next=1;let mut pending=None;let mut abandoned=0;
- println!("GUEST READY");std::io::stdout().flush().unwrap();
+ println!("GUEST READY {}",std::process::id());std::io::stdout().flush().unwrap();
  for line in lines{let line=line.unwrap();let args=line.split_whitespace().collect::<Vec<_>>();if args[0]=="quit"{break;}
   if args[0]=="exec" {
    // Preserve this actual open descriptor across exec. POSIX ownership is
@@ -17,8 +17,9 @@ fn posix_broker_guest_child(){
    use std::os::unix::process::CommandExt;
    panic!("exec failed: {}",Command::new(std::env::current_exe().unwrap()).args(["--exact","posix_broker_guest_child","--ignored","--nocapture"]).exec());
   }
-  let mut frame=Frame::new(match args[0]{"register"|"repeat"=>Operation::Register,"set"=>Operation::Set,"get"=>Operation::Get,"wait"=>Operation::Wait,"cancel"=>Operation::Cancel,"close"=>Operation::Close,_=>Operation::Get},next);next+=1;frame.ticket=ticket;
+  let mut frame=Frame::new(match args[0]{"attach"=>Operation::Attach,"register"|"repeat"=>Operation::Register,"set"=>Operation::Set,"get"=>Operation::Get,"wait"=>Operation::Wait,"cancel"=>Operation::Cancel,"close"=>Operation::Close,_=>Operation::Get},next);next+=1;frame.ticket=ticket;
   frame.key=identity.to_bytes();frame.access=libc::O_RDWR;
+  if args[0]=="attach"{frame.host_pid=999999;frame.guest_pid=999999;}
   if matches!(args[0],"set"|"get"|"wait"){frame.range=Range{kind:args[1].parse().unwrap(),start:args[2].parse().unwrap(),len:args[3].parse().unwrap()};}
   let reply=match args[0]{
    "register"|"repeat"=>{let result=client.call(frame,Some(file.as_fd())).unwrap();ticket=result.ticket;result},
@@ -38,7 +39,7 @@ struct Guest {child:Child,input:ChildStdin,output:BufReader<ChildStdout>}
 impl Guest {
  fn spawn()->Self{let mut child=Command::new(std::env::current_exe().unwrap()).args(["--exact","posix_broker_guest_child","--ignored","--nocapture"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();Self{input:child.stdin.take().unwrap(),output:BufReader::new(child.stdout.take().unwrap()),child}}
  fn owner(&self,pid:i32)->Owner{Owner{process:ProcessIdentity::running(self.child.id()as i32).unwrap(),guest_pid:pid}}
- fn init(&mut self,endpoint:&str,path:&std::path::Path){writeln!(self.input,"{endpoint}\n{}",path.display()).unwrap();self.input.flush().unwrap();assert_eq!(self.read(),"READY");}
+ fn init(&mut self,endpoint:&str,path:&std::path::Path){writeln!(self.input,"{endpoint}\n{}",path.display()).unwrap();self.input.flush().unwrap();assert_eq!(self.read(),format!("READY {}",self.child.id()));eprintln!("CONTROLLED_POSIX_CHILD_EXECUTED host_pid={}",self.child.id());}
  fn read(&mut self)->String{loop{let mut line=String::new();assert!(self.output.read_line(&mut line).unwrap()>0,"guest unexpectedly exited");if let Some(value)=line.trim().strip_prefix("GUEST "){return value.into();}}}
  fn call(&mut self,command:&str)->Vec<i64>{writeln!(self.input,"{command}").unwrap();self.input.flush().unwrap();self.read().split_whitespace().map(|part|part.parse().unwrap()).collect()}
  fn quit(&mut self){writeln!(self.input,"quit").unwrap();self.input.flush().unwrap();assert!(self.child.wait().unwrap().success());}
@@ -51,9 +52,16 @@ fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes(){
  let controller=Controller::start(Config{endpoint:endpoint.clone(),holder:std::path::PathBuf::from(env!("CARGO_BIN_EXE_aim-lock-holder")),startup_timeout:Duration::from_secs(3)}).unwrap();
  // A real unregistered process cannot turn a claimed PID into ownership.
  let unauthorized=Client::lookup(&endpoint).unwrap();let forged=Frame::new(Operation::Get,1);assert_eq!(unauthorized.call(forged,None).unwrap().errno,libc::EPERM);
+ let mut unknown=Frame::new(Operation::Attach,2);unknown.guest_pid=41001;
+ assert_eq!(unauthorized.call(unknown,None).unwrap().errno,libc::EPERM);
+ let locator=directory.join("controller-owner");controller.owner_config().unwrap().write(&locator).unwrap();
+ let trusted=ProcessIdentity::running(std::process::id()as i32).unwrap();
+ assert_eq!(aim_storage::posix_broker::OwnerConfig::read(&locator,trusted).unwrap().process,trusted);
+ let forged=ProcessIdentity{start_microseconds:trusted.start_microseconds.wrapping_add(1),..trusted};
+ assert!(aim_storage::posix_broker::OwnerConfig::read(&locator,forged).is_err());
  let mut first=Guest::spawn();let mut second=Guest::spawn();let first_owner=first.owner(41001);let second_owner=second.owner(41002);
  let first_holder=controller.register_guest(first_owner).unwrap();let second_holder=controller.register_guest(second_owner).unwrap();assert_ne!(first_holder,second_holder);assert_eq!(controller.register_guest(first_owner).unwrap(),first_holder,"same incarnation rebind keeps locks");
- first.init(&endpoint,&path);second.init(&endpoint,&path);let ticket=first.call("register")[1];second.call("register");
+ first.init(&endpoint,&path);second.init(&endpoint,&path);assert_eq!(first.call("attach")[2],41001);assert_eq!(second.call("attach")[2],41002);let ticket=first.call("register")[1];second.call("register");
  assert_eq!(first.call("set 1 0 8")[0],0);assert!(matches!(second.call("set 1 0 8")[0]as i32,libc::EACCES|libc::EAGAIN));
  first.call("pin");assert!(matches!(second.call("set 1 0 8")[0]as i32,libc::EACCES|libc::EAGAIN));assert_eq!(first.call("repeat")[1],ticket);assert!(matches!(second.call("set 1 0 8")[0]as i32,libc::EACCES|libc::EAGAIN));
  first.call("exec");first.init(&endpoint,&path);
@@ -65,7 +73,7 @@ fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes(){
  let observed=second.call("get 1 0 8");assert_eq!(observed[0],0);assert_eq!(observed[2],41001);assert_eq!(observed[3],0,"helper host PID must not escape");
  assert_eq!(second.call("set 1 8 8")[0],0);
  second.call("wait 1 0 8");assert_eq!(second.call("duplicate")[0]as i32,libc::EALREADY,"new client counter must not alias the old wait");
- controller.rebind_guest(second_owner).unwrap();assert_eq!(second.call("await")[0]as i32,libc::EINTR);
+ assert_eq!(second.call("attach")[2],41002);assert_eq!(second.call("await")[0]as i32,libc::EINTR);
  assert!(matches!(first.call("set 1 8 8")[0]as i32,libc::EACCES|libc::EAGAIN),"rebind must preserve the same owner existing locks");
  second.call("reset");
  assert!(matches!(second.call("set 1 0 8")[0]as i32,libc::EACCES|libc::EAGAIN),"rebind cancels waits without releasing other owner's locks");
@@ -78,4 +86,22 @@ fn controller_owns_two_guest_incarnations_and_real_lock_lifetimes(){
  first.call("register");assert_eq!(first.call("set 1 0 8")[0],0);first.quit();
  let deadline=std::time::Instant::now()+Duration::from_secs(3);while first_holder.is_live(){assert!(std::time::Instant::now()<deadline,"dead guest holder not retired");std::thread::sleep(Duration::from_millis(10));}
  assert_eq!(second.call("set 1 0 8")[0],0,"owner exit releases real POSIX locks");second.quit();controller.shutdown().unwrap();assert!(!first_holder.is_live()&&!second_holder.is_live());std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn fork_attach_requires_native_parent_and_birth_bound_namespace_receipt(){
+ let directory=std::env::temp_dir().join(format!("aim-posix-fork-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));std::fs::create_dir(&directory).unwrap();let table=directory.join("native-identity");let path=directory.join("file");std::fs::write(&path,b"fork lock proof").unwrap();
+ let endpoint=format!("com.aim.posix-fork.{}.{}",std::process::id(),directory.file_name().unwrap().to_string_lossy());
+ let controller=Controller::start(Config{endpoint:endpoint.clone(),holder:std::path::PathBuf::from(env!("CARGO_BIN_EXE_aim-lock-holder")),startup_timeout:Duration::from_secs(3)}).unwrap();
+ let native=ProcessIdentity::running(std::process::id()as i32).unwrap();let init=aim_storage::process_namespace::InitRegistration::register(&table,native,"boot-native").unwrap();
+ aim_storage::process_namespace::register_mount_namespace(&table,native,"parent-current-mount").unwrap();controller.bind_namespace(&table,&init).unwrap();
+ let mut child=Guest::spawn();let actor=child.owner(child.child.id()as i32);child.init(&endpoint,&path);
+ aim_storage::process_namespace::register_mount_namespace(&table,actor.process,"parent-current-mount").unwrap();
+ assert_eq!(child.call("attach")[0]as i32,libc::EPERM,"namespace receipt alone cannot admit a foreign parent");
+ controller.register_guest(Owner{process:native,guest_pid:1}).unwrap();
+ std::fs::remove_file(table.join(format!("{}.mount-namespace",actor.process.host_pid))).unwrap();assert_eq!(child.call("attach")[0]as i32,libc::EPERM,"no receipt cannot be guessed from ppid");
+ aim_storage::process_namespace::register_mount_namespace(&table,actor.process,"foreign-mount").unwrap();assert_eq!(child.call("attach")[0]as i32,libc::EPERM);
+ aim_storage::process_namespace::register_mount_namespace(&table,actor.process,"parent-current-mount").unwrap();
+ let attached=child.call("attach");assert_eq!(attached[0],0);assert_eq!(attached[2],actor.process.host_pid as i64,"authoritative namespace mapping, no payload PID");
+ child.call("register");assert_eq!(child.call("set 1 0 8")[0],0);child.quit();controller.guest_exited(actor).unwrap();controller.shutdown().unwrap();std::fs::remove_dir_all(directory).unwrap();
 }

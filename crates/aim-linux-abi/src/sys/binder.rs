@@ -22,6 +22,11 @@ static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
 /// Classification is granted by the native owner's explicit registry.
 pub fn file_class(fd: i32) -> Result<u32, i32> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } < 0 { return Err(crate::errno::last()); }
+    if stat.st_mode & libc::S_IFMT == libc::S_IFSOCK {
+        return super::net::classify_socket_scm(fd);
+    }
     let client = CLIENT.lock().unwrap();
     match client.as_ref() {
         Some(client) => client.file_class(fd),
@@ -55,10 +60,28 @@ pub fn init(name: &str) -> Result<(), String> {
     let client =
         Client::connect(name).ok_or_else(|| format!("binder host '{name}' is not running"))?;
     *CLIENT.lock().unwrap() = Some(client);
+    super::net::reset_socket_scm();
+    super::net::init_socket_carriers().map_err(|error| format!("socket carrier initialization: errno {error}"))?;
     let _ = NAME.set(name.to_string());
     super::fdtab::refresh_capabilities()
         .map_err(|e| format!("binder capability registry: errno {e}"))?;
     Ok(())
+}
+
+pub(super) fn socket_carriers_configured() -> bool { CLIENT.lock().unwrap().is_some() }
+
+pub(super) fn socket_scm_endpoint() -> Result<aim_binder_host::socket_scm::Endpoint, i32> {
+    CLIENT.lock().unwrap().as_ref().ok_or(crate::errno::ENODEV)?.socket_scm_endpoint()
+}
+
+pub(super) fn create_regular_scm(backing: i32, writer: Option<i32>, metadata: &aim_binder_host::wire::RegularMetadata) -> Result<aim_binder_host::regular_scm::FilePort, i32> {
+    CLIENT.lock().unwrap().as_ref().ok_or(crate::errno::ENODEV)?.create_regular_scm(backing, writer, metadata)
+}
+pub(super) fn resolve_regular_scm(carrier: i32) -> Result<aim_binder_host::regular_scm::Resolved, i32> {
+    CLIENT.lock().unwrap().as_ref().ok_or(crate::errno::ENODEV)?.resolve_regular_scm(carrier)
+}
+pub(super) fn drain_regular_scm(identity: &[u8; 36]) -> Result<(), i32> {
+    CLIENT.lock().unwrap().as_ref().ok_or(crate::errno::ENODEV)?.drain_regular_scm(identity)
 }
 
 fn lookup(fd: i32) -> Option<BinderFile> {
@@ -69,7 +92,10 @@ fn lookup(fd: i32) -> Option<BinderFile> {
 }
 
 #[derive(Default)]
-struct Guest { exported: Vec<super::fdtab::ExportedFd> }
+struct Guest {
+    exported: Vec<super::fdtab::ExportedFd>,
+    regular: Vec<(i32, super::fdtab::RegularExport)>,
+}
 
 /// Nothing maps below 4 GiB on macOS arm64 (`__PAGEZERO`), so a pointer
 /// there, null included, is EFAULT as copy_from_user would make it. A copy
@@ -106,6 +132,9 @@ impl UserMemory for Guest {
         super::fdtab::adopt_untyped(fd);
     }
 
+    fn install_fileport(&mut self, fd:i32, port:aim_binder_host::mach::Port) -> Result<(),i32> {
+        super::fdtab::install_fileport(fd,port)
+    }
     fn installed_typed(&mut self, fd: i32, class: u32) {
         self.installed(fd);
         if class == aim_binder_host::proxy_file::CLASS {
@@ -113,23 +142,44 @@ impl UserMemory for Guest {
         }
     }
     fn export_fd(&mut self, fd: i32) -> Result<i32,i32> {
+        if let Some(regular) = super::fdtab::export_regular(fd)? {
+            let number = regular.backing_fd;
+            self.regular.push((fd,regular));
+            return Ok(number);
+        }
         let exported = super::fdtab::export_fd(fd)?;
         let number = exported.fd;
         self.exported.push(exported);
         Ok(number)
     }
+    fn regular_export(&mut self, fd:i32) -> Result<Option<aim_binder_host::regular_file::Export>,i32> {
+        Ok(self.regular.iter().find(|(original,_)| *original==fd).map(|(_,regular)| aim_binder_host::regular_file::Export {
+            metadata:regular.transport.metadata.clone(), writer_fd:regular.transport.writer_fd,
+        }))
+    }
+    fn install_regular(&mut self, fd:i32, metadata:&aim_binder_host::wire::RegularMetadata, writer:Option<aim_binder_host::regular_file::WriterPort>) -> Result<(),i32> {
+        super::fdtab::on_close(fd);
+        super::fdtab::install_regular(fd,metadata,writer)?;
+        super::fdtab::publish_guest(fd)
+    }
     fn install_typed(&mut self, fd:i32, class:u32) -> Result<(),i32> {
-        if class == aim_binder_host::path_file::CLASS { return super::fdtab::install_path(fd); }
-        self.installed_typed(fd,class); Ok(())
+        if class == aim_binder_host::path_file::CLASS { super::fdtab::install_path(fd)?; }
+        else { self.installed_typed(fd,class); }
+        super::fdtab::publish_guest(fd)
     }
     fn file_class(&mut self, fd: i32) -> u32 {
-        if matches!(super::fdtab::get(fd),Some(Kind::Path(_))) {
+        if self.regular.iter().any(|(original,_)| *original==fd) {
+            aim_binder_host::regular_file::CLASS
+        } else if matches!(super::fdtab::get(fd),Some(Kind::Path(_))) {
             aim_binder_host::path_file::CLASS
         } else if super::proxy_file::is_proxy(fd) {
             aim_binder_host::proxy_file::CLASS
         } else {
             0
         }
+    }
+    fn close_file(&mut self, fd:i32) -> Result<(),i32> {
+        super::fdtab::close_owned_guest(fd,true)
     }
     fn closed(&mut self, fd: i32) {
         super::fdtab::on_close(fd);

@@ -74,6 +74,7 @@ pub fn open(guest: &str, flags: u64) -> Option<i64> {
             return Some(-(e as i64));
         }
         super::fdtab::set_flags(fd, false, flags & O_CLOEXEC != 0);
+        if let Err(error)=super::fdtab::publish_typed_guest(fd){libc::close(fd);return Some(-(error as i64));}
         fd as i64
     })
 }

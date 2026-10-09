@@ -212,7 +212,7 @@ fn present(p: &mut Present) -> i64 {
     // The server has its own copy of the writer now.
     drop(writer);
     if r == 0 {
-        p.present = aim_sync_file::give_to_guest(fence);
+        p.present = match aim_sync_file::give_to_guest(fence){Ok(fd)=>fd,Err(error)=>return neg(error)};
     }
     r
 }
@@ -291,7 +291,7 @@ fn layers(f: &mut Layers) -> i64 {
     if ok.is_err() {
         return neg(errno::ENOTCONN);
     }
-    f.present = aim_sync_file::give_to_guest(fence);
+    f.present = match aim_sync_file::give_to_guest(fence){Ok(fd)=>fd,Err(error)=>return neg(error)};
     0
 }
 

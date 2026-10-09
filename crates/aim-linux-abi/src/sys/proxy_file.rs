@@ -89,6 +89,19 @@ mod tests {
     use std::os::fd::IntoRawFd;
     #[test]
     fn linux_io_dup_offsets_positioned_io_stat_and_revoke_use_native_owner() {
+        // fork_restore mutates a process-wide child namespace, so exercise
+        // that boundary in an actual child rather than other tests' process.
+        let mut child=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","sys::proxy_file::tests::proxy_linux_io_controlled_child","--ignored","--nocapture"])
+            .stdin(std::process::Stdio::piped()).spawn().unwrap();
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(b"AIM-PROXY-CHILD1\n").unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+    #[test]
+    #[ignore="controlled child of linux_io_dup_offsets_positioned_io_stat_and_revoke_use_native_owner"]
+    fn proxy_linux_io_controlled_child() {
+        let mut input=String::new();std::io::stdin().read_line(&mut input).unwrap();assert_eq!(input,"AIM-PROXY-CHILD1\n");
         let path = std::env::temp_dir().join(format!("aim-proxy-linux-{}", std::process::id()));
         let file = std::fs::OpenOptions::new()
             .create_new(true)
@@ -99,21 +112,15 @@ mod tests {
         let (owner, client, worker) = proxy_file::open(file).unwrap();
         let fd = client.into_raw_fd();
         fdtab::insert(fd, Kind::ProxyFile);
+        fdtab::publish_guest(fd).unwrap();
         let dup = super::super::fs::dup([fd as u64, 0, 0, 0, 0, 0]) as i32;
         assert!(is_proxy(dup));
         let mut writer = super::super::fork_state::Writer::default();
-        // A child snapshot containing only our two inherited descriptors:
-        // avoid replacing other tests' global FD-table entries.
-        writer.u64(2);
-        writer.i32(fd);
-        writer.u64(0);
-        writer.bool(true);
-        writer.u32(9);
-        writer.i32(dup);
-        writer.u64(0);
-        writer.bool(false);
-        writer.u64(0);
+        // Use the real snapshot schema, including hidden and visible roles.
+        fdtab::fork_save(&mut writer);
         let saved = writer.into_bytes();
+        fdtab::withdraw_guest(fd).unwrap();
+        fdtab::withdraw_guest(dup).unwrap();
         fdtab::on_close(fd);
         fdtab::on_close(dup);
         let mut reader = super::super::fork_state::Reader::new(&saved);
@@ -184,8 +191,8 @@ mod tests {
         );
         assert_eq!(super::super::fsops::fsync([fd as u64, 0, 0, 0, 0, 0]), -1);
         assert_eq!(seek(fd, 0, 0), -1);
-        super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]);
-        super::super::fs::close([dup as u64, 0, 0, 0, 0, 0]);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]),0);
+        assert_eq!(super::super::fs::close([dup as u64, 0, 0, 0, 0, 0]),0);
         drop(worker);
         std::fs::remove_file(path).unwrap();
     }

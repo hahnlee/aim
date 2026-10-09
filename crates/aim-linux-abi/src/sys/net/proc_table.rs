@@ -41,11 +41,6 @@ impl Info {
     }
 }
 
-pub(super) fn raw_identity(fd:i32)->Result<(u64,u64),Errno>{
-    let identity=aim_storage::socket_inode::identity(fd).map_err(|error|error.raw_os_error().map(errno::from_darwin).unwrap_or(EIO))?;
-    Ok((identity.inode,identity.cookie))
-}
-
 pub(super) fn created(fd: i32) -> Result<SocketMetadata, Errno> {
     let info = Info::read(unsafe { libc::getpid() }, fd)?;
     if !matches!(info.family(), libc::AF_INET | libc::AF_INET6) { return Err(97); }
@@ -292,18 +287,20 @@ mod tests {
 
             let dup = unsafe { libc::dup(fd) }; assert!(dup >= 0);
             fdtab::on_dup(fd, dup);
+            fdtab::publish_guest(dup).unwrap();
             assert_eq!(String::from_utf8(table(kind).unwrap()).unwrap().lines().filter(|line| line.contains(&token)).count(), 1);
-            super::super::super::fs::close([dup as u64,0,0,0,0,0]);
+            assert_eq!(super::super::super::fs::close([dup as u64,0,0,0,0,0]), 0);
             let path = format!("/proc/net/{kind}");
             let stat = super::super::super::procfs::stat(&path, true).unwrap().unwrap();
             assert_eq!(stat.st_mode & libc::S_IFMT, libc::S_IFREG);
             let opened = super::super::super::procfs::open(&path, 0, libc::O_RDONLY).unwrap();
             assert!(opened >= 0);
+            fdtab::publish_guest(opened as i32).unwrap();
             let mut bytes = vec![0; 8192];
             let size = unsafe { libc::read(opened as i32, bytes.as_mut_ptr().cast(), bytes.len()) };
             assert!(size > 0); bytes.truncate(size as usize);
             assert!(String::from_utf8(bytes).unwrap().contains(&token));
-            super::super::super::fs::close([opened as u64,0,0,0,0,0]);
+            assert_eq!(super::super::super::fs::close([opened as u64,0,0,0,0,0]), 0);
             assert_eq!(super::super::super::procfs::open(&path, 1, libc::O_WRONLY), Some(-13));
             owned.push((fd, kind, token));
         }

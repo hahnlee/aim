@@ -121,11 +121,37 @@ impl ExclusiveLease {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     struct Fixture {path:PathBuf,file:File,inode:Inode}
     impl Fixture {fn new()->Self{static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);let path=std::env::temp_dir().join(format!("aim-inode-lease-{}-{}",std::process::id(),NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));fs::create_dir(&path).unwrap();let file=OpenOptions::new().read(true).write(true).create_new(true).open(path.join("source")).unwrap();let inode=Inode::open(&path.join("locks"),file.as_fd()).unwrap();Self{path,file,inode}}}
     impl Drop for Fixture {fn drop(&mut self){fs::remove_dir_all(&self.path).unwrap();}}
+    pub(crate) fn isolated_fork_fixture(name:&str,marker:&str)->bool{
+        if std::env::args().any(|arg|arg==marker){return false;}
+        use std::{ffi::CString,io::Read,os::unix::ffi::OsStrExt};
+        let executable=CString::new(std::env::current_exe().unwrap().as_os_str().as_bytes()).unwrap();
+        let arguments=[executable.clone(),CString::new("--exact").unwrap(),CString::new(name).unwrap(),CString::new("--skip").unwrap(),CString::new(marker).unwrap(),CString::new("--nocapture").unwrap()];
+        let mut argv=arguments.iter().map(|arg|arg.as_ptr()as*mut libc::c_char).collect::<Vec<_>>();argv.push(std::ptr::null_mut());
+        let environment=[std::ptr::null_mut::<libc::c_char>()];let output=pipe();let mut pid=0;
+        struct Spawn{attributes:libc::posix_spawnattr_t,actions:libc::posix_spawn_file_actions_t}
+        impl Drop for Spawn{fn drop(&mut self){unsafe{if !self.actions.is_null(){libc::posix_spawn_file_actions_destroy(&mut self.actions);}if !self.attributes.is_null(){libc::posix_spawnattr_destroy(&mut self.attributes);}}}}
+        let mut spawn=Spawn{attributes:std::ptr::null_mut(),actions:std::ptr::null_mut()};
+        // Darwin's default excludes foreign descriptors before the child starts,
+        // including non-CLOEXEC recvmsg aliases held by concurrent fixtures.
+        unsafe{
+            assert_eq!(libc::posix_spawnattr_init(&mut spawn.attributes),0);assert_eq!(libc::posix_spawn_file_actions_init(&mut spawn.actions),0);
+            assert_eq!(libc::posix_spawnattr_setflags(&mut spawn.attributes,libc::POSIX_SPAWN_CLOEXEC_DEFAULT as i16),0);
+            assert_eq!(libc::posix_spawn_file_actions_adddup2(&mut spawn.actions,output[1].as_raw_fd(),1),0);assert_eq!(libc::posix_spawn_file_actions_adddup2(&mut spawn.actions,output[1].as_raw_fd(),2),0);
+            assert_eq!(libc::posix_spawn(&mut pid,executable.as_ptr(),&spawn.actions,&spawn.attributes,argv.as_ptr(),environment.as_ptr()),0);
+        }
+        drop(spawn);let mut child=OwnedChild(Some(pid));let[reader,writer]=output;drop(writer);let mut bytes=vec![];File::from(reader).read_to_end(&mut bytes).unwrap();
+        let mut status=0;assert_eq!(unsafe{libc::waitpid(pid,&mut status,0)},pid);child.0=None;
+        let text=String::from_utf8_lossy(&bytes);assert!(libc::WIFEXITED(status)&&libc::WEXITSTATUS(status)==0,"isolated fork fixture failed: {text}");
+        assert!(text.contains(marker),"isolated fork fixture did not execute: {text}");
+        true
+    }
+    struct OwnedChild(Option<i32>);
+    impl Drop for OwnedChild{fn drop(&mut self){if let Some(pid)=self.0{unsafe{libc::kill(pid,libc::SIGKILL);libc::waitpid(pid,std::ptr::null_mut(),0);}}}}
     fn busy(result:io::Result<ExclusiveLease>){assert_eq!(result.err().unwrap().raw_os_error(),Some(libc::EBUSY));}
     #[test]
     fn actual_identity_round_trip_rejects_invalid_fields_and_aliases_keep_lock(){
@@ -150,7 +176,7 @@ mod tests {
         assert!(fixture.inode.admission().unwrap().writer().is_ok());
     }
     fn byte(fd:i32,value:u8){assert_eq!(unsafe{libc::write(fd,(&value as *const u8).cast(),1)},1);}
-    fn read_byte(fd:i32)->u8{let mut value=0;assert_eq!(unsafe{libc::read(fd,(&mut value as *mut u8).cast(),1)},1);value}
+    fn read_byte(fd:i32)->u8{let mut event=libc::pollfd{fd,events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut event,1,2000)},1,"owned child did not produce a receipt");let mut value=0;assert_eq!(unsafe{libc::read(fd,(&mut value as *mut u8).cast(),1)},1);value}
     fn pipe()->[OwnedFd;2]{let mut fds=[0;2];assert_eq!(unsafe{libc::pipe(fds.as_mut_ptr())},0);unsafe{[OwnedFd::from_raw_fd(fds[0]),OwnedFd::from_raw_fd(fds[1])]}}
     #[test]
     fn readonly_enablers_share_writer_denial_but_not_enable_slot(){
@@ -166,6 +192,8 @@ mod tests {
     }
     #[test]
     fn actual_child_exit_and_crash_release_writer_only_on_final_close(){
+        const MARKER:&str="INODE_WRITER_FORK_FIXTURE_EXECUTED";
+        if isolated_fork_fixture("inode_lease::tests::actual_child_exit_and_crash_release_writer_only_on_final_close",MARKER){return;}
         for crash in [false,true]{
             let fixture=Fixture::new();let ready=pipe();let exit=pipe();let child=unsafe{libc::fork()};assert!(child>=0);
             if child==0{
@@ -175,12 +203,15 @@ mod tests {
                 let mut command=0u8;unsafe{libc::read(exit[0].as_raw_fd(),(&mut command as *mut u8).cast(),1);}
                 let _live=alias;unsafe{libc::_exit(0)}
             }
+            let mut owned_child=OwnedChild(Some(child));
             assert_eq!(read_byte(ready[0].as_raw_fd()),b'r');busy(fixture.inode.admission().unwrap().exclusive());
             if crash{assert_eq!(unsafe{libc::kill(child,libc::SIGKILL)},0);}else{byte(exit[1].as_raw_fd(),b'e');}
             let mut status=0;assert_eq!(unsafe{libc::waitpid(child,&mut status,0)},child);
+            owned_child.0=None;
             if crash{assert!(libc::WIFSIGNALED(status));assert_eq!(libc::WTERMSIG(status),libc::SIGKILL);}else{assert!(libc::WIFEXITED(status));assert_eq!(libc::WEXITSTATUS(status),0);}
             assert!(fixture.inode.admission().unwrap().exclusive().is_ok());
         }
+        println!("{MARKER}");
     }
     #[test]
     fn scm_carrier_keeps_actual_open_description_after_sender_close(){
@@ -207,6 +238,8 @@ mod tests {
     }
     #[test]
     fn offset_lock_serializes_processes_until_final_alias_close(){
+        const MARKER:&str="INODE_OFFSET_FORK_FIXTURE_EXECUTED";
+        if isolated_fork_fixture("inode_lease::tests::offset_lock_serializes_processes_until_final_alias_close",MARKER){return;}
         let fixture=Fixture::new();let lock=fixture.inode.offset_lock().unwrap();let alias=lock.try_clone().unwrap();
         let ready=pipe();let acquired=pipe();let child=unsafe{libc::fork()};assert!(child>=0);
         if child==0{
@@ -215,9 +248,7 @@ mod tests {
             let _lock=match fixture.inode.offset_lock(){Ok(lock)=>lock,Err(_)=>unsafe{libc::_exit(41)}};
             byte(acquired[1].as_raw_fd(),b'a');unsafe{libc::_exit(0)}
         }
-        struct Child(Option<i32>);
-        impl Drop for Child{fn drop(&mut self){if let Some(pid)=self.0{unsafe{libc::kill(pid,libc::SIGKILL);libc::waitpid(pid,std::ptr::null_mut(),0);}}}}
-        let mut owned_child=Child(Some(child));
+        let mut owned_child=OwnedChild(Some(child));
         assert_eq!(read_byte(ready[0].as_raw_fd()),b'r');
         let mut event=libc::pollfd{fd:acquired[0].as_raw_fd(),events:libc::POLLIN,revents:0};
         assert_eq!(unsafe{libc::poll(&mut event,1,50)},0);
@@ -228,6 +259,7 @@ mod tests {
         owned_child.0=None;
         assert!(libc::WIFEXITED(status));assert_eq!(libc::WEXITSTATUS(status),0);
         assert!(fixture.inode.offset_lock().is_ok());
+        println!("{MARKER}");
     }
     #[test]
     fn canonical_directory_and_lock_nodes_reject_symlink_redirection(){

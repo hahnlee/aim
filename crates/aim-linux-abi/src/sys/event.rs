@@ -169,6 +169,10 @@ pub fn eventfd2(a: [u64; 6]) -> i64 {
             lock: Mutex::new(()),
         })),
     );
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -377,6 +381,10 @@ pub fn timerfd_create(a: [u64; 6]) -> i64 {
     });
     register(&t);
     fdtab::insert(fd, Kind::Timer(t));
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -487,6 +495,35 @@ pub fn relocate_hidden(fd: i32) {
             fdtab::unhide(fd);
             peer.store(fdtab::hide(fd), Ordering::Relaxed);
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn actual_typed_producers_publish_guest_ends_and_keep_peers_private() {
+        let event=eventfd2([0,O_CLOEXEC,0,0,0,0]);assert!(event>=0,"eventfd {event}");
+        let peer=match fdtab::get(event as i32){Some(Kind::Event(value))=>value.peer.load(Ordering::Relaxed),_=>panic!("event description missing")};
+        assert!(fdtab::visible(event as i32));assert!(!fdtab::visible(peer));assert!(fdtab::is_hidden(peer));
+        let timer=timerfd_create([1,O_CLOEXEC,0,0,0,0]);assert!(timer>=0,"timerfd {timer}");
+        let timer_peer=match fdtab::get(timer as i32){Some(Kind::Timer(value))=>value.peer.load(Ordering::Relaxed),_=>panic!("timer description missing")};
+        assert!(fdtab::visible(timer as i32));assert!(!fdtab::visible(timer_peer));
+        let epoll=super::super::epoll::epoll_create1([O_CLOEXEC,0,0,0,0,0]);assert!(epoll>=0,"epoll {epoll}");
+        let inotify=super::super::inotify::inotify_init1([O_CLOEXEC,0,0,0,0,0]);assert!(inotify>=0,"inotify {inotify}");
+        let name=std::ffi::CString::new("typed-publication").unwrap();
+        let memfd=super::super::memfd::memfd_create([name.as_ptr() as u64,1,0,0,0,0]);assert!(memfd>=0,"memfd {memfd}");
+        let ashmem=super::super::ashmem::open("/dev/ashmem",O_CLOEXEC).unwrap();assert!(ashmem>=0,"ashmem {ashmem}");
+        let pidfd=super::super::wait::open_pidfd(unsafe{libc::getpid()},false);assert!(pidfd>=0,"pidfd {pidfd}");
+        let content=super::super::procfs::content_fd(b"native content",true);assert!(content>=0);
+        let knob=super::super::knob::open(b"native knob",true,|_|Ok(None));assert!(knob>=0);
+        assert!(matches!(fdtab::get(knob as i32),Some(Kind::Knob(_))));
+        for fd in [event,timer,epoll,inotify,memfd,ashmem,pidfd,content,knob]{
+            assert!(fdtab::visible(fd as i32));
+            assert_eq!(fdtab::SLOW[fd as usize].load(Ordering::Relaxed),1);
+            assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+            assert!(!fdtab::visible(fd as i32));
         }
     }
 }

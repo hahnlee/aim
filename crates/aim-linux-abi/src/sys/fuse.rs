@@ -111,7 +111,9 @@ impl Drop for TransportAllocation{fn drop(&mut self){
     }
 }}
 pub fn open_device(runtime_dir:&Path,flags:i32)->Result<RawFd,Errno>{
-    open_device_with_helper(runtime_dir,flags,&std::env::current_exe().map_err(io_error)?)
+    let fd=open_device_with_helper(runtime_dir,flags,&std::env::current_exe().map_err(io_error)?)?;
+    if let Err(error)=super::fdtab::publish_typed_guest(fd){unsafe{libc::close(fd);}return Err(error);}
+    Ok(fd)
 }
 fn open_device_with_helper(runtime_dir:&Path,flags:i32,helper:&Path)->Result<RawFd,Errno>{
     fs::create_dir_all(runtime_dir).map_err(io_error)?;

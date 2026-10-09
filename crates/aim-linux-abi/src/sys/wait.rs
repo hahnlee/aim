@@ -12,6 +12,7 @@
 //! Darwin does not pass kqueues to a forked child; [`after_fork_child`]
 //! recreates the pidfds there.
 
+use super::fdtab;
 use std::sync::Mutex;
 
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, ESRCH};
@@ -382,6 +383,10 @@ pub(super) fn open_pidfd(pid: i32, nonblock: bool) -> i64 {
         pid,
         nonblock,
     });
+    drop(t);
+    if let Err(error)=fdtab::publish_typed_guest(kq){
+        PIDFDS.lock().unwrap().retain(|entry|entry.fd!=kq);unsafe{libc::close(kq);}return -(error as i64);
+    }
     kq as i64
 }
 

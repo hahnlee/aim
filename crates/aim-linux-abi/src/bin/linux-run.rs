@@ -44,6 +44,8 @@ const USAGE: &str = "usage: linux-run [OPTIONS] PROGRAM [ARGS...]
   --stdio-null           the guest's stdin, stdout and stderr are /dev/null
                          (as init gives services); the layer's own messages
                          still go to the original stderr
+  --guest-fds LIST        explicit inherited guest descriptors, comma separated
+  --posix-control FILE    authenticated POSIX lock controller locator
   --diag-fd FD           the layer's messages go to FD (kept across exec)
   --identity FILE        the process's credentials (identity file); its
                          by-pid directory is FILE's directory + /by-pid
@@ -138,6 +140,8 @@ fn main() {
     let mut execfn = None;
     let mut runtime_args = Vec::new();
     let mut diag_fd = None;
+    let mut posix_control=None;
+    let mut socket_receipts=Vec::new();let mut guest_fds=vec![0,1,2];let mut explicit_guest_fds=false;
     let program = loop {
         let Some(a) = args.next() else { usage() };
         if a == "--fork-child" {
@@ -154,7 +158,12 @@ fn main() {
             "--root" => root = PathBuf::from(value()),
             "--cache" => cache = Some(Some(PathBuf::from(value()))),
             "--no-cache" => cache = Some(None),
+            "--socket-receipts"=>socket_receipts=aim_linux_abi::sys::parse_socket_receipts(&value().to_string_lossy()).unwrap_or_else(|error|{eprintln!("linux-run: invalid socket receipt: errno {error}");std::process::exit(2)}),
+            "--regular-fds"=>state.regular_fds=value().to_string_lossy().into_owned(),
+            "--exec-close-receipt"=>{let fd=value().to_string_lossy().parse::<i32>().unwrap_or_else(|_|usage());if fd<0{usage();}state.close_receipt=Some(fd);},
+            "--guest-fds"=>{explicit_guest_fds=true;guest_fds=aim_linux_abi::sys::parse_guest_fds(&value().to_string_lossy()).unwrap_or_else(|error|{eprintln!("linux-run: invalid guest descriptor inventory: errno {error}");std::process::exit(2)});},
             "--path-map" => path_map = Some(PathBuf::from(value())),
+            "--posix-control"=>posix_control=Some(PathBuf::from(value())),
             "--binder" => binder = Some(value().to_string_lossy().into_owned()),
             "--gpu" => gpu = Some(PathBuf::from(value())),
             "--vulkan" => vulkan = Some(PathBuf::from(value())),
@@ -212,6 +221,7 @@ fn main() {
     };
     let cache = cache.unwrap_or_else(aim_linux_abi::cache::Cache::default_dir);
     runtime_args.extend([cstring("--root"), cstring(root.as_os_str().as_bytes())]);
+    if let Some(path)=&posix_control{runtime_args.extend([cstring("--posix-control"),cstring(path.as_os_str().as_bytes())]);}
     match &cache {
         Some(c) => runtime_args.extend([cstring("--cache"), cstring(c.as_os_str().as_bytes())]),
         None => runtime_args.push(cstring("--no-cache")),
@@ -243,6 +253,7 @@ fn main() {
     if let Some(fd) = diag_fd {
         runtime_args.extend([cstring("--diag-fd"), cstring(fd.to_string())]);
     }
+    if !explicit_guest_fds{guest_fds.retain(|fd|unsafe{libc::fcntl(*fd,libc::F_GETFD)}>=0);}
     if let Some(label) = seclabel {
         identity.seclabel = label;
     }
@@ -261,6 +272,9 @@ fn main() {
             by_pid,
             state,
             runtime_args,
+            guest_fds,
+            socket_receipts,
+            posix_control,
         });
         aim_linux_abi::diag!("linux-run: {err}");
         std::process::exit(127);
@@ -292,6 +306,9 @@ fn main() {
         by_pid,
         state,
         runtime_args,
+        guest_fds,
+        socket_receipts,
+        posix_control,
     });
     aim_linux_abi::diag!("linux-run: {err}");
     std::process::exit(127);

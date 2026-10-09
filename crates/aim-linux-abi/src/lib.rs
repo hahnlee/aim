@@ -53,11 +53,16 @@ pub struct RunOptions<'a> {
     /// The process table directory (`by-pid`) the process belongs to;
     /// None: a new, private one (`sys/pidns.rs`).
     pub by_pid: Option<PathBuf>,
+    /// Authenticated native POSIX controller locator supplied by the launcher.
+    pub posix_control: Option<PathBuf>,
     /// State carried over the guest's last exec.
     pub state: sys::ExecState,
     /// The options describing this runtime (root, cache, tracing, ...),
     /// repeated when the guest execs another program.
     pub runtime_args: Vec<CString>,
+    /// Explicit descriptors handed to the guest by the launcher or guest exec.
+    pub guest_fds:Vec<i32>,
+    pub socket_receipts:Vec<(i32,aim_storage::socket_inode::Receipt)>,
 }
 
 /// The environment a freshly started Android process sees from init.
@@ -98,9 +103,11 @@ fn trace_image(name: &str, i: &loader::Image) {
 /// of `opts` are used; the process state comes from the parent. Returns
 /// only on failure.
 pub fn run_fork_child(opts: RunOptions) -> String {
+    if let Err(error)=sys::fdtab::install_storage_registrar(){return error;}
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
+    if let Err(error)=start_verity_runtime(){return error;}
     sys::initialize_umask();
     sys::init_heap_window();
     sys::set_trace(opts.trace);
@@ -110,6 +117,7 @@ pub fn run_fork_child(opts: RunOptions) -> String {
     {
         return e;
     }
+    sys::posix_locks::set_fork_locator(opts.posix_control);
     sys::init_exec(opts.runtime_args);
     sys::become_fork_child()
 }
@@ -117,11 +125,15 @@ pub fn run_fork_child(opts: RunOptions) -> String {
 /// Load `program` under `root` and run it on the current thread. Returns
 /// only on a load error; the guest ends the process with exit_group.
 pub fn run(opts: RunOptions) -> String {
+    let inherited=opts.guest_fds.clone();
+    if let Err(error)=sys::fdtab::install_storage_registrar(){return error;}
     if let Err(e) = vfs::init(opts.root, opts.path_map) {
         return e;
     }
+    if let Err(error)=start_verity_runtime(){return error;}
     sys::initialize_umask();
     sys::init_heap_window();
+    if let Err(error)=sys::fdtab::bootstrap(inherited,&opts.socket_receipts){return format!("inherited descriptor publication: errno {error}");}
     sys::init_fds();
     sys::set_trace(opts.trace);
     xrt::init(Some(vfs::root()), opts.cache.clone());
@@ -145,6 +157,8 @@ pub fn run(opts: RunOptions) -> String {
     diag::install_signal_handlers();
     if let Err(error)=opts.state.apply(){return error;}
     if let Err(error)=vfs::publish_process_namespace(){return format!("process mount namespace: errno {error}");}
+    if let Err(error)=sys::posix_locks::start(opts.posix_control.as_deref()){return format!("POSIX lock process admission: errno {error}");}
+    if let Err(error)=opts.state.apply_posix_closes(){return error;}
 
     let resolved = match vfs::resolve(vfs::LINUX_AT_FDCWD, opts.program.as_bytes(), true) {
         Ok(r) => r,
@@ -211,4 +225,24 @@ pub fn load_program(
         interp_base,
     })?;
     Ok((entry, sp))
+}
+
+static VERITY_RUNTIME:std::sync::Mutex<Option<sys::verity_control::Runtime>>=std::sync::Mutex::new(None);
+pub(crate) fn verity_client()->Option<std::sync::Arc<aim_storage::verity_control::Client>>{
+    VERITY_RUNTIME.lock().unwrap().as_ref().map(|runtime|runtime.client.clone())
+}
+pub(crate) fn start_verity_runtime()->Result<(),String>{
+    let Some(runtime)=vfs::runtime_dir()else{return Ok(())};
+    let config=match aim_storage::verity_control::OwnerConfig::read(&runtime.join("verity-control-owner")){
+        Ok(config)=>config,
+        Err(error)if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
+        Err(error)=>return Err(format!("verity coordinator owner: {error}")),
+    };
+    let mut current=VERITY_RUNTIME.lock().unwrap();
+    if current.is_some(){return Err("verity process registration already initialized".into());}
+    let store=sys::regular_file::configured_store()
+        .map_err(|error|format!("verity proof store: errno {error}"))?
+        .ok_or("verity coordinator has no configured proof store")?;
+    *current=Some(sys::verity_control::Runtime::start_with_store(&config.endpoint,config.process,std::time::Duration::from_secs(5),store).map_err(|error|format!("verity process registration: {error}"))?);
+    Ok(())
 }

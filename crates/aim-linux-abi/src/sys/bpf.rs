@@ -595,7 +595,8 @@ fn obj_pin(path: u64, fd: i32) -> i64 {
         return -(EBADF as i64);
     }
     // SAFETY: guest string.
-    let guest = unsafe { super::guest_cstr(path) };
+    let owned_guest=match super::guest_cstr(path){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let guest=owned_guest.as_slice();
     let r = match vfs::resolve(LINUX_AT_FDCWD, guest, false) {
         Ok(r) => r,
         Err(e) => return -(e as i64),
@@ -609,7 +610,8 @@ fn obj_pin(path: u64, fd: i32) -> i64 {
 
 fn obj_get(path: u64) -> i64 {
     // SAFETY: guest string.
-    let guest = unsafe { super::guest_cstr(path) };
+    let owned_guest=match super::guest_cstr(path){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let guest=owned_guest.as_slice();
     let r = match vfs::resolve(LINUX_AT_FDCWD, guest, true) {
         Ok(r) => r,
         Err(e) => return -(e as i64),

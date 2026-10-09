@@ -6,9 +6,33 @@ fn error(code:i32)->io::Error{io::Error::from_raw_os_error(code)}
 type Key=(i32,u64,u64);
 fn key(p:ProcessIdentity)->Key{(p.host_pid,p.start_seconds,p.start_microseconds)}
 static NEXT:AtomicU64=AtomicU64::new(1);
+#[derive(Clone)]
 pub struct Config {pub endpoint:String,pub holder:PathBuf,pub startup_timeout:Duration}
 #[derive(Clone,Debug)]
 pub struct OwnerConfig {pub endpoint:String,pub process:ProcessIdentity}
+impl OwnerConfig {
+ /// Native init publishes this locator. Its authority is the separately
+ /// retained init identity and audited Mach peer, not filesystem ownership.
+ pub fn write(&self,path:&std::path::Path)->io::Result<()> {
+  use std::{io::Write,os::unix::fs::OpenOptionsExt};
+  if !self.process.is_live()||self.endpoint.is_empty()||self.endpoint.contains(['\t','\n','\0']){return Err(error(libc::EINVAL));}
+  let text=format!("AIMPOSIX1\t{}\t{}\t{}\t{}\n",self.process.host_pid,self.process.start_seconds,self.process.start_microseconds,self.endpoint);
+  let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;
+  file.write_all(text.as_bytes())?;file.sync_all()
+ }
+ pub fn read(path:&std::path::Path,init:ProcessIdentity)->io::Result<Self>{
+  use std::{io::Read,os::unix::fs::OpenOptionsExt};
+  let mut file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;
+  if !file.metadata()?.is_file(){return Err(error(libc::EINVAL));}
+  let mut text=String::new();file.by_ref().take(1025).read_to_string(&mut text)?;
+  if text.len()>1024||!text.ends_with('\n'){return Err(error(libc::EPROTO));}
+  let fields=text.trim_end_matches('\n').split('\t').collect::<Vec<_>>();
+  if fields.len()!=5||fields[0]!="AIMPOSIX1"||fields[4].is_empty(){return Err(error(libc::EPROTO));}
+  let process=ProcessIdentity{host_pid:fields[1].parse().map_err(|_|error(libc::EPROTO))?,start_seconds:fields[2].parse().map_err(|_|error(libc::EPROTO))?,start_microseconds:fields[3].parse().map_err(|_|error(libc::EPROTO))?};
+  if process!=init||!init.is_live(){return Err(error(libc::EPERM));}
+  Ok(Self{endpoint:fields[4].into(),process})
+ }
+}
 struct Holder {owner:Owner,process:ProcessIdentity,client:Client,child:Mutex<Option<Child>>,requests:Mutex<BTreeMap<u64,(Operation,u64)>>,next_request:AtomicU64,dispatch:Mutex<()>,rebinding:AtomicBool}
 impl Holder {
  fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Arc<Self>>{
@@ -58,7 +82,9 @@ impl Holder {
 }
 impl Drop for Holder {fn drop(&mut self){if let Err(failure)=self.stop(){eprintln!("POSIX holder cleanup: {failure}");}}}
 struct Forwarded {frame:Frame,native_request:u64,actor:ProcessIdentity,reply:crate::posix_control::Reply,holder:Arc<Holder>,pending:crate::posix_control::Pending}
-struct State {owners:Mutex<BTreeMap<Key,Arc<Holder>>>,failures:Mutex<Vec<String>>}
+#[derive(Clone)]
+struct Namespace {table:PathBuf,init:crate::process_namespace::InitRegistration}
+struct State {config:Config,controller:ProcessIdentity,namespace:Mutex<Option<Namespace>>,owners:Mutex<BTreeMap<Key,Arc<Holder>>>,failures:Mutex<Vec<String>>}
 impl State {
  fn record(&self,failure:io::Error){self.failures.lock().unwrap().push(failure.to_string());}
  fn retire_dead(&self)->io::Result<()> {
@@ -70,10 +96,36 @@ impl State {
   for holder in owners.into_values(){if let Err(error)=holder.stop(){failure=Some(error);}}
   match failure{Some(error)=>Err(error),None=>Ok(())}
  }
+ fn admit_fork(&self,actor:ProcessIdentity)->io::Result<Arc<Holder>> {
+  let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?;
+  let mut info:libc::proc_bsdinfo=unsafe{std::mem::zeroed()};let size=std::mem::size_of_val(&info)as i32;
+  if unsafe{libc::proc_pidinfo(actor.host_pid,libc::PROC_PIDTBSDINFO,1,(&mut info as *mut libc::proc_bsdinfo).cast(),size)}!=size{return Err(error(libc::ESRCH));}
+  let parent=self.owners.lock().unwrap().values().find(|holder|holder.owner.process.host_pid==info.pbi_ppid as i32&&holder.owner.process.is_live()).cloned().ok_or_else(||error(libc::EPERM))?;
+  let init=crate::process_namespace::InitRegistration::read(&namespace.table)?;
+  let parent_namespace=crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process)?;
+  let child_namespace=crate::process_namespace::mount_namespace_of(&namespace.table,actor).map_err(|failure|if failure.kind()==io::ErrorKind::NotFound{error(libc::EPERM)}else{failure})?;
+  if init.process!=namespace.init.process||init.mount_namespace!=namespace.init.mount_namespace
+   ||child_namespace!=parent_namespace{return Err(error(libc::EPERM));}
+  if !actor.is_live()||!parent.owner.process.is_live(){return Err(error(libc::ESRCH));}
+  let owner=Owner{process:actor,guest_pid:if actor==namespace.init.process{1}else{actor.host_pid}};
+  let holder=Holder::spawn(&self.config,owner,self.controller)?;
+  if !actor.is_live()||!parent.owner.process.is_live(){holder.stop()?;return Err(error(libc::ESRCH));}
+  if crate::process_namespace::mount_namespace_of(&namespace.table,actor)?!=child_namespace
+   ||crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process)?!=parent_namespace{holder.stop()?;return Err(error(libc::EPERM));}
+  let mut owners=self.owners.lock().unwrap();
+  if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop()?;return Ok(existing);}
+  owners.insert(key(actor),holder.clone());Ok(holder)
+ }
  fn begin(&self,request:Request)->io::Result<Option<Forwarded>> {
   self.retire_dead()?;
   let Request{frame,proof,actor,reply}=request;
   let holder=self.owners.lock().unwrap().get(&key(actor)).cloned();
+  let holder=if holder.is_none()&&frame.operation==Operation::Attach{match self.admit_fork(actor){Ok(holder)=>Some(holder),Err(failure)=>{let mut response=frame;response.host_pid=0;response.guest_pid=0;response.errno=failure.raw_os_error().unwrap_or(libc::EPERM);reply.send(response)?;return Ok(None)}}}else{holder};
+  if frame.operation==Operation::Attach {
+   let mut response=frame;response.host_pid=0;response.guest_pid=0;
+   response.errno=match holder.as_ref(){Some(holder)if holder.owner.process==actor&&actor.is_live()&&holder.process.is_live()=>{match holder.rebind(){Ok(())=>{response.guest_pid=holder.owner.guest_pid;0},Err(failure)=>failure.raw_os_error().unwrap_or(libc::EIO)}},_=>libc::EPERM};
+   reply.send(response)?;return Ok(None);
+  }
   let prepared=(||{
    let holder=holder.ok_or_else(||error(libc::EPERM))?;
    if !actor.is_live()||holder.owner.process!=actor||!holder.process.is_live(){return Err(error(libc::ESRCH));}
@@ -115,7 +167,7 @@ impl Controller {
  pub fn start(config:Config)->io::Result<Self>{
   if config.startup_timeout.is_zero()||!config.holder.is_absolute()||!config.holder.is_file(){return Err(error(libc::EINVAL));}
   let endpoint=Endpoint::register(&config.endpoint)?;let process=ProcessIdentity::running(std::process::id()as i32)?;
-  let state=Arc::new(State{owners:Mutex::new(BTreeMap::new()),failures:Mutex::new(Vec::new())});let stop=Arc::new(AtomicBool::new(false));
+  let state=Arc::new(State{config:config.clone(),controller:process,namespace:Mutex::new(None),owners:Mutex::new(BTreeMap::new()),failures:Mutex::new(Vec::new())});let stop=Arc::new(AtomicBool::new(false));
   let serving=state.clone();let stopped=stop.clone();
   let thread=thread::Builder::new().name("posix-controller".into()).spawn(move||{
    let mut requests:Vec<thread::JoinHandle<io::Result<()>>>=Vec::new();
@@ -135,6 +187,15 @@ impl Controller {
   })?;
   Ok(Self{config,process,state,stop,thread:Some(thread)})
  }
+ /// Bind the native namespace receipt directory, already verified by boot
+ /// to be outside all guest-visible mounts.
+ pub fn bind_namespace(&self,table:&std::path::Path,init:&crate::process_namespace::InitRegistration)->io::Result<()> {
+  let table=std::fs::canonicalize(table)?;let current=crate::process_namespace::InitRegistration::read(&table)?;
+  if current.process!=init.process||current.mount_namespace!=init.mount_namespace||init.process!=self.process{return Err(error(libc::EPERM));}
+  let mut namespace=self.state.namespace.lock().unwrap();
+  if let Some(prior)=namespace.as_ref(){if prior.table==table&&prior.init.process==init.process&&prior.init.mount_namespace==init.mount_namespace{return Ok(());}return Err(error(libc::EBUSY));}
+  *namespace=Some(Namespace{table,init:init.clone()});Ok(())
+ }
  /// Native admission passes the actual launched child/namespace receipt.
  /// No Mach frame, Darwin UID, or guest-supplied PID can create this entry.
  pub fn register_guest(&self,owner:Owner)->io::Result<ProcessIdentity>{
@@ -150,6 +211,14 @@ impl Controller {
  pub fn rebind_guest(&self,owner:Owner)->io::Result<()> {
   let holder=self.state.owners.lock().unwrap().get(&key(owner.process)).cloned().ok_or_else(||error(libc::ESRCH))?;
   if holder.owner!=owner||!owner.process.is_live(){return Err(error(libc::ESRCH));}holder.rebind()
+ }
+ /// Native wait/reap retains the birth receipt even after the PID is gone.
+ pub fn guest_exited(&self,owner:Owner)->io::Result<()> {
+  if owner.process.is_live(){return Err(error(libc::EBUSY));}
+  let holder={let mut owners=self.state.owners.lock().unwrap();
+   if let Some(holder)=owners.get(&key(owner.process)){if holder.owner!=owner{return Err(error(libc::EPERM));}}
+   owners.remove(&key(owner.process))};
+  if let Some(holder)=holder{holder.stop()?;}Ok(())
  }
  pub fn owner_config(&self)->io::Result<OwnerConfig>{if self.stop.load(Ordering::Acquire)||!self.process.is_live(){return Err(error(libc::ESRCH));}Ok(OwnerConfig{endpoint:self.config.endpoint.clone(),process:self.process})}
  pub fn failures(&self)->Vec<String>{self.state.failures.lock().unwrap().clone()}
