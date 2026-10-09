@@ -785,7 +785,12 @@ helper beside the frozen linux-run/guest-init binaries. The actual build graph
 loads both nodes and compile-checks successfully; the explicit helper build
 completes in 3.0 seconds with no failures. The Source release helper exists,
 while C staging and the common frozen-runtime receipt remain pending (#1193).
-The full newly integrated boot, syscall lifecycle and CTS checks remain pending.
+The initial coherent image build completed 27 nodes but boot-image/oat workers
+failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
+has neither a proof-store locator nor a native coordinator owner. Optional
+configuration now applies only when both entries are absent; declared, dangling
+or malformed stores remain errors. Its focused owner-configuration check passes;
+the rebuilt worker execution and full image/CTS replay remain pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains

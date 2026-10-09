@@ -1,7 +1,7 @@
 //! Regular open descriptions retain inode writer admission across aliases (#226).
 use crate::{errno::{self,Errno},vfs};
 use aim_storage::{fsverity::{Store,Error},inode_lease::{Identity,Inode,WriterLease},private_fd::{PrivateFd,PrivateFile}};
-use std::{fs::File,io::Read,os::{fd::{AsRawFd,BorrowedFd,FromRawFd},unix::{ffi::OsStrExt,fs::OpenOptionsExt}},path::PathBuf,sync::{Arc,OnceLock}};
+use std::{fs::File,io::Read,os::{fd::{AsRawFd,BorrowedFd,FromRawFd},unix::{ffi::OsStrExt,fs::OpenOptionsExt}},path::{Path,PathBuf},sync::{Arc,OnceLock}};
 fn io(error:std::io::Error)->Errno{errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))}
 fn core(error:Error)->Errno{match error{Error::Linux(error)=>error,Error::Io(error)=>io(error)}}
 struct Configuration{store:Arc<Store>,leases:PathBuf}
@@ -9,14 +9,29 @@ static CONFIGURATION:OnceLock<Result<Option<Configuration>,Errno>>=OnceLock::new
 fn configuration()->Result<Option<&'static Configuration>,Errno>{
  match CONFIGURATION.get_or_init(||{
   let Some(runtime)=vfs::runtime_dir()else{return Ok(None)};
-  let mut file=PrivateFile::allocate(||File::options().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(runtime.join("fs-verity-root"))).map_err(io)?;
+  load_configuration(runtime)
+ }){Ok(configuration)=>Ok(configuration.as_ref()),Err(error)=>Err(*error)}
+}
+fn load_configuration(runtime:&Path)->Result<Option<Configuration>,Errno>{
+  let locator=runtime.join("fs-verity-root");
+  match std::fs::symlink_metadata(&locator){
+   Ok(_)=>{},
+   Err(error)if error.kind()==std::io::ErrorKind::NotFound=>{
+    return match std::fs::symlink_metadata(runtime.join("verity-control-owner")){
+     Err(error)if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+     Err(error)=>Err(io(error)),
+     Ok(_)=>Err(errno::ENOENT),
+    };
+   },
+   Err(error)=>return Err(io(error)),
+  }
+  let mut file=PrivateFile::allocate(||File::options().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(locator)).map_err(io)?;
   let mut bytes=Vec::new();file.by_ref().take(4110).read_to_end(&mut bytes).map_err(io)?;
   let path=bytes.strip_prefix(b"AIMVRTROOT01\0").ok_or(errno::EINVAL)?;
   if path.is_empty()||path.contains(&0)||path.len()>4096{return Err(errno::EINVAL);}
   let path=PathBuf::from(std::ffi::OsStr::from_bytes(path));
   if !path.is_absolute()||!std::fs::symlink_metadata(&path).map_err(io)?.is_dir()||std::fs::canonicalize(&path).map_err(io)?!=path{return Err(errno::EINVAL);}
   let leases=runtime.join("fs-verity-leases");let store=Arc::new(Store::new(&path,&leases).map_err(core)?);Ok(Some(Configuration{store,leases}))
- }){Ok(configuration)=>Ok(configuration.as_ref()),Err(error)=>Err(*error)}
 }
 pub struct Description{pub flags:u64,pub identity:Identity,pub writer:Option<WriterLease>,pub store:Arc<Store>,inode:Inode}
 impl Description{
@@ -126,6 +141,23 @@ impl Description{
 mod offset_tests {
     use super::*;
     use std::os::fd::AsFd;
+
+    #[test]
+    fn scratch_without_verity_owner_is_optional_but_declared_stores_are_strict(){
+        let root=std::env::temp_dir().join(format!("aim-verity-config-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        struct Directory(PathBuf);impl Drop for Directory{fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+        let _directory=Directory(root.clone());
+        assert!(load_configuration(&root).unwrap().is_none());
+        let owner=root.join("verity-control-owner");std::fs::write(&owner,b"declared owner").unwrap();
+        assert!(matches!(load_configuration(&root),Err(errno::ENOENT)));std::fs::remove_file(owner).unwrap();
+        let locator=root.join("fs-verity-root");std::os::unix::fs::symlink(root.join("missing"),&locator).unwrap();
+        assert!(load_configuration(&root).is_err());std::fs::remove_file(&locator).unwrap();
+        std::fs::write(&locator,b"corrupt").unwrap();assert!(matches!(load_configuration(&root),Err(errno::EINVAL)));
+        let proof=root.join("proof");std::fs::create_dir(&proof).unwrap();let proof=std::fs::canonicalize(proof).unwrap();
+        let mut bytes=b"AIMVRTROOT01\0".to_vec();bytes.extend_from_slice(proof.as_os_str().as_bytes());std::fs::write(&locator,bytes).unwrap();
+        assert!(load_configuration(&root).unwrap().is_some());
+    }
 
     #[test]
     fn verified_duplicate_reads_are_disjoint_and_pread_does_not_move_position() {
