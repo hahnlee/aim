@@ -580,11 +580,8 @@ fn first_boot(
         }
         if written.is_some()
             && granted.is_none()
-            && (!native_package
-                || permission_completion(dir, settings, constructor_controller_version)?)
-            && take(dir, permissions, &PERMISSIONS, &[], QUIET)?
-            && (!native_package
-                || permission_completion(permissions, settings, constructor_controller_version)?)
+            && take_permissions_after_boot(dir, permissions, settings,
+                constructor_controller_version, native_package, completed, QUIET)?
         {
             granted = Some(start.elapsed());
         }
@@ -732,6 +729,19 @@ fn snapshot(
         }
     }
     Ok(Some(result))
+}
+
+// A completed permission write can precede BOOT_COMPLETED and later role work.
+// Freeze only after the same boot's actual completion has been observed (#1219).
+fn take_permissions_after_boot(
+    dir: &Path, permissions: &Path, settings: &Path,
+    controller_version: Option<i64>, native_package: bool,
+    completed: Option<Duration>, quiet: Duration,
+) -> Result<bool, String> {
+    if completed.is_none() { return Ok(false); }
+    if native_package && !permission_completion(dir, settings, controller_version)? { return Ok(false); }
+    if !take(dir, permissions, &PERMISSIONS, &[], quiet)? { return Ok(false); }
+    Ok(!native_package || permission_completion(permissions, settings, controller_version)?)
 }
 
 /// Completion fields are written by the original role/permission owners,
@@ -928,6 +938,29 @@ mod completion_tests {
             fs::remove_dir_all(&self.0).unwrap();
         }
     }
+    #[test]
+    fn permission_capture_does_not_freeze_completed_files_before_boot() {
+        let source = Fixture::new();
+        let captured = Fixture::new();
+        let settings = Fixture::new();
+        settings.write(PACKAGES, "<packages><version fingerprint='partition' buildFingerprint='build'/></packages>");
+        source.permissions(true);
+        assert!(permission_completion(&source.0, &settings.0, Some(42)).unwrap());
+        assert!(!take_permissions_after_boot(&source.0, &captured.0, &settings.0,
+            Some(42), true, None, Duration::ZERO).unwrap());
+        assert!(!captured.0.join(PERMISSIONS[6]).exists());
+        // The original role owner changes its completed state before boot ends.
+        for file in [PERMISSIONS[6], PERMISSIONS[7]] {
+            source.write(file, "<roles version='1' packagesHash='post-boot-hash'><role name='android.app.role.HOME'><holder name='settled.home'/></role></roles>");
+        }
+        assert!(take_permissions_after_boot(&source.0, &captured.0, &settings.0,
+            Some(42), true, Some(Duration::from_secs(1)), Duration::ZERO).unwrap());
+        for file in PERMISSIONS {
+            assert_eq!(fs::read(captured.0.join(file)).unwrap(), fs::read(source.0.join(file)).unwrap());
+        }
+        assert!(permission_completion(&captured.0, &settings.0, Some(42)).unwrap());
+    }
+
     #[test]
     fn stable_partial_initialization_is_not_completion() {
         let source = Fixture::new();
