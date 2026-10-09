@@ -2,7 +2,7 @@
 //! the match flags, stopped and disabled components, visibility, the
 //! explicit and per-package paths and providers by authority.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use super::super::intent::{ComponentName, FLAG_EXCLUDE_STOPPED_PACKAGES, Intent};
 use super::super::intent_filter::{IntentFilter, ParsedIntentInfo};
@@ -1238,4 +1238,141 @@ fn dynamic_split_web_block_drops_instant_target_but_keeps_full_target() {
     state.packages.get_mut("a.viewer").unwrap().users.get_mut(&0).unwrap().instant_app=true;
     let instant=Resolution::new(Arc::new(state),&Default::default()).unwrap();
     assert!(instant.apply_post_resolution_filter(vec![info],None,true,SYSTEM_UID,0,&web).unwrap().is_empty());
+}
+
+const INSTANT_ACTION: &str = "fixture.intent.INSTANT_QUERY";
+fn instant_resolution_state() -> Arc<State> {
+    let make = |name: &str, id, instant, visibility, priority| {
+        let mut ps = package(name, id, false, |pkg| {
+            let mut entry = filter(INSTANT_ACTION, None, None, priority);
+            entry.filter.instant_app_visibility = visibility;
+            let mut activity = main(name, &format!("{name}.Activity"), vec![entry]);
+            activity.component.flags = match visibility {
+                1 => FLAG_VISIBLE_TO_INSTANT_APP,
+                2 => FLAG_VISIBLE_TO_INSTANT_APP | FLAG_IMPLICITLY_VISIBLE_TO_INSTANT_APP,
+                _ => 0,
+            };
+            pkg.activities.push(Activity { main: activity, ..Default::default() });
+        });
+        ps.users.get_mut(&0).unwrap().instant_app = instant;
+        ps
+    };
+    let packages = [make("caller.instant", 10100, true, 0, 0), make("exposed.full", 10101, false, 1, 0),
+        make("implicit.full", 10102, false, 2, 0), make("hidden.full", 10103, false, 0, 0),
+        make("other.instant", 10104, true, 1, 0)];
+    let packages = packages.into_iter().map(|p| (p.name.clone(), p)).collect::<BTreeMap<_, _>>();
+    let mut registry = super::super::registry::Registry::default();
+    for package in packages.values() {
+        registry.register(Arc::new(super::super::scan::LoadedPackage::new(
+            package.pkg.as_deref().unwrap().clone(), super::super::sign::SigningDetails::unknown()).unwrap())).unwrap();
+    }
+    Arc::new(State { generation: 17, packages, package_registry: Some(Arc::new(registry)),
+        users: [(0, User { id: 0, unlocking_or_unlocked: true, ..Default::default() })].into(), ..Default::default() })
+}
+fn instant_query_intent(package: Option<&str>, component: Option<&str>) -> Intent {
+    Intent { action: Some(INSTANT_ACTION.into()), package: package.map(str::to_owned),
+        component: component.map(|class| ComponentName { package: package.unwrap().into(), class: class.into() }), ..Default::default() }
+}
+#[test]
+fn instant_post_resolution_retains_own_and_exposed_full_activities_in_source_order() {
+    let state = instant_resolution_state();
+    let resolution = Resolution::new(state.clone(), &Default::default()).unwrap();
+    let intent = instant_query_intent(None, None);
+    let raw = resolution.find(Kind::Activity, &intent, None, MATCH_INSTANT | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE, 0, None).unwrap().unwrap();
+    let infos = raw.into_iter().map(|info| (info.component().0.to_owned(), info)).collect::<BTreeMap<_, _>>();
+    let order = ["hidden.full", "exposed.full", "other.instant", "caller.instant", "implicit.full"];
+    let list = order.iter().map(|name| infos[*name].clone()).collect();
+    let result = resolution.apply_post_resolution_filter(list, Some("caller.instant"), false, 10100, 0, &intent).unwrap();
+    assert_eq!(names(&result), ["exposed.full.Activity", "caller.instant.Activity", "implicit.full.Activity"]);
+    assert!(Arc::ptr_eq(&resolution.state, &state));
+    assert!(resolution.state.packages["caller.instant"].users[&0].instant_app);
+}
+fn instant_public_request(package: Option<&str>, component: Option<&str>, flags: i64, user: i32) -> Parcel {
+    let mut request = Parcel::new();
+    request.write_interface_token(pm::DESCRIPTOR);
+    request.write_i32(1);
+    request.write_string8(Some(INSTANT_ACTION));
+    request.write_i32(0); // null Uri
+    request.write_string8(None);
+    request.write_string8(None);
+    request.write_i32(0);
+    request.write_i32(0);
+    request.write_string8(package);
+    request.write_string16(component.map(|_| package.unwrap()));
+    if let Some(component) = component { request.write_string16(Some(component)); }
+    for value in [0, 0, 0, 0, -2, -1, 0, 0] { request.write_i32(value); }
+    request.write_string16(None); // resolved type
+    request.write_i64(flags);
+    request.write_i32(user);
+    request
+}
+#[test]
+fn instant_public_resolve_queries_preserve_explicit_visibility_and_caller_identity() {
+    let state = instant_resolution_state();
+    let resolution = Resolution::new(state.clone(), &Default::default()).unwrap();
+    let resolver = Resolver::default();
+    let implicit = instant_query_intent(None, None);
+    let list = resolution.query_intent_activities(&implicit, None, 0, 0, 10100).unwrap();
+    assert_eq!(names(&list).into_iter().collect::<BTreeSet<_>>(), ["caller.instant.Activity".into(), "exposed.full.Activity".into(), "implicit.full.Activity".into()].into());
+    let request = instant_public_request(None, None, 0, 0);
+    let actual = resolver.query(&state, pm::QUERY_INTENT_ACTIVITIES, 10100, &mut request.reader()).unwrap().unwrap();
+    let mut expected_reply = Parcel::new();
+    let slice = ListSlice { creator: "android.content.pm.ResolveInfo".into(), items: list };
+    pm::write_query_intent_activities_reply(&mut expected_reply, Some(&slice));
+    let mut actual_reader = actual.reader();
+    assert_eq!(resolver.decode_reply(pm::QUERY_INTENT_ACTIVITIES, &mut actual_reader).unwrap().unwrap(),
+        resolver.decode_reply(pm::QUERY_INTENT_ACTIVITIES, &mut expected_reply.reader()).unwrap().unwrap());
+    assert_eq!(actual_reader.remaining(), 0);
+    for (package, component, expected) in [("caller.instant", "caller.instant.Activity", true),
+        ("exposed.full", "exposed.full.Activity", true), ("implicit.full", "implicit.full.Activity", false),
+        ("hidden.full", "hidden.full.Activity", false), ("other.instant", "other.instant.Activity", false)] {
+        let intent = instant_query_intent(Some(package), Some(component));
+        let value = resolution.resolve_intent(&intent, None, 0, 0, 10100).unwrap();
+        assert_eq!(value.as_ref().map(|info| info.component().1), expected.then_some(component));
+        for code in [pm::RESOLVE_INTENT, pm::QUERY_INTENT_ACTIVITIES] {
+            let request = instant_public_request(Some(package), Some(component), 0, 0);
+            let actual = resolver.query(&state, code, 10100, &mut request.reader()).unwrap().unwrap();
+            let mut expected_reply = Parcel::new();
+            if code == pm::RESOLVE_INTENT { pm::write_resolve_intent_reply(&mut expected_reply, value.as_ref()); }
+            else { let slice = ListSlice { creator: "android.content.pm.ResolveInfo".into(), items: value.clone().into_iter().collect() }; pm::write_query_intent_activities_reply(&mut expected_reply, Some(&slice)); }
+            let mut actual_reader = actual.reader();
+            let mut expected_reader = expected_reply.reader();
+            assert_eq!(resolver.decode_reply(code, &mut actual_reader).unwrap().unwrap(), resolver.decode_reply(code, &mut expected_reader).unwrap().unwrap());
+            assert_eq!(actual_reader.remaining(), 0);
+        }
+    }
+}
+#[test]
+fn instant_resolution_keeps_isolated_owner_user_and_captured_generation_boundaries() {
+    let before = instant_resolution_state();
+    let resolver = Resolver::default();
+    let old = resolver.resolution(&before).unwrap();
+    let mut next = (*before).clone();
+    next.generation += 1;
+    next.system.isolated_owners.push((99001, 10100));
+    next.packages.get_mut("exposed.full").unwrap().users.get_mut(&0).unwrap().enabled = 2;
+    let next = Arc::new(next);
+    let latest = resolver.resolution(&next).unwrap();
+    let intent = instant_query_intent(Some("exposed.full"), Some("exposed.full.Activity"));
+    assert!(old.resolve_intent(&intent, None, 0, 0, 10100).unwrap().is_some());
+    assert!(latest.resolve_intent(&intent, None, 0, 0, 10100).unwrap().is_none());
+    assert_eq!((old.state.generation, latest.state.generation), (17, 18));
+    assert!(Arc::ptr_eq(&old.state, &before));
+    assert!(Arc::ptr_eq(&latest.state, &next));
+    let own = instant_query_intent(Some("caller.instant"), Some("caller.instant.Activity"));
+    assert!(latest.resolve_intent(&own, None, 0, 0, 99001).unwrap().is_some());
+    assert!(latest.resolve_intent(&own, None, 0, 0, 99002).is_err());
+    assert!(latest.resolve_intent(&own, None, 0, 0, 110100).is_err());
+    assert!(latest.resolve_intent(&own, None, 0, 99, 10100).unwrap().is_none());
+}
+#[test]
+fn instant_missing_split_replacement_still_precedes_caller_post_filter() {
+    let state = dynamic_split_state(true);
+    let resolution = Resolution::new(state, &Default::default()).unwrap();
+    let info = missing_split_info(&resolution);
+    let intent = view(None, None);
+    let results = resolution.apply_post_resolution_filter(vec![info], Some("a.viewer"), true, 10001, 0, &intent).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].component(), ("installer.owner", "InstallerActivity"));
+    assert_eq!(results[0].auxiliary.as_ref().unwrap().package, "a.viewer");
 }

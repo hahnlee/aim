@@ -482,9 +482,6 @@ impl Resolution {
         user: i32,
         intent: &Intent,
     ) -> Result<Vec<ResolveInfo>> {
-        if instant_pkg.is_some() {
-            return Err(NotModelled("an instant app's results").into());
-        }
         // A missing policy matters only for results that actually consult it;
         // ordinary full-app results do not acquire an unrelated owner dependency.
         let block_instant = || -> Result<bool> {
@@ -531,6 +528,13 @@ impl Resolution {
                 continue;
             }
             let (package, _) = info.component();
+            if let Some(caller) = instant_pkg {
+                let exposed_full_app = matches!(&info.info, Info::Activity(activity)
+                    if activity.flags & FLAG_VISIBLE_TO_INSTANT_APP != 0
+                        && activity.info.application_info.private_flags & PRIVATE_FLAG_INSTANT == 0);
+                if caller == package || exposed_full_app { kept.push(info); }
+                continue;
+            }
             let target = self.state.packages.get(package);
             let hidden = match target {
                 Some(t) => self

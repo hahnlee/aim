@@ -67,6 +67,12 @@ failure (#1222), concurrent XML association failure (#1223) and actual device
 preparation timeout (#1227) leave affected rows NOT RUN. Original zygote
 SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate failures.
 Neither campaign proves the acceptance gate.
+Instant caller query resolution now applies the original post-filter rather than
+throwing for every instant result (#725): retain its own package or visible
+non-instant activities, after existing web/split handling, with actual UID/user
+and captured identity preserved. Four focused public-query/policy regressions
+pass; resolve-for-start behavior is unchanged. Actual AppOps instant replay is
+still NOT RUN.
 
 The isolated namespace owner now retains stable mount-object IDs, parent and
 shared/slave relations, clones real mount inventories, and separates native
