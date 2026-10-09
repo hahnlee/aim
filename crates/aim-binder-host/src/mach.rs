@@ -434,6 +434,31 @@ pub fn call(buf: &mut Buffer, dest: Port, reply_port: Port, msg: &Msg) -> Result
     Ok(decode(buf))
 }
 
+/// A bounded request/reply exchange for native startup handshakes.
+/// The caller owns the reply receive right and must destroy it on timeout.
+pub fn call_bounded(buf: &mut Buffer, dest: Port, reply_port: Port, msg: &Msg,
+    timeout_ms: u32) -> Result<Received, Kern> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+    let size = encode(buf, msg, (dest, COPY_SEND), (reply_port, MAKE_SEND_ONCE));
+    // Send once. After an interrupted receive, wait for this same pending reply.
+    check(unsafe {
+        mach_msg(buf.bytes().as_mut_ptr(), SEND_MSG | 0x10,
+            size, 0, NULL, timeout_ms, NULL)
+    })?;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() { return Err(0x10004003); }
+        let timeout = remaining.as_millis().max(1).min(u32::MAX as u128) as u32;
+        let result = unsafe {
+            mach_msg(buf.bytes().as_mut_ptr(), receive_options() | 0x100 | 0x400,
+                0, BUFFER as u32, reply_port, timeout, NULL)
+        };
+        if result == 0x10004005 { continue; } // MACH_RCV_INTERRUPTED
+        check(result)?;
+        return Ok(decode(buf));
+    }
+}
+
 /// Receive one message on `port` (or port set).
 pub fn receive(buf: &mut Buffer, port: Port) -> Result<Received, Kern> {
     // SAFETY: `buf` has room for any message of this format.

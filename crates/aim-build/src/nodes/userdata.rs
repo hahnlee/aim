@@ -39,6 +39,9 @@
 //! output. A Mac of another SKU boots from the empty image until the node
 //! runs there.
 
+#[path = "binder_ready.rs"]
+mod binder_ready;
+
 use crate::bench::{Guest, Session};
 use crate::boot;
 use crate::graph::{Action, Ctx, Dep, Node};
@@ -520,6 +523,8 @@ fn first_boot(
             return Err(format!("guest-init: {e}"));
         }
     };
+    let init_identity = aim_storage::process_namespace::ProcessIdentity::running(session.init.id() as i32)
+        .map_err(|error| format!("template init identity: {error}"))?;
     let guest = Guest {
         linux_run: isolated.map_or_else(
             || ctx.workspace.host_bin("linux-run"),
@@ -587,7 +592,10 @@ fn first_boot(
         }
         if completed.is_none() && asked.elapsed() >= Duration::from_millis(500) {
             asked = Instant::now();
-            if guest.path_map.exists() && getprop("sys.boot_completed")? == "1" {
+            if guest.path_map.exists()
+                && binder_ready::poll(&data::runtime_of(dir), init_identity, &guest.binder,
+                    BOOT_PATIENCE.saturating_sub(start.elapsed()).as_millis().min(20) as u32)?
+                && getprop("sys.boot_completed")? == "1" {
                 completed = Some(start.elapsed());
             }
         }

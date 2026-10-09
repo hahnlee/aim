@@ -75,6 +75,7 @@ version = "0.1.0"
 dependencies = [
  "aim-android-image",
  "aim-android-xml",
+ "aim-binder-host",
  "aim-paths",
  "aim-storage",
  "libc",

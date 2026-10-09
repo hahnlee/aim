@@ -11,6 +11,7 @@ name = "cargo-aim"
 path = "src/main.rs"
 
 [dependencies]
+aim-binder-host = { path = "../aim-binder-host" }
 aim-android-image = { path = "../aim-android-image" }
 aim-android-xml = { path = "../aim-android-xml" }
 aim-paths.workspace = true
