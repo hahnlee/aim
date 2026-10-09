@@ -41,9 +41,10 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, original).map_err(WriteError::before)?;
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
             let state = self
                 .state
@@ -198,5 +199,64 @@ impl Store {
         }
         self.set_pending_default_browser(user, None)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod pending_browser_owner_tests {
+    use super::*;
+    use super::super::tests::Data;
+    use std::io::Write;
+    fn fixture(reserve:bool)->(Data,Store,PathBuf) {
+        let data=Data::new();let path=data.settings();
+        let old=b"<package-restrictions><pkg name='example.app' enabled='0'/><default-apps/><retained-extension owner='keep'/></package-restrictions>";
+        if reserve {fs::write(&path,b"broken source").unwrap();fs::write(sibling(&path,".reservecopy"),old).unwrap();}
+        else {fs::write(&path,old).unwrap();}
+        let store=Store::open(&data.0,&[0]).unwrap().unwrap();(data,store,path)
+    }
+    fn parsed(path:&Path)->crate::package::restrictions::Restrictions {crate::package::restrictions::Restrictions::parse(&aim_android_xml::read(&fs::read(path).unwrap()).unwrap()).unwrap()}
+    #[test]
+    fn setter_is_immediately_visible_without_changing_durable_bytes_then_real_write_reopens() {
+        let(data,mut store,path)=fixture(false);let bytes=fs::read(&path).unwrap();let baseline=store.durable_restrictions[&0].clone();
+        store.set_pending_default_browser(0,Some("actual.browser")).unwrap();
+        assert_eq!(store.pending_default_browser(0).unwrap().as_deref(),Some("actual.browser"));
+        assert_eq!(fs::read(&path).unwrap(),bytes);assert_eq!(store.durable_restrictions[&0],baseline);
+        store.commit_enabled("example.app",0,&Enabled{enabled:2,..Default::default()}).unwrap();
+        assert_eq!(parsed(&path).default_browser.as_deref(),Some("actual.browser"));
+        assert_eq!(store.durable_restrictions[&0],store.restrictions[&0]);drop(store);
+        let reopened=Store::open(&data.0,&[0]).unwrap().unwrap();assert_eq!(reopened.pending_default_browser(0).unwrap().as_deref(),Some("actual.browser"));
+        assert_eq!(reopened.durable_restrictions[&0],reopened.restrictions[&0]);
+    }
+    #[test]
+    fn pending_desired_state_does_not_admit_real_foreign_file_change() {
+        let(_data,mut store,path)=fixture(false);let baseline=store.durable_restrictions[&0].clone();
+        store.set_pending_default_browser(0,Some("actual.browser")).unwrap();
+        let foreign=b"<package-restrictions><pkg name='example.app' enabled='3'/><default-apps><default-browser packageName='foreign.browser'/></default-apps></package-restrictions>";
+        fs::write(&path,foreign).unwrap();
+        let error=store.commit_enabled("example.app",0,&Enabled{enabled:2,..Default::default()}).unwrap_err();
+        assert!(!error.committed);assert!(error.message.contains("outside the native owner"));
+        assert_eq!(fs::read(&path).unwrap(),foreign);assert_eq!(store.durable_restrictions[&0],baseline);
+        assert_eq!(store.pending_default_browser(0).unwrap().as_deref(),Some("actual.browser"));
+    }
+    #[test]
+    fn recovered_reserve_and_failed_main_preserve_baseline_and_desired_retry() {
+        let(_data,mut store,path)=fixture(true);let baseline=store.durable_restrictions[&0].clone();
+        store.set_pending_default_browser(0,Some("actual.browser")).unwrap();
+        let error=store.commit_enabled_using("example.app",0,&Enabled{enabled:2,..Default::default()},|path,backup,_|write_with(path,backup,|file|{file.write_all(b"partial")?;Err(io::Error::new(io::ErrorKind::Interrupted,"controlled writer interruption"))})).unwrap_err();
+        assert!(!error.committed);assert!(!path.exists());assert_eq!(store.durable_restrictions[&0],baseline);
+        let saved=path.with_file_name("package-restrictions-backup.xml");assert_eq!(parsed(&saved).default_browser,None);
+        assert_eq!(store.pending_default_browser(0).unwrap().as_deref(),Some("actual.browser"));
+        store.commit_enabled("example.app",0,&Enabled{enabled:2,..Default::default()}).unwrap();
+        assert_eq!(parsed(&path).default_browser.as_deref(),Some("actual.browser"));assert_eq!(store.durable_restrictions[&0],store.restrictions[&0]);
+    }
+    #[test]
+    fn real_reserve_failure_advances_committed_baseline_and_allows_next_pending_clear() {
+        let(_data,mut store,path)=fixture(false);store.set_pending_default_browser(0,Some("actual.browser")).unwrap();
+        let error=store.commit_enabled_using("example.app",0,&Enabled{enabled:2,..Default::default()},|path,backup,bytes|write_with(path,backup,|file|{file.write_all(bytes)?;fs::remove_file(sibling(path,".reservecopy"))})).unwrap_err();
+        assert!(error.committed);assert_eq!(parsed(&path).default_browser.as_deref(),Some("actual.browser"));
+        assert_eq!(store.durable_restrictions[&0],store.restrictions[&0]);
+        store.set_pending_default_browser(0,None).unwrap();assert_eq!(store.pending_default_browser(0).unwrap(),None);
+        store.commit_enabled("example.app",0,&Enabled{enabled:0,..Default::default()}).unwrap();assert_eq!(parsed(&path).default_browser,None);
+        assert_eq!(store.durable_restrictions[&0],store.restrictions[&0]);
     }
 }

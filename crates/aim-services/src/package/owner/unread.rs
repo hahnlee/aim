@@ -189,6 +189,7 @@ impl Store {
             if crate::package::preferred::has_preferred_resolver(&root) {
                 self.preferred_users.insert(user);
             }
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
             self.unread_restrictions.remove(&user);
             self.unread_claims.remove(&user);

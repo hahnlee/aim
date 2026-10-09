@@ -100,6 +100,8 @@ pub struct Store {
     data: PathBuf,
     state: State,
     restrictions: BTreeMap<u32, Element>,
+    /// Last restored or committed bytes; memory-only edits never advance this owner.
+    durable_restrictions: BTreeMap<u32, Element>,
     unread_restrictions: BTreeSet<u32>,
     unread_claims: BTreeMap<u32, unread::Claim>,
     runtime_claims: BTreeMap<u32, unread::Claim<4>>,
@@ -189,6 +191,7 @@ impl Store {
         Ok(Self {
             data: data.to_owned(),
             state,
+            durable_restrictions: restrictions.clone(),
             restrictions,
             unread_restrictions: if restore_restrictions { BTreeSet::new() } else { users.iter().copied().collect() },
             unread_claims: BTreeMap::new(),
@@ -229,9 +232,10 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, original).map_err(WriteError::before)?;
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
         }
         result.map(|()| true)
@@ -430,9 +434,10 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, original).map_err(WriteError::before)?;
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
             let current = &mut self
                 .state
@@ -661,6 +666,12 @@ impl Store {
         user: u32,
         enabled: &Enabled,
     ) -> Result<(), WriteError> {
+        self.commit_enabled_using(package,user,enabled,write_resilient)
+    }
+    fn commit_enabled_using(
+        &mut self, package:&str, user:u32, enabled:&Enabled,
+        write:impl FnOnce(&Path,&Path,&[u8])->Result<(),WriteError>,
+    )->Result<(),WriteError>{
         if self.unread_restrictions.contains(&user) {
             return Err(WriteError::before("package restrictions were not restored by the settings continuation"));
         }
@@ -733,9 +744,10 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, &self.restrictions[&user]).map_err(WriteError::before)?;
-        let result = write_resilient(&path, &backup, &bytes);
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
+        let result = write(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|e| e.committed) {
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
             let parsed = restrictions
                 .packages

@@ -113,9 +113,10 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, original).map_err(WriteError::before)?;
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
             let current = self
                 .state

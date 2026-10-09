@@ -22,10 +22,12 @@ impl Store {
         self.state.users.sort_by_key(|(id, _)| *id);
         self.restrictions
             .insert(user, element("package-restrictions"));
+        self.durable_restrictions.insert(user,element("package-restrictions"));
         self.unread_restrictions.insert(user);
         if let Err(error) = self.claim_unread_restrictions(user).and_then(|_|self.claim_runtime_permissions(user)) {
             self.state.users.retain(|(id, _)| *id != user);
             self.restrictions.remove(&user);
+            self.durable_restrictions.remove(&user);
             self.unread_restrictions.remove(&user);
             self.unread_claims.remove(&user);
             self.runtime_claims.remove(&user);
@@ -62,9 +64,10 @@ impl Store {
         let dir = self.data.join("system/users").join(user.to_string());
         let path = dir.join("package-restrictions.xml");
         let backup = dir.join("package-restrictions-backup.xml");
-        prepare(&path, &backup, &self.restrictions[&user]).map_err(WriteError::before)?;
+        prepare(&path, &backup, &self.durable_restrictions[&user]).map_err(WriteError::before)?;
         let result = write_resilient(&path, &backup, &bytes);
         if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+            self.durable_restrictions.insert(user, root.clone());
             self.restrictions.insert(user, root);
             self.state
                 .users
@@ -84,6 +87,7 @@ impl Store {
         let was_registered = self.state.users.iter().any(|(id, _)| *id == user);
         self.state.users.retain(|(id, _)| *id != user);
         self.restrictions.remove(&user);
+        self.durable_restrictions.remove(&user);
         self.unread_restrictions.remove(&user);
         self.unread_claims.remove(&user);
         self.runtime_claims.remove(&user);

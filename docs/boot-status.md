@@ -392,6 +392,18 @@ including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
 with existing browser and extension state preserved. This correction also
 requires new runtime replay; earlier XML differences remain failure evidence.
+Pending browser edits now retain a separate last-restored/committed
+restrictions baseline (#1275), so a legitimate in-memory change no longer
+looks like a foreign disk mutation. Nine focused lifecycle tests pass,
+including actual write failures, committed reserve failure, recovery and
+foreign-file rejection. Runtime replay with this correction is not run.
+The a4 production replay containing the global writer and shutdown changes
+fails the unchanged300-second constructor gate: no constructor settings,
+post-boot permissions, boot completion or template is obtained. Repeated
+scan epochs are observed; the attempted logcat read followed guest cleanup
+and returned no-running-guest, so the actual constructor exception is not
+recovered. This replay does not prove global parity or Android detach fixes.
+Its owned processes and remaining ASIF attachment are normally cleaned.
 The earlier63-file publication remains invalid evidence. Actual b04 shutdown
 observation finds permission-directory/main/reserve descriptors still open
 before and after native stop and at self-dissent (#1266); the producer
