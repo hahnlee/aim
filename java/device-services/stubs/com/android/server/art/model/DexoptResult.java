@@ -15,6 +15,7 @@ public abstract class DexoptResult {
  }
  public static abstract class DexContainerFileDexoptResult {
   protected DexContainerFileDexoptResult(){throw new RuntimeException("stub");}
+  public abstract java.util.List<String> getExternalProfileErrors();
   public abstract String getDexContainerFile();
   public abstract long getDex2oatWallTimeMillis();
   public abstract long getSizeBytes();

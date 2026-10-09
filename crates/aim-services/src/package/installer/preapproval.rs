@@ -347,6 +347,15 @@ impl BridgeOwner {
         data.write_string16(status.pending_installer.as_deref());
         self.read(aidl::SEND_SESSION_STATUS, &data, |_| Ok(()))
     }
+    pub fn deliver_with_warnings(&self,status:&Status,warnings:&[String])->Result<(),Exception> {
+        let mut data=self.request();data.write_i32(1);status.receiver.write_to(&mut data);
+        data.write_i32(status.session_id);data.write_string16(status.package.as_deref());
+        data.write_i32(status.legacy_status);data.write_string16(status.message.as_deref());
+        data.write_bool(status.preapproval);data.write_string16(status.pending_installer.as_deref());
+        let values=warnings.iter().cloned().map(Some).collect::<Vec<_>>();
+        aim_service_aidl::write_string_list(&mut data,Some(&values));
+        self.read(aidl::SEND_SESSION_STATUS_WITH_WARNINGS,&data,|_|Ok(()))
+    }
     pub fn pending_streaming(
         &self,
         receiver: IntentSender,

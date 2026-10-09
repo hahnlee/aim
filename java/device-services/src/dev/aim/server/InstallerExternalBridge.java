@@ -242,8 +242,13 @@ public final class InstallerExternalBridge extends IInstallerExternalBridge.Stub
     }
     @Override public void sendSessionStatus(IntentSender receiver, int sessionId, String packageName,
             int legacyStatus, String message, boolean preapproval, String pendingInstallerPackage) {
-        enforceSystem(); checkOpen(); Objects.requireNonNull(receiver);
+        sendSessionStatusWithWarnings(receiver,sessionId,packageName,legacyStatus,message,preapproval,pendingInstallerPackage,new String[0]);
+    }
+    @Override public void sendSessionStatusWithWarnings(IntentSender receiver, int sessionId, String packageName,
+            int legacyStatus, String message, boolean preapproval, String pendingInstallerPackage, String[] warnings) {
+        enforceSystem(); checkOpen(); Objects.requireNonNull(receiver);Objects.requireNonNull(warnings);
         Intent fill = new Intent();
+        if(warnings.length!=0) fill.putStringArrayListExtra(android.content.pm.PackageInstaller.EXTRA_WARNINGS,new java.util.ArrayList<>(java.util.Arrays.asList(warnings)));
         fill.putExtra("android.content.pm.extra.SESSION_ID", sessionId);
         fill.putExtra("android.content.pm.extra.PRE_APPROVAL", preapproval);
         if (pendingInstallerPackage != null) {

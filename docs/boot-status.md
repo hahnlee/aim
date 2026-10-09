@@ -99,6 +99,15 @@ its generated Bootstrap getter (94), performs full v3 crypto verification, and
 matches current signer certificates to the already verified APK (#1233). Four
 focused tests cover actual crypto/admission and live flag owner errors; complete
 Java/AIDL, D8 and original-image linkage pass. Official SDM replay remains NOT RUN.
+The original ART install completion result now preserves actual per-dex external
+profile errors into per-child ADB warnings and PackageInstaller.EXTRA_WARNINGS
+(#1234). Atomic package success remains separate from dexopt warning/error
+status. Original improveInstallFreeze selects the exception policy: asynchronous
+failures log the actual Throwable and continue without a fabricated DexoptResult;
+synchronous failures propagate the same Throwable. Six DTO/ledger/real Binder
+regressions and a production Java policy oracle pass; Java/AIDL, D8 and original
+method/field linkage pass. Actual ART execution and official warning replay
+remain NOT RUN.
 The separate original-PMS svc reproduction confirms actual Svc execution with
 no output or shell-v2 exit frame before the 140-second bound (#1227). The isolated
 901eea52 carrier-owner runtime still times out untraced. A later diagnostic

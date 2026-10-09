@@ -95,6 +95,7 @@ pub struct NativeOwners {
     confirmation_policy: Mutex<Option<super::commit::ConfirmationPolicySource>>,
     commit_queue: Mutex<Option<std::sync::mpsc::Sender<Option<i32>>>>,
     commit_worker: Mutex<Option<super::commit::Worker>>,
+    install_warnings: super::install_warnings::Owner,
     receivers: Mutex<
         std::collections::BTreeMap<
             i32,
@@ -198,6 +199,7 @@ impl NativeOwners {
             confirmation_policy: Mutex::new(None),
             commit_queue: Mutex::new(None),
             commit_worker: Mutex::new(None),
+            install_warnings: Default::default(),
             receivers: Mutex::new(Default::default()),
             writes: Arc::new(Default::default()),
             sessions,
@@ -621,12 +623,24 @@ impl NativeOwners {
         }
         Ok(())
     }
+    pub(crate) fn install_warning_ticket(&self,session:i32)->Result<super::install_warnings::Ticket,Exception> {
+        self.install_warnings.ticket(session)
+    }
+    pub(crate) fn record_install_profile_errors(&self,ticket:super::install_warnings::Ticket,generation:u64,adb:bool,errors:&[String])->Result<(),Exception> {
+        self.install_warnings.record(ticket,generation,adb,errors)
+    }
+    pub(crate) fn record_install_without_dexopt_result(&self,ticket:super::install_warnings::Ticket,generation:u64)->Result<(),Exception> {
+        self.install_warnings.record_without_result(ticket,generation)
+    }
     fn deliver_install(
         &self,
         id: i32,
         legacy: i32,
         message: Option<String>,
     ) -> Result<(), Exception> {
+        self.deliver_install_with_warnings(id,legacy,message,&[])
+    }
+    fn deliver_install_with_warnings(&self,id:i32,legacy:i32,message:Option<String>,warnings:&[String])->Result<(),Exception> {
         let sender = self
             .receivers
             .lock()
@@ -643,7 +657,7 @@ impl NativeOwners {
             let external = self.external.lock().unwrap().clone().ok_or_else(|| {
                 Exception::new(EX_ILLEGAL_STATE, "Installer status owner unavailable")
             })?;
-            external.deliver(&super::preapproval::Status {
+            external.deliver_with_warnings(&super::preapproval::Status {
                 receiver,
                 session_id: id,
                 package,
@@ -651,7 +665,7 @@ impl NativeOwners {
                 message,
                 preapproval: false,
                 pending_installer: None,
-            })?;
+            },warnings)?;
         }
         Ok(())
     }
@@ -663,10 +677,14 @@ impl NativeOwners {
         Ok(())
     }
     fn run_install(&self, id: i32) -> Result<(), Exception> {
+        let root=self.sessions.snapshot(id)?;
+        let ordered=std::iter::once(id).chain(root.children.iter().copied()).collect();
+        let warning_attempt=self.install_warnings.begin(id,ordered)?;
         let result = self.install_staged_batch(id);
         match result {
             Err(super::pipeline::Error::Pending) => Ok(()),
             Ok(()) => {
+                let warnings=warning_attempt.take()?;
                 let root = self.sessions.snapshot(id)?;
                 let ids: Vec<_> = std::iter::once(id)
                     .chain(root.children.iter().copied())
@@ -680,7 +698,7 @@ impl NativeOwners {
                         success: true,
                     });
                 }
-                self.deliver_install(id, 1, None)?;
+                self.deliver_install_with_warnings(id, 1, None,&warnings)?;
                 self.receivers.lock().unwrap().remove(&id);
                 let retired = self.sessions.finish_nonstaged(id)?;
                 if !retired.is_empty() {
@@ -4686,6 +4704,7 @@ impl super::SessionOperations for NativeOwners {
     }
     fn abandon_session(&self, id: i32, uid: u32) -> Result<(), Exception> {
         let ids = self.sessions.abandon(id, uid)?;
+        self.install_warnings.retire(&ids);
         self.abandon_stage(&ids)
     }
     fn data_loader(&self, id: i32, uid: u32) -> Result<Option<super::codec::Object>, Exception> {

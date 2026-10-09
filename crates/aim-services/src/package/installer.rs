@@ -37,6 +37,7 @@ pub mod service;
 pub mod silent;
 pub mod storage;
 mod sdm;
+pub(crate) mod install_warnings;
 pub mod staged_owner;
 pub mod streaming_owner;
 

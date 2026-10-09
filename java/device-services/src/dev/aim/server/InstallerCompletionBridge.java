@@ -34,8 +34,14 @@ public final class InstallerCompletionBridge extends IInstallerCompletionBridge.
         }
     }
     @Override public int dexoptInstalled(String name,int scenario,int installReason,int flags,String filter,boolean debuggable,boolean instant,boolean apex,boolean rollback){
+        var result=dexoptInstalledResult(name,scenario,installReason,flags,filter,debuggable,instant,apex,rollback);
+        return result==null||!result.hasResult?-1:result.finalStatus;
+    }
+    @Override public InstallDexoptResult dexoptInstalledResult(String name,int scenario,int installReason,int flags,String filter,boolean debuggable,boolean instant,boolean apex,boolean rollback){
         enforceNativeOwner();
-        if(instant||apex||rollback)return -1; // Original shouldCallArtService excludes these requests.
+        if(instant||apex||rollback)return null;
+        boolean asyncPolicy=com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags.improveInstallFreeze();
+        try {
         var manager=LocalManagerRegistry.getManager(ArtManagerLocal.class);
         var packages=LocalManagerRegistry.getManager(PackageManagerLocal.class);
         if(manager==null||packages==null)throw new IllegalStateException("original ART/package snapshot owner unavailable");
@@ -46,12 +52,28 @@ public final class InstallerCompletionBridge extends IInstallerCompletionBridge.
         else if(debuggable)options=options.overrideCompilerFilter(DexoptParams.COMPILER_FILTER_NOOP);
         int extra=(flags&PackageManager.INSTALL_IGNORE_DEXOPT_PROFILE)!=0?ArtFlags.FLAG_IGNORE_PROFILE:0;
         try(var snapshot=packages.withFilteredSnapshot()){
-            return manager.dexoptPackage(snapshot,name,options.convertToDexoptParams(extra)).getFinalStatus();
-        } catch (RuntimeException failure) {
-            android.util.Log.e("InstallerCompletionBridge", "Original installed-package dexopt failed: " + name, failure);
-            throw failure;
+            var result=manager.dexoptPackage(snapshot,name,options.convertToDexoptParams(extra));
+            var errors=new java.util.LinkedHashSet<String>();
+            for(var pkg:result.getPackageDexoptResults())
+                for(var dex:pkg.getDexContainerFileDexoptResults()) errors.addAll(dex.getExternalProfileErrors());
+            var reply=new InstallDexoptResult();reply.hasResult=true;reply.finalStatus=result.getFinalStatus();
+            reply.externalProfileErrors=errors.toArray(new String[0]);return reply;
+        }
+        } catch (Throwable failure) {
+            var diagnostic=observeException(failure,asyncPolicy);
+            android.util.Slog.wtf("PackageManager", "Dexopt encountered a fatal error",new java.util.concurrent.CompletionException(failure));
+            return diagnostic;
         }
     }
+    static InstallDexoptResult observeException(Throwable failure,boolean asyncPolicy) {
+        if(!asyncPolicy)throw InstallerCompletionBridge.<RuntimeException>unchanged(failure);
+        var diagnostic=new InstallDexoptResult();
+        diagnostic.exceptionClass=failure.getClass().getName();diagnostic.exceptionMessage=failure.getMessage();
+        return diagnostic;
+    }
+    // Synchronous original dexopt propagates the same Throwable, including its identity.
+    @SuppressWarnings("unchecked")
+    private static <T extends Throwable> RuntimeException unchanged(Throwable failure) throws T {throw (T)failure;}
     private static void enforceNativeOwner() {
         if (android.os.Binder.getCallingUid() != android.os.Process.SYSTEM_UID)
             throw new SecurityException("native installer bridge requires system UID");

@@ -5,6 +5,7 @@ package android.content.pm;
 import android.os.Handler;
 
 public class PackageInstaller {
+    public static final String EXTRA_WARNINGS = "android.content.pm.extra.WARNINGS";
     public static final class PreapprovalDetails implements android.os.Parcelable {
  private PreapprovalDetails(android.os.Parcel parcel){throw new RuntimeException("stub");}
         public static final android.os.Parcelable.Creator<PreapprovalDetails> CREATOR = null;

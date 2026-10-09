@@ -362,7 +362,9 @@ impl System {
                     && code.record.initiating_package.as_deref() == Some("android");
                 let mut request = Parcel::new();
                 use aim_service_aidl::dev_aim_server_iinstallercompletionbridge as api;
-                api::DexoptInstalled {
+                let installer=system.package_installer_native_owner()?;
+                let warning_ticket=installer.install_warning_ticket(code.session.id)?;
+                api::DexoptInstalledResult {
                     package_name: Some(name.clone()),
                     install_scenario: code.record.params.install_scenario,
                     install_reason: code.record.params.install_reason,
@@ -375,20 +377,32 @@ impl System {
                 }
                 .write(&mut request);
                 let reply = art
-                    .transact(api::DEXOPT_INSTALLED, &request, false)
+                    .transact(api::DEXOPT_INSTALLED_RESULT, &request, false)
                     .map_err(|code| {
                         environment_error(format!("ART completion transport {code}"))
                     })?;
                 let mut reader = reply.reader();
-                let status = api::read_dexopt_installed_reply(&mut reader)
+                let result = api::read_dexopt_installed_result_reply::<crate::package::installer::install_warnings::DexoptResult>(&mut reader)
                     .map_err(|code| environment_error(format!("ART completion reply {code}")))??;
                 if reader.remaining() != 0 {
                     return Err(environment_error("ART completion trailing reply"));
                 }
                 // Dexopt failure does not invalidate a committed install. Preserve
                 // the original ART result diagnostically without inventing success.
-                if status == 30 {
-                    eprintln!("native install ART dexopt failed for {name}");
+                match result {
+                    Some(crate::package::installer::install_warnings::DexoptResult::Completed{final_status,external_profile_errors})=>{
+                        if final_status==30 {eprintln!("native install ART dexopt failed for {name}");}
+                        installer.record_install_profile_errors(warning_ticket,receipt.generation,
+                            code.record.params.install_flags&0x20!=0,&external_profile_errors)?;
+                    }
+                    Some(crate::package::installer::install_warnings::DexoptResult::ObservedException{class,message})=>{
+                        eprintln!("native install ART exception for {name}: {class}: {message:?}");
+                        installer.record_install_without_dexopt_result(warning_ticket,receipt.generation)?;
+                    }
+                    None if code.record.params.install_flags&0x800!=0||code.package.is2(booleans2::APEX)||rollback=>{
+                        installer.record_install_without_dexopt_result(warning_ticket,receipt.generation)?;
+                    }
+                    None=>return Err(environment_error("ART completion unexpectedly skipped an eligible package")),
                 }
                 for installed in receipt
                     .packages

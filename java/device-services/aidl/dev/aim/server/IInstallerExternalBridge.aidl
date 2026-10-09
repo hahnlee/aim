@@ -32,4 +32,6 @@ interface IInstallerExternalBridge {
     /** Original guest kernel/user/image configuration, no host defaults. */
     byte[] getNativeInstallEnvironment();
     int getZipLocalUtcOffset(int year, int month, int day, int hour, int minute, int second);
+    void sendSessionStatusWithWarnings(in IntentSender receiver, int sessionId, String packageName,
+        int legacyStatus, String message, boolean preapproval, String pendingInstallerPackage, in String[] warnings);
 }
