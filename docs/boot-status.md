@@ -282,10 +282,15 @@ are not normalized away. The structure
 capture tool now reads real Darwin xattrs with libc NOFOLLOW calls (#1261);
 12 tests include actual local-file capture and error propagation. Compiled
 code validity, two-template structure and original/runtime parity remain
-unverified. A separate bounded lifecycle diagnostic reproduces svc help
-output without terminal EOF. Its signal-free75-second snapshot records one
-SIGQUIT wait entry for the real adbd child; no missing marker is treated as
-proof of a cause. The diagnostic boot is cleaned and is not a CTS pass. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
+unverified. Separate bounded lifecycle diagnostics reproduce svc help
+output without terminal EOF. A full wait observer once permits natural exit,
+but scalar wait recording alone and an idle-worker-only variant both fail
+the unchanged180-second bound (180.009 and180.010 seconds). The latter two
+signal-free75-second snapshots record SIGQUIT wait entry for the real adbd
+child without an observed shutdown chain. Adding an idle worker alone has
+not corrected the problem; neither marker absence nor the successful full
+observer establishes its cause. These experimental runtimes are not
+production corrections or CTS passes. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
 pass in an isolated test. A separate unread-PTY exit test reproduces an
 unbounded terminal drain (#1259); this is not yet proved to cause svc delay.
 Both earlier interrupted full66
