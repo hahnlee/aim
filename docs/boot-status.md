@@ -330,6 +330,14 @@ focused tests pass. Persisted legacy permission migrations are now separate
 from the original modern permission projection (#1219): nine focused tests
 preserve modern grants/GIDs and genuine fresh/restored legacy serialization.
 Neither correction is included in the frozen three-template cohort above.
+The source now completes admitted nonincremental system loading before
+factory retention (#1220), preserving the original default zero and live
+incremental progress; four loading tests pass. It also invokes the existing
+shared-UID ABI reconciliation after system/data/stub scanning (#810), before
+final metadata publication. Thirty-two ABI tests pass without forcing an
+architecture or changing raw parsed code. Actual template replay with these
+two corrections remains required; the earlier frozen XML differences are
+not relabeled as resolved.
 Twelve actual CE/DE directory references in its source boot images match
 their inode values through the real guest path-map; differing integer values
 are not ignored or rewritten. Consumer recreation/rebinding remains unverified.
