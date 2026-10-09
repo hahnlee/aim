@@ -385,8 +385,14 @@ An Original permission fixture then exposed a writable-data clone inheriting
 its immutable template's0444 mode and attaching read-only before Android
 started. The data owner now sets only the new private image to0600 before
 publication. A real disposable APFS image test passes write/sync/detach and
-preserves the template's hash, mode and inode (#1272). Original permission decisions
-and PID delegation remain not run until corrected-runtime replay.
+preserves the template's hash, mode and inode (#1272). A fresh Original
+permission gate using the corrected42 runtime now passes in342.91 seconds:
+authenticated Binder readiness precedes property queries, boot completes
+within the300-second bound, the authored APK installs, and actual original
+ActivityManager decisions deny PID19847/UID10213, allow genuine registered
+UiAutomation delegation and deny again after it is dropped. System UID
+permission and APK uninstall also pass. Owned processes and mounts are
+cleaned; Native installer proxy and full49/10 gates remain unrun.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
