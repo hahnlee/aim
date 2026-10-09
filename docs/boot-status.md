@@ -784,7 +784,7 @@ under `host/guest-init`; isolated template inputs require and hash that same
 helper beside the frozen linux-run/guest-init binaries. The actual build graph
 loads both nodes and compile-checks successfully; the explicit helper build
 completes in 3.0 seconds with no failures. The Source release helper exists,
-while C staging and the common frozen-runtime receipt remain pending (#1193).
+and the actual frozen common runtime now includes that helper with verified hashes (#1193).
 The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional
@@ -793,8 +793,23 @@ or malformed stores remain errors. Its focused owner-configuration check passes,
 and actual unchanged profman profile extraction exits successfully with 1,078
 output lines. The original-PMS derived image rebuild then completes with four
 rebuilt nodes, 29 fresh nodes and no failures (51.5 seconds). Native-C image
-staging uses the same committed source; its build and full image/CTS replay
-remain pending.
+staging uses the same committed source and retains its explicit native service activation.
+Its build completes with 29 rebuilt nodes, four fresh nodes and no failures
+(123.2 seconds). Both images have verified overlay receipts and share a detached,
+read-only common host runtime. The first empty-data native template stops before
+guest launch because its long runtime control socket exceeds Darwin SUN_LEN.
+A short-output replay passes that setup, then stops during init signal collection:
+Darwin returns EINVAL even for read-only sigaction queries on SIGKILL/SIGSTOP
+(#1200). These uncatchable dispositions are now excluded, and all 26 guest-init library
+checks pass. A fresh short-path diagnostic replay publishes native init PID
+readiness and starts eight original guest services, then times out after 300
+seconds with settings, permission capture and boot completion all absent. An
+actual read-only vdc trace waits for servicemanager.ready; all owned boot/display
+processes are gone after the failed template. The separate long-runtime
+control owner now allocates a retained private short native directory (#1201);
+authenticated attach, admission, real ENABLE publication and explicit/Drop
+cleanup pass against a runtime path beyond SUN_LEN. Full image/CTS acceptance
+remains pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains

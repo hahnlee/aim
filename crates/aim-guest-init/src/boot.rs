@@ -37,6 +37,29 @@ use crate::props::{Properties, heap_properties, mapped_properties, read_property
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
+fn init_caught_signal_mask() -> std::io::Result<u64> {
+    let mut caught = 0u64;
+    for host_signal in 1..32 {
+        // Darwin rejects even read-only sigaction queries for these signals (#1200).
+        if matches!(host_signal, libc::SIGKILL | libc::SIGSTOP) {
+            continue;
+        }
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(host_signal, std::ptr::null(), &mut action) } < 0 {
+            return Err(std::io::Error::other(format!(
+                "init signal {host_signal} disposition: {}", std::io::Error::last_os_error()
+            )));
+        }
+        if action.sa_sigaction != libc::SIG_DFL && action.sa_sigaction != libc::SIG_IGN {
+            let guest_signal = aim_storage::process_namespace::signal_from_host(host_signal);
+            if guest_signal > 0 {
+                caught |= 1u64 << (guest_signal - 1);
+            }
+        }
+    }
+    Ok(caught)
+}
+
 /// Wakes the boot loop on every SIGCHLD, as init's signalfd does, so a
 /// child's exit (an `exec` ending) is handled at once rather than at the
 /// loop's next timeout. The thread ends with the loop's receiver.
@@ -533,14 +556,13 @@ impl Boot {
         layout.prepare_runtime().map_err(|e| e.to_string())?;
         let verity_control = if options.mode == RunMode::Run {
             data_mount.borrow_mut().mount()?;
-            let endpoint = layout.runtime.join("vc/ctl");
             let store = Arc::new(aim_storage::fsverity::Store::new(
                 &layout.data.join("fs-verity"), &layout.runtime.join("fs-verity-leases"),
             ).map_err(|error| format!("verity store: {error:?}"))?);
-            let owner = aim_storage::verity_control::RunningServer::start_with_store(&endpoint, Duration::from_secs(5), store)
-                .map_err(|error| error.to_string())?;
-            aim_storage::verity_control::OwnerConfig { endpoint, process: owner.process }
-                .write(&layout.runtime.join("verity-control-owner")).map_err(|error| error.to_string())?;
+            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(Duration::from_secs(5), store)
+                .map_err(|error| format!("native verity control startup: {error}"))?;
+            aim_storage::verity_control::OwnerConfig { endpoint:owner.endpoint().to_path_buf(), process: owner.process }
+                .write(&layout.runtime.join("verity-control-owner")).map_err(|error| format!("native verity owner locator: {error}"))?;
             Some(owner)
         } else {
             None
@@ -561,15 +583,7 @@ impl Boot {
             std::fs::write(&identity_file,identity.to_file_text()).map_err(|error|error.to_string())?;
             std::os::unix::fs::symlink(&identity_file,layout.identity_dir().join("by-pid").join(process.host_pid.to_string())).map_err(|error|error.to_string())?;
             aim_storage::process_namespace::register_mount_namespace(&layout.identity_dir().join("by-pid"),process,&namespace).map_err(|error|error.to_string())?;
-            let mut caught=0u64;
-            for host_signal in 1..32 {
-                let mut action:libc::sigaction=unsafe{std::mem::zeroed()};
-                if unsafe{libc::sigaction(host_signal,std::ptr::null(),&mut action)}<0{return Err(std::io::Error::last_os_error().to_string());}
-                if action.sa_sigaction!=libc::SIG_DFL&&action.sa_sigaction!=libc::SIG_IGN{
-                    let guest_signal=aim_storage::process_namespace::signal_from_host(host_signal);
-                    if guest_signal>0{caught|=1u64<<(guest_signal-1);}
-                }
-            }
+            let caught = init_caught_signal_mask().map_err(|error| error.to_string())?;
             aim_storage::process_namespace::register_init_signals(&layout.identity_dir().join("by-pid"),process,caught).map_err(|error|error.to_string())?;
             // Publish only after the actual init, mount owner and signal
             // dispositions are registered, before any native or guest service.
@@ -1294,6 +1308,17 @@ impl Boot {
 #[cfg(test)]
 mod androidboot_options_tests {
     use super::*;
+    #[test]
+    fn actual_init_signal_dispositions_exclude_uncatchable_signals() {
+        let caught = init_caught_signal_mask().unwrap();
+        assert_eq!(caught & ((1 << (9 - 1)) | (1 << (19 - 1))), 0);
+        for signal in [libc::SIGKILL, libc::SIGSTOP] {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EINVAL));
+        }
+    }
+
     #[test]
     fn explicit_debug_port_preserves_device_hardware_and_hardware_override_is_unique() {
         let mut options = BootOptions::new(PathBuf::new(), PathBuf::new(), RunMode::DryRun);

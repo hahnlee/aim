@@ -139,6 +139,40 @@ impl Client {
 mod tests {
  use super::*;use std::os::unix::net::UnixListener;use std::process::{Command,Stdio};
  #[test]
+ fn bound_owner_without_listener_threads_still_retires_owned_sockets(){
+  use std::os::unix::fs::MetadataExt;
+  let directory=EndpointDirectory::new().unwrap();let path=directory.path.join("ctl");
+  let server=Arc::new(Server::bind(&path,Duration::from_secs(1)).unwrap());
+  let paths=[path.clone(),path.with_extension("admission")];let mut inodes=[(0,0);2];
+  for(index,path)in paths.iter().enumerate(){let stat=std::fs::symlink_metadata(path).unwrap();inodes[index]=(stat.dev(),stat.ino());}
+  let root=directory.path.clone();let owner=RunningServer{server,process:ProcessIdentity::running(std::process::id()as i32).unwrap(),path,inodes,enable_inode:None,owned_directory:Some(directory),cleaned:false,stop:Arc::new(std::sync::atomic::AtomicBool::new(false)),threads:vec![]};
+  owner.shutdown().unwrap();assert!(!root.exists());
+ }
+ #[test]
+ fn owned_short_endpoints_support_long_runtime_and_cleanup_all_three_sockets(){
+  use std::os::unix::{ffi::OsStrExt,fs::PermissionsExt};
+  let root=std::env::temp_dir().join(format!("aim-verity-long-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())).join("long-native-runtime-component".repeat(8));
+  std::fs::create_dir_all(&root).unwrap();assert!(root.as_os_str().as_bytes().len()>104);
+  std::fs::write(root.join("data"),vec![37;4096]).unwrap();let data=std::fs::File::open(root.join("data")).unwrap();
+  let store=Arc::new(crate::fsverity::Store::new(&root.join("proof"),&root.join("leases")).unwrap());
+  let owner=RunningServer::start_private_with_store(Duration::from_secs(2),store.clone()).unwrap();
+  let endpoint=owner.endpoint().to_path_buf();let directory=endpoint.parent().unwrap().to_path_buf();
+  assert!(!endpoint.starts_with(&root));assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode()&0o777,0o700);
+  for path in [endpoint.clone(),endpoint.with_extension("admission"),endpoint.with_extension("enable")]{assert!(path.as_os_str().as_bytes().len()<104);assert!(path.exists());}
+  let config=OwnerConfig{endpoint:endpoint.clone(),process:owner.process};config.write(&root.join("owner")).unwrap();
+  let loaded=OwnerConfig::read(&root.join("owner")).unwrap();assert_eq!(loaded.endpoint,endpoint);assert_eq!(loaded.process,owner.process);
+  let(client,_control)=Client::attach(&loaded.endpoint,loaded.process,Duration::from_secs(2)).unwrap();
+  client.admission([7;36]).unwrap().published().unwrap();client.unmap([7;36]).unwrap();
+  let admission=store.lock_inode(&data).unwrap();let guard=admission.begin_enable().unwrap();drop(admission);
+  let blob=guard.build(crate::fsverity::BuildOptions::new(1,4096,vec![],16384,4096).unwrap(),&[],||false).unwrap();let view=blob.metadata_view().unwrap();
+  let identity=crate::fsverity::Identity::from_fd(std::os::fd::AsFd::as_fd(&data)).unwrap();
+  let proof=PrivateFd::allocate(||{let fd=unsafe{libc::fcntl(view.backing_descriptor().as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};if fd<0{Err(io::Error::last_os_error())}else{Ok(unsafe{OwnedFd::from_raw_fd(fd)})}}).unwrap();
+  let transition=client.enable_transition(identity.to_bytes(),&proof).unwrap();let committed=guard.commit(blob).unwrap();transition.published(&committed).unwrap();assert!(store.lookup(identity).unwrap().is_some());
+  owner.shutdown().unwrap();assert!(!directory.exists());
+  let second=RunningServer::start_private_with_store(Duration::from_secs(2),store).unwrap();let second_directory=second.endpoint().parent().unwrap().to_path_buf();assert_ne!(directory,second_directory);drop(second);assert!(!second_directory.exists());
+  std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+ }
+ #[test]
  #[ignore="owned subprocess helper invoked by authenticated_cross_process_frames"]
  fn control_child(){let Some(path)=std::env::args().find_map(|a|a.strip_prefix("--control-endpoint=").map(String::from))else{return;};let mut channel=Channel::new(UnixStream::connect(path).unwrap(),None,Duration::from_secs(2)).unwrap();let(frame,proof)=channel.receive().unwrap();assert!(proof.is_some());channel.send(&Frame{operation:Operation::Prepared,..frame},None).unwrap();}
  #[test]
@@ -160,15 +194,42 @@ mod tests {
 
 /// Boot-owned native endpoint lifetime. Only its captured socket inodes may be
 /// unlinked; a replacement endpoint or PID incarnation is never cleaned up.
-pub struct RunningServer {pub server:Arc<Server>,pub process:ProcessIdentity,path:std::path::PathBuf,inodes:[(u64,u64);2],enable_inode:Option<(u64,u64)>,stop:Arc<std::sync::atomic::AtomicBool>,threads:Vec<std::thread::JoinHandle<io::Result<()>>>}
+// Native transport paths are independent of the guest's runtime path length.
+struct EndpointDirectory {path:std::path::PathBuf,identity:Option<(u64,u64)>}
+impl EndpointDirectory {
+ fn new()->io::Result<Self>{use std::os::unix::{ffi::OsStrExt,fs::MetadataExt};
+  let mut template=b"/tmp/av-XXXXXX\0".to_vec();
+  if unsafe{libc::mkdtemp(template.as_mut_ptr().cast())}.is_null(){return Err(io::Error::last_os_error());}
+  let raw=std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&template[..template.len()-1]));
+  let mut owned=Self{path:raw,identity:None};
+  let metadata=std::fs::symlink_metadata(&owned.path)?;
+  owned.identity=Some((metadata.dev(),metadata.ino()));
+  owned.path=std::fs::canonicalize(&owned.path)?;Ok(owned)
+ }
+ fn remove(&self)->io::Result<()>{use std::os::unix::fs::MetadataExt;
+  let metadata=match std::fs::symlink_metadata(&self.path){Ok(metadata)=>metadata,Err(failure)if failure.kind()==io::ErrorKind::NotFound=>return Ok(()),Err(failure)=>return Err(failure)};
+  if !metadata.is_dir()||self.identity.is_some_and(|identity|(metadata.dev(),metadata.ino())!=identity){return Err(error(libc::ESTALE));}
+  std::fs::remove_dir(&self.path)
+ }
+}
+impl Drop for EndpointDirectory{fn drop(&mut self){if let Err(failure)=self.remove(){eprintln!("verity endpoint directory cleanup: {failure}");}}}
+pub struct RunningServer {pub server:Arc<Server>,pub process:ProcessIdentity,path:std::path::PathBuf,inodes:[(u64,u64);2],enable_inode:Option<(u64,u64)>,owned_directory:Option<EndpointDirectory>,cleaned:bool,stop:Arc<std::sync::atomic::AtomicBool>,threads:Vec<std::thread::JoinHandle<io::Result<()>>>}
 impl RunningServer {
- pub fn start(path:&std::path::Path,timeout:Duration)->io::Result<Self>{use std::os::unix::fs::MetadataExt;let process=ProcessIdentity::running(std::process::id()as i32)?;let server=Arc::new(Server::bind(path,timeout)?);server.listener.set_nonblocking(true)?;server.admission_listener.set_nonblocking(true)?;let paths=[path.to_path_buf(),path.with_extension("admission")];let mut inodes=[(0,0);2];for(i,p)in paths.iter().enumerate(){let stat=std::fs::symlink_metadata(p)?;inodes[i]=(stat.dev(),stat.ino());}let stop=Arc::new(std::sync::atomic::AtomicBool::new(false));let mut threads=Vec::new();
-  for admission in [false,true]{let owner=server.clone();let stopped=stop.clone();threads.push(std::thread::Builder::new().name(if admission{"verity-admission-listener"}else{"verity-control-listener"}.into()).spawn(move||{let mut workers:Vec<std::thread::JoinHandle<io::Result<()>>>=Vec::new();while !stopped.load(std::sync::atomic::Ordering::Acquire){for index in (0..workers.len()).rev(){if workers[index].is_finished(){match workers.swap_remove(index).join(){Ok(Ok(()))=>{},Ok(Err(failure))if matches!(failure.raw_os_error(),Some(libc::EPIPE)|Some(libc::ECONNRESET))=>{},Ok(Err(failure))=>eprintln!("verity admission worker failed: {failure}"),Err(_)=>return Err(error(libc::EIO))}}}let listener=if admission{&owner.admission_listener}else{&owner.listener};match listener.accept(){Ok((stream,_))=>{if workers.len()>=256{drop(stream);continue;}let current=owner.clone();workers.push(std::thread::spawn(move||{let channel=Channel::new(stream,None,current.timeout)?;if admission{current.admission_request(channel)}else{let process=channel.peer;let member=current.coordinator.register(process)?;let mut channel=channel;channel.send(&Frame{operation:Operation::Register,transaction:member,identity:[0;36],generation:0,error:0},None)?;current.channels.lock().unwrap().insert(member,Arc::new(Mutex::new(channel)));Ok(())}}));},Err(failure)if failure.kind()==io::ErrorKind::WouldBlock=>std::thread::sleep(Duration::from_millis(5)),Err(failure)=>return Err(failure)}}for worker in workers{match worker.join(){Ok(Ok(()))=>{},Ok(Err(failure))if matches!(failure.raw_os_error(),Some(libc::EPIPE)|Some(libc::ECONNRESET))=>{},Ok(Err(failure))=>return Err(failure),Err(_)=>return Err(error(libc::EIO))}}Ok(())})?);}
-  Ok(Self{server,process,path:path.into(),inodes,enable_inode:None,stop,threads})
+ pub fn start(path:&std::path::Path,timeout:Duration)->io::Result<Self>{use std::os::unix::fs::MetadataExt;let process=ProcessIdentity::running(std::process::id()as i32)?;let server=Arc::new(Server::bind(path,timeout)?);server.listener.set_nonblocking(true)?;server.admission_listener.set_nonblocking(true)?;let paths=[path.to_path_buf(),path.with_extension("admission")];let mut inodes=[(0,0);2];for(i,p)in paths.iter().enumerate(){let stat=std::fs::symlink_metadata(p)?;inodes[i]=(stat.dev(),stat.ino());}let stop=Arc::new(std::sync::atomic::AtomicBool::new(false));let mut running=Self{server:server.clone(),process,path:path.into(),inodes,enable_inode:None,owned_directory:None,cleaned:false,stop:stop.clone(),threads:Vec::new()};
+  for admission in [false,true]{let owner=server.clone();let stopped=stop.clone();running.threads.push(std::thread::Builder::new().name(if admission{"verity-admission-listener"}else{"verity-control-listener"}.into()).spawn(move||{let mut workers:Vec<std::thread::JoinHandle<io::Result<()>>>=Vec::new();while !stopped.load(std::sync::atomic::Ordering::Acquire){for index in (0..workers.len()).rev(){if workers[index].is_finished(){match workers.swap_remove(index).join(){Ok(Ok(()))=>{},Ok(Err(failure))if matches!(failure.raw_os_error(),Some(libc::EPIPE)|Some(libc::ECONNRESET))=>{},Ok(Err(failure))=>eprintln!("verity admission worker failed: {failure}"),Err(_)=>return Err(error(libc::EIO))}}}let listener=if admission{&owner.admission_listener}else{&owner.listener};match listener.accept(){Ok((stream,_))=>{if workers.len()>=256{drop(stream);continue;}let current=owner.clone();workers.push(std::thread::spawn(move||{let channel=Channel::new(stream,None,current.timeout)?;if admission{current.admission_request(channel)}else{let process=channel.peer;let member=current.coordinator.register(process)?;let mut channel=channel;channel.send(&Frame{operation:Operation::Register,transaction:member,identity:[0;36],generation:0,error:0},None)?;current.channels.lock().unwrap().insert(member,Arc::new(Mutex::new(channel)));Ok(())}}));},Err(failure)if failure.kind()==io::ErrorKind::WouldBlock=>std::thread::sleep(Duration::from_millis(5)),Err(failure)=>return Err(failure)}}for worker in workers{match worker.join(){Ok(Ok(()))=>{},Ok(Err(failure))if matches!(failure.raw_os_error(),Some(libc::EPIPE)|Some(libc::ECONNRESET))=>{},Ok(Err(failure))=>return Err(failure),Err(_)=>return Err(error(libc::EIO))}}Ok(())})?);}
+  Ok(running)
  }
  pub fn start_with_store(path:&std::path::Path,timeout:Duration,store:Arc<crate::fsverity::Store>)->io::Result<Self>{use std::os::unix::fs::{MetadataExt,PermissionsExt};let mut running=Self::start(path,timeout)?;*running.server.store.lock().unwrap()=Some(store);let endpoint=path.with_extension("enable");let listener=std::os::unix::net::UnixListener::bind(&endpoint)?;std::fs::set_permissions(&endpoint,std::fs::Permissions::from_mode(0o600))?;listener.set_nonblocking(true)?;let stat=std::fs::symlink_metadata(&endpoint)?;running.enable_inode=Some((stat.dev(),stat.ino()));let owner=running.server.clone();let stopped=running.stop.clone();running.threads.push(std::thread::Builder::new().name("verity-enable-listener".into()).spawn(move||{let mut workers:Vec<std::thread::JoinHandle<io::Result<()>>>=Vec::new();while !stopped.load(std::sync::atomic::Ordering::Acquire){for index in (0..workers.len()).rev(){if workers[index].is_finished(){match workers.swap_remove(index).join(){Ok(Ok(()))=>{},Ok(Err(failure))=>eprintln!("verity enable request failed: {failure}"),Err(_)=>return Err(error(libc::EIO))}}}match listener.accept(){Ok((stream,_))=>{if workers.len()>=32{drop(stream);continue;}let current=owner.clone();workers.push(std::thread::spawn(move||current.enable_request(Channel::new(stream,None,current.timeout)?)));},Err(failure)if failure.kind()==io::ErrorKind::WouldBlock=>std::thread::sleep(Duration::from_millis(5)),Err(failure)=>return Err(failure)}}for worker in workers{match worker.join(){Ok(Ok(()))=>{},Ok(Err(failure))=>eprintln!("verity enable request failed: {failure}"),Err(_)=>return Err(error(libc::EIO))}}Ok(())})?);Ok(running)}
+ /// Allocate a real short Unix endpoint, retaining its exclusive native
+ /// directory until the server has stopped and all owned sockets are gone.
+ pub fn start_private_with_store(timeout:Duration,store:Arc<crate::fsverity::Store>)->io::Result<Self>{
+  let directory=EndpointDirectory::new()?;let endpoint=directory.path.join("ctl");
+  let mut running=Self::start_with_store(&endpoint,timeout,store)?;
+  running.owned_directory=Some(directory);Ok(running)
+ }
+ pub fn endpoint(&self)->&std::path::Path{&self.path}
  pub fn shutdown(mut self)->io::Result<()>{self.stop_and_join()}
- fn stop_and_join(&mut self)->io::Result<()>{use std::os::unix::fs::MetadataExt;if self.threads.is_empty(){return Ok(());}self.stop.store(true,std::sync::atomic::Ordering::Release);let mut failure=None;for thread in self.threads.drain(..){match thread.join(){Ok(Ok(()))=>{},Ok(Err(error))=>failure=Some(error),Err(_)=>failure=Some(error(libc::EIO))}}self.server.channels.lock().unwrap().clear();if !self.process.is_live(){return Err(error(libc::ESRCH));}for(index,path)in [self.path.clone(),self.path.with_extension("admission")].iter().enumerate(){match std::fs::symlink_metadata(path){Ok(stat)if(stat.dev(),stat.ino())==self.inodes[index]=>std::fs::remove_file(path)?,Ok(_)=>return Err(error(libc::ESTALE)),Err(error)if error.kind()==io::ErrorKind::NotFound=>{},Err(error)=>return Err(error)}}if let Some(expected)=self.enable_inode{let path=self.path.with_extension("enable");let stat=std::fs::symlink_metadata(&path)?;if(stat.dev(),stat.ino())!=expected{return Err(error(libc::ESTALE));}std::fs::remove_file(path)?;}if let Some(error)=failure{Err(error)}else{Ok(())}}
+ fn stop_and_join(&mut self)->io::Result<()>{use std::os::unix::fs::MetadataExt;if self.cleaned{return Ok(());}self.stop.store(true,std::sync::atomic::Ordering::Release);let mut failure=None;for thread in self.threads.drain(..){match thread.join(){Ok(Ok(()))=>{},Ok(Err(error))=>failure=Some(error),Err(_)=>failure=Some(error(libc::EIO))}}self.server.channels.lock().unwrap().clear();if !self.process.is_live(){return Err(error(libc::ESRCH));}for(index,path)in [self.path.clone(),self.path.with_extension("admission")].iter().enumerate(){match std::fs::symlink_metadata(path){Ok(stat)if(stat.dev(),stat.ino())==self.inodes[index]=>std::fs::remove_file(path)?,Ok(_)=>return Err(error(libc::ESTALE)),Err(error)if error.kind()==io::ErrorKind::NotFound=>{},Err(error)=>return Err(error)}}if let Some(expected)=self.enable_inode{let path=self.path.with_extension("enable");match std::fs::symlink_metadata(&path){Ok(stat)if(stat.dev(),stat.ino())==expected=>std::fs::remove_file(path)?,Ok(_)=>return Err(error(libc::ESTALE)),Err(failure)if failure.kind()==io::ErrorKind::NotFound=>{},Err(failure)=>return Err(failure)}}if let Some(directory)=self.owned_directory.as_ref(){directory.remove()?;}self.cleaned=true;if let Some(error)=failure{Err(error)}else{Ok(())}}
 }
 impl Drop for RunningServer {fn drop(&mut self){if let Err(failure)=self.stop_and_join(){eprintln!("verity coordinator shutdown failed: {failure}");}}}
 
