@@ -169,7 +169,19 @@ directory host GIDs differ from the source although guest metadata and bytes
 match. Storage copy now preserves actual host UID/GID before mode/xattrs/times,
 propagating ownership errors; two strict constructor copy/seal tests and the
 generic copy test pass. First live seal failure and corrected native publication
-still require a new runtime replay; pending evidence is preserved.
+The matched DA6 replay seals all five settings files and three directories
+with actual content/host UID+GID/xattrs/guest metadata, publishes package and
+package_native at authenticated native init guest PID 1, and reaches boot
+completion. Capture epoch is 11 and controller version is 330000000. Original
+DA6 also completes boot and real APK streaming install/path/uninstall/absence
+checks. These checkpoints are verified; full conformance remains incomplete.
+Later original SystemServer exits with SIGKILL and fresh full66 startup helpers
+are also killed. The unchanged, validly signed DA6 linux-run --help terminates
+with SIGKILL before guest startup; an exact-path/SHA Exosphere execution event
+is timestamped inside that invocation (#232, #902). No execution-policy bypass
+is attempted. Administrator allowlisting is required before current runtime
+CTS/apps/template/rollback gates can proceed. Both new full66 attempts invoke
+zero tests; all 66 modules remain NOT RUN, and owned processes are cleaned.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The
