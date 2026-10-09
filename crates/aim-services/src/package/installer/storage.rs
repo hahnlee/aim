@@ -1242,7 +1242,7 @@ mod tests {
         let input = aim_paths::fetched().join("cts-tradefed/android-cts/testcases/CtsPackageManagerHostTestCases");
         assert!(input.is_dir(), "Pinned CTS split APK inputs must be available");
         let environment = crate::package::parse::lite::Environment { sdk: 36, codenames: vec![], properties: BTreeMap::new() };
-        let policy = super::super::native::LitePolicy { environment, art_managed_extensions: vec![] };
+        let policy = super::super::native::LitePolicy { environment, art_managed_extensions: vec![], cloud_compilation_verification: false };
         let names = ["CtsSplitAppTypeFeature.apk", "CtsSplitAppTypeFeatureData.apk", "CtsSplitAppTypeFeatureFoo.apk"];
         let base = input.join("CtsSplitApp.apk");
         let parts: Vec<_> = names.iter().map(|name| crate::package::parse::lite::install_lite(&input.join(name), &policy.environment).unwrap()).collect();

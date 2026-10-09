@@ -235,6 +235,12 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     }
 
     @Override
+    public boolean installerCloudCompilationVerificationEnabled() {
+        enforceSystemUid();
+        return com.android.internal.hidden_from_bootclasspath.android.content.pm.Flags.cloudCompilationVerification();
+    }
+
+    @Override
     public boolean isInstallerArtServiceV3Enabled() {
         enforceSystemUid();
         return com.android.art.flags.Flags.artServiceV3();

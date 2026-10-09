@@ -163,4 +163,5 @@ interface IPackageBootstrapBridge {
     String formatPackageTimestamp(long millis);
     /** Current SDK library dependency policy from the original framework flags. */
     boolean isSdkLibraryIndependenceEnabled();
+    boolean installerCloudCompilationVerificationEnabled();
 }

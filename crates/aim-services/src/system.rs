@@ -3161,8 +3161,14 @@ impl System {
                 error => Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
                     format!("installer ART filter owner: {error:?}")),
             })?;
+            let cloud_compilation_verification = bridge.installer_cloud_compilation_verification_enabled().map_err(|error| match error {
+                crate::package::bootstrap::OwnerError::Owner(exception) => exception,
+                error => Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,
+                    format!("installer cloud verification owner: {error:?}")),
+            })?;
             system.check_package_bootstrap(&bridge)?;
             Ok(crate::package::installer::native::LitePolicy {
+                cloud_compilation_verification,
                 environment: crate::package::parse::lite::Environment {
                     sdk: platform.sdk,
                     codenames: platform.codenames.clone(),

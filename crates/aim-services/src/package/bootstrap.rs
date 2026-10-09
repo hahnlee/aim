@@ -560,6 +560,20 @@ impl Bridge {
         Ok(super::preferred::registry::Identity { hash, lease: std::sync::Arc::new(lease) })
     }
 
+    pub fn installer_cloud_compilation_verification_enabled(&self) -> Result<bool, OwnerError> {
+        let mut data = Parcel::new();
+        bridge::InstallerCloudCompilationVerificationEnabled {}.write(&mut data);
+        let reply = self.owner.transact(bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED, &data, false)
+            .map_err(OwnerError::Transport)?;
+        let mut reader = reply.reader();
+        let enabled = bridge::read_installer_cloud_compilation_verification_enabled_reply(&mut reader)
+            .map_err(OwnerError::Transport)?.map_err(OwnerError::Owner)?;
+        if reader.remaining() != 0 {
+            return Err(OwnerError::Transport(aim_binder_host::parcel::BAD_VALUE));
+        }
+        Ok(enabled)
+    }
+
     pub fn installer_art_service_v3_enabled(&self) -> Result<bool, OwnerError> {
         let mut data = Parcel::new();
         bridge::IsInstallerArtServiceV3Enabled {}.write(&mut data);
@@ -896,6 +910,62 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloud_verification_reads_live_binder_flag_and_preserves_owner_failures() {
+        use aim_binder_driver::{Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*};
+        use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
+        use aim_binder_host::parcel::{Binder, UNKNOWN_TRANSACTION, BAD_VALUE};
+        use std::sync::{Arc, atomic::{AtomicI32, Ordering}};
+        struct NoMemory;
+        impl GuestProcess for NoMemory {
+            fn copy_from_user(&mut self, _: u64, _: &mut [u8]) -> Result<(), Errno> { Err(errno::EFAULT) }
+            fn copy_to_user(&mut self, _: u64, _: &[u8]) -> Result<(), Errno> { Err(errno::EFAULT) }
+            fn get_file(&mut self, _: u32) -> Result<File, Errno> { Err(errno::EBADF) }
+            fn install_file(&mut self, _: File) -> Result<u32, Errno> { Err(errno::EBADF) }
+            fn close_fd(&mut self, _: u32) { panic!("unexpected fd") }
+        }
+        struct Flag(Arc<AtomicI32>);
+        impl Service for Flag {
+            fn descriptor(&self) -> &str { bridge::DESCRIPTOR }
+            fn transact(&self, call: &mut Call<'_>) -> Reply {
+                assert_eq!(call.sender_euid, 1000);
+                if call.code != bridge::INSTALLER_CLOUD_COMPILATION_VERIFICATION_ENABLED { return Err(UNKNOWN_TRANSACTION); }
+                bridge::InstallerCloudCompilationVerificationEnabled::read(&mut call.data)?;
+                assert_eq!(call.data.remaining(), 0);
+                let mut reply = Parcel::new();
+                match self.0.load(Ordering::Acquire) {
+                    2 => reply.write_exception(&Exception::new(EX_ILLEGAL_STATE, "cloud flag owner failed")),
+                    3 => reply.write_no_exception(),
+                    4 => { bridge::write_installer_cloud_compilation_verification_enabled_reply(&mut reply, true); reply.write_i32(99); },
+                    5 => return Err(BAD_VALUE),
+                    enabled => bridge::write_installer_cloud_compilation_verification_enabled_reply(&mut reply, enabled == 1),
+                }
+                Ok(reply)
+            }
+        }
+        struct Processes { driver: Arc<Driver>, server: Arc<LocalProcess>, client: Arc<LocalProcess> }
+        impl Drop for Processes { fn drop(&mut self) { self.driver.release(self.client.proc_handle()); self.driver.release(self.server.proc_handle()); } }
+        let driver = Driver::new();
+        let open = |pid| LocalProcess::open(&driver, Device::Binder, Credentials { pid, euid: 1000, security_context: None });
+        let server = open(99601); let client = open(99602);
+        let _processes = Processes { driver:driver.clone(), server:server.clone(), client:client.clone() };
+        let phase = Arc::new(AtomicI32::new(0));
+        let Binder::Local(ptr) = server.add_service(Arc::new(Flag(phase.clone()))) else { unreachable!() };
+        let mut object = FlatBinderObject { kind:BINDER_TYPE_BINDER, flags:0, binder:ptr, cookie:ptr }.encode();
+        driver.ioctl(server.proc_handle(), 99603, BINDER_SET_CONTEXT_MGR_EXT, &mut object, &mut NoMemory).unwrap();
+        server.start(); client.start();
+        let owner = Bridge { owner:client.strong(0), test_base_on_bcp:false, signing_debuggable:false };
+        for enabled in [false, true, false] {
+            phase.store(i32::from(enabled), Ordering::Release);
+            assert_eq!(owner.installer_cloud_compilation_verification_enabled().unwrap(), enabled);
+        }
+        phase.store(2, Ordering::Release);
+        assert!(matches!(owner.installer_cloud_compilation_verification_enabled(), Err(OwnerError::Owner(error)) if error.message == "cloud flag owner failed"));
+        for value in [3, 4, 5] {
+            phase.store(value, Ordering::Release);
+            assert!(matches!(owner.installer_cloud_compilation_verification_enabled(), Err(OwnerError::Transport(_))));
+        }
+    }
     #[test]
     fn sdk_library_policy_reads_live_binder_flag_and_preserves_owner_failures() {
         use aim_binder_driver::{Credentials, Device, Driver, Errno, File, GuestProcess, errno, uapi::*};

@@ -142,6 +142,9 @@ pub fn verify_batch(
             committed: false,
             message,
         })?;
+        if lite.cloud_compilation_verification {
+            super::sdm::verify(&host, &signing, &crate::package::sign::Build::of(&apks.platform), apks.signing_overrides.as_deref())?;
+        }
         result.push(VerifiedCode {
             session,
             record,

@@ -87,6 +87,11 @@ before ActivityManager publication and preserves original Context semantics.
 Seven focused tests pass, including grant/revoke/re-adopt and real driver reply,
 epoch and descriptor checks. Actual Java delegation and official replay remain
 NOT RUN.
+SDM admission now reads the original cloudCompilationVerification flag through
+its generated Bootstrap getter (94), performs full v3 crypto verification, and
+matches current signer certificates to the already verified APK (#1233). Four
+focused tests cover actual crypto/admission and live flag owner errors; complete
+Java/AIDL, D8 and original-image linkage pass. Official SDM replay remains NOT RUN.
 The separate original-PMS svc reproduction confirms actual Svc execution with
 no output or shell-v2 exit frame before the 140-second bound (#1227); it does not
 distinguish Binder wait from ART internal wait.

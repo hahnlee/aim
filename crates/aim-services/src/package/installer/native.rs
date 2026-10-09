@@ -48,6 +48,7 @@ fn storage_install_failure(error: storage::Error) -> super::pipeline::Error {
     })
 }
 pub struct LitePolicy {
+    pub cloud_compilation_verification: bool,
     pub environment: crate::package::parse::lite::Environment,
     pub art_managed_extensions: Vec<String>,
 }

@@ -36,6 +36,7 @@ pub mod removal;
 pub mod service;
 pub mod silent;
 pub mod storage;
+mod sdm;
 pub mod staged_owner;
 pub mod streaming_owner;
 

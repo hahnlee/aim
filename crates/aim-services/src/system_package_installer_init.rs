@@ -131,8 +131,11 @@ pub fn configure_existing(system: &Arc<System>, bridge: &Arc<Bridge>,
         let properties = properties()?;
         let art_v3 = retained.installer_art_service_v3_enabled()
             .map_err(|error| illegal(format!("installer ART filter owner: {error:?}")))?;
+        let cloud_compilation_verification = retained.installer_cloud_compilation_verification_enabled()
+            .map_err(|error| illegal(format!("installer cloud verification owner: {error:?}")))?;
         system.check_package_bootstrap(&retained)?;
         Ok(installer::native::LitePolicy {
+            cloud_compilation_verification,
             environment: crate::package::parse::lite::Environment { sdk, codenames: codenames.clone(), properties },
             art_managed_extensions: if art_v3 { vec![".dm".into(), ".prof".into(), ".sdm".into()] }
                 else { vec![".dm".into()] },
