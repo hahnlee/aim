@@ -357,7 +357,14 @@ boot236.6 seconds/post-boot permissions242.8 seconds with producer exit0.
 The new source-derived required-payload check passes and70 files publish,
 restoring the missing APK/OAT/VDEX set. Copy integrity and strict structural
 correspondence are being audited; full template/runtime acceptance is still
-unproven. The earlier63-file publication remains invalid evidence. The same
+unproven. Actual copy checks now verify all70 files preserve bytes, modes,
+xattrs and mtimes. Precise permission counts remain different: packages.xml
+contains zero legacy permission items, but runtime-permissions.xml still
+contains88 package rows,16 shared-user rows and2984 permission items, against
+the original16 shared-user rows and zero items. A separate runtime XML writer
+still reads the computed modern permission projection; it must use the
+validated persisted legacy owners while retaining modern query grants/GIDs.
+The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML
 differences are not relabeled as resolved.
