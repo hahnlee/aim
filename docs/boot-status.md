@@ -404,6 +404,15 @@ scan epochs are observed; the attempted logcat read followed guest cleanup
 and returned no-running-guest, so the actual constructor exception is not
 recovered. This replay does not prove global parity or Android detach fixes.
 Its owned processes and remaining ASIF attachment are normally cleaned.
+The next63 replay captures the actual constructor exception while live:
+the keyset-only writer rejects permission trees/definitions and domain state
+as unrelated changes, because those global serializers have not yet run.
+It also fails the unchanged300-second gate with no published template.
+The source now applies the validated global owners before keyset validation,
+retaining the full keyset and whole-document guards (#1271). A formal
+versioned-keyset fresh/restored Store regression reproduces the original
+failure and passes after this ordering change, preserving all keyset state
+on write and reopening. Android replay with this correction is not run.
 The earlier63-file publication remains invalid evidence. Actual b04 shutdown
 observation finds permission-directory/main/reserve descriptors still open
 before and after native stop and at self-dissent (#1266); the producer

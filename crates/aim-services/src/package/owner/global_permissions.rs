@@ -93,12 +93,14 @@ mod tests {
             fs::create_dir_all(dir.0.join("system")).unwrap();
             let path = dir.0.join("system/packages.xml");
             let old = if restored {
-                b"<packages vendor='saved'><package name='p' codePath='/data/app/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/><permissions><item name='old' package='p'/></permissions><vendor-global/></packages>".as_slice()
+                b"<packages vendor='saved'><package name='p' codePath='/data/app/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/><permissions><item name='old' package='p'/></permissions><vendor-global/><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings></packages>".as_slice()
             } else {
-                b"<packages vendor='fresh'><package name='p' codePath='/data/app/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/><vendor-global/></packages>".as_slice()
+                b"<packages vendor='fresh'><package name='p' codePath='/data/app/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'/><vendor-global/><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings></packages>".as_slice()
             };
             fs::write(&path, old).unwrap();
             let mut disk = Store::open(&dir.0, &[]).unwrap().unwrap();
+            assert!(disk.state().settings.key_sets.versioned);
+            let before_keys = disk.state().settings.key_sets.clone();
             let mut scan = SigningScan::new(&Default::default(), &disk.state().settings, 36).unwrap();
             let source = aim_android_xml::read(b"<packages><permissions><item name='p.PERMISSION' package='p' protection='2'/></permissions><permission-trees><item name='p.TREE' package='p'/></permission-trees><domain-verifications><active><package-state packageName='p' id='00000000-0000-0000-0000-000000000001' hasAutoVerifyDomains='true'><state><domain name='example.test' state='1'/></state></package-state></active><restored/></domain-verifications><domain-verifications-legacy><user-states packageName='p'><user-state userId='0' state='2'/></user-states></domain-verifications-legacy></packages>").unwrap();
             let actual = Settings::parse(&source).unwrap();
@@ -114,6 +116,7 @@ mod tests {
             assert_eq!(reopened.state().settings.permission_trees, actual.permission_trees);
             assert_eq!(reopened.state().settings.domain_verification, actual.domain_verification);
             assert!(reopened.state().users.is_empty());
+            assert_eq!(reopened.state().settings.key_sets, before_keys);
             let document = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
             assert!(document.children().any(|e| e.name == "vendor-global"));
             assert!(document.children().filter(|e| e.name == "package").all(|e| !e.children().any(|e| e.name == "perms")));

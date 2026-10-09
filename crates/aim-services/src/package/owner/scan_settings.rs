@@ -195,6 +195,10 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
         root.content.push(Node::Element(node));
     }
     write_versions(&mut root, &mut expected)?;
+    root = super::global_permissions::replace(&root, &expected)?;
+    root = super::domains::replace(&root, &expected.domain_verification)?;
+    expected.permissions = super::global_permissions::persisted(&expected.permissions);
+    expected.permission_trees = super::global_permissions::persisted(&expected.permission_trees);
     // writeLPr keeps the incoming table entry; readLPw drops its pending
     // shared reference when the old group was pruned. Preserve the written
     // package's keysets while validating the distinct restored inventory.
@@ -205,10 +209,6 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
     if expected.key_sets.versioned {
         root = key_sets::replace_for_scan(&root, &written, &expected)?;
     }
-    root = super::global_permissions::replace(&root, &expected)?;
-    root = super::domains::replace(&root, &expected.domain_verification)?;
-    expected.permissions = super::global_permissions::persisted(&expected.permissions);
-    expected.permission_trees = super::global_permissions::persisted(&expected.permission_trees);
     if signing::persisted(Settings::parse(&root)?) != signing::persisted(expected) {
         return Err("scan settings require an unresolved global owner or do not round trip".into());
     }
