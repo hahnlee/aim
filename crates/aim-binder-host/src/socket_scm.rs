@@ -1,39 +1,29 @@
-//! Socket receipt carrier owned by a regular inode shared open-description
-//! lease. Synchronous drain releases backing after the final kernel lease ref.
+//! Socket receipts travel in one opaque pipe writer. The registry reader
+//! observes the last actual kernel reference, including unconnected recipients.
 use std::{collections::HashMap,io,os::{fd::{AsFd,AsRawFd,BorrowedFd,OwnedFd},unix::net::UnixStream},sync::{LazyLock,Mutex,MutexGuard}};
 use aim_storage::socket_inode::Receipt;
 use std::os::unix::ffi::OsStrExt;
 use crate::proxy_file::{send,receive_flags};
+#[path="socket_scm_pipe_token.rs"] mod pipe_token;
 pub const CLASS:u32=5;
-struct Entry {probe:std::fs::File,backing:OwnedFd,receipt:Receipt}
+struct Entry {reader:pipe_token::Reader,backing:OwnedFd,receipt:Receipt}
 static REGISTRY:LazyLock<Mutex<HashMap<(u64,u64),Entry>>>=LazyLock::new(Default::default);
 pub(crate) struct NativeReply {pub descriptor:Option<OwnedFd>,pub receipt:Option<Receipt>,pub class:u32,_registry:MutexGuard<'static,HashMap<(u64,u64),Entry>>}
 pub struct Reply {pub descriptor:Option<OwnedFd>,pub receipt:Option<Receipt>,pub class:u32}
 const CREATE:u8=1;const RESOLVE:u8=2;const CLASSIFY:u8=3;const DRAIN:u8=4;
 const REQUEST:usize=41;const RESPONSE:usize=48;
-fn carrier_identity(fd:i32)->io::Result<Option<(u64,u64)>>{
- let mut stat:libc::stat=unsafe{std::mem::zeroed()};if unsafe{libc::fstat(fd,&mut stat)}<0{return Err(io::Error::last_os_error());}
- Ok((stat.st_mode&libc::S_IFMT==libc::S_IFREG).then_some((stat.st_dev as u64,stat.st_ino)))
-}
-struct LeasePath(std::path::PathBuf);
-impl Drop for LeasePath{fn drop(&mut self){if let Err(failure)=std::fs::remove_file(&self.0){if failure.kind()!=io::ErrorKind::NotFound{eprintln!("socket carrier lease cleanup: {failure}");}}}}
+fn carrier_identity(fd:i32)->io::Result<Option<(u64,u64)>>{pipe_token::key(fd)}
 fn create_native(backing:OwnedFd,receipt:Receipt)->io::Result<NativeReply>{
- use std::os::unix::fs::OpenOptionsExt;
  receipt.validate(backing.as_raw_fd())?;let mut registry=REGISTRY.lock().unwrap();prune(&mut registry)?;
- let mut nonce=[0u8;16];unsafe{libc::arc4random_buf(nonce.as_mut_ptr().cast(),nonce.len());}
- let path=LeasePath(std::env::temp_dir().join(format!("aim-socket-lease-{}-{}",std::process::id(),nonce.iter().map(|byte|format!("{byte:02x}")).collect::<String>())));
- let carrier=std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path.0)?;
- let probe=std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW).open(&path.0)?;
- std::fs::remove_file(&path.0)?;
- if unsafe{libc::flock(carrier.as_raw_fd(),libc::LOCK_SH|libc::LOCK_NB)}<0{return Err(io::Error::last_os_error());}
- let identity=carrier_identity(carrier.as_raw_fd())?.ok_or_else(||error(libc::EPROTO))?;
+ let(reader,carrier)=pipe_token::create()?;let identity=reader.key;
  if registry.contains_key(&identity){return Err(error(libc::EPROTO));}
- registry.insert(identity,Entry{probe,backing,receipt});
- Ok(NativeReply{descriptor:Some(carrier.into()),receipt:Some(receipt),class:CLASS,_registry:registry})
+ registry.insert(identity,Entry{reader,backing,receipt});
+ Ok(NativeReply{descriptor:Some(carrier),receipt:Some(receipt),class:CLASS,_registry:registry})
 }
 fn resolve_native(carrier:BorrowedFd<'_>)->io::Result<NativeReply>{
  use std::os::fd::FromRawFd;
  let identity=carrier_identity(carrier.as_raw_fd())?.ok_or_else(||error(libc::ENOENT))?;let registry=REGISTRY.lock().unwrap();let entry=registry.get(&identity).ok_or_else(||error(libc::ENOENT))?;
+ if !entry.reader.matches(identity)?{return Err(error(libc::ENOENT));}
  entry.receipt.validate(entry.backing.as_raw_fd())?;
  let fd=unsafe{libc::fcntl(entry.backing.as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};if fd<0{return Err(io::Error::last_os_error());}
  Ok(NativeReply{descriptor:Some(unsafe{OwnedFd::from_raw_fd(fd)}),receipt:Some(entry.receipt),class:CLASS,_registry:registry})
@@ -128,6 +118,7 @@ fn serve_channel(server:UnixStream,queue_root:aim_storage::socket_queue_root::So
    };
    let result=received.and_then(|(count,descriptor)|{
     if count!=REQUEST{return Err(error(libc::EPROTO));}
+    pipe_token::healthy()?;
     if bytes[0]==DRAIN{if descriptor.is_some()||bytes[1..].iter().any(|byte|*byte!=0){return Err(error(libc::EPROTO));}return drain_native();}
     let descriptor=descriptor.ok_or_else(||error(libc::EPROTO))?;
     match bytes[0]{CREATE=>create_native(descriptor,Receipt::from_bytes(&bytes[1..])?),RESOLVE=>resolve_native(descriptor.as_fd()),CLASSIFY=>{
@@ -142,6 +133,8 @@ fn serve_channel(server:UnixStream,queue_root:aim_storage::socket_queue_root::So
   }
  if let Err(failure)=queue_root.prepare_last_close(server.as_fd()){eprintln!("socket SCM terminal receive cleanup: {failure}");}
  drop(server);drop(queue_root);
+ let retired={let mut registry=REGISTRY.lock().unwrap();prune(&mut registry)};
+ if let Err(failure)=retired{eprintln!("socket token terminal retirement: {failure}");}
 }
 fn wait_frame(fd:i32,length:usize,timeout_ms:i32)->io::Result<()> {
  let start=std::time::Instant::now();
@@ -175,10 +168,14 @@ fn decode_reply(bytes:&[u8;RESPONSE],count:usize,descriptor:Option<OwnedFd>)->io
 fn error(value:i32)->io::Error{io::Error::from_raw_os_error(value)}
 fn prune(registry:&mut HashMap<(u64,u64),Entry>)->io::Result<()> {
  let mut dead=vec![];
- for(key,entry)in registry.iter(){if unsafe{libc::flock(entry.probe.as_raw_fd(),libc::LOCK_EX|libc::LOCK_NB)}==0{dead.push(*key);}else{let failure=io::Error::last_os_error();if failure.kind()!=io::ErrorKind::WouldBlock{return Err(failure);}}}
+ for(key,entry)in registry.iter(){if entry.reader.eof()?{dead.push(*key);}}
  for key in dead{registry.remove(&key);}Ok(())
 }
-pub(crate) fn registered_class(fd:i32)->io::Result<u32>{let Some(identity)=carrier_identity(fd)?else{return Ok(0)};Ok(if REGISTRY.lock().unwrap().contains_key(&identity){CLASS}else{0})}
+fn token_event(fd:i32,tag:usize,eof:bool)->io::Result<()>{
+ let mut registry=REGISTRY.lock().unwrap();let key=registry.iter().find_map(|(key,entry)|(entry.reader.fd()==fd&&entry.reader.tag==tag).then_some(*key));
+ if let Some(key)=key{let entry=registry.get(&key).unwrap();if entry.reader.eof()?{if !eof{return Err(error(libc::EPROTO));}registry.remove(&key);}}Ok(())
+}
+pub(crate) fn registered_class(fd:i32)->io::Result<u32>{let Some(identity)=carrier_identity(fd)?else{return Ok(0)};let registry=REGISTRY.lock().unwrap();match registry.get(&identity){Some(entry)if entry.reader.matches(identity)?=>Ok(CLASS),_=>Ok(0)}}
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -279,6 +276,7 @@ pub(crate) mod tests {
  }
  #[test]
  fn socket_scm_parallel_creators_preserve_exact_leases_and_original_backing_io(){
+  const MARKER:&str="SCM_PARALLEL_PRIVATE_NAMESPACE_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_parallel_creators_preserve_exact_leases_and_original_backing_io",MARKER){return;}
   let service=std::sync::Arc::new(Service::start().unwrap());let mut workers=vec![];
   for _ in 0..4{let service=service.clone();workers.push(std::thread::spawn(move||{
    let channel=UnixStream::connect(std::path::Path::new(std::ffi::OsStr::from_bytes(&service.endpoint().path))).unwrap();let root=aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap();authenticate(channel.as_raw_fd(),service.endpoint()).unwrap();
@@ -287,15 +285,92 @@ pub(crate) mod tests {
     request_resolve(channel.as_raw_fd(),carrier.as_raw_fd()).unwrap();let reply=receive_ready(channel.as_raw_fd()).unwrap();assert_eq!(reply.receipt,Some(receipt));let mut imported=std::fs::File::from(reply.descriptor.unwrap());receipt.validate(imported.as_raw_fd()).unwrap();drop(carrier);
     request_drain(channel.as_raw_fd()).unwrap();let reply=receive_ready(channel.as_raw_fd()).unwrap();assert_eq!(reply.class,0);assert!(reply.descriptor.is_none());
     use std::io::Write;peer.write_all(b"real").unwrap();let mut bytes=[0;4];imported.read_exact(&mut bytes).unwrap();assert_eq!(&bytes,b"real");drop(imported);
-    let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0);
+    let mut byte=0u8;let eof=unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)};
+    if eof!=0{let failure=io::Error::last_os_error();eprintln!("parallel SCM final EOF result={eof} error={failure} registry_live={}",REGISTRY.lock().unwrap().values().any(|entry|entry.receipt==receipt));for fd in 0..unsafe{libc::getdtablesize()}{if receipt.validate(fd).is_ok(){eprintln!("parallel SCM live backing fd={fd} fdflags={}",unsafe{libc::fcntl(fd,libc::F_GETFD)});}}}
+    assert_eq!(eof,0);
    }
    root.prepare_last_close(channel.as_fd()).unwrap();drop(channel);drop(root);
   }));}
-  for worker in workers{worker.join().unwrap();}
+  for worker in workers{worker.join().unwrap();}println!("{MARKER}");
  }
  #[test]
  fn socket_scm_rejects_foreign_receipt_and_unregistered_socket(){
   let(backing,peer)=UnixStream::pair().unwrap();let foreign=Receipt::mint(peer.as_raw_fd()).unwrap();assert!(create_native(backing.into(),foreign).is_err());
   let(first,second)=UnixStream::pair().unwrap();assert_eq!(registered_class(first.as_raw_fd()).unwrap(),0);assert!(resolve_native(second.as_fd()).is_err());
  }
+
+
+ #[test]
+ fn socket_scm_pipe_token_outlives_service_and_preserves_live_writer_alias(){
+  const MARKER:&str="PIPE_TOKEN_SERVICE_LIFETIME_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_pipe_token_outlives_service_and_preserves_live_writer_alias",MARKER){return;}
+  let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let token=carrier(backing.into(),receipt);let key=carrier_identity(token.as_raw_fd()).unwrap().unwrap();
+  assert_eq!(registered_class(token.as_raw_fd()).unwrap(),CLASS);let alias=token.try_clone().unwrap();drop(token);live(&peer);
+  let(reader,ordinary)=pipe_token::create().unwrap();assert_eq!(registered_class(ordinary.as_raw_fd()).unwrap(),0,"unregistered writer cannot impersonate class5");assert_eq!(registered_class(reader.fd()).unwrap(),0,"reader is not a writer capability");assert_ne!(unsafe{libc::fcntl(reader.fd(),libc::F_GETFD)}&libc::FD_CLOEXEC,0);drop(ordinary);drop(reader);
+  // The creator service guard has already been dropped by carrier(). No
+  // reconnect, DRAIN, process watch or receipt query may be needed for EOF.
+  let mut event=libc::pollfd{fd:peer.as_raw_fd(),events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut event,1,0)},0);drop(alias);
+  assert_eq!(unsafe{libc::poll(&mut event,1,1000)},1);let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0);assert!(!REGISTRY.lock().unwrap().contains_key(&key));println!("{MARKER}");
+ }
+ #[test]
+ fn socket_scm_reactor_start_failure_rejects_before_token_publish(){
+  const MARKER:&str="PIPE_TOKEN_REACTOR_FAILURE_EXECUTED";if isolated_exec_fixture("socket_scm::tests::socket_scm_reactor_start_failure_rejects_before_token_publish",MARKER){return;}
+  let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let mut limit:libc::rlimit=unsafe{std::mem::zeroed()};assert_eq!(unsafe{libc::getrlimit(libc::RLIMIT_NOFILE,&mut limit)},0);
+  struct Limit(libc::rlimit);impl Drop for Limit{fn drop(&mut self){assert_eq!(unsafe{libc::setrlimit(libc::RLIMIT_NOFILE,&self.0)},0);}}
+  let restore=Limit(limit);let blocked=libc::rlimit{rlim_cur:0,rlim_max:limit.rlim_max};assert_eq!(unsafe{libc::setrlimit(libc::RLIMIT_NOFILE,&blocked)},0);
+  let error=match create_native(backing.into(),receipt){Ok(_)=>panic!("real kqueue allocation failure published a token"),Err(error)=>error};assert_eq!(error.raw_os_error(),Some(libc::EMFILE));assert!(REGISTRY.lock().unwrap().is_empty());
+  let mut byte=0u8;assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0,"failed creation must close its actual backing without a phantom C");drop(restore);
+  let(backing,peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let reply=create_native(backing.into(),receipt).unwrap();let writer=reply.descriptor.as_ref().unwrap();assert_ne!(unsafe{libc::fcntl(writer.as_raw_fd(),libc::F_GETFD)}&libc::FD_CLOEXEC,0);let key=carrier_identity(writer.as_raw_fd()).unwrap().unwrap();assert_ne!(unsafe{libc::fcntl(reply._registry.get(&key).unwrap().reader.fd(),libc::F_GETFD)}&libc::FD_CLOEXEC,0);drop(reply);
+  let mut ready=libc::pollfd{fd:peer.as_raw_fd(),events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut ready,1,1000)},1);assert_eq!(unsafe{libc::recv(peer.as_raw_fd(),(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},0);println!("{MARKER}");
+ }
+ #[test]
+ #[ignore="owned SIGKILL helper for socket_scm_sigkill_final_queued_lease_wakes_blocking_peer_without_drain"]
+ fn socket_scm_queued_lease_sigkill_child(){
+  use std::io::Write;
+  let argument=std::env::args().find(|arg|arg.starts_with("SOCKET_DEATH_ENDPOINT=")).unwrap();
+  let encoded=argument.strip_prefix("SOCKET_DEATH_ENDPOINT=").unwrap();
+  let bytes=(0..encoded.len()).step_by(2).map(|at|u8::from_str_radix(&encoded[at..at+2],16).unwrap()).collect::<Vec<_>>();
+  let endpoint=Endpoint::decode(&mut crate::wire::Reader::new(&bytes)).unwrap();
+  let channel=if std::env::args().any(|arg|arg=="SOCKET_DEATH_PREAUTH"){None}else{let channel=UnixStream::connect(std::path::Path::new(std::ffi::OsStr::from_bytes(&endpoint.path))).unwrap();authenticate(channel.as_raw_fd(),&endpoint).unwrap();Some(channel)};
+  let _control_root=channel.as_ref().map(|channel|aim_storage::socket_queue_root::SocketQueueRoot::new(channel.as_fd()).unwrap());
+  let receiver=unsafe{BorrowedFd::borrow_raw(0)};
+  let _receive_root=aim_storage::socket_queue_root::SocketQueueRoot::new(receiver).unwrap();
+  let mut ready=libc::pollfd{fd:0,events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut ready,1,1000)},1);assert_ne!(ready.revents&libc::POLLIN,0);
+  println!("SOCKET_DEATH_QUEUED_ONLY_READY");std::io::stdout().flush().unwrap();
+  loop{unsafe{libc::pause();}}
+ }
+ #[test]
+ fn socket_scm_sigkill_final_queued_lease_wakes_blocking_peer_without_drain(){death_proof(false);}
+ #[test]
+ fn socket_scm_preauth_sigkill_final_queued_lease_wakes_blocking_peer_without_drain(){death_proof(true);}
+ fn death_proof(preauth:bool){
+  const MARKER:&str="SOCKET_DEATH_RAW_BLOCKING_ORACLE_EXECUTED";
+  let name=if preauth{"socket_scm::tests::socket_scm_preauth_sigkill_final_queued_lease_wakes_blocking_peer_without_drain"}else{"socket_scm::tests::socket_scm_sigkill_final_queued_lease_wakes_blocking_peer_without_drain"};
+  if isolated_exec_fixture(name,MARKER){return;}
+  use std::{io::BufRead,process::{Command,Stdio},sync::mpsc,time::Duration};
+  struct Child(Option<std::process::Child>);
+  impl Drop for Child{fn drop(&mut self){if let Some(mut child)=self.0.take(){if child.try_wait().unwrap().is_none(){child.kill().unwrap();}child.wait().unwrap();}}}
+  let channel=Channel::new();let(backing,mut peer)=UnixStream::pair().unwrap();let receipt=Receipt::mint(backing.as_raw_fd()).unwrap();let carrier=channel.create(backing.into(),receipt);
+  let(sender,receiver)=UnixStream::pair().unwrap();send(sender.as_raw_fd(),b"queued",carrier.as_raw_fd()).unwrap();drop(carrier);
+  let encoded=channel._service.endpoint().encode().iter().map(|byte|format!("{byte:02x}")).collect::<String>();
+  let mut command=Command::new(std::env::current_exe().unwrap());command.args(["--exact","socket_scm::tests::socket_scm_queued_lease_sigkill_child","--ignored","--nocapture","--skip",&format!("SOCKET_DEATH_ENDPOINT={encoded}")]);if preauth{command.args(["--skip","SOCKET_DEATH_PREAUTH"]);}
+  let mut child=Child(Some(command.stdin(Stdio::from(OwnedFd::from(receiver))).stdout(Stdio::piped()).spawn().unwrap()));
+  drop(command); // The child owns the sole receive queue after spawn.
+  let mut output=std::io::BufReader::new(child.0.as_mut().unwrap().stdout.take().unwrap());loop{let mut line=String::new();assert!(output.read_line(&mut line).unwrap()>0);if line.contains("SOCKET_DEATH_QUEUED_ONLY_READY"){break;}}
+  drop(sender);live(&peer);
+  let(started_send,started)=mpsc::channel();let(done_send,done)=mpsc::channel();
+  let reader=std::thread::spawn(move||{started_send.send(()).unwrap();let mut byte=[0];let result=peer.read(&mut byte);done_send.send(result).unwrap();});
+  started.recv().unwrap();assert!(matches!(done.recv_timeout(Duration::from_millis(50)),Err(mpsc::RecvTimeoutError::Timeout)),"peer must really be waiting before final owner death");
+  let process=child.0.as_mut().unwrap();process.kill().unwrap();let status=process.wait().unwrap();assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status),Some(libc::SIGKILL));child.0=None;
+  // This observation contains no CREATE, DRAIN, receipt resolution or guest
+  // syscall barrier. A timeout is missing EOF, never successful cleanup.
+  let observed=done.recv_timeout(Duration::from_secs(1));let woke=matches!(&observed,Ok(Ok(0)));
+  eprintln!("SIGKILL_WITHOUT_DRAIN observed={observed:?}");
+  if !woke{
+   request_drain(channel.socket.as_raw_fd()).unwrap();let reply=receive_ready(channel.socket.as_raw_fd()).unwrap();assert_eq!(reply.class,0);assert!(reply.descriptor.is_none());
+   let recovered=done.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();assert_eq!(recovered,0,"cleanup ACK must release actual native backing");eprintln!("SIGKILL_AFTER_EXPLICIT_CLEANUP_DRAIN EOF=0");
+  }
+  reader.join().unwrap();println!("{MARKER}");
+  assert!(woke,"last queued carrier SIGKILL did not wake real blocking peer without an extra DRAIN");
+ }
+
 }

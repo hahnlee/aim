@@ -131,8 +131,15 @@ entries execute through their parents, and the two standalone performance benche
 remain not run. Its FUSE CLI helper input is the hash-pinned frozen b04 executable,
 not proof of a newly deployed runtime. The poll FD fixture is process-isolated
 from other tests' global FD state. Actual Perfetto/adbd crash replay remains
-unverified (#1207, #1221); abrupt cross-process final-carrier death is a separate
-owner-lifecycle proof still under investigation (#1191).
+unverified (#1207, #1221). The isolated native carrier now uses an opaque PIPE
+writer token with a retained reader and one process-owned kqueue reactor (#1231).
+Actual final kernel reference loss drives EOF, including queued rights and a
+SIGKILL recipient that never authenticated. Reciprocal pipe identity protects
+registration, and ordinary pipes remain unclassified. Host library gate passes
+54 with zero failures; its one ignored child helper executes through the parents.
+Actual ABI import/re-export/discard/reconnect/ACK/EOF regression passes. No known
+pre-auth failure is waived. The live b04 cohort still uses the older carrier;
+all common runtime binaries must be rebuilt coherently before runtime replay.
 
 The inactive UM redirect gate verifies all 14 original PMS
 call sites. An isolated experimental C worktree has built redirected services.jar and its
