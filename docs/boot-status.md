@@ -905,7 +905,11 @@ paths with the actual cgroup2 entry; `netd` is found after real BPF readiness.
 `dumpsys --pid package` and `package_native` return native init PID 1, while
 `activity` returns original SystemServer PID 43196. This isolated C diagnostic
 runtime is not the final matched CTS cohort. GMS persistent reports an ANR
-after boot, and Settings/app/template/CTS acceptance remains pending. Original Perfetto traced_probes
+after boot. A cold original Settings launch returns `Status: timeout` after
+21.284 seconds; the original ActivityTaskManager subsequently reports it
+displayed and fully drawn after 23.598 seconds. Media and Google companion
+processes also report ANRs. This is observed rendering, not a passing bounded
+launch or functional app acceptance. App/template/CTS acceptance remains pending. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
