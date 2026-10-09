@@ -883,7 +883,12 @@ the original actual lock/close assertions. The rebuilt batch protocol runtime
 but reaches the 300-second bound without settings/permission captures or
 `sys.boot_completed`. Its zygote log reports failed fork descriptor inheritance
 for descriptors starting at 10240. A separate managed repetition captures
-repeated netd aborts in the original `DnsProxyListener` constructor. The managed repetition does spawn a SystemServer child, which reaches original
+repeated netd aborts in the original `DnsProxyListener` constructor before the
+original BPF loader publishes its configuration map (#1214). The replacement
+netd now waits for the real `bpf.progs_loaded=1` property before original DNS
+resolver initialization, restoring the pinned startup dependency. Android
+compilation and two readiness-loop checks pass; actual resolver startup with
+this change remains unverified. The managed repetition does spawn a SystemServer child, which reaches original
 zygote JNI specialization and aborts when `createProcessGroup` finds no
 initialized cgroup controller and tries `/system/uid_1000` on the read-only
 system filesystem. These failures remain under owner-level investigation;
