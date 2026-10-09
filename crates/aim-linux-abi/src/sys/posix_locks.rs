@@ -372,6 +372,25 @@ mod lifecycle_tests {
                 .kind,
             2
         );
+        // The holder has a real file lock while a pipe's EOF reader closes its
+        // guest descriptor. A successful host close must not fail postclose.
+        for flags in [0,0o2000000]{
+            let mut pipe=[-1i32;2];
+            assert_eq!(super::super::fs::pipe2([pipe.as_mut_ptr()as u64,flags,0,0,0,0]),0);
+            assert!(super::super::fdtab::visible(pipe[0])&&super::super::fdtab::visible(pipe[1]));
+            let reader=pipe[0];let worker=std::thread::spawn(move||{
+                let mut bytes=vec![];let mut buffer=[0u8;7];
+                loop{let count=super::super::fs::read([reader as u64,buffer.as_mut_ptr()as u64,buffer.len()as u64,0,0,0]);assert!(count>=0,"active-holder pipe read {count}");if count==0{break;}bytes.extend_from_slice(&buffer[..count as usize]);}
+                assert!(super::super::fdtab::visible(reader));let before=unsafe{libc::fcntl(reader,libc::F_GETFD)};assert!(before>=0);
+                let closed=super::super::fs::close([reader as u64,0,0,0,0,0]);let after=unsafe{libc::fcntl(reader,libc::F_GETFD)};
+                assert_eq!(closed,0,"active-holder EOF close fd={reader} before={before} after={after} visible={}",super::super::fdtab::visible(reader));
+                assert_eq!(after,-1);assert!(!super::super::fdtab::visible(reader));bytes
+            });
+            let bytes=b"original buffered pipe output";
+            assert_eq!(super::super::fs::write([pipe[1]as u64,bytes.as_ptr()as u64,bytes.len()as u64,0,0,0]),bytes.len()as i64);
+            assert_eq!(super::super::fs::close([pipe[1]as u64,0,0,0,0,0]),0,"active-holder pipe writer close");
+            assert_eq!(worker.join().unwrap(),bytes);
+        }
         current()
             .unwrap()
             .close_inode(Identity::from_fd(file.as_fd()).unwrap())

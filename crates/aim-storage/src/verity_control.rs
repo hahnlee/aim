@@ -26,7 +26,7 @@ impl Channel {
  pub fn shutdown_handle(&self)->io::Result<PrivateFd>{self.stream.try_clone()}
  fn borrowed(&self)->std::mem::ManuallyDrop<UnixStream>{std::mem::ManuallyDrop::new(unsafe{UnixStream::from_raw_fd(self.stream.as_raw_fd())})}
  pub fn new(stream:UnixStream,expected:Option<ProcessIdentity>,timeout:Duration)->io::Result<Self>{Self::from_private(PrivateFd::adopt(stream.into())?,expected,timeout)}
- fn from_private(stream:PrivateFd,expected:Option<ProcessIdentity>,timeout:Duration)->io::Result<Self>{let borrowed=std::mem::ManuallyDrop::new(unsafe{UnixStream::from_raw_fd(stream.as_raw_fd())});borrowed.set_read_timeout(Some(timeout))?;borrowed.set_write_timeout(Some(timeout))?;let peer=authenticate(&borrowed,expected)?;let enabled=1i32;if unsafe{libc::setsockopt(stream.as_raw_fd(),libc::SOL_SOCKET,libc::SO_NOSIGPIPE,(&enabled as*const i32).cast(),std::mem::size_of::<i32>()as _)}<0{return Err(io::Error::last_os_error());}Ok(Self{stream,peer})}
+ fn from_private(stream:PrivateFd,expected:Option<ProcessIdentity>,timeout:Duration)->io::Result<Self>{let borrowed=std::mem::ManuallyDrop::new(unsafe{UnixStream::from_raw_fd(stream.as_raw_fd())});let peer=authenticate(&borrowed,expected)?;borrowed.set_read_timeout(Some(timeout))?;borrowed.set_write_timeout(Some(timeout))?;let enabled=1i32;if unsafe{libc::setsockopt(stream.as_raw_fd(),libc::SOL_SOCKET,libc::SO_NOSIGPIPE,(&enabled as*const i32).cast(),std::mem::size_of::<i32>()as _)}<0{return Err(io::Error::last_os_error());}Ok(Self{stream,peer})}
  pub fn send(&mut self,frame:&Frame,proof:Option<&PrivateFd>)->io::Result<()> {
   if !self.peer.is_live(){return Err(error(libc::ESRCH));}
   let bytes=frame.encode();let mut vector=libc::iovec{iov_base:bytes.as_ptr()as*mut _,iov_len:SIZE};let mut message:libc::msghdr=unsafe{std::mem::zeroed()};message.msg_iov=&mut vector;message.msg_iovlen=1;
@@ -138,6 +138,14 @@ impl Client {
 #[cfg(test)]
 mod tests {
  use super::*;use std::os::unix::net::UnixListener;use std::process::{Command,Stdio};
+ #[test]
+ fn disconnected_accepted_peer_is_rejected_before_socket_configuration(){
+  let root=std::env::temp_dir().join(format!("aim-control-disconnected-{}",std::process::id()));std::fs::create_dir(&root).unwrap();
+  let listener=UnixListener::bind(root.join("ctl")).unwrap();let client=UnixStream::connect(root.join("ctl")).unwrap();let(stream,_)=listener.accept().unwrap();drop(client);
+  assert_eq!(stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap_err().raw_os_error(),Some(libc::EINVAL));
+  let failure=match Channel::new(stream,None,Duration::from_secs(2)){Err(failure)=>failure,Ok(_)=>panic!("disconnected peer authenticated")};
+  assert_eq!(failure.raw_os_error(),Some(libc::ENOTCONN));drop(listener);std::fs::remove_dir_all(root).unwrap();
+ }
  #[test]
  fn bound_owner_without_listener_threads_still_retires_owned_sockets(){
   use std::os::unix::fs::MetadataExt;

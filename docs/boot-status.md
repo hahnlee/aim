@@ -846,8 +846,21 @@ invalid info buffers return EFAULT. Three focused object/pin/reopen/close and
 error-cleanup checks pass. A concurrent raw rights receipt intentionally lacking
 CLOEXEC is tested in a fresh kernel process, preserving the actual EOF assertion
 without unrelated helper inheritance. The coherent default-parallel ABI suite
-passes 235/0 with thirteen ignored. Rebuilt original netbpfload and actual boot
-replay remain pending; broader BPF execution/hook gaps remain #202. Full image/CTS acceptance remains pending.
+passes 235/0 with thirteen ignored. The rebuilt original netbpfload completes its load stage: actual
+bpf.progs_loaded is 1 and original loader logs contain the pinned maps/programs.
+The fresh empty-data native boot launches 69 services without the former BPF
+reboot, but reaches 300 seconds with no settings capture, permission capture or
+sys.boot_completed. Zygote repeatedly exits with SIGKILL before SystemServer
+publication; the exact cause remains unproven. Original Perfetto traced_probes
+asserts after a stdout pipe close returns EBADF (#1207); both standalone and
+managed syscall-traced repetitions succeed, and a real active-POSIX-holder
+buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
+Native accepted-then-closed verity transport sockets produce EINVAL while setting
+timeouts before peer authentication (#1208). Authentication now precedes setup,
+with actual ENOTCONN for a disconnected peer and no admission-policy relaxation.
+Closed-peer and authenticated transfer checks pass; storage passes 54/0 with
+three ignored. These transport proofs do not establish the zygote failure cause.
+Broader BPF execution/hook gaps remain #202. Full image/CTS acceptance remains pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains
