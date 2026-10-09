@@ -622,7 +622,8 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
     w.str(&crate::vfs::cwd());
     w.str(&crate::vfs::own_mounts_text());
     let tracked=super::super::verity_pager::tracked_identities().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
-    let fork_lease=crate::verity_client().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
+    let identity_count=tracked.len();
+    let fork_lease=crate::verity_client().map(|client|client.fork_lease(tracked)).transpose().map_err(|error|{crate::diag!("[linux-abi] fork mapping admission ({identity_count} identities): {error}");-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)})?;
     let pager=super::super::verity_pager::ForkSnapshot::capture().map_err(|error|-(crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64))?;
     let writer_receipts=fdtab::fork_writer_receipts().map_err(|error|-(error as i64))?;
     let mut private_fds=pager.private_fds();

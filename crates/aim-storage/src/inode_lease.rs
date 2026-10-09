@@ -155,6 +155,8 @@ pub(crate) mod tests {
     fn busy(result:io::Result<ExclusiveLease>){assert_eq!(result.err().unwrap().raw_os_error(),Some(libc::EBUSY));}
     #[test]
     fn actual_identity_round_trip_rejects_invalid_fields_and_aliases_keep_lock(){
+        const MARKER:&str="INODE_ALIAS_FINAL_CLOSE_FIXTURE_EXECUTED";
+        if isolated_fork_fixture("inode_lease::tests::actual_identity_round_trip_rejects_invalid_fields_and_aliases_keep_lock",MARKER){return;}
         let fixture=Fixture::new();
         let directory=File::open(&fixture.path).unwrap();
         assert_eq!(Inode::open(fixture.inode.directory(),directory.as_fd()).err().unwrap().raw_os_error(),Some(libc::EINVAL));
@@ -167,19 +169,25 @@ pub(crate) mod tests {
         busy(fixture.inode.admission().unwrap().exclusive());let carrier=alias.into_private_fd();let writer=fixture.inode.adopt_private_writer(carrier).unwrap();busy(fixture.inode.admission().unwrap().exclusive());drop(writer);
         assert!(fixture.inode.admission().unwrap().exclusive().is_ok());
         assert!(fixture.inode.adopt_private_writer(duplicate(fixture.file.as_fd()).unwrap()).is_err());
+        println!("{MARKER}");
     }
     #[test]
     fn exclusive_enable_build_never_blocks_a_writer_holding_admission(){
+        const MARKER:&str="INODE_EXCLUSIVE_FINAL_ALIAS_FIXTURE_EXECUTED";
+        if isolated_fork_fixture("inode_lease::tests::exclusive_enable_build_never_blocks_a_writer_holding_admission",MARKER){return;}
         let fixture=Fixture::new();let admission=fixture.inode.admission().unwrap();let exclusive=admission.exclusive().unwrap();let slot=admission.enable_slot().unwrap();drop(admission);
         let admission=fixture.inode.admission().unwrap();assert_eq!(admission.writer().err().unwrap().raw_os_error(),Some(libc::EBUSY));busy(admission.enable_slot());drop(admission);
         let reacquired=fixture.inode.admission().unwrap();drop(reacquired);drop(slot);drop(exclusive);
         assert!(fixture.inode.admission().unwrap().writer().is_ok());
+        println!("{MARKER}");
     }
     fn byte(fd:i32,value:u8){assert_eq!(unsafe{libc::write(fd,(&value as *const u8).cast(),1)},1);}
     fn read_byte(fd:i32)->u8{let mut event=libc::pollfd{fd,events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut event,1,2000)},1,"owned child did not produce a receipt");let mut value=0;assert_eq!(unsafe{libc::read(fd,(&mut value as *mut u8).cast(),1)},1);value}
     fn pipe()->[OwnedFd;2]{let mut fds=[0;2];assert_eq!(unsafe{libc::pipe(fds.as_mut_ptr())},0);unsafe{[OwnedFd::from_raw_fd(fds[0]),OwnedFd::from_raw_fd(fds[1])]}}
     #[test]
     fn readonly_enablers_share_writer_denial_but_not_enable_slot(){
+        const MARKER:&str="INODE_READONLY_FINAL_ALIAS_FIXTURE_EXECUTED";
+        if isolated_fork_fixture("inode_lease::tests::readonly_enablers_share_writer_denial_but_not_enable_slot",MARKER){return;}
         let fixture=Fixture::new();let admission=fixture.inode.admission().unwrap();
         let first=admission.deny_writers().unwrap();let slot=admission.enable_slot().unwrap();drop(admission);
         let admission=fixture.inode.admission().unwrap();let second=admission.deny_writers().unwrap();
@@ -189,6 +197,7 @@ pub(crate) mod tests {
         drop(alias);let writer=fixture.inode.admission().unwrap().writer().unwrap();
         busy(fixture.inode.admission().unwrap().deny_writers());drop(writer);
         assert!(fixture.inode.admission().unwrap().deny_writers().is_ok());
+        println!("{MARKER}");
     }
     #[test]
     fn actual_child_exit_and_crash_release_writer_only_on_final_close(){

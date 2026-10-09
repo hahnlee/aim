@@ -866,7 +866,18 @@ publication pattern. Both now use private endpoints and lifecycle-protected
 guest handoff, including fork-child hook setup. Actual guest pipe IO/private
 denial checks pass for memory and an injected Bluetooth backend (no physical
 radio claim). The coherent default-parallel ABI suite passes 238/0 with thirteen
-ignored. A rebuilt managed boot is required before accepting these corrections. Original Perfetto traced_probes
+ignored. The rebuilt managed composer remains connected with native vsync delivery;
+zygote completes 18,367-class preload and accepts command sockets. SystemServer
+fork then fails with Broken pipe (#1213). A real 257-inode owner probe reproduces
+that error before any child spawn: the old per-inode fork lease opens more than
+the admission listener's 256-worker cap. Fork admission now sends one typed vector
+on one authenticated connection and reserves the whole set atomically. Real
+257-inode abort/EOF, malformed vector, complete-child handoff and missing-one-
+child rejection checks pass. The default-parallel suites pass storage 57/0 with
+three ignored and ABI 238/0 with thirteen ignored. Final-close lease fixtures
+run in fresh processes to exclude unrelated raw-fork aliases while retaining
+the original actual lock/close assertions. Native boot and SystemServer
+publication still require the rebuilt batch protocol runtime. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
