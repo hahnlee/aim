@@ -184,7 +184,13 @@ that exact DA6 binary. The same unchanged file now executes --help with exit
 zero. Fresh matched original/native boots reach boot completion, and native
 full66 validation starts with a new strict constructor capture. During its
 first module, original adbd aborts on a double-close of fd29 in its deferred
-fdevent close path (#1221); the current descriptor owner is under investigation.
+fdevent close path (#1221). Its descriptor trace confirms native close succeeds
+before an interrupted POSIX-controller receive returns EINTR to the guest,
+followed by EBADF on the retry. The close notification now waits again on the
+same pending request with the original deadline. Three focused owner tests
+pass, including authentic EIO preservation, real interruption, one request,
+actual lock release and safe descriptor reuse. The running DA6 campaigns
+retain their frozen runtime; corrected adbd/CTS replay remains unverified.
 No new full66 result is yet accepted. Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
