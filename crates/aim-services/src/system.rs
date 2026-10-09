@@ -1902,7 +1902,7 @@ impl System {
         self.check_package_bootstrap(bridge)?;
         let system = Arc::downgrade(self);
         let bridge = bridge.clone();
-        Ok(Arc::new(move |uid, user| {
+        Ok(Arc::new(move |uid, pid, user| {
             let system = system.upgrade().ok_or_else(|| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -1910,7 +1910,7 @@ impl System {
                 )
             })?;
             system.check_package_bootstrap(&bridge)?;
-            let mut policy = base(uid, user)?;
+            let mut policy = base(uid, pid, user)?;
             match bridge.installer_user_policy(user).map_err(|error| {
                 Exception::new(
                     aim_binder_host::parcel::EX_ILLEGAL_STATE,
@@ -3218,7 +3218,8 @@ impl System {
             (apks.files)(&guest).ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "confirmation stage VFS unavailable"))
         });
-        let policy = installer_confirmation::Source::new(leaf, source, resolver, stages, name)?;
+        let permissions = crate::system_package_installer_init::permission_source(self, bridge)?;
+        let policy = installer_confirmation::Source::new(leaf, source, resolver, stages, name, permissions)?;
         self.check_package_bootstrap(bridge)?;
         installer.configure_confirmation(policy.policy_source())
     }

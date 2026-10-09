@@ -93,6 +93,7 @@ pub trait Owners: Send + Sync {
     fn normalize(
         &self,
         uid: u32,
+        pid: i32,
         params: SessionParams,
         installer: Option<String>,
         tag: Option<String>,
@@ -475,6 +476,7 @@ impl Service for Endpoint {
                     }
                     let (record, permission) = self.owners.normalize(
                         uid,
+                        call.sender_pid as i32,
                         params,
                         a.installer_package_name,
                         a.installer_attribution_tag,
@@ -657,6 +659,7 @@ mod tests {
         fn normalize(
             &self,
             _: u32,
+            _: i32,
             _: SessionParams,
             _: Option<String>,
             _: Option<String>,

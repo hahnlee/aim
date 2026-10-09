@@ -14,8 +14,27 @@ pub struct UserPolicy {
     pub disallow_debugging_features: bool,
     pub organization_managed: bool,
 }
+/// Live permission authority. A captured policy retains the reader, not grants.
+#[derive(Clone)]
+pub struct CallingPermissions(
+    std::sync::Arc<dyn Fn(&str, i32, i32) -> Result<bool, Exception> + Send + Sync>,
+);
+impl std::fmt::Debug for CallingPermissions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallingPermissions(original owner)")
+    }
+}
+impl CallingPermissions {
+    pub fn new(read: std::sync::Arc<dyn Fn(&str, i32, i32) -> Result<bool, Exception> + Send + Sync>) -> Self {
+        Self(read)
+    }
+    pub fn check(&self, name: &str, pid: i32, uid: i32) -> Result<bool, Exception> {
+        (self.0)(name, pid, uid)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct DevicePolicy {
+    pub permissions: CallingPermissions,
     pub debuggable: bool,
     pub apex_supported: bool,
     pub rollback_lifetime: bool,
@@ -47,6 +66,16 @@ pub fn cross_user(
     shell: bool,
     operation: &str,
 ) -> Result<(), Exception> {
+    cross_user_checked(q, policy, user, shell, operation, &|name| permission(q, name))
+}
+fn cross_user_checked(
+    q: &Query<'_>,
+    policy: &DevicePolicy,
+    user: i32,
+    shell: bool,
+    operation: &str,
+    check: &dyn Fn(&str) -> Result<bool, Exception>,
+) -> Result<(), Exception> {
     if user < 0 {
         return Err(Exception::illegal_argument(format!(
             "Invalid userId {user}"
@@ -54,7 +83,7 @@ pub fn cross_user(
     }
     if user != apps_filter::user_id(q.calling_uid)
         && !matches!(q.calling_uid, 0 | 1000)
-        && !permission(q, "android.permission.INTERACT_ACROSS_USERS_FULL")?
+        && !check("android.permission.INTERACT_ACROSS_USERS_FULL")?
     {
         return Err(Exception::security(format!(
             "{operation}: requires INTERACT_ACROSS_USERS_FULL"
@@ -116,6 +145,7 @@ fn valid_name(value: &str) -> bool {
 /// Icon resizing, incremental installation and archiving require their concrete owners.
 pub fn normalize(
     q: &Query<'_>,
+    calling_pid: i32,
     device: &DevicePolicy,
     service: &mut ServicePolicy,
     config: &SystemConfig,
@@ -125,18 +155,19 @@ pub fn normalize(
     user: i32,
     now: i64,
 ) -> Result<(Record, bool), Exception> {
+    let check = |name: &str| device.permissions.check(name, calling_pid, q.calling_uid);
     if let Some(error) = &config.installer_policy_error {
         return Err(Exception::new(EX_ILLEGAL_STATE, error));
     }
     if params.data_loader_params.is_some() {
-        if !permission(q, "android.permission.USE_INSTALLER_V2")? {
+        if !check("android.permission.USE_INSTALLER_V2")? {
             return Err(Exception::security(
                 "You need USE_INSTALLER_V2 permission to use a data loader",
             ));
         }
     }
     params.install_flags &= !(1 << 29);
-    cross_user(q, device, user, true, "createSession")?;
+    cross_user_checked(q, device, user, true, "createSession",&check)?;
     let user_policy = device.users.get(&user).cloned().ok_or_else(|| {
         Exception::new(EX_ILLEGAL_STATE, "UserManager policy capture unavailable")
     })?;
@@ -144,8 +175,8 @@ pub fn normalize(
         return Err(Exception::security("User restriction prevents installing"));
     }
     if params.install_reason == 5
-        && !permission(q, "android.permission.MANAGE_ROLLBACKS")?
-        && !permission(q, "android.permission.TEST_MANAGE_ROLLBACKS")?
+        && !check("android.permission.MANAGE_ROLLBACKS")?
+        && !check("android.permission.TEST_MANAGE_ROLLBACKS")?
     {
         return Err(Exception::security(
             "INSTALL_REASON_ROLLBACK requires MANAGE_ROLLBACKS or TEST_MANAGE_ROLLBACKS",
@@ -188,7 +219,7 @@ pub fn normalize(
     let uid = q.calling_uid as u32;
     let special = matches!(uid, 0 | 1000 | 2000);
     let adb = matches!(uid, 0 | 2000) || device.adopted_shell_uids.contains(&uid);
-    let install_permission = permission(q, "android.permission.INSTALL_PACKAGES")?;
+    let install_permission = check("android.permission.INSTALL_PACKAGES")?;
     if adb {
         params.install_flags |= 0x20;
         installer = Some("com.android.shell".into());
@@ -204,7 +235,7 @@ pub fn normalize(
         if params.install_flags & 0x10000 != 0 && device.verifier_uid != Some(uid) {
             params.install_flags &= !0x10000;
         }
-        if !permission(q, "android.permission.INSTALL_TEST_ONLY_PACKAGE")? {
+        if !check("android.permission.INSTALL_TEST_ONLY_PACKAGE")? {
             params.install_flags &= !4;
         }
         params.development_install_flags = 0;
@@ -230,7 +261,7 @@ pub fn normalize(
             ));
         }
         if params.rollback_lifetime_millis > 0 {
-            rollback(q, &params, "rollbackLifetimeMillis")?;
+            rollback(&check, &params, "rollbackLifetimeMillis")?;
         }
     }
     if params.rollback_impact_level < 0 {
@@ -239,14 +270,14 @@ pub fn normalize(
         ));
     }
     if matches!(params.rollback_impact_level, 1 | 2) {
-        rollback(q, &params, "rollbackImpactLevel")?;
+        rollback(&check, &params, "rollbackImpactLevel")?;
     }
     let apex = params.install_flags & 0x20000 != 0;
-    if apex && !permission(q, "android.permission.INSTALL_PACKAGE_UPDATES")? && !install_permission
+    if apex && !check("android.permission.INSTALL_PACKAGE_UPDATES")? && !check("android.permission.INSTALL_PACKAGES")?
     {
         return Err(Exception::security("Not allowed to perform APEX updates"));
     }
-    if !apex && params.staged && !install_permission {
+    if !apex && params.staged && !check("android.permission.INSTALL_PACKAGES")? {
         return Err(Exception::security(
             "Staged install requires INSTALL_PACKAGES",
         ));
@@ -313,7 +344,7 @@ pub fn normalize(
     service.bypass_next_staged_installer_check = false;
     service.bypass_next_allowed_apex_update_check = false;
     if !params.multi_package {
-        let grant = permission(q, "android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS")?;
+        let grant = check("android.permission.INSTALL_GRANT_RUNTIME_PERMISSIONS")?;
         if params.install_flags & 0x100 != 0 && !grant {
             return Err(Exception::security(
                 "You need INSTALL_GRANT_RUNTIME_PERMISSIONS permission to grant all requested permissions",
@@ -342,7 +373,7 @@ pub fn normalize(
     if user_policy.organization_managed {
         params.install_flags |= 1 << 26;
     }
-    if apex || !permission(q, "android.permission.ENFORCE_UPDATE_OWNERSHIP")? {
+    if apex || !check("android.permission.ENFORCE_UPDATE_OWNERSHIP")? {
         params.install_flags &= !(1 << 25);
     }
     let mut requested_uid = -1;
@@ -375,7 +406,7 @@ pub fn normalize(
             ));
         }
         if loader.package.as_deref() == Some("android")
-            && !permission(q, "android.permission.USE_SYSTEM_DATA_LOADERS")?
+            && !check("android.permission.USE_SYSTEM_DATA_LOADERS")?
         {
             return Err(Exception::security(
                 "You need com.android.permission.USE_SYSTEM_DATA_LOADERS permission to use system data loaders",
@@ -403,13 +434,13 @@ pub fn normalize(
         install_permission,
     ))
 }
-fn rollback(q: &Query<'_>, params: &SessionParams, field: &str) -> Result<(), Exception> {
+fn rollback(check:&dyn Fn(&str)->Result<bool,Exception>, params: &SessionParams, field: &str) -> Result<(), Exception> {
     if params.install_flags & 0x40000 == 0 {
         return Err(Exception::illegal_argument(format!(
             "Can't set {field} when rollback is not enabled"
         )));
     }
-    if !permission(q, "android.permission.MANAGE_ROLLBACKS")? {
+    if !check("android.permission.MANAGE_ROLLBACKS")? {
         return Err(Exception::security(
             "Setting rollback policy requires MANAGE_ROLLBACKS",
         ));

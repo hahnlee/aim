@@ -77,9 +77,14 @@ PFDs and authenticated inbound caller identity (#1226). Three transport tests
 pass, including real driver forwarding of the shell caller, descriptor lifetime,
 and original exception/tail handling; complete Java/AIDL, D8 and original-image
 linkage pass. Actual profile creation and official CTS replay remain NOT RUN.
-The installer APEX authorization contract must ask the original live permission
-owner with the actual PID/UID instead of persisted grants (#1230). An uncached
-permission primitive retains that distinction from the package-info nonce.
+Installer authorization now retains an uncached reader of the original Context
+permission owner, not granted permission values (#1230). Public create-session
+retains actual PID/UID; commit and emergency decisions re-read current installer
+and target UID permissions. The existing typed Maintenance leaf is available
+before ActivityManager publication and preserves original Context semantics.
+Seven focused tests pass, including grant/revoke/re-adopt and real driver reply,
+epoch and descriptor checks. Actual Java delegation and official replay remain
+NOT RUN.
 The separate original-PMS svc reproduction confirms actual Svc execution with
 no output or shell-v2 exit frame before the 140-second bound (#1227); it does not
 distinguish Binder wait from ART internal wait.

@@ -26,7 +26,7 @@ pub type StreamPreparation =
     Arc<dyn Fn(&Session, &Record, &str) -> Result<bool, Exception> + Send + Sync>;
 pub type QuerySource = Arc<dyn Fn() -> Result<Arc<State>, Exception> + Send + Sync>;
 pub type Publisher = Arc<dyn Fn(Arc<dyn Service>) -> Result<Binder, Exception> + Send + Sync>;
-pub type PolicySource = Arc<dyn Fn(u32, i32) -> Result<DevicePolicy, Exception> + Send + Sync>;
+pub type PolicySource = Arc<dyn Fn(u32, i32, i32) -> Result<DevicePolicy, Exception> + Send + Sync>;
 pub type WriteModeSource = Arc<dyn Fn() -> Result<bool, Exception> + Send + Sync>;
 pub type AllocationOwner =
     Arc<dyn Fn(&std::fs::File, i64, i32) -> Result<(), Exception> + Send + Sync>;
@@ -295,7 +295,7 @@ impl NativeOwners {
         if uid < 0 {
             return Err(super::archiver::name_error("Installer package unavailable"));
         }
-        self.normalize(uid as u32, params, Some(installer.to_owned()), None, user)
+        self.normalize(uid as u32, -1, params, Some(installer.to_owned()), None, user)
             .map(|(record, _)| record)
     }
     pub fn archived_install_record(
@@ -305,7 +305,7 @@ impl NativeOwners {
         user: i32,
         calling_uid: u32,
     ) -> Result<Record, Exception> {
-        self.normalize(calling_uid, params, Some(installer.to_owned()), None, user)
+        self.normalize(calling_uid, -1, params, Some(installer.to_owned()), None, user)
             .map(|(record, _)| record)
     }
     pub fn archiver_save_sessions(&self) -> Result<(), Exception> {
@@ -340,7 +340,7 @@ impl NativeOwners {
             })
     }
     pub fn archiver_device_policy(&self, uid: u32, user: i32) -> Result<DevicePolicy, Exception> {
-        (self.policy_source)(uid, user)
+        (self.policy_source)(uid, -1, user)
     }
 
     pub fn configure_archiver(&self, owner: Arc<super::archiver::Owner>) -> Result<(), Exception> {
@@ -469,8 +469,11 @@ impl NativeOwners {
                     "Installer managed/emergency/compat confirmation policy unavailable",
                 )
             })?(&session, &record)?;
+        // Original checkUidPermission evaluates the immutable installer UID at
+        // this decision, independently of the committing Binder caller.
+        let permissions = (self.policy_source)(session.installer_uid, -1, session.user as i32)?.permissions;
         self.query(session.installer_uid, |query| {
-            let permission = |name| policy::permission(query, name);
+            let permission = |name| permissions.check(name, -1, session.installer_uid as i32);
             let package = session
                 .resolved_package
                 .as_deref()
@@ -1600,6 +1603,7 @@ impl Owners for NativeOwners {
     fn normalize(
         &self,
         uid: u32,
+        pid: i32,
         mut params: SessionParams,
         installer: Option<String>,
         tag: Option<String>,
@@ -1635,7 +1639,8 @@ impl Owners for NativeOwners {
         let result = self.query(uid, |query| {
             policy::normalize(
                 query,
-                &(self.policy_source)(uid, user)?,
+                pid,
+                &(self.policy_source)(uid, pid, user)?,
                 &mut self.service_policy.lock().unwrap(),
                 &self.config,
                 params,
@@ -1956,6 +1961,9 @@ mod tests {
     }
     fn device() -> DevicePolicy {
         DevicePolicy {
+            permissions: policy::CallingPermissions::new(Arc::new(|name, _pid, uid| {
+                Ok(matches!(uid, 0 | 1000) || uid == 10100 && name == "android.permission.INTERACT_ACROSS_USERS" || uid == 10101 && name == "android.permission.INSTALL_PACKAGES")
+            })),
             debuggable: false,
             apex_supported: false,
             rollback_lifetime: true,
@@ -2031,7 +2039,7 @@ mod tests {
         nodes: Arc<Mutex<Vec<Arc<dyn Service>>>>,
         events: Arc<Mutex<Vec<Event>>>,
     ) -> Arc<NativeOwners> {
-        make_owner_with_policy(data, sessions, nodes, events, Arc::new(|_, _| Ok(device())))
+        make_owner_with_policy(data, sessions, nodes, events, Arc::new(|_, _, _| Ok(device())))
     }
     fn make_owner_with_policy(
         data: &Data,
@@ -2106,6 +2114,89 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn apex_admission_reads_adopted_permissions_again_for_same_actual_caller() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let data = Data::new();
+        let owner = make_owner(&data, Arc::new(Sessions::default()), Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+        let delegated = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let flag = delegated.clone();
+        let observed = reads.clone();
+        let mut policy = device();
+        policy.apex_supported = true;
+        policy.permissions = policy::CallingPermissions::new(Arc::new(move |name, pid, uid| {
+            observed.lock().unwrap().push((name.to_owned(), pid, uid));
+            Ok(pid == 77 && uid == 10100 && name == "android.permission.INSTALL_PACKAGES" && flag.load(Ordering::SeqCst))
+        }));
+        let mut config = SystemConfig::default();
+        config.staged_installers.insert("fixture".into());
+        let run = |pid| owner.query(10100, |query| {
+            let mut params = request();
+            params.install_flags |= 0x20000;
+            params.staged = true;
+            policy::normalize(query, pid, &policy, &mut policy::ServicePolicy::default(), &config, params, Some("fixture".into()), None, 0, 1)
+        });
+        let rejected = run(77).unwrap_err();
+        assert_eq!(rejected.message, "Not allowed to perform APEX updates");
+        delegated.store(true, Ordering::SeqCst);
+        assert!(run(77).is_ok());
+        assert_eq!(run(78).unwrap_err().message, "Not allowed to perform APEX updates");
+        delegated.store(false, Ordering::SeqCst);
+        assert_eq!(run(77).unwrap_err().message, "Not allowed to perform APEX updates");
+        assert!(reads.lock().unwrap().iter().all(|(_, _, uid)| *uid == 10100));
+        assert!(state().packages["fixture"].users[&0].granted_permissions.iter().all(|name| name != "android.permission.INSTALL_PACKAGES"));
+        owner.shutdown_callbacks();
+    }
+    #[test]
+    fn endpoint_create_and_confirmation_do_not_retain_delegated_install_grants() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let data = Data::new();
+        let sessions = Arc::new(Sessions::default());
+        let delegated = Arc::new(AtomicBool::new(true));
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let flag = delegated.clone();
+        let observed = reads.clone();
+        let permissions = policy::CallingPermissions::new(Arc::new(move |name, pid, uid| {
+            observed.lock().unwrap().push((name.to_owned(), pid, uid));
+            Ok(uid == 10100 && matches!(pid, 77 | -1) && flag.load(Ordering::SeqCst) && matches!(name, "android.permission.INSTALL_PACKAGES" | "android.permission.TEST_MANAGE_ROLLBACKS"))
+        }));
+        let source_permissions = permissions.clone();
+        let owner = make_owner_with_policy(&data, sessions.clone(), Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())), Arc::new(move |uid, pid, user| {
+            assert_eq!((uid, user), (10100, 0));
+            assert!(matches!(pid, 77 | -1));
+            let mut policy = device();
+            policy.permissions = source_permissions.clone();
+            Ok(policy)
+        }));
+        owner.configure_confirmation(Arc::new(|_, _| Ok(super::super::commit::ConfirmationPolicy {
+            installer_package: "installer.ui".into(), device_owner_or_affiliated: false,
+            emergency_install: false, install_disabled: false, dependency_installer_enabled: false,
+            update_ownership_enabled: false, silent_target_allowed: false,
+            has_device_admin_receiver: false, is_sdk_or_static_library: false, uptime_millis: 1,
+        }))).unwrap();
+        let endpoint = super::super::endpoint::Endpoint { sessions: sessions.clone(), owners: owner.clone() };
+        let mut params = request();
+        params.install_reason = 5;
+        let mut parcel = Parcel::new();
+        aidl::CreateSession { params: Some(params), installer_package_name: Some("fixture".into()), installer_attribution_tag: None, user_id: 0 }.write(&mut parcel);
+        let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &parcel);
+        let id = aidl::read_create_session_reply(&mut reply.reader()).unwrap().unwrap();
+        assert_eq!(owner.confirmation(id, false).unwrap(), None);
+        delegated.store(false, Ordering::SeqCst);
+        assert_eq!(owner.confirmation(id, false).unwrap().as_deref(), Some("installer.ui"));
+        let reply = call(&endpoint, aidl::CREATE_SESSION, 10100, &parcel);
+        assert!(aidl::read_create_session_reply(&mut reply.reader()).unwrap().is_err());
+        assert_eq!(sessions.records().len(), 1);
+        delegated.store(true, Ordering::SeqCst);
+        assert_eq!(owner.confirmation(id, false).unwrap(), None);
+        let reads = reads.lock().unwrap();
+        assert!(reads.iter().any(|(name, pid, uid)| name == "android.permission.INSTALL_PACKAGES" && (*pid, *uid) == (77, 10100)));
+        assert!(reads.iter().filter(|(_, pid, _)| *pid == -1).all(|(_, _, uid)| *uid == 10100));
+        assert!(reads.iter().filter(|(name, pid, _)| name == "android.permission.INSTALL_PACKAGES" && *pid == -1).count() >= 3);
+        drop(reads);
+        owner.shutdown_callbacks();
+    }
+    #[test]
     fn streaming_inventory_keeps_order_duplicate_identity_and_xml_bytes() {
         use super::super::SessionOperations;
         let data = Data::new();
@@ -2127,7 +2218,7 @@ mod tests {
             .object(),
         );
         let (record, permission) = owner
-            .normalize(0, params, Some("fixture".into()), None, 0)
+            .normalize(0, 77, params, Some("fixture".into()), None, 0)
             .unwrap();
         let id = sessions.create_record(record, permission).unwrap();
         let (session, record) = sessions.records().pop().unwrap();
@@ -2217,7 +2308,7 @@ mod tests {
             .configure_domain_policy(Arc::new(|| Ok((2, 3, None))))
             .unwrap();
         let (mut record, permission) = owner
-            .normalize(0, request(), Some("fixture".into()), None, 0)
+            .normalize(0, 77, request(), Some("fixture".into()), None, 0)
             .unwrap();
         record.installer_uid = 0;
         let id = sessions.create_record(record, permission).unwrap();
@@ -2449,7 +2540,7 @@ mod tests {
             sessions.clone(),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
-            Arc::new(move |uid, user| {
+            Arc::new(move |uid, _pid, user| {
                 assert_eq!((uid, user), (10100, 0));
                 count.fetch_add(1, Ordering::SeqCst);
                 let mut policy = device();
@@ -2540,7 +2631,7 @@ mod tests {
             sessions.clone(),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
-            Arc::new(move |_, _| {
+            Arc::new(move |_, _, _| {
                 let mut next = (**policy_state.lock().unwrap()).clone();
                 next.generation += 1;
                 // Keep the caller UID modelled while withdrawing its ownership
@@ -2598,7 +2689,7 @@ mod tests {
         let owner = NativeOwners::open(
             sessions.clone(),
             Arc::new(|| Ok(state())),
-            Arc::new(|_, _| panic!("callback registration must not capture install device policy")),
+            Arc::new(|_, _, _| panic!("callback registration must not capture install device policy")),
             SystemConfig::default(),
             disk(&data),
             Arc::new(|_| panic!("registration does not publish a session")),
@@ -3214,7 +3305,7 @@ mod tests {
             sessions.clone(),
             nodes.clone(),
             Arc::new(Mutex::new(Vec::new())),
-            Arc::new(|_, _| Ok(device())),
+            Arc::new(|_, _, _| Ok(device())),
             Arc::new(move || Ok(captured.clone())),
         );
         let worker = owner.take_callback_worker().unwrap();
@@ -3308,7 +3399,7 @@ mod tests {
         let owner = NativeOwners::open(
             sessions.clone(),
             Arc::new(|| Ok(state())),
-            Arc::new(|_, _| Ok(device())),
+            Arc::new(|_, _, _| Ok(device())),
             SystemConfig::default(),
             disk(&data),
             Arc::new(move |node| {

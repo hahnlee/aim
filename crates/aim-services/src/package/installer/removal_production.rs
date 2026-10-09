@@ -50,7 +50,7 @@ pub fn build(inputs: Inputs) -> Result<Arc<Controller>, Exception> {
     let roles = inputs.roles.clone();
     let user_policy = inputs.user_policy;
     let policy: PolicySource = Arc::new(move |query, request| {
-        let device = user_policy(request.uid, request.user)?;
+        let device = user_policy(request.uid, request.pid, request.user)?;
         let users = external.users()?;
         if users.iter().any(|user| *user < 0)
             || users.iter().collect::<BTreeSet<_>>().len() != users.len()

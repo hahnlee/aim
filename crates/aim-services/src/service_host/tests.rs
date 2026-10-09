@@ -1711,8 +1711,9 @@ fn exercise_bootstrap_on(
         .path
         .push_str("/foreign");
     use crate::package::installer::policy::DevicePolicy;
-    let base = Arc::new(|_: u32, _: i32| {
+    let base = Arc::new(|_: u32, _: i32, _: i32| {
         Ok(DevicePolicy {
+            permissions: crate::package::installer::policy::CallingPermissions::new(Arc::new(|_, _, uid| Ok(matches!(uid, 0 | 1000)))),
             debuggable: false,
             apex_supported: true,
             rollback_lifetime: false,
@@ -1722,12 +1723,12 @@ fn exercise_bootstrap_on(
         })
     });
     let policy_source = system.package_installer_policy_source(&old, base).unwrap();
-    let initial = policy_source(1000, 0).unwrap();
+    let initial = policy_source(1000, -1, 0).unwrap();
     assert!(!initial.users[&0].disallow_install_apps);
     assert!(initial.users[&0].organization_managed);
     owner.users_reply.store(1, Ordering::SeqCst);
-    assert!(policy_source(1000, 0).unwrap().users[&0].disallow_install_apps);
-    assert!(!policy_source(1000, 99).unwrap().users.contains_key(&99));
+    assert!(policy_source(1000, -1, 0).unwrap().users[&0].disallow_install_apps);
+    assert!(!policy_source(1000, -1, 99).unwrap().users.contains_key(&99));
     owner.users_reply.store(2, Ordering::SeqCst);
     assert!(system.package_shell_debugging_policy(0).unwrap());
     // A nonexistent user's restriction still comes from the actual owner record.
@@ -2470,6 +2471,7 @@ fn exercise_bootstrap_on(
         crate::package::installer::endpoint::Owners::normalize(
             installer_fixture.owner.as_ref(),
             1000,
+            -1,
             crate::package::installer::codec::SessionParams {
                 mode: 1,
                 ..Default::default()
@@ -6362,8 +6364,9 @@ fn verify_installer_binding(
         system.check_package_bootstrap(&retained)?;
         Ok(state)
     });
-    let base: PolicySource = Arc::new(|_, _| {
+    let base: PolicySource = Arc::new(|_, _, _| {
         Ok(DevicePolicy {
+            permissions: crate::package::installer::policy::CallingPermissions::new(Arc::new(|_, _, uid| Ok(matches!(uid, 0 | 1000)))),
             debuggable: false,
             apex_supported: false,
             rollback_lifetime: true,
