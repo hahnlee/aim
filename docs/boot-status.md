@@ -191,7 +191,10 @@ same pending request with the original deadline. Three focused owner tests
 pass, including authentic EIO preservation, real interruption, one request,
 actual lock release and safe descriptor reuse. The running DA6 campaigns
 retain their frozen runtime; corrected adbd/CTS replay remains unverified.
-No new full66 result is yet accepted. Both earlier interrupted full66
+The resumed DA6 pair completes Parsing with official XML: 11 pass, zero fail
+on each side, with identical per-test names/results and done=true. Both full66
+campaigns continue into PreferredActivity; the remaining 65 modules and the
+corrected-runtime cohort remain unaccepted. Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
