@@ -66,8 +66,16 @@ fn authored_instrumentation_compiles_links_and_packages(){let dir=std::env::temp
 #[ignore="one fresh Original boot; actual AMS and registered UiAutomation; requires approved explicit cohort"]
 fn original_allowed_denied_and_registered_pid_delegation(){
     let inputs=common::runtime::cohort::load().unwrap();inputs.revalidate(true).unwrap();
-    let dir=std::env::temp_dir().join(format!("aim-permission-original-{}",std::process::id()));fs::create_dir(&dir).unwrap();let data=Data(dir);let apk=build(&data.0,&inputs.image(common::runtime::cohort::Variant::Original));
-    let boot=Boot::new(inputs.tools["aimctl"].path.clone(),data.0.join("guest"));captured(boot.start_command().args(["start","--windows"]),&data.0,"boot-start",Duration::from_secs(270));
+    let dir=std::env::temp_dir().join(format!("ap-{}",std::process::id()));fs::create_dir(&dir).unwrap();let data=Data(dir);let apk=build(&data.0,&inputs.image(common::runtime::cohort::Variant::Original));
+    use std::os::unix::ffi::OsStrExt;
+    let canonical = fs::canonicalize(&data.0).unwrap().join("g.aimctl");
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    for socket in ["display", "display.input/event0", "display.input/event1", "display.input/event2"] {
+        let path=canonical.join(socket);
+        assert!(path.as_os_str().as_bytes().len()<address.sun_path.len()-1,"NOT RUN: canonical fixture socket exceeds SUN_LEN: {}",path.display());
+    }
+    println!("owned canonical fixture {}",fs::canonicalize(&data.0).unwrap().display());
+    let boot=Boot::new(inputs.tools["aimctl"].path.clone(),data.0.join("g"));captured(boot.start_command().args(["start","--windows"]),&data.0,"boot-start",Duration::from_secs(270));
     let deadline=Instant::now()+Duration::from_secs(300);let mut n=0;
     loop{let value=captured(boot.command().args(["shell","getprop","sys.boot_completed"]),&data.0,&format!("ready-{n}"),Duration::from_secs(15));if value.trim()=="1"{break}assert!(Instant::now()<deadline,"original boot incomplete");n+=1;std::thread::sleep(Duration::from_secs(1));}
     let guest=boot.data.join("data/local/tmp/permission.apk");fs::copy(&apk,&guest).unwrap();
