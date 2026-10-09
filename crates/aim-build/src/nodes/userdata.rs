@@ -433,6 +433,17 @@ fn publish(
     Ok(())
 }
 
+fn copy_constructor_settings(from: &Path, settings: &Path, paths: &[&Path]) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let data = settings.join("data");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&data)
+        .map_err(|error| format!("{}: {error}", data.display()))?;
+    copy::copy_paths(from, &data, paths)?;
+    Ok(())
+}
+
 /// Boots the derived image on the new data directory `dir` to
 /// `sys.boot_completed`, taking the native owner's immutable constructor
 /// output (or the original's explicitly labelled legacy early-file capture)
@@ -552,7 +563,7 @@ fn first_boot(
                     .iter()
                     .map(Path::new)
                     .collect();
-                copy::copy_paths(&capture.directory, &settings.join("data"), &paths)?;
+                copy_constructor_settings(&capture.directory, settings, &paths)?;
                 constructor_controller_version = Some(capture.controller_version);
                 log.line(&format!(
                     "immutable package constructor epoch {} controller {}",
@@ -951,6 +962,35 @@ mod completion_tests {
         }
         assert!(!permission_completion(&source.0, &captured.0, Some(42)).unwrap());
     }
+    #[test]
+    fn native_constructor_copy_creates_root_and_preserves_nested_settings() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use aim_storage::guest_inode::{self, GuestInode};
+        let source = Fixture::new();
+        let settings = Fixture::new();
+        let paths: Vec<_> = aim_storage::constructor_capture::FILES.iter().map(Path::new).collect();
+        let inode = GuestInode { uid: Some(1000), gid: Some(1000), mode: Some(0o640) };
+        for (i, path) in paths.iter().enumerate() {
+            source.write(path.to_str().unwrap(), &format!("immutable constructor file {i}"));
+            guest_inode::record(&source.0.join(path), inode).unwrap();
+        }
+        assert!(copy::copy_paths(&source.0, &settings.0.join("data"), &paths).is_err());
+        copy_constructor_settings(&source.0, &settings.0, &paths).unwrap();
+        assert_eq!(fs::metadata(settings.0.join("data")).unwrap().permissions().mode() & 0o777, 0o700);
+        for path in paths {
+            let from = source.0.join(path);
+            let to = settings.0.join("data").join(path);
+            assert_eq!(fs::read(&from).unwrap(), fs::read(&to).unwrap());
+            assert_eq!(guest_inode::read(&to).unwrap(), Some(inode));
+            let before = fs::metadata(&from).unwrap();
+            let after = fs::metadata(&to).unwrap();
+            assert_eq!(before.permissions().mode(), after.permissions().mode());
+            assert_eq!((before.uid(), before.gid()), (after.uid(), after.gid()));
+            assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(), after.mtime_nsec()));
+        }
+        assert!(copy_constructor_settings(&source.0, &settings.0, &[]).is_err());
+    }
+
     #[test]
     fn capture_rejects_atomic_write_and_preserves_constructor_bytes() {
         let source = Fixture::new();
