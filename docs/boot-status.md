@@ -434,7 +434,14 @@ cycles that retain the actual Settings Store (#1266). Those backreferences
 now use explicit Weak ownership and report a typed closed-owner error after
 retirement. A real graph fixture passes live policy/draft operations, retired
 errors and Store/three claim-FD release with an external System reference.
-Actual Android detach with this additional correction is not yet run.
+Actual4bb replay with this additional correction boots in235.2 seconds,
+captures permissions at241.0 seconds and publishes70 required files with
+all copied bytes/modes/xattrs/mtimes preserved. Guest-init reports no
+self-dissent and the producer reports no left-attached volume. Exact owned
+PID births, namespace members and ASIF attachments are absent after normal
+cleanup. Four closing IPC transport errors remain separately recorded;
+they do not retain the data volume. Matched Original parity, a second native
+run, compiled/consumer checks and full CTS acceptance remain not run.
 The earlier63-file publication remains invalid evidence. Actual b04 shutdown
 observation finds permission-directory/main/reserve descriptors still open
 before and after native stop and at self-dissent (#1266); the producer
