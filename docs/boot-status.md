@@ -381,6 +381,12 @@ a final publication before constructor capture (#1271). Three focused tests
 verify fresh/restored disk writes, reopening, extension preservation and
 duplicate rejection without changing modern grant/GID owners. This source
 correction is not included in the b04 replay above; actual replay is not run.
+An Original permission fixture then exposed a writable-data clone inheriting
+its immutable template's0444 mode and attaching read-only before Android
+started. The data owner now sets only the new private image to0600 before
+publication. A real disposable APFS image test passes write/sync/detach and
+preserves the template's hash, mode and inode. Original permission decisions
+and PID delegation remain not run until corrected-runtime replay.
 The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML
