@@ -1681,7 +1681,13 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
                 format!("/proc/{t}")
             };
             let linked = node(&canonical(&target));
-            if let Some(Node::Dir(list)) = linked {
+            if let Some(Node::MountTable { host_pid, info }) = linked {
+                if write { return Some(-(EACCES as i64)); }
+                match process_mount_points(host_pid) {
+                    Ok(points) => content_fd(if info { mountinfo(points) } else { mounts(points) }.as_bytes(), cloexec),
+                    Err(error) => -(error as i64),
+                }
+            } else if let Some(Node::Dir(list)) = linked {
                 dir_fd(&canonical(&target), list, cloexec)
             } else if let Some(Node::File(data)) = linked.filter(|_| !write) {
                 // /proc/mounts -> self/mounts.
@@ -1868,6 +1874,36 @@ mod tests {
     /// Held by tests that start processes or need no other process to
     /// inherit their fds.
     static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn mounts_symlink_opens_the_same_live_namespace_as_self_mounts() {
+        let (_view, root) = crate::vfs::test_view();
+        let read = |path: &str| {
+            let fd = super::open(path, 0, libc::O_RDONLY).unwrap();
+            assert!(fd >= 0, "{path}: errno {}", -fd);
+            let mut bytes = vec![0u8; 65536];
+            let length = unsafe { libc::pread(fd as i32, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+            assert!(length >= 0);
+            bytes.truncate(length as usize);
+            assert_eq!(crate::sys::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+            bytes
+        };
+        let before = read("/proc/mounts");
+        assert_eq!(before, read("/proc/self/mounts"));
+        let host = root.join("proc-mount-link-test");
+        std::fs::create_dir_all(&host).unwrap();
+        crate::vfs::add_mount("/mnt/proc-link-test", host.clone(), crate::vfs::Area::Writable,
+            "tmpfs", "tmpfs").unwrap();
+        let after = read("/proc/mounts");
+        assert_eq!(after, read("/proc/self/mounts"));
+        assert_ne!(before, after);
+        assert!(String::from_utf8(after).unwrap().contains(" /mnt/proc-link-test tmpfs "));
+        assert_eq!(super::readlink(b"/proc/mounts").unwrap().unwrap(), b"self/mounts");
+        assert_eq!(super::open("/proc/mounts", 1, libc::O_WRONLY), Some(-(crate::errno::EACCES as i64)));
+        crate::vfs::remove_mount("/mnt/proc-link-test").unwrap();
+        assert_eq!(read("/proc/mounts"), before);
+        std::fs::remove_dir(host).unwrap();
+    }
 
     fn read_all(fd: i32) -> Vec<u8> {
         let mut b = vec![0u8; 64];

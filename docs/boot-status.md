@@ -891,8 +891,13 @@ compilation and two readiness-loop checks pass; actual resolver startup with
 this change remains unverified. The managed repetition does spawn a SystemServer child, which reaches original
 zygote JNI specialization and aborts when `createProcessGroup` finds no
 initialized cgroup controller and tries `/system/uid_1000` on the read-only
-system filesystem. These failures remain under owner-level investigation;
-neither attempt establishes SystemServer publication or native boot acceptance. Original Perfetto traced_probes
+system filesystem. The original libprocessgroup first fails to read
+`/proc/mounts`: procfs symlink resolution omitted the dynamic mount-table node.
+That owner now resolves the link through the actual process mount namespace;
+a focused test verifies equality with `/proc/self/mounts`, live mount addition
+and removal, unchanged readlink and write rejection. Runtime cgroup recovery
+remains unverified. Neither attempt establishes SystemServer publication or
+native boot acceptance. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
