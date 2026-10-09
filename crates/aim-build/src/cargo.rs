@@ -222,6 +222,7 @@ impl Workspace {
                     if target.name == "guest-init" {
                         deps.push(Dep::order_only("host/aim-lock-holder"));
                     }
+                    if target.name == "linux-run" { deps.push(Dep::order_only("host/aim-pty-holder")); }
                     nodes.push(Node {
                         name: format!("host/{}", target.name),
                         deps,

@@ -313,8 +313,18 @@ child without an observed shutdown chain. Adding an idle worker alone has
 not corrected the problem; neither marker absence nor the successful full
 observer establishes its cause. These experimental runtimes are not
 production corrections or CTS passes. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
-pass in an isolated test. A separate unread-PTY exit test reproduces an
-unbounded terminal drain (#1259); this is not yet proved to cause svc delay.
+pass in an isolated test. The native PTY owner now retains original output
+through actual endpoint lifetime rather than unbounded terminal drain
+(#1259). Original bionic verifies natural exit with268 unread bytes then
+EIO, real fork/exec under UID2000, controlling-terminal operations and
+runtime-directory reuse. Nine independent original-bionic read-contract
+cases pass for VMIN/VTIME, NONBLOCK/FIONBIO and interbyte timing; blocking
+SIGALRM wake and handled/blocked/ignored/orphan job-control cases also pass.
+Actual SCM_RIGHTS, fork/exec and native Binder endpoint proofs preserve
+ownership, logical flags and hangup without retaining weak observers.
+Source integration checks pass for ABI/guest-init/holder. The default
+job-control stop cause reported through wait remains open (#1284), and
+production Android svc/full CTS replay with the new owner is not yet run.
 Native Binder loopers previously retained registered service/file owners
 after the outer boot owner dropped, and an actual guest-init stop reported
 self-dissent during data-volume detach (#1266). Shutdown now closes looper

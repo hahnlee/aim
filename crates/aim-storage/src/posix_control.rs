@@ -195,8 +195,12 @@ unsafe extern "C" {
         size: i32,
     ) -> i32;
 }
-fn task() -> u32 {
+pub(crate) fn task() -> u32 {
     unsafe { mach_task_self_ }
+}
+pub(crate) fn register_service(name:&str,port:&SendRight)->io::Result<()> {
+ let name=CString::new(name).map_err(|_|error(libc::EINVAL))?;
+ if unsafe{bootstrap_register(bootstrap_port,name.as_ptr(),port.name())}!=0{return Err(error(libc::EADDRINUSE));}Ok(())
 }
 pub struct SendRight(u32);
 impl SendRight {
@@ -355,7 +359,7 @@ fn process_generation(pid: i32) -> io::Result<(u64, u32)> {
         u32::from_ne_bytes(bytes[32..36].try_into().unwrap()),
     ))
 }
-fn authenticate_actor(pid: i32, audit_version: u32) -> io::Result<ProcessIdentity> {
+pub(crate) fn authenticate_actor(pid: i32, audit_version: u32) -> io::Result<ProcessIdentity> {
     let before = process_generation(pid)?;
     if before.1 != audit_version {
         return Err(error(libc::EPERM));

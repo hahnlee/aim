@@ -4,6 +4,27 @@ use crate::{posix_control::{Client,Endpoint,Frame,Operation,Owner,Request},proce
 use std::{collections::BTreeMap,io,path::PathBuf,process::{Child,Command,Stdio},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicU64,Ordering}},thread,time::{Duration,Instant}};
 fn error(code:i32)->io::Error{io::Error::from_raw_os_error(code)}
 type Key=(i32,u64,u64);
+#[derive(Clone,Copy,Debug)]
+pub struct Credentials{pub uid:u32,pub effective_uid:u32,pub effective_capabilities:u64}
+/// Read the kernel-published identity for this exact registered incarnation.
+pub fn read_credentials(table:&std::path::Path,actor:ProcessIdentity)->io::Result<Credentials>{
+ use std::{io::Read,os::{fd::AsRawFd,unix::fs::OpenOptionsExt}};
+ let namespace=crate::process_namespace::mount_namespace_of(table,actor)?;
+ let mut record=crate::private_fd::PrivateFile::allocate(||std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(table.join(actor.host_pid.to_string())))?;
+ let mut stat:libc::stat=unsafe{std::mem::zeroed()};if unsafe{libc::fstat(record.as_raw_fd(),&mut stat)}<0{return Err(io::Error::last_os_error());}if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Err(error(libc::EPROTO));}
+ loop{if unsafe{libc::flock(record.as_raw_fd(),libc::LOCK_SH)}==0{break;}let failure=io::Error::last_os_error();if failure.kind()!=io::ErrorKind::Interrupted{return Err(failure);}}
+ let mut text=String::new();record.by_ref().take(65537).read_to_string(&mut text)?;if text.len()>65536{return Err(error(libc::EPROTO));}
+ let(mut uid,mut euid,mut capabilities)=(None,None,None);
+ for line in text.lines(){let Some((name,value))=line.split_once('\t')else{continue;};match name{
+  "uid"=>{if uid.is_some(){return Err(error(libc::EPROTO));}uid=Some(value.parse::<u32>().map_err(|_|error(libc::EPROTO))?);},
+  "euid"=>{if euid.is_some(){return Err(error(libc::EPROTO));}euid=Some(value.parse::<u32>().map_err(|_|error(libc::EPROTO))?);},
+  "cap_effective"=>{if capabilities.is_some(){return Err(error(libc::EPROTO));}capabilities=Some(match value.strip_prefix("0x"){Some(value)=>u64::from_str_radix(value,16),None=>value.parse()}.map_err(|_|error(libc::EPROTO))?);},_=>{}
+ }}
+ let uid=uid.ok_or_else(||error(libc::EPROTO))?;let effective_capabilities=capabilities.ok_or_else(||error(libc::EPROTO))?;
+ if !actor.is_live()||crate::process_namespace::mount_namespace_of(table,actor)?!=namespace{return Err(error(libc::ESRCH));}
+ // The v1 identity writer omits euid exactly when it equals uid.
+ Ok(Credentials{uid,effective_uid:euid.unwrap_or(uid),effective_capabilities})
+}
 fn key(p:ProcessIdentity)->Key{(p.host_pid,p.start_seconds,p.start_microseconds)}
 static NEXT:AtomicU64=AtomicU64::new(1);
 #[derive(Clone)]
@@ -117,29 +138,16 @@ impl State {
   owners.insert(key(actor),holder.clone());Ok(holder)
  }
  fn external_namespace(&self,actor:ProcessIdentity)->io::Result<String> {
-  use std::{io::Read,os::{fd::AsRawFd,unix::fs::OpenOptionsExt}};
   let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?;
   let init=crate::process_namespace::InitRegistration::read(&namespace.table)?;
   if init.process!=self.controller||init.process!=namespace.init.process||init.mount_namespace!=namespace.init.mount_namespace{return Err(error(libc::EPERM));}
   let current=crate::process_namespace::mount_namespace_of(&namespace.table,init.process)?;
   if crate::process_namespace::mount_namespace_of(&namespace.table,actor)?!=current{return Err(error(libc::EPERM));}
   crate::mount_namespace::Namespace::open(namespace.table.parent().and_then(std::path::Path::parent).ok_or_else(||error(libc::EPROTO))?,&current)?.read()?;
-  let mut record=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(namespace.table.join(actor.host_pid.to_string()))?;
-  if !record.metadata()?.is_file(){return Err(error(libc::EPROTO));}
-  loop{if unsafe{libc::flock(record.as_raw_fd(),libc::LOCK_SH)}==0{break;}let failure=io::Error::last_os_error();if failure.kind()!=io::ErrorKind::Interrupted{return Err(failure);}}
-  let mut text=String::new();record.by_ref().take(65537).read_to_string(&mut text)?;
-  if text.len()>65536{return Err(error(libc::EPROTO));}
-  let mut uid=None;let mut euid=None;let mut capabilities=None;
-  for line in text.lines(){let Some((name,value))=line.split_once('\t')else{continue;};match name{
-   "uid"=>{if uid.is_some(){return Err(error(libc::EPROTO));}uid=Some(value.parse::<u32>().map_err(|_|error(libc::EPROTO))?);},
-   "euid"=>{if euid.is_some(){return Err(error(libc::EPROTO));}euid=Some(value.parse::<u32>().map_err(|_|error(libc::EPROTO))?);},
-   "cap_effective"=>{if capabilities.is_some(){return Err(error(libc::EPROTO));}capabilities=Some(match value.strip_prefix("0x"){Some(value)=>u64::from_str_radix(value,16),None=>value.parse()}.map_err(|_|error(libc::EPROTO))?);},_=>{}
-  }}
   // Namespace entry is a privileged operation; the native owner reads the
   // retained guest identity, never UID or guest PID claims in a Mach frame.
-  uid.ok_or_else(||error(libc::EPROTO))?;
-  let capabilities=capabilities.ok_or_else(||error(libc::EPROTO))?;
-  if capabilities&(1<<21)==0{return Err(error(libc::EPERM));}
+  let credentials=read_credentials(&namespace.table,actor)?;
+  if credentials.effective_capabilities&(1<<21)==0{return Err(error(libc::EPERM));}
   if !actor.is_live(){return Err(error(libc::ESRCH));}Ok(current)
  }
  fn admit_external(&self,actor:ProcessIdentity)->io::Result<Arc<Holder>> {

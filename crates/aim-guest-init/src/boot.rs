@@ -334,6 +334,7 @@ pub struct Boot {
     /// Drops after executor's HostLauncher has killed and reaped its children.
     _verity_control: Option<aim_storage::verity_control::RunningServer>,
     _posix_control: Option<Arc<aim_storage::posix_broker::Controller>>,
+    _pty_owner: Option<aim_storage::pty_owner::transport::RunningServer>,
     /// The native status bar runs (`start_status_bar`).
     status_bar: bool,
     pub report: BootReport,
@@ -707,6 +708,22 @@ impl Boot {
             controller.owner_config().and_then(|owner|owner.write(&layout.runtime.join("posix-control-owner"))).map_err(|error|error.to_string())?;
             Some(controller)
         }else{None};
+        let pty_owner = if options.mode == RunMode::Run {
+            use std::os::unix::fs::PermissionsExt;
+            let runtime = layout.runtime.join("pty-pairs");
+            std::fs::create_dir(&runtime).map_err(|error| format!("PTY owner directory: {error}"))?;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+            let runtime = std::fs::canonicalize(runtime).map_err(|error| error.to_string())?;
+            let endpoint = format!("dev.aim.pty.{}", std::process::id());
+            let owner = aim_storage::pty_owner::transport::RunningServer::start_with_credentials(&endpoint, &runtime,&layout.identity_dir().join("by-pid"))
+                .map_err(|error| format!("PTY owner: {error}"))?;
+            owner.config.write(&layout.runtime.join("pty-control-owner"))
+                .map_err(|error| format!("PTY owner locator: {error}"))?;
+            aim_binder_host::pty_file::install_owner(&owner.config)
+                .map_err(|error| format!("PTY transport owner: {error}"))?;
+            Some(owner)
+        } else { None };
         let linux_run_options = match options.mode {
             RunMode::DryRun => LinuxRunOptions::CONTRACT,
             RunMode::Run => LinuxRunOptions::detect(&linux_run_binary),
@@ -859,6 +876,7 @@ impl Boot {
             native_services,
             _verity_control: verity_control,
             _posix_control: posix_control,
+            _pty_owner: pty_owner,
             status_bar: false,
             data: data_mount,
             _sweep: sweep,

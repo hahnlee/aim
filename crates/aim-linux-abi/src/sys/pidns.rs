@@ -296,6 +296,37 @@ pub fn check(pid: i32) -> Result<i32, i64> {
     }
 }
 
+/// Retained incarnations of a controlling terminal's actual namespace group.
+pub(super) fn tty_group_members(pgrp:i32,sid:i32)->Result<Vec<aim_storage::process_namespace::ProcessIdentity>,crate::errno::Errno>{
+    let table=super::cred::by_pid_dir().ok_or(crate::errno::ESRCH)?;
+    let mut members=Vec::new();
+    for entry in std::fs::read_dir(table).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?{
+        let entry=entry.map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        let Some(pid)=entry.file_name().to_str().and_then(|name|name.parse::<i32>().ok())else{continue;};
+        if pid<=1{continue;}
+        let Some(info)=bsd_info(pid)else{continue;};
+        if info.pbi_pgid as i32!=pgrp||unsafe{libc::getsid(pid)}!=sid{continue;}
+        let process=aim_storage::process_namespace::ProcessIdentity::running(pid).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        aim_storage::posix_broker::read_credentials(table,process).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        if process.is_live(){members.push(process);}
+    }
+    if members.is_empty(){Err(crate::errno::ESRCH)}else{Ok(members)}
+}
+pub(super) fn tty_group_orphaned(members:&[aim_storage::process_namespace::ProcessIdentity],pgrp:i32,sid:i32)->Result<bool,crate::errno::Errno>{
+    let table=super::cred::by_pid_dir().ok_or(crate::errno::ESRCH)?;
+    for member in members{
+        if !member.is_live(){continue;}
+        let Some(info)=bsd_info(member.host_pid)else{continue;};
+        let parent=info.pbi_ppid as i32;
+        if parent<=1||is_namespace_init(parent).map_err(|error|(-error)as crate::errno::Errno)?{continue;}
+        let Some(parent_info)=bsd_info(parent)else{continue;};
+        if parent_info.pbi_pgid as i32==pgrp||unsafe{libc::getsid(parent)}!=sid{continue;}
+        let process=aim_storage::process_namespace::ProcessIdentity::running(parent).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        aim_storage::posix_broker::read_credentials(table,process).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+        if process.is_live(){return Ok(false);}
+    }
+    Ok(true)
+}
 /// The members in process group `pgrp`. None without a table.
 pub fn group(pgrp: i32) -> Option<Vec<i32>> {
     let pgrp=syscall_pid(pgrp).ok()?;

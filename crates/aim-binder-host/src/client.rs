@@ -191,7 +191,8 @@ impl Client {
     pub fn file_class(&self, fd: i32) -> Result<u32, Errno> {
         let mut ty = 0i32;
         let mut len = std::mem::size_of::<i32>() as u32;
-        // Non-sockets cannot be entries in the explicit endpoint registry.
+        // Opaque PTY carriers use real pipe identities; endpoint owners
+        // classify them without treating other native files as capabilities.
         if unsafe {
             libc::getsockopt(
                 fd,
@@ -203,7 +204,11 @@ impl Client {
         } < 0
         {
             return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOTSOCK) {
-                Ok(0)
+                match aim_storage::pipe_identity::key(fd) {
+                    Ok(Some(_)) => self.pipe_file_class(fd),
+                    Ok(None) => Ok(0),
+                    Err(_) => Err(errno::EBADF),
+                }
             } else {
                 Err(errno::EBADF)
             };
@@ -218,6 +223,14 @@ impl Client {
         mach::release_send(port);
         let reply = result??;
         status(&reply)?.u32()
+    }
+
+    fn pipe_file_class(&self, fd: i32) -> Result<u32, Errno> {
+        let port = mach::fd_to_port(fd).ok_or(errno::EBADF)?;
+        let msg = Msg { id: wire::FILE_CLASS, ports: vec![(port, mach::COPY_SEND)], data: Vec::new() };
+        let result = with_thread(|t| call(t, self.service, &msg));
+        mach::release_send(port);
+        status(&result??)?.u32()
     }
 
     pub fn connect(name: &str) -> Option<Self> {

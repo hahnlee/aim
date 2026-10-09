@@ -36,3 +36,7 @@ pub mod posix_broker;
 pub mod socket_queue_root;
 
 pub mod constructor_capture;
+
+pub mod pty_owner;
+
+pub mod pipe_identity;

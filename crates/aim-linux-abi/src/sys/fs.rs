@@ -194,12 +194,35 @@ fn openat_owned(a: [u64; 6], id: &super::cred::Identity) -> i64 {
     if let Some(fd) = crate::xrt::open_translated(&r.host, &r.guest, hflags) {
         return fd as i64;
     }
+    if flags & O_PATH == 0 && (r.guest == "/dev/ptmx" || super::tty::pts_host(&r.guest).is_some()) {
+        if flags & O_DIRECTORY != 0 { return -(errno::ENOTDIR as i64); }
+        if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL { return -(errno::EEXIST as i64); }
+    }
+    if flags & O_PATH == 0 && r.guest == "/dev/ptmx" {
+        let description = match super::pty_owner::allocate(flags) {
+            Ok(Some(description)) => description,
+            Ok(None) => return -(errno::ENODEV as i64),
+            Err(error) => return -(error as i64),
+        };
+        use std::os::fd::AsRawFd;
+        if let Err(error) = super::tty::allocated_owned_master(description.descriptor().as_raw_fd(), id) {
+            return -(error as i64);
+        }
+        return super::pty_owner::publish(description, flags).map(|fd| fd as i64).unwrap_or_else(|error| -(error as i64));
+    }
+    if flags & O_PATH == 0 && super::tty::pts_host(&r.guest).is_some() {
+        match super::pty_owner::open_slave(r.host.as_bytes(), flags) {
+            Ok(Some(description)) => return super::pty_owner::publish(description, flags).map(|fd| fd as i64).unwrap_or_else(|error| -(error as i64)),
+            Ok(None) => {},
+            Err(error) => return -(error as i64),
+        }
+    }
     // SAFETY: host path from the resolver.
     let fd = unsafe { libc::open(r.host.as_ptr(), hflags&!libc::O_TRUNC, mode as libc::c_uint) };
     if fd < 0 {
         return -(errno::last() as i64);
     }
-    if r.guest == "/dev/ptmx" {
+    if r.guest == "/dev/ptmx" && flags & O_PATH == 0 {
         if let Err(error) = super::tty::allocated_master(fd, id) {
             unsafe { libc::close(fd); }
             return -(error as i64);
@@ -363,6 +386,7 @@ fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> 
     let (buf, len) = first(iov);
     match k {
         Kind::Regular(description) => Some(description.rw(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},iov,None,false)),
+        Kind::Pty(description) => Some(description.rw(iov,false)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, false)),
         Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
@@ -400,6 +424,7 @@ fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64>
     let (buf, len) = first(iov);
     match k {
         Kind::Regular(description) => Some(description.rw(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)},iov,None,true)),
+        Kind::Pty(description) => Some(description.rw(iov,true)),
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, true)),
         Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
@@ -1357,6 +1382,10 @@ pub fn fcntl(a: [u64; 6]) -> i64 {
         if !matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC | F_GETFD | F_SETFD) { return -(EBADF as i64); }
     }
     if super::fuse_client::get(fd).is_some()&&matches!(cmd,F_GETFL|F_SETFL){return super::fuse::description_flags(fd,(cmd==F_SETFL).then_some(arg as u32)).map(|flags|if cmd==F_GETFL{flags as i64}else{0}).unwrap_or_else(|error|-(error as i64));}
+    if let Some(Kind::Pty(description))=pin.kind(){
+        if cmd==F_GETFL{return description.flags()as i64;}
+        if cmd==F_SETFL{return description.set_flags(arg).map(|_|0).unwrap_or_else(|error|-(error as i64));}
+    }
     // SAFETY: fcntl with integer arguments.
     unsafe {
         match cmd {
@@ -1429,6 +1458,11 @@ pub fn ioctl(a:[u64;6])->i64{
     use std::os::fd::AsRawFd;let fd=pin.descriptor().as_raw_fd();
     if is_path_fd(fd){return -(EBADF as i64);}
     let(req,arg)=(a[1],a[2]);
+    if req==FIONBIO{if let Some(Kind::Pty(description))=pin.kind(){
+        let on=match super::user_memory::read_exact(arg,4){Ok(bytes)=>i32::from_le_bytes(bytes.try_into().unwrap())!=0,Err(error)=>return -(error as i64)};
+        let flags=description.flags();let flags=if on{flags|O_NONBLOCK}else{flags&!O_NONBLOCK};
+        return description.set_flags(flags).map(|_|0).unwrap_or_else(|error|-(error as i64));
+    }}
     if let Some(result)=super::fsverity_ioctl::ioctl(&pin,req,arg){return result;}
     if super::fuse_device::is_device(fd){
         if req!=super::fuse::FUSE_DEV_IOC_CLONE{return -(crate::errno::ENOTTY as i64);}

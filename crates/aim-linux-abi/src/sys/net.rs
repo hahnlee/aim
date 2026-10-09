@@ -1496,6 +1496,7 @@ fn adopt_received_descriptor(fd: i32) -> Result<(), errno::Errno> {
         aim_binder_host::path_file::CLASS => fdtab::install_path(fd),
         aim_binder_host::regular_scm::CLASS => regular_scm::adopt(fd),
         aim_binder_host::socket_scm::CLASS => socket_scm::adopt(fd),
+        aim_binder_host::pty_file::CLASS => fdtab::install_pty(fd),
         _ => Err(71),
     }
 }

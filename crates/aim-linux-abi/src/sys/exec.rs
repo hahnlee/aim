@@ -145,7 +145,8 @@ impl ExecState {
             personality: super::pstate::personality_value(),
             mounts: vfs::own_mounts_text(),
             itimers: super::itimer::exec_text(),
-            regular_fds:super::fdtab::regular_exec_text(),
+            // Descriptor receipts are captured under the final exec admission.
+            regular_fds:String::new(),
             close_receipt:None,
         }
     }
@@ -465,7 +466,7 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     let mut descriptors=Vec::new();
     for fd in super::fd_visibility::visible(){let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{let error=errno::last();drop(guard);return -(error as i64);}if flags&libc::FD_CLOEXEC==0{descriptors.push(fd.to_string());}}
     let mut options=vec![arg("--guest-fds"),arg(descriptors.join(",")),arg("--socket-receipts"),arg(super::fdtab::socket_exec_text())];
-    let regular=super::fdtab::regular_exec_text();if !regular.is_empty(){options.extend([arg("--regular-fds"),arg(regular)]);}
+    let regular=match super::fdtab::regular_exec_text(){Ok(text)=>text,Err(error)=>{drop(guard);return -(error as i64);}};if !regular.is_empty(){options.extend([arg("--regular-fds"),arg(regular)]);}
     if let Some(receipt)=&receipt{options.extend([arg("--exec-close-receipt"),arg(receipt.fd().to_string())]);}
     host.splice(1..1,options);
     let mut hargv: Vec<*const libc::c_char> = host.iter().map(|s| s.as_ptr()).collect();

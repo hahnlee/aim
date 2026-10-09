@@ -339,30 +339,36 @@ fn publish(id: &Identity) {
 /// This process's `by-pid` entry, open for writing in place, and the
 /// length written so far (a shorter text is padded to it with empty
 /// lines, which readers skip).
-static ENTRY: Mutex<Option<(std::fs::File, usize)>> = Mutex::new(None);
+static ENTRY: Mutex<Option<(aim_storage::private_fd::PrivateFile, usize)>> = Mutex::new(None);
 
 /// Write `id` as the `by-pid` entry of `pid`, replacing (never modifying)
 /// what is there. Returns the new file, open for writing.
-fn write_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<std::fs::File> {
+fn write_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<aim_storage::private_fd::PrivateFile> {
+    write_entry_checked(dir,pid,id).ok()
+}
+fn write_entry_checked(dir:&std::path::Path,pid:i32,id:&Identity)->std::io::Result<aim_storage::private_fd::PrivateFile>{
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let tmp = dir.join(format!(".{pid}.tmp"));
-    let mut f = std::fs::OpenOptions::new()
+    let mut f = aim_storage::private_fd::PrivateFile::allocate(||std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&tmp)
-        .ok()?;
-    f.write_all(id.to_text().as_bytes()).ok()?;
-    std::fs::rename(&tmp, dir.join(pid.to_string())).ok()?;
-    Some(f)
+        .open(&tmp))?;
+    let result=(||{f.write_all(id.to_text().as_bytes())?;f.sync_all()?;std::fs::rename(&tmp,dir.join(pid.to_string()))})();
+    if let Err(error)=result{if let Err(cleanup)=std::fs::remove_file(&tmp){eprintln!("identity publication cleanup: {cleanup}");}return Err(error);}
+    Ok(f)
 }
 
 /// An exclusive or shared `flock` on `f` for the life of the guard.
 struct Flock<'a>(&'a std::fs::File);
 
 impl<'a> Flock<'a> {
+    fn checked(f:&'a std::fs::File,op:i32)->std::io::Result<Self>{
+        use std::os::fd::AsRawFd;
+        loop{if unsafe{libc::flock(f.as_raw_fd(),op)}==0{return Ok(Self(f));}let error=std::io::Error::last_os_error();if error.kind()!=std::io::ErrorKind::Interrupted{return Err(error);}}
+    }
     fn new(f: &'a std::fs::File, op: i32) -> Flock<'a> {
         use std::os::fd::AsRawFd as _;
         // SAFETY: plain flock on an open file.
@@ -387,21 +393,19 @@ impl Drop for Flock<'_> {
 /// wrote before the fork handed it its state, or one it had before an
 /// exec; a new one when there is none, or only guest-init's link to the
 /// identity file (which never changes).
-fn open_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<(std::fs::File, usize)> {
-    use std::os::fd::{FromRawFd as _, IntoRawFd as _};
+fn open_entry(dir: &std::path::Path, pid: i32, id: &Identity) -> Option<(aim_storage::private_fd::PrivateFile, usize)> {
+    open_entry_checked(dir,pid,id).ok()
+}
+fn open_entry_checked(dir:&std::path::Path,pid:i32,id:&Identity)->std::io::Result<(aim_storage::private_fd::PrivateFile,usize)>{
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt as _;
-    let f = std::fs::OpenOptions::new()
+    let f = match aim_storage::private_fd::PrivateFile::allocate(||std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(dir.join(pid.to_string()))
-        .ok()
-        .filter(|f| f.metadata().is_ok_and(|m| m.is_file()))
-        .or_else(|| write_entry(dir, pid, id))?;
-    let len = f.metadata().ok()?.len() as usize;
-    // SAFETY: the layer's own fd, moved out of the guest's range.
-    let f = unsafe { std::fs::File::from_raw_fd(super::fdtab::hide(f.into_raw_fd())) };
-    Some((f, len))
+        .open(dir.join(pid.to_string()))){Ok(file)=>file,Err(error)if matches!(error.raw_os_error(),Some(libc::ENOENT)|Some(libc::ELOOP))=>write_entry_checked(dir,pid,id)?,Err(error)=>return Err(error)};
+    let mut stat:libc::stat=unsafe{std::mem::zeroed()};if unsafe{libc::fstat(f.as_raw_fd(),&mut stat)}<0{return Err(std::io::Error::last_os_error());}if stat.st_mode&libc::S_IFMT!=libc::S_IFREG||stat.st_size<0{return Err(std::io::Error::from_raw_os_error(libc::EINVAL));}
+    Ok((f,stat.st_size as usize))
 }
 
 /// Publish `id` as this process's `by-pid` entry, in place.
@@ -419,7 +423,9 @@ fn write_own_entry(id: &Identity) {
 }
 
 /// Rewrite the entry `f`, `len` bytes long, with `text` in place.
-fn rewrite(f: &std::fs::File, len: &mut usize, text: String) {
+fn rewrite(f: &aim_storage::private_fd::PrivateFile, len: &mut usize, text: String) {
+    use std::os::fd::{AsRawFd,FromRawFd};
+    let borrowed=std::mem::ManuallyDrop::new(unsafe{std::fs::File::from_raw_fd(f.as_raw_fd())});let f=&*borrowed;
     use std::os::unix::fs::FileExt as _;
     let mut text = text.into_bytes();
     if text.len() < *len {
@@ -471,6 +477,35 @@ pub fn init(id: Identity, by_pid: Option<PathBuf>) {
 
 pub fn by_pid_dir() -> Option<&'static PathBuf> {
     BY_PID.get()
+}
+/// Establish an actual kernel roster for standalone native owners, without
+/// declaring namespace init or changing this process's credentials.
+pub(crate) fn publish_current_for_owner(directory:&std::path::Path)->Result<PathBuf,crate::errno::Errno>{
+    use std::{os::{fd::{AsRawFd,FromRawFd},unix::fs::{DirBuilderExt,MetadataExt}},io};
+    let io=|error:io::Error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO));
+    if BY_PID.get().is_none(){
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).map_err(io)?;
+        let metadata=std::fs::symlink_metadata(directory).map_err(io)?;
+        if !metadata.is_dir()||metadata.uid()!=unsafe{libc::geteuid()}||metadata.mode()&0o077!=0{return Err(crate::errno::EPERM);}
+        let directory=std::fs::canonicalize(directory).map_err(io)?;
+        if crate::vfs::guest_path_of_host(&directory).is_some(){return Err(crate::errno::EPERM);}
+        let _=BY_PID.set(directory);
+    }
+    let table=BY_PID.get().ok_or(crate::errno::EIO)?;
+    let namespace=crate::vfs::mount_namespace_id().ok_or(crate::errno::ENODEV)?;
+    let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(io)?;
+    aim_storage::process_namespace::register_mount_namespace(table,process,&namespace).map_err(io)?;
+    let identity=current();let text=identity.to_text();
+    let(mut file,mut length)=open_entry_checked(table,process.host_pid,&identity).map_err(io)?;
+    let borrowed=std::mem::ManuallyDrop::new(unsafe{std::fs::File::from_raw_fd(file.as_raw_fd())});
+    let lock=Flock::checked(&borrowed,libc::LOCK_EX).map_err(io)?;
+    use std::os::unix::fs::FileExt;
+    let mut bytes=text.into_bytes();if bytes.len()<length{bytes.resize(length,b'\n');}
+    borrowed.write_all_at(&bytes,0).map_err(io)?;file.sync_all().map_err(io)?;length=bytes.len();drop(lock);
+    let previous=ENTRY.lock().unwrap().replace((file,length));drop(previous);
+    let actual=aim_storage::posix_broker::read_credentials(table,process).map_err(io)?;
+    if actual.effective_uid!=identity.uid[1]||actual.effective_capabilities!=identity.cap_eff{return Err(crate::errno::EIO);}
+    Ok(table.clone())
 }
 
 fn read<R>(f: impl FnOnce(&Identity) -> R) -> R {

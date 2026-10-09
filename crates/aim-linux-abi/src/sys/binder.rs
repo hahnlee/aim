@@ -171,6 +171,7 @@ impl UserMemory for Guest {
     fn install_typed(&mut self, fd:i32, class:u32) -> Result<(),i32> {
         if class == aim_binder_host::socket_scm::CLASS{return Err(71);}
         if class == aim_binder_host::path_file::CLASS { super::fdtab::install_path(fd)?; }
+        else if class == aim_binder_host::pty_file::CLASS { super::fdtab::install_pty(fd)?; }
         else { self.installed_typed(fd,class); }
         super::fdtab::publish_guest(fd)
     }
@@ -180,6 +181,8 @@ impl UserMemory for Guest {
             aim_binder_host::regular_file::CLASS
         } else if matches!(super::fdtab::get(fd),Some(Kind::Path(_))) {
             aim_binder_host::path_file::CLASS
+        } else if matches!(super::fdtab::get(fd),Some(Kind::Pty(_))) {
+            aim_binder_host::pty_file::CLASS
         } else if super::proxy_file::is_proxy(fd) {
             aim_binder_host::proxy_file::CLASS
         } else {

@@ -26,6 +26,7 @@ pub mod mach;
 pub mod parcel;
 pub mod proxy_file;
 pub mod path_file;
+pub mod pty_file;
 pub mod regular_file;
 pub mod regular_scm;
 pub mod socket_scm;

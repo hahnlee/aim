@@ -510,6 +510,22 @@ pub fn fatal_pending(th:&Thread)->bool {
     th.sig.own.load(SeqCst)&mask!=0 || lock(&th.sig.pending).set&mask!=0 || process().set&mask!=0
 }
 
+pub(super) fn tty_signal_ignored(sig:i32)->Result<bool,crate::errno::Errno>{
+    let th=thread::current().ok_or(crate::errno::ESRCH)?;
+    Ok(th.sig.mask()&bit(sig)!=0||ignored(sig,&action(sig)))
+}
+pub(super) fn tty_signal_group(members:&[aim_storage::process_namespace::ProcessIdentity],pgrp:i32,sid:i32,sig:i32)->Result<(),crate::errno::Errno>{
+    let info=Siginfo::new(sig,128); // Linux SI_KERNEL.
+    let mut sent=false;
+    for member in members{
+        if !member.is_live()||unsafe{libc::getpgid(member.host_pid)}!=pgrp||unsafe{libc::getsid(member.host_pid)}!=sid{continue;}
+        let result=if member.host_pid==libc_getpid(){send_process(info)}else{super::ptrace::remote_signal(member.host_pid,0,&info)};
+        if result<0{return Err((-result)as crate::errno::Errno);}
+        sent=true;
+    }
+    if sent{Ok(())}else{Err(crate::errno::ESRCH)}
+}
+
 pub fn interrupted(th: &Thread) -> bool {
     // A stashed signal keeps the flag set until it is delivered.
     if th.sig.attn.load(SeqCst) == 0 {

@@ -137,7 +137,9 @@ pub(crate) fn registered_descriptor_class(fd: i32) -> std::io::Result<u32> {
     let path=crate::path_file::registered_class_result(fd)?;
     if path!=0{return Ok(path);}
     let regular=crate::regular_scm::registered_class(fd)?;if regular!=0{return Ok(regular);}
-    crate::socket_scm::registered_class(fd)
+    let socket = crate::socket_scm::registered_class(fd)?;
+    if socket != 0 { return Ok(socket); }
+    crate::pty_file::registered_class(fd)
 }
 
 pub fn path_file_from_fd(fd: std::os::fd::BorrowedFd<'_>) -> Option<File> {

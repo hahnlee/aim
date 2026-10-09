@@ -22,6 +22,7 @@ use crate::sys::{
 pub struct Writer(Vec<u8>,Vec<fdtab::ForkPrivateFd>,Option<crate::errno::Errno>);
 
 impl Writer {
+    pub fn error(&mut self,error:crate::errno::Errno){self.2.get_or_insert(error);}
     pub fn retain_private(&mut self,fd:i32){
         if self.1.iter().any(|owner|owner.target()==fd)||self.2.is_some(){return;}
         match fdtab::hold_fork_private(unsafe{std::os::fd::BorrowedFd::borrow_raw(fd)}){Ok(owner)=>self.1.push(owner),Err(error)=>self.2=Some(error)}
@@ -184,7 +185,7 @@ impl<'a> Reader<'a> {
 
 /// Every module's state, in restore order.
 pub fn save(w:&mut Writer,mounts:&str){
-    w.u32(0x46444e02);
+    w.u32(0x46444e03);
     crate::xrt::fork_save(w);
     crate::diag::fork_save(w);
     crate::patch::fork_save(w);
@@ -214,7 +215,7 @@ pub fn save(w:&mut Writer,mounts:&str){
 pub fn restore(r: &mut Reader) -> bool {
     r.stage("state-version");
     let version=r.u32();
-    if version!=0x46444e02{eprintln!("fork state version: received={version:#x} expected=0x46444e02");r.invalidate();return false;}
+    if version!=0x46444e03{eprintln!("fork state version: received={version:#x} expected=0x46444e03");r.invalidate();return false;}
     r.stage("xrt");
     crate::xrt::fork_restore(r);
     r.stage("diag");
@@ -267,7 +268,8 @@ pub fn restore(r: &mut Reader) -> bool {
         return false;
     }
     wait::after_fork_child();
-    fdtab::after_fork_child();
+    r.stage("descriptor-rebuild");
+    if let Err(error)=fdtab::after_fork_child(){eprintln!("fork descriptor rebuild: errno {error}");r.invalidate();return false;}
     super::super::posix_locks::reset_fork();
     r.stage("posix-admission");
     if let Err(error)=super::super::posix_locks::attach_fork(){eprintln!("fork POSIX owner admission: errno {error}");return false;}

@@ -619,6 +619,10 @@ pub fn fork(ctx: &GuestContext, setup: &ChildSetup, runtime: &[CString]) -> Resu
             }
             // Before the handover: the child keeps this entry.
             crate::sys::cred::note_child(pid);
+            if let Err(error)=crate::sys::pty_owner::inherit_child(pid){
+                unsafe{libc::kill(pid,libc::SIGKILL);while libc::waitpid(pid,std::ptr::null_mut(),0)<0&&errno::last()==errno::EINTR{}}
+                return Err(-(error as i64));
+            }
             if unsafe{libc::kill(pid,libc::SIGCONT)}!=0{
                 let error=errno::last();unsafe{libc::kill(pid,libc::SIGKILL);while libc::waitpid(pid,std::ptr::null_mut(),0)<0&&errno::last()==errno::EINTR{}}return Err(-(error as i64));
             }
@@ -1228,7 +1232,7 @@ mod fd_owner_tests{
   let guest=fields[0].parse::<i32>().unwrap();let high=fields[1].parse::<i32>().unwrap();let unrelated=fields[2].parse::<i32>().unwrap();let event=fields[3].parse::<i32>().unwrap();let timer=fields[4].parse::<i32>().unwrap();let ino=fields[7].parse::<i32>().unwrap();let fence=fields[8].parse::<i32>().unwrap();let retired=fields[9].parse::<i32>().unwrap();
   reserve_fds(fields[5]).unwrap();assert!(!fdtab::visible(high));assert!(fdtab::is_hidden(high));assert_ne!(unsafe{libc::fcntl(high,libc::F_GETFD)}&libc::FD_CLOEXEC,0);
   assert_eq!(unsafe{libc::fcntl(unrelated,libc::F_GETFD)},-1,"unrelated native private fd inherited");assert!(!fdtab::is_hidden(unrelated));
-  let mut blob=Vec::new();File::open(fields[6]).unwrap().read_to_end(&mut blob).unwrap();let mut reader=Reader::new(&blob);fdtab::fork_restore(&mut reader);crate::sys::sync_file::fork_restore(&mut reader);assert!(reader.intact());assert_eq!(unsafe{libc::fcntl(retired,libc::F_GETFD)},-1);assert!(!fdtab::is_hidden(retired));let replaced=unsafe{libc::dup2(1,retired)};assert_eq!(replaced,retired);fdtab::publish_guest(retired).unwrap();assert_eq!(crate::sys::fs::close([retired as u64,0,0,0,0,0]),0);fdtab::after_fork_child();
+  let mut blob=Vec::new();File::open(fields[6]).unwrap().read_to_end(&mut blob).unwrap();let mut reader=Reader::new(&blob);fdtab::fork_restore(&mut reader);crate::sys::sync_file::fork_restore(&mut reader);assert!(reader.intact());assert_eq!(unsafe{libc::fcntl(retired,libc::F_GETFD)},-1);assert!(!fdtab::is_hidden(retired));let replaced=unsafe{libc::dup2(1,retired)};assert_eq!(replaced,retired);fdtab::publish_guest(retired).unwrap();assert_eq!(crate::sys::fs::close([retired as u64,0,0,0,0,0]),0);fdtab::after_fork_child().unwrap();
   for(fd,cloexec)in reader.seq(|r|(r.i32(),r.bool())){assert_eq!(unsafe{libc::fcntl(fd,libc::F_SETFD,if cloexec{libc::FD_CLOEXEC}else{0})},0);}assert!(reader.ok());
   assert!(fdtab::visible(guest));assert!(!fdtab::visible(high));assert!(fdtab::is_hidden(high));
   let mut bytes=[0u8;32];assert_eq!(crate::sys::fs::read([guest as u64,bytes.as_mut_ptr()as u64,32,0,0,0]),12);assert_eq!(&bytes[..12],b"actual bytes");assert_eq!(crate::sys::fs::close([guest as u64,0,0,0,0,0]),0);assert!(!fdtab::visible(guest));

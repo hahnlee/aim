@@ -38,6 +38,7 @@ impl Guest {
         for d in [
             "data/local/tmp",
             "dev/socket",
+            "dev/pts",
             "tmp",
             "kernfs/proc",
             "kernfs/sys",
@@ -202,7 +203,17 @@ fn files() {
 
 #[test]
 fn pseudo_terminals() {
-    check("t_pty", &[]);
+    let (Some(clang), Some(image)) = (ndk_clang(), image()) else {
+        aim_paths::skip("the pinned NDK or the extracted image is missing");
+        return;
+    };
+    let guest = Guest::new(&image, "t_pty");
+    let program = guest.build(&clang, "t_pty");
+    for args in [vec![program.as_str()], vec![program.as_str(), "--allocate-close"]] {
+        let (ok, output) = guest.run(&args);
+        println!("{output}");
+        assert!(ok && output.contains("PASS"), "PTY owner process lifecycle failed: {output}");
+    }
 }
 
 #[test]

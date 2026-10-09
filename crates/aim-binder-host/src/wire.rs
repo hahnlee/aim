@@ -55,7 +55,7 @@ impl RegularMetadata {
     }
 }
 fn valid_class(class: u32) -> bool {
-    matches!(class, 0 | crate::proxy_file::CLASS | crate::path_file::CLASS | crate::regular_file::CLASS | crate::socket_scm::CLASS)
+    matches!(class, 0 | crate::proxy_file::CLASS | crate::path_file::CLASS | crate::regular_file::CLASS | crate::socket_scm::CLASS | crate::pty_file::CLASS)
 }
 fn validate_metadata(classes: &[u32], regular: &[Option<RegularMetadata>], sockets: &[Option<aim_storage::socket_inode::Receipt>], count: usize) -> Result<(), Errno> {
     if classes.len() != count || regular.len() != count || sockets.len() != count { return Err(EPROTO); }

@@ -50,10 +50,67 @@ impl Interest {
         self.events & (EPOLLOUT | EPOLLWRNORM) != 0
     }
 }
+fn pty_ctl(ep:&Arc<Epoll>,epfd:i32,fd:i32,op:u64,event:u64,description:&Arc<super::pty_owner::Description>)->i64{
+    let watch=match description.watch(){Ok(watch)=>Arc::new(watch),Err(error)=>return -(error as i64)};
+    let identity=match aim_storage::inode_lease::Identity::from_fd(watch.observation.status.descriptor()){
+        Ok(identity)=>identity,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64),
+    };
+    let new=if op==EPOLL_CTL_DEL{None}else{
+        let bytes=match super::user_memory::read_exact(event,16){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+        Some(Interest{events:u32::from_le_bytes(bytes[..4].try_into().unwrap()),data:u64::from_le_bytes(bytes[8..].try_into().unwrap()),disabled:false})
+    };
+    let mut retired=None;
+    let guard=fdtab::lifecycle();
+    if !fdtab::visible(epfd)||!fdtab::visible(fd)||!matches!(fdtab::get(epfd),Some(Kind::Epoll(current))if Arc::ptr_eq(&current,ep))||!matches!(fdtab::get(fd),Some(Kind::Pty(current))if Arc::ptr_eq(&current,description)){return -(EBADF as i64);}
+    let mut interests=ep.ptys.lock().unwrap();
+    let index=interests.iter().position(|interest|interest.fd==fd&&interest.identity==identity);
+    match op{
+        EPOLL_CTL_ADD if index.is_some()=>return -(EEXIST as i64),
+        EPOLL_CTL_MOD|EPOLL_CTL_DEL if index.is_none()=>return -(ENOENT as i64),
+        EPOLL_CTL_ADD|EPOLL_CTL_MOD|EPOLL_CTL_DEL=>{},_=>return -(EINVAL as i64),
+    }
+    let active=index.map(|index|interests[index].watch.clone()).unwrap_or(watch);
+    let tag=match index{Some(index)=>interests[index].tag,None=>match NEXT_PTY_TAG.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|tag|tag.checked_add(1)){Ok(tag)=>tag,Err(_)=>{drop(interests);drop(guard);drop(active);return -(errno::from_darwin(libc::EOVERFLOW) as i64);}}};
+    let result=apply(epfd,&pty_changes(&active,tag,index.map(|index|&interests[index].interest),new.as_ref()));
+    if result<0{drop(interests);drop(guard);drop(active);return result;}
+    match(index,new){
+        (Some(index),Some(interest))=>interests[index].interest=interest,
+        (Some(index),None)=>retired=Some(interests.remove(index)),
+        (None,Some(interest))=>interests.push(PtyInterest{tag,fd,identity,watch:active.clone(),interest}),
+        _=>{},
+    }
+    drop(interests);drop(guard);drop(retired);0
+}
 
 pub struct Epoll {
     cloexec: bool,
     interest: Mutex<HashMap<i32, Interest>>,
+    ptys: Mutex<Vec<PtyInterest>>,
+}
+struct PtyInterest {
+    tag:u64,
+    fd:i32,
+    identity:aim_storage::inode_lease::Identity,
+    watch:Arc<super::pty_owner::Watch>,
+    interest:Interest,
+}
+static NEXT_PTY_TAG:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(1);
+fn pty_changes(watch:&super::pty_owner::Watch,tag:u64,old:Option<&Interest>,new:Option<&Interest>)->Vec<libc::kevent>{
+    use std::os::fd::AsRawFd;
+    let data=watch.observation.data().as_raw_fd();
+    let mut changes=changes(data,old,new);
+    if let Some(notification)=watch.observation.notification(){
+        let fd=notification.as_raw_fd();
+        if old.is_some(){changes.push(kev(fd,libc::EVFILT_READ,libc::EV_DELETE));}
+        if let Some(interest)=new{
+            let flags=libc::EV_ADD|if interest.disabled{libc::EV_DISABLE}else{libc::EV_ENABLE}
+                |if interest.events&EPOLLET!=0{libc::EV_CLEAR}else{0}
+                |if interest.events&EPOLLONESHOT!=0{libc::EV_DISPATCH}else{0};
+            changes.push(kev(fd,libc::EVFILT_READ,flags));
+        }
+    }
+    for change in &mut changes{change.udata=tag as*mut _;}
+    changes
 }
 
 fn kev(fd: i32, filter: i16, flags: u16) -> libc::kevent {
@@ -176,6 +233,7 @@ pub fn epoll_create1(a: [u64; 6]) -> i64 {
         Kind::Epoll(Arc::new(Epoll {
             cloexec,
             interest: Mutex::new(HashMap::new()),
+            ptys:Mutex::new(Vec::new()),
         })),
     );
     if let Err(error) = fdtab::publish_guest(kq) {
@@ -191,6 +249,7 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
         Ok(e) => e,
         Err(e) => return e,
     };
+    if let Some(Kind::Pty(description))=fdtab::get(fd){return pty_ctl(&ep,epfd,fd,op,ev,&description);}
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fstat into a local buffer.
     if unsafe { libc::fstat(fd, &mut st) } < 0 {
@@ -337,6 +396,7 @@ fn ready(ep: &Epoll, kevs: &[libc::kevent]) -> (Vec<(i32, u32, u64)>, Vec<libc::
     let mut rearm = Vec::new();
     let mut interest = ep.interest.lock().unwrap();
     for k in kevs {
+        if !k.udata.is_null(){continue;}
         let fd = k.ident as i32;
         let Some(i) = interest.get_mut(&fd) else {
             continue;
@@ -367,6 +427,36 @@ fn ready(ep: &Epoll, kevs: &[libc::kevent]) -> (Vec<(i32, u32, u64)>, Vec<libc::
         }
         out.push((fd, b, i.data));
     }
+    drop(interest);
+    use std::os::fd::AsRawFd;
+    let mut retired=Vec::new();
+    let mut ptys=ep.ptys.lock().unwrap();
+    for index in (0..ptys.len()).rev(){
+        if ptys[index].watch.observation.status.retired(){retired.push(ptys.remove(index));continue;}
+        let pty=&mut ptys[index];
+        if pty.interest.disabled{continue;}
+        let data=pty.watch.observation.data().as_raw_fd();
+        let notification=pty.watch.observation.notification().map(|fd|fd.as_raw_fd());
+        let mut bits=0;
+        let mut hit=false;
+        for event in kevs{
+            if event.udata as u64!=pty.tag{continue;}
+            if event.ident as i32==data{hit=true;bits|=self::bits(event,&pty.interest);}
+            else if Some(event.ident as i32)==notification{hit=true;}
+        }
+        if !hit{continue;}
+        if pty.watch.observation.status.hangup(){
+            bits|=EPOLLHUP;
+            if pty.watch.side==aim_storage::pty_owner::Side::Slave{bits|=(EPOLLIN|EPOLLOUT)&pty.interest.events|EPOLLERR;}
+        }
+        if bits==0{continue;}
+        if pty.interest.events&EPOLLONESHOT!=0{
+            pty.interest.disabled=true;
+            rearm.extend(pty_changes(&pty.watch,pty.tag,Some(&Interest{disabled:false,..pty.interest}),Some(&pty.interest)));
+        }
+        out.push((pty.fd,bits,pty.interest.data));
+    }
+    drop(ptys);drop(retired);
     (out, rearm)
 }
 
@@ -407,6 +497,12 @@ pub(super) fn save(ep: &Epoll, w: &mut super::fork_state::Writer) {
         w.u64(i.data);
         w.bool(i.disabled);
     });
+    drop(interest);
+    let ptys=ep.ptys.lock().unwrap();
+    w.seq(ptys.iter(),|w,pty|{
+        w.i32(pty.fd);w.u64(pty.tag);w.bytes(&pty.identity.to_bytes());
+        w.u32(pty.interest.events);w.u64(pty.interest.data);w.bool(pty.interest.disabled);pty.watch.save(w);
+    });
 }
 
 pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
@@ -421,16 +517,28 @@ pub(super) fn load(r: &mut super::fork_state::Reader) -> Arc<Epoll> {
             },
         )
     });
+    let ptys=r.seq(|r|{
+        let fd=r.i32();let tag=r.u64();let identity=aim_storage::inode_lease::Identity::from_bytes(&r.bytes());
+        let interest=Interest{events:r.u32(),data:r.u64(),disabled:r.bool()};
+        let watch=super::pty_owner::Watch::restore(r);
+        let valid=match(identity,watch){(Ok(identity),Ok(watch))if tag>0&&tag<u64::MAX=>{
+            match aim_storage::inode_lease::Identity::from_fd(watch.observation.status.descriptor()){
+                Ok(actual)if actual==identity=>{NEXT_PTY_TAG.fetch_max(tag+1,std::sync::atomic::Ordering::Relaxed);Some(PtyInterest{fd,tag,identity,interest,watch:Arc::new(watch)})},_=>None,
+            }
+        },_=>None};
+        if valid.is_none(){r.invalidate();}valid
+    });
     Arc::new(Epoll {
         cloexec,
         interest: Mutex::new(interest.into_iter().collect()),
+        ptys:Mutex::new(ptys.into_iter().flatten().collect()),
     })
 }
 
 /// Fork child: kqueues are not inherited. Make each epoll again on its fd
 /// numbers, then re-register the interests (after all kqueues exist, since
 /// an epoll may watch another).
-pub fn after_fork_child() {
+pub fn after_fork_child()->Result<(),errno::Errno> {
     rebuild(
         fdtab::fds_where(|k| matches!(k, Kind::Epoll(_)))
             .into_iter()
@@ -439,10 +547,10 @@ pub fn after_fork_child() {
                 _ => None,
             })
             .collect(),
-    );
+    )
 }
 
-fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>) {
+fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>)->Result<(),errno::Errno> {
     // One kqueue per epoll, duplicated onto every fd that refers to it.
     let mut made: Vec<(i32, Arc<Epoll>)> = Vec::new();
     for (fd, ep) in epolls {
@@ -472,7 +580,10 @@ fn rebuild(epolls: Vec<(i32, Arc<Epoll>)>) {
     for (fd, ep) in made {
         let mut interest = ep.interest.lock().unwrap_or_else(|e| e.into_inner());
         interest.retain(|&t, i| apply(fd, &changes(t, None, Some(i))) == 0);
+        drop(interest);
+        for pty in ep.ptys.lock().unwrap().iter(){let result=apply(fd,&pty_changes(&pty.watch,pty.tag,None,Some(&pty.interest)));if result<0{return Err(-result as errno::Errno);}}
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -513,7 +624,7 @@ mod tests {
         }
         let loaded = load(&mut Reader::new(&saved));
         fdtab::insert(ep, Kind::Epoll(loaded.clone()));
-        rebuild(vec![(ep, loaded)]);
+        rebuild(vec![(ep, loaded)]).unwrap();
         let one = 1u64;
         super::super::event::write(efd, &one as *const u64 as u64, 8);
         let mut out = [0u64; 2];

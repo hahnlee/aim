@@ -56,6 +56,7 @@ mod procfs;
 mod procrec;
 mod proxy_file;
 mod pstate;
+mod pty_owner;
 pub(crate) use pstate::initialize_umask;
 mod ptimer;
 mod ptrace;

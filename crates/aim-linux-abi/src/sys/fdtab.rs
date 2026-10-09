@@ -29,6 +29,7 @@ pub static SLOW: [AtomicU8; SLOW_FDS] = [const { AtomicU8::new(0) }; SLOW_FDS];
 
 #[derive(Clone)]
 pub enum Kind {
+    Pty(Arc<super::pty_owner::Description>),
     Regular(Arc<super::regular_file::Description>),
     /// A Linux O_PATH open description; flags do not grant read/write access.
     Path(Arc<PathDescription>),
@@ -84,6 +85,7 @@ pub(super) fn export_fd(fd:i32)->Result<ExportedFd,crate::errno::Errno>{export_p
 pub(super) fn export_pinned(pin:Pinned)->Result<ExportedFd,crate::errno::Errno>{
     use std::os::fd::AsRawFd;
     let fd=pin.descriptor().as_raw_fd();
+    if let Some(Kind::Pty(description))=pin.kind(){return Ok(ExportedFd{fd:description.carrier()?.as_raw_fd(),_proof:None,_pin:pin});}
     let Some(Kind::Path(path))=pin.kind()else{return Ok(ExportedFd{fd,_proof:None,_pin:pin})};
     let mut proof=path.proof.lock().unwrap();
     if proof.is_none(){let carrier=super::binder::create_path(fd,path.flags as u32)?;*proof=Some(PathProof::new(carrier));}
@@ -189,6 +191,7 @@ pub(crate) fn fork_writer_receipts()->Result<Vec<ForkPrivateFd>,crate::errno::Er
 }
 thread_local!{static RESTORED_PRIVATE:std::cell::RefCell<Vec<i32>>=const{std::cell::RefCell::new(Vec::new())};}
 pub(crate) fn take_restored_private_targets()->Vec<i32>{RESTORED_PRIVATE.with(|targets|std::mem::take(&mut*targets.borrow_mut()))}
+pub(crate) fn remember_restored_private(fds:&[i32]){RESTORED_PRIVATE.with(|targets|{let mut targets=targets.borrow_mut();for fd in fds{if !targets.contains(fd){targets.push(*fd);}}});}
 pub(crate) fn close_fork_private(fd:i32)->Result<(),crate::errno::Errno>{
     fn close(fd:i32)->Result<(),crate::errno::Errno>{if visible(fd){return Err(crate::errno::EBADF);}let result=unsafe{libc::close(fd)};if result<0{return Err(crate::errno::last());}unhide(fd);super::fd_visibility::private_closed(fd);Ok(())}
     if RETIRED.with(|owners|owners.borrow().is_some()){return close(fd);}let _guard=lifecycle();close(fd)
@@ -226,6 +229,27 @@ pub fn export_regular(fd:i32)->Result<Option<RegularExport>,crate::errno::Errno>
 pub fn install_regular(fd:i32,metadata:&aim_binder_host::wire::RegularMetadata,writer:Option<aim_binder_host::regular_file::WriterPort>)->Result<(),crate::errno::Errno>{
     let description=super::regular_file::import(fd,metadata,writer)?;
     insert(fd,Kind::Regular(description));Ok(())
+}
+pub(super) fn install_pty(fd:i32)->Result<(),crate::errno::Errno>{
+    install_pty_from(fd,fd)
+}
+fn install_pty_from(fd:i32,carrier:i32)->Result<(),crate::errno::Errno>{
+    if carrier<0{return Err(crate::errno::EBADF);}
+    use std::os::fd::{AsRawFd,BorrowedFd};
+    let description=super::pty_owner::restore(unsafe{BorrowedFd::borrow_raw(carrier)})?;
+    let guard=lifecycle();
+    if is_hidden(fd){return Err(crate::errno::EBADF);}
+    let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};
+    if flags<0{return Err(crate::errno::last());}
+    let retained=get(fd);let fuse=super::fuse_client::get(fd);let posix=guest_close_owner(fd)?;
+    let published=visible(fd);if published{withdraw_guest(fd)?;}
+    let result=unsafe{libc::dup2(description.descriptor().as_raw_fd(),fd)};
+    let failure=if result<0{Some(crate::errno::last())}else if unsafe{libc::fcntl(fd,libc::F_SETFD,flags)}<0{Some(crate::errno::last())}else{None};
+    if result>=0{on_close(fd);if failure.is_none(){insert(fd,Kind::Pty(description.clone()));}}
+    else if published{publish_guest(fd)?;}
+    drop(guard);drop(retained);drop(fuse);
+    if result>=0{finish_guest_close(posix)?;}
+    match failure{Some(error)=>Err(error),None=>Ok(())}
 }
 
 static LIFECYCLE:Mutex<()>=Mutex::new(());
@@ -400,6 +424,7 @@ pub(super) fn adopt_received(fd: i32) -> Result<(), i32> {
         0 => adopt_untyped(fd),
         aim_binder_host::proxy_file::CLASS => insert(fd, Kind::ProxyFile),
         aim_binder_host::path_file::CLASS => install_path(fd)?,
+        aim_binder_host::pty_file::CLASS => install_pty(fd)?,
         _ => return Err(71),
     }
     Ok(())
@@ -522,7 +547,7 @@ pub fn open_fds() -> Vec<i32> {
 pub fn anon_name(fd: i32) -> Option<String> {
     Some(
         match get(fd)? {
-            Kind::Regular(_) => return None,
+            Kind::Regular(_) | Kind::Pty(_) => return None,
             Kind::Event(_) => "anon_inode:[eventfd]",
             Kind::Timer(_) => "anon_inode:[timerfd]",
             Kind::Epoll(_) => "anon_inode:[eventpoll]",
@@ -558,41 +583,48 @@ pub fn kqueue_fds() -> Vec<i32> {
 /// runs: kqueues are not inherited and the child has no threads, so epoll
 /// and inotify fds are rebuilt on their numbers (held by placeholders until
 /// now) and the timerfd thread restarted.
-pub fn after_fork_child() {
+pub fn after_fork_child()->Result<(),crate::errno::Errno> {
     super::display::init();
     super::host_descriptors::init();
-    epoll::after_fork_child();
+    epoll::after_fork_child()?;
     inotify::after_fork_child();
     event::after_fork_child();
+    Ok(())
 }
 
-pub(crate) fn regular_exec_text()->String{
-    TABLE.read().unwrap().iter().filter_map(|(fd,kind)|{
-        let Kind::Regular(description)=kind else{return None};
+pub(crate) fn regular_exec_text()->Result<String,crate::errno::Errno>{
+    let mut records=Vec::new();
+    for (fd,kind) in TABLE.read().unwrap().iter(){
+        if !visible(*fd){continue;}
         let flags=unsafe{libc::fcntl(*fd,libc::F_GETFD)};
-        if !visible(*fd)||flags<0||flags&libc::FD_CLOEXEC!=0{return None;}
+        if flags<0{return Err(crate::errno::last());}
+        if flags&libc::FD_CLOEXEC!=0{continue;}
         use std::os::fd::AsRawFd;
-        Some(format!("{}\t{}\t{}",fd,description.flags,description.writer.as_ref().map(|writer|writer.descriptor().as_raw_fd()).unwrap_or(-1)))
-    }).collect::<Vec<_>>().join("\n")
+        match kind{
+            Kind::Regular(description)=>records.push(format!("{}\t{}\t{}",fd,description.flags,description.writer.as_ref().map(|writer|writer.descriptor().as_raw_fd()).unwrap_or(-1))),
+            Kind::Pty(description)=>records.push(format!("pty\t{}\t{}",fd,description.carrier()?.as_raw_fd())),
+            _=>{},
+        }
+    }Ok(records.join("\n"))
 }
-pub(crate) struct ExecWriterFlags(Vec<(std::sync::Arc<super::regular_file::Description>,i32)>);
+pub(crate) struct ExecWriterFlags(Vec<(Kind,i32,i32)>);
 impl Drop for ExecWriterFlags{
- fn drop(&mut self){for(description,flags)in &self.0{use std::os::fd::AsRawFd;if let Some(writer)=&description.writer{unsafe{libc::fcntl(writer.descriptor().as_raw_fd(),libc::F_SETFD,*flags);}}}}
+ fn drop(&mut self){for(_,fd,flags)in &self.0{unsafe{libc::fcntl(*fd,libc::F_SETFD,*flags);}}}
 }
 pub(crate) fn prepare_regular_exec()->Result<ExecWriterFlags,crate::errno::Errno>{
     use std::os::fd::AsRawFd;
     let mut changed=ExecWriterFlags(Vec::new());
     let mut writers=std::collections::HashSet::new();
-    for(guest,kind)in fds_where(|kind|matches!(kind,Kind::Regular(_))){
+    for(guest,kind)in fds_where(|kind|matches!(kind,Kind::Regular(_)|Kind::Pty(_))){
         if !visible(guest){continue;}
         let guest_flags=unsafe{libc::fcntl(guest,libc::F_GETFD)};
         if guest_flags<0{return Err(crate::errno::last());}
         if guest_flags&libc::FD_CLOEXEC!=0{continue;}
-        let Kind::Regular(description)=kind else{continue};
-        if let Some(writer)=&description.writer{let fd=writer.descriptor().as_raw_fd();if !writers.insert(fd){continue;}let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::last());}
+        let descriptor=match &kind{Kind::Regular(description)=>description.writer.as_ref().map(|writer|writer.descriptor()),Kind::Pty(description)=>Some(description.carrier()?),_=>None};
+        if let Some(descriptor)=descriptor{let fd=descriptor.as_raw_fd();if !writers.insert(fd){continue;}let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::last());}
             if unsafe{libc::fcntl(fd,libc::F_SETFD,flags&!libc::FD_CLOEXEC)}<0{return Err(crate::errno::last());}
             // Retain the original descriptor, not a dup: FD_CLOEXEC is local.
-            changed.0.push((description,flags));
+            changed.0.push((kind,fd,flags));
         }
     }Ok(changed)
 }
@@ -600,6 +632,14 @@ pub(crate) fn restore_regular_exec(text:&str)->Result<(),crate::errno::Errno>{
     let mut inherited=Vec::new();
     for line in text.lines(){
         let fields=line.split('\t').collect::<Vec<_>>();if fields.len()!=3{return Err(crate::errno::EINVAL);}
+        if fields[0]=="pty"{
+            let fd=fields[1].parse::<i32>().map_err(|_|crate::errno::EINVAL)?;
+            let carrier=fields[2].parse::<i32>().map_err(|_|crate::errno::EINVAL)?;
+            require_guest_visible(fd)?;
+            install_pty_from(fd,carrier)?;publish_guest(fd)?;
+            if !inherited.contains(&carrier){inherited.push(carrier);}
+            continue;
+        }
         let fd=fields[0].parse::<i32>().map_err(|_|crate::errno::EINVAL)?;
         let flags=fields[1].parse::<u64>().map_err(|_|crate::errno::EINVAL)?;
         let writer=fields[2].parse::<i32>().map_err(|_|crate::errno::EINVAL)?;
@@ -764,6 +804,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
     for (fd, k) in table.iter().filter(|(fd,_)|visible(**fd)) {
         let p = match k {
             Kind::Regular(a) => Arc::as_ptr(a) as *const (),
+            Kind::Pty(a) => Arc::as_ptr(a) as *const (),
             Kind::Event(a) => Arc::as_ptr(a) as *const (),
             Kind::Timer(a) => Arc::as_ptr(a) as *const (),
             Kind::Sock(a) => Arc::as_ptr(a) as *const (),
@@ -793,6 +834,7 @@ pub(super) fn fork_save(w: &mut super::fork_state::Writer) {
         }
         match k {
             Kind::Regular(description) => {w.u32(11);w.u64(description.flags);w.opt(description.writer.as_ref(),|w,writer|{use std::os::fd::AsRawFd;w.i32(writer.descriptor().as_raw_fd());});},
+            Kind::Pty(description)=>{use std::os::fd::AsRawFd;w.u32(12);match description.carrier(){Ok(carrier)=>{let fd=carrier.as_raw_fd();w.retain_private(fd);w.i32(fd);},Err(error)=>{w.error(error);w.i32(-1);}}},
             Kind::Event(e) => {
                 w.u32(0);
                 event::save_event(e, w);
@@ -855,6 +897,7 @@ pub(super) fn fork_restore(r: &mut super::fork_state::Reader) {
             9 => Kind::ProxyFile,
             10 => Kind::Path(PathDescription::new(r.u64())),
             11 => {let flags=r.u64();let writer=r.opt(|r|r.i32());if let Some(fd)=writer{if !inherited_writers.contains(&fd){inherited_writers.push(fd);}}match super::regular_file::restore(fd,flags,writer){Ok(description)=>Kind::Regular(description),Err(error)=>{eprintln!("regular descriptor fork restore: errno {error}");r.invalidate();return (fd,None);}}},
+            12=>{let carrier=r.i32();if !inherited_writers.contains(&carrier){inherited_writers.push(carrier);}match super::pty_owner::restore(unsafe{std::os::fd::BorrowedFd::borrow_raw(carrier)}){Ok(description)=>Kind::Pty(description),Err(error)=>{eprintln!("PTY descriptor fork restore: errno {error}");r.invalidate();return(fd,None);}}},
             _ => Kind::Memfd((r.u64(), r.u64())),
         };
         objects.push(k.clone());
