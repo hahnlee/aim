@@ -132,6 +132,7 @@ pub struct BootOptions {
     /// Run mode: compare these original services with their native models
     /// and log each call to the file (`aim_services::shadow`).
     pub binder_shadow: Option<(Vec<String>, PathBuf)>,
+    /// Build mode: claim a new host directory for the native constructor snapshot.
     pub package_constructor_capture: Option<PathBuf>,
     /// `androidboot.*` bootconfig entries (without the prefix).
     pub androidboot: Vec<(String, String)>,

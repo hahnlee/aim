@@ -2,7 +2,7 @@
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
 //! [--binder-trace FILE] [--binder-shadow SERVICES --binder-shadow-log FILE]
-//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR]`
+//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
@@ -27,7 +27,7 @@ fn usage() -> ! {
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--exclude a,b] [--runtime DIR]\n\
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
          \x20                 [--binder-trace FILE] [--binder-shadow a,b --binder-shadow-log FILE]\n\
-         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR]"
+         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]"
     );
     std::process::exit(2);
 }
