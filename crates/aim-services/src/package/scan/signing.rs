@@ -1069,6 +1069,29 @@ impl SigningScan {
         })
     }
 
+    /// InitAppsHelper prunes after system scanning, before data/code metadata
+    /// publication. Retire each group and its captured permission reference in
+    /// one candidate; older snapshots keep their actual member instances.
+    pub fn prune_system_shared_users(&mut self) -> Result<Vec<String>, String> {
+        if self.shared_processes.is_some() {
+            return Err("system shared pruning follows shared process publication".into());
+        }
+        self.validate_legacy_permissions()?;
+        let mut next = self.clone();
+        let removed = next.identities.prune_unused(&next.settings);
+        let retired_ids = removed.iter().map(|name| self.identities.shared_users[name].app_id).collect::<BTreeSet<_>>();
+        for name in &removed {
+            next.remove_legacy_shared(name)?;
+        }
+        next.settings.shared_users.retain(|group| !removed.contains(&group.name));
+        if let Some(owners) = &mut next.legacy_permissions {
+            owners.installed_receipt.retain(|uid| !retired_ids.contains(uid));
+        }
+        next.validate_legacy_permissions()?;
+        *self = next;
+        Ok(removed)
+    }
+
     /// The unsealed original constructor keeps the prior UID/group setting
     /// instance and aliases its existing users to the accepted copy.
     pub(super) fn retain_original_setting(
@@ -1824,6 +1847,52 @@ pub(super) fn selected_shared_user(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn system_scan_pruning_retires_empty_seeds_and_preserves_disabled_and_permission_owners() {
+        use super::*;
+        use crate::package::owner::legacy_permissions::{Migration, Permission};
+        let settings = Settings {
+            packages: [("system",1000),("phone",1001),("nfc",1027),("network",1073),("shell",2000)]
+                .into_iter().map(|(name,id)|crate::package::settings::Package {
+                    name:name.into(),app_id:id,shared_user:true,..Default::default()
+                }).collect(),
+            disabled_system_packages:vec![crate::package::settings::Package {
+                name:"disabled.bluetooth".into(),app_id:1002,shared_user:true,..Default::default()
+            }],
+            shared_users: Bootstrap::new(&Default::default()).ordered_shared_users().unwrap()
+                .into_iter().map(|(name, group)| SharedUser {name:name.into(),app_id:group.app_id,
+                    flags:group.flags,signatures:group.signatures.clone()}).collect(),
+            ..Default::default()
+        };
+        let mut scan = SigningScan::new(&Default::default(), &settings, 36).unwrap();
+        let packages = settings.packages.iter().map(|p|((p.name.clone(),false),Migration::default()))
+            .chain(settings.disabled_system_packages.iter().map(|p|((p.name.clone(),true),Migration::default()))).collect();
+        let mut grants = Migration::default();
+        grants.put(0, Permission {name:Some("owned.permission".into()),runtime:true,granted:true,flags:4}).unwrap();
+        let groups = scan.identities.shared_users.keys().map(|name|(name.clone(),grants.clone())).collect();
+        scan.capture_legacy_permissions(&[0],packages,groups).unwrap();
+        scan.legacy_permissions.as_mut().unwrap().installed_receipt.extend([1000,1007]);
+        let previous = scan.clone();
+        let alive = ["android.uid.system","android.uid.phone","android.uid.bluetooth","android.uid.nfc","android.uid.networkstack","android.uid.shell"];
+        assert_eq!(scan.prune_system_shared_users().unwrap(),["android.uid.log","android.uid.se","android.uid.uwb"]);
+        assert_eq!(scan.settings.shared_users, previous.settings.shared_users.iter()
+            .filter(|group| !["android.uid.log","android.uid.se","android.uid.uwb"].contains(&group.name.as_str()))
+            .cloned().collect::<Vec<_>>());
+        assert_eq!(scan.settings.packages,previous.settings.packages);
+        assert_eq!(scan.settings.disabled_system_packages,previous.settings.disabled_system_packages);
+        for name in alive {
+            assert_eq!(scan.identities.shared_users[name],previous.identities.shared_users[name]);
+            assert_eq!(scan.shared_legacy_permissions(name).unwrap(),previous.shared_legacy_permissions(name).unwrap());
+        }
+        assert!(scan.identities.ids.get(1007).is_none());
+        assert!(scan.identities.ids.get(1031).is_none());
+        assert!(scan.identities.ids.get(1083).is_none());
+        assert_eq!(scan.installed_permission_receipt_uids().unwrap(),&BTreeSet::from([1000]));
+        assert!(previous.shared_legacy_permissions("android.uid.log").unwrap().is_some());
+        assert!(scan.shared_legacy_permissions("android.uid.log").unwrap().is_none());
+        assert!(scan.prune_system_shared_users().unwrap().is_empty());
+    }
+
     #[test]
     fn original_shared_instance_keeps_existing_users_and_frozen_captures() {
         use super::*;

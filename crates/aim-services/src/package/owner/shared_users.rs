@@ -493,13 +493,20 @@ impl Bootstrap {
     /// including packages uninstalled for every user. Removing empty
     /// groups also advances the original runtime allocation cursor.
     pub fn prune_unused(&mut self, settings: &Settings) -> Vec<String> {
-        let used: BTreeSet<_> = settings
-            .packages
-            .iter()
-            .chain(&settings.disabled_system_packages)
-            .filter(|p| p.shared_user)
-            .map(|p| p.uid_owner_id())
-            .collect();
+        let active: BTreeSet<_> = settings.packages.iter().map(|p| p.name.as_str()).collect();
+        let disabled: BTreeSet<_> = settings.disabled_system_packages.iter()
+            .filter_map(|p| p.shared_app_id()).collect();
+        for group in self.shared_users.values_mut() {
+            group.packages.retain(|name, _| active.contains(name.as_str()));
+            group.retained.retain(|name, _| active.contains(name.as_str()));
+            group.retained_instances.retain(|value| active.contains(value.package.name.as_str()));
+            group.member_order.retain(|(name, retained)| if *retained {
+                group.retained.contains_key(name) || group.retained_instances.iter().any(|v| v.package.name == *name)
+            } else { group.packages.contains_key(name) });
+        }
+        let used = self.shared_users.values().filter(|group|
+            group.member_count() != 0 || disabled.contains(&group.app_id))
+            .map(|group| group.app_id).collect();
         self.prune_unreferenced(&used)
     }
 
@@ -865,6 +872,32 @@ mod tests {
         let unknown = SigningDetails::from_saved(&Default::default()).unwrap();
         assert!(group.merge_authorized_lineage(&unknown, &[]).is_err());
         assert_eq!(group, before);
+    }
+
+    #[test]
+    fn system_pruning_keeps_retained_member_when_current_same_name_has_another_uid() {
+        let original = Package {name:"same.name".into(),app_id:10050,shared_user:true,..Default::default()};
+        let mut settings = Settings {packages:vec![original.clone()],shared_users:vec![SavedGroup {
+            name:"retained.group".into(),app_id:10050,flags:0,signatures:None,
+        }],..Default::default()};
+        let mut boot = Bootstrap::restore(&Default::default(), &settings).unwrap();
+        boot.shared_users.get_mut("retained.group").unwrap().retain_unparsed_setting(
+            crate::package::owner::app_ids::DetachedSetting {package:original,users:Default::default(),
+                user_aliases:Default::default(),legacy:None,install_fixed:None,runtime:None}).unwrap();
+        settings.packages[0].shared_user=false;
+        settings.packages[0].app_id=10051;
+        boot.ids.register_existing(10051,Owner::Package("same.name".into())).unwrap();
+        let retained=boot.shared_users["retained.group"].clone();
+        let previous=boot.clone();
+        let removed=boot.prune_unused(&settings);
+        assert!(!removed.contains(&"retained.group".into()));
+        assert_eq!(boot.shared_users["retained.group"],retained);
+        assert_eq!(boot.ids.get(10050),Some(&Owner::SharedUser("retained.group".into())));
+        assert_eq!(boot.ids.get(10051),Some(&Owner::Package("same.name".into())));
+        assert_eq!(previous.shared_users["retained.group"],retained);
+        settings.packages.clear();
+        assert_eq!(boot.prune_unused(&settings),["retained.group"]);
+        assert!(boot.ids.get(10050).is_none());
     }
 
     #[test]
