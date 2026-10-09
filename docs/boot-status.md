@@ -832,8 +832,10 @@ a second guest-FD admission. Socket read/write now borrow that retained pin,
 without publishing private aliases. Two actual scalar/vector/offset-minus-one
 and close/reuse checks pass, including hidden-FD rejection; the full default-
 parallel ABI suite passes 234/0 with thirteen ignored. The rebuilt immutable runtime passes the original, untraced setprop/getprop
-and bionic serial proof at both 81-byte and 280-byte socket paths: real peer
-PID/UID, publication, response and file/guest values/serials agree. The fresh
+and bionic serial proof at both short and deep socket paths: real peer
+PID/UID, publication, response and file/guest values/serials agree. A repeat
+against the immutable `aee732eb` runtime passes both 82-byte and 281-byte
+paths (one actual integration test, 1.61 seconds). The fresh
 long-output native template now advances to the BPF stage but repeatedly
 requests reboot,bpfloader-failed (#1206). The original netbpfload launches
 successfully, then aborts via bionic fdsan when a returned BPF object FD is
