@@ -527,6 +527,8 @@ pub fn kqueue_fds() -> Vec<i32> {
 /// and inotify fds are rebuilt on their numbers (held by placeholders until
 /// now) and the timerfd thread restarted.
 pub fn after_fork_child() {
+    super::display::init();
+    super::host_descriptors::init();
     epoll::after_fork_child();
     inotify::after_fork_child();
     event::after_fork_child();
@@ -618,6 +620,8 @@ pub(crate) fn bootstrap(inherited:Vec<i32>,receipts:&[(i32,aim_storage::socket_i
 
 /// Set up the table for this process: recognize inherited fds.
 pub fn init() {
+    super::display::init();
+    super::host_descriptors::init();
     sync_file::init();
     adopt_inherited();
 }

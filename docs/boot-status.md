@@ -850,8 +850,23 @@ passes 235/0 with thirteen ignored. The rebuilt original netbpfload completes it
 bpf.progs_loaded is 1 and original loader logs contain the pinned maps/programs.
 The fresh empty-data native boot launches 69 services without the former BPF
 reboot, but reaches 300 seconds with no settings capture, permission capture or
-sys.boot_completed. Zygote repeatedly exits with SIGKILL before SystemServer
-publication; the exact cause remains unproven. Original Perfetto traced_probes
+sys.boot_completed. The captured zygote SIGKILLs follow the original restart chain: composer
+exits 1, its onrestart restarts SurfaceFlinger, and that onrestart restarts
+zygote (#1210). Actual managed compositor syscall logs show display event
+read(fd4,32) returns EBADF after a successful display handshake and service
+registration. The host-call event FD had no guest publication. Its owner now
+retains the native connection privately, allocates real socket identity at
+creation, and publishes only a new guest duplicate. A real native HELLO/WINDOWS
+proof passes unchanged 32-byte events through guest read/poll/stat/close and
+rejects the private original. Standalone original zygote using copied boot
+linker configuration and classpaths also reaches ART threads and remains live
+through its 15-second diagnostic bound; this is not native boot acceptance.
+The memory watcher (#1211) and Bluetooth wake (#1212) had the same missing
+publication pattern. Both now use private endpoints and lifecycle-protected
+guest handoff, including fork-child hook setup. Actual guest pipe IO/private
+denial checks pass for memory and an injected Bluetooth backend (no physical
+radio claim). The coherent default-parallel ABI suite passes 238/0 with thirteen
+ignored. A rebuilt managed boot is required before accepting these corrections. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.

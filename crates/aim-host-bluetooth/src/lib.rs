@@ -19,7 +19,9 @@ mod hci;
 mod l2cap;
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use aim_storage::private_fd::{PrivateFd, receive_allocations};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aim_hostcall::bluetooth::{
@@ -28,7 +30,9 @@ use aim_hostcall::bluetooth::{
 use aim_hostcall::{HostModule, args_mut, errno, module};
 
 pub use adv::Addr;
-pub use backend::{Backend, Event};
+pub use backend::{Backend, Event, AdvertiseRequest as BackendAdvertisement, PeerId as BackendPeerId};
+pub use att::Op as BackendOperation;
+pub use gatt::Target as BackendTarget;
 pub use controller::Controller;
 
 pub static MODULE: HostModule = HostModule {
@@ -90,9 +94,9 @@ struct Session {
     queue: VecDeque<(u32, Vec<u8>)>,
     /// The pipe's write end: one byte in the pipe while `queue` is not
     /// empty.
-    wake: i32,
+    wake: PrivateFd,
     /// Our own copy of the read end, the guest's being the guest's.
-    wake_read: i32,
+    wake_read: PrivateFd,
     generation: u64,
 }
 
@@ -104,20 +108,16 @@ impl Session {
         if was_empty && !self.queue.is_empty() {
             // SAFETY: a byte into our non-blocking pipe; a full pipe
             // already wakes the reader.
-            unsafe { libc::write(self.wake, [1u8].as_ptr().cast(), 1) };
+            unsafe { libc::write(self.wake.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
         }
     }
 }
 
-impl Drop for Session {
-    fn drop(&mut self) {
-        // SAFETY: our fds; the guest owns its read end.
-        unsafe {
-            libc::close(self.wake);
-            libc::close(self.wake_read);
-        }
-    }
-}
+/// The ABI duplicates and publishes this borrowed native reader under its
+/// descriptor lifecycle; module-private pipe endpoints never become guest fds.
+pub struct Hooks { pub publish: fn(BorrowedFd<'_>) -> Result<i32, i32> }
+static HOOKS: OnceLock<Hooks> = OnceLock::new();
+pub fn set_hooks(hooks: Hooks) -> Result<(), Hooks> { HOOKS.set(hooks) }
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -131,62 +131,46 @@ fn with_session(generation: u64, f: impl FnOnce(&mut Session)) {
     }
 }
 
-/// Where host-call fds the guest must not see go: high up, as the syscall
-/// layer keeps its own.
-fn move_high(fd: i32) -> i32 {
-    let mut lim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: plain getrlimit into a local.
-    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) };
-    let base = (lim.rlim_cur.min(1 << 20) * 3 / 4).max(64) as i32;
-    // SAFETY: duplicating and closing our own fd.
-    unsafe {
-        let high = libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, base - 1);
-        if high < 0 {
-            return fd;
-        }
-        libc::close(fd);
-        high
+fn pipe_error(error:std::io::Error)->i32 {
+    match error.raw_os_error() {
+        Some(libc::EMFILE)=>24, Some(libc::ENFILE)=>23, Some(libc::ENOMEM)=>errno::ENOMEM,
+        Some(libc::EBADF)=>errno::EBADF, Some(libc::EINVAL)=>errno::EINVAL,
+        _=>5,
     }
 }
-
-fn open() -> i64 {
-    let mut slot = SESSION.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.is_some() {
-        return neg(errno::EBUSY);
-    }
-    let mut fds = [0i32; 2];
-    // SAFETY: a pipe into a local array.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return neg(errno::ENODEV);
-    }
-    for fd in fds {
-        // SAFETY: flags on our new fds.
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
+fn wake_pipe()->Result<(PrivateFd,PrivateFd),i32>{
+    let(_,mut descriptors)=receive_allocations(|| {
+        let mut raw=[-1i32;2];
+        if unsafe{libc::pipe(raw.as_mut_ptr())}<0{return Err(std::io::Error::last_os_error());}
+        let descriptors=raw.into_iter().map(|fd|unsafe{OwnedFd::from_raw_fd(fd)}).collect::<Vec<_>>();
+        for descriptor in &descriptors {
+            let fd=descriptor.as_raw_fd();let flags=unsafe{libc::fcntl(fd,libc::F_GETFL)};
+            if flags<0{return Err(std::io::Error::last_os_error());}
+            if unsafe{libc::fcntl(fd,libc::F_SETFD,libc::FD_CLOEXEC)}<0||unsafe{libc::fcntl(fd,libc::F_SETFL,flags|libc::O_NONBLOCK)}<0{return Err(std::io::Error::last_os_error());}
         }
-    }
-    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
-    let Some(backend) = new_backend(generation) else {
-        // SAFETY: closing the fds just made.
-        unsafe {
-            libc::close(fds[0]);
-            libc::close(fds[1]);
-        }
-        return neg(errno::ENODEV);
-    };
-    *slot = Some(Session {
-        controller: Controller::new(backend, local_address()),
-        queue: VecDeque::new(),
-        wake: move_high(fds[1]),
-        // SAFETY: duplicating the fd just made.
-        wake_read: move_high(unsafe { libc::dup(fds[0]) }),
-        generation,
-    });
-    fds[0] as i64
+        Ok(((),descriptors))
+    }).map_err(pipe_error)?;
+    let writer=descriptors.pop().unwrap();let reader=descriptors.pop().unwrap();Ok((reader,writer))
+}
+fn open_with(factory:impl FnOnce(u64)->Option<Box<dyn Backend>>,address:Addr,publish:fn(BorrowedFd<'_>)->Result<i32,i32>)->Result<i32,i32>{
+    let mut slot=SESSION.lock().unwrap_or_else(|error|error.into_inner());
+    if slot.is_some(){return Err(errno::EBUSY);}
+    let(reader,writer)=wake_pipe()?;
+    let generation=GENERATION.fetch_add(1,Ordering::Relaxed)+1;
+    let backend=factory(generation).ok_or(errno::ENODEV)?;
+    let session=Session{controller:Controller::new(backend,address),queue:VecDeque::new(),wake:writer,wake_read:reader,generation};
+    let guest=publish(session.wake_read.as_fd())?;
+    *slot=Some(session);Ok(guest)
+}
+/// Explicit backend dependency injection uses the same descriptor producer.
+/// The default hostcall still requires the actual CoreBluetooth backend.
+pub fn open_controller(backend:Box<dyn Backend>,address:Addr)->Result<i32,i32>{
+    let hook=HOOKS.get().ok_or(errno::ENODEV)?;
+    open_with(|_|Some(backend),address,hook.publish)
+}
+fn open()->i64 {
+    let Some(hook)=HOOKS.get()else{return neg(errno::ENODEV)};
+    open_with(new_backend,local_address(),hook.publish).map(|fd|fd as i64).unwrap_or_else(neg)
 }
 
 #[cfg(target_os = "macos")]
@@ -238,7 +222,7 @@ fn recv(buf: &mut [u8]) -> Result<(u32, usize), i32> {
     if s.queue.is_empty() {
         let mut sink = [0u8; 64];
         // SAFETY: draining our non-blocking pipe into a local buffer.
-        while unsafe { libc::read(s.wake_read, sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
+        while unsafe { libc::read(s.wake_read.as_raw_fd(), sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
     }
     Ok((k, n))
 }
@@ -259,4 +243,48 @@ fn local_address() -> Addr {
 pub(crate) fn random(buf: &mut [u8]) {
     // SAFETY: fills our buffer.
     unsafe { libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len()) };
+}
+
+#[cfg(test)]
+mod wake_owner_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI32;
+    static FAILED_READER:AtomicI32=AtomicI32::new(-1);
+    static FAILED_OBSERVER:AtomicI32=AtomicI32::new(-1);
+    fn publish(reader:BorrowedFd<'_>)->Result<i32,i32>{
+        let duplicate=unsafe{libc::fcntl(reader.as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};
+        if duplicate<0{return Err(5);}Ok(duplicate)
+    }
+    fn fail(reader:BorrowedFd<'_>)->Result<i32,i32>{
+        FAILED_READER.store(reader.as_raw_fd(),Ordering::Relaxed);
+        let observer=publish(reader)?;FAILED_OBSERVER.store(observer,Ordering::Relaxed);Err(errno::ENOMEM)
+    }
+    #[test]
+    fn injected_radio_wake_pipe_owner_publishes_only_reader_and_rolls_back_failure(){
+        // This exercises FD ownership with the existing radio test backend;
+        // it does not claim a real CoreBluetooth adapter is available.
+        let address=Addr([1,2,3,4,5,0x02]);
+        let guest=open_with(|_|Some(Box::new(controller::tests::Fake::default())),address,publish).unwrap();
+        let slot=SESSION.lock().unwrap();let session=slot.as_ref().unwrap();
+        let native_reader=session.wake_read.as_raw_fd();let native_writer=session.wake.as_raw_fd();
+        assert_ne!(guest,native_reader);assert_ne!(guest,native_writer);
+        for descriptor in [native_reader,native_writer]{assert_ne!(unsafe{libc::fcntl(descriptor,libc::F_GETFD)}&libc::FD_CLOEXEC,0);assert_ne!(unsafe{libc::fcntl(descriptor,libc::F_GETFL)}&libc::O_NONBLOCK,0);}
+        let mut native_stat:libc::stat=unsafe{std::mem::zeroed()};let mut guest_stat:libc::stat=unsafe{std::mem::zeroed()};
+        assert_eq!(unsafe{libc::fstat(native_reader,&mut native_stat)},0);assert_eq!(unsafe{libc::fstat(guest,&mut guest_stat)},0);
+        assert_eq!(guest_stat.st_mode&libc::S_IFMT,libc::S_IFIFO);assert_eq!((guest_stat.st_dev,guest_stat.st_ino),(native_stat.st_dev,native_stat.st_ino));
+        drop(slot);
+        let mut poll=libc::pollfd{fd:guest,events:libc::POLLIN,revents:0};assert_eq!(unsafe{libc::poll(&mut poll,1,0)},0);
+        let opcode=hci::cmd::READ_LOCAL_VERSION_INFORMATION;let command=[opcode as u8,(opcode>>8)as u8,0];
+        assert_eq!(send(kind::COMMAND,&command),0);assert_eq!(unsafe{libc::poll(&mut poll,1,0)},1);
+        let mut wake=0u8;assert_eq!(unsafe{libc::read(guest,(&mut wake as*mut u8).cast(),1)},1);assert_eq!(wake,1);
+        assert_eq!(unsafe{libc::write(guest,(&wake as*const u8).cast(),1)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EBADF));
+        let mut event=[0u8;64];let(event_kind,length)=recv(&mut event).unwrap();assert_eq!(event_kind,kind::EVENT);assert_eq!(event[0],hci::ev::COMMAND_COMPLETE);assert!(length>3);
+        assert_eq!(recv(&mut event),Err(errno::EAGAIN));
+        close();assert_eq!(unsafe{libc::fcntl(native_reader,libc::F_GETFD)},-1);assert_eq!(unsafe{libc::fcntl(native_writer,libc::F_GETFD)},-1);
+        assert_eq!(unsafe{libc::read(guest,(&mut wake as*mut u8).cast(),1)},0);assert_eq!(unsafe{libc::close(guest)},0);
+        assert_eq!(open_with(|_|Some(Box::new(controller::tests::Fake::default())),address,fail),Err(errno::ENOMEM));
+        assert!(SESSION.lock().unwrap().is_none());assert_eq!(unsafe{libc::fcntl(FAILED_READER.load(Ordering::Relaxed),libc::F_GETFD)},-1);
+        let observer=FAILED_OBSERVER.swap(-1,Ordering::Relaxed);assert!(observer>=0);assert_eq!(unsafe{libc::read(observer,(&mut wake as*mut u8).cast(),1)},0,"failed publication dropped the internal writer");assert_eq!(unsafe{libc::close(observer)},0);
+        assert_eq!(open_with(|_|None,address,publish),Err(errno::ENODEV));assert!(SESSION.lock().unwrap().is_none());
+    }
 }

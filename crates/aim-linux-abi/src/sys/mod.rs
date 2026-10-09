@@ -25,6 +25,8 @@ pub(crate) mod regular_file;
 pub(crate) mod verified_source;
 mod fork;
 mod fs;
+mod display;
+mod host_descriptors;
 mod fsverity_ioctl;
 mod fsops;
 mod futex;

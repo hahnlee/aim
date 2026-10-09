@@ -20,7 +20,7 @@ enum Call {
 }
 
 #[derive(Clone, Default)]
-struct Fake(Arc<Mutex<Vec<Call>>>);
+pub(crate) struct Fake(Arc<Mutex<Vec<Call>>>);
 
 impl Fake {
     fn take(&self) -> Vec<Call> {
