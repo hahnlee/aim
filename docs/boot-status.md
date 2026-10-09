@@ -121,7 +121,7 @@ bounded join, plus the separate external SIGQUIT case. These do not reproduce
 the managed ART hang; no production signal defect is demonstrated.
 
 Isolated acceptance fixes retain the running pair unchanged. The complete PM
-library gate passes 840 tests with zero failures and eleven ignored tests not
+library gate passes 867 tests with zero failures and eleven ignored tests not
 run. Visibility recapture passes five focused tests, loading completion three,
 shared-UID ABI inheritance three, and dex-metadata sidecar handling six, including
 preflight of all temporary names and restoration after rename failure.
