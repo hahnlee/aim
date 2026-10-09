@@ -75,9 +75,12 @@ version = "0.1.0"
 dependencies = [
  "aim-android-image",
  "aim-android-xml",
+ "aim-apps",
  "aim-binder-host",
  "aim-paths",
  "aim-storage",
+ "android-image-extract",
+ "flate2",
  "libc",
  "n2",
  "serde_json",

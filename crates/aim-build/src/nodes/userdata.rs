@@ -200,13 +200,18 @@ pub fn run_template(ctx: &Ctx, log: &mut Log) -> Result<(), String> {
         }
     }
 
-    let sku = first_boot(ctx, &work, &boot, &settings, &permissions, log, None)?;
+    let (sku, admission) = first_boot(ctx, &work, &boot, &settings, &permissions, log, None)?;
     let identity = aim_android_image::identity::read_tree_identity(&aim_paths::derived_image())?
         .ok_or("the derived image has no identity")?;
     let name = data::template_name(&identity, sku.as_deref());
     let from = DataImage::attach(&boot, None)?;
     let mut volume_files = vec![PathBuf::from(DALVIK_CACHE)];
-    volume_files.extend(check(from.dir(), &settings)?);
+    volume_files.extend(check(
+        from.dir(),
+        &settings,
+        &aim_paths::derived_image(),
+        &admission,
+    )?);
     let settings_files: Vec<PathBuf> = SETTINGS
         .iter()
         .flat_map(|(file, reserve)| [Some(*file), *reserve])
@@ -340,7 +345,7 @@ pub fn run_isolated_template(ctx: &Ctx, config: &IsolatedTemplate) -> Result<(),
     let permissions = work.join("permissions");
     let data = work.join("boot");
     fs::create_dir_all(&settings).map_err(|error| error.to_string())?;
-    let sku = first_boot(
+    let (sku, admission) = first_boot(
         ctx,
         &work,
         &data,
@@ -352,7 +357,7 @@ pub fn run_isolated_template(ctx: &Ctx, config: &IsolatedTemplate) -> Result<(),
     let name = data::template_name(&identity, sku.as_deref());
     let from = DataImage::attach(&data, None)?;
     let mut volume_files = vec![PathBuf::from(DALVIK_CACHE)];
-    volume_files.extend(check(from.dir(), &settings)?);
+    volume_files.extend(check(from.dir(), &settings, &config.image, &admission)?);
     let settings_files: Vec<_> = SETTINGS
         .iter()
         .flat_map(|(file, reserve)| [Some(*file), *reserve])
@@ -459,7 +464,19 @@ fn first_boot(
     permissions: &Path,
     log: &mut Log,
     isolated: Option<&IsolatedTemplate>,
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, stubs::Admission), String> {
+    let template = isolated.map_or_else(
+        || aim_paths::userdata().join(EMPTY_TEMPLATE),
+        |config| config.output.join("inputs").join(EMPTY_TEMPLATE),
+    );
+    let input = DataImage::attach(dir, Some(&template))?;
+    let admission = stubs::Admission::read(input.dir())?;
+    input.detach()?;
+    fs::write(
+        work.join("pre-boot-stub-admission.json"),
+        serde_json::to_vec_pretty(&admission.receipt()).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     let image = isolated.map_or_else(aim_paths::derived_image, |config| config.image.clone());
     let activation =
         image.join(aim_android_image::system_server::NATIVE_SERVICES.trim_start_matches('/'));
@@ -628,7 +645,7 @@ fn first_boot(
         ));
     }
     drop(session);
-    Ok(sku)
+    Ok((sku, admission))
 }
 
 /// Copies `files` from the data volume at `dir` into `dest` once every
@@ -808,7 +825,12 @@ fn permission_completion(
 /// (the stubs' decompressed copies in `/data/app`, which update a system
 /// package, and no package an installer added) and no verifier identity.
 /// Returns the stubs' directories.
-fn check(volume: &Path, settings: &Path) -> Result<Vec<PathBuf>, String> {
+fn check(
+    volume: &Path,
+    settings: &Path,
+    image: &Path,
+    admission: &stubs::Admission,
+) -> Result<Vec<PathBuf>, String> {
     let cache = volume.join(CACHE);
     let caches: Vec<String> = fs::read_dir(&cache)
         .map_err(|e| format!("{}: {e}", cache.display()))?
@@ -860,6 +882,7 @@ fn check(volume: &Path, settings: &Path) -> Result<Vec<PathBuf>, String> {
         }
         stubs.push(dir);
     }
+    stubs::validate(image, volume, settings, &root, admission)?;
     Ok(stubs)
 }
 
@@ -1056,3 +1079,6 @@ mod completion_tests {
         assert!(!take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap());
     }
 }
+
+#[path = "userdata/stubs.rs"]
+mod stubs;
