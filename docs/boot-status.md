@@ -412,9 +412,23 @@ privileged launcher, drops actual UID/GID/groups/capabilities before executing
 original app_process, and checks the resulting Binder caller identity. Weak
 Boot capture and ordered native/boot/data cleanup prevent the retained-owner
 cycle and preserve original failure evidence. Two lifecycle tests and the
-authored NDK launcher compilation pass; actual Android replay is not run.
-The kernel admission guard remains unchanged.
-Full49/10 gates remain unrun.
+authored NDK launcher compilation pass. The corrected099 runtime replay
+now reaches original boot and actual native Binder with UID10100/PID35009.
+Credential proofs confirm UID/GID10100 for the app and1000 for the original
+permission reader, with empty groups and capabilities. The original reader
+then exceeds its15-second bound, so proxy semantic acceptance still fails.
+Cleanup preserves the original error and data without a double panic; all
+owned PIDs and image attachments are gone. The kernel admission guard
+remains unchanged.
+A fresh roster has63 required manual bodies: seven host bodies pass, the
+proxy body fails, and55 are unrun; full aggregate acceptance remains unproven.
+The suspension fixture now uses a shared birth-bound Binder readiness owner
+and bounded property queries within the300-second boot budget (#1285). Two
+actual host Binder tests and fixture compilation pass; its Android body is
+unrun. A separate first Native099 template fails initial getprop admission
+with EPERM before constructor/boot/svc assertions (#1286), despite the same
+producer and image inputs previously passing on4bb. Its owned processes and
+attachments are gone; earlier4bb shutdown evidence remains valid for4bb.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass

@@ -1,6 +1,17 @@
 //! Disposable original-runtime fixture support.
 #[path = "cohort.rs"]
 pub mod cohort;
+#[path = "../../../aim-build/src/nodes/binder_ready.rs"]
+mod binder_ready;
+
+struct QueryChild(std::process::Child);
+impl Drop for QueryChild {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) { let _ = self.0.kill(); }
+        let _ = self.0.wait();
+    }
+}
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -58,6 +69,52 @@ impl Boot {
             .args(["--binder",&format!("dev.aim.guest-init.{guest}.binder")])
             .args(["--identity-text",&format!("uid\t{uid}\ngid\t{uid}\n")]);
         Ok(command)
+    }
+    /// Wait for the launched init's authenticated Binder owner and actual Android boot.
+    pub fn wait_ready(&self, limit: std::time::Duration) -> Result<(), String> {
+        use std::{io::Read, time::{Duration, Instant}};
+        let state = fs::read_to_string(format!("{}.aimctl/state", self.data.display()))
+            .map_err(|error| format!("boot state: {error}"))?;
+        let pid: i32 = state.lines().find_map(|line| line.strip_prefix("guest="))
+            .ok_or("boot init PID missing")?.parse().map_err(|error| format!("boot init PID: {error}"))?;
+        let init = aim_storage::process_namespace::ProcessIdentity::running(pid)
+            .map_err(|error| format!("boot init birth: {error}"))?;
+        let runtime = aim_storage::data::runtime_of(&self.data);
+        let name = format!("dev.aim.guest-init.{pid}.binder");
+        let deadline = Instant::now() + limit;
+        let mut query = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(format!("Android boot incomplete after {limit:?}")); }
+            if binder_ready::poll(&runtime, init, &name, remaining.as_millis().min(20) as u32)? {
+                let output = format!("{}.ready-{query}.stdout", self.data.display());
+                let errors = format!("{}.ready-{query}.stderr", self.data.display());
+                query += 1;
+                let stdout = fs::File::create(&output).map_err(|error| error.to_string())?;
+                let stderr = fs::File::create(&errors).map_err(|error| error.to_string())?;
+                let mut child = QueryChild(self.command().args(["shell", "getprop", "sys.boot_completed"])
+                    .stdout(stdout).stderr(stderr).spawn().map_err(|error| error.to_string())?);
+                let query_deadline = Instant::now() + remaining.min(Duration::from_secs(15));
+                let status = loop {
+                    if let Some(status) = child.0.try_wait().map_err(|error| error.to_string())? { break status; }
+                    if Instant::now() >= query_deadline { return Err("boot property query timed out".into()); }
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                let read = |path: &str| -> Result<String, String> {
+                    let mut bytes = Vec::new();
+                    fs::File::open(path).map_err(|error| error.to_string())?.take(65537)
+                        .read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+                    if bytes.len() > 65536 { return Err("boot property output exceeds 64KiB".into()); }
+                    String::from_utf8(bytes).map_err(|error| error.to_string())
+                };
+                if !status.success() { return Err(format!("boot property query {status}: {}", read(&errors)?)); }
+                if read(&output)?.trim() == "1" {
+                    if !init.is_live() { return Err("boot init exited during property query".into()); }
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
     pub fn start_command(&self) -> Command {
         let inputs = self.inputs();

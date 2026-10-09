@@ -4,7 +4,7 @@ use aim_services::package::restrictions::dialog::DialogInfo;
 use std::{
     fs,
     process::Command,
-    time::{Duration, Instant},
+    time::Duration,
 };
 mod common {
     pub mod java;
@@ -78,22 +78,7 @@ fn suspension_parameters_match_original_xml_owners() {
     .unwrap();
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let result = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "disposable boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("suspension oracle boot readiness");
     let directory = boot.data.join("data/local/tmp/suspension-dialogs");
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
