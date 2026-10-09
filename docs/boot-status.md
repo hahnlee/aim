@@ -100,8 +100,16 @@ matches current signer certificates to the already verified APK (#1233). Four
 focused tests cover actual crypto/admission and live flag owner errors; complete
 Java/AIDL, D8 and original-image linkage pass. Official SDM replay remains NOT RUN.
 The separate original-PMS svc reproduction confirms actual Svc execution with
-no output or shell-v2 exit frame before the 140-second bound (#1227); it does not
-distinguish Binder wait from ART internal wait.
+no output or shell-v2 exit frame before the 140-second bound (#1227). The isolated
+901eea52 carrier-owner runtime still times out untraced. A later diagnostic
+SIGQUIT to a freshly verified owned Svc PID captures original ART main in
+DestroyJavaVM/Runtime destruction waiting on SignalCatcher pthread_join; the
+client then exits zero. This is post-signal evidence, not an untraced pass or
+proof of the pre-signal wait location. All diagnostic processes and mounts are
+reaped. Standalone original-bionic regressions now pass thread-directed blocked
+SIGQUIT before/after wait readiness, competing-waiter isolation, SI_TKILL and
+bounded join, plus the separate external SIGQUIT case. These do not reproduce
+the managed ART hang; no production signal defect is demonstrated.
 
 Isolated acceptance fixes retain the running pair unchanged. The complete PM
 library gate passes 840 tests with zero failures and eleven ignored tests not

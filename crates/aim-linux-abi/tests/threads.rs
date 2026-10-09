@@ -142,3 +142,31 @@ fn signal_from_another_process_reaches_sigwait() {
     assert_eq!(lines.next().unwrap().unwrap(), "got 3");
     assert!(child.wait().unwrap().success());
 }
+
+/// Original bionic pthread_kill targets its clone TID, even while SIGQUIT is blocked.
+#[test]
+fn directed_blocked_sigquit_wakes_and_joins_its_original_bionic_target() {
+    let r = root().expect("required pinned original image and NDK: NOT RUN if missing");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_linux-run"))
+        .arg("--root").arg(&r.0)
+        .args(["/data/local/tmp/threads", "directed_sigquit_join"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if child.try_wait().unwrap().is_some() { break; }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!("directed wait/join exceeded 10 seconds: {}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && text.contains("queued-before-wait") &&
+        text.contains("after-wait-ready") && text.contains("ALL PASSED"),
+        "{:?}\n{text}\n{}", output.status, String::from_utf8_lossy(&output.stderr));
+    eprintln!("{text}");
+}
