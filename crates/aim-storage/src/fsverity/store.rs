@@ -112,6 +112,15 @@ fn hex(bytes:&[u8])->String{bytes.iter().map(|byte|format!("{byte:02x}")).collec
 fn binding(identity:Identity)->[u8;36]{identity.to_bytes()}
 
 pub struct Admission{store:Store,inode:Inode,admission:crate::inode_lease::Admission}
+/// Retain the exact store and inode used to obtain admission; every lock still
+/// validates the real inode and acquires its cross-process admission lock.
+pub struct RetainedAdmission{store:Store,inode:Inode}
+impl RetainedAdmission{
+ pub fn lock(&self)->Result<Admission>{
+  let admission=self.inode.admission()?;
+  Ok(Admission{store:self.store.clone(),inode:self.inode.clone(),admission})
+ }
+}
 pub struct EnableGuard{store:Store,inode:Inode,_slot:EnableSlot,_writers:ExclusiveLease}
 pub struct WriterExclusion{inode:Inode,writers:ExclusiveLease}
 struct Temporary(PathBuf);
@@ -124,6 +133,7 @@ impl Prepared{
  pub fn metadata_view(&self)->Result<Metadata>{Metadata::from_file(self.file.try_clone()?,&binding(self.identity))}
 }
 impl Admission{
+ pub fn retain(&self)->RetainedAdmission{RetainedAdmission{store:self.store.clone(),inode:self.inode.clone()}}
  pub fn identity(&self)->Identity{self.inode.identity()}
  pub fn enabled(&self)->Result<Option<Metadata>>{self.store.lookup(self.identity())}
  pub fn writer_lease(&self)->Result<WriterLease>{

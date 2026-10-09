@@ -3,7 +3,7 @@
 mod tree;
 mod store;
 pub use tree::{BuildOptions, Descriptor, build};
-pub use store::{Admission,EnableGuard,Metadata,Prepared,Store,WriterExclusion};
+pub use store::{Admission,EnableGuard,Metadata,Prepared,RetainedAdmission,Store,WriterExclusion};
 pub use crate::inode_lease::Identity;
 use std::io;
 

@@ -33,14 +33,14 @@ fn load_configuration(runtime:&Path)->Result<Option<Configuration>,Errno>{
   if !path.is_absolute()||!std::fs::symlink_metadata(&path).map_err(io)?.is_dir()||std::fs::canonicalize(&path).map_err(io)?!=path{return Err(errno::EINVAL);}
   let leases=runtime.join("fs-verity-leases");let store=Arc::new(Store::new(&path,&leases).map_err(core)?);Ok(Some(Configuration{store,leases}))
 }
-pub struct Description{pub flags:u64,pub identity:Identity,pub writer:Option<WriterLease>,pub store:Arc<Store>,inode:Inode}
+pub struct Description{pub flags:u64,pub identity:Identity,pub writer:Option<WriterLease>,pub store:Arc<Store>,inode:Inode,admission:aim_storage::fsverity::RetainedAdmission}
 impl Description{
  pub fn new(fd:BorrowedFd<'_>,flags:u64,store:Arc<Store>)->Result<Arc<Self>,Errno>{
   let configuration=configuration()?.ok_or(errno::EOPNOTSUPP)?;
   let inode=Inode::open(&configuration.leases,fd).map_err(io)?;
-  let admission=store.lock_inode(&fd).map_err(core)?;let identity=admission.identity();
+  let admission=store.lock_inode(&fd).map_err(core)?;let identity=admission.identity();let retained=admission.retain();
   let writer=if matches!(flags&3,1|2){Some(admission.writer_lease().map_err(core)?)}else{None};
-  Ok(Arc::new(Self{flags:flags&!super::fs::O_CLOEXEC,identity,writer,store,inode}))
+  Ok(Arc::new(Self{flags:flags&!super::fs::O_CLOEXEC,identity,writer,store,inode,admission:retained}))
  }
  pub fn check_write(&self)->Result<(),Errno>{if !matches!(self.flags&3,1|2){return Err(errno::EBADF);}if self.store.lookup(self.identity).map_err(core)?.is_some(){return Err(errno::EPERM);}Ok(())}
 
@@ -80,7 +80,8 @@ pub fn restore(fd:i32,flags:u64,writer_fd:Option<i32>)->Result<Arc<Description>,
   }).map_err(io)?;
   Some(inode.adopt_private_writer(carrier).map_err(io)?)
  }else{None};
- Ok(Arc::new(Description{flags,identity,writer,store:configuration.store.clone(),inode}))
+ let admission=configuration.store.lock_inode(&source).map_err(core)?.retain();
+ Ok(Arc::new(Description{flags,identity,writer,store:configuration.store.clone(),inode,admission}))
 }
 pub fn import(fd:i32,metadata:&aim_binder_host::wire::RegularMetadata,writer:Option<aim_binder_host::regular_file::WriterPort>)->Result<Arc<Description>,Errno>{
  let Some(configuration)=configuration()?else{return Err(errno::EOPNOTSUPP)};
@@ -96,7 +97,8 @@ pub fn import(fd:i32,metadata:&aim_binder_host::wire::RegularMetadata,writer:Opt
   let lease=inode.adopt_private_writer(carrier).map_err(io)?;
   if configuration.store.lookup(identity).map_err(core)?.is_some(){return Err(errno::EPERM);}Some(lease)
  }else{None};
- Ok(Arc::new(Description{flags:metadata.flags,identity,writer,store:configuration.store.clone(),inode}))
+ let admission=configuration.store.lock_inode(&source).map_err(core)?.retain();
+ Ok(Arc::new(Description{flags:metadata.flags,identity,writer,store:configuration.store.clone(),inode,admission}))
 }
 
 unsafe extern "C"{static mach_task_self_:u32;fn mach_vm_write(task:u32,address:u64,data:usize,length:u32)->i32;}
@@ -113,7 +115,7 @@ impl Description{
   if self.flags&3==3||write&&self.flags&3==0||!write&&self.flags&3==1{return Err(errno::EBADF);}
   if Identity::from_fd(fd).map_err(io)?!=self.identity{return Err(errno::EBADF);}
   let _offset=if position.is_none(){Some(self.inode.offset_lock().map_err(io)?)}else{None};
-  let admission=self.store.lock_inode(&fd).map_err(core)?;
+  let admission=self.admission.lock().map_err(core)?;
   let enabled=admission.enabled().map_err(core)?;
   if write&&enabled.is_some(){return Err(errno::EPERM);}
   let Some(metadata)=enabled else{
@@ -199,3 +201,7 @@ mod offset_tests {
         assert_eq!(u64::from_le_bytes(bytes), 2);
     }
 }
+
+#[cfg(test)]
+#[path = "regular_io_probe_tests.rs"]
+mod owner_cost_tests;
