@@ -57,7 +57,9 @@ impl MountNamespaces {
         for entry in selected {
             let source = map.lookup(&format!("/apex/{}", entry.module_name)).0;
             if !source.is_dir() { return Err(format!("bootstrap APEX {} is not activated", entry.module_name)); }
-            std::os::unix::fs::symlink(format!("/bootstrap-apex/{}", entry.module_name), view.join(&entry.module_name)).map_err(|error| error.to_string())?;
+            // Original libapexutil scans only DT_DIR mountpoints. The actual
+            // read-only source is selected by the explicit module mounts below.
+            fs::create_dir(view.join(&entry.module_name)).map_err(|error| error.to_string())?;
             for target in [format!("/apex/{}", entry.module_name), format!("/bootstrap-apex/{}", entry.module_name)] {
                 bootstrap_map.add(MapEntry { guest: target, host: source.clone(), kind: MapKind::ReadOnly });
             }
@@ -161,6 +163,16 @@ mod tests{
         let base=layout.path_map();let data=base.lookup("/data").0;fs::create_dir_all(data.join("alternate")).unwrap();let bootstrap=Namespace::open(&layout.runtime,"actual-bootstrap").unwrap();bootstrap.initialize(&base.to_file_text()).unwrap();
         process_namespace::InitRegistration::register(&table,process,bootstrap.id()).unwrap();process_namespace::register_mount_namespace(&table,process,bootstrap.id()).unwrap();
         let(owner,map)=MountNamespaces::setup(&layout,&base,&entries,true).unwrap();let default=owner.default.clone();let bootstrap=owner.bootstrap.clone();
+        let view=layout.runtime.join("bootstrap-apex-view");
+        let path=std::ffi::CString::new(view.as_os_str().as_encoded_bytes()).unwrap();
+        let directory=unsafe{libc::opendir(path.as_ptr())};assert!(!directory.is_null());
+        let mut discovered=BTreeSet::new();
+        loop{let entry=unsafe{libc::readdir(directory)};if entry.is_null(){break;}let name=unsafe{std::ffi::CStr::from_ptr((*entry).d_name.as_ptr())}.to_str().unwrap();if name.starts_with('.'){continue;}if name=="apex-info-list.xml"{continue;}
+            assert_eq!(unsafe{(*entry).d_type},libc::DT_DIR,"original GetActivePackages requires directory: {name}");discovered.insert(name.to_owned());
+        }
+        assert_eq!(unsafe{libc::closedir(directory)},0);
+        assert_eq!(discovered,BTreeSet::from(["com.android.runtime","com.android.i18n","com.android.tzdata","com.android.virt","example.vendor"].map(str::to_owned)));
+        assert!(!discovered.contains("example.regular"));
         let before=bootstrap.read().unwrap();assert_ne!(before.mounts[0].id,default.read().unwrap().mounts[0].id);
         let default_before=default.read().unwrap();
         for entry in &entries {
