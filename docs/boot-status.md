@@ -52,14 +52,21 @@ redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance.
 
-The frozen b04c9e67 original/native pair is running the same 66-module CTS
-campaign with pinned runtime and harness inputs. Native parsing reports 9 pass /
-2 fail against original 11 / 0 (#1110). Native setting reports 2 / 0 and
-UsesLibrary 3 / 0. Native DexMetadata reports 1 / 9 (#1225, #1226). Host classpath
+The frozen b04c9e67 original/native pair uses the same pinned 66-module CTS
+inputs. The original campaign is terminal and all owned processes are reaped:
+26 pass / 41 fail / five assumptions in verified associated XML, plus ten
+DexMetadata passes retained separately after an association error. Seven rows
+are recorded and 59 remain not-run-complete; this is not acceptance. Later
+original commands cannot load libdl after pre-reboot dexopt namespace changes
+(#1236); Compilation APK/DM writes also fail fstat with ENODATA (#1235).
+
+The native campaign remains live. Parsing reports 9 pass / 2 fail against
+original 11 / 0 (#1110); Setting 2 / 0, UsesLibrary 3 / 0, DexMetadata 1 / 9
+(#1225, #1226), Compilation 3 / 26 (#1232, #1233, #1234, #1061). Host classpath
 failure (#1222), concurrent XML association failure (#1223) and actual device
-preparation timeout (#1227) leave affected campaign rows NOT RUN. Original
-zygote SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate
-runtime failures. Neither campaign has completed or passed the acceptance gate.
+preparation timeout (#1227) leave affected rows NOT RUN. Original zygote
+SIGABRT (#1224) and native adbd fdsan abort (#1221) remain separate failures.
+Neither campaign proves the acceptance gate.
 
 Two native empty-data templates publish 70 guest files each and reach boot
 completion at 196.2 and 196.8 seconds under concurrent load. Parity is not
