@@ -3250,6 +3250,7 @@ mod incoming_control_tests {
     }
     #[test]
     fn incoming_control_closes_rights_after_rest_read_error_and_truncation() {
+        if fdtab::isolated_kernel_test("sys::net::incoming_control_tests::incoming_control_closes_rights_after_rest_read_error_and_truncation") { return; }
         let name = format!("dev.aim.test.incoming-scm.{}",std::process::id());
         let _server = aim_binder_host::server::Server::start(&name).unwrap();
         super::super::binder::init(&name).unwrap();
@@ -3258,6 +3259,7 @@ mod incoming_control_tests {
         let incoming = receive_control(sender.as_raw_fd(), receiver.as_raw_fd(), proof.as_raw_fd());
         let received = incoming.owned[0].0;
         assert!(!fdtab::visible(received));
+        assert_eq!(unsafe { libc::fcntl(received, libc::F_GETFD) } & libc::FD_CLOEXEC, 0,"ordinary raw SCM receipt remains inheritable in this kernel instance");
         drop(proof);
         let file = std::fs::File::open("/dev/null").unwrap();
         let mut byte = 0u8;

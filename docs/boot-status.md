@@ -839,8 +839,15 @@ requests reboot,bpfloader-failed (#1206). The original netbpfload launches
 successfully, then aborts via bionic fdsan when a returned BPF object FD is
 rejected by generic close as EBADF. A bounded original trace verifies OBJ_GET
 returns FD11, no intervening close, then close(11) fails and fdsan reports
-double-close. BPF FD producers lack guest publication; the owning fix and
-actual boot replay remain pending. Full image/CTS acceptance remains pending.
+double-close. BPF FD producers lacked guest publication. The owner now initializes map,
+program and BTF objects privately, then publishes a new CLOEXEC guest duplicate
+under lifecycle admission. Input object commands retain the admitted pin, and
+invalid info buffers return EFAULT. Three focused object/pin/reopen/close and
+error-cleanup checks pass. A concurrent raw rights receipt intentionally lacking
+CLOEXEC is tested in a fresh kernel process, preserving the actual EOF assertion
+without unrelated helper inheritance. The coherent default-parallel ABI suite
+passes 235/0 with thirteen ignored. Rebuilt original netbpfload and actual boot
+replay remain pending; broader BPF execution/hook gaps remain #202. Full image/CTS acceptance remains pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains

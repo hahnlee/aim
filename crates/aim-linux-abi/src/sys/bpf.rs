@@ -24,13 +24,16 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::{ffi::OsStrExt,fs::OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::errno::{self, E2BIG, EBADF, EEXIST, EFAULT, EINVAL, ENOENT, EPERM};
 use crate::vfs::{self, LINUX_AT_FDCWD};
+use super::fdtab;
+use std::os::fd::{AsRawFd,FromRawFd};
+use aim_storage::private_fd::PrivateFile;
 
 const MAP_CREATE: u64 = 0;
 const MAP_LOOKUP_ELEM: u64 = 1;
@@ -244,36 +247,41 @@ fn objects_dir() -> PathBuf {
 }
 
 /// A new object file of `data_len` bytes plus the header; returns its fd.
-fn create_object(mut header: Header, data_len: usize) -> i64 {
-    // A unique name: the pid survives exec, a counter does not.
-    let Ok(tmpl) = CString::new(objects_dir().join("obj.XXXXXX").as_os_str().as_bytes()) else {
-        return -(EINVAL as i64);
-    };
-    let mut tmpl = tmpl.into_bytes_with_nul();
-    // SAFETY: mkstemp fills in our template and creates the file.
-    let fd = unsafe { libc::mkstemp(tmpl.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return -(errno::last() as i64);
-    }
-    // SAFETY: plain fcntl on our new fd.
-    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: fstat of the file we created.
-    unsafe { libc::fstat(fd, &mut st) };
-    header.id = st.st_ino as u32;
-    header.data_len = data_len as u64;
-    // SAFETY: sizing the file and writing the header after the data.
-    unsafe {
-        if libc::ftruncate(fd, (data_len + HEADER) as i64) != 0
-            || libc::pwrite(fd, (&raw const header).cast(), HEADER, data_len as i64)
-                != HEADER as isize
-        {
-            let e = errno::last();
-            libc::close(fd);
-            return -(e as i64);
-        }
-    }
-    fd as i64
+fn create_object(mut header: Header, data_len: usize, initial:Option<&[u8]>) -> i64 {
+    let Ok(tmpl)=CString::new(objects_dir().join("obj.XXXXXX").as_os_str().as_bytes())else{return -(EINVAL as i64)};
+    let mut tmpl=tmpl.into_bytes_with_nul();
+    let mut created=false;
+    let file=match PrivateFile::allocate(||{
+        let fd=unsafe{libc::mkstemp(tmpl.as_mut_ptr().cast())};
+        if fd<0{return Err(std::io::Error::last_os_error());}
+        created=true;
+        Ok(unsafe{std::fs::File::from_raw_fd(fd)})
+    }){Ok(file)=>file,Err(error)=>{if created{unsafe{libc::unlink(tmpl.as_ptr().cast());}}return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)}};
+    let result=(||{
+        let fd=file.as_raw_fd();
+        if unsafe{libc::fcntl(fd,libc::F_SETFD,libc::FD_CLOEXEC)}<0{return Err(errno::last());}
+        let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+        if unsafe{libc::fstat(fd,&mut stat)}<0{return Err(errno::last());}
+        header.id=stat.st_ino as u32;header.data_len=data_len as u64;
+        let length=data_len.checked_add(HEADER).filter(|length|*length<=i64::MAX as usize).ok_or(E2BIG)?;
+        if unsafe{libc::ftruncate(fd,length as i64)}<0{return Err(errno::last());}
+        let count=unsafe{libc::pwrite(fd,(&raw const header).cast(),HEADER,data_len as i64)};
+        if count!=HEADER as isize{return Err(if count<0{errno::last()}else{errno::EIO});}
+        if let Some(bytes)=initial{let count=unsafe{libc::pwrite(fd,bytes.as_ptr().cast(),bytes.len(),0)};if count!=bytes.len()as isize{return Err(if count<0{errno::last()}else{errno::EIO});}}
+        Ok(publish_object(file.as_raw_fd()))
+    })();
+    let result=result.unwrap_or_else(|error|-(error as i64));
+    if result<0{unsafe{libc::unlink(tmpl.as_ptr().cast());}}result
+}
+/// Duplicate a fully initialized private description into a new guest slot.
+fn publish_object(private:i32)->i64{
+    publish_object_with(private,fdtab::publish_typed_guest)
+}
+fn publish_object_with(private:i32,publish:impl FnOnce(i32)->Result<(),errno::Errno>)->i64{
+    let _guard=fdtab::lifecycle();
+    let fd=unsafe{libc::fcntl(private,libc::F_DUPFD_CLOEXEC,0)};
+    if fd<0{return -(errno::last()as i64);}
+    match publish(fd){Ok(())=>fd as i64,Err(error)=>{unsafe{libc::close(fd);}-(error as i64)}}
 }
 
 /// The header of object file `fd`, if it is one.
@@ -415,7 +423,7 @@ fn map_create(attr: &[u32]) -> i64 {
         data_len: 0,
         _pad: [0; 56],
     };
-    create_object(header, data_len)
+    create_object(header, data_len,None)
 }
 
 fn elem(cmd: u64, a: &[u64]) -> i64 {
@@ -528,7 +536,7 @@ fn btf_load(btf: u64, size: u32) -> i64 {
         return -(EINVAL as i64);
     }
     // SAFETY: the guest's BTF blob.
-    let data = unsafe { std::slice::from_raw_parts(btf as *const u8, size as usize) };
+    let data=match super::user_memory::read_exact(btf,size as usize){Ok(data)=>data,Err(error)=>return -(error as i64)};
     let header = Header {
         magic: MAGIC,
         kind: KIND_BTF,
@@ -545,12 +553,7 @@ fn btf_load(btf: u64, size: u32) -> i64 {
         data_len: 0,
         _pad: [0; 56],
     };
-    let fd = create_object(header, size as usize);
-    if fd >= 0 {
-        // SAFETY: writing the blob at the start of our object file.
-        unsafe { libc::pwrite(fd as i32, data.as_ptr().cast(), data.len(), 0) };
-    }
-    fd
+    create_object(header,size as usize,Some(&data))
 }
 
 fn prog_load(a: &[u32]) -> i64 {
@@ -576,7 +579,7 @@ fn prog_load(a: &[u32]) -> i64 {
         data_len: 0,
         _pad: [0; 56],
     };
-    create_object(header, 0)
+    create_object(header, 0,None)
 }
 
 /// The host path of the object behind `fd`.
@@ -616,17 +619,9 @@ fn obj_get(path: u64) -> i64 {
         Ok(r) => r,
         Err(e) => return -(e as i64),
     };
-    // SAFETY: opening the pinned object.
-    let fd = unsafe { libc::open(r.host.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return -(errno::last() as i64);
-    }
-    if read_header(fd).is_none() {
-        // SAFETY: closing what we opened.
-        unsafe { libc::close(fd) };
-        return -(EPERM as i64);
-    }
-    fd as i64
+    let file=match PrivateFile::allocate(||std::fs::File::options().read(true).write(true).custom_flags(libc::O_CLOEXEC).open(std::ffi::OsStr::from_bytes(r.host.as_bytes()))){Ok(file)=>file,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)};
+    if read_header(file.as_raw_fd()).is_none(){return -(EPERM as i64);}
+    publish_object(file.as_raw_fd())
 }
 
 fn info_by_fd(fd: i32, len_p: u64, info: u64) -> i64 {
@@ -663,13 +658,10 @@ fn info_by_fd(fd: i32, len_p: u64, info: u64) -> i64 {
         out[64..80].copy_from_slice(&h.name);
         96
     };
-    // SAFETY: the guest's info_len and info buffer.
-    unsafe {
-        let len = (len_p as *const u32).read_unaligned() as usize;
-        let n = len.min(used);
-        std::ptr::copy_nonoverlapping(out.as_ptr(), info as *mut u8, n);
-        (len_p as *mut u32).write_unaligned(n as u32);
-    }
+    let bytes=match super::user_memory::read_exact(len_p,4){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
+    let n=(u32::from_ne_bytes(bytes.try_into().unwrap())as usize).min(used);
+    if let Err(error)=super::user_memory::write_exact(info,&out[..n]){return -(error as i64);}
+    if let Err(error)=super::user_memory::write_exact(len_p,&(n as u32).to_ne_bytes()){return -(error as i64);}
     0
 }
 
@@ -680,27 +672,31 @@ pub fn bpf(a: [u64; 6]) -> i64 {
     }
     // bpf_attr is at most a few hundred bytes; read what the guest gave.
     let words = size.min(256) / 4;
+    let bytes=match super::user_memory::read_exact(attr,words*4){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)};
     // SAFETY: the guest's bpf_attr of `size` bytes.
     let u32s: Vec<u32> = (0..words.max(24))
         .map(|i| {
             if i < words {
-                unsafe { (attr as *const u32).add(i).read_unaligned() }
+                u32::from_ne_bytes(bytes[i*4..i*4+4].try_into().unwrap())
             } else {
                 0
             }
         })
         .collect();
     let u64_at = |w: usize| u32s[w] as u64 | (u32s[w + 1] as u64) << 32;
+    let fd_word=match cmd{MAP_LOOKUP_ELEM|MAP_UPDATE_ELEM|MAP_DELETE_ELEM|MAP_GET_NEXT_KEY|OBJ_GET_INFO_BY_FD|MAP_FREEZE=>Some(0),OBJ_PIN=>Some(2),_=>None};
+    let pinned=if let Some(word)=fd_word{match fdtab::pin_guest(u32s[word]as i32){Ok(pin)=>Some(pin),Err(error)=>return -(error as i64)}}else{None};
+    let object_fd=pinned.as_ref().map(|pin|pin.descriptor().as_raw_fd());
     match cmd {
         MAP_CREATE => map_create(&u32s),
         MAP_LOOKUP_ELEM | MAP_UPDATE_ELEM | MAP_DELETE_ELEM | MAP_GET_NEXT_KEY => {
             // map_fd, pad, key, value/next_key, flags
-            elem(cmd, &[u32s[0] as u64, u64_at(2), u64_at(4), u64_at(6)])
+            elem(cmd, &[object_fd.unwrap()as u64, u64_at(2), u64_at(4), u64_at(6)])
         }
         PROG_LOAD => prog_load(&u32s),
         // btf, btf_log_buf, btf_size
         BTF_LOAD => btf_load(u64_at(0), u32s[4]),
-        OBJ_PIN => obj_pin(u64_at(0), u32s[2] as i32),
+        OBJ_PIN => obj_pin(u64_at(0), object_fd.unwrap()),
         OBJ_GET => obj_get(u64_at(0)),
         // Attached programs never run.
         PROG_ATTACH | PROG_DETACH => 0,
@@ -708,10 +704,10 @@ pub fn bpf(a: [u64; 6]) -> i64 {
         OBJ_GET_INFO_BY_FD => {
             // bpf_fd, info_len, info
             let len_p = attr + 4;
-            info_by_fd(u32s[0] as i32, len_p, u64_at(2))
+            info_by_fd(object_fd.unwrap(), len_p, u64_at(2))
         }
         MAP_FREEZE => {
-            let fd = u32s[0] as i32;
+            let fd = object_fd.unwrap();
             match read_header(fd) {
                 Some((h, st)) if h.kind == KIND_MAP => {
                     let one = 1u32.to_ne_bytes();
@@ -731,6 +727,38 @@ pub fn bpf(a: [u64; 6]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returned_objects_are_guest_owned_cloexec_and_reopened_with_fresh_visibility(){
+        if fdtab::isolated_kernel_test("sys::bpf::tests::returned_objects_are_guest_owned_cloexec_and_reopened_with_fresh_visibility"){return;}
+        let(_view,root)=vfs::test_view();
+        let pin=root.join("data/bpf-publication-pin");let guest=std::ffi::CString::new("/data/bpf-publication-pin").unwrap();
+        let mut map=[0u32;24];map[..5].copy_from_slice(&[ARRAY,4,8,2,0]);
+        let mut prog=[0u32;24];prog[0]=1;prog[1]=1;
+        let btf=[0x9fu8,0xeb,1,0,24,0,0,0];let mut btf_attr=[0u32;24];btf_attr[..2].copy_from_slice(&ptr(btf.as_ptr()));btf_attr[4]=btf.len()as u32;
+        for(cmd,attr)in [(MAP_CREATE,&mut map),(PROG_LOAD,&mut prog),(BTF_LOAD,&mut btf_attr)]{
+            let fd=call(cmd,attr);assert!(fd>=0,"command {cmd} returned {fd}");assert!(fdtab::visible(fd as i32));
+            assert_eq!(super::super::fs::fcntl([fd as u64,1,0,0,0,0]),libc::FD_CLOEXEC as i64);
+            let mut before=[0u64;16];assert_eq!(super::super::fs::fstat([fd as u64,before.as_mut_ptr()as u64,0,0,0,0]),0);
+            let mut info=[0u8;96];let mut info_attr=[0u32;24];info_attr[0]=fd as u32;info_attr[1]=96;info_attr[2..4].copy_from_slice(&ptr(info.as_mut_ptr()));assert_eq!(call(OBJ_GET_INFO_BY_FD,&mut info_attr),0);
+            info_attr[2..4].copy_from_slice(&ptr(1usize as*const u8));assert_eq!(call(OBJ_GET_INFO_BY_FD,&mut info_attr),-(EFAULT as i64));
+            info_attr[2..4].copy_from_slice(&ptr(info.as_mut_ptr()));
+            let held=fdtab::pin_guest(fd as i32).unwrap();info_attr[0]=held.descriptor().as_raw_fd()as u32;assert_eq!(call(OBJ_GET_INFO_BY_FD,&mut info_attr),-(EBADF as i64));drop(held);
+            let mut pin_attr=[0u32;24];pin_attr[..2].copy_from_slice(&ptr(guest.as_ptr().cast()));pin_attr[2]=fd as u32;assert_eq!(call(OBJ_PIN,&mut pin_attr),0);
+            assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);assert!(!fdtab::visible(fd as i32));
+            let mut reopen=[0u32;24];reopen[..2].copy_from_slice(&ptr(guest.as_ptr().cast()));let reopened=call(OBJ_GET,&mut reopen);assert!(reopened>=0);assert!(fdtab::visible(reopened as i32));
+            let mut after=[0u64;16];assert_eq!(super::super::fs::fstat([reopened as u64,after.as_mut_ptr()as u64,0,0,0,0]),0);assert_eq!(&before[..2],&after[..2]);
+            assert_eq!(super::super::fs::fcntl([reopened as u64,1,0,0,0,0]),libc::FD_CLOEXEC as i64);
+            assert_eq!(super::super::fs::close([reopened as u64,0,0,0,0,0]),0);std::fs::remove_file(&pin).unwrap();
+        }
+        let mut unsupported=[0u32;24];assert_eq!(call(LINK_CREATE,&mut unsupported),-(EINVAL as i64));
+        let private=PrivateFile::allocate(||std::fs::File::open("/dev/null")).unwrap();
+        let mut rejected=-1;
+        assert_eq!(publish_object_with(private.as_raw_fd(),|fd|{rejected=fd;super::super::fd_visibility::hide(fd)?;fdtab::publish_typed_guest(fd)}),-(EBADF as i64));
+        assert_eq!(unsafe{libc::fcntl(rejected,libc::F_GETFD)},-1);assert_eq!(errno::last(),EBADF);
+        super::super::fd_visibility::private_closed(rejected);
+        assert!(unsafe{libc::fcntl(private.as_raw_fd(),libc::F_GETFD)}>=0,"failed guest publication must retain private owner");
+    }
 
     fn call(cmd: u64, attr: &mut [u32]) -> i64 {
         bpf([
@@ -802,7 +830,7 @@ mod tests {
         let word = |i: usize| u32::from_ne_bytes(info[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!([word(0), word(2), word(3), word(4)], [HASH, 8, 4, 4]);
         // SAFETY: closing the map fd.
-        unsafe { libc::close(fd as i32) };
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
     }
 
     #[test]
@@ -830,6 +858,6 @@ mod tests {
             -(ENOENT as i64)
         );
         // SAFETY: closing the map fd.
-        unsafe { libc::close(fd as i32) };
+        assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
     }
 }
