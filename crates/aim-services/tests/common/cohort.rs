@@ -46,7 +46,7 @@ pub struct Cohort {
     bindings: BTreeMap<PathBuf,Stamp>,
     userdata_bindings: BTreeMap<PathBuf,Stamp>,
 }
-const BINARIES: [&str; 5] = ["linux-run", "guest-init", "aim-lock-holder", "aim-binderd", "aim-display"];
+const BINARIES: [&str; 6] = ["linux-run", "guest-init", "aim-lock-holder", "aim-pty-holder", "aim-binderd", "aim-display"];
 const IMAGE_FILES: [(&str, &str); 4] = [
     ("services", "system/framework/services.jar"), ("java", "system/framework/aim-services.jar"),
     ("native_services", "system/etc/aim/native-services"),
@@ -257,6 +257,8 @@ mod tests {
         fs::create_dir_all(new.parent().unwrap()).unwrap(); fs::copy(&old,&new).unwrap();
         fixture.text = fixture.text.replace(old.to_str().unwrap(),new.to_str().unwrap());
         assert!(fixture.read().unwrap_err().contains("mixed runtime sibling"));
+        let mut fixture = Fixture::new(); fixture.text = fixture.text.lines().filter(|l|!l.starts_with("runtime\taim-pty-holder\t")).collect::<Vec<_>>().join("\n");
+        assert!(fixture.read().unwrap_err().contains("missing runtime aim-pty-holder"));
         let mut fixture = Fixture::new(); fixture.text = fixture.text.lines().filter(|l|!l.starts_with("tool\taidl\t")).collect::<Vec<_>>().join("\n");
         assert!(fixture.read().unwrap_err().contains("missing tool aidl"));
         let mut fixture = Fixture::new();
