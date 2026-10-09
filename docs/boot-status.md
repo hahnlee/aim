@@ -666,10 +666,12 @@ six comparison checks and four host selection checks pass. Actual next-cohort
 invocation acceptance remains pending.
 Current Source has no aggregate
 cargo aim test --integration result. That command builds the complete graph,
-then runs normal test binaries; its 48 ignored integration tests and explicit
-original ART/PM library gates require separate invocation. The two HAL client
-inputs in #1156 have existing graph owners but have not been built in Source;
-historical Main logs and old skip markers do not prove this cohort ran. Full
+then runs normal test binaries; 49 ignored integration tests (48 service tests
+and one property ABI test) and ten explicit original ART/PM library gates
+require separate invocation. The two HAL client inputs in #1156 are now built
+in Source through their graph owners and verified as AArch64 ELF; their actual
+runtime gates remain not run. Historical Main logs and old skip markers do not
+prove this cohort ran. Full
 integration waits for frozen build/image leases; no missing-input skip is counted
 as executed. The standalone service-AIDL generation command is verified in
 the isolated C worktree: existing getUserIds code9 is unchanged and the appended
@@ -895,9 +897,15 @@ system filesystem. The original libprocessgroup first fails to read
 `/proc/mounts`: procfs symlink resolution omitted the dynamic mount-table node.
 That owner now resolves the link through the actual process mount namespace;
 a focused test verifies equality with `/proc/self/mounts`, live mount addition
-and removal, unchanged readlink and write rejection. Runtime cgroup recovery
-remains unverified. Neither attempt establishes SystemServer publication or
-native boot acceptance. Original Perfetto traced_probes
+and removal, unchanged readlink and write rejection (#1215). The committed
+`6ba935d0` C snapshot builds coherently (22 built, 11 fresh, zero failed;
+57.4 seconds). A new disposable managed boot reaches `sys.boot_completed=1`
+and original SystemServer boot phase 1000. Original shell reads both mounts
+paths with the actual cgroup2 entry; `netd` is found after real BPF readiness.
+`dumpsys --pid package` and `package_native` return native init PID 1, while
+`activity` returns original SystemServer PID 43196. This isolated C diagnostic
+runtime is not the final matched CTS cohort. GMS persistent reports an ANR
+after boot, and Settings/app/template/CTS acceptance remains pending. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
