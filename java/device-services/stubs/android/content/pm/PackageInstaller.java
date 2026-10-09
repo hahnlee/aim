@@ -23,7 +23,8 @@ public class PackageInstaller {
         public void writeToParcel(android.os.Parcel parcel, int flags) { throw new RuntimeException("stub"); }
         public int describeContents() { throw new RuntimeException("stub"); }
     }
-    public static boolean ENABLE_REVOCABLE_FD;
+    public static final boolean ENABLE_REVOCABLE_FD;
+    static { ENABLE_REVOCABLE_FD = false; }
     public PackageInstaller(IPackageInstaller installer, String installerPackageName,
             String installerAttributionTag, int userId) { throw new RuntimeException("stub"); }
 

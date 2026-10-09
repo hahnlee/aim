@@ -1,0 +1,2 @@
+// Compile-only pinned original DEX API.
+package android.system; public final class StructMsghdr { public java.net.SocketAddress msg_name; public final java.nio.ByteBuffer[] msg_iov; public StructCmsghdr[] msg_control; public int msg_flags; public StructMsghdr(java.net.SocketAddress name,java.nio.ByteBuffer[] iov,StructCmsghdr[] control,int flags){this.msg_iov=iov;throw new RuntimeException("stub");} }

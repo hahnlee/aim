@@ -1627,115 +1627,25 @@ fn java_oracles_link_against_original_image() {
             &aim_paths::root().join("java/device-services/stubs"),
         ))
         .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api/SELinuxMMAC.java")));
+    let production = common::java::production_classes(&data.0, &jdk, &stubs);
+    let oracle_api = data.0.join("oracle-api");
+    fs::create_dir(&oracle_api).unwrap();
+    let api = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/api");
+    let api_classpath = std::env::join_paths([production.as_path(), stubs.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
-        .args(["--release", "17", "-d"])
+        .args(["--release", "17", "-d"]).arg(&oracle_api)
+        .arg("-classpath").arg(&api_classpath)
+        .args(common::java::sources(&api.join("installer")))
+        .args(common::java::sources(&api.join("com/android/permission/persistence"))));
+    let classpath = std::env::join_paths([oracle_api.as_path(), production.as_path(), stubs.as_path()]).unwrap();
+    run(Command::new(jdk.join("bin/javac"))
+        .args(["--release", "17", "-Xmaxerrs", "1000", "-d"])
         .arg(&classes)
         .arg("-classpath")
-        .arg(&stubs)
+        .arg(&classpath)
         .args(common::java::sources(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"),
-        ))
-        .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
-        )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageObjects.java"))
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/com/android/server/pm/CapturedPackageSetting.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageLibraryState.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageLibraryFeed.java"),
-        )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageCode.java"))
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageSigningState.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageUserStateData.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageSettingData.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageTransientState.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageLegacyPermissions.java"),
-        )
-        .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageDomainIds.java"),
-        )
-        .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanUsers.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageMimeGroups.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/com/android/server/pm/CapturedInstallSource.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/com/android/server/pm/CapturedKeySetData.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageUserStateReplica.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageSeInfoState.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageUsageState.java"),
-        )
-        .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageScanLease.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageStateReplica.java"),
-        )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/SharedUserData.java"))
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/SharedUserReplica.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageRuntimeState.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageRuntimeFeed.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/dev/aim/server/PackageUserScopeFeed.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/com/android/server/pm/SharedProcessFeed.java"),
-        )
-        .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
-        )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/PackageUidOwners.java"))
-        .arg(common::java::snapshot_aidl(&data.0))
-        .arg(common::java::computer_aidl(&data.0)));
+        )));
     let mut pending = vec![classes];
     let mut files = Vec::new();
     while let Some(dir) = pending.pop() {
@@ -1761,14 +1671,17 @@ fn java_oracles_link_against_original_image() {
             "--lib",
         ])
         .arg(&jdk)
-        .arg("--classpath")
-        .arg(&stubs)
+        .arg("--classpath").arg(&oracle_api)
+        .arg("--classpath").arg(&production)
+        .arg("--classpath").arg(&stubs)
         .arg("--output")
         .arg(&dex)
         .args(files));
-    common::java::check_linkage(
-        &dex.join("classes.dex"),
-        &["/system/framework/services.jar"],
-    )
-    .unwrap();
+    let mut server_jars = aim_android_image::classpath::jars(
+        &aim_paths::derived_image(), "systemserverclasspath.pb",
+        aim_android_image::classpath::SYSTEMSERVERCLASSPATH,
+    ).unwrap();
+    server_jars.push("/system/framework/aim-services.jar".into());
+    let server_jars: Vec<&str> = server_jars.iter().map(String::as_str).collect();
+    common::java::check_linkage(&dex.join("classes.dex"), &server_jars).unwrap();
 }

@@ -5,6 +5,8 @@ package android.content.pm;
 import android.os.Handler;
 
 public class PackageInstaller {
+    public static final boolean ENABLE_REVOCABLE_FD;
+    static { ENABLE_REVOCABLE_FD = false; }
     public PackageInstaller(IPackageInstaller installer, String installerPackageName,
             String installerAttributionTag, int userId) { throw new RuntimeException("stub"); }
 

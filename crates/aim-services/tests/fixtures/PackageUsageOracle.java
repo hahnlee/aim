@@ -12,7 +12,7 @@ public final class PackageUsageOracle {
     private static final class Usage extends PackageUsage {
         private final File file;
         Usage(File file) { this.file = file; }
-        @Override protected AtomicFile getFile() { return new AtomicFile(file); }
+        @Override public AtomicFile getFile() { return new AtomicFile(file); }
     }
     private static void check(boolean value) {
         if (!value) throw new AssertionError("package usage contract changed");

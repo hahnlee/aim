@@ -17,6 +17,14 @@ public final class InstallerUserPolicyOracle {
         RuntimeException failure;
         Runnable replace;
         public void addUserVisibilityListener(UserVisibilityListener listener) { throw new AssertionError("unused visibility owner"); }
+        public java.util.List<android.content.pm.UserInfo> getUsers(boolean partial, boolean dying, boolean precreated) { throw new AssertionError("unused users owner"); }
+        public android.content.pm.UserInfo[] getUserInfos() { throw new AssertionError("unused user records owner"); }
+        public android.content.pm.UserInfo getUserInfo(int user) { throw new AssertionError("unused user record owner"); }
+        public int getProfileParentId(int user) { throw new AssertionError("unused profile owner"); }
+        public boolean isUserRunning(int user) { throw new AssertionError("unused running owner"); }
+        public boolean isUserUnlockingOrUnlocked(int user) { throw new AssertionError("unused unlocking owner"); }
+        public android.content.pm.UserProperties getUserProperties(int user) { throw new AssertionError("unused user properties owner"); }
+        public int[] getProfileIds(int user, boolean enabled) { throw new AssertionError("unused profile inventory owner"); }
         public int[] getUserIds() { throw new AssertionError("unused user inventory owner"); }
         public boolean exists(int user) {
             if (user != USER) throw new AssertionError("user identity changed");
@@ -32,6 +40,7 @@ public final class InstallerUserPolicyOracle {
         }
     }
     private static final class FixtureDevicePolicy extends DevicePolicyManagerInternal {
+        public boolean canSilentlyInstallPackage(String name, int uid) { throw new AssertionError("unused silent installation owner"); }
         boolean managed;
         Runnable replace;
         public boolean isUserOrganizationManaged(int user) {

@@ -23,6 +23,23 @@ public final class PackagePermissionLifecycleOracle {
         public void onSystemReady() { events.add("ready"); }
         public void onUserCreated(int user) { events.add("created:" + user); }
         public void onUserRemoved(int user) { events.add("removed:" + user); }
+        public java.util.List<android.content.pm.PermissionInfo> getAllPermissionsWithProtection(int protection) { throw new AssertionError("unexpected permission classification"); }
+        public boolean isPermissionsReviewRequired(String name, int user) { throw new AssertionError("unexpected permission review"); }
+        public int[] getPermissionGids(String name, int user) { throw new AssertionError("unexpected permission GIDs"); }
+        public void resetRuntimePermissions(com.android.server.pm.pkg.AndroidPackage pkg, int user) { throw new AssertionError("unexpected package permission reset"); }
+        public void resetRuntimePermissionsForUser(int user) { throw new AssertionError("unexpected user permission reset"); }
+        public void resetRuntimePermissions() { throw new AssertionError("unexpected legacy permission reset"); }
+        public void restoreDelayedRuntimePermissions(String name, int user) { throw new AssertionError("unexpected delayed permission restore"); }
+        public HotwordDetectionServiceProvider getHotwordDetectionServiceProvider() { throw new AssertionError("unexpected hotword owner"); }
+        public void onPackageInstalled(com.android.server.pm.pkg.AndroidPackage pkg, int previousAppId, PackageInstalledParams params, int user) { throw new AssertionError("unexpected package installed"); }
+        public void onPackageAdded(com.android.server.pm.pkg.PackageState state, boolean instant, com.android.server.pm.pkg.AndroidPackage oldPkg) { throw new AssertionError("unexpected package added"); }
+        public void readLegacyPermissionsTEMP(com.android.server.pm.permission.LegacyPermissionSettings settings) { throw new AssertionError("unexpected legacy permissions read"); }
+        public void writeLegacyPermissionsTEMP(com.android.server.pm.permission.LegacyPermissionSettings settings) { throw new AssertionError("unexpected legacy permissions write"); }
+        public void onPackageRemoved(com.android.server.pm.pkg.AndroidPackage pkg) { throw new AssertionError("unexpected package removed"); }
+        public void onPackageUninstalled(String name, int appId, com.android.server.pm.pkg.PackageState state, com.android.server.pm.pkg.AndroidPackage pkg, java.util.List<com.android.server.pm.pkg.AndroidPackage> shared, int user) { throw new AssertionError("unexpected package uninstalled"); }
+        public void onStorageVolumeMounted(String volumeUuid, boolean fingerprintChanged) {
+            throw new AssertionError("unexpected storage volume callback in user lifecycle fixture");
+        }
         public void writeLegacyPermissionStateTEMP() { checkLock(); events.add("write"); }
         public void readLegacyPermissionStateTEMP() { checkLock(); events.add("read"); }
         public void setLocationPackagesProvider(PackagesProvider provider) { throw new AssertionError(); }

@@ -14,6 +14,13 @@ public class ParcelFileDescriptor implements Parcelable, java.io.Closeable {
     }
 
     public static ParcelFileDescriptor fromFd(int fd) throws java.io.IOException { throw new RuntimeException("stub"); }
+    public int getFd(){throw new RuntimeException("stub");}
+    public int detachFd(){throw new RuntimeException("stub");}
+    public static ParcelFileDescriptor adoptFd(int fd){throw new RuntimeException("stub");}
+    public static class AutoCloseOutputStream extends java.io.FileOutputStream {
+        public AutoCloseOutputStream(ParcelFileDescriptor descriptor){super(descriptor.getFileDescriptor());}
+        @Override public void close() throws java.io.IOException {throw new RuntimeException("stub");}
+    }
     public FileDescriptor getFileDescriptor() { throw new RuntimeException("stub"); }
     @Override public void close() throws java.io.IOException { throw new RuntimeException("stub"); }
     public ParcelFileDescriptor(FileDescriptor fd) { throw new RuntimeException("stub"); }
