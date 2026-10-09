@@ -255,7 +255,14 @@ are not inferred. The command helper previously discarded stderr and treated
 nonzero exits other than SIGKILL as successful stdout (#1264). It now retains
 all exit/signal/output failures, bounds nonblocking pipe capture and reaps only
 its directly started child PID; two real-process regressions pass. Actual
-original replay with this producer remains required. The pinned stub-output
+original replay with this producer immediately exposes exit127: Binder host
+is not running when the first getprop starts. No guest commands/services have
+started, so this is not an original PMS failure. The path-map and init
+registration precede Binder startup. The builder now checks a bounded existing
+FILES response from the launched init, validates its audit PID and process
+birth before/after, then runs the real query (#1265). Two actual Mach tests
+pass; the existing300-second limit and nonzero-exit handling remain unchanged.
+Actual readiness-corrected original template replay remains required. The pinned stub-output
 checker now accepts only the original decompression basenames and
 ABI-selected lib directories and excludes top-level host-volume internals
 consistently (#1262). Thirteen focused tests pass; real six XML differences
