@@ -209,12 +209,22 @@ Actual adb shell svc help prints its original help but does not deliver an
 ADB terminal response within 180 seconds; only the owned ADB client is
 terminated, so svc exit acceptance remains unproven (#1227). Actual adb reboot
 returns zero, takes adbd offline and removes the original SystemServer; the
-restarted device returns online, with boot completion still pending (#1255).
+restarted device returns online and completes boot with a new original
+SystemServer and verified native package owner guest PID 1 (#1255).
 The optional constructor export is independent: its existing output directory
 cannot be reclaimed on automatic reboot. Init now consumes only capture
 option/value positions recorded by the initial parser, preserving the first
 immutable output and all other arguments. Two focused argument tests pass;
 actual capture-enabled reboot replay is still required (#1257).
+The first isolated native697 template reaches an immutable five-file
+constructor capture (epoch 11/controller330000000), then its build fails
+because settings/data does not exist (#1260). The builder now creates its
+private copy root before copying; a focused filesystem test verifies all five
+nested files preserve bytes, actual and guest ownership, mode and mtime.
+Corrected producer execution and two published template comparisons remain
+unverified. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
+pass in an isolated test. A separate unread-PTY exit test reproduces an
+unbounded terminal drain (#1259); this is not yet proved to cause svc delay.
 Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
