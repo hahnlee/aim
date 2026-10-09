@@ -143,6 +143,58 @@ class TemplateStructure(unittest.TestCase):
         altered['inventory'][root + '/lib/other-isa'] = copy.deepcopy(b['inventory'][root])
         self.assertFalse(audit.compare(a, altered, {})['structure_pass'])
 
+    def test_pinned_permission_maps_and_package_rows_reorder(self):
+        permission_file = 'data/misc_de/0/apexdata/com.android.permission/access.abx'
+        rows = [node('app-id', {'id': '1001'}, [node('permission', {'name': 'p.a', 'flags': '1'}), node('permission', {'name': 'p.b', 'flags': '2'})]),
+                node('app-id', {'id': '1002'}, [node('permission', {'name': 'p.c', 'flags': '4'})])]
+        tree = node('access', children=[node('app-id-permissions', children=rows),
+            node('app-id-app-ops', children=[node('app-id', {'id': '1001'}, [node('app-op', {'name': 'op.a', 'mode': '0'}), node('app-op', {'name': 'op.b', 'mode': '1'})])]),
+            node('package-app-ops', children=[node('package', {'name': 'pkg'}, [node('app-op', {'name': 'op.a', 'mode': '0'}), node('app-op', {'name': 'op.b', 'mode': '1'})])]),
+            node('package-versions', children=[node('package', {'name': 'a', 'version': '1'}), node('package', {'name': 'b', 'version': '2'})])])
+        changed = copy.deepcopy(tree)
+        for container in changed['children']:
+            container['children'].reverse()
+            for row in container['children']:
+                row['children'].reverse()
+        self.assertEqual(audit.canonical(tree, permission_file), audit.canonical(changed, permission_file))
+        changed['children'][0]['children'][0]['children'][0]['attrs']['flags'] = '999'
+        self.assertNotEqual(audit.canonical(tree, permission_file), audit.canonical(changed, permission_file))
+        restrictions = node('package-restrictions', children=[node('pkg', {'name': 'a', 'stopped': 'true'}), node('pkg', {'name': 'b', 'stopped': 'false'})])
+        changed = copy.deepcopy(restrictions)
+        changed['children'].reverse()
+        filename = 'data/system/users/0/package-restrictions.xml'
+        self.assertEqual(audit.canonical(restrictions, filename), audit.canonical(changed, filename))
+
+    def test_duplicate_map_keys_fail_instead_of_sorting_last_wins(self):
+        filename = 'data/misc_de/0/apexdata/com.android.permission/access.abx'
+        for container, entry, key in [('app-id-permissions', 'app-id', 'id'), ('app-id-app-ops', 'app-id', 'id'),
+                                     ('package-app-ops', 'package', 'name'), ('package-versions', 'package', 'name')]:
+            tree = node('access', children=[node(container, children=[node(entry, {key: 'same'}), node(entry, {key: 'same'})])])
+            with self.assertRaisesRegex(ValueError, 'duplicate map key'):
+                audit.canonical(tree, filename)
+        for container, entry, child in [('app-id-permissions', 'app-id', 'permission'), ('app-id-app-ops', 'app-id', 'app-op'), ('package-app-ops', 'package', 'app-op')]:
+            tree = node('access', children=[node(container, children=[node(entry, {'id': '1001', 'name': 'pkg'},
+                [node(child, {'name': 'same', 'flags': '1', 'mode': '0'}), node(child, {'name': 'same', 'flags': '2', 'mode': '1'})])])])
+            with self.assertRaisesRegex(ValueError, 'duplicate map key'):
+                audit.canonical(tree, filename)
+        tree = node('package-restrictions', children=[node('pkg', {'name': 'same'}), node('pkg', {'name': 'same'})])
+        with self.assertRaisesRegex(ValueError, 'duplicate map key'):
+            audit.canonical(tree, 'data/system/users/0/package-restrictions.xml')
+
+    def test_unknown_permission_child_order_namespace_and_roles_hash_stay_strict(self):
+        filename = 'data/misc_de/0/apexdata/com.android.permission/access.abx'
+        tree = node('access', children=[node('app-id-permissions', children=[node('unknown', {'name': 'a'}), node('unknown', {'name': 'b'})])])
+        changed = copy.deepcopy(tree)
+        changed['children'][0]['children'].reverse()
+        self.assertNotEqual(audit.canonical(tree, filename), audit.canonical(changed, filename))
+        tree['children'][0]['tag'] = '{unknown}app-id-permissions'
+        changed = copy.deepcopy(tree)
+        changed['children'][0]['children'].reverse()
+        self.assertNotEqual(audit.canonical(tree, filename), audit.canonical(changed, filename))
+        a, b = fixture(), fixture()
+        b['xml']['data/misc_de/0/apexdata/com.android.permission/roles.xml']['attrs']['packagesHash'] = 'different'
+        self.assertFalse(audit.compare(a, b, {})['structure_pass'])
+
     def test_missing_mtime_rejects_incomplete_receipt(self):
         a, b = fixture(), fixture()
         del b['inventory']['data/system/packages.list']['mtime_ns']

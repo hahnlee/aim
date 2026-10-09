@@ -249,15 +249,35 @@ class Normalizer:
         return {key: entry[key] for key in ('kind', 'host_mode', 'host_uid', 'host_gid', 'guest', 'xattrs')}
 
 
-def canonical(node):
-    children = [canonical(child) for child in node['children']]
-    # Reorder only defined named-map members; unknown/ordered children retain
-    # their positions, especially preferred resolver and intent-filter records.
-    members = {'packages': {'package', 'updated-package', 'shared-user'},
-               'keys': {'public-key'}, 'keysets': {'keyset'},
-               'permissions': {'item', 'permission'}, 'app-ids': {'app-id'}}
-    for tag in members.get(node['tag'], set()):
+def canonical(node, filename, ancestors=()):
+    path = ancestors + (node['tag'],)
+    maps = {}
+    if filename.startswith('data/system/packages.xml'):
+        maps = {('packages',): {'package': 'name', 'updated-package': 'name', 'shared-user': 'name'},
+                ('packages', 'keyset-settings', 'keys'): {'public-key': 'identifier'},
+                ('packages', 'keyset-settings', 'keysets'): {'keyset': 'identifier'},
+                ('packages', 'permissions'): {'item': 'name'}}
+    elif filename.startswith('data/system/users/0/package-restrictions.xml'):
+        maps = {('package-restrictions',): {'pkg': 'name'}}
+    elif filename.startswith('data/misc_de/0/apexdata/com.android.permission/access.abx'):
+        # Pinned persistence readers assign by key; duplicate rows are last-wins
+        # and ambiguous, so fail them before treating writer order as incidental.
+        maps = {('access', 'package-versions'): {'package': 'name'},
+                ('access', 'package-app-ops'): {'package': 'name'},
+                ('access', 'package-app-ops', 'package'): {'app-op': 'name'},
+                ('access', 'app-id-app-ops'): {'app-id': 'id'},
+                ('access', 'app-id-app-ops', 'app-id'): {'app-op': 'name'},
+                ('access', 'app-id-permissions'): {'app-id': 'id'},
+                ('access', 'app-id-permissions', 'app-id'): {'permission': 'name'}}
+    children = [canonical(child, filename, path) for child in node['children']]
+    for tag, key in maps.get(path, {}).items():
         positions = [i for i, child in enumerate(node['children']) if child['tag'] == tag]
+        seen = set()
+        for position in positions:
+            attrs = node['children'][position]['attrs']
+            if key not in attrs or attrs[key] in seen:
+                raise ValueError('missing or duplicate map key ' + '/'.join(path) + '/' + tag + '@' + key)
+            seen.add(attrs[key])
         ordered = sorted((children[i] for i in positions), key=repr)
         for position, child in zip(positions, ordered):
             children[position] = child
@@ -345,7 +365,7 @@ def compare(left, right, permission_owners):
     for path in sorted(xml_paths):
         if path not in left['xml'] or path not in right['xml']:
             differences.append({'path': path, 'error': 'XML capture missing'})
-        elif canonical(a.tree(left['xml'][path], path)) != canonical(b.tree(right['xml'][path], path)):
+        elif canonical(a.tree(left['xml'][path], path), path) != canonical(b.tree(right['xml'][path], path), path):
             differences.append({'path': path, 'error': 'normalized XML differs'})
     compiled, mtimes = [], []
     entries_a = {a.path(p): v for p, v in left['inventory'].items() if p.split('/')[0] not in VOLUME_INTERNAL}
