@@ -241,8 +241,21 @@ restrictions; compiled and original/runtime parity remain unverified.
 The first template captured permissions before boot completion
 (247.8 versus258.0 seconds), while the second captured afterward. The
 builder now requires observed boot completion before freezing permission
-files (#1219); its real-file lifecycle regression passes. Fresh template
-comparison after this correction remains required. The pinned stub-output
+files (#1219); its real-file lifecycle regression passes. Two corrected
+templates publish70 files each, with permissions captured after boot.
+Their HOME holders and named permission/app-op/package state values agree.
+The pinned unique-key persistence schema comparison rejects duplicates and
+retains unknown/ordered records;16 focused tests pass. It reduces the actual
+comparison to two roles.xml/reserve differences in packagesHash. The original
+hash uses live installed paths, component iteration and owner/demo/wallet
+inputs not fully captured, so its binding and full structure remain unproven.
+A matched original template fails300 seconds without observed boot1 (#1263).
+Permission capture was not attempted before boot; missing permission files
+are not inferred. The command helper previously discarded stderr and treated
+nonzero exits other than SIGKILL as successful stdout (#1264). It now retains
+all exit/signal/output failures, bounds nonblocking pipe capture and reaps only
+its directly started child PID; two real-process regressions pass. Actual
+original replay with this producer remains required. The pinned stub-output
 checker now accepts only the original decompression basenames and
 ABI-selected lib directories and excludes top-level host-volume internals
 consistently (#1262). Thirteen focused tests pass; real six XML differences
