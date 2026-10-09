@@ -459,13 +459,8 @@ pub(crate) fn enter_init_namespace(map: Option<&Path>, by_pid: Option<&Path>) ->
         }
     }
     std::fs::read_to_string(&map).and_then(|text|parse_map(&text).map(|_|()).map_err(std::io::Error::other)).map_err(|error|error.to_string())?;
-    let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|format!("mount namespace init admission: {error}"))?;
-    let id=aim_storage::process_namespace::mount_namespace_of(&table,init.process).map_err(|error|format!("mount namespace current owner: {error}"))?;
-    let owner=aim_storage::mount_namespace::Namespace::open(runtime,&id).map_err(|error|error.to_string())?;
-    owner.read().map_err(|error|format!("mount namespace inventory: {error}"))?;
     let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).map_err(|error|error.to_string())?;
-    aim_storage::process_namespace::register_mount_namespace(&table,process,owner.id()).map_err(|error|format!("mount namespace membership: {error}"))?;
-    Ok(owner)
+    aim_storage::process_namespace::InitNamespaceEntry::capture(&table,process).map_err(|error|format!("mount namespace init entry: {error}"))
 }
 
 /// Native fork startup precedes VM restore. Inherit only the actual XNU

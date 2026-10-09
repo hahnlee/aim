@@ -110,7 +110,9 @@ impl State {
  fn record(&self,failure:io::Error){self.failures.lock().unwrap().push(failure.to_string());}
  fn retire_dead(&self)->io::Result<()> {
   let dead={let mut owners=self.owners.lock().unwrap();let keys=owners.iter().filter(|(_,holder)|!holder.owner.process.is_live()).map(|(key,_)|*key).collect::<Vec<_>>();keys.into_iter().filter_map(|key|owners.remove(&key)).collect::<Vec<_>>()};
-  for holder in dead{holder.stop()?;}Ok(())
+  for holder in dead{holder.stop()?;}
+  if let Some(namespace)=self.namespace.lock().unwrap().clone(){crate::process_namespace::InitNamespaceEntry::retire_dead(&namespace.table,self.controller)?;}
+  Ok(())
  }
  fn retire_all(&self)->io::Result<()> {
   let owners=std::mem::take(&mut *self.owners.lock().unwrap());let mut failure=None;
@@ -141,13 +143,14 @@ impl State {
   let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?;
   let init=crate::process_namespace::InitRegistration::read(&namespace.table)?;
   if init.process!=self.controller||init.process!=namespace.init.process||init.mount_namespace!=namespace.init.mount_namespace{return Err(error(libc::EPERM));}
-  let current=crate::process_namespace::mount_namespace_of(&namespace.table,init.process)?;
+  let entry=crate::process_namespace::InitNamespaceEntry::read(&namespace.table,actor,init.process)?;
+  let current=entry.namespace;
   if crate::process_namespace::mount_namespace_of(&namespace.table,actor)?!=current{return Err(error(libc::EPERM));}
   crate::mount_namespace::Namespace::open(namespace.table.parent().and_then(std::path::Path::parent).ok_or_else(||error(libc::EPROTO))?,&current)?.read()?;
   // Namespace entry is a privileged operation; the native owner reads the
   // retained guest identity, never UID or guest PID claims in a Mach frame.
   let credentials=read_credentials(&namespace.table,actor)?;
-  if credentials.effective_capabilities&(1<<21)==0{return Err(error(libc::EPERM));}
+  if credentials.effective_capabilities&((1<<21)|(1<<18))!=((1<<21)|(1<<18)){return Err(error(libc::EPERM));}
   if !actor.is_live(){return Err(error(libc::ESRCH));}Ok(current)
  }
  fn admit_external(&self,actor:ProcessIdentity)->io::Result<Arc<Holder>> {
@@ -265,7 +268,9 @@ impl Controller {
   let holder={let mut owners=self.state.owners.lock().unwrap();
    if let Some(holder)=owners.get(&key(owner.process)){if holder.owner!=owner{return Err(error(libc::EPERM));}}
    owners.remove(&key(owner.process))};
-  if let Some(holder)=holder{holder.stop()?;}Ok(())
+  if let Some(holder)=holder{holder.stop()?;}
+  if let Some(namespace)=self.state.namespace.lock().unwrap().clone(){crate::process_namespace::InitNamespaceEntry::retire_dead(&namespace.table,self.process)?;}
+  Ok(())
  }
  pub fn owner_config(&self)->io::Result<OwnerConfig>{if self.stop.load(Ordering::Acquire)||!self.process.is_live(){return Err(error(libc::ESRCH));}Ok(OwnerConfig{endpoint:self.config.endpoint.clone(),process:self.process})}
  pub fn failures(&self)->Vec<String>{self.state.failures.lock().unwrap().clone()}

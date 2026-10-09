@@ -40,6 +40,66 @@ impl InitRegistration {
         if Self::read(table).is_ok_and(|current|current.process==self.process){fs::remove_file(table.join("namespace-init"))?;}Ok(())
     }
 }
+#[derive(Clone,Debug)]
+pub struct InitNamespaceEntry { pub actor:ProcessIdentity,pub source:ProcessIdentity,pub namespace:String }
+impl InitNamespaceEntry {
+    /// Capture the real target namespace before it can switch; callers never
+    /// supply a namespace name. The resulting entry is bound to both births.
+    pub fn capture(table:&Path,actor:ProcessIdentity)->io::Result<crate::mount_namespace::Namespace>{
+        let _lock=entry_lock(table)?;
+        let init=InitRegistration::read(table)?;
+        let namespace=mount_namespace_of(table,init.process)?;
+        let runtime=table.parent().and_then(Path::parent).ok_or_else(||io::Error::from_raw_os_error(libc::EPROTO))?;
+        let owner=crate::mount_namespace::Namespace::open(runtime,&namespace)?;
+        owner.read()?;
+        let current=InitRegistration::read(table)?;
+        if !actor.is_live()||current.process!=init.process||current.mount_namespace!=init.mount_namespace{return Err(io::Error::from_raw_os_error(libc::ESRCH));}
+        register_mount_namespace(table,actor,owner.id())?;
+        atomic_write(&table.join(format!("{}.init-namespace-entry",actor.host_pid)),format!("AIMINITENTRY1\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",actor.host_pid,actor.start_seconds,actor.start_microseconds,init.process.host_pid,init.process.start_seconds,init.process.start_microseconds,owner.id()).as_bytes())?;
+        Ok(owner)
+    }
+    pub fn read(table:&Path,actor:ProcessIdentity,source:ProcessIdentity)->io::Result<Self>{
+        let entry=Self::read_record(table,actor.host_pid)?;
+        if entry.actor!=actor||entry.source!=source{return Err(io::Error::from_raw_os_error(libc::EPERM));}
+        if !actor.is_live()||!source.is_live(){return Err(io::Error::from_raw_os_error(libc::ESRCH));}
+        Ok(entry)
+    }
+    pub fn retire_dead(table:&Path,source:ProcessIdentity)->io::Result<()> {
+        for file in fs::read_dir(table)?{
+            let name=file?.file_name();let Some(pid)=name.to_str().and_then(|name|name.strip_suffix(".init-namespace-entry")).and_then(|pid|pid.parse::<i32>().ok())else{continue;};
+            if pid<=0{continue;}
+            let _lock=entry_lock(table)?;
+            let entry=match Self::read_record(table,pid){Ok(entry)=>entry,Err(error)if error.kind()==io::ErrorKind::NotFound=>continue,Err(error)=>return Err(error)};
+            if entry.actor.host_pid!=pid||entry.source!=source||ProcessIdentity::running(pid).is_ok(){continue;}
+            // A failed identity query alone does not establish process exit.
+            if unsafe{libc::kill(pid,0)}==0{continue;}
+            let error=io::Error::last_os_error();
+            if error.raw_os_error()!=Some(libc::ESRCH){return Err(error);}
+            fs::remove_file(table.join(format!("{pid}.init-namespace-entry")))?;
+        }
+        Ok(())
+    }
+    fn read_record(table:&Path,pid:i32)->io::Result<Self>{
+        use std::{io::Read,os::unix::fs::OpenOptionsExt};
+        let mut file=crate::private_fd::PrivateFile::allocate(||fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(table.join(format!("{pid}.init-namespace-entry"))))?;
+        use std::os::fd::AsRawFd;
+        let mut stat:libc::stat=unsafe{std::mem::zeroed()};
+        if unsafe{libc::fstat(file.as_raw_fd(),&mut stat)}<0{return Err(io::Error::last_os_error());}
+        if stat.st_mode&libc::S_IFMT!=libc::S_IFREG{return Err(io::Error::from_raw_os_error(libc::EPROTO));}
+        let mut text=String::new();file.by_ref().take(4097).read_to_string(&mut text)?;
+        if text.len()>4096{return Err(io::Error::from_raw_os_error(libc::EPROTO));}
+        let fields=text.trim_end_matches('\n').split('\t').collect::<Vec<_>>();
+        if fields.len()!=8||fields[0]!="AIMINITENTRY1"||fields[7].is_empty()||matches!(fields[7],"."|"..")||fields[7].contains(['/', '\0','\n','\t']){return Err(io::Error::from_raw_os_error(libc::EPROTO));}
+        let identity=|at:usize|->io::Result<ProcessIdentity>{Ok(ProcessIdentity{host_pid:fields[at].parse().map_err(|_|io::Error::from_raw_os_error(libc::EPROTO))?,start_seconds:fields[at+1].parse().map_err(|_|io::Error::from_raw_os_error(libc::EPROTO))?,start_microseconds:fields[at+2].parse().map_err(|_|io::Error::from_raw_os_error(libc::EPROTO))?})};
+        let entry=Self{actor:identity(1)?,source:identity(4)?,namespace:fields[7].into()};
+        Ok(entry)
+    }
+}
+fn entry_lock(table:&Path)->io::Result<crate::private_fd::PrivateFile>{
+    use std::{os::{fd::AsRawFd,unix::fs::OpenOptionsExt}};
+    let file=crate::private_fd::PrivateFile::allocate(||fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(table.join("namespace-entry-lock")))?;
+    loop{if unsafe{libc::flock(file.as_raw_fd(),libc::LOCK_EX)}==0{return Ok(file);}let error=io::Error::last_os_error();if error.kind()!=io::ErrorKind::Interrupted{return Err(error);}}
+}
 pub fn register_mount_namespace(table:&Path,process:ProcessIdentity,namespace:&str)->io::Result<()> {
     if !process.is_live()||namespace.is_empty()||namespace.contains(['/', '\t','\n','\0']){return Err(io::Error::from_raw_os_error(libc::EINVAL));}
     atomic_write(&table.join(format!("{}.mount-namespace",process.host_pid)),

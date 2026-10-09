@@ -434,6 +434,17 @@ bodies remain unrun. A separate first Native099 template fails initial getprop a
 with EPERM before constructor/boot/svc assertions (#1286), despite the same
 producer and image inputs previously passing on4bb. Its owned processes and
 attachments are gone; earlier4bb shutdown evidence remains valid for4bb.
+Captured receipts show init changed namespace9ms after the client joined.
+The owner now records the actual namespace captured at entry, bound to both
+process births, and validates that receipt instead of rereading mutable init
+membership. Required mount-entry capabilities are CAP_SYS_ADMIN and
+CAP_SYS_CHROOT (#1288); retained UID alone is not authority. The actual Mach
+regression fails with the old comparison and passes with the correction,
+including stale/foreign/changed-namespace and missing-capability denials.
+Native entry retirement preserves live/reused/foreign records; a failed
+process-info query alone cannot authorize removal. Source integration passes
+one actual parent test with six owned actor subprocesses and ABI/guest-init
+compilation. Corrected whole-runtime Android replay remains unrun.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
