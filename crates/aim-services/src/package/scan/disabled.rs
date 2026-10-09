@@ -435,6 +435,36 @@ impl SigningScan {
         self.disabled_users.get(name).map(|state| &state.users)
     }
 
+    /// Bind an admitted factory's immutable code to the actual copied setting.
+    /// Mutable Settings fields may have advanced since its scan outcome.
+    pub fn current_disabled_record(&self, admitted: &Record) -> Result<Record, SigningError> {
+        let name = &admitted.settings.name;
+        let reject = |message: &str| SigningError::Rejected(Error {
+            package: name.clone(), path: admitted.settings.code_path.clone(),
+            phase: "factory-record", message: message.into(),
+        });
+        let setting = self.settings.disabled_system_packages.iter().find(|p| p.name == *name)
+            .ok_or_else(|| reject("current disabled factory setting missing"))?;
+        let code = self.disabled_loaded.get(name)
+            .ok_or_else(|| reject("current disabled factory code missing"))?;
+        code.validate_setting(setting, true).map_err(|e| reject(&e))?;
+        if admitted.origin != crate::package::owner::shared_users::ScanOrigin::SystemDirectory
+            || admitted.settings.code_path != setting.code_path
+            || admitted.settings.version_code != setting.version_code
+            || admitted.settings.app_id != setting.app_id
+            || admitted.settings.shared_user != setting.shared_user
+            || admitted.settings.shared_user_app_id != setting.shared_user_app_id
+            || admitted.identity.internal_name != *name
+            || admitted.identity.real_name != setting.real_name
+            || admitted.identity.manifest_name != code.package.manifest_package_name.as_deref().unwrap_or(&code.package.package_name)
+            || code.package != admitted.parsed
+            || code.collected_signing != admitted.signing {
+            return Err(reject("admitted factory identity/code/signing differs from current owner"));
+        }
+        Ok(Record { settings: setting.clone(), parsed: admitted.parsed.clone(),
+            signing: admitted.signing.clone(), identity: admitted.identity.clone(), origin: admitted.origin })
+    }
+
     /// Settings.disableSystemPackageLPw(replaced=true): copy the loaded factory
     /// before marking the active setting updated. Disabled shared membership is
     /// retained by disabled_system_packages, without changing active UID flags.

@@ -360,8 +360,10 @@ impl System {
                     let mut staged=owner.clone();
                     staged.disable_system_package(&name).map_err(|error|format!("compressed factory retention: {error:?}"))?;
                     let signing=apks.signing_details(&expanded.package)?;
-                    let factory=factories.packages.iter().find(|completed|completed.candidate.record.settings.name==name)
+                    let admitted_factory=factories.packages.iter().find(|completed|completed.candidate.record.settings.name==name)
                         .map(|completed|&completed.candidate.record).ok_or("compressed factory scan record missing")?;
+                    let factory=staged.current_disabled_record(admitted_factory)
+                        .map_err(|error|format!("compressed current factory record: {error:?}"))?;
                     let mut manifest=crate::package::scan::ScanPolicy::default();
                     manifest.inherit_system_setting(&saved);
                     manifest.adjust_shared_uid_privilege(&expanded.package,&signing,&platform,&staged.identities,policy.vendor_sdk);
@@ -383,7 +385,7 @@ impl System {
                     let library_host=(apks.files)(&library_guest).ok_or("compressed native destination mapping missing")?;
                     let destination=NativeLibraryDestination{guest_root:&library_guest,root:&library_host,owner:aim_storage::guest_inode::GuestInode{uid:Some(1000),gid:Some(1000),mode:None},zip_time,restorecon:&label};
                     let code=Code{location:Location{path:expanded.receipt.guest_path.clone(),partition:Partition::Data,kind:Kind::App,apex:None},parsed:expanded.package.clone(),signing};
-                    staged.scan_existing(&code,update,&saved_users,users.users.as_deref(),Some(factory),apks,ScanMetadataCompletion{
+                    staged.scan_existing(&code,update,&saved_users,users.users.as_deref(),Some(&factory),apks,ScanMetadataCompletion{
                         scan_as_instant_app:saved_users.get(&name).and_then(|users|users.get(&0)).is_some_and(|state|state.instant_app),
                         seinfo:crate::package::scan::SeInfoScan{policy:policy.seinfo,compatibility:bridge.as_ref()},abi_policy:policy.abi,native_environment:&environment,
                         context:AbiScanContext{mode:AbiScanMode::Existing{first_boot_or_upgrade:true,old_was_stub:true,saved:Some(&saved)},system:true,updated:true,override_abi:None,platform_runtime_64bit:None},
