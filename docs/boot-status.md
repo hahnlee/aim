@@ -192,9 +192,20 @@ pass, including authentic EIO preservation, real interruption, one request,
 actual lock release and safe descriptor reuse. The running DA6 campaigns
 retain their frozen runtime; corrected adbd/CTS replay remains unverified.
 The resumed DA6 pair completes Parsing with official XML: 11 pass, zero fail
-on each side, with identical per-test names/results and done=true. Both full66
-campaigns continue into PreferredActivity; the remaining 65 modules and the
-corrected-runtime cohort remain unaccepted. Both earlier interrupted full66
+on each side, with identical per-test names/results and done=true. The partial
+DA6 pair ends after three complete modules: original 15 pass/0 fail, native
+14 pass/1 fail. PreferredActivity expects two live duplicate records before
+reboot and one after restoration; native passes the first condition but keeps
+two after a reboot request, with no accepted sys.powerctl event or observed
+SystemServer replacement (#1119, #1255). Setting passes both tests on each
+side, while cleanup DELETE_FAILED_INTERNAL_ERROR is observed on both (#1256).
+The fourth PMHost module fails preparation through repeated adb svc timeouts
+before any test body (#1227); its XML declares zero tests and done=false.
+The other 62 modules remain unattempted. Both partial campaigns are stopped
+and all owned processes, listeners and leases are cleaned; full acceptance
+remains unproven. Corrected runtime638 builds and its unchanged-file --help
+preflight exits zero; actual fresh ADB lifecycle replay is pending.
+Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
