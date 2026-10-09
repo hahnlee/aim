@@ -876,8 +876,16 @@ on one authenticated connection and reserves the whole set atomically. Real
 child rejection checks pass. The default-parallel suites pass storage 57/0 with
 three ignored and ABI 238/0 with thirteen ignored. Final-close lease fixtures
 run in fresh processes to exclude unrelated raw-fork aliases while retaining
-the original actual lock/close assertions. Native boot and SystemServer
-publication still require the rebuilt batch protocol runtime. Original Perfetto traced_probes
+the original actual lock/close assertions. The rebuilt batch protocol runtime
+(`aee732eb`) launches 69 services in a fresh native empty-data template attempt,
+but reaches the 300-second bound without settings/permission captures or
+`sys.boot_completed`. Its zygote log reports failed fork descriptor inheritance
+for descriptors starting at 10240. A separate managed repetition captures
+repeated netd aborts in the original `DnsProxyListener` constructor. The managed repetition does spawn a SystemServer child, which reaches original
+zygote JNI specialization and aborts when `createProcessGroup` finds no
+initialized cgroup controller and tries `/system/uid_1000` on the read-only
+system filesystem. These failures remain under owner-level investigation;
+neither attempt establishes SystemServer publication or native boot acceptance. Original Perfetto traced_probes
 asserts after a stdout pipe close returns EBADF (#1207); both standalone and
 managed syscall-traced repetitions succeed, and a real active-POSIX-holder
 buffered pipe EOF/close proof passes, so POSIX presence alone is not the cause.
