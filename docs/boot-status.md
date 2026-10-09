@@ -228,9 +228,19 @@ dissented by a scanning process (#532). No template publication is accepted.
 Storage now retries generic transient busy/dissent within the existing
 deadline, retaining persistent failure and never forcing eject; four focused
 retry tests pass. Real successful publication and two-template comparison
-remain unverified. The actual structure-capture tool also fails because
-Darwin Python lacks its os xattr APIs (#1261); fixture-only passes do not
-establish an actual capture. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
+are not yet complete. The first detachfix template is actually published
+with 70 files, constructor epoch11/controller330000000 and SKU light_hinge.
+A real capture and source-copy receipt verify all 70 files retain bytes,
+manifest hashes, host modes, all xattrs and mtimes. A concurrent second
+build times out at300 seconds before permissions and boot completion; it
+is not accepted. A fresh quiet second build remains pending. The structure
+capture tool now reads real Darwin xattrs with libc NOFOLLOW calls (#1261);
+12 tests include actual local-file capture and error propagation. Compiled
+code validity, two-template structure and original/runtime parity remain
+unverified. A separate bounded lifecycle diagnostic reproduces svc help
+output without terminal EOF. Its signal-free75-second snapshot records one
+SIGQUIT wait entry for the real adbd child; no missing marker is treated as
+proof of a cause. The diagnostic boot is cleaned and is not a CTS pass. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
 pass in an isolated test. A separate unread-PTY exit test reproduces an
 unbounded terminal drain (#1259); this is not yet proved to cause svc delay.
 Both earlier interrupted full66
