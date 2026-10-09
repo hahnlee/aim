@@ -275,7 +275,15 @@ log continues into original first-boot dexopt:133 packages requested,
 56 skipped and16 performed results recorded before the final Chrome
 ART work. Dexopt completion is not recorded; the log's last entry is
 artd opening Chrome output files, after UpdatePackagesIfNeeded.
-The remaining boot delay's cause is not established. Logcat ends with an
+An actual regular-file owner fixture confirms a cost candidate: three1MiB
+512-byte read samples have a440ms median before retained inode admission
+and338ms afterward. The owner now retains the exact store/inode capability
+while reacquiring the real cross-process lock and current proof on each I/O;
+it does not cache metadata or remove writer checks. Focused actual-file
+tests preserve shared offsets, pread position, writer exclusion, proof enabled
+after open, and EIO for corrupted data or metadata. These host measurements
+do not prove an Android boot-time improvement; corrected runtime replay
+remains required. The remaining boot delay's cause is not established. Logcat ends with an
 unexpected-EOF diagnostic, so the partial log does not prove absence of later
 fatal errors. All owned processes and mounts are cleaned; original template
 publication and parity remain unverified. The pinned stub-output
