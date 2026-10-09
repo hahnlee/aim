@@ -129,16 +129,18 @@ pub struct State {
     pub windows: bool,
     /// Seconds since the Unix epoch.
     pub started: u64,
+    pub inputs: crate::inputs::Inputs,
 }
 
 impl State {
     pub fn to_text(&self) -> String {
         format!(
-            "pid={}\nguest={}\nmode={}\nstarted={}\n",
+            "pid={}\nguest={}\nmode={}\nstarted={}\n{}",
             self.pid,
             self.guest.map_or(String::new(), |p| p.to_string()),
             if self.windows { "windows" } else { "device" },
-            self.started
+            self.started,
+            self.inputs.to_text()
         )
     }
 
@@ -166,6 +168,7 @@ impl State {
                 _ => return Err("state: bad mode".into()),
             },
             started: number("started")?,
+            inputs: crate::inputs::Inputs::parse(text)?,
         })
     }
 
@@ -255,12 +258,14 @@ mod tests {
                 guest: Some(34),
                 windows: true,
                 started: 1_790_000_000,
+                inputs: crate::inputs::Inputs::default(),
             },
             State {
                 pid: 12,
                 guest: None,
                 windows: false,
                 started: 5,
+                inputs: crate::inputs::Inputs::default(),
             },
         ] {
             assert_eq!(State::parse(&state.to_text()).unwrap(), state);
@@ -280,6 +285,7 @@ mod tests {
             guest: None,
             windows: false,
             started: 2,
+            inputs: crate::inputs::Inputs::default(),
         };
         state.write(&path).unwrap();
         let later = State {
@@ -302,6 +308,7 @@ mod tests {
             guest: Some(2),
             windows: false,
             started: 3,
+            inputs: crate::inputs::Inputs::default(),
         };
         // A state left behind without its holder.
         state.write(&files.state()).unwrap();

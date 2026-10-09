@@ -28,6 +28,15 @@ disposable one. `aimctl` runs the programs beside it (`guest-init`,
 `target/release`) on the derived image, ANGLE and MoltenVK that `cargo aim
 build` built (docs/build.md).
 
+`start` and `run` also accept `--image DIR`, `--host-runtime DIR` and
+`--userdata DIR` to select an image root, host programs and data-template
+directory. The selection is saved with the resident state and forwarded
+when `start` launches `run`; later shells and app scans use that same image
+and runtime. Shells enter the running init's authenticated mount namespace.
+`aim-apps` itself still runs beside aimctl; its image and display host use
+the saved selection. Existing state files without a selection use the
+normal build paths.
+
 ## The resident guest
 
 `aimctl run` is the guest's keeper: it starts aim-display (a device window

@@ -8,6 +8,7 @@
 
 mod args;
 mod guest;
+mod inputs;
 mod resident;
 mod state;
 
@@ -55,8 +56,8 @@ fn run(a: args::Args) -> Result<ExitCode, String> {
     let files = Files::of(&data)?;
     match a.command {
         Cmd::Help => unreachable!(),
-        Cmd::Start { windows } => resident::start(&files, windows),
-        Cmd::Run { windows } => resident::run(&files, windows),
+        Cmd::Start { windows } => resident::start(&files, windows, &a.inputs.resolve()?),
+        Cmd::Run { windows } => resident::run(&files, windows, a.inputs.resolve()?),
         Cmd::Stop => resident::stop(&files),
         Cmd::Status => status(&files),
         Cmd::Shell(command) => shell(&files, &command),
@@ -181,8 +182,8 @@ fn shell(files: &Files, command: &[String]) -> Result<ExitCode, String> {
 /// The launcher apps of the running guest, as its image and `/data` hold
 /// them.
 fn launcher_apps(files: &Files) -> Result<Vec<aim_apps::installed::Installed>, String> {
-    running(files)?;
-    let root = aim_paths::derived_image();
+    let (state, _) = running(files)?;
+    let root = state.inputs.image;
     let framework_res = root.join("system/framework/framework-res.apk");
     let framework = aim_apps::apk::Apk::open(&framework_res)
         .map_err(|e| format!("{}: {e}", framework_res.display()))?;
