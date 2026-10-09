@@ -29,7 +29,7 @@ def fixture(uid=10001, salt='a', key='1', keyset='1'):
     packages = [node('shared-user', {'name': 'fixture.shared', 'userId': str(uid)})]
     packages += [node('package', {'name': name, 'sharedUserId': str(uid), 'codePath': '/' + roots[name],
                   'ut': '1234', 'ft': '1234', 'domainSetId': '11111111-1111-4111-8111-111111111111',
-                  'flags': '1', 'loadingProgress': '1.0'},
+                  'flags': '1', 'loadingProgress': '1.0', 'primaryCpuAbi': 'arm64-v8a'},
                  [node('proper-signing-keyset', {'identifier': keyset}),
                   node('sigs', children=[node('cert', {'index': key, 'key': 'actual-fixture-cert'})])]) for name in names]
     # Each original domain identity belongs to exactly one package.
@@ -44,7 +44,8 @@ def fixture(uid=10001, salt='a', key='1', keyset='1'):
         node('pkg', {'name': names[0], 'stopped': 'true', 'first-install-time': '1234'}),
         node('preferred-activities', children=[node('item', {'name': 'one'}), node('item', {'name': 'two'})])])
     xml['data/system/users/0/package-restrictions.xml.reservecopy'] = copy.deepcopy(xml['data/system/users/0/package-restrictions.xml'])
-    files = audit.REQUIRED | {root + '/base.apk' for root in roots.values()}
+    apk_names = ['Chrome.apk', 'WebViewGoogle.apk', 'TrichromeLibrary.apk']
+    files = audit.REQUIRED | {roots[name] + '/' + apk for name, apk in zip(names, apk_names)}
     inventory = {}
     for path in files:
         data = path.removesuffix('.reservecopy').encode() if path in audit.REQUIRED else path.split('/')[-2].split('-')[0].encode()
@@ -104,7 +105,7 @@ class TemplateStructure(unittest.TestCase):
     def test_compiled_difference_never_implies_validity(self):
         a, b = fixture(), fixture()
         base = next(path for path in a['inventory'] if path.endswith('.apk'))
-        compiled = base.removesuffix('base.apk') + 'oat/arm64/base.odex'
+        compiled = str(Path(base).parent / 'oat/arm64' / (Path(base).stem + '.odex'))
         for capture, value in [(a, 'first'), (b, 'second')]:
             capture['inventory'][compiled] = copy.deepcopy(capture['inventory'][base])
             capture['inventory'][compiled]['sha256'] = value
@@ -121,6 +122,26 @@ class TemplateStructure(unittest.TestCase):
         a, b = fixture(), fixture()
         b['xml']['data/system/packages.xml']['children'][1]['attrs']['future-state'] = 'unexpected'
         self.assertFalse(audit.compare(a, b, {})['structure_pass'])
+
+    def test_named_stub_library_dirs_and_volume_internal_are_exact(self):
+        a, b = fixture(), fixture()
+        for capture, value in ((a, 'uuid-one'), (b, 'uuid-two')):
+            root = next(path for path in capture['inventory'] if path.endswith('/Chrome.apk')).rsplit('/', 1)[0]
+            for suffix in ('/lib', '/lib/arm64'):
+                capture['inventory'][root + suffix] = copy.deepcopy(capture['inventory'][root])
+            capture['inventory']['.fseventsd/fseventsd-uuid'] = copy.deepcopy(capture['inventory']['data/system/packages.list'])
+            capture['inventory']['.fseventsd/fseventsd-uuid']['sha256'] = value
+        self.assertTrue(audit.compare(a, b, {})['structure_pass'])
+        for suffix in ('/unexpected.apk', '/lib/arm64/unknown.so', '/oat/arm64/unknown.odex'):
+            altered = copy.deepcopy(b)
+            altered['inventory'][root + suffix] = copy.deepcopy(b['inventory']['data/system/packages.list'])
+            self.assertFalse(audit.compare(a, altered, {})['structure_pass'])
+        altered = copy.deepcopy(b)
+        altered['inventory']['data/.fseventsd/unknown'] = copy.deepcopy(b['inventory']['data/system/packages.list'])
+        self.assertFalse(audit.compare(a, altered, {})['structure_pass'])
+        altered = copy.deepcopy(b)
+        altered['inventory'][root + '/lib/other-isa'] = copy.deepcopy(b['inventory'][root])
+        self.assertFalse(audit.compare(a, altered, {})['structure_pass'])
 
     def test_missing_mtime_rejects_incomplete_receipt(self):
         a, b = fixture(), fixture()

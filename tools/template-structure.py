@@ -136,7 +136,7 @@ class Normalizer:
     def __init__(self, capture, permission_owners):
         self.capture, self.permission_owners = capture, permission_owners
         self.uids, self.paths, self.cert, self.keys, self.sets, self.domains = {}, {}, {}, {}, {}, {}
-        self.stub_roots = {}
+        self.stub_roots, self.stub_apks, self.stub_dirs = {}, {}, set()
         tree = capture['xml']['data/system/packages.xml']
         uid_names = collections.defaultdict(list)
         for node in walk(tree):
@@ -149,6 +149,14 @@ class Normalizer:
                     raise ValueError('unexpected decompressed package owner ' + name)
                 path = attrs['codePath']
                 self.stub_roots[name] = path.lstrip('/')
+                # Original decompressFiles removes only .gz; it does not rename to base.apk.
+                basename = {'com.android.chrome': 'Chrome.apk', 'com.google.android.webview': 'WebViewGoogle.apk'}.get(name, 'TrichromeLibrary.apk')
+                self.stub_apks[path.lstrip('/')] = basename
+                self.stub_dirs.add(path.lstrip('/') + '/lib')
+                instruction_sets = {'arm64-v8a': 'arm64', 'armeabi-v7a': 'arm', 'armeabi': 'arm', 'x86': 'x86', 'x86_64': 'x86_64', 'arm64-v8a-hwasan': 'arm64', 'riscv64': 'riscv64'}
+                for field in ('primaryCpuAbi', 'secondaryCpuAbi'):
+                    if field in attrs:
+                        self.stub_dirs.add(path.lstrip('/') + '/lib/' + instruction_sets[attrs[field]])
                 if not re.fullmatch(r'/data/app/~~[^/]+/[^/]+', path):
                     raise ValueError(f'unexpected stub code path {path}')
                 self.paths[path] = '/data/app/<container:' + attrs['name'] + '>/<stub:' + attrs['name'] + '>'
@@ -261,19 +269,19 @@ def shipped(path, normalizer):
         return True
     if path.startswith('data/dalvik-cache/arm64/'):
         return Path(path).suffix in COMPILED or path.endswith('@classes.dex')
-    for root in normalizer.stub_roots.values():
-        if path == root + '/base.apk':
+    for root, basename in normalizer.stub_apks.items():
+        if path == root + '/' + basename:
             return True
         prefix = root + '/oat/arm64/'
         if path.startswith(prefix) and '/' not in path[len(prefix):]:
-            return Path(path).suffix in COMPILED
+            return Path(path).name in {Path(basename).stem + suffix for suffix in COMPILED}
     return False
 
 
 def audit(capture, normalizer):
     inventory = capture['inventory']
     files = {p for p, entry in inventory.items() if entry.get('sha256') is not None}
-    required_apks = {root + '/base.apk' for root in normalizer.stub_roots.values()}
+    required_apks = {root + '/' + name for root, name in normalizer.stub_apks.items()}
     missing = sorted((REQUIRED | required_apks) - files)
     extra = sorted(p for p in files if not shipped(p, normalizer) and p.split('/')[0] not in VOLUME_INTERNAL)
     errors = [f'missing shipped file {p}' for p in missing] + [f'unexpected shipped file {p}' for p in extra]
@@ -298,7 +306,7 @@ def audit(capture, normalizer):
         if entry['kind'] not in (stat.S_IFDIR, stat.S_IFREG):
             errors.append('unexpected shipped inode kind ' + path)
         if entry['kind'] == stat.S_IFDIR and path not in files:
-            if not any(p.startswith(path + '/') for p in files if shipped(p, normalizer)):
+            if path not in normalizer.stub_dirs and not any(p.startswith(path + '/') for p in files if shipped(p, normalizer)):
                 errors.append('unexpected empty directory ' + path)
         normalized = normalizer.path(path)
         if normalized in result:
@@ -340,8 +348,8 @@ def compare(left, right, permission_owners):
         elif canonical(a.tree(left['xml'][path], path)) != canonical(b.tree(right['xml'][path], path)):
             differences.append({'path': path, 'error': 'normalized XML differs'})
     compiled, mtimes = [], []
-    entries_a = {a.path(p): v for p, v in left['inventory'].items()}
-    entries_b = {b.path(p): v for p, v in right['inventory'].items()}
+    entries_a = {a.path(p): v for p, v in left['inventory'].items() if p.split('/')[0] not in VOLUME_INTERNAL}
+    entries_b = {b.path(p): v for p, v in right['inventory'].items() if p.split('/')[0] not in VOLUME_INTERNAL}
     for path in sorted(entries_a.keys() & entries_b.keys()):
         entry_a, entry_b = entries_a[path], entries_b[path]
         if entry_a.get('mtime_ns') != entry_b.get('mtime_ns'):
