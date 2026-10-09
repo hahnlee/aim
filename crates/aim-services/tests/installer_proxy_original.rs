@@ -21,6 +21,8 @@ mod common {
     pub mod java;
     pub mod runtime;
 }
+#[path = "../../aim-build/src/nodes/binder_ready.rs"]
+mod binder_ready;
 use common::runtime::{Boot, Data, run};
 
 // SET_CONTEXT_MGR_EXT reads only its inline object; no guest pointers or files.
@@ -65,31 +67,41 @@ fn isolated_client(boot: &Boot, name: &str) -> Command {
 struct ClientGuard(Option<Child>);
 impl Drop for ClientGuard {
     fn drop(&mut self) {
-        if let Some(child) = self.0.as_mut() {
-            if child.try_wait().unwrap().is_none() {
-                child.kill().unwrap();
-            }
-            child.wait().unwrap();
+        let Some(child)=self.0.as_mut() else{return};
+        if matches!(child.try_wait(),Ok(Some(_))) { let _=child.wait(); return; }
+        unsafe { libc::kill(child.id() as i32,libc::SIGTERM); }
+        let grace=Instant::now()+Duration::from_secs(1);
+        while Instant::now()<grace {
+            if matches!(child.try_wait(),Ok(Some(_))) { let _=child.wait(); return; }
+            std::thread::sleep(Duration::from_millis(10));
         }
+        let _=child.kill(); let _=child.wait();
     }
 }
-fn original_client(command: &mut Command) -> std::process::Output {
-    let mut guard = ClientGuard(Some(
-        command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    ));
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while guard.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "original proxy consumer exceeded 60 seconds"
-        );
-        std::thread::sleep(Duration::from_millis(20));
+fn capture_client(command:&mut Command,dir:&std::path::Path,label:&str,limit:Duration)->std::io::Result<std::process::Output> {
+    use std::io::Read;
+    let out=dir.join(format!("{label}.stdout"));let err=dir.join(format!("{label}.stderr"));
+    let child=command.stdout(fs::File::create(&out)?).stderr(fs::File::create(&err)?).spawn()?;
+    let mut guard=ClientGuard(Some(child));let pid=guard.0.as_ref().unwrap().id();let deadline=Instant::now()+limit;
+    let status=loop {
+        if let Some(status)=guard.0.as_mut().unwrap().try_wait()? {break status;}
+        if Instant::now()>=deadline {return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,format!("original client PID{pid} exceeded {limit:?}; output files {} / {}",out.display(),err.display())));}
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    guard.0.as_mut().unwrap().wait()?;
+    let read=|path:&std::path::Path|->std::io::Result<Vec<u8>> {
+        let mut bytes=Vec::new();fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+        if bytes.len()>65536 {return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,format!("original client output exceeds64KiB: {}",path.display())));}
+        Ok(bytes)
+    };
+    let stdout=read(&out);let stderr=read(&err);
+    if !status.success() && (stdout.is_err() || stderr.is_err()) {
+        return Err(std::io::Error::other(format!("original client PID{pid} {status}; stdout:{stdout:?}; stderr:{stderr:?}")));
     }
-    guard.0.take().unwrap().wait_with_output().unwrap()
+    Ok(std::process::Output{status,stdout:stdout?,stderr:stderr?})
+}
+fn original_client(command:&mut Command,dir:&std::path::Path)->std::process::Output {
+    capture_client(command,dir,"proxy-client",Duration::from_secs(60)).expect("original proxy capture")
 }
 fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
     -> Result<bool, aim_binder_host::parcel::Exception> {
@@ -101,40 +113,12 @@ fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
         "/system/bin", "InstallerProxyOracle", "permission-check", permission,
         &pid.to_string(), &uid.to_string()]);
     let ticket = NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
-    let stdout = boot.data.parent().ok_or_else(||failure("permission output parent missing".into()))?
-        .join(format!("permission-{ticket}.stdout"));
-    let stderr = stdout.with_extension("stderr");
-    let out = fs::File::create(&stdout).map_err(|e|failure(e.to_string()))?;
-    let err = fs::File::create(&stderr).map_err(|e|failure(e.to_string()))?;
-    let child = command.stdin(Stdio::null()).stdout(out).stderr(err).spawn()
-        .map_err(|e|failure(format!("original permission spawn: {e}")))?;
-    let mut guard = ClientGuard(Some(child)); let actual_pid = guard.0.as_ref().unwrap().id();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut timed_out = false;
-    let status = loop {
-        match guard.0.as_mut().unwrap().try_wait().map_err(|e|failure(e.to_string()))? {
-            Some(status) => break status,
-            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            None => {
-                timed_out = true;
-                unsafe { libc::kill(actual_pid as i32,libc::SIGTERM) };
-                let grace = Instant::now() + Duration::from_secs(1);
-                let terminal = loop {
-                    if let Some(status) = guard.0.as_mut().unwrap().try_wait().map_err(|e|failure(e.to_string()))? { break status; }
-                    if Instant::now() >= grace { guard.0.as_mut().unwrap().kill().map_err(|e|failure(e.to_string()))?; break guard.0.as_mut().unwrap().wait().map_err(|e|failure(e.to_string()))?; }
-                    std::thread::sleep(Duration::from_millis(10));
-                };
-                break terminal;
-            }
-        }
-    };
-    if let Some(mut child)=guard.0.take(){child.wait().map_err(|e|failure(e.to_string()))?;}
-    let read = |path: &std::path::Path| -> Result<String,Exception> {
-        if fs::metadata(path).map_err(|e|failure(e.to_string()))?.len()>65536 {return Err(failure("original permission output exceeds64KiB".into()));}
-        fs::read_to_string(path).map_err(|e|failure(e.to_string()))
-    };
-    let out = read(&stdout)?; let err = read(&stderr)?;
-    if timed_out || !status.success() {return Err(failure(format!("original permission pid{actual_pid} status{status} timeout={timed_out}; stdout:{out}; stderr:{err}")));}
+    let label=format!("permission-{ticket}");
+    let output=capture_client(command.stdin(Stdio::null()),boot.data.parent().unwrap(),&label,Duration::from_secs(15))
+        .map_err(|e|failure(format!("original permission capture: {e}")))?;
+    let out=String::from_utf8(output.stdout).map_err(|e|failure(e.to_string()))?;
+    let err=String::from_utf8(output.stderr).map_err(|e|failure(e.to_string()))?;
+    if !output.status.success() {return Err(failure(format!("original permission status{}; stdout:{out}; stderr:{err}",output.status)));}
     if !err.is_empty(){return Err(failure(format!("original permission unexpected stderr:{err}")));}
     match out.as_str() {
         "PERMISSION_RESULT 0\n" => Ok(true), "PERMISSION_RESULT -1\n" => Ok(false),
@@ -243,26 +227,36 @@ fn permission_oracle_compiles_and_links_against_original_framework() {
 #[test]
 #[ignore = "requires rebuilt wire-v2 runtime, pinned image, aimctl, JDK and d8; explicit true-mode test owner"]
 fn original_art_consumes_native_installer_proxy_capability() {
-    let directory = std::env::temp_dir().join(format!("aim-proxy-original-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("ap-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let data = Data(directory);
     let repo = aim_paths::root();
     let dex = compile_oracle(&data, &repo);
     common::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
-    let boot = Arc::new(Boot::new(repo.join("target/release/aimctl"), data.0.join("guest")));
-    run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let boot = Arc::new(Boot::new(repo.join("target/release/aimctl"), data.0.join("g")));
+    use std::os::unix::ffi::OsStrExt;
+    let canonical=fs::canonicalize(&data.0).unwrap().join("g.aimctl");
+    let address:libc::sockaddr_un=unsafe{std::mem::zeroed()};
+    for socket in ["display","display.input/event0","display.input/event1","display.input/event2"] {
+        let path=canonical.join(socket);assert!(path.as_os_str().as_bytes().len()<address.sun_path.len()-1,"NOT RUN: fixture socket exceeds SUN_LEN: {}",path.display());
+    }
+    let started=capture_client(boot.start_command().args(["start","--windows"]),&data.0,"boot-start",Duration::from_secs(270)).unwrap();
+    assert!(started.status.success(),"{} {}",started.status,String::from_utf8_lossy(&started.stderr));
+    let deadline=Instant::now()+Duration::from_secs(300);
+    let state=fs::read_to_string(format!("{}.aimctl/state",boot.data.display())).unwrap();
+    let pid:i32=state.lines().find_map(|line|line.strip_prefix("guest=")).expect("actual init PID missing").parse().unwrap();
+    let init=aim_storage::process_namespace::ProcessIdentity::running(pid).unwrap();
+    let runtime=aim_storage::data::runtime_of(&boot.data);let name=format!("dev.aim.guest-init.{pid}.binder");
+    let mut count=0;
     loop {
-        let output = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
-            break;
+        assert!(Instant::now()<deadline,"proxy oracle boot incomplete");let remaining=deadline.saturating_duration_since(Instant::now());
+        if binder_ready::poll(&runtime,init,&name,remaining.as_millis().min(20) as u32).unwrap() {
+            let output=capture_client(boot.command().args(["shell","getprop","sys.boot_completed"]),&data.0,&format!("ready-{count}"),remaining.min(Duration::from_secs(15))).unwrap();
+            assert!(output.status.success(),"{} {}",output.status,String::from_utf8_lossy(&output.stderr));
+            if String::from_utf8_lossy(&output.stdout).trim()=="1" {break;}
+            count+=1;
         }
-        assert!(Instant::now() < deadline, "proxy oracle boot incomplete");
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(100));
     }
     fs::copy(
         dex.join("classes.dex"),
@@ -446,6 +440,7 @@ fn original_art_consumes_native_installer_proxy_capability() {
                 ]
                 .map(|code| code.to_string()),
             ),
+        &data.0,
     );
     assert!(
         output.status.success(),
@@ -473,4 +468,33 @@ fn original_art_consumes_native_installer_proxy_capability() {
     drop(callback);
     assert!(owners.take_errors().is_empty());
     drop(boot);
+}
+#[test]
+fn file_capture_finishes_while_an_owned_descendant_retains_the_writer() {
+    let root=std::env::temp_dir().join(format!("aim-proxy-inherited-{}",std::process::id()));fs::create_dir(&root).unwrap();let data=Data(root);let pid_file=data.0.join("writer.pid");
+    let started=Instant::now();
+    let output=capture_client(Command::new("/bin/sh").args(["-c","/bin/sleep 20 & echo $! > \"$1\"; printf inherited-writer","fixture"]).arg(&pid_file),&data.0,"inherited",Duration::from_secs(2)).unwrap();
+    let pid:i32=fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    let identity=aim_storage::process_namespace::ProcessIdentity::running(pid).unwrap();
+    struct Descendant(aim_storage::process_namespace::ProcessIdentity);
+    impl Drop for Descendant { fn drop(&mut self){
+        if !self.0.is_live(){return;}unsafe{libc::kill(self.0.host_pid,libc::SIGTERM);}
+        let deadline=Instant::now()+Duration::from_secs(1);while self.0.is_live() && Instant::now()<deadline {std::thread::sleep(Duration::from_millis(10));}
+        if self.0.is_live(){unsafe{libc::kill(self.0.host_pid,libc::SIGKILL);}}
+    } }
+    let owned=Descendant(identity);
+    assert!(identity.is_live(),"actual descendant still holds inherited output");
+    assert!(started.elapsed()<Duration::from_secs(2));assert!(output.status.success());assert_eq!(output.stdout,b"inherited-writer");
+    drop(owned);let deadline=Instant::now()+Duration::from_secs(2);while identity.is_live() && Instant::now()<deadline {std::thread::sleep(Duration::from_millis(10));}
+    assert!(!identity.is_live(),"owned descendant not cleaned");
+}
+#[test]
+fn file_capture_preserves_error_status_and_bounds_timeout_and_output() {
+    let root=std::env::temp_dir().join(format!("aim-proxy-status-{}",std::process::id()));fs::create_dir(&root).unwrap();let data=Data(root);
+    let result=capture_client(Command::new("/bin/sh").args(["-c","printf real-error >&2; exit 7"]),&data.0,"status",Duration::from_secs(2)).unwrap();
+    assert_eq!(result.status.code(),Some(7));assert_eq!(result.stderr,b"real-error");
+    let result=capture_client(Command::new("/usr/bin/head").args(["-c","65537","/dev/zero"]),&data.0,"oversized",Duration::from_secs(2));assert_eq!(result.unwrap_err().kind(),std::io::ErrorKind::InvalidData);
+    let pid_file=data.0.join("timeout.pid");let result=capture_client(Command::new("/bin/sh").args(["-c","echo $$ > \"$1\"; exec /bin/sleep 20","fixture"]).arg(&pid_file),&data.0,"timeout",Duration::from_millis(100));assert_eq!(result.unwrap_err().kind(),std::io::ErrorKind::TimedOut);
+    let pid:i32=fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();let mut status=0;assert_eq!(unsafe{libc::waitpid(pid,&mut status,libc::WNOHANG)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::ECHILD));
+    assert_eq!(capture_client(&mut Command::new(data.0.join("absent")),&data.0,"spawn-error",Duration::from_secs(2)).unwrap_err().kind(),std::io::ErrorKind::NotFound);
 }
