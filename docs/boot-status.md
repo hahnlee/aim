@@ -86,7 +86,12 @@ The coherent aa0c8884 original-PMS replay failed before installation because
 initial path-map parsing rejected the bootstrap read-only `ro` entries (#1242).
 The parser now retains them as image areas; a fresh-process initialization test
 passes actual read access and EROFS on writes without changing the backing.
-Actual original boot and APK installation with this correction remain NOT RUN.
+The coherent 7f837348 replay passed initial map parsing but failed boot after
+keystore2 exited with status 1 four times. Its actual namespace receipts exist;
+external readiness instead failed with missing self admission (exit 127, #1243),
+a separate failure. APK installation remains NOT RUN. The original full-default
+linkerconfig was also not generated after the restricted bootstrap run; its
+causal relation to keystore2 requires a corrected replay.
 The latest combined ABI gate passes 245 with zero failures and 19 ignored;
 controlled child entries run through their parents, and input-dependent/manual
 gates remain separate. Native create-user now forwards original pinned parser
