@@ -789,8 +789,12 @@ The initial coherent image build completed 27 nodes but boot-image/oat workers
 failed to execute dex2oat/profman with ENOENT. Their ordinary scratch path-map
 has neither a proof-store locator nor a native coordinator owner. Optional
 configuration now applies only when both entries are absent; declared, dangling
-or malformed stores remain errors. Its focused owner-configuration check passes;
-the rebuilt worker execution and full image/CTS replay remain pending.
+or malformed stores remain errors. Its focused owner-configuration check passes,
+and actual unchanged profman profile extraction exits successfully with 1,078
+output lines. The original-PMS derived image rebuild then completes with four
+rebuilt nodes, 29 fresh nodes and no failures (51.5 seconds). Native-C image
+staging uses the same committed source; its build and full image/CTS replay
+remain pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains
