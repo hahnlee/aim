@@ -60,7 +60,10 @@ are recorded and 59 remain not-run-complete; this is not acceptance. Later
 original commands cannot load libdl after pre-reboot dexopt namespace changes
 (#1236); Compilation APK/DM writes also fail fstat with ENODATA (#1235).
 
-The native campaign remains live. Parsing reports 9 pass / 2 fail against
+The native b04c9e67 campaign is terminal: all 66 modules were attempted, with
+three all-pass recorded modules, five recorded failing modules and 58 not-run
+or incomplete modules. Owned processes and leases were released; this is not
+acceptance. Parsing reports 9 pass / 2 fail against
 original 11 / 0 (#1110); Setting 2 / 0, UsesLibrary 3 / 0, DexMetadata 1 / 9
 (#1225, #1226), Compilation 3 / 26 (#1232, #1233, #1234, #1061). Host classpath
 failure (#1222), concurrent XML association failure (#1223) and actual device
@@ -104,7 +107,7 @@ stale/foreign/missing records and absent capabilities fail. Actual process IPC
 and final lock-release checks pass, as do selected all-target compilation and
 shell syntax checks. Corrected boot readiness and CTS replay remain NOT RUN.
 
-The latest combined ABI gate passes 245 with zero failures and 19 ignored;
+The f242504e combined ABI gate passes 249 with zero failures and 21 ignored;
 controlled child entries run through their parents, and input-dependent/manual
 gates remain separate. Native create-user now forwards original pinned parser
 options to the retained original UserManager, preserving actual caller and PFDs
@@ -132,8 +135,12 @@ CLONE_NEWNS and parent exit; private APEX/linkerconfig changes stay isolated.
 The default namespace now records each actually activated APEX module as its
 own read-only mount (#1246). Actual module open/proc-fd readlink stays under
 `/apex`, writable opens return EROFS, and native bootstrap/default inventory
-and stable mount-ID proofs pass (two focused tests). Corrected default
-linkerconfig and boot success still require a fresh runtime replay.
+and stable mount-ID proofs pass (two focused tests). The coherent 79cf9cec replay confirms the actual bootstrap/default helper
+namespace receipts and a 238499-byte full default linkerconfig. The original
+BPF loader exits zero and sets bpf.progs_loaded=1. Original SystemServer then
+dies in HintManagerService after Power HAL discovery returns no SupportInfo
+(#1247); actual HAL addService failures and init namespace selection remain
+under investigation. Boot completion and APK installation are not accepted.
 Kernfs area encoding is retained instead of being imported as writable. Actual
 original-bionic fork/NEWNS, two-process view, mountinfo and parent-exit proofs
 pass. Combined guest-init: 27 pass, zero fail; storage: 60 pass, zero fail. The
