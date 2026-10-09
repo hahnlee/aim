@@ -392,9 +392,16 @@ including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
 with existing browser and extension state preserved. This correction also
 requires new runtime replay; earlier XML differences remain failure evidence.
-The earlier63-file publication remains invalid evidence. The same
-runtime still reports self-dissent from guest-init during data detach (#1266);
-the producer detaches only after guest-init exits. The earlier frozen XML
+The earlier63-file publication remains invalid evidence. Actual b04 shutdown
+observation finds permission-directory/main/reserve descriptors still open
+before and after native stop and at self-dissent (#1266); the producer
+detaches only after guest-init exits. The source now retires the attached
+bootstrap for both constructor paths: BootSession stores its Runtime outside
+NativeServices' separate runtime slot, so the former slot condition skipped
+cleanup. A real attached Store regression fails before the fix and passes
+after it, closing all three claim FDs even with an external System reference;
+two focused shutdown tests pass. Actual Android detach with this correction
+is not yet run. The earlier frozen XML
 differences are not relabeled as resolved.
 Twelve actual CE/DE directory references in its source boot images match
 their inode values through the real guest path-map; differing integer values

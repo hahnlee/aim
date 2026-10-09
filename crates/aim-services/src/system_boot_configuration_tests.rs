@@ -240,4 +240,54 @@ mod boot_configuration_epoch {
         assert!(fixture.system.check_package_bootstrap(&replacement).is_ok(),"old Session close must not detach replacement");
     }
 
+    #[test]
+    fn native_services_drop_detaches_boot_session_store_without_direct_runtime_slot() {
+        use std::{fs, os::unix::fs::MetadataExt};
+        use crate::package::{owner::Store, permissions::RuntimePermissions};
+        let mut fixture = Fixture::new();
+        let bridge = fixture.attach();
+        let data = fixture.root.join("data");
+        fs::create_dir_all(data.join("system/users/0")).unwrap();
+        fs::write(data.join("system/packages.xml"), b"<packages/>").unwrap();
+        fs::write(data.join("system/users/0/package-restrictions.xml"), b"<package-restrictions/>").unwrap();
+        let permissions = data.join("misc_de/0/apexdata/com.android.permission");
+        fs::create_dir_all(&permissions).unwrap();
+        let mut disk = Store::open(&data, &[0]).unwrap().unwrap();
+        disk.claim_runtime_permission_inventory(&[0]).unwrap();
+        let actual = RuntimePermissions { version: 7, fingerprint: Some("actual-permission-owner".into()), ..Default::default() };
+        disk.commit_runtime_permissions(0, &actual, aim_storage::guest_inode::GuestInode {
+            uid: Some(1000), gid: Some(1000), mode: Some(0o600),
+        }).unwrap();
+        let paths = [permissions.clone(), permissions.join("runtime-permissions.xml"),
+            permissions.join("runtime-permissions.xml.reservecopy")];
+        let identities = paths.map(|path| { let meta = fs::metadata(path).unwrap(); (meta.dev(), meta.ino()) });
+        let held = |identity: (u64, u64)| {
+            fs::read_dir("/dev/fd").unwrap().filter_map(|entry| entry.ok())
+                .filter_map(|entry| entry.file_name().to_str().and_then(|name| name.parse::<i32>().ok()))
+                .filter(|fd| {
+                    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+                    unsafe { libc::fstat(*fd, stat.as_mut_ptr()) == 0
+                        && { let stat = stat.assume_init(); (stat.st_dev as u64, stat.st_ino as u64) == identity } }
+                }).count()
+        };
+        for identity in identities { assert_eq!(held(identity), 1, "actual directory/main/reserve claim must pin exactly one FD"); }
+        let disk = Arc::new(Mutex::new(disk));
+        let weak_disk = Arc::downgrade(&disk);
+        fixture.system.package_bootstrap.lock().unwrap().current.as_mut().unwrap().persistence = Some(disk);
+        let retained_system = fixture.system.clone();
+        let services = crate::NativeServices {
+            system: fixture.system.clone(), services: Vec::new(),
+            package_runtime: Mutex::new(None),
+            package_constructing: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert!(services.package_runtime.lock().unwrap().is_none(), "BootSession owns the actual runtime instead of this direct slot");
+        assert!(retained_system.check_package_bootstrap(&bridge).is_ok());
+        drop(services);
+        assert!(retained_system.package_bootstrap().is_err(), "external System Arc must not keep a detached epoch alive");
+        assert!(weak_disk.upgrade().is_none(), "bootstrap must release its actual Store");
+        for identity in identities { assert_eq!(held(identity), 0, "actual claimed inode FD must close after shutdown"); }
+        assert_eq!(fs::read(permissions.join("runtime-permissions.xml")).unwrap(), actual.serialize().unwrap());
+        assert_eq!(fs::read(permissions.join("runtime-permissions.xml.reservecopy")).unwrap(), actual.serialize().unwrap());
+    }
+
 }

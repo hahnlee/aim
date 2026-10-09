@@ -239,14 +239,14 @@ impl NativeServices {
 
 impl Drop for NativeServices {
     fn drop(&mut self) {
-        if self.package_runtime.get_mut().unwrap().is_some() {
-            if let Ok(bridge) = self.system.package_bootstrap() {
-                if let Err(error) = self.system.detach_package_bootstrap(&bridge) {
-                    eprintln!("native package shutdown cleanup: {}", error.message);
-                }
+        // BootSession retains its Runtime itself; that constructor does not
+        // populate package_runtime. Retire the attached epoch in either path.
+        if let Ok(bridge) = self.system.package_bootstrap() {
+            if let Err(error) = self.system.detach_package_bootstrap(&bridge) {
+                eprintln!("native package shutdown cleanup: {}", error.message);
             }
-            self.package_runtime.get_mut().unwrap().take();
         }
+        self.package_runtime.get_mut().unwrap().take();
         if let Err(error) = self.system.process().shutdown() {
             eprintln!("native Binder shutdown: {error}");
         }
