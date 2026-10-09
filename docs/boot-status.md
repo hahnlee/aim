@@ -352,8 +352,12 @@ fixture passes and rejects five foreign-record variants. The builder now
 derives required compressed payloads from the image and actual pre-boot
 settings, checks real APK identity/ZIP CRC and full gzip bytes, and rejects
 missing required payloads. A real binary-AXML APK filesystem fixture passes;
-neither correction has yet been replayed in a new template. This publication
-is not credited as template acceptance. The same
+the corrected runtime and producer have now completed a fresh template at
+boot236.6 seconds/post-boot permissions242.8 seconds with producer exit0.
+The new source-derived required-payload check passes and70 files publish,
+restoring the missing APK/OAT/VDEX set. Copy integrity and strict structural
+correspondence are being audited; full template/runtime acceptance is still
+unproven. The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML
 differences are not relabeled as resolved.
