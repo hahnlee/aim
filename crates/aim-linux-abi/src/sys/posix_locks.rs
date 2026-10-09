@@ -90,7 +90,25 @@ impl Client {
         let mut tickets = self.tickets.lock().unwrap();
         let mut frame = Frame::new(Operation::Close, self.request()?);
         frame.key = key.to_bytes();
-        self.call(frame, None)?;
+        let pending = self.control.begin(frame, None).map_err(io)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(errno::from_darwin(libc::ETIMEDOUT));
+            }
+            match pending.wait_authenticated(remaining, self.controller) {
+                Ok(response) => {
+                    Self::reply(response)?;
+                    break;
+                }
+                Err(error) if error.raw_os_error() == Some(libc::EINTR) => {
+                    #[cfg(test)]
+                    CLOSE_INTERRUPTED.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => return Err(io(error)),
+            }
+        }
         tickets.retain(|(identity, _), _| *identity != frame.key);
         Ok(())
     }
@@ -189,6 +207,8 @@ impl Client {
         Ok(output)
     }
 }
+#[cfg(test)]
+static CLOSE_INTERRUPTED:AtomicU64=AtomicU64::new(0);
 static CURRENT: Mutex<Option<Arc<Client>>> = Mutex::new(None);
 /// Root configures an authenticated controller-produced owner at process start.
 pub fn install(client: Arc<Client>) -> Result<(), Errno> {
@@ -479,5 +499,194 @@ mod lifecycle_tests {
         registration.remove(&table).unwrap();
         std::fs::remove_dir_all(root).unwrap();
         println!("POSIX_BOOTSTRAP_OWNER_EXECUTED");
+    }
+}
+
+#[cfg(test)]
+mod interrupted_close_tests {
+    use super::*;
+    use std::os::fd::{AsFd, AsRawFd, IntoRawFd};
+    #[test]
+    fn close_reply_preserves_real_noninterrupted_error() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::posix_locks::interrupted_close_tests::close_reply_preserves_real_noninterrupted_error",
+        ) {
+            return;
+        }
+        let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
+        let name = format!("dev.aim.close-error.{}", actual.host_pid);
+        let endpoint = posix_control::Endpoint::register(&name).unwrap();
+        let client = Client::new(
+            posix_control::Client::lookup(&name).unwrap(),
+            Owner {
+                process: actual,
+                guest_pid: actual.host_pid,
+            },
+            actual,
+        )
+        .unwrap();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let identity = Identity::from_fd(file.as_fd()).unwrap();
+        let server = std::thread::spawn(move || {
+            let request = endpoint.receive(Duration::from_secs(2)).unwrap();
+            assert_eq!(request.actor, actual);
+            assert_eq!(request.frame.operation, Operation::Close);
+            let mut response = request.frame;
+            response.errno = libc::EIO;
+            request.reply.send(response).unwrap();
+        });
+        let before = CLOSE_INTERRUPTED.load(Ordering::Relaxed);
+        assert_eq!(client.close_inode(identity), Err(errno::EIO));
+        server.join().unwrap();
+        assert_eq!(CLOSE_INTERRUPTED.load(Ordering::Relaxed), before);
+    }
+    extern "C" fn unrelated_signal(_: i32) {}
+    #[test]
+    fn interrupted_close_wait_preserves_one_request_and_reused_descriptor() {
+        if super::super::fdtab::isolated_kernel_test(
+            "sys::posix_locks::interrupted_close_tests::interrupted_close_wait_preserves_one_request_and_reused_descriptor",
+        ) {
+            return;
+        }
+        let (_view, directory) = crate::vfs::test_view();
+        let actual = ProcessIdentity::running(unsafe { libc::getpid() }).unwrap();
+        let holder = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("aim-lock-holder");
+        assert!(holder.is_file());
+        let endpoint = format!("dev.aim.interrupted-close.{}", actual.host_pid);
+        let controller =
+            aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config {
+                endpoint: endpoint.clone(),
+                holder,
+                startup_timeout: Duration::from_secs(5),
+            })
+            .unwrap();
+        let owner = Owner {
+            process: actual,
+            guest_pid: actual.host_pid,
+        };
+        controller.register_guest(owner).unwrap();
+        let native = posix_control::Client::lookup(&endpoint).unwrap();
+        let locker = Client::new(native.try_clone().unwrap(), owner, actual).unwrap();
+        let path = directory.join("original-lock");
+        std::fs::write(&path, b"original").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let lock = LinuxFlock {
+            kind: 1,
+            whence: 0,
+            pad: 0,
+            start: 0,
+            len: 1,
+            pid: 0,
+            pad2: 0,
+        };
+        locker.lock(file.as_fd(), 6, lock, || false).unwrap();
+        let mut held = libc::flock {
+            l_start: 0, l_len: 1, l_pid: 0,
+            l_type: libc::F_WRLCK as i16, l_whence: libc::SEEK_SET as i16,
+        };
+        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut held) }, 0);
+        assert_eq!(held.l_type, libc::F_WRLCK as i16);
+        assert!(held.l_pid > 0 && held.l_pid != actual.host_pid);
+
+        let original = file.into_raw_fd();
+        super::super::fdtab::publish_guest(original).unwrap();
+        let replacement = std::fs::File::open("/dev/null").unwrap();
+        let replacement_fd = replacement.as_raw_fd();
+        let relay_name = format!("dev.aim.close-relay.{}", actual.host_pid);
+        let relay = posix_control::Endpoint::register(&relay_name).unwrap();
+        let close_client = Client::new(
+            posix_control::Client::lookup(&relay_name).unwrap(),
+            owner,
+            actual,
+        )
+        .unwrap();
+        install(close_client).unwrap();
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = unrelated_signal as *const () as usize;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            assert_eq!(libc::sigaction(libc::SIGUSR2, &action, &mut previous), 0);
+        }
+        struct Handler(libc::sigaction);
+        impl Drop for Handler {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::sigaction(libc::SIGUSR2, &self.0, std::ptr::null_mut());
+                }
+            }
+        }
+        let _handler = Handler(previous);
+        let waiting = unsafe { libc::pthread_self() } as usize;
+        let before = CLOSE_INTERRUPTED.load(Ordering::Relaxed);
+        let relay_thread = std::thread::spawn(move || {
+            let request = relay.receive(Duration::from_secs(2)).unwrap();
+            assert_eq!(request.actor, actual);
+            assert_eq!(request.frame.operation, Operation::Close);
+            // The authentic RPC is held while a real unrelated host signal interrupts
+            // the waiting guest syscall; then exactly one request reaches the broker.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while CLOSE_INTERRUPTED.load(Ordering::Relaxed) == before {
+                assert!(std::time::Instant::now() < deadline);
+                unsafe {
+                    assert_eq!(
+                        libc::pthread_kill(waiting as libc::pthread_t, libc::SIGUSR2),
+                        0
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            {
+                let _guard = super::super::fdtab::lifecycle();
+                assert_eq!(unsafe { libc::dup2(replacement_fd, original) }, original);
+                super::super::fdtab::publish_guest(original).unwrap();
+            }
+            let response = native
+                .begin(request.frame, None)
+                .unwrap()
+                .wait_authenticated(Duration::from_secs(2), actual)
+                .unwrap();
+            assert_eq!(response.errno, 0);
+            request.reply.send(response).unwrap();
+            assert!(
+                matches!(relay.receive(Duration::from_millis(25)),Err(error)if error.raw_os_error()==Some(libc::ETIMEDOUT))
+            );
+        });
+        assert_eq!(super::super::fs::close([original as u64, 0, 0, 0, 0, 0]), 0);
+        relay_thread.join().unwrap();
+        assert!(CLOSE_INTERRUPTED.load(Ordering::Relaxed) > before);
+        assert!(super::super::fdtab::visible(original));
+        assert!(unsafe { libc::fcntl(original, libc::F_GETFD) } >= 0);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut query = libc::flock {
+            l_start: 0,
+            l_len: 1,
+            l_pid: 0,
+            l_type: libc::F_WRLCK as i16,
+            l_whence: libc::SEEK_SET as i16,
+        };
+        assert_eq!(
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut query) },
+            0
+        );
+        assert_eq!(query.l_type, libc::F_UNLCK as i16);
+        reset_fork();
+        super::super::fdtab::close_owned_guest(original, false).unwrap();
+        drop(replacement);
+        drop(controller);
     }
 }
