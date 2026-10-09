@@ -62,7 +62,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     };
     use common::runtime::{Boot, run};
     use std::fmt::Write;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let data = Data::new();
     let res = data.0.join("res");
     for directory in ["xml", "xml-en", "values"] {
@@ -437,22 +437,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
     .unwrap();
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let output = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "disposable boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("split_parser oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/update-ownership");
     fs::create_dir(&guest).unwrap();
     let policy_root = data.0.join("policy");
@@ -798,7 +783,7 @@ fn manifest_keysets_match_original_parser() {
     use common::runtime::{Boot, run};
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     use std::fmt::Write;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     let data = Data::new();
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
@@ -1009,22 +994,7 @@ fn manifest_keysets_match_original_parser() {
     }
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let result = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "disposable boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("split_parser oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/manifest-keysets");
     fs::create_dir(&guest).unwrap();
     fs::copy(dex.join("classes.dex"), guest.join("oracle.dex")).unwrap();

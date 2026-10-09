@@ -2,7 +2,7 @@
 use aim_services::package::owner::app_ids::{AppIds, Error, Owner};
 use std::fs;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common {
     pub mod java;
@@ -75,22 +75,7 @@ fn allocation_matches_the_original_runtime() {
     .unwrap();
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let output = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "disposable boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("app_ids oracle boot readiness");
     fs::copy(
         dex.join("classes.dex"),
         boot.data.join("data/local/tmp/app-ids.dex"),

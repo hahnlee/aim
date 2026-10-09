@@ -16,7 +16,7 @@ use aim_services::package::{
 use std::collections::BTreeMap;
 use std::fs;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common {
     pub mod java;
@@ -77,22 +77,7 @@ fn saved_scan_libraries_match_original_pms() {
     .unwrap();
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let result = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "original PMS boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("scan_runtime oracle boot readiness");
     let properties =
         String::from_utf8(run(boot.command().args(["shell", "getprop"])).stdout).unwrap();
     let properties: BTreeMap<_, _> = properties

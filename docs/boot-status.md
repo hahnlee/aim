@@ -422,10 +422,11 @@ owned PIDs and image attachments are gone. The kernel admission guard
 remains unchanged.
 A fresh roster has63 required manual bodies: seven host bodies pass, the
 proxy body fails, and55 are unrun; full aggregate acceptance remains unproven.
-The suspension fixture now uses a shared birth-bound Binder readiness owner
-and bounded property queries within the300-second boot budget (#1285). Two
-actual host Binder tests and fixture compilation pass; its Android body is
-unrun. A separate first Native099 template fails initial getprop admission
+Fourteen integration fixture files now use a shared birth-bound Binder
+readiness owner and bounded property queries within the300-second boot
+budget (#1285), replacing15 duplicated property loops. Two actual host
+Binder tests pass and all14 fixture targets compile; their affected Android
+bodies remain unrun. A separate first Native099 template fails initial getprop admission
 with EPERM before constructor/boot/svc assertions (#1286), despite the same
 producer and image inputs previously passing on4bb. Its owned processes and
 attachments are gone; earlier4bb shutdown evidence remains valid for4bb.

@@ -6,24 +6,12 @@ use common::runtime::{Boot, Data, run};
 use std::{
     fs,
     process::Command,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 fn ready(boot: &Boot) {
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let output = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
-            break;
-        }
-        assert!(Instant::now() < deadline, "boot readiness timed out");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("memfd_lifecycle oracle boot readiness");
 }
 
 #[test]

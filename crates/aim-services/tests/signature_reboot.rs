@@ -10,22 +10,7 @@ use common::runtime::{Boot, Data, run};
 
 fn start(boot: &Boot) {
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let result = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "original PMS boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("signature_reboot oracle boot readiness");
 }
 
 #[test]

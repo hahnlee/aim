@@ -2,7 +2,7 @@
 use std::{
     fs,
     process::Command,
-    time::{Duration, Instant},
+    time::Duration,
 };
 mod common {
     pub mod java;
@@ -76,22 +76,7 @@ fn package_permission_lifecycle_matches_original_order() {
     .unwrap();
     let boot = Boot::new(repo.join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let output = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "user policy oracle boot incomplete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("package_permission_lifecycle oracle boot readiness");
     let guest = boot
         .data
         .join("data/local/tmp/package-permission-lifecycle");
