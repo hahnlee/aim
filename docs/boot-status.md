@@ -345,7 +345,15 @@ data APK remains and the template lacks three APKs plus four OAT/VDEX files.
 The identity validator remains intact; the factory-record owner must carry
 the actual current setting with its admitted code. The builder also needs a
 generic required-payload check instead of accepting zero selected data stubs
-(#1269). This publication is not credited as template acceptance. The same
+(#1269). The source now constructs a current disabled-factory record only
+after validating its admitted identity, code and signing; the existing full
+setting comparison remains. An actual system-scan/loading/disable/existing-scan
+fixture passes and rejects five foreign-record variants. The builder now
+derives required compressed payloads from the image and actual pre-boot
+settings, checks real APK identity/ZIP CRC and full gzip bytes, and rejects
+missing required payloads. A real binary-AXML APK filesystem fixture passes;
+neither correction has yet been replayed in a new template. This publication
+is not credited as template acceptance. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML
 differences are not relabeled as resolved.
