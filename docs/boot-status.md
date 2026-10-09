@@ -292,8 +292,13 @@ ABI-selected lib directories and excludes top-level host-volume internals
 consistently (#1262). Thirteen focused tests pass; real six XML differences
 are not normalized away. The structure
 capture tool now reads real Darwin xattrs with libc NOFOLLOW calls (#1261);
-12 tests include actual local-file capture and error propagation. Compiled
-code validity, two-template structure and original/runtime parity remain
+12 tests include actual local-file capture and error propagation. Read-only
+attachments of both published native templates verify54 actual OAT/VDEX
+pairs: OAT259/VDEX027 headers, AArch64 ELF bounds, APK/JAR DEX SHA1 and
+Adler32, VDEX ZIP CRC lists and first OAT source bindings pass. Both images
+retain their original hashes and are normally detached. These offline checks
+do not establish ART loading, boot-image/context binding or complete OAT
+checksum acceptance. Runtime compiled-code validity, two-template structure and original/runtime parity remain
 unverified. Separate bounded lifecycle diagnostics reproduce svc help
 output without terminal EOF. A full wait observer once permits natural exit,
 but scalar wait recording alone and an idle-worker-only variant both fail
