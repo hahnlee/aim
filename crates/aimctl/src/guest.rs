@@ -1,10 +1,8 @@
 //! Programs run in the resident guest, and what its processes use.
 
-use std::io::Read;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use crate::state::{Files, State};
 
@@ -57,41 +55,9 @@ impl Guest {
         command
     }
 
-    /// `argv`'s exit status and output; its whole process group is killed
-    /// after `timeout`.
+    /// Capture a command within its deadline and reap only its own child PID.
     pub fn output(&self, argv: &[&str], timeout: Duration) -> Result<(ExitStatus, String), String> {
-        let mut child = self
-            .command(argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .map_err(|e| format!("linux-run: {e}"))?;
-        let mut stdout = child.stdout.take().expect("piped");
-        let reader = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let _ = stdout.read_to_end(&mut out);
-            out
-        });
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                break status;
-            }
-            if Instant::now() > deadline {
-                // SAFETY: the process group of the child we started.
-                unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
-                let _ = child.wait();
-                return Err(format!("{}: no answer after {timeout:?}", argv.join(" ")));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let out = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
-        if status.signal() == Some(libc::SIGKILL) {
-            return Err(format!("{}: linux-run was killed", argv.join(" ")));
-        }
-        Ok((status, out))
+        crate::output::run(&mut self.command(argv), timeout)
     }
 
     /// Whether Android finished booting (`sys.boot_completed`).

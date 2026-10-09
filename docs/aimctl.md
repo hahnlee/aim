@@ -37,6 +37,11 @@ and runtime. Shells enter the running init's authenticated mount namespace.
 the saved selection. Existing state files without a selection use the
 normal build paths.
 
+Captured guest commands preserve unsuccessful exit status and stderr. Their
+deadline also bounds inherited output writers; command timeout terminates and
+reaps only the directly started child PID (#1268). The separate resident-stop
+session fallback is not covered by this command-runner correction.
+
 ## The resident guest
 
 `aimctl run` is the guest's keeper: it starts aim-display (a device window

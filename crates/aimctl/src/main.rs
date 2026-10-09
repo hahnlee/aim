@@ -9,6 +9,7 @@
 mod args;
 mod guest;
 mod inputs;
+mod output;
 mod resident;
 mod state;
 
