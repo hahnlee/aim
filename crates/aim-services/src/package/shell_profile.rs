@@ -1,9 +1,15 @@
-//! Android 16 snapshot-profile executes the original ART Service shell owner.
+//! Android 16 PM delegates its pinned ART commands to the original ART owner.
 use super::shell::Context;
 use aim_binder_host::parcel::{EX_ILLEGAL_STATE, Exception};
 
+#[path = "art_shell_commands.rs"]
+mod commands;
+fn supported(command: Option<&str>) -> bool {
+    command.is_some_and(|command| commands::SUPPORTED.contains(&command))
+}
+
 pub fn run(context: &mut Context<'_>) -> Result<Option<i32>, Exception> {
-    if context.command.args.first().map(String::as_str) != Some("snapshot-profile") {
+    if !supported(context.command.args.first().map(String::as_str)) {
         return Ok(None);
     }
     let missing = |name| {
@@ -35,4 +41,31 @@ pub fn run(context: &mut Context<'_>) -> Result<Option<i32>, Exception> {
         .system()?
         .shell_art_command(context.uid, context.pid, input, output, error, args)
         .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_pinned_art_commands_enter_art_owner() {
+        for command in commands::SUPPORTED {
+            assert!(supported(Some(command)));
+        }
+        for command in [
+            "install",
+            "uninstall",
+            "list",
+            "path",
+            "set-home-activity",
+            "compile-extra",
+            "",
+            "ART",
+        ] {
+            assert!(
+                !supported(Some(command)),
+                "generic package command intercepted: {command}"
+            );
+        }
+        assert!(!supported(None));
+    }
 }

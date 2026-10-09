@@ -71,12 +71,14 @@ PermissionController version. The builder consumes its bytes, file and ancestor
 metadata and xattrs; the original image retains its existing capture path without
 claiming constructor provenance. Capture and permission-completion tests pass
 (one storage, two builder), and related all-target compilation passes. Actual new
-image/template replay and consumer checks remain necessary. Native snapshot-profile
-now delegates to the original ArtManagerLocal shell owner with actual transferred
+image/template replay and consumer checks remain necessary. The nine pinned ART shell commands
+now delegate to the original ArtManagerLocal shell owner with actual transferred
 PFDs and authenticated inbound caller identity (#1226). Three transport tests
 pass, including real driver forwarding of the shell caller, descriptor lifetime,
 and original exception/tail handling; complete Java/AIDL, D8 and original-image
-linkage pass. Actual profile creation and official CTS replay remain NOT RUN.
+linkage pass. One source-derived dispatch guard test and the three transport tests pass;
+Rust/Java guard drift is checked against the pinned original command set. Actual
+profile creation and official CTS replay remain NOT RUN.
 Installer authorization now retains an uncached reader of the original Context
 permission owner, not granted permission values (#1230). Public create-session
 retains actual PID/UID; commit and emergency decisions re-read current installer

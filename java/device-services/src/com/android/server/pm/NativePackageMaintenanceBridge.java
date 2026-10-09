@@ -92,15 +92,21 @@ public final class NativePackageMaintenanceBridge extends IPackageMaintenanceBri
         try (input; output; error) {
             int uid = Binder.getCallingUid();
             if (uid != android.os.Process.ROOT_UID && uid != android.os.Process.SHELL_UID)
-                throw new SecurityException("ART Service shell commands require root or shell");
+                throw new SecurityException("ART service shell commands need root or shell access");
             java.util.Objects.requireNonNull(input);
             java.util.Objects.requireNonNull(output);
             java.util.Objects.requireNonNull(error);
             java.util.Objects.requireNonNull(arguments);
-            if (arguments.length == 0 || !"snapshot-profile".equals(arguments[0]))
+            if (arguments.length == 0 || !NativeArtShellCommands.supports(arguments[0]))
                 throw new IllegalArgumentException("Unknown native ART shell command");
             var owner = profileOwner();
-            if (owner == null) throw new IllegalStateException("ART Service is not ready. Please try again later");
+            if (owner == null) {
+                // Borrowed stream: the incoming PFD remains the close owner.
+                var writer = new java.io.PrintWriter(new java.io.FileOutputStream(error.getFileDescriptor()));
+                writer.println("ART Service is not ready. Please try again later");
+                writer.flush();
+                return -1;
+            }
             return owner.handleShellCommand(this, input, output, error, arguments);
         } catch (java.io.IOException failure) {
             throw new IllegalStateException(failure);
