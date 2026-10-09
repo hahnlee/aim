@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 import json
+import hashlib
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -42,6 +44,82 @@ class Lifetime(unittest.TestCase):
                 pm.resume_state(args, dict(provenance, wrapper_bundle={'identity': 'changed'}))
             with self.assertRaisesRegex(ValueError, 'cts_args'):
                 pm.resume_state(args, dict(provenance, cts_args=['--changed']))
+
+    def test_official_launcher_resolves_pinned_preparer_class_and_resource(self):
+        harness = ROOT / '_build/cts-tradefed/android-cts'
+        owner = harness / 'testcases/CtsAppSecurityHostTestCases/CtsAppSecurityHostTestCases.jar'
+        pins = {}
+        for line in (ROOT / 'upstream/cts-tradefed.lock').read_text().splitlines():
+            if line.startswith('"'):
+                entry, digest = line.strip('"').split('|')
+                pins[entry] = digest
+        pin = pins['android-cts/testcases/CtsAppSecurityHostTestCases/CtsAppSecurityHostTestCases.jar']
+        self.assertEqual(hashlib.sha256(owner.read_bytes()).hexdigest(), pin)
+        resource_name = 'android/appsecurity/cts/AppSecurityPreparer.class'
+        with zipfile.ZipFile(owner) as jar:
+            resource_sha = hashlib.sha256(jar.read(resource_name)).hexdigest()
+        java = next(path for path in [
+            Path('/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java'),
+            Path('/opt/homebrew/opt/openjdk@21/bin/java'),
+        ] if path.is_file() and '21.' in subprocess.run(
+            [str(path), '-version'], capture_output=True, text=True, check=True).stderr)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = bundle.snapshot(ROOT, harness, root / 'generations')
+            private = Path(receipt['directory']) / 'harness/android-cts'
+            self.assertFalse((private / 'testcases').is_symlink())
+            # These are the unchanged pinned launcher's actual discovery rules.
+            launcher = (private / 'tools/cts-tradefed').read_text()
+            self.assertIn("find ${CTS_ROOT}/android-cts/testcases -name '*.jar'", launcher)
+            discover = lambda path: subprocess.check_output(
+                ['find', str(path), '-name', '*.jar'], text=True).splitlines()
+            jars = discover(private / 'testcases')
+            self.assertEqual({str(Path(path).resolve()) for path in jars},
+                             {str(Path(path).resolve()) for path in discover((harness / 'testcases').resolve())})
+            self.assertIn(str((private / 'testcases/CtsAppSecurityHostTestCases') / owner.name), jars)
+            tools = [str(path) for path in sorted((private / 'tools').glob('*.jar'))]
+            probe = root / 'PreparerProbe.java'
+            probe.write_text(r"""
+import android.appsecurity.cts.AppSecurityPreparer;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+public class PreparerProbe {
+    public static void main(String[] args) throws Exception {
+        AppSecurityPreparer preparer = new AppSecurityPreparer();
+        Path actual = Path.of(preparer.getClass().getProtectionDomain().getCodeSource().getLocation().toURI()).toRealPath();
+        if (!actual.equals(Path.of(args[0]).toRealPath())) throw new AssertionError(actual);
+        try (var resource = AppSecurityPreparer.class.getResourceAsStream("/android/appsecurity/cts/AppSecurityPreparer.class")) {
+            if (resource == null) throw new AssertionError("missing preparer resource");
+            String sha = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(resource.readAllBytes()));
+            if (!sha.equals(args[1])) throw new AssertionError(sha);
+        }
+        System.out.println("real pinned preparer class, constructor, resource and artifact delegation resolved");
+    }
+}
+""")
+            broken = root / 'old-testcases'
+            broken.symlink_to((harness / 'testcases').resolve(), target_is_directory=True)
+            self.assertEqual(discover(broken), [])
+            failed = subprocess.run([str(java), '-cp', ':'.join(tools + discover(broken)),
+                                     str(probe), str(owner), resource_sha],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn('android.appsecurity.cts', failed.stderr)
+            passed = subprocess.run([str(java), '-cp', ':'.join(tools + jars),
+                                     str(probe), str(owner), resource_sha],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertIn('real pinned preparer class', passed.stdout)
+            self.assertEqual(hashlib.sha256(owner.read_bytes()).hexdigest(), pin)
+            bundle.validate(receipt['directory'])
+            link = private / 'testcases/CtsAppSecurityHostTestCases' / owner.name
+            link.unlink()
+            foreign = root / 'foreign.jar'
+            foreign.write_bytes(b'foreign artifact')
+            link.symlink_to(foreign)
+            with self.assertRaisesRegex(ValueError, 'testcase artifact link differs'):
+                bundle.validate(receipt['directory'])
 
     def test_waiting_bash_retains_detached_generation_after_source_edit(self):
         with tempfile.TemporaryDirectory() as temporary:
