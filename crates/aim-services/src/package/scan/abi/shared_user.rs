@@ -123,4 +123,54 @@ mod tests {
         assert!(owner.reconcile_shared_user_abis().is_err());
         assert_eq!(owner, before);
     }
+
+    #[test]
+    fn completed_boot_groups_inherit_the_eight_captured_setting_abis_without_changing_raw_code() {
+        // Inputs from the matched original/native packages.xml snapshots. Only
+        // the setting ABI is inherited; these names are not production policy.
+        let missing = ["com.android.providers.settings", "com.android.inputdevices", "com.android.server.telecom",
+            "com.android.keychain", "com.android.localtransport", "com.android.settings", "com.android.location.fused",
+            "com.google.android.cellbroadcastservice"];
+        let mut packages = vec![member("android", Some("arm64-v8a")), member("com.android.DeviceAsWebcam", Some("arm64-v8a"))];
+        packages.extend(missing[..7].iter().map(|name| member(name, None)));
+        for (name, abi) in [("com.google.android.networkstack.tethering", Some("arm64-v8a")),
+            (missing[7], None), ("com.google.android.networkstack", Some("arm64-v8a"))] {
+            let mut package = member(name, abi); package.app_id = 1073; packages.push(package);
+        }
+        // An incremental-loaded setting and disabled factory retain independent
+        // metadata; neither may be silently converted or used as a new ABI guess.
+        packages.iter_mut().find(|package| package.name == missing[0]).unwrap().loading_progress = 0.35;
+        let mut disabled = member(missing[5], Some("armeabi-v7a")); disabled.code_path = "/system/disabled-factory".into();
+        let settings = Settings {packages, disabled_system_packages:vec![disabled], shared_users:vec![
+            SharedUser{name:"android.uid.system".into(), app_id:1000, flags:0, signatures:None},
+            SharedUser{name:"android.uid.networkstack".into(), app_id:1073, flags:0, signatures:None}], ..Default::default()};
+        let mut owner = SigningScan::new(&SystemConfig::default(), &settings, 36).unwrap();
+        for package in &settings.packages {
+            owner.loaded.insert(package.name.clone(), std::sync::Arc::new(crate::package::scan::LoadedPackage::new(
+                crate::package::pkg::AndroidPackage {package_name:package.name.clone(), primary_cpu_abi:package.primary_cpu_abi.clone(), ..Default::default()},
+                crate::package::sign::SigningDetails::unknown()).unwrap()));
+        }
+        let before = owner.clone(); let mut expected = before.settings.clone();
+        for name in missing {expected.packages.iter_mut().find(|package| package.name == name).unwrap().primary_cpu_abi = Some("arm64-v8a".into());}
+        let report = owner.reconcile_shared_user_abis().unwrap();
+        assert!(report.mismatches.is_empty()); assert_eq!(report.changed_code_paths.len(), 8);
+        assert_eq!(owner.settings, expected); assert_eq!(owner.loaded, before.loaded);
+        assert_eq!(owner.settings.disabled_system_packages, before.settings.disabled_system_packages);
+        assert!(owner.settings.packages.iter().find(|package| package.name == missing[0]).unwrap().is_loading());
+        assert!(owner.reconcile_shared_user_abis().unwrap().changed_code_paths.is_empty());
+    }
+
+    #[test]
+    fn shared_groups_do_not_inherit_from_another_uid_or_overwrite_existing_32bit_choice() {
+        let native = member("native", Some("arm64-v8a")); let mut java = member("java", None); java.app_id = 1073;
+        let mut selected = member("selected", Some("armeabi-v7a")); selected.app_id = 1073;
+        let settings = Settings {packages:vec![native,java,selected], shared_users:vec![
+            SharedUser{name:"android.uid.system".into(),app_id:1000,flags:0,signatures:None},
+            SharedUser{name:"android.uid.networkstack".into(),app_id:1073,flags:0,signatures:None}], ..Default::default()};
+        let mut owner = SigningScan::new(&SystemConfig::default(), &settings, 36).unwrap();
+        owner.reconcile_shared_user_abis().unwrap();
+        assert_eq!(owner.settings.packages[0].primary_cpu_abi.as_deref(),Some("arm64-v8a"));
+        assert_eq!(owner.settings.packages[1].primary_cpu_abi.as_deref(),Some("armeabi-v7a"));
+        assert_eq!(owner.settings.packages[2].primary_cpu_abi.as_deref(),Some("armeabi-v7a"));
+    }
 }

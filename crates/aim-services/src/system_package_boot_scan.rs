@@ -226,6 +226,11 @@ impl System {
         let decompression=Arc::new(crate::package::scan::boot_compressed::BootDecompression::new(begin.data.join("app")).map_err(failure)?);
         let mut usage=Usage::new(owner.loaded_packages().keys().map(String::as_str));usage.read(&begin.data.join("system/package-usage.list")).map_err(failure)?;
         self.expand_native_boot_stubs(bridge,&begin,&mut owner,apks,policy,&system,&decompression,zip_time,&usage,&mut retained_runtime)?;
+        let shared_abis=owner.reconcile_shared_user_abis().map_err(failure)?;
+        for mismatch in shared_abis.mismatches {
+            eprintln!("PackageManager: shared UID instruction set mismatch: {} requires {}, {:?} requires {}",
+                mismatch.package,mismatch.package_isa,mismatch.required_by,mismatch.required_isa);
+        }
         let runtime_metadata=if begin.prepared.report.first_boot{
             // No saved runtime input was read by readLPw. Real constructor
             // SettingBase owners remain empty until permission initialization.
