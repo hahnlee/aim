@@ -155,12 +155,21 @@ impl State {
                 .parse::<u64>()
                 .map_err(|_| format!("state: bad {key}"))
         };
+        // kill(0, ...) targets a group and kill(-1, ...) broadcasts. Stored
+        // process ids must never acquire either meaning when cast to pid_t.
+        let pid = |key: &str, value: u64| {
+            if value == 0 || value > i32::MAX as u64 {
+                Err(format!("state: bad {key}"))
+            } else {
+                Ok(value as u32)
+            }
+        };
         let guest = field("guest")?;
         Ok(State {
-            pid: number("pid")? as u32,
+            pid: pid("pid", number("pid")?)?,
             guest: match guest {
                 "" => None,
-                g => Some(g.parse().map_err(|_| "state: bad guest".to_string())?),
+                g => Some(pid("guest", g.parse::<u64>().map_err(|_| "state: bad guest".to_string())?)?),
             },
             windows: match field("mode")? {
                 "windows" => true,
@@ -273,6 +282,19 @@ mod tests {
         assert!(State::parse("pid=1\nguest=\nmode=phone\nstarted=0\n").is_err());
         assert!(State::parse("pid=1\nmode=device\nstarted=0\n").is_err());
         assert!(State::parse("pid=x\nguest=\nmode=device\nstarted=0\n").is_err());
+    }
+
+    #[test]
+    fn stored_pids_never_become_groups_broadcasts_or_truncated_processes() {
+        let state = State { pid: 1, guest: Some(i32::MAX as u32), windows: false,
+            started: 2, inputs: crate::inputs::Inputs::default() };
+        assert_eq!(State::parse(&state.to_text()).unwrap(), state);
+        for invalid in ["0", "2147483648", "4294967295", "4294967296", "18446744073709551615", "-1"] {
+            let text = state.to_text().replacen("pid=1\n", &format!("pid={invalid}\n"), 1);
+            assert!(State::parse(&text).is_err(), "resident pid {invalid}");
+            let text = state.to_text().replacen("guest=2147483647\n", &format!("guest={invalid}\n"), 1);
+            assert!(State::parse(&text).is_err(), "guest pid {invalid}");
+        }
     }
 
     #[test]
