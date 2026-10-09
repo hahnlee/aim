@@ -281,9 +281,12 @@ tests preserve shared offsets, pread position, writer exclusion, proof enabled
 after open, and EIO for corrupted data or metadata. The host fixture
 measurements are distinct from the actual286.2-second boot result and do not
 alone attribute the whole boot-time difference. Original template publication
-is now verified; strict original/native structure, runtime parity and consumer
-checks remain unverified. Cleanup and filtered-log diagnostics are being
-finalized without a claim that all Android errors are absent. The pinned stub-output
+is now verified. The matching corrected-runtime native pair also publishes70
+files each, with observed boot238.5/234.7 seconds and post-boot permission
+capture244.6/234.8 seconds. Strict pair/original comparison is in progress;
+runtime parity and consumer checks remain unverified. The filtered original
+alarm stack logs a non-protected UPDATE_CT_LOGS broadcast, not an established
+permission denial; no absence of Android errors is claimed. The pinned stub-output
 checker now accepts only the original decompression basenames and
 ABI-selected lib directories and excludes top-level host-volume internals
 consistently (#1262). Thirteen focused tests pass; real six XML differences
@@ -307,6 +310,15 @@ observer establishes its cause. These experimental runtimes are not
 production corrections or CTS passes. Original-bionic SIGQUIT wait/join and fork/exec under UID2000
 pass in an isolated test. A separate unread-PTY exit test reproduces an
 unbounded terminal drain (#1259); this is not yet proved to cause svc delay.
+Native Binder loopers previously retained registered service/file owners
+after the outer boot owner dropped, and an actual guest-init stop reported
+self-dissent during data-volume detach (#1266). Shutdown now closes looper
+admission, interrupts only its known driver threads, joins callbacks before
+driver retirement, and releases its owned services/files. Three Binder
+fixtures and one NativeServices drop fixture pass, including concurrent
+shutdown, borrowed buffer lifetime, self-worker EDEADLK and safe FD reuse.
+The current template cohort uses the earlier frozen runtime; actual Android
+detach with this shutdown correction remains unverified.
 Both earlier interrupted full66
 attempts invoked zero tests and were cleaned up; their evidence is preserved.
 Kernfs area encoding is retained instead of being imported as writable. Actual
