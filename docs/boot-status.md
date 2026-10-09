@@ -65,9 +65,13 @@ Two native empty-data templates publish 70 guest files each and reach boot
 completion at 196.2 and 196.8 seconds under concurrent load. Parity is not
 accepted: preferred state differs (#1218), permission/role completion is missing
 (#1219), loading state is incomplete (#1220), and shared-UID ABI inheritance is
-missing (#810). Constructor-time immutable capture, actual template replay and
-consumer checks remain necessary; post-boot file sampling is not constructor
-provenance.
+missing (#810). The isolated native constructor now publishes an immutable settings bundle before
+public service registration, retaining the actual unsigned 64-bit query epoch and
+PermissionController version. The builder consumes its bytes, file and ancestor
+metadata and xattrs; the original image retains its existing capture path without
+claiming constructor provenance. Capture and permission-completion tests pass
+(one storage, two builder), and related all-target compilation passes. Actual new
+image/template replay and consumer checks remain necessary.
 
 Isolated acceptance fixes retain the running pair unchanged. The complete PM
 library gate passes 840 tests with zero failures and eleven ignored tests not

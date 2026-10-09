@@ -132,6 +132,7 @@ pub struct BootOptions {
     /// Run mode: compare these original services with their native models
     /// and log each call to the file (`aim_services::shadow`).
     pub binder_shadow: Option<(Vec<String>, PathBuf)>,
+    pub package_constructor_capture: Option<PathBuf>,
     /// `androidboot.*` bootconfig entries (without the prefix).
     pub androidboot: Vec<(String, String)>,
     /// Run mode: stop everything after this long.
@@ -166,6 +167,7 @@ impl BootOptions {
             trace: false,
             binder_trace: None,
             binder_shadow: None,
+            package_constructor_capture: None,
             // The device: init.rc imports init.aim.rc and vold reads
             // fstab.aim (image/overlay.toml).
             androidboot: vec![("hardware".to_string(), "aim".to_string())],
@@ -359,8 +361,10 @@ fn start_native_services(
     properties: &std::path::Path,
     server: &Arc<Server>,
     guest_pid:i32,
+    constructor_capture: Option<&std::path::Path>,
 ) -> Result<Option<Arc<NativeServices>>, String> {
     let Ok(list) = image.read(NATIVE_SERVICES) else {
+        if constructor_capture.is_some(){return Err("original package constructor capture capability unavailable".into());}
         return Ok(None);
     };
     let names: Vec<String> = parse_native_services(&String::from_utf8_lossy(&list))
@@ -368,8 +372,12 @@ fn start_native_services(
         .into_iter()
         .map(|s| s.name)
         .collect();
+    if constructor_capture.is_some() && !names.iter().any(|name| name == "package") {
+        return Err("constructor capture requires native package owner; original constructor capture unavailable".into());
+    }
     let services = NativeServices::new_for_namespace(server.driver(), &names,guest_pid).map_err(|e| format!("native services: {e}"))?;
     if names.iter().any(|name| name == "package") {
+        if let Some(path)=constructor_capture { services.configure_package_constructor_capture(path)?; }
         services.configure_package_image(image.root(), data, &[])
             .map_err(|error| format!("native package image: {error}"))?;
         services.configure_package_property_area(properties)
@@ -720,7 +728,7 @@ impl Boot {
             if let Some(file) = &options.binder_trace {
                 trace_binder(server, file)?;
             }
-            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid)?;
+            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid,options.package_constructor_capture.as_deref())?;
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
                 let files = map.clone();

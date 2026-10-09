@@ -68,6 +68,10 @@ pub struct NativeServices {
 }
 
 impl NativeServices {
+    pub fn configure_package_constructor_capture(&self,path:&std::path::Path)->Result<(),String> {
+        self.system.configure_package_constructor_capture(path)
+    }
+
     pub fn configure_package_image(&self, image: &std::path::Path, data: &std::path::Path,
         original_roots: &[std::path::PathBuf],
     ) -> Result<(), String> {

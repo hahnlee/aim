@@ -34,6 +34,7 @@ pub struct Inputs {
     pub boot_apex_changed: bool,
 }
 pub struct Runtime {
+    pub constructor_capture: Option<(aim_storage::constructor_capture::Capture,Arc<crate::package::scan_snapshot::query_state::Capture>)>,
     pub persistence: crate::system_package_persistence_init::Installed,
     pub pipeline: Arc<installer::pipeline::Native>,
     pub archive: super::installer_archive::ArchiveOwners,
@@ -61,6 +62,12 @@ impl Drop for ConstructionGuard {
     }
 }
 impl System {
+    pub fn configure_package_constructor_capture(&self,path:&std::path::Path)->std::result::Result<(),String> {
+        let mut sink=self.package_constructor_capture.lock().unwrap();
+        if sink.is_some(){return Err("package constructor capture already configured".into());}
+        *sink=Some(Arc::new(aim_storage::constructor_capture::Sink::claim(path)?)); Ok(())
+    }
+
     pub fn publish_native_package_services(self: &Arc<Self>, bridge: &Arc<Bridge>, runtime: &Runtime) -> Result<(Binder, Binder)> {
         self.check_package_bootstrap(bridge)?;
         let current = self.package_bootstrap.lock().unwrap().current.as_ref()
@@ -180,8 +187,15 @@ impl System {
         let boot_lifecycle = self.initialize_package_boot_lifecycle(bridge, lifecycle_leaf,
             inputs.decompression, inputs.boot_apex_changed)?;
         self.check_package_bootstrap(bridge)?;
+        let constructor_capture = if let Some(sink)=self.package_constructor_capture.lock().unwrap().clone() {
+            let _publication=self.package_install_guard();
+            let _disk=persistence.disk.lock().unwrap();
+            let retained=self.capture_package_queries()?;
+            Some((sink.freeze(&inputs.data,retained.scan().version(),inputs.persistence_inputs.controller_version)
+                .map_err(|cause|Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,cause))?,retained))
+        } else { None };
         construction.armed = false;
-        Ok(Runtime { persistence, pipeline, archive, metadata, verification,
+        Ok(Runtime { constructor_capture, persistence, pipeline, archive, metadata, verification,
             maintenance, internal_installs, relocation, application_data, user_operations, events,
             early_users: inputs.early_users, boot_lifecycle, web_policy, original_domains })
     }

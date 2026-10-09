@@ -26,7 +26,8 @@
 //! app has run yet: a later write would hold what apps did in their first
 //! seconds (components they enable, packages they start), which differs
 //! from boot to boot. The permission module's state is taken once the role
-//! controller has written roles and the module has been quiet for
+//! controller has recorded initialized roles and the default-grant fingerprints
+//! match the constructor settings, and the module has been quiet for
 //! [`QUIET`]. Everything else is taken once the boot has completed (boot
 //! dexopt ends before `ams_ready`) and been stopped. The shipped paths are
 //! copied into a new empty image, not deleted from the used one, whose
@@ -153,7 +154,7 @@ pub fn template() -> Node {
         // Named after the SKU, which the build boot names.
         outputs: Vec::new(),
         tools: Vec::new(),
-        recipe: 3,
+        recipe: 4,
         action: Action::UserdataTemplate,
         boot: true,
     }
@@ -373,10 +374,20 @@ pub fn run_isolated_template(ctx: &Ctx, config: &IsolatedTemplate) -> Result<(),
         &inputs.join(EMPTY_TEMPLATE),
     )?;
     from.detach()?;
+    let constructor_provenance = match aim_storage::constructor_capture::read(
+        &work.join("constructor-capture"),
+    )? {
+        Some(capture) => {
+            serde_json::json!({"kind":"native-immutable-constructor","epoch":capture.epoch,"controller_version":capture.controller_version})
+        }
+        None => {
+            serde_json::json!({"kind":"original-legacy-early-file-capture","immutable_constructor_provenance":false})
+        }
+    };
     fs::write(
         output.join("provenance.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "inputs": provenance, "sku": sku, "template": name,
+            "inputs": provenance, "sku": sku, "template": name, "constructor_capture": constructor_provenance,
         }))
         .map_err(|error| error.to_string())?,
     )
@@ -423,9 +434,9 @@ fn publish(
 }
 
 /// Boots the derived image on the new data directory `dir` to
-/// `sys.boot_completed`, copying PackageManager's settings into `settings`
-/// as they are first written and the permission module's state into
-/// `permissions`, and stops it; returns the SKU the boot had.
+/// `sys.boot_completed`, taking the native owner's immutable constructor
+/// output (or the original's explicitly labelled legacy early-file capture)
+/// and the permission module's state, then stopping the owned boot.
 fn first_boot(
     ctx: &Ctx,
     work: &Path,
@@ -435,6 +446,20 @@ fn first_boot(
     log: &mut Log,
     isolated: Option<&IsolatedTemplate>,
 ) -> Result<Option<String>, String> {
+    let image = isolated.map_or_else(aim_paths::derived_image, |config| config.image.clone());
+    let activation =
+        image.join(aim_android_image::system_server::NATIVE_SERVICES.trim_start_matches('/'));
+    let native_package = match fs::read_to_string(&activation) {
+        Ok(config) => aim_android_image::system_server::parse_native_services(&config)?
+            .iter()
+            .any(|service| service.name == "package"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("{}: {error}", activation.display())),
+    };
+    let capture_output = work.join("constructor-capture");
+    if capture_output.exists() {
+        return Err("constructor capture output already exists".into());
+    }
     let output = fs::File::create(work.join("guest-init.log")).map_err(|e| e.to_string())?;
     let display_dir = DisplaySocketDir::new()?;
     let display = match isolated {
@@ -462,6 +487,13 @@ fn first_boot(
         }
         None => boot::guest_init(ctx, dir, &display_dir.0.join("display")),
     };
+    if native_package {
+        command
+            .arg("--package-constructor-capture")
+            .arg(&capture_output);
+    } else {
+        log.line("original template uses legacy early-file capture; immutable constructor provenance unavailable");
+    }
     let init = command
         .arg("--quiet")
         .stdout(output.try_clone().map_err(|e| e.to_string())?)
@@ -499,11 +531,12 @@ fn first_boot(
         ));
     }
     let start = Instant::now();
-    let settings_files: Vec<&str> = SETTINGS
+    let settings_files: Vec<_> = SETTINGS
         .iter()
         .flat_map(|(file, reserve)| [Some(*file), *reserve])
         .flatten()
         .collect();
+    let mut constructor_controller_version = None;
     let (mut written, mut granted, mut completed, mut asked) = (None, None, None, start);
     while written.is_none() || granted.is_none() || completed.is_none() {
         session.check()?;
@@ -513,10 +546,35 @@ fn first_boot(
                  sys.boot_completed {completed:?}"
             ));
         }
-        if written.is_none() && take(dir, settings, &settings_files, &WRITING, Duration::ZERO)? {
+        if written.is_none() && native_package {
+            if let Some(capture) = aim_storage::constructor_capture::read(&capture_output)? {
+                let paths: Vec<_> = aim_storage::constructor_capture::FILES
+                    .iter()
+                    .map(Path::new)
+                    .collect();
+                copy::copy_paths(&capture.directory, &settings.join("data"), &paths)?;
+                constructor_controller_version = Some(capture.controller_version);
+                log.line(&format!(
+                    "immutable package constructor epoch {} controller {}",
+                    capture.epoch, capture.controller_version
+                ));
+                written = Some(start.elapsed());
+            }
+        }
+        if written.is_none()
+            && !native_package
+            && take(dir, settings, &settings_files, &WRITING, Duration::ZERO)?
+        {
             written = Some(start.elapsed());
         }
-        if granted.is_none() && take(dir, permissions, &PERMISSIONS, &[], QUIET)? {
+        if written.is_some()
+            && granted.is_none()
+            && (!native_package
+                || permission_completion(dir, settings, constructor_controller_version)?)
+            && take(dir, permissions, &PERMISSIONS, &[], QUIET)?
+            && (!native_package
+                || permission_completion(permissions, settings, constructor_controller_version)?)
+        {
             granted = Some(start.elapsed());
         }
         if completed.is_none() && asked.elapsed() >= Duration::from_millis(500) {
@@ -567,22 +625,14 @@ fn take(
     writing: &[&str],
     quiet: Duration,
 ) -> Result<bool, String> {
-    let written = || -> Option<Vec<SystemTime>> {
-        if writing.iter().any(|w| dir.join(w).exists()) {
-            return None;
-        }
-        files
-            .iter()
-            .map(|f| fs::metadata(dir.join(f)).and_then(|m| m.modified()).ok())
-            .collect()
-    };
-    let Some(before) = written() else {
+    let written = || snapshot(dir, files, writing);
+    let Some(before) = written()? else {
         return Ok(false);
     };
     let newest = before
         .iter()
+        .map(|file| file.modified)
         .max()
-        .copied()
         .unwrap_or(SystemTime::UNIX_EPOCH);
     if newest.elapsed().unwrap_or_default() < quiet {
         return Ok(false);
@@ -593,7 +643,134 @@ fn take(
     // A write that began meanwhile fails the copy or changes a file: the
     // next poll takes the files again.
     let copied = copy::copy_paths(dir, dest, &paths).is_ok();
-    Ok(copied && written() == Some(before))
+    if !copied || written()?.as_ref() != Some(&before) {
+        return Ok(false);
+    }
+    let Some(after) = snapshot(dest, files, &[])? else {
+        return Ok(false);
+    };
+    Ok(before.iter().zip(after).all(|(a, b)| a.bytes == b.bytes))
+}
+
+#[derive(PartialEq)]
+struct CaptureFile {
+    device: u64,
+    inode: u64,
+    modified: SystemTime,
+    bytes: Vec<u8>,
+}
+
+fn snapshot(
+    dir: &Path,
+    files: &[&str],
+    writing: &[&str],
+) -> Result<Option<Vec<CaptureFile>>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let in_progress = || {
+        writing.iter().any(|file| dir.join(file).exists())
+            || files
+                .iter()
+                .filter(|file| !file.ends_with(".reservecopy"))
+                .any(|file| {
+                    dir.join(format!("{file}.backup")).exists()
+                        || dir.join(format!("{file}.new")).exists()
+                })
+    };
+    if in_progress() {
+        return Ok(None);
+    }
+    let mut result = Vec::new();
+    for file in files {
+        let path = dir.join(file);
+        let input = match fs::File::open(&path) {
+            Ok(input) => input,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        let before = input.metadata().map_err(|error| error.to_string())?;
+        let mut input = input;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut input, &mut bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let after = fs::metadata(&path).map_err(|error| error.to_string())?;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.modified().ok() != after.modified().ok()
+            || before.len() != after.len()
+        {
+            return Ok(None);
+        }
+        result.push(CaptureFile {
+            device: after.dev(),
+            inode: after.ino(),
+            modified: after.modified().map_err(|error| error.to_string())?,
+            bytes,
+        });
+    }
+    if in_progress() {
+        return Ok(None);
+    }
+    // Each ResilientAtomicFile's successful write completes both copies.
+    for (index, file) in files.iter().enumerate() {
+        if let Some(primary) = file.strip_suffix(".reservecopy") {
+            if let Some(primary) = files.iter().position(|file| *file == primary) {
+                if result[index].bytes != result[primary].bytes {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    Ok(Some(result))
+}
+
+/// Completion fields are written by the original role/permission owners,
+/// independently of file existence or a quiet interval (#1219).
+fn permission_completion(
+    dir: &Path,
+    settings: &Path,
+    expected_controller_version: Option<i64>,
+) -> Result<bool, String> {
+    let Some(files) = snapshot(dir, &PERMISSIONS, &[])? else {
+        return Ok(false);
+    };
+    let packages =
+        aim_android_xml::read(&fs::read(settings.join(PACKAGES)).map_err(|e| e.to_string())?)?;
+    let version = packages
+        .children()
+        .find(|e| e.name == "version" && e.attr("volumeUuid").is_none())
+        .ok_or("constructor settings lack internal volume version")?;
+    let partition = version
+        .string("fingerprint")
+        .ok_or("constructor settings lack partition fingerprint")?;
+    let build = version
+        .string("buildFingerprint")
+        .ok_or("constructor settings lack build fingerprint")?;
+    let runtime = aim_android_xml::read(&files[4].bytes)?;
+    let roles = aim_android_xml::read(&files[6].bytes)?;
+    let access = aim_android_xml::read(&files[2].bytes)?;
+    fn grant(e: &aim_android_xml::Element) -> Option<String> {
+        if e.name == "default-permission-grant" {
+            return e.string("fingerprint").map(|s| s.into_owned());
+        }
+        e.children().find_map(grant)
+    }
+    let fingerprint = runtime.string("fingerprint");
+    let controller_version = fingerprint
+        .as_deref()
+        .and_then(|value| value.strip_prefix(&format!("{partition}?pc_version=")))
+        .and_then(|value| value.parse::<u64>().ok());
+    Ok(runtime.name == "runtime-permissions"
+        && runtime.int("version")?.is_some_and(|v| v >= 0)
+        && controller_version.is_some_and(|version| {
+            expected_controller_version
+                .is_some_and(|expected| u64::try_from(expected).ok() == Some(version))
+        })
+        && roles.name == "roles"
+        && roles.int("version")?.is_some_and(|v| v >= 0)
+        && roles
+            .string("packagesHash")
+            .is_some_and(|hash| !hash.is_empty())
+        && grant(&access).as_deref() == Some(build.as_ref()))
 }
 
 /// The build boot's volume at `volume` and the settings taken from it hold
@@ -687,5 +864,114 @@ mod isolation_tests {
         assert!(isolated_output(&config).is_err());
         assert!(!image.join("nested").exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "aim-capture-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+        fn write(&self, name: &str, value: &str) {
+            let path = self.0.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, value).unwrap();
+        }
+        fn permissions(&self, complete: bool) {
+            for file in PERMISSIONS {
+                let value = if file.contains("roles.xml") {
+                    if complete {
+                        "<roles version='1' packagesHash='actual-hash'><role name='android.app.role.HOME'/></roles>"
+                    } else {
+                        "<roles version='-1'/>"
+                    }
+                } else if file.contains("runtime-permissions.xml") {
+                    if complete {
+                        "<runtime-permissions version='0' fingerprint='partition?pc_version=42'/>"
+                    } else {
+                        "<runtime-permissions version='0'/>"
+                    }
+                } else if file.contains("misc_de/") && complete {
+                    "<access><default-permission-grant fingerprint='build'/></access>"
+                } else {
+                    "<access/>"
+                };
+                self.write(file, value);
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    #[test]
+    fn stable_partial_initialization_is_not_completion() {
+        let source = Fixture::new();
+        let captured = Fixture::new();
+        captured.write(
+            PACKAGES,
+            "<packages><version fingerprint='partition' buildFingerprint='build'/></packages>",
+        );
+        source.permissions(false);
+        assert!(snapshot(&source.0, &PERMISSIONS, &[]).unwrap().is_some());
+        assert!(!permission_completion(&source.0, &captured.0, Some(42)).unwrap());
+        source.permissions(true);
+        assert!(permission_completion(&source.0, &captured.0, Some(42)).unwrap());
+        assert!(!permission_completion(&source.0, &captured.0, Some(43)).unwrap());
+        for file in [PERMISSIONS[2], PERMISSIONS[3]] {
+            let tree = aim_android_xml::read(&fs::read(source.0.join(file)).unwrap()).unwrap();
+            fs::write(
+                source.0.join(file),
+                aim_android_xml::abx::write(&tree).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(permission_completion(&source.0, &captured.0, Some(42)).unwrap());
+        source.write(&format!("{}.backup", PERMISSIONS[2]), "previous");
+        assert!(!permission_completion(&source.0, &captured.0, Some(42)).unwrap());
+        fs::remove_file(source.0.join(format!("{}.backup", PERMISSIONS[2]))).unwrap();
+        for file in [PERMISSIONS[4], PERMISSIONS[5]] {
+            source.write(
+                file,
+                "<runtime-permissions version='0' fingerprint='other?pc_version=42'/>",
+            );
+        }
+        assert!(!permission_completion(&source.0, &captured.0, Some(42)).unwrap());
+    }
+    #[test]
+    fn capture_rejects_atomic_write_and_preserves_constructor_bytes() {
+        let source = Fixture::new();
+        let capture = Fixture::new();
+        let files = [PACKAGES, "data/system/packages.xml.reservecopy"];
+        for name in files {
+            source.write(
+                name,
+                "<packages><version fingerprint='constructor'/></packages>",
+            );
+        }
+        source.write(WRITING[0], "previous");
+        assert!(!take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap());
+        fs::remove_file(source.0.join(WRITING[0])).unwrap();
+        assert!(take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap());
+        let immutable = fs::read(capture.0.join(PACKAGES)).unwrap();
+        for name in files {
+            source.write(name, "<packages><package name='later-app'/></packages>");
+        }
+        assert_eq!(fs::read(capture.0.join(PACKAGES)).unwrap(), immutable);
+        source.write("data/system/packages.xml.reservecopy", "incomplete reserve");
+        assert!(!take(&source.0, &capture.0, &files, &WRITING, Duration::ZERO).unwrap());
     }
 }

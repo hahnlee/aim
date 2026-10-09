@@ -61,6 +61,7 @@ fn main() {
     let mut androidboot = Vec::new();
     let mut quiet = false;
     let mut userdata = None;
+    let mut package_constructor_capture = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().unwrap_or_else(|| usage());
         match arg.as_str() {
@@ -102,6 +103,7 @@ fn main() {
             "--binder-shadow-log" => binder_shadow_log = Some(PathBuf::from(value())),
             "--quiet" => quiet = true,
             "--userdata" => userdata = Some(PathBuf::from(value())),
+            "--package-constructor-capture" => package_constructor_capture = Some(PathBuf::from(value())),
             "--timeout" => {
                 timeout = Some(Duration::from_secs_f64(
                     value().parse().unwrap_or_else(|_| usage()),
@@ -128,6 +130,7 @@ fn main() {
     options.display = display;
     options.trace = trace;
     options.binder_trace = binder_trace;
+    options.package_constructor_capture = package_constructor_capture;
     options.binder_shadow = match (binder_shadow, binder_shadow_log) {
         (None, None) => None,
         (Some(names), Some(log)) => Some((names, log)),

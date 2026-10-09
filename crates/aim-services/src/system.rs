@@ -207,6 +207,7 @@ pub struct System {
     /// the call).
     bridge_listeners: Mutex<Vec<BridgeListener>>,
     package_bootstrap: Mutex<PackageBootstrapState>,
+    package_constructor_capture: Mutex<Option<Arc<aim_storage::constructor_capture::Sink>>>,
     package_public_services: Mutex<Option<package_public_services::Pair>>,
     package_install_lock: Arc<Mutex<()>>,
     package_signing: Mutex<Option<Arc<crate::package::sign::Overrides>>>,
@@ -460,6 +461,7 @@ impl System {
                 permissions: Mutex::new(Permissions::default()),
                 bridge_listeners: Mutex::new(Vec::new()),
                 package_bootstrap: Mutex::new(PackageBootstrapState::default()),
+                package_constructor_capture: Mutex::new(None),
                 package_public_services: Mutex::new(None),
                 package_install_lock: Arc::new(Mutex::new(())),
                 package_signing: Mutex::new(None),
