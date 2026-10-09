@@ -24,6 +24,7 @@ use super::{State, resilient, restrictions::Restrictions, sibling};
 
 pub mod app_ids;
 pub mod domains;
+mod global_permissions;
 pub mod install_sources;
 pub mod key_sets;
 pub mod keystore;

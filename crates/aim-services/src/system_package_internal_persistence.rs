@@ -58,6 +58,16 @@ impl Runtime {
         // PackageManagerService.scheduleWriteSettings coalesces the first request.
         state.1.get_or_insert(Instant::now() + Duration::from_secs(10)); cv.notify_all(); Ok(())
     }
+    fn capture_definitions(&self) -> Result<crate::package::settings::Settings> {
+        let reply = self.call(permission_api::CAPTURE_DEFINITIONS)?;
+        let mut reader = reply.reader();
+        reader.read_exception().map_err(|status| illegal(status.to_string()))??;
+        let bytes = aim_service_aidl::read_byte_array(&mut reader).map_err(|status| illegal(status.to_string()))?
+            .ok_or_else(|| illegal("permission definitions missing"))?;
+        if reader.remaining() != 0 { return Err(illegal("permission definitions trailing data")); }
+        let root = aim_android_xml::abx::read(&bytes).map_err(illegal)?;
+        crate::package::settings::Settings::parse(&root).map_err(illegal)
+    }
     fn call(&self, code: u32) -> Result<aim_binder_host::local::Received> {
         let mut request = Parcel::new(); request.write_interface_token(permission_api::DESCRIPTOR);
         let reply = self.permission.transact(code, &request, false)
@@ -75,6 +85,51 @@ impl Drop for Runtime {
     }
 }
 impl System {
+    /// Finish actual global owners after original permission initialization,
+    /// before the immutable constructor Settings capture is frozen.
+    pub(crate) fn persist_constructor_global_settings(&self, bridge: &Arc<crate::package::bootstrap::Bridge>) -> Result<()> {
+        let owner = self.internal_persistence_owner()?;
+        if !Arc::ptr_eq(&owner.bridge, bridge) { return Err(illegal("constructor global owner epoch differs")); }
+        let _write = owner.writes.lock().unwrap();
+        self.check_package_bootstrap(bridge)?;
+        let definitions = owner.capture_definitions()?;
+        self.publish_global_settings(&owner, &definitions)?;
+        bridge.invalidate_package_info_cache().map_err(|error| illegal(format!("constructor settings cache owner: {error:?}")))?;
+        Ok(())
+    }
+    fn publish_global_settings(&self, owner: &Runtime, definitions: &crate::package::settings::Settings)
+        -> Result<Arc<crate::package::scan_snapshot::query_state::Capture>> {
+        let _install = self.package_install_guard();
+        let disk = self.package_bootstrap.lock().unwrap().current.as_ref()
+            .filter(|current| Arc::ptr_eq(&current.bridge, &owner.bridge))
+            .and_then(|current| current.persistence.clone()).ok_or_else(|| illegal("Settings disk owner unavailable"))?;
+        loop {
+            self.check_package_bootstrap(&owner.bridge)?;
+            let base = self.capture_package_queries()?;
+            let mut scan = base.scan().owner().clone();
+            apply_permission_definitions(&mut scan, definitions);
+            let domains = base.domains().ok_or_else(|| illegal("Settings domain owner unavailable"))?;
+            scan.settings.domain_verification = domains.owner().xml_projection();
+            // Full graph preparation can call original owners. Never hold the
+            // bootstrap or disk coordinator across it; usage may publish meanwhile.
+            let update = base.prepare_package_update(scan).map_err(illegal)?;
+            let mut disk = disk.lock().unwrap();
+            let mut state = self.package_bootstrap.lock().unwrap();
+            let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, &owner.bridge))
+                .ok_or_else(|| illegal("settings writer bootstrap changed"))?;
+            let latest = current.queries.as_ref().ok_or_else(|| illegal("settings writer capture unavailable"))?;
+            if !Arc::ptr_eq(latest, &base) { continue; }
+            let result = disk.commit_scan_settings(update.capture.scan());
+            if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
+                current.publish_snapshot(update.store);
+                current.queries = Some(update.capture.clone());
+                if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
+                state.version = update.capture.scan().version();
+            }
+            result.map_err(|error| illegal(error.to_string()))?;
+            return Ok(update.capture);
+        }
+    }
     pub(crate) fn install_internal_persistence(&self, owner: Arc<Runtime>) -> Result<()> {
         self.check_package_bootstrap(&owner.bridge)?;
         let mut state = self.package_bootstrap.lock().unwrap();
@@ -99,49 +154,27 @@ impl System {
         let _write = owner.writes.lock().unwrap();
         owner.signal.0.lock().unwrap().1 = None;
         self.check_package_bootstrap(&owner.bridge)?;
-        let reply = owner.call(permission_api::CAPTURE_DEFINITIONS)?;
-        let mut reader = reply.reader(); reader.read_exception().map_err(|status| illegal(status.to_string()))??;
-        let bytes = aim_service_aidl::read_byte_array(&mut reader).map_err(|status| illegal(status.to_string()))?
-            .ok_or_else(|| illegal("permission definitions missing"))?;
-        if reader.remaining() != 0 { return Err(illegal("permission definitions trailing data")); }
-        let root = aim_android_xml::abx::read(&bytes).map_err(illegal)?;
-        let definitions = crate::package::settings::Settings::parse(&root).map_err(illegal)?;
-        let install = self.package_install_guard();
+        let definitions = owner.capture_definitions()?;
+        let capture = self.publish_global_settings(owner, &definitions)?;
+        owner.bridge.invalidate_package_info_cache().map_err(|error| illegal(format!("settings write cache owner: {error:?}")))?;
         let disk = self.package_bootstrap.lock().unwrap().current.as_ref()
             .filter(|current|Arc::ptr_eq(&current.bridge,&owner.bridge))
             .and_then(|current| current.persistence.clone()).ok_or_else(|| illegal("Settings disk owner unavailable"))?;
         let mut disk = disk.lock().unwrap();
-        let mut state = self.package_bootstrap.lock().unwrap();
-        let current = state.current.as_mut().filter(|current| Arc::ptr_eq(&current.bridge, &owner.bridge))
-            .ok_or_else(|| illegal("settings writer bootstrap changed"))?;
-        let base=current.queries.clone().ok_or_else(||illegal("settings writer current capture unavailable"))?;
-        let mut scan = base.scan().owner().clone();
-        apply_permission_definitions(&mut scan,&definitions);
-        let update = base.prepare_package_update(scan).map_err(illegal)?;
-        let result = disk.commit_scan_settings(update.capture.scan());
-        if result.is_ok() || result.as_ref().is_err_and(|error| error.committed) {
-            current.publish_snapshot(update.store); current.queries = Some(update.capture.clone());
-            if let Some(page) = &current.version_page { page.publish(update.capture.scan().version()); }
-            state.version = update.capture.scan().version();
-        }
-        drop(state);
-        drop(install);
-        result.map_err(|error| illegal(error.to_string()))?;
-        owner.bridge.invalidate_package_info_cache().map_err(|error| illegal(format!("settings write cache owner: {error:?}")))?;
-        let users = update.capture.state().users.keys().copied().collect::<Vec<_>>();
-        for setting in &update.capture.scan().owner().settings.packages {
-            let states = update.capture.scan().owner().scanned_user_states(&setting.name)
+        let users = capture.state().users.keys().copied().collect::<Vec<_>>();
+        for setting in &capture.scan().owner().settings.packages {
+            let states = capture.scan().owner().scanned_user_states(&setting.name)
                 .ok_or_else(|| illegal("settings kernel mapping user owner unavailable"))?;
             let excluded = states.iter().filter_map(|(id, state)| (!state.installed).then_some(*id)).collect::<Vec<_>>();
             owner.kernel.update(&setting.name, setting.app_id, &excluded).map_err(illegal)?;
         }
-        self.commit_package_list_from_scan(&owner.bridge, &mut disk, &update.capture, &users)
+        self.commit_package_list_from_scan(&owner.bridge, &mut disk, &capture, &users)
             .map_err(|error| illegal(error.to_string()))?;
         drop(disk);
         let resolver = crate::package::resolve::Resolver::default();
-        let resolution = resolver.resolution(update.capture.state()).map_err(|error| illegal(format!("settings restriction resolution: {error:?}")))?;
-        let query = crate::package::query::Query { state: update.capture.state(), filter: &resolution.apps_filter, calling_uid: 1000 };
-        for user in &users { self.flush_native_package_restrictions(&query, *user, &update.capture)?; }
+        let resolution = resolver.resolution(capture.state()).map_err(|error| illegal(format!("settings restriction resolution: {error:?}")))?;
+        let query = crate::package::query::Query { state: capture.state(), filter: &resolution.apps_filter, calling_uid: 1000 };
+        for user in &users { self.flush_native_package_restrictions(&query, *user, &capture)?; }
         self.internal_write_permission_settings(Some(users), true, 1000, -1)?;
         Ok(())
     }

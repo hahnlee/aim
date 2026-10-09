@@ -375,6 +375,12 @@ bytes, modes, xattrs and mtimes; its owned processes and readonly mounts are
 normally cleaned. Full permission semantics and complete template parity
 are not yet accepted. Diagnostic comparison against the earlier original
 still differs in six XML files; a new matched original/native pair is not run.
+The source now writes the captured original global permission definitions
+and native domain owner through the complete Settings serializer, including
+a final publication before constructor capture (#1271). Three focused tests
+verify fresh/restored disk writes, reopening, extension preservation and
+duplicate rejection without changing modern grant/GID owners. This source
+correction is not included in the b04 replay above; actual replay is not run.
 The earlier63-file publication remains invalid evidence. The same
 runtime still reports self-dissent from guest-init during data detach (#1266);
 the producer detaches only after guest-init exits. The earlier frozen XML

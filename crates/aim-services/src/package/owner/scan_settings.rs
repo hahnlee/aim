@@ -9,8 +9,8 @@ use crate::package::{
 use aim_android_xml::{Element, Node, Value};
 use std::collections::BTreeSet;
 
-/// Write package/shared and volume version owners together. Other global owners must have
-/// committed their changes already; the round trip rejects unresolved changes.
+/// Write the complete native Settings owners; the whole-document round trip
+/// rejects unresolved changes.
 pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element, String> {
     if !scan.capture_ready() {
         return Err("cannot persist unfinished scan metadata".into());
@@ -205,6 +205,10 @@ pub(super) fn replace(original: &Element, scan: &SigningScan) -> Result<Element,
     if expected.key_sets.versioned {
         root = key_sets::replace_for_scan(&root, &written, &expected)?;
     }
+    root = super::global_permissions::replace(&root, &expected)?;
+    root = super::domains::replace(&root, &expected.domain_verification)?;
+    expected.permissions = super::global_permissions::persisted(&expected.permissions);
+    expected.permission_trees = super::global_permissions::persisted(&expected.permission_trees);
     if signing::persisted(Settings::parse(&root)?) != signing::persisted(expected) {
         return Err("scan settings require an unresolved global owner or do not round trip".into());
     }

@@ -187,6 +187,7 @@ impl System {
         let boot_lifecycle = self.initialize_package_boot_lifecycle(bridge, lifecycle_leaf,
             inputs.decompression, inputs.boot_apex_changed)?;
         self.check_package_bootstrap(bridge)?;
+        self.persist_constructor_global_settings(bridge)?;
         let constructor_capture = if let Some(sink)=self.package_constructor_capture.lock().unwrap().clone() {
             let _publication=self.package_install_guard();
             let _disk=persistence.disk.lock().unwrap();
