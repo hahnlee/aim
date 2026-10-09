@@ -392,7 +392,15 @@ within the300-second bound, the authored APK installs, and actual original
 ActivityManager decisions deny PID19847/UID10213, allow genuine registered
 UiAutomation delegation and deny again after it is dropped. System UID
 permission and APK uninstall also pass. Owned processes and mounts are
-cleaned; Native installer proxy and full49/10 gates remain unrun.
+cleaned. The subsequent Native installer proxy attempt reaches the original
+boot and then fails before its proxy/permission assertions: its UID10100
+external namespace entry correctly lacks CAP_SYS_ADMIN and returns EPERM
+(#1282). Retained Boot references then cause a Data destructor double panic
+(#1283); the fixture reports SIGABRT. Its frozen controller subsequently
+stops the guest normally, with no owned PID or mounted volume left. Authentic
+privileged namespace entry followed by real UID dropping and explicit
+fixture lifetime cleanup are required; the kernel admission guard remains.
+Full49/10 gates remain unrun.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
