@@ -336,8 +336,19 @@ incremental progress; four loading tests pass. It also invokes the existing
 shared-UID ABI reconciliation after system/data/stub scanning (#810), before
 final metadata publication. Thirty-two ABI tests pass without forcing an
 architecture or changing raw parsed code. Actual template replay with these
-two corrections remains required; the earlier frozen XML differences are
-not relabeled as resolved.
+two corrections now reaches boot231.8 seconds and post-boot permissions238.0
+seconds, but the resulting63-file template is invalid. All three compressed
+system APK installations fail with "disabled library original disagrees with
+saved identity": the current factory settings have completed loading, while
+the retained scan record still contains the earlier setting values. No active
+data APK remains and the template lacks three APKs plus four OAT/VDEX files.
+The identity validator remains intact; the factory-record owner must carry
+the actual current setting with its admitted code. The builder also needs a
+generic required-payload check instead of accepting zero selected data stubs
+(#1269). This publication is not credited as template acceptance. The same
+runtime still reports self-dissent from guest-init during data detach (#1266);
+the producer detaches only after guest-init exits. The earlier frozen XML
+differences are not relabeled as resolved.
 Twelve actual CE/DE directory references in its source boot images match
 their inode values through the real guest path-map; differing integer values
 are not ignored or rewritten. Consumer recreation/rebinding remains unverified.
