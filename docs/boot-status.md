@@ -825,7 +825,15 @@ without discarding queued rights (#1202). The native owner now drains actual
 recvmsg rights to EOF under private descriptor admission, with bounded retries
 only before consumption. The five-by-1,000 concurrent close regression passes;
 the full storage suite passes 53/0 with three ignored and the host suite 50/0.
-Full image/CTS acceptance remains pending.
+The actual original setprop property transport exposes a separate generic socket
+I/O regression (#1204): connect succeeds, then writev returns EBADF. File I/O
+had already captured a guest-authorized pin but passed its private alias through
+a second guest-FD admission. Socket read/write now borrow that retained pin,
+without publishing private aliases. Two actual scalar/vector/offset-minus-one
+and close/reuse checks pass, including hidden-FD rejection; the full default-
+parallel ABI suite passes 234/0 with thirteen ignored. Actual original
+short/deep property transport and native boot replay still require the rebuilt
+runtime. Full image/CTS acceptance remains pending.
 Darwin GC also flushes message-only socket references behind live unregistered
 receive queues under concurrency (#1191). The class5 carrier now uses a regular
 inode/OFD lease; the native backing is retained exactly while that lease remains

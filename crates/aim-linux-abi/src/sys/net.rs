@@ -226,12 +226,28 @@ pub(super) fn load_sock(r: &mut super::fork_state::Reader) -> Arc<Sock> {
     s
 }
 
-struct SocketInput {
-    pin: fdtab::Pinned,
+enum SocketPin<'a> {
+    Owned(fdtab::Pinned),
+    // read/write already captured guest authority; its alias is private (#1204).
+    Borrowed(&'a fdtab::Pinned),
 }
-impl SocketInput {
+impl std::ops::Deref for SocketPin<'_> {
+    type Target = fdtab::Pinned;
+    fn deref(&self) -> &Self::Target {
+        match self { Self::Owned(pin) => pin, Self::Borrowed(pin) => pin }
+    }
+}
+struct SocketInput<'a> {
+    pin: SocketPin<'a>,
+}
+impl SocketInput<'static> {
     fn capture(fd: i32) -> Result<Self, i64> {
         let pin = fdtab::pin_guest(fd).map_err(|error| -(error as i64))?;
+        Self::checked(SocketPin::Owned(pin))
+    }
+}
+impl<'a> SocketInput<'a> {
+    fn checked(pin: SocketPin<'a>) -> Result<Self, i64> {
         let input = Self { pin };
         if !input.pin.socket_allowed() {
             return Err(-ENOTSOCK);
@@ -2402,8 +2418,8 @@ pub fn recvmmsg(a: [u64; 6]) -> i64 {
 
 /// read/readv on a socket with Linux state (a plain host read for
 /// AF_INET options).
-pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    let input = match SocketInput::capture(fd) { Ok(input) => input, Err(error) if error == -ENOTSOCK => return None, Err(error) => return Some(error) };
+pub(super) fn read_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    let input = match SocketInput::checked(SocketPin::Borrowed(pin)) { Ok(input) => input, Err(error) => return Some(error) };
     if let Family::Inet(o) = &any_sock(&input)?.family
         && !o.icmp4.load(Ordering::Relaxed)
     {
@@ -2417,8 +2433,8 @@ pub fn read(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
 
 /// write/writev on a socket with Linux state (a plain host write for
 /// AF_INET options, but for DHCP to the virtual router).
-pub fn write(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
-    let input = match SocketInput::capture(fd) { Ok(input) => input, Err(error) if error == -ENOTSOCK => return None, Err(error) => return Some(error) };
+pub(super) fn write_pinned(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    let input = match SocketInput::checked(SocketPin::Borrowed(pin)) { Ok(input) => input, Err(error) => return Some(error) };
     let fd = input.fd();
     let s = any_sock(&input)?;
     if let Family::Inet(_) = &s.family {
@@ -3138,8 +3154,8 @@ mod hidden_net_boundary_tests {
         for (name,call) in [("bind",bind as fn([u64;6])->i64),("connect",connect),("listen",listen),("accept4",accept4),("getsockname",getsockname),("getpeername",getpeername),("shutdown",shutdown),("sendto",sendto),("recvfrom",recvfrom),("sendmsg",sendmsg),("recvmsg",recvmsg),("sendmmsg",sendmmsg),("recvmmsg",recvmmsg),("setsockopt",setsockopt),("getsockopt",getsockopt)] {
             assert_eq!(call(args), -(EBADF as i64),"hidden descriptor accepted by {name}: roleVisible={} hidden={}",fdtab::visible(fd),fdtab::is_hidden(fd));
         }
-        assert_eq!(read(fd,&[]),Some(-(EBADF as i64)));
-        assert_eq!(write(fd,&[]),Some(-(EBADF as i64)));
+        assert_eq!(super::super::fs::read([fd as u64,0,0,0,0,0]),-(EBADF as i64));
+        assert_eq!(super::super::fs::write([fd as u64,0,0,0,0,0]),-(EBADF as i64));
         let mut rights=[0u8;24];rights[..8].copy_from_slice(&20u64.to_ne_bytes());
         rights[8..12].copy_from_slice(&(L_SOL_SOCKET as i32).to_ne_bytes());
         rights[12..16].copy_from_slice(&L_SCM_RIGHTS.to_ne_bytes());

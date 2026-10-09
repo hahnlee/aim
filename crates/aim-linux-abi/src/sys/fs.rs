@@ -306,7 +306,7 @@ fn special_read(fd:i32,iov:&[libc::iovec])->Option<i64>{
     let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
     if let Err(error)=prepare_iov(&pin,iov,false){return Some(-(error as i64));}
     use std::os::fd::AsRawFd;let actual=pin.descriptor().as_raw_fd();
-    Some(special_read_kernel(actual,iov).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,iov.as_ptr(),iov.len() as i32)} as i64)))
+    Some(special_read_kernel(&pin,iov).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,iov.as_ptr(),iov.len() as i32)} as i64)))
 }
 fn special_write(fd:i32,iov:&[libc::iovec])->Option<i64>{
     let pin=match fdtab::pin_guest(fd){Ok(pin)=>pin,Err(error)=>return Some(-(error as i64))};
@@ -317,7 +317,7 @@ fn special_write(fd:i32,iov:&[libc::iovec])->Option<i64>{
         let iov=match charge_iov(actual,iov){Ok(iov)=>iov,Err(error)=>return Some(error)};
         return Some(description.rw(pin.descriptor(),&iov,None,true));
     }
-    Some(special_write_kernel(actual,iov).unwrap_or_else(||{
+    Some(special_write_kernel(&pin,iov).unwrap_or_else(||{
         let iov=match charge_iov(actual,iov){Ok(iov)=>iov,Err(error)=>return error};
         errno::check(unsafe{libc::writev(actual,iov.as_ptr(),iov.len() as i32)} as i64)
     }))
@@ -337,7 +337,8 @@ fn special_pio(fd:i32,buf:u64,len:usize,pos:i64,write:bool)->Option<i64>{
     }))
 }
 
-fn special_read_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+fn special_read_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    use std::os::fd::AsRawFd;let fd=pin.descriptor().as_raw_fd();
     if is_path_fd(fd) { return Some(-(EBADF as i64)); }
     if let Some(result)=super::fuse_device::rw(fd,iov,false){return Some(result);}
     if let Some(error)=super::fuse_client::inherited_error(fd){return Some(-(error as i64));}
@@ -351,7 +352,7 @@ fn special_read_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Event(_) | Kind::Timer(_) => event::read(fd, buf, len),
         Kind::Inotify(_) => inotify::read(fd, buf, len),
         Kind::Evdev(_) => super::evdev::read(fd, buf, len),
-        Kind::Sock(_) => net::read(fd, iov),
+        Kind::Sock(_) => net::read_pinned(pin, iov),
         Kind::Dir(_) => Some(-EISDIR),
         Kind::Epoll(_) | Kind::SyncFile | Kind::Binder(_) => Some(-(EINVAL as i64)),
         Kind::Content | Kind::Knob(_) | Kind::Random => None,
@@ -373,7 +374,8 @@ fn special_read_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
     }
 }
 
-fn special_write_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
+fn special_write_kernel(pin: &fdtab::Pinned, iov: &[libc::iovec]) -> Option<i64> {
+    use std::os::fd::AsRawFd;let fd=pin.descriptor().as_raw_fd();
     if is_path_fd(fd) { return Some(-(EBADF as i64)); }
     if let Some(result)=super::fuse_device::rw(fd,iov,true){return Some(result);}
     if let Some(error)=super::fuse_client::inherited_error(fd){return Some(-(error as i64));}
@@ -385,7 +387,7 @@ fn special_write_kernel(fd: i32, iov: &[libc::iovec]) -> Option<i64> {
         Kind::Path(_) => Some(-(EBADF as i64)),
         Kind::ProxyFile => Some(super::proxy_file::rw(fd, iov, None, true)),
         Kind::Event(_) | Kind::Timer(_) => event::write(fd, buf, len),
-        Kind::Sock(_) => net::write(fd, iov),
+        Kind::Sock(_) => net::write_pinned(pin, iov),
         Kind::Evdev(_) => super::evdev::write(fd, buf, len),
         Kind::Dir(_) => Some(-(EBADF as i64)),
         Kind::Epoll(_) | Kind::Inotify(_) | Kind::SyncFile | Kind::Binder(_) => {
@@ -589,7 +591,7 @@ pub fn preadv(write:bool,a:[u64;6])->i64{
         &&super::fuse_client::get(actual).is_none()&&!super::fuse_device::is_device(actual);
     let vectors=if write&&plain{match charge_iov(actual,vectors){Ok(vectors)=>vectors,Err(error)=>return error}}else{Cow::Borrowed(vectors)};
     let vectors=&*vectors;
-    if pos==-1{return if write{special_write_kernel(actual,vectors).unwrap_or_else(||errno::check(unsafe{libc::writev(actual,vectors.as_ptr(),vectors.len()as i32)}as i64))}else{special_read_kernel(actual,vectors).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,vectors.as_ptr(),vectors.len()as i32)}as i64))};}
+    if pos==-1{return if write{special_write_kernel(&pin,vectors).unwrap_or_else(||errno::check(unsafe{libc::writev(actual,vectors.as_ptr(),vectors.len()as i32)}as i64))}else{special_read_kernel(&pin,vectors).unwrap_or_else(||errno::check(unsafe{libc::readv(actual,vectors.as_ptr(),vectors.len()as i32)}as i64))};}
     let mut total=0i64;
     for vector in vectors{
         let result=special_pio_kernel(actual,vector.iov_base as u64,vector.iov_len,pos+total,write).unwrap_or_else(||errno::check(unsafe{if write{libc::pwrite(actual,vector.iov_base,vector.iov_len,pos+total)}else{libc::pread(actual,vector.iov_base,vector.iov_len,pos+total)}}as i64));
@@ -1698,4 +1700,67 @@ mod regular_admission_tests{
   let mut bytes=[0u8;32];let n=read([fd as u64,bytes.as_mut_ptr()as u64,bytes.len()as u64,0,0,0]);assert_eq!(&bytes[..n as usize],b"unchanged verity data");
   assert_eq!(close([fd as u64,0,0,0,0,0]),0);drop(data);fs::remove_file(path).unwrap();let _=root;
  }
+}
+
+#[cfg(test)]
+mod retained_socket_io_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    fn call(number:u64,args:[u64;6])->i64{
+        let context=crate::context::init_thread();
+        unsafe{(&mut (*context).x)[..6].copy_from_slice(&args);(*context).x[8]=number;super::super::dispatch(&mut *context);(*context).x[0]as i64}
+    }
+    fn pair() -> [i32;2] {
+        let mut descriptors=[-1;2];
+        assert_eq!(net::socketpair([1,1|0x800|0x80000,0,descriptors.as_mut_ptr()as u64,0,0]),0);
+        descriptors
+    }
+    fn closed(fd:i32){assert_eq!(close([fd as u64,0,0,0,0,0]),0);}
+    fn vector(bytes:&mut[u8])->libc::iovec{libc::iovec{iov_base:bytes.as_mut_ptr().cast(),iov_len:bytes.len()}}
+
+    #[test]
+    fn public_unix_socket_scalar_vector_and_offset_minus_one_io_use_retained_authority(){
+        if fdtab::isolated_kernel_test("sys::fs::retained_socket_io_tests::public_unix_socket_scalar_vector_and_offset_minus_one_io_use_retained_authority"){return;}
+        let(_view,_directory)=vfs::test_view();
+        let sockets=pair();let mut received=[0u8;4];
+        assert_eq!(write([sockets[0]as u64,b"live".as_ptr()as u64,4,0,0,0]),4);
+        assert_eq!(read([sockets[1]as u64,received.as_mut_ptr()as u64,4,0,0,0]),4);assert_eq!(&received,b"live");
+        let mut tx_a=*b"ve";let mut tx_b=*b"ct";let source=[vector(&mut tx_a),vector(&mut tx_b)];
+        let mut a=[0u8;2];let mut b=[0u8;2];let target=[vector(&mut a),vector(&mut b)];
+        assert_eq!(writev([sockets[1]as u64,source.as_ptr()as u64,2,0,0,0]),4);
+        assert_eq!(readv([sockets[0]as u64,target.as_ptr()as u64,2,0,0,0]),4);assert_eq!((&a,&b),(&*b"ve",&*b"ct"));
+        assert_eq!(call(287,[sockets[0]as u64,source.as_ptr()as u64,2,u64::MAX,0,0]),4);
+        a.fill(0);b.fill(0);
+        assert_eq!(call(286,[sockets[1]as u64,target.as_ptr()as u64,2,u64::MAX,0,0]),4);assert_eq!((&a,&b),(&*b"ve",&*b"ct"));
+        // An ordinary positioned socket operation remains ESPIPE.
+        assert_eq!(call(286,[sockets[0]as u64,target.as_ptr()as u64,2,0,0,0]),-29);
+        let pin=fdtab::pin_guest(sockets[0]).unwrap();let hidden=pin.descriptor().as_raw_fd();assert!(fdtab::is_hidden(hidden));
+        for call in [read,write]{assert_eq!(call([hidden as u64,received.as_mut_ptr()as u64,4,0,0,0]),-(EBADF as i64));}
+        for call in [readv,writev]{assert_eq!(call([hidden as u64,target.as_ptr()as u64,2,0,0,0]),-(EBADF as i64));}
+        for writing in [false,true]{assert_eq!(call(if writing{287}else{286},[hidden as u64,target.as_ptr()as u64,2,u64::MAX,0,0]),-(EBADF as i64));}
+        assert_eq!(read([sockets[1]as u64,received.as_mut_ptr()as u64,4,0,0,0]),-(errno::EAGAIN as i64));
+        drop(pin);super::super::close_effects::flush().unwrap();
+        for fd in sockets{closed(fd);}
+    }
+
+    #[test]
+    fn retained_socket_kernel_io_survives_public_close_and_numeric_reuse(){
+        if fdtab::isolated_kernel_test("sys::fs::retained_socket_io_tests::retained_socket_kernel_io_survives_public_close_and_numeric_reuse"){return;}
+        let(_view,_directory)=vfs::test_view();let original=pair();let replacement=pair();
+        let pin=fdtab::pin_guest(original[0]).unwrap();let hidden=pin.descriptor().as_raw_fd();
+        closed(original[0]);assert_eq!(dup3([replacement[0]as u64,original[0]as u64,0,0,0,0]),original[0]as i64);
+        let mut byte=[b'o'];assert_eq!(special_write_kernel(&pin,&[vector(&mut byte)]),Some(1));
+        let mut received=[0u8];assert_eq!(read([original[1]as u64,received.as_mut_ptr()as u64,1,0,0,0]),1);assert_eq!(received,[b'o']);
+        assert_eq!(write([original[0]as u64,b"r".as_ptr()as u64,1,0,0,0]),1);
+        assert_eq!(read([replacement[1]as u64,received.as_mut_ptr()as u64,1,0,0,0]),1);assert_eq!(received,[b'r']);
+        assert_eq!(write([original[1]as u64,b"p".as_ptr()as u64,1,0,0,0]),1);
+        assert_eq!(write([replacement[1]as u64,b"q".as_ptr()as u64,1,0,0,0]),1);
+        assert_eq!(special_read_kernel(&pin,&[vector(&mut received)]),Some(1));assert_eq!(received,[b'p']);
+        assert_eq!(read([original[0]as u64,received.as_mut_ptr()as u64,1,0,0,0]),1);assert_eq!(received,[b'q']);
+        assert_eq!(write([hidden as u64,b"x".as_ptr()as u64,1,0,0,0]),-(EBADF as i64));
+        drop(pin);super::super::close_effects::flush().unwrap();
+        assert_eq!(read([original[1]as u64,received.as_mut_ptr()as u64,1,0,0,0]),0,"last actual original pin closes the original socket");
+        for fd in [original[0],original[1],replacement[0],replacement[1]]{closed(fd);}
+    }
 }
