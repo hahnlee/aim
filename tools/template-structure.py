@@ -22,6 +22,9 @@ import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import os
+import plistlib
+import subprocess
+import tempfile
 
 SETTINGS = {
     'data/system/packages.xml', 'data/system/packages.xml.reservecopy',
@@ -519,6 +522,256 @@ def capture(root, provenance):
     return result
 
 
+def file_digest(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def input_digest(captured):
+    return digest(json.dumps(captured['inputs'], sort_keys=True, separators=(',', ':')).encode())
+
+
+def inode_fields(captured):
+    result = {}
+    for filename, tree in captured['xml'].items():
+        match = re.fullmatch(r'data/system/users/([0-9]+)/package-restrictions.xml', filename)
+        if not match:
+            continue
+        user, seen = int(match[1]), set()
+        reserve = filename + '.reservecopy'
+        if reserve not in captured['xml'] or tree != captured['xml'][reserve]:
+            raise ValueError('restriction/reserve XML differs ' + filename)
+        if captured['inventory'][filename]['sha256'] != captured['inventory'][reserve]['sha256']:
+            raise ValueError('restriction/reserve bytes differ ' + filename)
+        for node in tree['children']:
+            if node['tag'] != 'pkg':
+                continue
+            package = node['attrs'].get('name')
+            if not isinstance(package, str) or not re.fullmatch(r'[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*', package):
+                raise ValueError('invalid inode package owner')
+            if package in seen:
+                raise ValueError('duplicate restriction package owner')
+            seen.add(package)
+            for storage, field in (('ce', 'ceDataInode'), ('de', 'deDataInode')):
+                raw = node['attrs'].get(field)
+                if raw is None:
+                    continue
+                if not re.fullmatch(r'-?[0-9]+', raw):
+                    raise ValueError('invalid stored inode')
+                inode = int(raw)
+                if inode <= 0:
+                    continue  # Sentinels remain strict, never normalized.
+                guest = (f'/data/data/{package}' if user == 0 else f'/data/user/{user}/{package}') if storage == 'ce' else f'/data/user_de/{user}/{package}'
+                if (package, user, storage) in result:
+                    raise ValueError('duplicate user/package inode reference')
+                result[(package, user, storage)] = {'package': package, 'user': user,
+                    'storage': storage, 'field': field, 'guest_path': guest,
+                    'settings_inode': inode, 'restrictions': filename}
+    if not result:
+        raise ValueError('no positive inode fields to qualify')
+    return result
+
+
+def validate_input_pins(captured, pins):
+    manifest = json.loads(Path(pins).read_text())
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError('full input pin manifest required')
+    for filename, expected in manifest.items():
+        if not re.fullmatch('[0-9a-f]{64}', expected) or file_digest(filename) != expected:
+            raise ValueError('input pin changed ' + filename)
+    values = captured['inputs']['inputs']
+    for field, basename in (('linux_run_sha256', 'linux-run'), ('guest_init_sha256', 'guest-init'),
+                            ('display_sha256', 'aim-display'), ('posix_lock_holder_sha256', 'aim-lock-holder')):
+        filename = str(Path(values['host_runtime']) / basename)
+        if manifest.get(filename) != values[field]:
+            raise ValueError('capture is not bound to input pin manifest ' + field)
+    return manifest
+
+
+def image_attachments(image):
+    info = subprocess.run(['hdiutil', 'info', '-plist'], capture_output=True, check=True, timeout=10)
+    return [entry for entry in plistlib.loads(info.stdout)['images']
+            if Path(entry['image-path']).resolve() == image]
+
+
+def owned_attachment(image, mount):
+    matches = []
+    for entry in image_attachments(image):
+        entities = entry['system-entities']
+        mounted = [item for item in entities if item.get('mount-point') and
+                   Path(item['mount-point']).resolve() == mount.resolve()]
+        if mounted:
+            if len(mounted) != 1 or not entities or not re.fullmatch(r'/dev/disk[0-9]+', entities[0].get('dev-entry', '')):
+                raise ValueError('ambiguous owned image attachment')
+            matches.append((entities[0]['dev-entry'], mounted[0]))
+    if len(matches) > 1:
+        raise ValueError('multiple owned image attachments')
+    return matches[0] if matches else None
+
+
+def collect_owner_bindings(capture_path, image, pins, owner_source):
+    # Own only this readonly attachment. No boot, guest command or image write.
+    captured = load(str(capture_path))
+    required = inode_fields(captured)
+    image, pins, owner_source = image.resolve(strict=True), pins.resolve(strict=True), owner_source.resolve(strict=True)
+    validate_input_pins(captured, pins)
+    before = file_digest(image)
+    receipt = {'schema': 'aim-inode-owner-v1', 'collector_sha256': file_digest(__file__),
+        'capture_sha256': file_digest(capture_path), 'inputs_sha256': input_digest(captured),
+        'pins_path': str(pins), 'pins_sha256': file_digest(pins),
+        'owner_source_path': str(owner_source), 'owner_source_sha256': file_digest(owner_source),
+        'source_asif': str(image), 'source_asif_before_sha256': before, 'bindings': []}
+    if image_attachments(image):
+        raise ValueError('source image is already attached')
+    directory = Path(tempfile.mkdtemp(prefix='aim-inode-owner-'))
+    mount = directory / 'volume'
+    mount.mkdir()
+    device, error, attach_started = None, None, False
+    lifecycle = {'source_asif': str(image), 'mount': str(mount.resolve())}
+    try:
+        attach_started = True
+        attach = subprocess.run(['diskutil', 'image', 'attach', '--readOnly', '--nobrowse', '--plist',
+            '--mountPoint', str(mount), str(image)], capture_output=True, timeout=60)
+        lifecycle['attach_returncode'] = attach.returncode
+        lifecycle['attach_stdout'] = attach.stdout.decode(errors='replace')
+        lifecycle['attach_stderr'] = attach.stderr.decode(errors='replace')
+        if attach.returncode:
+            raise ValueError('readonly attach failed: ' + lifecycle['attach_stderr'])
+        # Bind exact image + unique owned mount before trusting attach metadata.
+        ownership = owned_attachment(image, mount)
+        if ownership is None:
+            raise ValueError('owned attachment identity unavailable')
+        device, mounted = ownership
+        lifecycle['owned_device'] = device
+        entities = plistlib.loads(attach.stdout)['system-entities']
+        matches = [entry for entry in entities if entry.get('mount-point') and
+                   Path(entry['mount-point']).resolve() == mount.resolve()]
+        if not entities or entities[0].get('dev-entry') != device or matches != [mounted]:
+            raise ValueError('attach metadata/image ownership mismatch')
+        info = plistlib.loads(subprocess.run(['diskutil', 'info', '-plist', mounted['dev-entry']],
+            capture_output=True, check=True, timeout=10).stdout)
+        if info.get('Writable') is not False or info.get('MountPoint') != mounted['mount-point']:
+            raise ValueError('volume is not verified readonly')
+        receipt['attachment'] = {'readonly': True, 'device': device,
+            'volume_device': mounted['dev-entry'], 'volume_uuid': info.get('VolumeUUID'),
+            'mount': str(mount.resolve()), 'stat_dev': mount.stat().st_dev}
+        raw_capture = {'xml': {}, 'inventory': {}}
+        receipt['raw_restrictions'] = {}
+        receipt['raw_vs_published_differences'] = []
+        for filename in sorted({row['restrictions'] for row in required.values()}):
+            for suffix in ('', '.reservecopy'):
+                name = filename + suffix
+                raw = (mount / name).read_bytes()
+                tree = xml_tree(raw)
+                raw_capture['xml'][name] = tree
+                raw_capture['inventory'][name] = {'sha256': digest(raw)}
+                receipt['raw_restrictions'][name] = {'sha256': digest(raw), 'tree': tree}
+                if tree != captured['xml'][name]:
+                    receipt['raw_vs_published_differences'].append({'path': name,
+                        'raw_tree': tree, 'published_tree': captured['xml'][name]})
+        raw_fields = inode_fields(raw_capture)
+        for key, row in required.items():
+            if raw_fields.get(key) != row:
+                raise ValueError('raw source inode field differs from published capture ' + str(key))
+        for row in required.values():
+            path = mount / row['guest_path'].lstrip('/')
+            # Reject symlink aliases and traversal at every owner path component.
+            current = mount
+            for part in path.relative_to(mount).parts:
+                current /= part
+                if not stat.S_ISDIR(current.lstat().st_mode):
+                    raise ValueError('inode owner path is not a physical directory')
+            meta = path.lstat()
+            if meta.st_dev != mount.stat().st_dev or meta.st_ino != row['settings_inode']:
+                raise ValueError('stored inode has no physical owner binding')
+            receipt['bindings'].append(row | {'observed_host_inode': meta.st_ino,
+                'observed_host_dev': meta.st_dev, 'actual_host_path': str(path.resolve())})
+        validate_input_pins(captured, pins)
+        if receipt['pins_sha256'] != file_digest(pins):
+            raise ValueError('input manifest changed during observation')
+    except BaseException as failure:
+        error = failure
+        lifecycle['observation_error'] = repr(failure)
+    finally:
+        if attach_started:
+            try:
+                current = owned_attachment(image, mount)
+                if current is not None:
+                    if device is not None and current[0] != device:
+                        raise ValueError('owned device changed before detach')
+                    device = current[0]
+                    lifecycle['owned_device'] = device
+                    detached = subprocess.run(['hdiutil', 'detach', device], capture_output=True, timeout=30)
+                    lifecycle['detach_returncode'] = detached.returncode
+                    lifecycle['detach_stderr'] = detached.stderr.decode(errors='replace')
+                    receipt['normal_detach_returncode'] = detached.returncode
+                    if detached.returncode != 0 or owned_attachment(image, mount) is not None:
+                        raise ValueError('owned image detach failed or attachment remains')
+                elif device is not None or lifecycle.get('attach_returncode') == 0:
+                    raise ValueError('owned attachment lost before normal detach')
+            except BaseException as cleanup_error:
+                lifecycle['cleanup_error'] = repr(cleanup_error)
+                error = cleanup_error
+        if error is not None:
+            (directory / 'ownership-failure.json').write_text(json.dumps(lifecycle, indent=2) + '\n')
+            raise ValueError(f'inode collection failed; owned directory/evidence retained at {directory}: {error}') from error
+        mount.rmdir() if mount.exists() else None
+        directory.rmdir()
+    after = file_digest(image)
+    if before != after:
+        raise ValueError('source ASIF changed during readonly collection')
+    receipt['source_asif_after_sha256'] = after
+    return receipt
+
+
+def qualify_inode_capture(captured, capture_path, receipt_path):
+    seal = json.loads(Path(receipt_path).read_text())
+    if seal.get('schema') != 'aim-inode-owner-v1' or seal.get('collector_sha256') != file_digest(__file__):
+        raise ValueError('unsealed or foreign inode collector receipt')
+    if '#' in str(capture_path) or seal.get('capture_sha256') != file_digest(capture_path) or seal.get('inputs_sha256') != input_digest(captured):
+        raise ValueError('inode receipt capture mismatch')
+    for field, filename in (('pins_sha256', 'pins_path'), ('owner_source_sha256', 'owner_source_path')):
+        if seal[field] != file_digest(seal[filename]):
+            raise ValueError('inode receipt source/pins changed')
+    validate_input_pins(captured, seal['pins_path'])
+    image_hash = file_digest(seal['source_asif'])
+    if image_hash != seal.get('source_asif_before_sha256') or image_hash != seal.get('source_asif_after_sha256'):
+        raise ValueError('inode receipt ASIF seal mismatch')
+    attachment = seal['attachment']
+    if attachment.get('readonly') is not True or seal.get('normal_detach_returncode') != 0 or not attachment.get('volume_uuid') or not attachment.get('device') or not attachment.get('volume_device'):
+        raise ValueError('inode receipt readonly lifecycle missing')
+    raw_capture = {'xml': {name: row['tree'] for name, row in seal['raw_restrictions'].items()},
+                   'inventory': {name: {'sha256': row['sha256']} for name, row in seal['raw_restrictions'].items()}}
+    raw_fields = inode_fields(raw_capture)
+    required, observations = inode_fields(captured), {}
+    if any(raw_fields.get(key) != row for key, row in required.items()):
+        raise ValueError('raw source/published inode reference mismatch')
+    for row in seal['bindings']:
+        key = (row['package'], row['user'], row['storage'])
+        if key in observations or key not in required or type(row['user']) is not int:
+            raise ValueError('duplicate or foreign inode owner')
+        expected = required[key]
+        if any(row.get(field) != value for field, value in expected.items()):
+            raise ValueError('inode receipt owner/reference mismatch')
+        if type(row.get('observed_host_inode')) is not int or row['observed_host_inode'] != expected['settings_inode'] or row.get('observed_host_dev') != attachment['stat_dev']:
+            raise ValueError('inode receipt physical reference mismatch')
+        if row.get('actual_host_path') != str(Path(attachment['mount']) / expected['guest_path'].lstrip('/')):
+            raise ValueError('inode receipt foreign directory')
+        observations[key] = row
+    if set(observations) != set(required):
+        raise ValueError('incomplete inode owner receipt')
+    qualified = copy.deepcopy(captured)
+    for row in required.values():
+        for suffix in ('', '.reservecopy'):
+            for node in qualified['xml'][row['restrictions'] + suffix]['children']:
+                if node['tag'] == 'pkg' and node['attrs'].get('name') == row['package']:
+                    node['attrs'][row['field']] = '<inode-owner:' + row['guest_path'] + '>'
+    return qualified
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -526,10 +779,15 @@ def main():
     collect.add_argument('--root', required=True, type=Path)
     collect.add_argument('--provenance', required=True, type=Path)
     collect.add_argument('--output', required=True, type=Path)
+    bind = commands.add_parser('capture-owner-bindings', help='seal inode observations from an owned readonly ASIF attachment')
+    for option in ('capture', 'asif', 'pins', 'owner-source', 'output'):
+        bind.add_argument('--' + option, required=True, type=Path)
     compare_cli = commands.add_parser('compare')
     compare_cli.add_argument('--native-first', required=True)
     compare_cli.add_argument('--native-second', required=True)
     compare_cli.add_argument('--original')
+    for side in ('first', 'second', 'original'):
+        compare_cli.add_argument('--owner-bindings-' + side, type=Path)
     compare_cli.add_argument('--permission-owner', action='append', default=[], metavar='PERMISSION=PACKAGE,PACKAGE')
     compare_cli.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
@@ -538,6 +796,10 @@ def main():
             if args.output.resolve().is_relative_to(args.root.resolve()):
                 raise ValueError('capture output must be outside the template volume')
             result = capture(args.root, args.provenance)
+        elif args.command == 'capture-owner-bindings':
+            if args.output.exists():
+                raise ValueError('owner receipt output already exists')
+            result = collect_owner_bindings(args.capture, args.asif, args.pins, args.owner_source)
         else:
             owners = {}
             for item in args.permission_owner:
@@ -547,6 +809,16 @@ def main():
                     raise ValueError('duplicate permission owner requires exactly two packages')
             first, second = load(args.native_first), load(args.native_second)
             result = {'native_structure': compare(first, second, owners)}
+            if args.owner_bindings_first or args.owner_bindings_second:
+                if not (args.owner_bindings_first and args.owner_bindings_second):
+                    raise ValueError('both native owner receipts required')
+                qualified_first = qualify_inode_capture(first, args.native_first, args.owner_bindings_first)
+                qualified_second = qualify_inode_capture(second, args.native_second, args.owner_bindings_second)
+                if json.loads(args.owner_bindings_first.read_text())['pins_sha256'] != json.loads(args.owner_bindings_second.read_text())['pins_sha256']:
+                    raise ValueError('owner-qualified native input pins differ')
+                result['owner_qualified_native_structure'] = compare(qualified_first, qualified_second, owners)
+            if args.owner_bindings_original and not (args.original and args.owner_bindings_first and args.owner_bindings_second):
+                raise ValueError('original qualification requires all three explicit owner receipts')
             inputs_a, inputs_b = first['inputs'], second['inputs']
             same = inputs_a['sku'] == inputs_b['sku'] and inputs_a['inputs'] == inputs_b['inputs']
             result['native_same_inputs'] = same
@@ -556,6 +828,10 @@ def main():
                 result['native_structure']['structure_pass'] = False
             if args.original:
                 original = load(args.original)
+                if args.owner_bindings_original:
+                    qualified_original = qualify_inode_capture(original, args.original, args.owner_bindings_original)
+                    result['owner_qualified_original_structure'] = compare(qualified_first, qualified_original, owners)
+                    result['owner_qualified_original_second_structure'] = compare(qualified_second, qualified_original, owners)
                 result['original_structure'] = compare(first, original, owners)
                 result['original_second_structure'] = compare(second, original, owners)
                 result['original_same_image_sku'] = (inputs_a['sku'] == original['inputs']['sku'] and
@@ -564,10 +840,11 @@ def main():
         with args.output.open('x') as output:
             json.dump(result, output, indent=2, sort_keys=True)
             output.write('\n')
-        failed = args.command == 'compare' and any(not row['structure_pass'] for key, row in result.items()
-                                                  if key in ('native_structure', 'original_structure', 'original_second_structure'))
+        gate_keys = [key for key in ('native_structure', 'original_structure', 'original_second_structure') if key in result]
+        gate_keys = [('owner_qualified_' + key) if ('owner_qualified_' + key) in result else key for key in gate_keys]
+        failed = args.command == 'compare' and any(not result[key]['structure_pass'] for key in gate_keys)
         return 1 if failed else 0
-    except (ValueError, KeyError, OSError, IndexError, ET.ParseError) as error:
+    except (ValueError, KeyError, OSError, IndexError, ET.ParseError, subprocess.CalledProcessError, subprocess.TimeoutExpired, plistlib.InvalidFileException) as error:
         print(f'template audit: {error}', file=sys.stderr)
         return 2
 
