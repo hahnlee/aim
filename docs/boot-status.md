@@ -424,8 +424,8 @@ Java/D8 linkage and Rust compilation pass; traced Android replay is unrun.
 Cleanup preserves the original error and data without a double panic; all
 owned PIDs and image attachments are gone. The kernel admission guard
 remains unchanged.
-The63 required manual-body roster now records35 scoped passes, four
-failures and24 unrun bodies. The three additional failures are duplicate
+The63 required manual-body roster now records36 scoped passes, three
+failures and24 unrun bodies. Historical failures included duplicate
 Java DataLoaderParams declarations before Android startup (#1295), an
 unauthorized UID1000 namespace entry after readiness (#1282), and a
 Suspension oracle command that writes66 files but does not return within
@@ -584,7 +584,13 @@ gone after birth-checked cleanup. The self-authored oracle now writes
 progress around each unchanged assertion and final stdout. Stub/oracle
 javac, D8 and pinned Original linkage pass for the corrected byte-write
 implementation; the initial writeString linkage failure is preserved.
-The instrumented actual replay remains pending (#1304).
+The later exact instrumented parcel replay on the new6bd Role image and
+whole f742 runtime passes the complete body in307.66s: all52 ordered
+progress stages, original assertions/stdout, Rust DTO verification and
+natural exit0. No test is ignored or skipped; owned processes,namespaces
+and mounts are gone. The prior900-second failure remains historical.
+The separate resident proxy natural-exit gate (#1294) is not proven by this
+codec body.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,
