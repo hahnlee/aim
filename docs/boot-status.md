@@ -634,7 +634,11 @@ the parent's exec-error socket returns EOF, but PTY epoll MOD enters
 without returning (#1309). Its eager spare-watch drop occurs under the
 same lifecycle lock used by private FD retirement. The spare watch now
 survives until the lock is released; actual typed PTY ADD/MOD/DEL,
-subsequent I/O and hangup checks pass. Corrected Android replay is pending.
+subsequent I/O and hangup checks pass. The whole-source f742ab18 original
+adbd replay now returns SDK36 and exits0 naturally through raw shell-v2
+in1.274s and PTY exec-out in1.365s, with MOD return, master read and HUP/DEL
+observed. All owned resources are released. This closes the kernel owner
+defect; its --only diagnostic does not establish full boot/svc/CTS acceptance.
 Binder public close now flushes existing loopers independently of final
 description release (#1307), preserving pinned ioctl references and queued
 transactions. Hidden/duplicate Binder lookup uses its actual descriptor
