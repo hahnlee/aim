@@ -103,12 +103,16 @@ class TemplateStructure(unittest.TestCase):
         self.assertFalse(audit.compare(a, b, {})['structure_pass'])
 
     def test_domain_owner_identity_conflicts_and_invalid_references_fail(self):
-        for kind in ('invalid_uuid', 'duplicate_owner', 'shared_uuid', 'setting_mismatch', 'reserve_mismatch'):
+        for kind in ('invalid_uuid', 'urn_uuid', 'braced_uuid', 'duplicate_owner', 'shared_uuid', 'setting_mismatch', 'reserve_mismatch'):
             with self.subTest(kind=kind):
                 a, b = self.domain_fixture(), self.domain_fixture()
                 states = b['xml']['data/system/packages.xml']['children'][-1]['children'][0]['children']
                 if kind == 'invalid_uuid':
                     states[-1]['attrs']['id'] = 'invalid'
+                elif kind == 'urn_uuid':
+                    states[-1]['attrs']['id'] = 'urn:uuid:' + states[-1]['attrs']['id']
+                elif kind == 'braced_uuid':
+                    states[-1]['attrs']['id'] = '{' + states[-1]['attrs']['id'] + '}'
                 elif kind == 'duplicate_owner':
                     states.append(copy.deepcopy(states[-1]))
                 elif kind == 'shared_uuid':

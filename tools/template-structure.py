@@ -191,6 +191,8 @@ class Normalizer:
                 parsed = uuid.UUID(value)
             except (ValueError, TypeError, AttributeError) as error:
                 raise ValueError('invalid domain UUID ' + source) from error
+            if value != str(parsed):
+                raise ValueError('noncanonical domain UUID ' + source)
             return owner, str(parsed), parsed.int
 
         def register(owner, value, nonzero, source):
