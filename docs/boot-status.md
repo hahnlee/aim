@@ -499,7 +499,21 @@ in this replay. Explicit Native-to-reader-to-Boot cleanup reaps the held
 child and preserves failed DATA; owned PID/mount residue is zero. Seven
 host boundary/child tests and original Java/D8 linkage pass. A separate
 diagnostic attempt fails its initial readiness query with exit137 before
-the resident process or trace starts (#1296); its cause is unproven.
+the resident process or trace starts (#1296). A later minimal-init root
+query exits with SIGKILL in3.46ms before its UID/FD91 checks. The actual
+Exosphere window reports linux-run execution blocked as an unconfirmed
+program configured for blocking. User security review is required; no
+allowlist, signature or execution-path bypass was made. This evidence
+does not establish the cause of every historical exit137.
+A later diagnostic invokes no readiness query before its300-second
+readiness failure, then exceeds60-second stop and aborts from a shared
+Boot::Drop double panic (#1297). Owned processes and mounts are normally
+cleaned by the supervisor. Shared cleanup now bounds its directly spawned
+stop child to60 seconds, records status/stdout/stderr and preserves the
+original failure during unwinding. Data is retained after cleanup failure
+or a live mount; ordinary cleanup failures remain test failures. Three
+actual Darwin child/mount/unwind checks pass. Android cleanup replay is
+not run while the execution block awaits user review.
 Shared fixture clients now enter the authenticated namespace as root and
 use the authored credential launcher to drop real UID/GID/groups/caps
 before the original program (#1282). The17 nonzero call sites preserve

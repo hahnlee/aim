@@ -32,8 +32,69 @@ pub fn run(command: &mut Command) -> Output {
 pub struct Data(pub PathBuf);
 impl Drop for Data {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        let marker=self.0.join(".aim-cleanup-failed");
+        if marker.exists() {
+            cleanup_error(&self.0,"recorded cleanup failure");return;
+        }
+        let result=mounted_under(&self.0).and_then(|mounted|{
+            if mounted { return Err("fixture data still contains an actual mount".into()); }
+            fs::remove_dir_all(&self.0).map_err(|error|error.to_string())
+        });
+        if let Err(error)=result {
+            if let Err(record)=fs::write(&marker,&error) {
+                eprintln!("cleanup failure receipt write failed: {record}");
+            }
+            cleanup_error(&self.0,&error);
+        }
     }
+}
+fn cleanup_error(data:&std::path::Path,error:&str) {
+    eprintln!("fixture cleanup failed; data preserved at {}: {error}",data.display());
+    if !std::thread::panicking() { panic!("fixture cleanup failed: {error}"); }
+}
+fn mounted_under(data:&std::path::Path)->Result<bool,String> {
+    use std::os::unix::ffi::OsStrExt;
+    let root=fs::canonicalize(data).map_err(|error|error.to_string())?;
+    let count=unsafe{libc::getfsstat(std::ptr::null_mut(),0,libc::MNT_NOWAIT)};
+    if count<0{return Err(std::io::Error::last_os_error().to_string());}
+    let mut entries=vec![unsafe{std::mem::zeroed::<libc::statfs>()};count as usize+64];
+    let size=i32::try_from(entries.len()*std::mem::size_of::<libc::statfs>()).map_err(|error|error.to_string())?;
+    let read=unsafe{libc::getfsstat(entries.as_mut_ptr(),size,libc::MNT_NOWAIT)};
+    if read<0{return Err(std::io::Error::last_os_error().to_string());}
+    if read as usize>=entries.len(){return Err("mount snapshot overflow".into());}
+    Ok(entries[..read as usize].iter().any(|entry|{
+        let name=unsafe{std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr())};
+        std::path::Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())).starts_with(&root)
+    }))
+}
+struct CleanupChild(std::process::Child);
+impl Drop for CleanupChild {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(),Ok(Some(_))){return;}
+        let _=self.0.kill();let _=self.0.wait();
+    }
+}
+fn bounded_cleanup(command:&mut Command, directory:&std::path::Path, limit:std::time::Duration)->Result<(),String> {
+    fs::create_dir(directory).map_err(|error|format!("cleanup output: {error}"))?;
+    let stdout=directory.join("stdout");let stderr=directory.join("stderr");
+    command.stdout(fs::File::create(&stdout).map_err(|error|error.to_string())?)
+        .stderr(fs::File::create(&stderr).map_err(|error|error.to_string())?);
+    let mut child=CleanupChild(command.spawn().map_err(|error|error.to_string())?);
+    let deadline=std::time::Instant::now()+limit;
+    let status=loop {
+        if let Some(status)=child.0.try_wait().map_err(|error|error.to_string())?{break Some(status);}
+        if std::time::Instant::now()>=deadline {
+            child.0.kill().map_err(|error|error.to_string())?;
+            let terminated=child.0.wait().map_err(|error|error.to_string())?;
+            fs::write(directory.join("terminated-status"),format!("{terminated:?}\n")).map_err(|error|error.to_string())?;
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    fs::write(directory.join("status"),format!("{status:?}\n")).map_err(|error|error.to_string())?;
+    if status.is_some_and(|status|status.success()){Ok(())}
+    else {Err(format!("cleanup status {status:?}; stderr: {}; raw output: {}",
+        String::from_utf8_lossy(&fs::read(stderr).map_err(|error|error.to_string())?),directory.display()))}
 }
 
 struct CredentialLauncher { path: PathBuf, sha256: String }
@@ -249,41 +310,45 @@ impl Boot {
     }
 
 }
+impl Boot {
+    fn cleanup(&self)->Result<(),String> {
+        let Some(inputs)=self.inputs.get() else{return Ok(());};
+        inputs.verify_controller()?;
+        static NEXT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+        let ticket=NEXT.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+        let parent=self.data.parent().ok_or("cleanup fixture parent missing")?;
+        let logs=parent.join(format!(".aim-cleanup-stop-{}-{ticket}",std::process::id()));
+        // Only this directly spawned controller child is signalled on timeout.
+        // The controller retains responsibility for its authenticated boot owners.
+        let state=fs::read_to_string(PathBuf::from(format!("{}.aimctl/state",self.data.display())));
+        bounded_cleanup(self.retained_command(inputs).arg("stop"),&logs,std::time::Duration::from_secs(60))?;
+        let state=match state {
+            Ok(state)=>state,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>String::new(),
+            Err(error)=>return Err(error.to_string()),
+        };
+        for field in state.lines().filter_map(|line|line.strip_prefix("pid=").or_else(||line.strip_prefix("guest="))) {
+            if field.is_empty(){continue;}
+            let pid=field.parse::<i32>().map_err(|error|format!("cleanup recorded PID: {error}"))?;
+            if pid<=0{return Err("invalid recorded cleanup PID".into());}
+            // Liveness check only; never signal a PID learned from a text record.
+            if unsafe{libc::kill(pid,0)}==0{return Err(format!("recorded process still exists: {pid}"));}
+            if std::io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH) {
+                return Err(format!("recorded process status unknown: {pid}"));
+            }
+        }
+        if mounted_under(&self.data)?{return Err("boot data is still mounted".into());}
+        Ok(())
+    }
+}
 impl Drop for Boot {
     fn drop(&mut self) {
-        if self.inputs.get().is_none() { return; }
-        let state = fs::read_to_string(PathBuf::from(format!(
-            "{}.aimctl/state",
-            self.data.display()
-        )))
-        .unwrap_or_default();
-        let pids: Vec<i32> = state
-            .lines()
-            .filter_map(|line| {
-                line.strip_prefix("pid=")
-                    .or_else(|| line.strip_prefix("guest="))
-                    .map(|pid| pid.parse().unwrap())
-            })
-            .collect();
-        let inputs = self.inputs.get().unwrap();
-        inputs.verify_controller().expect("pinned cleanup controller changed");
-        // Cleanup keeps the launch selection even if its manifest was retired.
-        run(self.retained_command(inputs).arg("stop"));
-        for pid in pids {
-            // Signal zero checks only the test's own keeper and guest.
-            assert_eq!(
-                unsafe { libc::kill(pid, 0) },
-                -1,
-                "owned process remains: {pid}"
-            );
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            );
+        if let Err(error)=self.cleanup() {
+            if let Some(parent)=self.data.parent(){
+                if let Err(record)=fs::write(parent.join(".aim-cleanup-failed"),&error){
+                    eprintln!("cleanup failure receipt write failed: {record}");
+                }
+            }
+            cleanup_error(&self.data,&error);
         }
-        // A stopped keeper's state may remain, but the owned mount must
-        // be detached before Data removes the fixture's directory.
-        let mounts = run(&mut Command::new("mount")).stdout;
-        assert!(!String::from_utf8_lossy(&mounts).contains(self.data.to_str().unwrap()));
     }
 }
