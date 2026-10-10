@@ -20,6 +20,15 @@ use super::clock::{self, Base};
 use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, EPERM};
 
+static TRACE_EVENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn trace_event(fd: i32, operation: &str, value: u64, semaphore: bool) {
+    if super::tracing() && TRACE_EVENT.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+        |n| (n < 64).then_some(n + 1)).is_ok() {
+        crate::diag!("eventfd receipt pid={} tid={} fd={fd} operation={operation} value={value} semaphore={semaphore}",
+            unsafe { libc::getpid() }, super::thread::host_tid());
+    }
+}
+
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
 const EFD_SEMAPHORE: u64 = 1;
@@ -117,6 +126,7 @@ impl EventFd {
                 if let Some(v) = v {
                     // SAFETY: guest buffer of at least 8 bytes.
                     unsafe { (buf as *mut u64).write_unaligned(v) };
+                    trace_event(fd, "read", v, self.semaphore);
                     return 8;
                 }
             }
@@ -143,6 +153,7 @@ impl EventFd {
             let _g = self.lock.lock().unwrap();
             self.add(fd, v);
         }
+        trace_event(fd, "write", v, self.semaphore);
         8
     }
 }
@@ -171,6 +182,7 @@ pub fn eventfd2(a: [u64; 6]) -> i64 {
         fdtab::on_close(fd); unsafe { libc::close(fd); }
         return -(error as i64);
     }
+    trace_event(fd, "create", init, flags & EFD_SEMAPHORE != 0);
     fd as i64
 }
 

@@ -558,8 +558,14 @@ closes and the parent's flag stays set. Both processes exit0 and all
 owned resources are gone. The original boot wait remains unresolved
 (#1298).
 The same diagnostic stops normally at its1GiB log guard: netd repeatedly
-gets one epoll event with an infinite timeout (#1301). Its watched event
-identity and blocking cause remain unproven. Both owned987MB log copies
+gets one epoll event with an infinite timeout (#1301). The sole watched
+descriptor is eventfd11, with a preceding eight-byte write and no captured
+read; normal unread level readiness is not excluded. Existing --trace now
+records bounded ctl interest/data, raw kevent and returned event fields,
+and eventfd create/read/write scalars without additional consuming I/O.
+The actual EventFd/Darwin kqueue host regression and full ABI library
+compilation pass; Android reproduction and the blocking cause remain
+unproven. Both owned987MB log copies
 are losslessly compressed to26MB each, with decompression SHA verified.
 The fresh matched Original/Native images share one verified device-services
 producer key053f8636 (#1300). All eight installed vendor artifacts have
@@ -600,7 +606,9 @@ The full66 CTS runner's comparison now reconstructs the same staged-install
 host-tool module argument as execution (#1305). Ten host comparison checks
 pass, including refusal of missing,changed and foreign selectors and
 incomplete campaigns. This is harness verification, not CTS execution.
-Three collector regressions cannot rerun without their captured XML input.
+Three collector regressions now pass against the unchanged, recovered official
+Original/Native XML and owning wrapper logs in an isolated target overlay.
+They verify association only; historical CTS results remain separate.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally

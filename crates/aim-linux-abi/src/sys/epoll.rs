@@ -18,6 +18,38 @@ use std::sync::{Arc, Mutex};
 use super::fdtab::{self, Kind};
 use crate::errno::{self, EBADF, EEXIST, EINVAL, ENOENT, EPERM};
 
+// Each receipt cohort is bounded independently, including busy level-triggered waits.
+fn trace_receipt(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    super::tracing() && counter.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |n| (n < 64).then_some(n + 1),
+    ).is_ok()
+}
+static TRACE_CTL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TRACE_WAIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn trace_ctl(epfd: i32, op: u64, fd: i32, interest: Option<Interest>) {
+    if trace_receipt(&TRACE_CTL) {
+        crate::diag!("epoll receipt pid={} tid={} ctl epfd={epfd} op={op} fd={fd} interest={:?}",
+            unsafe { libc::getpid() }, super::thread::host_tid(),
+            interest.map(|i| (i.events, i.data)));
+    }
+}
+fn trace_wait(epfd: i32, kevs: &[libc::kevent], out: &[(i32, u32, u64)]) {
+    if !trace_receipt(&TRACE_WAIT) { return; }
+    crate::diag!("epoll receipt pid={} tid={} wait epfd={epfd} backend={} returned={} shown_max=16",
+        unsafe { libc::getpid() }, super::thread::host_tid(), kevs.len(), out.len());
+    for k in kevs.iter().take(16) {
+        let (ident, filter, flags, fflags, data, udata) =
+            (k.ident, k.filter, k.flags, k.fflags, k.data, k.udata as usize);
+        crate::diag!("epoll backend epfd={epfd} ident={} filter={} flags={:#x} fflags={:#x} data={} udata={:#x}",
+            ident, filter, flags, fflags, data, udata);
+    }
+    for &(fd, mask, data) in out.iter().take(16) {
+        crate::diag!("epoll returned epfd={epfd} fd={fd} mask={mask:#x} data={data:#x}");
+    }
+}
+
 const EPOLLIN: u32 = 0x1;
 const EPOLLPRI: u32 = 0x2;
 const EPOLLOUT: u32 = 0x4;
@@ -79,7 +111,7 @@ fn pty_ctl(ep:&Arc<Epoll>,epfd:i32,fd:i32,op:u64,event:u64,description:&Arc<supe
         (None,Some(interest))=>interests.push(PtyInterest{tag,fd,identity,watch:active.clone(),interest}),
         _=>{},
     }
-    drop(interests);drop(guard);drop(retired);0
+    drop(interests);drop(guard);drop(retired);trace_ctl(epfd,op,fd,new);0
 }
 
 pub struct Epoll {
@@ -293,6 +325,8 @@ pub fn epoll_ctl(a: [u64; 6]) -> i64 {
         Some(n) => interest.insert(fd, n),
         None => interest.remove(&fd),
     };
+    drop(interest);
+    trace_ctl(epfd, op, fd, new.or(old));
     0
 }
 
@@ -382,6 +416,7 @@ fn wait(epfd: i32, events: u64, maxevents: i32, timeout: Option<libc::timespec>,
                 .write_unaligned([*b as u64, *data])
         };
     }
+    trace_wait(epfd, &kevs, &out);
     out.len() as i64
 }
 
