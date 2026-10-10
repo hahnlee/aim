@@ -566,8 +566,25 @@ producer key053f8636 (#1300). All eight installed vendor artifacts have
 equal SHA,size,0644mode and nanosecond mtime; both final mounts are read-only.
 Original retains its PMS, while the Native image's formal19redirect/14UM
 symbolic checks and experimental service list pass. A default-overlay
-intermediate was rejected before execution. These are image checks;
-Android boot, template parity, rollback and CTS acceptance remain unproven.
+intermediate was rejected before execution. These image checks do not
+prove native runtime construction, template parity, rollback or CTS acceptance.
+The first exact parcel replay on this matched Original image reaches
+boot readiness (captured property1) and executes the original codec oracle.
+The whole body still fails its900-second limit (#1304). Ten captured
+original DTOs pass the existing Rust decode/tail/reencode checks, and file
+ordering proves nine Java cases progressed; the final Java check, stdout
+and natural exit remain unverified. Owned processes and data mount are
+gone after birth-checked cleanup. The self-authored oracle now writes
+progress around each unchanged assertion and final stdout. Stub/oracle
+javac, D8 and pinned Original linkage pass for the corrected byte-write
+implementation; the initial writeString linkage failure is preserved.
+The instrumented actual replay remains pending (#1304).
+The first template on the matched Native image completes settings in110.3s,
+boot in250.1s and permissions in256.6s and publishes70 mandatory files.
+Actual dumpsys reports package and package_native owned by guest initPID1,
+paired with the authenticated host init birth. Final payload/cleanup
+verification is pending; matched Original/template parity, second Native
+determinism, rollback, apps and full66CTS remain unproven.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally
