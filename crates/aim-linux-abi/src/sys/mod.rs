@@ -80,7 +80,7 @@ mod wait;
 pub mod window;
 mod xattr;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::context::GuestContext;
 use crate::errno::ENOSYS;
@@ -111,6 +111,7 @@ pub use window::init as init_heap_window;
 /// Read by the trampoline: while set, every syscall takes the full path so
 /// it is traced.
 pub static TRACE: AtomicBool = AtomicBool::new(false);
+static TRACE_CALL: AtomicU64 = AtomicU64::new(0);
 
 /// Reclaims unused host memfd backing names after guest shutdown.
 pub fn sweep_unused_memfds() -> u64 {
@@ -154,7 +155,12 @@ pub fn dispatch(ctx: &mut GuestContext) {
     let nr = ctx.x[8];
     let a = [ctx.x[0], ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[4], ctx.x[5]];
     let mut line = String::new();
-    if tracing() {
+    let trace = tracing().then(|| {
+        // SAFETY: getpid reads this process's host identity.
+        let pid = unsafe { libc::getpid() };
+        (pid, host_tid(), TRACE_CALL.fetch_add(1, Ordering::Relaxed))
+    });
+    if let Some((pid, tid, call)) = trace {
         let name = match names::name(nr) {
             Some(n) => n,
             None if nr == aim_hostcall::SYSCALL_NR => "hostcall",
@@ -177,9 +183,7 @@ pub fn dispatch(ctx: &mut GuestContext) {
             }
         }
         line.push(')');
-        if matches!(nr, 93 | 94) {
-            crate::diag!("{line}");
-        }
+        crate::diag!("{line} [pid={pid} tid={tid} call={call} enter]");
     }
     // A syscall a host signal interrupted is restarted when no guest
     // handler is to run for it.
@@ -191,13 +195,13 @@ pub fn dispatch(ctx: &mut GuestContext) {
             break r;
         }
     };
-    if tracing() {
+    if let Some((pid, tid, call)) = trace {
         if (-4095..0).contains(&r) {
-            crate::diag!("{line} = -{} ({})", -r, names::errno_name(-r as i32));
+            crate::diag!("{line} = -{} ({}) [pid={pid} tid={tid} call={call} leave]", -r, names::errno_name(-r as i32));
         } else if !(0..=0xffff).contains(&r) {
-            crate::diag!("{line} = {r:#x}");
+            crate::diag!("{line} = {r:#x} [pid={pid} tid={tid} call={call} leave]");
         } else {
-            crate::diag!("{line} = {r}");
+            crate::diag!("{line} = {r} [pid={pid} tid={tid} call={call} leave]");
         }
     }
     ctx.x[0] = r as u64;

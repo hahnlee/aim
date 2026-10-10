@@ -532,6 +532,13 @@ services are never published. The61 init errors concern missing files,
 optional properties and a root remount; none proves the blocking cause.
 All owned processes and mounts are gone. The next evidence must identify
 the original zygote's wait before system_server publication (#1298).
+Generic tracing alone does not identify that wait: multiple restarted
+zygotes share an append log, and the441 runtime records ordinary syscalls
+only after completion. The dispatcher now emits an entry and matching
+completion with host PID, Linux TID and call sequence under the existing
+--trace option (#1299). Compilation passes; actual blocking-call and
+original boot validation are pending. This is diagnostic instrumentation,
+not a fix for the boot stall or slice C acceptance.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally
