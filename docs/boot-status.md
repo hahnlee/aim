@@ -597,8 +597,13 @@ in247.8s and permissions in254.6s; all70 copied files match bytes,mode,mtime
 andxattrs and all owned resources are released. Strict first/third comparison
 fails four XML files: roles primary/reserve differ in packagesHash, and
 user0 package restrictions primary/reserve differ in five CE/DE inode values.
-packages.xml matches. The fields remain checked; inode bindings and hash
-preimages still require owner evidence. Matched Original/template parity,
+packages.xml matches. All five changed inode fields on each side bind to
+their actual package CE/DE directories on the retained read-only raw DATA
+volumes (10/10). The fields remain checked; hash preimages and consumer
+inode rebinding remain unverified. The matched Original template attempt
+captures settings in193.1s but fails the unchanged300-second limit without
+boot completion, permission capture or publication. Matched Original parity
+is NOT RUN; partial settings do not substitute for a template. Matched Original/template parity,
 rollback, apps and full66CTS remain
 unproven. The instrumented Original parcel replay also fails boot-query
 readiness before launching its oracle; its progress checks are NOT RUN.
