@@ -1036,3 +1036,41 @@ fn rejected_nested_delivery_restores_both_parent_stacks() {
     q.flush(Q_PID, Commands::new().free_buffer(outer.buffer));
     caller.join().unwrap();
 }
+
+#[test]
+fn flush_returns_parked_loopers_without_releasing_or_dropping_commands() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let driver = Driver::new();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10_001, 0);
+    let resumed = Arc::new(AtomicUsize::new(0));
+    let callback = || -> aim_binder_driver::Resume {
+        let resumed=resumed.clone();
+        Box::new(move || { resumed.fetch_add(1,Ordering::SeqCst); })
+    };
+    let mut read=vec![0;READ_CAPACITY];
+    let mut arg=WriteRead { read_size:read.len()as u64,read_buffer:read.as_mut_ptr()as u64,..Default::default() }.encode();
+    assert_eq!(q.ioctl_or_park(Q_PID,BINDER_WRITE_READ,&mut arg,callback()),None);
+    assert_eq!(resumed.load(Ordering::SeqCst),0);
+    driver.flush(q.handle).unwrap();
+    assert_eq!(resumed.load(Ordering::SeqCst),1);
+    q.ioctl(Q_PID,BINDER_WRITE_READ,&mut arg).unwrap();
+    let done=WriteRead::decode(&arg);
+    assert_eq!(names(&parse_returns(&read[..done.read_consumed as usize])),["BR_NOOP"]);
+    // A flush asks a current read to return; it neither tears down this proc
+    // nor leaves the next empty read spuriously ready.
+    arg=WriteRead { read_size:read.len()as u64,read_buffer:read.as_mut_ptr()as u64,..Default::default() }.encode();
+    assert_eq!(q.ioctl_or_park(Q_PID,BINDER_WRITE_READ,&mut arg,callback()),None);
+    let mut payload=Parcel::new();payload.write_i32(0x1307);
+    p.transact(P_PID,Commands::new().transaction(0,0x1307,TF_ONE_WAY,&payload));
+    assert_eq!(resumed.load(Ordering::SeqCst),2);
+    driver.flush(q.handle).unwrap();
+    q.ioctl(Q_PID,BINDER_WRITE_READ,&mut arg).unwrap();
+    let done=WriteRead::decode(&arg);
+    let returns=parse_returns(&read[..done.read_consumed as usize]);
+    let (transaction,_)=find_transaction(&returns);
+    assert_eq!(transaction.code,0x1307);
+    assert_eq!(data_of(&transaction),payload.data);
+    q.release();
+    assert_eq!(driver.flush(q.handle),Err(errno::EBADF));
+}

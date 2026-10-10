@@ -393,6 +393,10 @@ mod tests {
         let epoll=super::super::epoll::epoll_create1([0;6]);assert!(epoll>=0);let epoll=GuestFd(epoll as i32);
         let event=[1u64,0x1259];
         assert_eq!(super::super::epoll::epoll_ctl([epoll.0 as u64,1,waiting.0 as u64,event.as_ptr()as u64,0,0]),0);
+        let updated=[1u64,0x125a];
+        assert_eq!(super::super::epoll::epoll_ctl([epoll.0 as u64,3,waiting.0 as u64,updated.as_ptr()as u64,0,0]),0);
+        assert_eq!(super::super::epoll::epoll_ctl([epoll.0 as u64,2,waiting.0 as u64,0,0,0]),0);
+        assert_eq!(super::super::epoll::epoll_ctl([epoll.0 as u64,1,waiting.0 as u64,updated.as_ptr()as u64,0,0]),0);
         let slave_event=[1u64,0xdead];
         assert_eq!(super::super::epoll::epoll_ctl([epoll.0 as u64,1,peer.0 as u64,slave_event.as_ptr()as u64,0,0]),0);
         let barrier=Arc::new(std::sync::Barrier::new(2));
@@ -407,7 +411,7 @@ mod tests {
         let mut event=[0u64;2];
         assert_eq!(super::super::epoll::epoll_pwait([epoll.0 as u64,event.as_mut_ptr()as u64,1,2000,0,0]),1);
         assert_ne!(event[0]&0x10,0);
-        assert_eq!(event[1],0x1259,"closed slave watch must not retain or deliver stale OFD");
+        assert_eq!(event[1],0x125a,"modified watch must retain its data without delivering the closed slave");
         drop(epoll);
         drop(waiting);drop(master_description);
         owner.shutdown().unwrap();std::fs::remove_dir(runtime).unwrap();

@@ -101,7 +101,8 @@ fn pty_ctl(ep:&Arc<Epoll>,epfd:i32,fd:i32,op:u64,event:u64,description:&Arc<supe
         EPOLL_CTL_MOD|EPOLL_CTL_DEL if index.is_none()=>return -(ENOENT as i64),
         EPOLL_CTL_ADD|EPOLL_CTL_MOD|EPOLL_CTL_DEL=>{},_=>return -(EINVAL as i64),
     }
-    let active=index.map(|index|interests[index].watch.clone()).unwrap_or(watch);
+    // Retire the spare watch after lifecycle admission; its private FDs use the same lock.
+    let active=index.map(|index|interests[index].watch.clone()).unwrap_or_else(||watch.clone());
     let tag=match index{Some(index)=>interests[index].tag,None=>match NEXT_PTY_TAG.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|tag|tag.checked_add(1)){Ok(tag)=>tag,Err(_)=>{drop(interests);drop(guard);drop(active);return -(errno::from_darwin(libc::EOVERFLOW) as i64);}}};
     let result=apply(epfd,&pty_changes(&active,tag,index.map(|index|&interests[index].interest),new.as_ref()));
     if result<0{drop(interests);drop(guard);drop(active);return result;}

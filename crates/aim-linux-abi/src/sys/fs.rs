@@ -309,7 +309,7 @@ impl CloseEvidence{
 }
 fn close_inner(a: [u64; 6],capture:&mut Option<CloseEvidence>) -> i64 {
     let fd=a[0] as i32;
-    let guard=fdtab::lifecycle();*capture=Some(CloseEvidence::capture(fd));let evidence=capture.as_ref().unwrap();
+    let guard=match fdtab::close_admission(fd){Ok(guard)=>guard,Err(error)=>return -(error as i64)};*capture=Some(CloseEvidence::capture(fd));let evidence=capture.as_ref().unwrap();
     if let Err(error)=fdtab::require_guest_visible(fd){evidence.failure("pre-visibility",-(error as i64),i32::MIN,0);return -(error as i64);}
     let retained=fdtab::get(fd);let file=super::fuse_client::get(fd);
     let socket=matches!(retained,Some(Kind::Sock(_)));
@@ -319,12 +319,13 @@ fn close_inner(a: [u64; 6],capture:&mut Option<CloseEvidence>) -> i64 {
     let native_ret=unsafe{libc::close(fd)};let native_errno=if native_ret<0{unsafe{*libc::__error()}}else{0};
     let result=if native_ret<0{-(errno::from_darwin(native_errno)as i64)}else{native_ret as i64};
     if result<0{evidence.failure("native-close",result,native_ret,native_errno);}
-    drop(guard);
+    let binder_flush=guard.finish(result==0);
     let posix=if result==0{fdtab::finish_guest_close(posix)}else{Ok(())};
     let flush=file.as_ref().map(|file|super::fuse_cache::flush_file(file).and_then(|_|super::fuse_client::flush(file)));
     drop(retained);drop(file);
     if result==0&&socket{super::close_effects::note_socket_close();}
     if let Err(error)=posix{evidence.failure("finish-posix",-(error as i64),native_ret,native_errno);return -(error as i64);}
+    if let Err(error)=binder_flush{if result==0{evidence.failure("finish-binder",-(error as i64),native_ret,native_errno);return -(error as i64);}}
     match flush{Some(Err(error))if result==0=>{evidence.failure("finish-fuse",-(error as i64),native_ret,native_errno);-(error as i64)},_=>result}
 }
 
@@ -1223,7 +1224,7 @@ pub fn dup3(a: [u64; 6]) -> i64 {
 fn dup3_inner(a: [u64; 6]) -> i64 {
     let(old,new,flags)=(a[0] as i32,a[1] as i32,a[2]);
     if old==new||flags&!O_CLOEXEC!=0{return -(EINVAL as i64);}
-    let guard=fdtab::lifecycle();
+    let guard=match fdtab::close_admission(new){Ok(guard)=>guard,Err(error)=>return -(error as i64)};
     if let Err(error)=fdtab::require_guest_visible(old){return -(error as i64);}
     if fdtab::is_hidden(new)||(!fdtab::visible(new)&&unsafe{libc::fcntl(new,libc::F_GETFD)}>=0){return -(EBADF as i64);}
     let retained=fdtab::get(new);let retained_fuse=super::fuse_client::get(new);
@@ -1235,8 +1236,9 @@ fn dup3_inner(a: [u64; 6]) -> i64 {
     if result<0{let error=errno::last();let restored=if was_visible{fdtab::publish_guest(new)}else{Ok(())};drop(guard);drop(retained);drop(retained_fuse);return -(restored.err().unwrap_or(error)as i64);}
     fdtab::on_dup(old,new);
     let result=if flags&O_CLOEXEC!=0&&unsafe{libc::fcntl(new,libc::F_SETFD,libc::FD_CLOEXEC)}<0{-(errno::last() as i64)}else{fdtab::publish_guest(new).map(|_|new as i64).unwrap_or_else(|error|-(error as i64))};
-    drop(guard);drop(retained);drop(retained_fuse);
+    let binder_flush=guard.finish(was_visible);drop(retained);drop(retained_fuse);
     if socket{super::close_effects::note_socket_close();}
+    fdtab::report_replaced_flush(binder_flush);
     match fdtab::finish_guest_close(posix){Ok(())=>result,Err(error)=>-(error as i64)}
 }
 

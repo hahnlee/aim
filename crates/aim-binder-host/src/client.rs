@@ -367,6 +367,13 @@ impl BinderFile {
         Ok(p)
     }
 
+    /// Flush this actual open description after a public Linux fd close.
+    /// The caller retains a private close pin until this acknowledgement.
+    pub fn flush(&self) -> Result<(), Errno> {
+        with_thread(|t| self.control(t, wire::FLUSH, Vec::new()))??;
+        Ok(())
+    }
+
     /// Install the receive buffer at `[vm_start, vm_start+len)`, which the
     /// caller reserved; it becomes a read-only view of the daemon's buffer.
     pub fn mmap(&self, vm_start: u64, len: u64) -> Result<(), Errno> {

@@ -15,6 +15,7 @@
 use aim_binder_driver::Errno;
 
 pub const OPEN: i32 = 0x6264_0001;
+pub const FLUSH: i32 = 0x6264_0012;
 pub const THREAD: i32 = 0x6264_0002;
 pub const MMAP: i32 = 0x6264_0003;
 pub const POLL: i32 = 0x6264_0004;

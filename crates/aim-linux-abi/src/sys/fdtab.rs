@@ -122,7 +122,7 @@ pub fn install_fileport(fd:i32,port:aim_binder_host::mach::Port)->Result<(),crat
         let raw=aim_binder_host::mach::port_to_fd(port).ok_or_else(||std::io::Error::from_raw_os_error(libc::EIO))?;
         Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(raw)})
     }).map_err(|error|crate::errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
-    let guard=lifecycle();
+    let guard=close_admission(fd)?;
     if is_hidden(fd){return Err(crate::errno::EBADF);}
     let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::last());}
     let retired=get(fd);let retired_fuse=super::fuse_client::get(fd);let posix=guest_close_owner(fd)?;
@@ -131,9 +131,10 @@ pub fn install_fileport(fd:i32,port:aim_binder_host::mach::Port)->Result<(),crat
     let result=unsafe{libc::dup2(backing.as_raw_fd(),fd)};
     if result>=0{on_close(fd);}else if was_visible{publish_guest(fd)?;}
     let error=if result<0{Some(crate::errno::last())}else if unsafe{libc::fcntl(fd,libc::F_SETFD,flags)}<0{Some(crate::errno::last())}else{None};
-    drop(guard);drop(retired);drop(retired_fuse);drop(backing);
+    let binder_flush=guard.finish(result>=0&&was_visible);drop(retired);drop(retired_fuse);drop(backing);
     if result>=0&&socket{super::close_effects::note_socket_close();}
     if result>=0{finish_guest_close(posix)?;}
+    report_replaced_flush(binder_flush);
     match error{Some(error)=>Err(error),None=>Ok(())}
 }
 
@@ -144,18 +145,18 @@ pub fn close_owned_guest(fd:i32,allow_reserved:bool)->Result<(),crate::errno::Er
 }
 pub(super) fn close_guest_cloexec(fd:i32)->Result<(),crate::errno::Errno>{close_owned(fd,false,true)}
 fn close_owned(fd:i32,allow_reserved:bool,cloexec_only:bool)->Result<(),crate::errno::Errno>{
-    let guard=lifecycle();if is_hidden(fd)||(!allow_reserved&&!visible(fd)){return Err(crate::errno::EBADF);}
+    let guard=close_admission(fd)?;if is_hidden(fd)||(!allow_reserved&&!visible(fd)){return Err(crate::errno::EBADF);}
     if cloexec_only{let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{return Err(crate::errno::last());}if flags&libc::FD_CLOEXEC==0{return Ok(());}}
     let retained=get(fd);let file=super::fuse_client::get(fd);let posix=guest_close_owner(fd)?;
     let socket=matches!(retained,Some(Kind::Sock(_)));
     if visible(fd){withdraw_guest(fd)?;}
     on_close(fd);
     let result=unsafe{libc::close(fd)};let error=if result<0{let error=crate::errno::last();if allow_reserved&&error==crate::errno::EBADF{None}else{Some(error)}}else{None};
-    drop(guard);
+    let binder_flush=guard.finish(result>=0);
     let flush=if error.is_none(){file.as_ref().map(|file|super::fuse_cache::flush_file(file).and_then(|_|super::fuse_client::flush(file)))}else{None};
     drop(retained);drop(file);
     if result>=0&&socket{super::close_effects::note_socket_close();}
-    match error{Some(error)=>Err(error),None=>{finish_guest_close(posix)?;flush.unwrap_or(Ok(()))}}
+    match error{Some(error)=>Err(error),None=>{finish_guest_close(posix)?;binder_flush?;flush.unwrap_or(Ok(()))}}
 }
 pub(super) type CloseOwner=Option<(std::sync::Arc<super::posix_locks::Client>,aim_storage::inode_lease::Identity)>;
 pub(super) fn guest_close_owner(fd:i32)->Result<CloseOwner,crate::errno::Errno>{
@@ -270,6 +271,32 @@ fn retire(kind:Option<Kind>){
     RETIRED.with(|owners|{if let Some(retired)=owners.borrow_mut().as_mut(){if let Some(owner)=kind.take(){retired.push(owner);}}});
     drop(kind);
 }
+/// Keep the retired Binder open description through its close flush, without
+/// nesting private allocation or performing IPC under the lifecycle lock.
+pub(crate) struct CloseAdmission { guard:Option<Lifecycle>, pin:Option<Pinned> }
+impl Drop for CloseAdmission { fn drop(&mut self) { drop(self.guard.take()); drop(self.pin.take()); } }
+impl CloseAdmission {
+    pub(crate) fn finish(mut self, closed:bool)->Result<(),crate::errno::Errno> {
+        drop(self.guard.take());
+        if closed { if let Some(Kind::Binder(file))=self.pin.as_ref().and_then(|pin|pin.kind()) { file.flush()?; } }
+        Ok(())
+    }
+}
+pub(crate) fn close_admission(fd:i32)->Result<CloseAdmission,crate::errno::Errno> {
+    loop {
+        let pin=if visible(fd) && matches!(get(fd),Some(Kind::Binder(_))) { Some(pin_guest(fd)?) } else { None };
+        let guard=lifecycle();
+        let current=if visible(fd) { get(fd) } else { None };
+        let same=match (current,pin.as_ref().and_then(|pin|pin.kind())) {
+            (Some(Kind::Binder(current)),Some(Kind::Binder(captured)))=>current.port==captured.port,
+            (Some(Kind::Binder(_)),_)|(_,Some(Kind::Binder(_)))=>false,
+            _=>true,
+        };
+        if same { return Ok(CloseAdmission { guard:Some(guard),pin }); }
+        drop(guard); drop(pin);
+    }
+}
+
 struct StorageAllocation{_guard:Lifecycle}
 impl aim_storage::private_fd::AllocationGuard for StorageAllocation{}
 struct StorageRegistrar;
@@ -1101,4 +1128,9 @@ mod publication_tests{
   assert_eq!(parse_guest_fds("0,1,2,17").unwrap(),[0,1,2,17]);
   for invalid in ["-1","0,0","0,,2","2147483648"," 2","2x"]{assert_eq!(parse_guest_fds(invalid).unwrap_err(),crate::errno::EBADF);}
  }
+}
+
+/// Linux do_dup2 ignores the retired filp_close result after replacement.
+pub(crate) fn report_replaced_flush(result:Result<(),crate::errno::Errno>) {
+    if let Err(error)=result { eprintln!("Binder replaced descriptor flush failed: errno={error}"); }
 }

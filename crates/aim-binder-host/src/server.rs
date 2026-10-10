@@ -540,6 +540,11 @@ impl Server {
     fn file_request(&self, file: &Arc<OpenFile>, req: &Received) -> Result<ControlReply, Errno> {
         let mut r = Reader::new(&req.data);
         match req.id {
+            wire::FLUSH => {
+                if !req.data.is_empty() || !req.ports.is_empty() { return Err(wire::EPROTO); }
+                self.driver.flush(file.handle)?;
+                Ok((Vec::new(), Vec::new()))
+            }
             wire::THREAD => {
                 let tid = r.i32()?;
                 let port = mach::new_port(false).map_err(|_| errno::ENOMEM)?;
@@ -1243,5 +1248,58 @@ mod ioctl_only_tests {
         assert_eq!(file.set_len(1).unwrap_err().raw_os_error(),Some(libc::EBADF));
         assert_eq!(file.metadata().unwrap().len(),0);
         drop(file);drop(owner);drop(backing);std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod close_flush_tests {
+    use super::*;
+    use crate::client::Client;
+    use aim_binder_driver::uapi::*;
+    use std::{os::fd::{FromRawFd,OwnedFd},sync::mpsc,time::Duration};
+    struct Memory;
+    impl GuestProcess for Memory {
+        fn copy_from_user(&mut self,address:u64,out:&mut[u8])->Result<(),Errno>{unsafe{std::ptr::copy_nonoverlapping(address as*const u8,out.as_mut_ptr(),out.len());}Ok(())}
+        fn copy_to_user(&mut self,address:u64,bytes:&[u8])->Result<(),Errno>{unsafe{std::ptr::copy_nonoverlapping(bytes.as_ptr(),address as*mut u8,bytes.len());}Ok(())}
+        fn get_file(&mut self,_fd:u32)->Result<aim_binder_driver::File,Errno>{Err(errno::EBADF)}
+        fn install_file(&mut self,_file:aim_binder_driver::File)->Result<u32,Errno>{Err(errno::ENOMEM)}
+        fn close_fd(&mut self,_fd:u32){panic!("flush read has no installed descriptor");}
+    }
+    #[test]
+    fn actual_client_flush_wakes_parked_read_while_real_private_pin_prevents_eof() {
+        let service=mach::new_port(true).unwrap();let set=mach::new_port_set().unwrap();mach::move_member(service,set).unwrap();
+        let driver=Driver::new();let pool=Arc::new(Pool{driver:driver.clone(),set:mach::new_port_set().unwrap(),threads:RwLock::new(HashMap::new())});
+        let server=Arc::new(Server{socket_service:crate::socket_scm::Service::start().unwrap(),driver:driver.clone(),service,set,files:Mutex::new(HashMap::new()),kq:unsafe{libc::kqueue()},shared:Mutex::new(Vec::new()),pool});
+        assert!(server.kq>=0);
+        let worker_server=server.clone();
+        let worker=std::thread::spawn(move||{
+            let mut buffer=Buffer::default();
+            for _ in 0..2 {
+                let request=mach::receive(&mut buffer,worker_server.set).unwrap();
+                let result=if request.id==wire::OPEN { worker_server.open(&request) } else {
+                    let file=worker_server.files.lock().unwrap().get(&request.local).unwrap().clone();worker_server.file_request(&file,&request)
+                };
+                for port in request.ports { mach::release_send(port); }
+                let mut out=Writer::default();let(ports,data)=match result{Ok(value)=>{out.i32(0);value},Err(error)=>{out.i32(error);(Vec::new(),Vec::new())}};out.0.extend_from_slice(&data);
+                mach::reply(&mut buffer,request.reply,&Msg{id:wire::REPLY,ports,data:out.0});
+            }
+        });
+        let client=Client::from_service_port(service);let file=client.open(Device::Binder,false,true,unsafe{libc::geteuid()},"native-flush-fixture").unwrap();
+        let open=server.files.lock().unwrap().get(&file.port).unwrap().clone();
+        let tid=1307;let enter=BC_ENTER_LOOPER.to_le_bytes();let mut arg=WriteRead{write_size:4,write_buffer:enter.as_ptr()as u64,..Default::default()}.encode();
+        driver.ioctl(open.handle,tid,BINDER_WRITE_READ,&mut arg,&mut Memory).unwrap();
+        let mut bytes=[0u8;64];arg=WriteRead{read_size:64,read_buffer:bytes.as_mut_ptr()as u64,..Default::default()}.encode();
+        let(sent,received)=mpsc::channel();
+        assert_eq!(driver.ioctl_or_park(open.handle,tid,BINDER_WRITE_READ,&mut arg,&mut Memory,Box::new(move||{sent.send(()).unwrap();})),None);
+        let raw=unsafe{libc::fcntl(file.fd,libc::F_DUPFD_CLOEXEC,0)};assert!(raw>=0);let pin=unsafe{OwnedFd::from_raw_fd(raw)};
+        assert_eq!(unsafe{libc::close(file.fd)},0);
+        let peer=open.readiness.lock().unwrap().socket;let mut byte=0u8;
+        assert_eq!(unsafe{libc::recv(peer,(&mut byte as*mut u8).cast(),1,libc::MSG_PEEK|libc::MSG_DONTWAIT)},-1);assert_eq!(std::io::Error::last_os_error().raw_os_error(),Some(libc::EAGAIN));
+        file.flush().unwrap();received.recv_timeout(Duration::from_secs(2)).unwrap();
+        driver.ioctl(open.handle,tid,BINDER_WRITE_READ,&mut arg,&mut Memory).unwrap();assert_eq!(WriteRead::decode(&arg).read_consumed,4);assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()),BR_NOOP);
+        let mut version=[0;4];driver.ioctl(open.handle,tid,BINDER_VERSION,&mut version,&mut Memory).unwrap();assert_eq!(i32::from_le_bytes(version),CURRENT_PROTOCOL_VERSION);
+        drop(pin);assert_eq!(unsafe{libc::recv(peer,(&mut byte as*mut u8).cast(),1,libc::MSG_PEEK|libc::MSG_DONTWAIT)},0);
+        worker.join().unwrap();driver.release(open.handle);server.files.lock().unwrap().remove(&file.port);
+        unsafe{libc::close(peer);libc::close(server.kq);}mach::destroy_receive(file.port);mach::destroy_receive(service);mach::destroy_receive(server.set);mach::destroy_receive(server.pool.set);
     }
 }

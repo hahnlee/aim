@@ -86,7 +86,7 @@ pub(super) fn drain_regular_scm(identity: &[u8; 36]) -> Result<(), i32> {
 
 fn lookup(fd: i32) -> Option<BinderFile> {
     match super::fdtab::get(fd)? {
-        Kind::Binder(file) => Some(file),
+        Kind::Binder(mut file) => { file.fd = fd; Some(file) },
         _ => None,
     }
 }
@@ -369,4 +369,37 @@ mod socket_receipt_tests {
         }
         assert_eq!(unsafe{libc::close(file.fd)},0);println!("BINDER_SOCKET_CHILD_EXECUTED {role}");
     }
+}
+
+#[cfg(test)]
+mod close_alias_tests {
+ use super::*;
+ use super::super::{fdtab,fs};
+ use std::os::fd::{AsRawFd,FromRawFd,OwnedFd};
+ fn pair()->(OwnedFd,OwnedFd){let mut p=[-1;2];assert_eq!(unsafe{libc::socketpair(libc::AF_UNIX,libc::SOCK_STREAM,0,p.as_mut_ptr())},0);unsafe{(OwnedFd::from_raw_fd(p[0]),OwnedFd::from_raw_fd(p[1]))}}
+ #[test]
+ fn public_duplicate_and_hidden_pin_lookup_use_actual_alias_after_original_replacement(){
+  if fdtab::isolated_kernel_test("sys::binder::close_alias_tests::public_duplicate_and_hidden_pin_lookup_use_actual_alias_after_original_replacement"){return;}
+  fdtab::install_storage_registrar().unwrap();let(a,b)=pair();let fd=a.as_raw_fd();fdtab::insert(fd,fdtab::Kind::Binder(BinderFile{port:0,fd}));fdtab::publish_guest(fd).unwrap();
+  let duplicate=fs::dup([fd as u64,0,0,0,0,0]);assert!(duplicate>=0);let duplicate=duplicate as i32;
+  let pin=fdtab::pin_guest(duplicate).unwrap();let pinned=pin.descriptor().as_raw_fd();assert!(fdtab::is_hidden(pinned));assert_eq!(lookup(pinned).unwrap().fd,pinned);assert_eq!(lookup(duplicate).unwrap().fd,duplicate);
+  assert_eq!(fdtab::close_owned_guest(pinned,true),Err(crate::errno::EBADF));
+  assert!(unsafe{libc::fcntl(pinned,libc::F_GETFD)}>=0);
+  fdtab::on_close(fd);fdtab::withdraw_guest(fd).unwrap();drop(a);
+  let replacement=std::fs::File::open("/dev/null").unwrap();assert_eq!(unsafe{libc::dup2(replacement.as_raw_fd(),fd)},fd);
+  assert_eq!(unsafe{libc::send(b.as_raw_fd(),b"x".as_ptr().cast(),1,0)},1);let mut byte=0;assert_eq!(unsafe{libc::recv(lookup(pinned).unwrap().fd,(&mut byte as*mut u8).cast(),1,libc::MSG_DONTWAIT)},1);assert_eq!(byte,b'x');
+  assert_eq!(lookup(pinned).unwrap().port,0);drop(pin);if replacement.as_raw_fd()!=fd{assert_eq!(unsafe{libc::close(fd)},0);}drop(replacement);
+  fdtab::on_close(duplicate);fdtab::withdraw_guest(duplicate).unwrap();assert_eq!(unsafe{libc::close(duplicate)},0);drop(b);
+ }
+ #[test]
+ fn replacement_flush_failure_preserves_actual_dup3_and_reserved_cleanup(){
+  if fdtab::isolated_kernel_test("sys::binder::close_alias_tests::replacement_flush_failure_preserves_actual_dup3_and_reserved_cleanup"){return;}
+  fdtab::install_storage_registrar().unwrap();let(a,b)=pair();let(c,d)=pair();let old=a.as_raw_fd();let target=c.as_raw_fd();
+  fdtab::publish_guest(old).unwrap();fdtab::insert(target,fdtab::Kind::Binder(BinderFile{port:0,fd:target}));fdtab::publish_guest(target).unwrap();
+  assert_eq!(fs::dup3([old as u64,target as u64,0,0,0,0]),target as i64);assert!(lookup(target).is_none());
+  assert_eq!(unsafe{libc::send(b.as_raw_fd(),b"y".as_ptr().cast(),1,0)},1);let mut byte=0;assert_eq!(unsafe{libc::recv(target,(&mut byte as*mut u8).cast(),1,0)},1);assert_eq!(byte,b'y');
+  for fd in [old,target]{fdtab::withdraw_guest(fd).unwrap();fdtab::on_close(fd);}drop(a);drop(c);drop(b);drop(d);
+  let(e,f)=pair();use std::os::fd::IntoRawFd;let reserved=e.into_raw_fd();fdtab::insert(reserved,fdtab::Kind::Binder(BinderFile{port:0,fd:reserved}));assert!(!fdtab::visible(reserved));fdtab::close_owned_guest(reserved,true).unwrap();assert_eq!(unsafe{libc::fcntl(reserved,libc::F_GETFD)},-1);drop(f);
+  let(g,h)=pair();let own=g.into_raw_fd();fdtab::insert(own,fdtab::Kind::Binder(BinderFile{port:0,fd:own}));fdtab::publish_guest(own).unwrap();assert_eq!(fs::close([own as u64,0,0,0,0,0]),-(crate::errno::EIO as i64));assert_eq!(unsafe{libc::fcntl(own,libc::F_GETFD)},-1);drop(h);
+ }
 }

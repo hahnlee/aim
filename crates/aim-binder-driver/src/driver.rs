@@ -281,6 +281,20 @@ impl Driver {
         Ok(ready)
     }
 
+    /// Linux binder_flush: each public descriptor close asks current loopers
+    /// to return, even while duplicates or in-flight ioctl references remain.
+    pub fn flush(&self, proc: ProcHandle) -> Result<(), Errno> {
+        let mut st = self.lock();
+        let tids: Vec<Tid> = st.procs.get(&proc.0).ok_or(errno::EBADF)?
+            .threads.keys().copied().collect();
+        for tid in tids {
+            st.thread(proc.0, tid).unwrap().looper_need_return = true;
+            st.wake_waiter(proc.0, tid);
+        }
+        self.unlock(st);
+        Ok(())
+    }
+
     /// Interrupt a thread blocked in a read (a signal arrived): the ioctl
     /// fails with `EINTR` and libbinder retries it.
     pub fn interrupt(&self, proc: ProcHandle, tid: Tid) {

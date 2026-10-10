@@ -627,6 +627,21 @@ OAT259 verify-filter checksums. All270 corrupted-input controls reject;
 ASIF hashes remain unchanged and owned read-only mounts are detached.
 Boot-image aggregate checksum, loader context resolution and actual ART
 loading remain NOT RUN.
+The isolated original-adbd owner diagnostic distinguishes raw shell-v2
+from exec-out's PTY path: raw SDK query returns36/exit0 in1.19s, while
+exec-out times out at15s with no output. The child writes three bytes and
+the parent's exec-error socket returns EOF, but PTY epoll MOD enters
+without returning (#1309). Its eager spare-watch drop occurs under the
+same lifecycle lock used by private FD retirement. The spare watch now
+survives until the lock is released; actual typed PTY ADD/MOD/DEL,
+subsequent I/O and hangup checks pass. Corrected Android replay is pending.
+Binder public close now flushes existing loopers independently of final
+description release (#1307), preserving pinned ioctl references and queued
+transactions. Hidden/duplicate Binder lookup uses its actual descriptor
+(#1308); replaced-target flush errors remain diagnostic without changing
+successful dup3, while ordinary close errors remain errors. Focused driver,
+Mach transport and alias/close checks pass; actual app_process natural-exit
+acceptance remains unverified.
 The full66 CTS runner's comparison now reconstructs the same staged-install
 host-tool module argument as execution (#1305). Ten host comparison checks
 pass, including refusal of missing,changed and foreign selectors and
