@@ -613,6 +613,20 @@ and package/user owners (#1306). Its appended AIDL codes, full vendor
 Java/D8/original linkage and regenerated Rust caller compilation pass;
 denied/missing owners fail. Coherent image deployment and actual unchanged
 state/digest binding remain NOT RUN. Existing template hashes are preserved.
+On the frozen d8ca9469 runtime, a corrected matched Original readiness
+probe observes boot completion in222.0s. Standard key authorization, the
+isolated host ADB server and device connection pass, but the first actual
+adbd exec-out getprop exceeds its15-second probe limit without output
+(#1227); svc and full66 are NOT RUN. All owned processes, listeners and
+DATA attachments are released. The previous attempt stopped at a host
+server invocation error and used a mismatched readiness root; its results
+remain qualified harness diagnostics.
+Both successful current Native templates pass offline checks of all54
+OAT/VDEX pairs and66 DEX entries against the actual source DEX, including
+OAT259 verify-filter checksums. All270 corrupted-input controls reject;
+ASIF hashes remain unchanged and owned read-only mounts are detached.
+Boot-image aggregate checksum, loader context resolution and actual ART
+loading remain NOT RUN.
 The full66 CTS runner's comparison now reconstructs the same staged-install
 host-tool module argument as execution (#1305). Ten host comparison checks
 pass, including refusal of missing,changed and foreign selectors and
