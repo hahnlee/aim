@@ -201,22 +201,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
     let server = aim_binder_host::server::Server::start(&name).unwrap();
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let output = boot
-            .command()
-            .args(["shell", "getprop", "sys.boot_completed"])
-            .output()
-            .unwrap();
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "disposable domain boot did not complete"
-        );
-        std::thread::sleep(Duration::from_secs(1));
-    }
+    boot.wait_ready(Duration::from_secs(300)).expect("domain_transport_test original oracle boot readiness");
     let directory = boot.data.join("data/local/tmp/domain-binder");
     fs::create_dir(&directory).unwrap();
     fs::copy(dex.join("classes.dex"), directory.join("oracle.dex")).unwrap();
