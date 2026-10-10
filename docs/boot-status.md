@@ -617,8 +617,13 @@ The UID1000-only vendor diagnostic now calls the original
 RoleServicePlatformHelperImpl.computePackageStateHash on the live Context
 and package/user owners (#1306). Its appended AIDL codes, full vendor
 Java/D8/original linkage and regenerated Rust caller compilation pass;
-denied/missing owners fail. Coherent image deployment and actual unchanged
-state/digest binding remain NOT RUN. Existing template hashes are preserved.
+denied/missing owners fail. The same 6bd vendor capability is deployed in
+both controlled read-only f742 images, with all eight installed vendor files
+matching in SHA, mode and mtime. The native host source exposes a UID1000-only
+Binder dump requiring a regular output FD; four host guard tests pass,
+including unread-pipe rejection and writer release. Actual unchanged-state
+stored-hash binding and execution of the new DUMP runtime remain NOT RUN.
+Existing template hashes are preserved.
 On the frozen d8ca9469 runtime, a corrected matched Original readiness
 probe observes boot completion in222.0s. Standard key authorization, the
 isolated host ADB server and device connection pass, but the first actual

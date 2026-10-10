@@ -18,8 +18,10 @@ The vendor bridge also exposes a UID1000-only read-only role hash diagnostic
 (#1306). It invokes the pinned original RoleServicePlatformHelperImpl with
 the actual system Context and live local owners; original service code is
 unchanged. Appended vendor AIDL methods and generated codes provide this
-capability on both controlled image variants. Source compilation and linkage
-pass; image deployment and actual stored-hash binding remain unverified.
+capability on both controlled read-only f742 image variants, built from the
+same 6bd vendor cohort. Compilation and original-image linkage pass. The
+native host source exposes it through a UID1000-only Binder dump to a regular output
+file; four host guard tests pass. Actual stored-hash binding remains NOT RUN.
 
 ## Context
 

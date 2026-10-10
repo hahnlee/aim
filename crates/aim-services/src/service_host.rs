@@ -4,6 +4,9 @@
 //! (docs/system-services.md, "The system_server bridge"), and forwards
 //! apps' requests for POST_NOTIFICATIONS to the Mac (#470).
 
+#[path = "service_host_role_hash_dump.rs"]
+mod role_hash_dump;
+
 use std::sync::{Arc, Weak};
 
 use aim_binder_host::local::{Call, LocalProcess, Reply, Service};
@@ -264,11 +267,26 @@ impl ServiceHost {
 }
 
 impl Service for ServiceHost {
+    fn accepts_fds(&self) -> bool {
+        true
+    }
+
     fn descriptor(&self) -> &str {
         host::DESCRIPTOR
     }
 
     fn transact(&self, call: &mut Call<'_>) -> Reply {
+        if call.code == role_hash_dump::DUMP_TRANSACTION {
+            if call.sender_euid != SYSTEM_UID {
+                return Err(aim_binder_host::parcel::PERMISSION_DENIED);
+            }
+            let system = self
+                .system
+                .upgrade()
+                .ok_or(aim_binder_host::parcel::DEAD_OBJECT)?;
+            return role_hash_dump::run(&self.process, &system, call);
+        }
+
         if call.code != host::ATTACH_BRIDGE
             && call.code != host::REQUEST_NOTIFICATION_PERMISSION
             && call.code != host::ATTACH_PACKAGE_BOOTSTRAP_BRIDGE
