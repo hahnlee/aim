@@ -502,9 +502,36 @@ diagnostic attempt fails its initial readiness query with exit137 before
 the resident process or trace starts (#1296). A later minimal-init root
 query exits with SIGKILL in3.46ms before its UID/FD91 checks. The actual
 Exosphere window reports linux-run execution blocked as an unconfirmed
-program configured for blocking. User security review is required; no
-allowlist, signature or execution-path bypass was made. This evidence
-does not establish the cause of every historical exit137.
+program configured for blocking. On2026-10-10, after the user's explicit
+confirmation, the official UI saved a file-path inspection exception for
+the frozen441bc68b linux-run; reopening settings confirmed the exact path
+and exception type. A new minimal-init replay then entered the actual
+namespace and the original getprop returned servicemanager.ready=true
+with exit0. After staging the unchanged helper, the UID1000 command
+fails in the original linker's deliberate early-abort path: the target
+runner supplied --guest-fds91, replacing rather than extending the
+default0,1,2 inventory. Original symbol/disassembly and CLI parsing
+identify this harness error. The corrected0,1,2,91 replay passes all
+three actual UID1000/2000/19001 contracts: real/effective/saved UID/GID,
+zero groups/caps, exact stdin with EOF and inherited regular FD91's
+bytes/device/inode. This is the minimal-init helper contract, not the
+Boot client API, Binder caller identity or PMS/CTS acceptance.
+The new resident body fails its300-second boot-readiness deadline (#1298),
+before launching the reader, and reports one failure in326.30 seconds
+without the previous double panic. Its held processes and owned data
+mount are gone; the stop command succeeds with its original failure
+preserved. Reader natural exit remains NOT RUN.
+These replays do not prove acceptance or establish the cause of every
+historical exit137.
+The bounded nonquiet diagnostic captures the full init report with the
+same original image/runtime and direct child supervision. Servicemanager,
+APEX activation, classpath and ART boot preparation complete before
+zygote launches. Zygote stays live until the300-second stop with no
+system_server child observed in one-second snapshots; activity/AMS
+services are never published. The61 init errors concern missing files,
+optional properties and a root remount; none proves the blocking cause.
+All owned processes and mounts are gone. The next evidence must identify
+the original zygote's wait before system_server publication (#1298).
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally
@@ -513,7 +540,7 @@ stop child to60 seconds, records status/stdout/stderr and preserves the
 original failure during unwinding. Data is retained after cleanup failure
 or a live mount; ordinary cleanup failures remain test failures. Three
 actual Darwin child/mount/unwind checks pass. Android cleanup replay is
-not run while the execution block awaits user review.
+not yet rerun after the user-approved execution-policy exception.
 Shared fixture clients now enter the authenticated namespace as root and
 use the authored credential launcher to drop real UID/GID/groups/caps
 before the original program (#1282). The17 nonzero call sites preserve
