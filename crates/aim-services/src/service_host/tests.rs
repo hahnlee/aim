@@ -3465,34 +3465,46 @@ fn verify_boot_scan(
             .unwrap_err()
             .committed
     );
-    for mode in [1, 2, 3] {
-        owner.legacy_reply.store(mode, Ordering::SeqCst);
-        assert!(
-            !system
-                .commit_runtime_permissions_from_scan(
-                    bridge,
-                    &mut list_store,
-                    &query,
-                    0,
-                    &runtime_metadata,
-                    runtime_inode
-                )
-                .unwrap_err()
-                .committed
-        );
+    // Persistence consumes captured SettingBase maps, not the live TEMP getter.
+    // Exercise its actual creation-metadata boundary before any file commits.
+    let untouched = list_store.state().users[0].1.runtime_permissions.clone();
+    for invalid in [
+        aim_storage::guest_inode::GuestInode { uid: None, ..runtime_inode },
+        aim_storage::guest_inode::GuestInode { gid: None, ..runtime_inode },
+        aim_storage::guest_inode::GuestInode { mode: Some(0o100600), ..runtime_inode },
+    ] {
+        let error = system.commit_runtime_permissions_from_scan(
+            bridge, &mut list_store, &query, 0, &runtime_metadata, invalid).unwrap_err();
+        assert!(!error.committed);
+        assert!(error.message.contains("creation"), "actual persistence metadata error: {error:?}");
         assert!(!runtime_file.exists());
+        assert_eq!(list_store.state().users[0].1.runtime_permissions, untouched);
     }
     owner.legacy_reply.store(4, Ordering::SeqCst);
-    let live = bridge
-        .runtime_permissions(&query, 0, 7, Some("current".into()))
-        .unwrap();
-    assert!(!live.shared_users.is_empty());
-    assert!(live.shared_users.iter().all(|(_, p)| p[0].granted));
-    assert!(live.packages.iter().all(|(name, _)| {
-        query.state().packages[name.as_ref().unwrap()]
-            .shared_user
-            .is_none()
+    let group = query.state().shared_users.values().next().unwrap();
+    let live = bridge.legacy_permissions(group.app_id, &[0]).unwrap();
+    assert!(live.user(0).unwrap().permissions.iter().all(|permission|
+        permission.granted && permission.flags == 1 << 16));
+    let persisted = bridge.runtime_permissions(&query, 0, 7, Some("current".into())).unwrap();
+    assert!(!persisted.shared_users.is_empty());
+    assert_eq!(persisted.shared_users.len(), query.state().shared_users.len());
+    for (name, permissions) in &persisted.shared_users {
+        let captured = query.scan().owner().shared_legacy_permissions(name.as_ref().unwrap()).unwrap().unwrap();
+        let captured = captured.user(0).unwrap();
+        assert_eq!(permissions.len(), captured.permissions.len());
+        for (written, captured) in permissions.iter().zip(&captured.permissions) {
+            assert_eq!((&written.name, written.granted, written.flags),
+                (&captured.name, captured.granted, captured.flags));
+        }
+    }
+    assert!(persisted.packages.iter().all(|(name, _)| {
+        query.state().packages[name.as_ref().unwrap()].shared_user.is_none()
     }));
+    owner.legacy_reply.store(1, Ordering::SeqCst);
+    assert!(bridge.legacy_permissions(group.app_id, &[0]).is_err());
+    assert_eq!(bridge.runtime_permissions(&query, 0, 7, Some("current".into())).unwrap(), persisted,
+        "malformed live receipt must not replace captured persistence maps");
+    owner.legacy_reply.store(4, Ordering::SeqCst);
     system
         .commit_runtime_permissions_from_scan(
             bridge,
@@ -3513,12 +3525,10 @@ fn verify_boot_scan(
         saved.fingerprint.as_deref(),
         Some("fixture-partitions?pc_version=12")
     );
-    assert!(
-        saved
-            .shared_users
-            .iter()
-            .all(|(_, p)| !p[0].granted && p[0].flags == 1 << 16)
-    );
+    assert_eq!(saved.packages, persisted.packages);
+    assert_eq!(saved.shared_users, persisted.shared_users);
+    assert!(saved.shared_users.iter().all(|(_, permissions)| permissions.is_empty()),
+        "the original Settings fixture has empty captured legacy maps, distinct from the live receipt");
     let reopened = crate::package::owner::Store::open(&list_data, &[0, 10])
         .unwrap()
         .unwrap();
@@ -3553,23 +3563,23 @@ fn verify_boot_scan(
             .version,
         8
     );
-    owner.legacy_reply.store(1, Ordering::SeqCst);
+    let user10_permissions = list_data.join("misc_de/10/apexdata/com.android.permission");
+    let held_user10_permissions = list_data.join("misc_de/10/apexdata/held-permission-owner");
+    std::fs::rename(&user10_permissions, &held_user10_permissions).unwrap();
+    std::fs::create_dir(&user10_permissions).unwrap();
+    let user0_bytes = std::fs::read(&runtime_file).unwrap();
     let inodes = BTreeMap::from([(0, runtime_inode), (10, runtime_inode)]);
-    assert!(
-        system
-            .flush_runtime_permission_requests(
-                bridge,
-                &mut list_store,
-                &query,
-                &mut runtime_metadata,
-                &inodes
-            )
-            .unwrap_err()
-            .completed
-            .is_empty()
-    );
+    let error = system.flush_runtime_permission_requests(
+        bridge, &mut list_store, &query, &mut runtime_metadata, &inodes).unwrap_err();
+    assert_eq!(error.user, 10);
+    assert!(!error.error.committed);
+    assert!(error.error.message.contains("directory identity"));
+    assert!(error.completed.is_empty());
     assert_eq!(runtime_metadata.pending_write_requests(), [10]);
-    owner.legacy_reply.store(4, Ordering::SeqCst);
+    assert_eq!(std::fs::read(&runtime_file).unwrap(), user0_bytes);
+    assert!(!user10_permissions.join("runtime-permissions.xml").exists());
+    std::fs::remove_dir(&user10_permissions).unwrap();
+    std::fs::rename(&held_user10_permissions, &user10_permissions).unwrap();
     assert_eq!(
         system
             .flush_runtime_permission_requests(
@@ -3700,20 +3710,22 @@ fn verify_boot_scan(
         );
         assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
         let due = installed.lock().unwrap().next_write_deadline().unwrap();
-        owner.legacy_reply.store(1, Ordering::SeqCst);
-        assert!(
-            system
-                .process_due_runtime_permission_requests(
-                    bridge,
-                    &mut list_store,
-                    &query,
-                    &inodes,
-                    due
-                )
-                .is_err()
-        );
+        let user0_permissions = runtime_file.parent().unwrap();
+        let held_user0_permissions = user0_permissions.with_file_name("held-runtime-owner");
+        std::fs::rename(user0_permissions, &held_user0_permissions).unwrap();
+        std::fs::create_dir(user0_permissions).unwrap();
+        let before_retry = std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap();
+        let error = system.process_due_runtime_permission_requests(
+            bridge, &mut list_store, &query, &inodes, due).unwrap_err();
+        assert_eq!(error.user, 0);
+        assert!(!error.error.committed);
+        assert!(error.error.message.contains("directory identity"));
+        assert!(error.completed.is_empty());
         assert_eq!(installed.lock().unwrap().pending_write_requests(), [0]);
-        owner.legacy_reply.store(4, Ordering::SeqCst);
+        assert_eq!(std::fs::read(held_user0_permissions.join("runtime-permissions.xml")).unwrap(), before_retry);
+        assert!(!runtime_file.exists());
+        std::fs::remove_dir(user0_permissions).unwrap();
+        std::fs::rename(&held_user0_permissions, user0_permissions).unwrap();
         assert!(
             system
                 .flush_installed_runtime_permission_requests(

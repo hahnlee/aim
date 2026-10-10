@@ -424,8 +424,14 @@ Java/D8 linkage and Rust compilation pass; traced Android replay is unrun.
 Cleanup preserves the original error and data without a double panic; all
 owned PIDs and image attachments are gone. The kernel admission guard
 remains unchanged.
-A fresh roster has63 required manual bodies: seven host bodies pass, the
-proxy body fails, and55 are unrun; full aggregate acceptance remains unproven.
+A fresh roster has63 required manual bodies:34 scoped host bodies pass,
+the proxy body fails, and28 are unrun; full aggregate acceptance remains
+unproven. The three shared bootstrap fixtures now inject failures into their
+actual captured-persistence metadata/directory owners and retain separate
+malformed live-getter checks (#1289); all three actual host bodies pass.
+The all-fixture Java gate now includes the pinned public API36 compile
+classpath and exact original AM permission signature; all fixtures compile
+and link against the original framework (#1249).
 Fourteen integration fixture files now use a shared birth-bound Binder
 readiness owner and bounded property queries within the300-second boot
 budget (#1285), replacing15 duplicated property loops. Two actual host
@@ -444,7 +450,18 @@ including stale/foreign/changed-namespace and missing-capability denials.
 Native entry retirement preserves live/reused/foreign records; a failed
 process-info query alone cannot authorize removal. Source integration passes
 one actual parent test with six owned actor subprocesses and ABI/guest-init
-compilation. Corrected whole-runtime Android replay remains unrun.
+compilation. Corrected whole-runtime Native replay now passes initial admission, boot
+260.3s and70 mandatory-validated file copies with zero owned PID/mount
+residue. A second Native replay boots250.6s and the same-runtime Original
+boots295.6s; each publishes70 files with unchanged copy metadata and normal
+detach. Strict XML comparison still fails six files: roles packagesHash,
+42 domain UUIDs absent from package Setting IDs, generated data inode and
+preferred-row order. These differences are under owner/normalizer analysis;
+no parity acceptance or ART load/checksum/context acceptance is claimed.
+The traced proxy replay still exceeds its15-second original reader bound
+without phase output. Tool-mode output is not redirected; the stage before
+the first actual PID/UID expression remains unobserved. Its failure and
+clean shutdown are retained, with owned PID/mount residue zero.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
