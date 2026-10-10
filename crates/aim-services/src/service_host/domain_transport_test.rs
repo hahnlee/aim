@@ -288,7 +288,7 @@ fn original_art_reads_large_native_domain_query_over_binder() {
             ));
             super::register(&process, alias, process.add_service(service));
         }
-        let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
+        let output = boot.client_with_binder(1000, &name).args([ "/system/bin/app_process",
             "-Djava.class.path=/data/local/tmp/domain-binder/oracle.dex", "/system/bin", "NativeDomainBinderOracle"])
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::GET_DOMAIN_VERIFICATION_INFO.to_string())
             .arg(aim_service_aidl::android_content_pm_verify_domain_idomainverificationmanager::DESCRIPTOR)

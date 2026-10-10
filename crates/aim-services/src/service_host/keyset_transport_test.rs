@@ -81,7 +81,7 @@ fn original_art_keysets_roundtrip_native_query_leases() {
             super::register(&process,name,process.add_service(Arc::new(computer)));
         }
         use aim_service_aidl::dev_aim_server_ipackagecomputer as api;
-        let output=boot.client(1000).args(["--binder",&name,"/system/bin/app_process","-Djava.class.path=/data/local/tmp/keyset-binder/oracle.dex","/system/bin","KeySetBinderOracle"])
+        let output=boot.client_with_binder(1000, &name).args(["/system/bin/app_process","-Djava.class.path=/data/local/tmp/keyset-binder/oracle.dex","/system/bin","KeySetBinderOracle"])
             .arg(api::GET_PACKAGE_MANAGER_QUERY_BINDER.to_string()).arg(api::DESCRIPTOR).arg(api::CLOSE.to_string()).output().unwrap();
         assert!(output.status.success(),"original KeySet Binder oracle: {} {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
         assert_eq!(String::from_utf8(output.stdout).unwrap(),"ORIGINAL_KEYSET_BINDER stable subset exact null foreign owners close\n");

@@ -30,6 +30,7 @@ fn installer_parcels_match_original_framework() {
     let api = repo.join("crates/aim-services/tests/api/installer");
     let replacement = [
         "android/content/pm/PackageInstaller.java",
+        "android/content/pm/DataLoaderParams.java",
         "android/graphics/Bitmap.java",
         "android/net/Uri.java",
     ];

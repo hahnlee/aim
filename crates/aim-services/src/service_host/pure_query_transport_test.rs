@@ -96,7 +96,7 @@ fn run_original_queries() {
     fs::copy(&dex, directory.join("oracle.dex")).unwrap();
     let oracle = |system: &Arc<System>, _bridge: &Arc<crate::package::bootstrap::Bridge>,
         _config: &SystemConfig, _store: &Arc<Mutex<crate::package::owner::Store>>| {
-        let output = boot.client(1000).args(["--binder", &name, "/system/bin/app_process",
+        let output = boot.client_with_binder(1000, &name).args([ "/system/bin/app_process",
             "-Djava.class.path=/data/local/tmp/pure-query/oracle.dex:/system/framework/aim-services.jar:/system/framework/services.jar",
             "/system/bin", "dev.aim.server.NativePackageQueryOracle",
             "queries"]).output().unwrap();

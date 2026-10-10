@@ -424,8 +424,14 @@ Java/D8 linkage and Rust compilation pass; traced Android replay is unrun.
 Cleanup preserves the original error and data without a double panic; all
 owned PIDs and image attachments are gone. The kernel admission guard
 remains unchanged.
-A fresh roster has63 required manual bodies:35 scoped host bodies pass,
-the proxy body fails, and27 are unrun; full aggregate acceptance remains
+The63 required manual-body roster now records35 scoped passes, four
+failures and24 unrun bodies. The three additional failures are duplicate
+Java DataLoaderParams declarations before Android startup (#1295), an
+unauthorized UID1000 namespace entry after readiness (#1282), and a
+Suspension oracle command that writes66 files but does not return within
+the900-second aggregate gate budget (#1294). All owned processes,
+namespaces and mounts are gone after cleanup; partial output does not
+establish complete runtime assertions. Full aggregate acceptance remains
 unproven. The three shared bootstrap fixtures now inject failures into their
 actual captured-persistence metadata/directory owners and retain separate
 malformed live-getter checks (#1289); all three actual host bodies pass.
@@ -481,14 +487,29 @@ A separate bounded syscall diagnostic proves successful app_process exec
 and ART boot-image loading, with no oracle DEX open or stdout/stderr writes;
 it does not establish the later permission/Binder stage. Its failure and
 clean shutdown are retained, with owned PID/mount residue zero.
-The installer fixture now prepares one credential-verified original AMS
+The installer fixture prepares one credential-verified original AMS
 permission reader before publishing its native installer (#1287), with a
 separate60-second startup budget, the original15-second request limit and
-60-second proxy total. Bounded typed pipe replies retain actual caller and
-subject identities; queue/error failures terminate the channel. Explicit
-Native-to-reader-to-Boot cleanup also reaps a held child when policy
-references or a busy request mutex remain. Seven actual host boundary/child
-tests and original Java/D8 linkage pass; quiet Android replay is not run.
+60-second proxy total. Actual quiet replay reaches READY in21.234 seconds
+with UID1000/groups0/caps0, receives eight exact original denial replies
+(status -1) and completes the native proxy assertions under UID10100.
+BYE sequence9 arrives, but natural child exit exceeds the5-second limit:
+the whole body fails in342.54 seconds (#1294). Grant status0 is not tested
+in this replay. Explicit Native-to-reader-to-Boot cleanup reaps the held
+child and preserves failed DATA; owned PID/mount residue is zero. Seven
+host boundary/child tests and original Java/D8 linkage pass. A separate
+diagnostic attempt fails its initial readiness query with exit137 before
+the resident process or trace starts (#1296); its cause is unproven.
+Shared fixture clients now enter the authenticated namespace as root and
+use the authored credential launcher to drop real UID/GID/groups/caps
+before the original program (#1282). The17 nonzero call sites preserve
+stdin and inherited FDs; three Binder overrides precede the launcher.
+Staged helper type, mode, guest ownership and bytes are revalidated per
+call, and compilation has a30-second bound. Two target host boundary tests
+and pinned NDK compilation pass; actual affected Android bodies require
+replay. The duplicate DataLoaderParams compile declaration is selected
+through the existing replacement list (#1295); exact javac/D8/original
+framework linkage passes without changing oracle assertions.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
