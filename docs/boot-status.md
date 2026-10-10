@@ -551,12 +551,23 @@ Fork restoration marks private transfers close-on-exec, including the
 hidden diagnostics FD that should survive exec (#1302). Restoration now
 clears that flag only for the hidden diagnostics FD, retaining ordinary
 guest and other private descriptor flags and reporting failures.
-Compilation passes; actual fork/host-exec retention verification is
-pending. The original boot wait remains unresolved (#1298).
+Compilation and actual fork/host-exec retention verification pass on
+the coherent6a3ecd11 runtime: the same child PID/birth retains its hidden
+diagnostics after host replacement, while an ordinary guest CLOEXEC FD
+closes and the parent's flag stays set. Both processes exit0 and all
+owned resources are gone. The original boot wait remains unresolved
+(#1298).
 The same diagnostic stops normally at its1GiB log guard: netd repeatedly
 gets one epoll event with an infinite timeout (#1301). Its watched event
 identity and blocking cause remain unproven. Both owned987MB log copies
 are losslessly compressed to26MB each, with decompression SHA verified.
+The fresh matched Original/Native images share one verified device-services
+producer key053f8636 (#1300). All eight installed vendor artifacts have
+equal SHA,size,0644mode and nanosecond mtime; both final mounts are read-only.
+Original retains its PMS, while the Native image's formal19redirect/14UM
+symbolic checks and experimental service list pass. A default-overlay
+intermediate was rejected before execution. These are image checks;
+Android boot, template parity, rollback and CTS acceptance remain unproven.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally
