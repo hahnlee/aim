@@ -607,6 +607,12 @@ is NOT RUN; partial settings do not substitute for a template. Matched Original/
 rollback, apps and full66CTS remain
 unproven. The instrumented Original parcel replay also fails boot-query
 readiness before launching its oracle; its progress checks are NOT RUN.
+The UID1000-only vendor diagnostic now calls the original
+RoleServicePlatformHelperImpl.computePackageStateHash on the live Context
+and package/user owners (#1306). Its appended AIDL codes, full vendor
+Java/D8/original linkage and regenerated Rust caller compilation pass;
+denied/missing owners fail. Coherent image deployment and actual unchanged
+state/digest binding remain NOT RUN. Existing template hashes are preserved.
 The full66 CTS runner's comparison now reconstructs the same staged-install
 host-tool module argument as execution (#1305). Ten host comparison checks
 pass, including refusal of missing,changed and foreign selectors and

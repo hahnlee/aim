@@ -14,6 +14,13 @@ The two unredirected PMS-bearing SystemServer calls retain the image's disabled
 OTA-dexopt and non-headless guards. This is the existing symbolic-redirect
 exception, not an additional runtime interception mechanism.
 
+The vendor bridge also exposes a UID1000-only read-only role hash diagnostic
+(#1306). It invokes the pinned original RoleServicePlatformHelperImpl with
+the actual system Context and live local owners; original service code is
+unchanged. Appended vendor AIDL methods and generated codes provide this
+capability on both controlled image variants. Source compilation and linkage
+pass; image deployment and actual stored-hash binding remain unverified.
+
 ## Context
 
 ADR 0012 runs the pinned Android userspace unmodified on a Linux syscall

@@ -1,5 +1,6 @@
 package dev.aim.server;
 
+import dev.aim.server.IPackageDiagnosticInputs;
 import dev.aim.server.ILocationBridge;
 import dev.aim.server.ILocationHost;
 import dev.aim.server.IPackageFeed;
@@ -67,4 +68,5 @@ interface IBridge {
     /** Original permission owner's supplementary GIDs for a complete UID. */
     int[] getPermissionGidsForUid(int uid);
 
+    IPackageDiagnosticInputs getPackageDiagnosticInputs();
 }

@@ -185,6 +185,12 @@ public final class DeviceServices extends SystemService {
         }
 
         @Override
+        public IPackageDiagnosticInputs getPackageDiagnosticInputs() {
+            enforceSystemUid();
+            return new PackageDiagnosticInputs(context);
+        }
+
+        @Override
         public void interceptNotificationPermissionRequests() {
             enforceSystemUid();
             NotificationPermissionInterceptor.register(context, host);

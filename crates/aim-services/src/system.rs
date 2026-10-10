@@ -15,6 +15,9 @@
 //! ([`crate::nonces`]); an instrumentation target's app ops are asked each
 //! time (docs/system-services.md, "Mirrored state").
 
+#[path = "system_role_hash_diagnostic.rs"]
+pub mod role_hash_diagnostic;
+
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Weak};

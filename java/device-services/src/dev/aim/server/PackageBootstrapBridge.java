@@ -361,7 +361,7 @@ public final class PackageBootstrapBridge extends IPackageBootstrapBridge.Stub {
     @Override
     public IPackageDiagnosticInputs getPackageDiagnosticInputs() {
         enforceSystemUid();
-        return new PackageDiagnosticInputs();
+        return new PackageDiagnosticInputs(systemContext());
     }
 
     @Override
