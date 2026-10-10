@@ -1,5 +1,5 @@
 [package]
-license.workspace = true
+license = "Apache-2.0 AND Unicode-3.0 AND (GPL-2.0-only WITH Classpath-exception-2.0)"
 name = "aim-services"
 version = "0.1.0"
 edition = "2024"
@@ -7,6 +7,9 @@ publish = false
 description = "Android's system services as native macOS implementations, served on the host's binder (ADR 0013)"
 
 [dependencies]
+aim-android-image = { path = "../aim-android-image" }
+aim-android-init = { path = "../aim-android-init" }
+aim-ashmem = { path = "../aim-ashmem" }
 aim-android-xml = { path = "../aim-android-xml" }
 aim-apps = { path = "../aim-apps" }
 aim-binder-driver = { path = "../aim-binder-driver" }
@@ -17,7 +20,10 @@ aim-host-location = { path = "../aim-host-location" }
 aim-host-sensors = { path = "../aim-host-sensors" }
 aim-hostcall.workspace = true
 aim-service-aidl = { path = "aidl" }
+aim-storage.workspace = true
 android-image-extract = { path = "../../tools/android-image-extract" }
+crc32fast = "1.5"
+png = "0.17.16"
 dsa = "0.6"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 libc.workspace = true

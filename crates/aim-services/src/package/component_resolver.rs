@@ -7,9 +7,11 @@
 //! its scan's order, but results are sorted by package name after their
 //! priority and match, and a package's own filters keep its manifest
 //! order either way, so the order of the replies does not depend on it.
-//! The feed's packages are the scanned ones, whose filters already carry
-//! the priorities `adjustPriority` capped.
+//! Activity priorities are adjusted at registration using the captured privilege,
+//! factory activity filters and authoritative setup wizard selection.
 
+#[path="component_resolver/raw.rs"] mod raw;
+#[path="component_resolver/priority.rs"] mod priority;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use super::info::{
     generate_application_info, generate_provider_info, generate_service_info,
     is_enabled_and_matches, user_state,
 };
-use super::intent::Intent;
+use super::intent::{Intent,ComponentName};
 use super::intent_filter::{CATEGORY_BROWSABLE, IntentFilter};
 use super::intent_resolver::{Build, Entry, IntentResolver, query_from_list};
 use super::model::{PackageState, PackageUserState, State};
@@ -78,10 +80,15 @@ pub enum Info {
     Provider(ProviderInfo),
 }
 
+#[derive(Clone,Debug,PartialEq)]
+pub struct Auxiliary {
+    pub failure:Option<ComponentName>,pub package:String,pub version:i64,pub split:String,
+}
 /// `android.content.pm.ResolveInfo`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolveInfo {
     pub info: Info,
+    pub auxiliary: Option<Auxiliary>,
     pub filter: Option<IntentFilter>,
     pub priority: i32,
     pub preferred_order: i32,
@@ -158,6 +165,7 @@ impl ResolveInfo {
     pub fn new(info: Info) -> ResolveInfo {
         ResolveInfo {
             info,
+            auxiliary: None,
             filter: None,
             priority: 0,
             preferred_order: 0,
@@ -249,9 +257,30 @@ fn main_of(pkg: &AndroidPackage, kind: Kind, index: usize) -> &MainComponent {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MimeGroupError {
+    MissingGroup,
+    NullType,
+    UriMatching(super::domain_verification::uri_parcel::MatchError),
+}
+
+impl MimeGroupError {
+    pub fn reply(self) -> aim_binder_host::parcel::Result<Parcel> {
+        let mut reply = Parcel::new();
+        use aim_binder_host::parcel::{EX_NULL_POINTER, UNKNOWN_TRANSACTION, Exception};
+        let exception = match self {
+            Self::MissingGroup => Exception::new(EX_NULL_POINTER, "missing MIME group during component registration"),
+            Self::NullType => Exception::new(EX_NULL_POINTER, "null MIME type during component registration"),
+            Self::UriMatching(error) => error.binder_exception().ok_or(UNKNOWN_TRANSACTION)?,
+        };
+        reply.write_exception(&exception);
+        Ok(reply)
+    }
+}
+
 impl ComponentResolver {
     /// `addAllComponents` of every package with code.
-    pub fn new(state: &State) -> ComponentResolver {
+    pub fn new(state: &State) -> std::result::Result<ComponentResolver, MimeGroupError> {
         let mut r = ComponentResolver::default();
         for ps in state.packages.values() {
             let Some(pkg) = ps.pkg.as_deref() else {
@@ -264,7 +293,7 @@ impl ComponentResolver {
                 (Kind::Service, pkg.services.len()),
             ] {
                 for component in 0..count {
-                    r.add(ps, pkg, kind, component);
+                    r.add(state, ps, pkg, kind, component)?;
                 }
             }
             for (i, p) in pkg.providers.iter().enumerate() {
@@ -284,7 +313,7 @@ impl ComponentResolver {
                 r.add_copies(ps, pkg);
             }
         }
-        r
+        Ok(r)
     }
 
     /// `addProvidersLocked`'s copies: a syncable provider keeps its first
@@ -320,13 +349,29 @@ impl ComponentResolver {
         }
     }
 
-    fn add(&mut self, ps: &PackageState, pkg: &AndroidPackage, kind: Kind, component: usize) {
+    fn add(
+        &mut self,
+        state: &State,
+        ps: &PackageState,
+        pkg: &AndroidPackage,
+        kind: Kind,
+        component: usize,
+    ) -> std::result::Result<(), MimeGroupError> {
         let main = main_of(pkg, kind, component);
         for (intent, info) in main.component.intents.iter().enumerate() {
             let mut filter = info.filter.clone();
+            if kind==Kind::Activity {
+                filter.priority=priority::adjust(ps,state.disabled_system_packages.get(&ps.name),
+                    &pkg.activities[component],&filter,state.system.roles.as_ref().and_then(|owner|owner.setup_wizard_priority_owner()));
+            }
             for group in filter.mime_groups.clone().iter().flatten().rev() {
-                let types = ps.mime_groups.iter().find(|(g, _)| g == group);
-                for ty in types.iter().flat_map(|(_, t)| t) {
+                let (_, types) = ps
+                    .mime_groups
+                    .iter()
+                    .find(|(g, _)| g.as_deref() == Some(group.as_str()))
+                    .ok_or(MimeGroupError::MissingGroup)?;
+                for ty in types {
+                    let ty = ty.as_deref().ok_or(MimeGroupError::NullType)?;
                     // A malformed type is skipped, as the original skips it.
                     let _ = filter.add_dynamic_data_type(ty);
                 }
@@ -345,6 +390,7 @@ impl ComponentResolver {
                 Kind::Provider => self.providers.add(entry),
             }
         }
+        Ok(())
     }
 
     /// `mProvidersByAuthority.get`.
@@ -570,9 +616,9 @@ impl ComponentResolver {
         intent: &Intent,
         resolved_type: Option<&str>,
         package: Option<&str>,
-    ) -> Option<Vec<ResolveInfo>> {
+    ) -> std::result::Result<Option<Vec<ResolveInfo>>, super::domain_verification::uri_parcel::MatchError> {
         if !results.state.users.contains_key(&results.user) {
-            return None;
+            return Ok(None);
         }
         let default_only = results.flags & MATCH_DEFAULT_ONLY != 0;
         let resolver = self.resolver(kind);
@@ -590,8 +636,8 @@ impl ComponentResolver {
                 }
                 query_from_list(lists, intent, resolved_type, default_only, &mut results)
             }
-        };
+        }?;
         list.sort_by(resolve_priority_order);
-        Some(list)
+        Ok(Some(list))
     }
 }

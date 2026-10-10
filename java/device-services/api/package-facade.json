@@ -1,0 +1,1763 @@
+{
+  "pin": "android-16.0.0_r1",
+  "origin": "original image DEX declarations; verified independently of source API estimates",
+  "classes": {
+    "Landroid/content/pm/PackageManagerInternal;": {
+      "jar": "services.jar",
+      "methods": [
+        {
+          "name": "<init>",
+          "proto": "()V",
+          "flags": 65537,
+          "implementation": "original_base_constructor"
+        },
+        {
+          "name": "addIsolatedUid",
+          "proto": "(II)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "canAccessComponent",
+          "proto": "(ILandroid/content/ComponentName;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "canAccessInstantApps",
+          "proto": "(II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "canQueryPackage",
+          "proto": "(ILjava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "checkUidSignaturesForAllUsers",
+          "proto": "(II)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "commitPackageStateMutation",
+          "proto": "(Lcom/android/server/pm/pkg/mutate/PackageStateMutator$InitialState;Ljava/util/function/Consumer;)Lcom/android/server/pm/pkg/mutate/PackageStateMutator$Result;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "deleteOatArtifactsOfPackage",
+          "proto": "(Ljava/lang/String;)J",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(Lcom/android/server/pm/pkg/AndroidPackage;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(Ljava/lang/String;II)Z",
+          "flags": 1,
+          "implementation": "original_base_default"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(Ljava/lang/String;IIZ)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "finishPackageInstall",
+          "proto": "(IZ)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "flushPackageRestrictions",
+          "proto": "(I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "forEachInstalledPackage",
+          "proto": "(Ljava/util/function/Consumer;I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "forEachPackage",
+          "proto": "(Ljava/util/function/Consumer;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "forEachPackageSetting",
+          "proto": "(Ljava/util/function/Consumer;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "forEachPackageState",
+          "proto": "(Ljava/util/function/Consumer;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "freeAllAppCacheAboveQuota",
+          "proto": "(Ljava/lang/String;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "freeStorage",
+          "proto": "(Ljava/lang/String;JI)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getActivityInfo",
+          "proto": "(Landroid/content/ComponentName;JII)Landroid/content/pm/ActivityInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getAndroidPackage",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/AndroidPackage;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getApksInApex",
+          "proto": "(Ljava/lang/String;)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getApplicationEnabledState",
+          "proto": "(Ljava/lang/String;I)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getApplicationInfo",
+          "proto": "(Ljava/lang/String;JII)Landroid/content/pm/ApplicationInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getComponentEnabledSetting",
+          "proto": "(Landroid/content/ComponentName;II)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDefaultHomeActivity",
+          "proto": "(I)Landroid/content/ComponentName;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDisabledComponents",
+          "proto": "(Ljava/lang/String;I)Landroid/util/ArraySet;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDisabledSystemPackage",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDisabledSystemPackageName",
+          "proto": "(Ljava/lang/String;)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDistractingPackageRestrictions",
+          "proto": "(Ljava/lang/String;I)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDistractingPackageRestrictionsAsUser",
+          "proto": "([Ljava/lang/String;I)[I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDynamicCodeLogger",
+          "proto": "()Lcom/android/server/pm/dex/DynamicCodeLogger;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getEnabledComponents",
+          "proto": "(Ljava/lang/String;I)Landroid/util/ArraySet;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getHistoricalSessions",
+          "proto": "(I)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getHomeActivitiesAsUser",
+          "proto": "(Ljava/util/List;I)Landroid/content/ComponentName;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getIncrementalStatesInfo",
+          "proto": "(Ljava/lang/String;II)Landroid/content/pm/IncrementalStatesInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstalledApplications",
+          "proto": "(JII)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstalledApplicationsCrossUser",
+          "proto": "(JII)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstantAppPackageName",
+          "proto": "(I)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getKnownPackageNames",
+          "proto": "(II)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getLegacyPermissions",
+          "proto": "()Lcom/android/server/pm/permission/LegacyPermissionSettings;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getLegacyPermissionsState",
+          "proto": "(I)Ljava/lang/Object;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getLegacyPermissionsVersion",
+          "proto": "(I)I",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getNameForUid",
+          "proto": "(I)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackage",
+          "proto": "(I)Lcom/android/server/pm/pkg/AndroidPackage;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackage",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/AndroidPackage;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageArchiver",
+          "proto": "()Lcom/android/server/pm/PackageArchiver;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getPackageInfo",
+          "proto": "(Ljava/lang/String;JII)Landroid/content/pm/PackageInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageList",
+          "proto": "()Lcom/android/server/pm/PackageList;",
+          "flags": 1,
+          "implementation": "original_base_default"
+        },
+        {
+          "name": "getPackageList",
+          "proto": "(Landroid/content/pm/PackageManagerInternal$PackageListObserver;)Lcom/android/server/pm/PackageList;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStateInternal",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStates",
+          "proto": "()Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageTargetSdkVersion",
+          "proto": "(Ljava/lang/String;)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageUid",
+          "proto": "(Ljava/lang/String;JI)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackagesForAppId",
+          "proto": "(I)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPermissionGids",
+          "proto": "(Ljava/lang/String;I)[I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getProcessesForUid",
+          "proto": "(I)Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSetupWizardPackageName",
+          "proto": "()Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUserApi",
+          "proto": "(I)Lcom/android/server/pm/pkg/SharedUserApi;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUserPackages",
+          "proto": "(I)Landroid/util/ArraySet;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUserPackagesForPackage",
+          "proto": "(Ljava/lang/String;I)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSuspendedDialogInfo",
+          "proto": "(Ljava/lang/String;Landroid/content/pm/UserPackage;I)Landroid/content/pm/SuspendDialogInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSuspendedPackageLauncherExtras",
+          "proto": "(Ljava/lang/String;I)Landroid/os/Bundle;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSuspendingPackage",
+          "proto": "(Ljava/lang/String;I)Landroid/content/pm/UserPackage;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSystemUiServiceComponent",
+          "proto": "()Landroid/content/ComponentName;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getTargetPackageNames",
+          "proto": "(I)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getUidTargetSdkVersion",
+          "proto": "(I)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "grantImplicitAccess",
+          "proto": "(ILandroid/content/Intent;IIZ)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "grantImplicitAccess",
+          "proto": "(ILandroid/content/Intent;IIZZ)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "hasInstantApplicationMetadata",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "hasSignatureCapability",
+          "proto": "(III)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isAdminSuspendingAnyPackages",
+          "proto": "(I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isApexPackage",
+          "proto": "(Ljava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isCallerInstallerOfRecord",
+          "proto": "(Lcom/android/server/pm/pkg/AndroidPackage;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isDataRestoreSafe",
+          "proto": "(Landroid/content/pm/Signature;Ljava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isDataRestoreSafe",
+          "proto": "([BLjava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isInstantApp",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isInstantAppInstallerComponent",
+          "proto": "(Landroid/content/ComponentName;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageDataProtected",
+          "proto": "(ILjava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "isPackageEphemeral",
+          "proto": "(ILjava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageFrozen",
+          "proto": "(Ljava/lang/String;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "isPackagePersistent",
+          "proto": "(Ljava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageStateProtected",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "isPackageStopped",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageSuspended",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPermissionUpgradeNeeded",
+          "proto": "(I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPermissionsReviewRequired",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPlatformSigned",
+          "proto": "(Ljava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isResolveActivityComponent",
+          "proto": "(Landroid/content/pm/ComponentInfo;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isSameApp",
+          "proto": "(Ljava/lang/String;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isSameApp",
+          "proto": "(Ljava/lang/String;JII)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isSystemPackage",
+          "proto": "(Ljava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isUidPrivileged",
+          "proto": "(I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "isUpgradingFromLowerThan",
+          "proto": "(I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "migrateLegacyObbData",
+          "proto": "()V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "notifyComponentUsed",
+          "proto": "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "notifyPackageUse",
+          "proto": "(Ljava/lang/String;I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "onPackageProcessKilledForUninstall",
+          "proto": "(Ljava/lang/String;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "pruneInstantApps",
+          "proto": "()V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "queryIntentActivities",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JII)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "queryIntentReceivers",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JIIIZ)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "queryIntentServices",
+          "proto": "(Landroid/content/Intent;JII)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "reconcileAppsData",
+          "proto": "(IIZ)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "registerInstalledLoadingProgressCallback",
+          "proto": "(Ljava/lang/String;Landroid/content/pm/PackageManagerInternal$InstalledLoadingProgressCallback;I)Z",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removeAllDistractingPackageRestrictions",
+          "proto": "(I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removeAllNonSystemPackageSuspensions",
+          "proto": "(I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removeDistractingPackageRestrictions",
+          "proto": "(Ljava/lang/String;I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removeIsolatedUid",
+          "proto": "(I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removeLegacyDefaultBrowserPackageName",
+          "proto": "(I)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removeNonSystemPackageSuspensions",
+          "proto": "(Ljava/lang/String;I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "removePackageListObserver",
+          "proto": "(Landroid/content/pm/PackageManagerInternal$PackageListObserver;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "requestChecksums",
+          "proto": "(Ljava/lang/String;ZIILjava/util/List;Landroid/content/pm/IOnChecksumsReadyListener;ILjava/util/concurrent/Executor;Landroid/os/Handler;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "requestInstantAppResolutionPhaseTwo",
+          "proto": "(Landroid/content/pm/AuxiliaryResolveInfo;Landroid/content/Intent;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLandroid/os/Bundle;I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "resolveContentProvider",
+          "proto": "(Ljava/lang/String;JII)Landroid/content/pm/ProviderInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "resolveIntent",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JJIZII)Landroid/content/pm/ResolveInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "resolveService",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JII)Landroid/content/pm/ResolveInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "resolveService",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JIII)Landroid/content/pm/ResolveInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "sendPackageDataClearedBroadcast",
+          "proto": "(Ljava/lang/String;IIZZ)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "sendPackageRestartedBroadcast",
+          "proto": "(Ljava/lang/String;II)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setDeviceAndProfileOwnerPackages",
+          "proto": "(ILjava/lang/String;Landroid/util/SparseArray;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setEnableRollbackCode",
+          "proto": "(II)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setEnabledOverlayPackages",
+          "proto": "(ILandroid/util/ArrayMap;Ljava/util/Set;Ljava/util/Set;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setExternalSourcesPolicy",
+          "proto": "(Landroid/content/pm/PackageManagerInternal$ExternalSourcesPolicy;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setKeepUninstalledPackages",
+          "proto": "(Ljava/util/List;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setOwnerProtectedPackages",
+          "proto": "(ILjava/util/List;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setPackageStoppedState",
+          "proto": "(Ljava/lang/String;ZI)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setPackagesSuspendedByAdmin",
+          "proto": "(I[Ljava/lang/String;Z)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "setVisibilityLogging",
+          "proto": "(Ljava/lang/String;Z)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "shutdown",
+          "proto": "()V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "snapshot",
+          "proto": "()Lcom/android/server/pm/snapshot/PackageDataSnapshot;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "uninstallApex",
+          "proto": "(Ljava/lang/String;JILandroid/content/IntentSender;I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "unsuspendAdminSuspendedPackages",
+          "proto": "(I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "updateRuntimePermissionsFingerprint",
+          "proto": "(I)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "wasPackageEverLaunched",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "writePermissionSettings",
+          "proto": "([IZ)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "writeSettings",
+          "proto": "(Z)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        }
+      ],
+      "count": 137
+    },
+    "Lcom/android/server/pm/snapshot/PackageDataSnapshot;": {
+      "jar": "services.jar",
+      "methods": [],
+      "count": 0
+    },
+    "Lcom/android/server/pm/Computer;": {
+      "jar": "services.jar",
+      "methods": [
+        {
+          "name": "activitySupportsIntentAsUser",
+          "proto": "(Landroid/content/ComponentName;Landroid/content/ComponentName;Landroid/content/Intent;Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "applyPostResolutionFilter",
+          "proto": "(Ljava/util/List;Ljava/lang/String;ZIZILandroid/content/Intent;)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "canAccessComponent",
+          "proto": "(ILandroid/content/ComponentName;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "canForwardTo",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_read_protocol"
+        },
+        {
+          "name": "canPackageQuery",
+          "proto": "(Ljava/lang/String;[Ljava/lang/String;I)[Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "canQueryPackage",
+          "proto": "(ILjava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "canRequestPackageInstalls",
+          "proto": "(Ljava/lang/String;IIZ)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "canViewInstantApps",
+          "proto": "(II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "canonicalToCurrentPackageNames",
+          "proto": "([Ljava/lang/String;)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "checkPackageFrozen",
+          "proto": "(Ljava/lang/String;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "checkSignatures",
+          "proto": "(Ljava/lang/String;Ljava/lang/String;I)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "checkUidPermission",
+          "proto": "(Ljava/lang/String;I)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "checkUidSignatures",
+          "proto": "(II)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "checkUidSignaturesForAllUsers",
+          "proto": "(II)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "createForwardingResolveInfoUnchecked",
+          "proto": "(Lcom/android/server/pm/WatchedIntentFilter;II)Landroid/content/pm/ResolveInfo;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "currentToCanonicalPackageNames",
+          "proto": "([Ljava/lang/String;)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "dump",
+          "proto": "(ILjava/io/FileDescriptor;Ljava/io/PrintWriter;Lcom/android/server/pm/DumpState;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpKeySet",
+          "proto": "(Ljava/io/PrintWriter;Ljava/lang/String;Lcom/android/server/pm/DumpState;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpPackages",
+          "proto": "(Ljava/io/PrintWriter;Ljava/lang/String;Landroid/util/ArraySet;Lcom/android/server/pm/DumpState;Z)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpPackagesProto",
+          "proto": "(Landroid/util/proto/ProtoOutputStream;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpPermissions",
+          "proto": "(Ljava/io/PrintWriter;Ljava/lang/String;Landroid/util/ArraySet;Lcom/android/server/pm/DumpState;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpSharedLibrariesProto",
+          "proto": "(Landroid/util/proto/ProtoOutputStream;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpSharedUsers",
+          "proto": "(Ljava/io/PrintWriter;Ljava/lang/String;Landroid/util/ArraySet;Lcom/android/server/pm/DumpState;Z)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "dumpSharedUsersProto",
+          "proto": "(Landroid/util/proto/ProtoOutputStream;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "enforceCrossUserOrProfilePermission",
+          "proto": "(IIZZLjava/lang/String;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "enforceCrossUserPermission",
+          "proto": "(IIZZLjava/lang/String;)V",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(Lcom/android/server/pm/pkg/AndroidPackage;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "filterAppAccess",
+          "proto": "(Ljava/lang/String;IIZ)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "filterOnlySystemPackages",
+          "proto": "([Ljava/lang/String;)[Ljava/lang/String;",
+          "flags": 1153,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "findPersistentPreferredActivity",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JLjava/util/List;ZI)Landroid/content/pm/ResolveInfo;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "findPreferredActivityInternal",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JLjava/util/List;ZZZIZ)Lcom/android/server/pm/PackageManagerService$FindPreferredActivityBodyResult;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "findSharedNonSystemLibraries",
+          "proto": "(Lcom/android/server/pm/pkg/PackageStateInternal;)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getActivityInfo",
+          "proto": "(Landroid/content/ComponentName;JI)Landroid/content/pm/ActivityInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getActivityInfoInternal",
+          "proto": "(Landroid/content/ComponentName;JII)Landroid/content/pm/ActivityInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getAllAvailablePackageNames",
+          "proto": "()[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getAllIntentFilters",
+          "proto": "(Ljava/lang/String;)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getAllPackages",
+          "proto": "()Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getAppOpPermissionPackages",
+          "proto": "(Ljava/lang/String;I)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getApplicationEnabledSetting",
+          "proto": "(Ljava/lang/String;I)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getApplicationHiddenSettingAsUser",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getApplicationInfo",
+          "proto": "(Ljava/lang/String;JI)Landroid/content/pm/ApplicationInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getApplicationInfoInternal",
+          "proto": "(Ljava/lang/String;JII)Landroid/content/pm/ApplicationInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getBlockUninstall",
+          "proto": "(ILjava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getBlockUninstallForUser",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getComponentEnabledSetting",
+          "proto": "(Landroid/content/ComponentName;II)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getComponentEnabledSettingInternal",
+          "proto": "(Landroid/content/ComponentName;II)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getComponentResolver",
+          "proto": "()Lcom/android/server/pm/resolution/ComponentResolverApi;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getCrossProfileDomainPreferredLpr",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JII)Lcom/android/server/pm/CrossProfileDomainInfo;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getDeclaredSharedLibraries",
+          "proto": "(Ljava/lang/String;JI)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getDefaultHomeActivity",
+          "proto": "(I)Landroid/content/ComponentName;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDisabledSystemPackage",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getDisabledSystemPackageStates",
+          "proto": "()Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getFlagsForUid",
+          "proto": "(I)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getFrozenPackages",
+          "proto": "()Lcom/android/server/utils/WatchedArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getGrantImplicitAccessProviderInfo",
+          "proto": "(ILjava/lang/String;)Landroid/content/pm/ProviderInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getHarmfulAppWarning",
+          "proto": "(Ljava/lang/String;I)Ljava/lang/CharSequence;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getHomeActivitiesAsUser",
+          "proto": "(Ljava/util/List;I)Landroid/content/ComponentName;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getHomeIntent",
+          "proto": "()Landroid/content/Intent;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstallReason",
+          "proto": "(Ljava/lang/String;I)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getInstallSourceInfo",
+          "proto": "(Ljava/lang/String;I)Landroid/content/pm/InstallSourceInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getInstalledApplications",
+          "proto": "(JIIZ)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstalledPackages",
+          "proto": "(JI)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getInstallerPackageName",
+          "proto": "(Ljava/lang/String;I)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstantAppInstallerComponent",
+          "proto": "()Landroid/content/ComponentName;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstantAppInstallerInfo",
+          "proto": "()Landroid/content/pm/ResolveInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstantAppPackageName",
+          "proto": "(I)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getInstrumentationInfoAsUser",
+          "proto": "(Landroid/content/ComponentName;II)Landroid/content/pm/InstrumentationInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getKeySetByAlias",
+          "proto": "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/pm/KeySet;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getMatchingCrossProfileIntentFilters",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;I)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getNameForUid",
+          "proto": "(I)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getNamesForUids",
+          "proto": "([I)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getNotifyPackagesForReplacedReceived",
+          "proto": "([Ljava/lang/String;)Landroid/util/ArraySet;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackage",
+          "proto": "(I)Lcom/android/server/pm/pkg/AndroidPackage;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackage",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/AndroidPackage;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageGids",
+          "proto": "(Ljava/lang/String;JI)[I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getPackageInfo",
+          "proto": "(Ljava/lang/String;JI)Landroid/content/pm/PackageInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageInfoInternal",
+          "proto": "(Ljava/lang/String;JJII)Landroid/content/pm/PackageInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageOrSharedUser",
+          "proto": "(I)Landroid/util/Pair;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStartability",
+          "proto": "(ZLjava/lang/String;II)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStateFiltered",
+          "proto": "(Ljava/lang/String;II)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStateForInstalledAndFiltered",
+          "proto": "(Ljava/lang/String;II)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStateInternal",
+          "proto": "(Ljava/lang/String;)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStateInternal",
+          "proto": "(Ljava/lang/String;I)Lcom/android/server/pm/pkg/PackageStateInternal;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageStates",
+          "proto": "()Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageUid",
+          "proto": "(Ljava/lang/String;JI)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackageUidInternal",
+          "proto": "(Ljava/lang/String;JII)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackagesForAppId",
+          "proto": "(I)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackagesForUid",
+          "proto": "(I)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPackagesHoldingPermissions",
+          "proto": "([Ljava/lang/String;JI)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getPackagesUsingSharedLibrary",
+          "proto": "(Landroid/content/pm/SharedLibraryInfo;JII)Landroid/util/Pair;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPersistentApplications",
+          "proto": "(ZI)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getPreferredActivities",
+          "proto": "(I)Lcom/android/server/pm/PreferredIntentResolver;",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "getPrivateFlagsForUid",
+          "proto": "(I)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getProcessesForUid",
+          "proto": "(I)Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getProfileParent",
+          "proto": "(I)Landroid/content/pm/UserInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getProviderInfo",
+          "proto": "(Landroid/content/ComponentName;JI)Landroid/content/pm/ProviderInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getReceiverInfo",
+          "proto": "(Landroid/content/ComponentName;JI)Landroid/content/pm/ActivityInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getServiceInfo",
+          "proto": "(Landroid/content/ComponentName;JI)Landroid/content/pm/ServiceInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getSharedLibraries",
+          "proto": "(Ljava/lang/String;JI)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getSharedLibraries",
+          "proto": "()Lcom/android/server/utils/WatchedArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedLibraryInfo",
+          "proto": "(Ljava/lang/String;J)Landroid/content/pm/SharedLibraryInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUser",
+          "proto": "(I)Lcom/android/server/pm/pkg/SharedUserApi;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUserPackages",
+          "proto": "(I)Landroid/util/ArraySet;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUserPackagesForPackage",
+          "proto": "(Ljava/lang/String;I)[Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSharedUsers",
+          "proto": "()Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSigningDetails",
+          "proto": "(I)Landroid/content/pm/SigningDetails;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSigningDetails",
+          "proto": "(Ljava/lang/String;)Landroid/content/pm/SigningDetails;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getSigningKeySet",
+          "proto": "(Ljava/lang/String;)Landroid/content/pm/KeySet;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getSystemSharedLibraryNamesAndPaths",
+          "proto": "()Landroid/util/ArrayMap;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getTargetSdkVersion",
+          "proto": "(Ljava/lang/String;)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getUidForSharedUser",
+          "proto": "(Ljava/lang/String;)I",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "getUidTargetSdkVersion",
+          "proto": "(I)I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getUsed",
+          "proto": "()I",
+          "flags": 1,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getUserInfos",
+          "proto": "()[Landroid/content/pm/UserInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getVersion",
+          "proto": "()I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getVisibilityAllowList",
+          "proto": "(Ljava/lang/String;I)[I",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getVisibilityAllowLists",
+          "proto": "(Ljava/lang/String;[I)Landroid/util/SparseArray;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "getVolumePackages",
+          "proto": "(Ljava/lang/String;)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "hasSigningCertificate",
+          "proto": "(Ljava/lang/String;[BI)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "hasUidSigningCertificate",
+          "proto": "(I[BI)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "isApexPackage",
+          "proto": "(Ljava/lang/String;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isApplicationEffectivelyEnabled",
+          "proto": "(Ljava/lang/String;Landroid/os/UserHandle;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isCallerInstallerOfRecord",
+          "proto": "(Lcom/android/server/pm/pkg/AndroidPackage;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isCallerSameApp",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isCallerSameApp",
+          "proto": "(Ljava/lang/String;IZ)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isComponentEffectivelyEnabled",
+          "proto": "(Landroid/content/pm/ComponentInfo;Landroid/os/UserHandle;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isImplicitImageCaptureIntentAndNotSetByDpc",
+          "proto": "(Landroid/content/Intent;ILjava/lang/String;J)Z",
+          "flags": 1025,
+          "implementation": "retained_original_preferred_records"
+        },
+        {
+          "name": "isInstallDisabledForPackage",
+          "proto": "(Ljava/lang/String;II)Z",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "isInstantApp",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isInstantAppInternal",
+          "proto": "(Ljava/lang/String;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageAvailable",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "isPackageQuarantinedForUser",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageSignedByKeySet",
+          "proto": "(Ljava/lang/String;Landroid/content/pm/KeySet;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "isPackageSignedByKeySetExactly",
+          "proto": "(Ljava/lang/String;Landroid/content/pm/KeySet;)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "isPackageStoppedForUser",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isPackageSuspendedForUser",
+          "proto": "(Ljava/lang/String;I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isSuspendingAnyPackages",
+          "proto": "(Ljava/lang/String;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "isUidPrivileged",
+          "proto": "(I)Z",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "queryContentProviders",
+          "proto": "(Ljava/lang/String;IJLjava/lang/String;)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "queryInstrumentationAsUser",
+          "proto": "(Ljava/lang/String;II)Landroid/content/pm/ParceledListSlice;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "queryIntentActivitiesInternal",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JI)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "queryIntentActivitiesInternal",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JII)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "queryIntentActivitiesInternal",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JJIIIZZ)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "queryIntentServicesInternal",
+          "proto": "(Landroid/content/Intent;Ljava/lang/String;JIIIZZ)Ljava/util/List;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "querySyncProviders",
+          "proto": "(ZLjava/util/List;Ljava/util/List;)V",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "resolveContentProvider",
+          "proto": "(Ljava/lang/String;JII)Landroid/content/pm/ProviderInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "resolveContentProviderForUid",
+          "proto": "(Ljava/lang/String;JII)Landroid/content/pm/ProviderInfo;",
+          "flags": 1025,
+          "implementation": "retained_native_public_query"
+        },
+        {
+          "name": "resolveInternalPackageName",
+          "proto": "(Ljava/lang/String;J)Ljava/lang/String;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "shouldFilterApplication",
+          "proto": "(Lcom/android/server/pm/pkg/PackageStateInternal;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "shouldFilterApplicationIncludingUninstalled",
+          "proto": "(Lcom/android/server/pm/pkg/PackageStateInternal;II)Z",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        },
+        {
+          "name": "updateFlagsForResolve",
+          "proto": "(JIIZZ)J",
+          "flags": 1025,
+          "implementation": "mandatory_owner"
+        },
+        {
+          "name": "use",
+          "proto": "()Lcom/android/server/pm/Computer;",
+          "flags": 1025,
+          "implementation": "retained_native_capture"
+        }
+      ],
+      "count": 153
+    }
+  }
+}

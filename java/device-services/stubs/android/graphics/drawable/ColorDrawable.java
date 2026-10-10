@@ -3,6 +3,7 @@
 package android.graphics.drawable;
 
 public class ColorDrawable extends Drawable {
+    public ColorDrawable(int color) { throw new RuntimeException("stub"); }
     public ColorDrawable() { throw new RuntimeException("stub"); }
     public int getColor() { throw new RuntimeException("stub"); }
     @Override

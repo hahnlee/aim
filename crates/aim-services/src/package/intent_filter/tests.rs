@@ -137,7 +137,7 @@ fn check(filter: &Match, conds: &[Cond]) {
             categories.as_deref(),
             c.wildcards,
             c.ignored,
-        );
+        ).unwrap();
         assert_eq!(
             result & MATCH_CATEGORY_MASK,
             c.result & MATCH_CATEGORY_MASK,
@@ -158,7 +158,7 @@ fn check_all(filters: &[Match], conds: &[Cond]) {
 }
 
 fn match_data(f: &IntentFilter, ty: Option<&str>, scheme: Option<&str>, data: Option<&str>) -> i32 {
-    f.match_data(ty, scheme, data.map(Uri::parse).as_ref(), false)
+    f.match_data(ty, scheme, data.map(Uri::parse).as_ref(), false).unwrap()
 }
 
 /// CTS `testMatchData`.
@@ -299,7 +299,7 @@ fn match_with_intent_data() {
     let mut f = IntentFilter::default();
     let uri = Uri::parse(URI);
     let m = |f: &IntentFilter, ty, scheme, data: Option<&Uri>, cats: Option<&[String]>| {
-        f.matches(Some(ACTION), ty, scheme, data, cats, false, None)
+        f.matches(Some(ACTION), ty, scheme, data, cats, false, None).unwrap()
     };
     assert_eq!(m(&f, None, None, None, None), NO_MATCH_ACTION);
     f.add_action(ACTION);
@@ -307,7 +307,7 @@ fn match_with_intent_data() {
     assert_eq!(m(&f, None, None, None, None), empty);
     assert_eq!(m(&f, None, Some(DATA_SCHEME), None, None), empty);
     assert_eq!(
-        f.match_data(None, Some(DATA_SCHEME), Some(&uri), false),
+        f.match_data(None, Some(DATA_SCHEME), Some(&uri), false).unwrap(),
         NO_MATCH_DATA
     );
     assert_eq!(
@@ -612,12 +612,13 @@ fn reads_a_parcel() {
     p.write_i32(1); // groups
     p.write_i32(ACTION_ALLOW);
     p.write_i32(2);
-    p.write_i32(URI_PART_PATH);
-    p.write_i32(PATTERN_LITERAL);
-    p.write_string16(Some("/path"));
+    // Original ArraySet writes the query filter before the path by signed hash.
     p.write_i32(URI_PART_QUERY);
     p.write_i32(PATTERN_SIMPLE_GLOB);
     p.write_string16(Some("q*"));
+    p.write_i32(URI_PART_PATH);
+    p.write_i32(PATTERN_LITERAL);
+    p.write_string16(Some("/path"));
     let mut r = Reader::new(p.data(), &[]);
     let f = IntentFilter::read(&mut r, &mut Plain).unwrap();
     assert_eq!(r.remaining(), 0);

@@ -64,6 +64,8 @@ pub trait GuestProcess {
     fn can_install(&mut self, _count: usize) -> bool {
         true
     }
+    /// Exact delivered buffer and transaction capability for a hosted receiver.
+    fn delivered(&mut self, _buffer: u64, _transaction: u64) {}
     /// Close an fd the driver installed (fd arrays of a freed buffer).
     fn close_fd(&mut self, fd: u32);
 }

@@ -12,6 +12,13 @@ import java.util.Set;
 
 public interface PackageState {
     AndroidPackage getAndroidPackage();
+    PackageUserState getStateForUser(android.os.UserHandle user);
+    long[] getLastPackageUsageTime();
+    String getPageSizeCompatWarningMessage(android.content.Context context);
+    default PackageUserState getUserStateOrDefault(int user) {
+        PackageUserState state = getUserStates().get(user);
+        return state == null ? PackageUserState.DEFAULT : state;
+    }
     String getApexModuleName();
     int getAppId();
     int getCategoryOverride();
@@ -63,4 +70,5 @@ public interface PackageState {
     boolean isUpdateAvailable();
     boolean isUpdatedSystemApp();
     boolean isVendor();
+
 }

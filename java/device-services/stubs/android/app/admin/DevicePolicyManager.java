@@ -8,4 +8,6 @@ import android.content.Context;
 public class DevicePolicyManager {
     public DevicePolicyManager(Context context, IDevicePolicyManager service) { throw new RuntimeException("stub"); }
     public boolean getScreenCaptureDisabled(ComponentName admin) { throw new RuntimeException("stub"); }
+    public String getDeviceOwner(){throw new RuntimeException("stub");}
+    public boolean packageHasActiveAdmins(String name,int user){throw new RuntimeException("stub");}
 }

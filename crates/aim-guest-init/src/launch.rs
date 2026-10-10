@@ -56,6 +56,8 @@ pub struct FileSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub service: String,
+    pub origin: crate::service_namespace::LaunchOrigin,
+    pub mount_namespace: Option<String>,
     /// Starts of this service so far, including this one.
     pub generation: u64,
     /// Guest argv after property expansion; `argv[0]` is the program.
@@ -109,16 +111,30 @@ impl LinuxRunOptions {
 
     /// Which contract options a `linux-run` binary accepts, from its usage
     /// text.
-    pub fn detect(binary: &Path) -> Self {
-        let Ok(output) = Command::new(binary).arg("--help").output() else {
-            return Self::default();
-        };
+    pub fn detect(binary: &Path) -> Result<Self, String> {
+        let output = Command::new(binary).arg("--help").output()
+            .map_err(|error| format!("linux-run capability query {}: {error}", binary.display()))?;
+        Self::from_usage_output(output)
+            .map_err(|error| format!("linux-run capability query {}: {error}", binary.display()))
+    }
+
+    fn from_usage_output(output: std::process::Output) -> Result<Self, String> {
+        // linux-run's usage exits 2; a killed helper establishes no contract.
+        if !matches!(output.status.code(), Some(0 | 2)) {
+            return Err(format!("{} before usage was established", output.status));
+        }
         let usage = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        Self {
+        let header = usage.lines().any(|line| line.trim_start().starts_with("usage:"));
+        let root = usage.split_whitespace()
+            .any(|word| word.trim_matches(['[', ']']) == "--root");
+        if !header || !root {
+            return Err(format!("{} without valid usage evidence", output.status));
+        }
+        Ok(Self {
             path_map: usage.contains("--path-map"),
             identity: usage.contains("--identity"),
             inherit_env: usage.contains("--inherit-env"),
@@ -128,7 +144,7 @@ impl LinuxRunOptions {
             vulkan: usage.contains("--vulkan"),
             display: usage.contains("--display"),
             stdio_null: usage.contains("--stdio-null"),
-        }
+        })
     }
 
     pub fn missing(&self) -> Vec<&'static str> {
@@ -177,6 +193,10 @@ pub struct LinuxRun {
 impl LinuxRun {
     /// The host command line (argv of the host process).
     pub fn command_line(&self, spec: &LaunchSpec) -> Vec<String> {
+        let mut inherited=vec![0,1,2];inherited.extend(spec.sockets.iter().map(|socket|socket.fd));inherited.extend(spec.files.iter().map(|file|file.fd));
+        self.command_line_with_fds(spec,&inherited)
+    }
+    fn command_line_with_fds(&self,spec:&LaunchSpec,inherited:&[i32])->Vec<String>{
         let mut out = vec![
             self.binary.display().to_string(),
             "--root".to_string(),
@@ -221,6 +241,8 @@ impl LinuxRun {
         if self.trace {
             out.push("--trace".to_string());
         }
+        out.push("--guest-fds".into());
+        out.push(inherited.iter().map(i32::to_string).collect::<Vec<_>>().join(","));
         out.extend(spec.argv.iter().cloned());
         out
     }
@@ -379,6 +401,8 @@ pub struct HostLauncher {
     pub linux_run: LinuxRun,
     layout: Layout,
     children: BTreeSet<u32>,
+    posix: Option<(std::sync::Arc<aim_storage::posix_broker::Controller>,PathBuf)>,
+    posix_children: std::collections::BTreeMap<u32,aim_storage::posix_control::Owner>,
 }
 
 impl HostLauncher {
@@ -387,7 +411,13 @@ impl HostLauncher {
             linux_run,
             layout,
             children: BTreeSet::new(),
+            posix: None,
+            posix_children: Default::default(),
         }
+    }
+
+    pub fn with_posix(mut self,controller:std::sync::Arc<aim_storage::posix_broker::Controller>,locator:PathBuf)->Self {
+        self.posix=Some((controller,locator));self
     }
 
     pub fn children(&self) -> impl Iterator<Item = u32> + '_ {
@@ -400,6 +430,15 @@ impl HostLauncher {
 /// listening when `+listen` was given. Darwin has no `SOCK_SEQPACKET` for
 /// AF_UNIX; such sockets are created as `SOCK_STREAM` and the guest type is
 /// recorded in the sockets table for the syscall layer.
+/// The native launcher represents original init's root filesystem identity;
+/// the socket pathname's SocketSpec uid/gid are a separate bind-time owner.
+pub fn create_owned_socket(spec: &SocketSpec, runtime: &Path) -> Result<(OwnedFd,i32,aim_storage::socket_inode::Receipt),String> {
+    let (fd,ty)=create_socket(spec)?;
+    let receipt=aim_storage::socket_inode::allocated(runtime,fd.as_raw_fd(),0,0)
+        .map_err(|error|format!("socket inode allocation {}: {error}",spec.name))?;
+    Ok((fd,ty,receipt))
+}
+
 pub fn create_socket(spec: &SocketSpec) -> Result<(OwnedFd, i32), String> {
     let host_type = match spec.socket_type {
         SocketType::Stream => libc::SOCK_STREAM,
@@ -504,9 +543,9 @@ impl Launcher for HostLauncher {
     fn launch(&mut self, spec: &LaunchSpec) -> Result<u32, String> {
         fs::write(&spec.identity_file, spec.identity.to_file_text())
             .map_err(|e| format!("{}: {e}", spec.identity_file.display()))?;
-        let mut passed: Vec<(OwnedFd, i32)> = Vec::new();
+        let mut passed: Vec<(OwnedFd,i32)>=Vec::new();let mut socket_receipts=Vec::new();
         for socket in &spec.sockets {
-            let (fd, host_type) = create_socket(socket)?;
+            let (fd, host_type,receipt) = create_owned_socket(socket, &self.layout.runtime)?;
             append(
                 &self.layout.sockets_file(),
                 &format!(
@@ -525,7 +564,8 @@ impl Launcher for HostLauncher {
                     if socket.listen { "listen" } else { "-" },
                 ),
             );
-            passed.push((fd, socket.fd));
+            socket_receipts.push(format!("{}:{}",socket.fd,receipt.to_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>()));
+            passed.push((fd,socket.fd));
         }
         // A file that cannot be opened is not published (init logs and
         // continues without its ANDROID_FILE_ variable).
@@ -547,16 +587,51 @@ impl Launcher for HostLauncher {
             .append(true)
             .open(&spec.log_file)
             .map_err(|e| format!("{}: {e}", spec.log_file.display()))?;
-        let argv = self.linux_run.command_line(spec);
-        let pid = spawn(&argv, &env, &passed, log.as_raw_fd())?;
+        let mut inherited=vec![0,1,2];inherited.extend(passed.iter().map(|(_,target)|*target));
+        let mut argv=self.linux_run.command_line_with_fds(spec,&inherited);
+        let position=argv.iter().position(|arg|arg=="--guest-fds").unwrap();
+        argv.splice(position..position,["--socket-receipts".into(),socket_receipts.join(",")]);
+        if let Some((_,locator))=&self.posix {
+            argv.splice(position..position,["--posix-control".into(),locator.display().to_string()]);
+        }
+        let managed=match fs::symlink_metadata(self.layout.identity_dir().join("by-pid/namespace-init")){
+            Ok(_)=>true,Err(error)if error.kind()==io::ErrorKind::NotFound=>false,Err(error)=>return Err(error.to_string()),
+        };
+        let suspended=managed||self.posix.is_some();
+        let pid = spawn(&argv, &env, &passed, log.as_raw_fd(),suspended)?;
+        if suspended {
+            let registered=(||{
+                let process=aim_storage::process_namespace::ProcessIdentity::running(pid as i32).map_err(|error|error.to_string())?;
+                let table=self.layout.identity_dir().join("by-pid");
+                let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
+                crate::service_namespace::admit(&self.layout.runtime,process,spec.mount_namespace.as_deref())?;
+                std::os::unix::fs::symlink(&spec.identity_file,table.join(pid.to_string())).map_err(|error|format!("native child identity publication: {error}"))?;
+                let guest_pid=if init.process==process{1}else{process.host_pid};
+                let owner=aim_storage::posix_control::Owner{process,guest_pid};
+                if let Some((controller,_))=&self.posix{controller.register_guest(owner).map_err(|error|format!("POSIX child admission: {error}"))?;}
+                if unsafe{libc::kill(pid as i32,libc::SIGCONT)}!=0{return Err(io::Error::last_os_error().to_string());}
+                Ok::<_,String>(owner)
+            })();
+            match registered {
+                Ok(owner)=>{if self.posix.is_some(){self.posix_children.insert(pid,owner);}},
+                Err(failure)=>{
+                    let killed=unsafe{libc::kill(pid as i32,libc::SIGKILL)};
+                    if killed!=0&&io::Error::last_os_error().raw_os_error()!=Some(libc::ESRCH){return Err(format!("{failure}; child termination: {}",io::Error::last_os_error()));}
+                    loop{let result=unsafe{libc::waitpid(pid as i32,std::ptr::null_mut(),0)};if result==pid as i32{break;}if io::Error::last_os_error().raw_os_error()!=Some(libc::EINTR){return Err(format!("{failure}; child reap: {}",io::Error::last_os_error()));}}
+                    let by_pid=self.layout.identity_dir().join("by-pid");
+                    for path in [by_pid.join(pid.to_string()),by_pid.join(format!("{pid}.mount-namespace"))]{match fs::remove_file(path){Ok(())=>{},Err(error)if error.kind()==io::ErrorKind::NotFound=>{},Err(error)=>return Err(format!("{failure}; native identity cleanup: {error}"))}}
+                    return Err(failure);
+                }
+            }
+        }
         self.children.insert(pid);
-        let _ = std::os::unix::fs::symlink(
+        if !suspended{let _ = std::os::unix::fs::symlink(
             &spec.identity_file,
             self.layout
                 .identity_dir()
                 .join("by-pid")
                 .join(pid.to_string()),
-        );
+        );}
         Ok(pid)
     }
 
@@ -577,6 +652,9 @@ impl Launcher for HostLauncher {
             let r = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
             if r == pid as i32 {
                 self.children.remove(&pid);
+                if let Some(owner)=self.posix_children.remove(&pid){
+                    if let Some((controller,_))=&self.posix {if let Err(error)=controller.guest_exited(owner){eprintln!("native POSIX service retirement: {error}");}}
+                }
                 // Its entry and its record (`docs/guest-init-contract.md`).
                 let by_pid = self.layout.identity_dir().join("by-pid");
                 let _ = fs::remove_file(by_pid.join(pid.to_string()));
@@ -598,6 +676,7 @@ impl Drop for HostLauncher {
             let mut status = 0;
             // SAFETY: reaping our own child.
             unsafe { libc::waitpid(pid as i32, &mut status, 0) };
+            if let Some(owner)=self.posix_children.remove(&pid){if let Some((controller,_))=&self.posix{if let Err(error)=controller.guest_exited(owner){eprintln!("native POSIX launcher shutdown: {error}");}}}
         }
     }
 }
@@ -610,6 +689,7 @@ fn spawn(
     env: &[(String, String)],
     passed: &[(OwnedFd, i32)],
     log_fd: i32,
+    suspended: bool,
 ) -> Result<u32, String> {
     let c_argv: Vec<CString> = argv
         .iter()
@@ -633,7 +713,7 @@ fn spawn(
         libc::posix_spawnattr_init(&mut attr);
         libc::posix_spawnattr_setflags(
             &mut attr,
-            (libc::POSIX_SPAWN_SETPGROUP | libc::POSIX_SPAWN_CLOEXEC_DEFAULT) as libc::c_short,
+            (libc::POSIX_SPAWN_SETPGROUP | libc::POSIX_SPAWN_CLOEXEC_DEFAULT | if suspended{libc::POSIX_SPAWN_START_SUSPENDED}else{0}) as libc::c_short,
         );
         libc::posix_spawnattr_setpgroup(&mut attr, 0);
         libc::posix_spawn_file_actions_addopen(
@@ -684,6 +764,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn posix_child_stays_stopped_until_native_identity_is_published() {
+        let directory=std::env::temp_dir().join(format!("aim-posix-launch-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&directory).unwrap();let marker=directory.join("child-ran");let log=fs::File::create(directory.join("log")).unwrap();
+        let pid=spawn(&["/usr/bin/touch".into(),marker.display().to_string()],&[],&[],log.as_raw_fd(),true).unwrap();
+        struct Child(i32);impl Drop for Child{fn drop(&mut self){unsafe{libc::kill(self.0,libc::SIGKILL);libc::waitpid(self.0,std::ptr::null_mut(),0);}}}
+        let child=Child(pid as i32);
+        let process=aim_storage::process_namespace::ProcessIdentity::running(child.0).unwrap();
+        let mut info:libc::proc_bsdinfo=unsafe{std::mem::zeroed()};let size=std::mem::size_of_val(&info)as i32;
+        assert_eq!(unsafe{libc::proc_pidinfo(child.0,libc::PROC_PIDTBSDINFO,1,(&mut info as *mut libc::proc_bsdinfo).cast(),size)},size);
+        assert_eq!(info.pbi_status,4 /* XNU SSTOP */);assert!(!marker.exists());
+        assert!(process.is_live());fs::write(directory.join("native-receipt"),format!("{}:{}:{}",process.host_pid,process.start_seconds,process.start_microseconds)).unwrap();
+        assert_eq!(unsafe{libc::kill(child.0,libc::SIGCONT)},0);let mut status=0;assert_eq!(unsafe{libc::waitpid(child.0,&mut status,0)},child.0);
+        assert!(libc::WIFEXITED(status)&&libc::WEXITSTATUS(status)==0);assert!(marker.exists());std::mem::forget(child);fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn descriptor_names_follow_init() {
         assert_eq!(
             descriptor_env_name("ANDROID_SOCKET_", "ot-daemon"),
@@ -693,6 +789,23 @@ mod tests {
             descriptor_env_name("ANDROID_FILE_", "/dev/kmsg"),
             "ANDROID_FILE__dev_kmsg"
         );
+    }
+
+    #[test]
+    fn native_service_socket_has_allocator_inode_owner_separate_from_bound_path() {
+        let dir=std::env::temp_dir().join(format!("gi-socket-owner-{}",std::process::id()));
+        let sockets=dir.join("dev/socket");fs::create_dir_all(&sockets).unwrap();
+        let spec=SocketSpec{name:"owned-listener".into(),socket_type:SocketType::Stream,passcred:false,listen:true,
+            perm:0o660,uid:2000,gid:3003,host_path:sockets.join("owned-listener"),env_name:"ANDROID_SOCKET_owned_listener".into(),fd:3};
+        let(fd,_,receipt)=create_owned_socket(&spec,&dir).unwrap();
+        let identity=aim_storage::socket_inode::identity(fd.as_raw_fd()).unwrap();
+        assert_eq!(receipt.identity,identity);receipt.validate(fd.as_raw_fd()).unwrap();
+        let bytes=fs::read(dir.join("socket-inodes").join(receipt.name())).unwrap();
+        let owner=aim_storage::socket_inode::decode(&bytes,receipt).unwrap();
+        assert_eq!((owner.uid,owner.gid,owner.mode),(0,0,0o777));
+        let path_owner=crate::guest_inode::read(&spec.host_path).unwrap().unwrap();
+        assert_eq!((path_owner.uid,path_owner.gid,path_owner.mode),(Some(2000),Some(3003),Some(0o660)));
+        drop(fd);fs::remove_dir_all(dir).unwrap();
     }
 
     /// A datagram socket (logd's `logdw`) holds what Linux's does, not
@@ -728,5 +841,37 @@ mod tests {
         };
         assert!(v >= 212_992, "{v}");
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod capability_failure_tests {
+    use super::LinuxRunOptions;
+    use std::process::Command;
+    fn output(script: &str) -> std::process::Output {
+        Command::new("/bin/sh").args(["-c", script]).output().unwrap()
+    }
+    #[test]
+    fn actual_signalled_usage_helper_is_not_unsupported_legacy() {
+        let error=LinuxRunOptions::from_usage_output(output("kill -KILL $$")).err().unwrap();
+        assert!(error.contains("signal") && error.contains("usage"), "{error}");
+    }
+    #[test]
+    fn real_normal_usage_exit_two_preserves_partial_legacy_options() {
+        let options=LinuxRunOptions::from_usage_output(output("printf 'usage: linux-run [--root DIR] [--gpu DIR]\n'; exit 2")).unwrap();
+        assert!(options.gpu); assert!(!options.identity); assert!(!options.path_map);
+    }
+    #[test]
+    fn empty_or_unrelated_error_output_does_not_establish_usage() {
+        for script in ["exit 2", "printf 'cannot access --root\n' >&2; exit 1", "printf 'usage: unrelated\n'; exit 2"] {
+            assert!(LinuxRunOptions::from_usage_output(output(script)).is_err());
+        }
+    }
+    #[test]
+    fn missing_usage_helper_is_a_real_spawn_error() {
+        let root=std::env::temp_dir().join(format!("aim-capability-missing-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let error=LinuxRunOptions::detect(&root.join("absent")).err().unwrap();
+        assert!(error.contains("capability query"));std::fs::remove_dir(root).unwrap();
     }
 }

@@ -617,6 +617,10 @@ pub fn open(r: &Resolved, flags: u64) -> Option<i64> {
             }),
         })),
     );
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return Some(-(error as i64));
+    }
     Some(fd as i64)
 }
 

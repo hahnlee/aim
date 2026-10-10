@@ -52,6 +52,22 @@ impl Intent {
     /// `Intent(Parcel)`; the strings through `strings` (an intent of a
     /// package's `<queries>` is in the parser cache's string pool).
     pub fn read(r: &mut Reader<'_>, strings: &mut dyn Strings) -> Result<Intent> {
+        Self::read_inner(r, strings, false)
+    }
+
+    /// A manifest query must not discard context needed by PackageImpl output.
+    pub(crate) fn read_package_query(
+        r: &mut Reader<'_>,
+        strings: &mut dyn Strings,
+    ) -> Result<Intent> {
+        Self::read_inner(r, strings, true)
+    }
+
+    fn read_inner(
+        r: &mut Reader<'_>,
+        strings: &mut dyn Strings,
+        package_query: bool,
+    ) -> Result<Intent> {
         let mut i = Intent {
             action: strings.string8(r)?,
             data: Uri::read(r, strings)?,
@@ -67,6 +83,9 @@ impl Intent {
             i.component = Some(ComponentName { package, class });
         }
         if r.read_i32()? != 0 {
+            if package_query {
+                return Err(BAD_VALUE);
+            }
             for _ in 0..4 {
                 r.read_i32()?; // source bounds
             }
@@ -83,17 +102,32 @@ impl Intent {
             i.categories = Some(categories);
         }
         if r.read_i32()? != 0 {
-            i.selector = Some(Box::new(Intent::read(r, strings)?));
+            i.selector = Some(Box::new(Self::read_inner(r, strings, package_query)?));
         }
         if r.read_i32()? != 0 {
+            if package_query {
+                return Err(BAD_VALUE);
+            }
             ClipData::read_from(r)?;
         }
-        r.read_i32()?; // content user hint
-        bundle(r)?; // extras
+        let content_user = r.read_i32()?;
+        if package_query {
+            if content_user != -2 || r.read_i32()? != -1 {
+                return Err(BAD_VALUE);
+            }
+        } else {
+            bundle(r)?;
+        }
         if r.read_i32()? != 0 {
+            if package_query {
+                return Err(BAD_VALUE);
+            }
             Intent::read(r, strings)?; // the original intent
         }
         if r.read_i32()? != 0 {
+            if package_query {
+                return Err(BAD_VALUE);
+            }
             // The creator token and its nested intents' keys.
             r.read_binder()?;
             for _ in 0..r.read_i32()?.max(0) {
@@ -210,6 +244,23 @@ mod tests {
         let s = i.selector.unwrap();
         assert_eq!(s.component.as_ref().unwrap().class, "q.C");
         assert!(!s.has_web_uri());
+    }
+
+    #[test]
+    fn package_queries_reject_unrepresented_user_context() {
+        let p = view();
+        let mut r = Reader::new(p.data(), p.objects());
+        Intent::read_package_query(&mut r, &mut Plain).unwrap();
+        assert_eq!(r.remaining(), 0);
+
+        let mut bytes = p.data().to_vec();
+        let user = bytes.len() - 16;
+        bytes[user..user + 4].copy_from_slice(&10_i32.to_le_bytes());
+        let mut r = Reader::new(&bytes, p.objects());
+        Intent::read(&mut r, &mut Plain).unwrap();
+        assert_eq!(r.remaining(), 0);
+        let mut r = Reader::new(&bytes, p.objects());
+        assert!(Intent::read_package_query(&mut r, &mut Plain).is_err());
     }
 
     #[test]

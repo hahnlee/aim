@@ -14,4 +14,5 @@ public final class Rect {
     public final int height() { throw new RuntimeException("stub"); }
     public final boolean isEmpty() { throw new RuntimeException("stub"); }
     public void set(int left, int top, int right, int bottom) { throw new RuntimeException("stub"); }
+ public Rect(Rect source){throw new RuntimeException("stub");}
 }

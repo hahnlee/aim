@@ -2,4 +2,7 @@
 // the members used, checked against the image by the device-services node.
 package android.app;
 
-public class ComponentOptions {}
+public class ComponentOptions {
+    public ComponentOptions setPendingIntentBackgroundActivityStartMode(int mode) { throw new RuntimeException("stub"); }
+    public void setPendingIntentBackgroundActivityLaunchAllowed(boolean allowed) { throw new RuntimeException("stub"); }
+}

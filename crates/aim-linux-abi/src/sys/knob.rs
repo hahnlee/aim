@@ -22,9 +22,12 @@ pub fn open(
     cloexec: bool,
     on_write: impl Fn(&[u8]) -> Result<Option<Vec<u8>>, Errno> + Send + Sync + 'static,
 ) -> i64 {
-    let fd = super::procfs::content_fd(contents, cloexec);
+    let fd = super::procfs::content_fd_unpublished(contents, cloexec);
     if fd >= 0 {
         fdtab::insert(fd as i32, Kind::Knob(Arc::new(Knob(Box::new(on_write)))));
+        if let Err(error)=fdtab::publish_guest(fd as i32){
+            fdtab::on_close(fd as i32);unsafe{libc::close(fd as i32);}return -(error as i64);
+        }
     }
     fd
 }

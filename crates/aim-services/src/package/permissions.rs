@@ -11,11 +11,13 @@
 //!   fingerprint;
 //! - `runtime-permissions.xml` beside the user's `access.abx`
 //!   (`RuntimePermissionsPersistenceImpl` in the permission module, always
-//!   text XML): the legacy runtime permission state, of which Android 16
-//!   writes only the version, the default grants' fingerprint and the
-//!   shared users.
+//!   text XML): the legacy runtime permission state, with version, the
+//!   default grants' fingerprint and package/shared permission lists. The
+//!   writer clears one-time grants while retaining their flags.
 
 use aim_android_xml::Element;
+
+mod runtime_write;
 
 use super::{children, string};
 
@@ -25,15 +27,16 @@ pub struct RuntimePermissions {
     /// `NO_VERSION` (-1) when the file has none.
     pub version: i32,
     pub fingerprint: Option<String>,
-    pub packages: Vec<(String, Vec<RuntimePermission>)>,
-    pub shared_users: Vec<(String, Vec<RuntimePermission>)>,
+    /// Original ArrayMap keys may be null, distinct from the empty string.
+    pub packages: Vec<(Option<String>, Vec<RuntimePermission>)>,
+    pub shared_users: Vec<(Option<String>, Vec<RuntimePermission>)>,
 }
 
 /// `RuntimePermissionsState.PermissionState`: `flags` are
 /// `PackageManager.FLAG_PERMISSION_*`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimePermission {
-    pub name: String,
+    pub name: Option<String>,
     pub granted: bool,
     pub flags: i32,
 }
@@ -58,7 +61,7 @@ impl RuntimePermissions {
             let permissions = children(e, "permission")
                 .map(|p| {
                     Ok(RuntimePermission {
-                        name: string(p, "name").ok_or("a permission without a name")?,
+                        name: string(p, "name"),
                         // `Boolean.parseBoolean`: anything else is false.
                         granted: string(p, "granted")
                             .is_some_and(|g| g.eq_ignore_ascii_case("true")),
@@ -66,8 +69,15 @@ impl RuntimePermissions {
                     })
                 })
                 .collect::<Result<_, String>>()?;
-            list.push((string(e, "name").unwrap_or_default(), permissions));
+            let name = string(e, "name");
+            if let Some((_, value)) = list.iter_mut().find(|(key, _)| *key == name) {
+                *value = permissions;
+            } else {
+                list.push((name, permissions));
+            }
         }
+        r.packages.sort_by_key(|(name, _)| name.as_deref().map(super::info::java_hash).unwrap_or(0));
+        r.shared_users.sort_by_key(|(name, _)| name.as_deref().map(super::info::java_hash).unwrap_or(0));
         Ok(r)
     }
 }

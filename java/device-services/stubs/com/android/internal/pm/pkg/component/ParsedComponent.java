@@ -3,5 +3,6 @@
 package com.android.internal.pm.pkg.component;
 
 public interface ParsedComponent {
+    String getPackageName();
     String getName();
 }

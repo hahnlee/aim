@@ -3,4 +3,6 @@
 package com.android.internal.pm.pkg.component;
 
 public interface ParsedMainComponent extends ParsedComponent {
+    String getClassName();
+    boolean isExported();
 }

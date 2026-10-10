@@ -8,6 +8,9 @@
 //! `android-16.0.0_r1` are the reference. Every field the parcel holds
 //! is kept, so the package can be written back as it was read (#723).
 
+mod write;
+pub use write::FacadeEntry;
+
 use aim_binder_host::parcel::{BAD_VALUE, Reader, Result};
 
 use super::intent::Intent;
@@ -300,6 +303,8 @@ pub struct UsesPermission {
 /// `ParsedProcess`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Process {
+    /// The enclosing PackageImpl process map's key.
+    pub map_key: Option<String>,
     pub use_embedded_dex: bool,
     pub name: Option<String>,
     /// The application class by package (`getAppClassNamesByPackage`).
@@ -561,7 +566,7 @@ impl AndroidPackage {
     /// `PackageImpl(Parcel)`.
     pub fn read(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<AndroidPackage> {
         Ok(AndroidPackage {
-            feature_flag_state: string_array(r, s)?,
+            feature_flag_state: feature_flag_state(r, s)?,
             supports_small_screens: for_boolean(r)?,
             supports_normal_screens: for_boolean(r)?,
             supports_large_screens: for_boolean(r)?,
@@ -688,7 +693,8 @@ impl AndroidPackage {
             volume_uuid: s.string16(r)?,
             signing_details: signing_details(r, s)?,
             path: s.string16(r)?,
-            queries_intents: typed_array(r, |r| Intent::read(r, s))?.unwrap_or_default(),
+            queries_intents: typed_array(r, |r| Intent::read_package_query(r, s))?
+                .unwrap_or_default(),
             queries_packages: string_list(r, s)?,
             queries_providers: string_list(r, s)?,
             app_component_factory: s.string16(r)?,
@@ -739,7 +745,7 @@ impl AndroidPackage {
             native_heap_zero_initialized: r.read_i32()?,
             request_raw_external_storage_access: for_boolean(r)?,
             locale_config_res: r.read_i32()?,
-            known_activity_embedding_certs: string_array(r, s)?,
+            known_activity_embedding_certs: string_set(r, s)?,
             manifest_package_name: s.string16(r)?,
             native_library_dir: s.string16(r)?,
             native_library_root_dir: s.string16(r)?,
@@ -817,8 +823,8 @@ impl Activity {
             lock_task_launch_mode: r.read_i32()?,
             screen_orientation: r.read_i32()?,
             resize_mode: r.read_i32()?,
-            max_aspect_ratio: float_value(r)?,
-            min_aspect_ratio: float_value(r)?,
+            max_aspect_ratio: Some(float_value(r)?.ok_or(BAD_VALUE)?),
+            min_aspect_ratio: Some(float_value(r)?.ok_or(BAD_VALUE)?),
             supports_size_changes: r.read_bool()?,
             requested_vr_component: s.string16(r)?,
             rotation_animation: r.read_i32()?,
@@ -840,7 +846,7 @@ impl Activity {
                 affinity: s.string8(r)?,
             });
         }
-        a.known_activity_embedding_certs = string_array(r, s)?;
+        a.known_activity_embedding_certs = string_set(r, s)?;
         a.required_display_category = s.string8(r)?;
         a.require_content_uri_permission_from_caller = r.read_i32()?;
         Ok(a)
@@ -901,7 +907,7 @@ impl Permission {
                 Some(_) => Some(PermissionGroup::read(r, s)?),
                 None => None,
             },
-            known_certs: string_array(r, s)?,
+            known_certs: string_set(r, s)?,
         })
     }
 }
@@ -940,6 +946,18 @@ fn long_array(r: &mut Reader<'_>) -> Result<Option<Vec<i64>>> {
 /// `createStringArray` (and `createStringArrayList`, the same form).
 fn string_array(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Option<String>>>> {
     array(r, |r| s.string16(r))
+}
+
+// PackageImpl.readFeatureFlagState iterates both the array and every string.
+fn feature_flag_state(
+    r: &mut Reader<'_>,
+    s: &mut dyn Strings,
+) -> Result<Option<Vec<Option<String>>>> {
+    let values = string_array(r, s)?.ok_or(BAD_VALUE)?;
+    if values.iter().any(Option::is_none) {
+        return Err(BAD_VALUE);
+    }
+    Ok(Some(values))
 }
 
 fn string8_array(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Option<String>>>> {
@@ -995,6 +1013,23 @@ fn feature_info(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<FeatureInfo> 
         req_gl_es_version: r.read_i32()?,
         flags: r.read_i32()?,
     })
+}
+
+/// Parcelling.ForStringSet returns an empty ArraySet for a null parcel.
+fn string_set(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Option<String>>>> {
+    let mut set = Vec::new();
+    for value in string_array(r, s)?.unwrap_or_default() {
+        if !set.contains(&value) {
+            set.push(value);
+        }
+    }
+    set.sort_by_key(|value| {
+        value
+            .as_deref()
+            .map(super::parse::parcel::java_hash)
+            .unwrap_or(0)
+    });
+    Ok(Some(set))
 }
 
 /// `readSerializable`: its class (null for none), then its bytes.
@@ -1135,12 +1170,13 @@ fn sparse_int_arrays(r: &mut Reader<'_>) -> Result<Option<SplitDependencies>> {
 /// The processes (`writeMap` of `ParsedProcessImpl`s by name).
 fn processes(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Process>>> {
     array(r, |r| {
-        string_value(r, s)?;
+        let map_key = string_value(r, s)?;
         parcelable(r, s, |r, s| {
             let flags = r.read_i32()?;
             Ok(Process {
+                map_key,
                 use_embedded_dex: flags & 0x40 != 0,
-                name: s.string16(r)?,
+                name: Some(s.string16(r)?.ok_or(BAD_VALUE)?),
                 app_class_names_by_package: array(r, |r| {
                     let key = string_value(r, s)?.ok_or(BAD_VALUE)?;
                     Ok((key, string_value(r, s)?))
@@ -1158,9 +1194,14 @@ fn processes(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<Vec<Proce
 
 /// `readParcelable` of `SigningDetails`: `None` for `UNKNOWN` (or null).
 fn signing_details(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<SigningDetails>> {
-    if s.string16(r)?.is_none() || r.read_bool()? {
+    if s.string16(r)?.is_none() {
         return Ok(None);
     }
+    read_signing_details_payload(r, s)
+}
+
+pub(crate) fn read_signing_details_payload(r: &mut Reader<'_>, s: &mut dyn Strings) -> Result<Option<SigningDetails>> {
+    if r.read_bool()? { return Ok(None); }
     Ok(Some(SigningDetails {
         signatures: typed_array(r, |r| byte_array(r)?.ok_or(BAD_VALUE))?,
         scheme_version: r.read_i32()?,
@@ -1186,6 +1227,32 @@ mod tests {
     use aim_binder_host::parcel::Parcel;
 
     use super::*;
+
+    #[test]
+    fn certificate_sets_normalize_null_duplicates_and_hash_collisions() {
+        use super::super::intent_filter::Plain;
+        let mut p = Parcel::new();
+        p.write_i32(-1);
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(string_set(&mut r, &mut Plain).unwrap(), Some(vec![]));
+
+        let mut p = Parcel::new();
+        p.write_i32(5);
+        for value in [Some("BB"), Some("Aa"), None, Some("BB"), Some("a")] {
+            p.write_string16(value);
+        }
+        let mut r = Reader::new(p.data(), p.objects());
+        assert_eq!(
+            string_set(&mut r, &mut Plain).unwrap(),
+            Some(vec![
+                None,
+                Some("a".into()),
+                Some("BB".into()),
+                Some("Aa".into())
+            ])
+        );
+        assert_eq!(r.remaining(), 0);
+    }
 
     /// A parcel written as `PackageCacher.toCacheEntryStatic` writes one:
     /// every string an index into the pool at its end.
@@ -1314,7 +1381,8 @@ mod tests {
         c.i(0).i(0).s(None).s(None).s(None).i(0).s(None);
         c.i(5).i(0).i(0).i(0).i(0).i(0).i(0).i(-1).i(0);
         c.i(VAL_FLOAT).p.write_f32(1.5);
-        c.i(VAL_NULL).i(0).s(None).i(-1).i(0);
+        c.i(VAL_FLOAT).p.write_f32(2.0);
+        c.i(0).s(None).i(-1).i(0);
         bundle(&mut c);
         c.i(0).i(-1).s(None).i(0);
         // apex system services, receivers, services, providers.
@@ -1396,6 +1464,85 @@ mod tests {
     }
 
     #[test]
+    fn code_cache_rejects_null_constructor_inputs_and_retains_empty_owners() {
+        let valid = AndroidPackage::read_cache_entry(&package()).unwrap();
+        for flags in [None, Some(vec![None])] {
+            let mut invalid = valid.clone();
+            invalid.feature_flag_state = flags;
+            assert!(invalid.to_cache_entry().is_err());
+        }
+        let mut empty = valid.clone();
+        empty.feature_flag_state = Some(Vec::new());
+        let entry = empty.to_cache_entry().unwrap();
+        assert_eq!(
+            AndroidPackage::read_cache_entry(&entry.bytes)
+                .unwrap()
+                .feature_flag_state,
+            Some(Vec::new())
+        );
+        let mut null_array = entry.bytes.clone();
+        null_array[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+        assert!(AndroidPackage::read_cache_entry(&null_array).is_err());
+        let entry = valid.to_cache_entry().unwrap();
+        let null = entry.pool.iter().position(Option::is_none).unwrap() as i32;
+        let mut null_string = entry.bytes.clone();
+        null_string[8..12].copy_from_slice(&null.to_le_bytes());
+        assert!(AndroidPackage::read_cache_entry(&null_string).is_err());
+        let mut process = valid.clone();
+        process.processes = Some(vec![Process {
+            map_key: None,
+            name: Some("cache.validation.process".into()),
+            ..Default::default()
+        }]);
+        let entry = process.to_cache_entry().unwrap();
+        let index = entry
+            .pool
+            .iter()
+            .position(|v| v.as_deref() == Some("cache.validation.process"))
+            .unwrap() as i32;
+        let positions: Vec<_> = entry.strings.iter().filter(|(_, i)| *i == index).collect();
+        assert_eq!(positions.len(), 1);
+        let mut null_name = entry.bytes.clone();
+        let null = entry.pool.iter().position(Option::is_none).unwrap() as i32;
+        null_name[positions[0].0..positions[0].0 + 4].copy_from_slice(&null.to_le_bytes());
+        assert!(AndroidPackage::read_cache_entry(&null_name).is_err());
+        process.processes.as_mut().unwrap()[0].name = None;
+        assert!(process.to_cache_entry().is_err());
+        process.processes.as_mut().unwrap()[0].name = Some(String::new());
+        let decoded =
+            AndroidPackage::read_cache_entry(&process.to_cache_entry().unwrap().bytes).unwrap();
+        assert_eq!(
+            decoded.processes.as_ref().unwrap()[0].name.as_deref(),
+            Some("")
+        );
+        assert_eq!(decoded.processes.as_ref().unwrap()[0].map_key, None);
+    }
+
+    #[test]
+    fn writes_loaded_metadata_and_preserves_independently_encoded_components() {
+        let mut pkg = AndroidPackage::read_cache_entry(&package()).unwrap();
+        pkg.uid = 10234;
+        pkg.native_library_root_dir = Some("/data/app/a/lib".into());
+        pkg.secondary_cpu_abi = Some("armeabi-v7a".into());
+        pkg.booleans |= booleans::SYSTEM;
+        pkg.page_size_app_compat_flags = 8;
+        pkg.processes = Some(vec![Process {
+            map_key: Some("map-key".into()),
+            name: Some("process-name".into()),
+            ..Default::default()
+        }]);
+        let bytes = pkg.to_cache_entry().unwrap().bytes;
+        let read = AndroidPackage::read_cache_entry(&bytes).unwrap();
+        assert_eq!(read, pkg);
+        assert_eq!(read.to_cache_entry().unwrap().bytes, bytes);
+        let mut refused = pkg.clone();
+        let mut filter = ParsedIntentInfo::default();
+        filter.filter.extras = Some(vec![1, 2, 3, 4]);
+        refused.activities[0].main.component.intents.push(filter);
+        assert!(refused.to_cache_entry().is_err());
+    }
+
+    #[test]
     fn reads_a_cache_entry() {
         let pkg = AndroidPackage::read_cache_entry(&package()).unwrap();
         assert_eq!(pkg.package_name, "org.example.app");
@@ -1422,7 +1569,10 @@ mod tests {
         );
         assert!(a.main.enabled && a.main.exported && a.main.direct_boot_aware);
         assert_eq!(a.launch_mode, 5);
-        assert_eq!((a.max_aspect_ratio, a.min_aspect_ratio), (Some(1.5), None));
+        assert_eq!(
+            (a.max_aspect_ratio, a.min_aspect_ratio),
+            (Some(1.5), Some(2.0))
+        );
         let meta = a.main.component.meta_data.as_ref().unwrap();
         assert_eq!(
             meta.0,

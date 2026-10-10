@@ -106,7 +106,7 @@ service host is the native services' process, and native is any other
 process. Method names and codes come from the image's AIDL stubs
 (`TRANSACTION_*` in framework.jar, via `tools/binder-trace-report.py`).
 These are the same stubs that `aim-service-aidl`'s generated codes are
-checked against (the four `IPackageManager` methods in
+checked against (all 224 `IPackageManager` methods in
 `crates/aim-services/sources.lock` agree). The tracked game set is not
 included because no document names it (#704).
 
@@ -300,8 +300,8 @@ through four in-process interfaces, which every subsystem uses:
 
 | Interface | Size | Users outside `pm/` (non-test files) |
 | --- | --- | --- |
-| `PackageManagerInternal` | 148 abstract methods, about 100 used outside `pm/` | 111 files in 54 subsystems |
-| `Computer` (`PackageManagerInternal.snapshot()`, a `PackageDataSnapshot` that `IntentResolver` casts to `Computer`) | 220 methods | `IntentResolver` and its subclasses: ActivityManager's broadcast receiver resolver, `IntentFirewall`, `UriGrantsManagerService` |
+| `PackageManagerInternal` | 134 abstract methods in the original image, about 100 used outside `pm/` | 111 files in 54 subsystems |
+| `Computer` (`PackageManagerInternal.snapshot()`, a `PackageDataSnapshot` that `IntentResolver` casts to `Computer`) | 153 methods in the original image | `IntentResolver` and its subclasses: ActivityManager's broadcast receiver resolver, `IntentFirewall`, `UriGrantsManagerService` |
 | `PackageManagerLocal` (snapshots of `PackageState`, `AndroidPackage`, `SharedUserApi`) | 7 methods, over `PackageState` (78), `PackageStateInternal` (36), `PackageUserState` (41) | ART Service, `AccessCheckingService` and `PermissionService`, `AppOpsService`, `AudioService`, DevicePolicy, `StorageStatsService` |
 | `IPackageManager` and `PackageManager` in system_server's own process | 224 | 55 files through `AppGlobals.getPackageManager()`, about 300 through `Context.getPackageManager()`: today calls on the local stub object |
 
@@ -379,8 +379,10 @@ ways to make it, both weighed:
    the `package_info_cache` nonce, through the bridge, so apps' caches
    drop as they do today.
 
-**What it costs.** The facade's Java is about 550 methods (148, 7, 220
-and some 155 of the `PackageState` family), most of them one line, and
+**What it costs.** The original image requires 134 abstract Internal methods,
+153 Computer methods, 7 Local methods and the `PackageState` family wrappers.
+The exact DEX declarations are retained in `java/device-services/api/package-facade.json`;
+the earlier source estimates of 148/220 are superseded. Most read wrappers are one line, and
 an AIDL of ours between the facade and the host of about 250 methods,
 generated for both sides as `IBridge` is. Every in-process query that
 misses the replica's caches costs a host round trip; how many that is
@@ -481,13 +483,378 @@ in-memory state.
 | `/data/app/~~*/<pkg>-*/`, `/data/user*/<u>/<pkg>`, `/data/misc/profiles` | files | installd on PMS's orders | apps, ART |
 
 The first-boot template (#565, #647; [first-boot.md](first-boot.md))
-ships `packages.xml`, `packages.list`, user 0's restrictions, the parser
-cache, the decompressed stubs and the permission module's files, as the
+ships `packages.xml`, `packages.list`, user 0's restrictions,
+the decompressed stubs and the permission module's files, as the
 original's build-time first boot wrote them. The native owner reads
 them in Rust (`crates/aim-services/src/package`, on the binary and text
 XML of `crates/aim-android-xml`), tested on the files of a template first
 boot with an installed app, a disabled package and a disabled
 component.
+
+On the C branch, `package::owner::Store` commits enabled settings to
+the complete restriction document as typed ABX, with the original's
+backup and reserve-copy protocol and guest inode ownership (#798).
+An interrupted main write preserves the previous state; a reserve-copy
+failure reports that the main file committed. It refuses a document
+changed outside the owner. In a disposable-data check (2026-10-02),
+native code disabled Settings, the original PMS booted and read
+`enabled=2`, then native code restored the default; the original booted
+again and launched Settings (`am start -W`: status ok, 85 ms). No native
+writer runs beside PMS; this store is not yet wired into the C service.
+
+`package::service::PackageQueries` implements the host Binder receiver for
+`package` and `package_native` over the owner's published scan snapshot.
+Both endpoints capture the same shared source, each call retaining one
+immutable version while the owner publishes later versions. They reuse
+the shadow-tested query and resolution code with the driver's calling
+uid and the pinned generated AIDL readers. Unsupported state dependencies
+and writes return an explicit unsupported-operation exception. The
+enabled-write decoder is also shared and retains `DONT_KILL_APP` and
+`SYNCHRONOUS` flags for the future mutation path. Receiver unit tests cover
+visibility by caller uid, interface-token rejection and publication to
+existing endpoints; all 123 package tests pass. Guest-init does not
+register these receivers; native scanning, mutation side effects and the
+SystemServer facade remain prerequisites tracked in #798 and the M4
+issues.
+
+For the native scan's built-in shared library input (#707),
+`SystemConfig::read` reads `library`/`apex-library` declarations and public
+native library lists. It applies partition and SKU permissions, file
+existence, SDK limits and bootclasspath transition conditions, retaining
+the dependency names. On a disposable original-PMS boot (2026-10-02,
+`sys.boot_completed=1`), all 19 built-in library names and paths matched
+`pm list libraries -v` and `dumpsys package libraries`.
+
+`package::libraries::Registry` registers built-in and APK-declared
+dynamic, static and SDK libraries by name/version, retaining code paths,
+internal package names and manifest declaring names. Dynamic declarations
+require a system app, cannot replace an existing library, and an updated
+system app may expose only names its original declared. A disposable
+original-PMS data check (2026-10-02, boot completed) read `packages.xml`
+and parsed APKs without the feed: all 23 original library names
+and paths matched, including Trichrome's static version 694313732 and
+internal package name. With isolated split dependency/asset loading and
+runtime display density supplied, the diagnostic parses all 243 installed
+APK packages, including GMS's 11 splits. The updated GMS's dynamic library
+is restricted to its original disabled system package's declarations.
+These checks cover library names/paths and parser success, not the whole
+native scan or installed GMS's complete parcel parity (#760).
+`Registry::collect` selects direct dependencies in the original order:
+required Java, static, optional Java, native when PlatformCompat enforces
+them, then SDK. Versioned dependencies check the provider's verified
+signatures, including certificate rotation and the pre-27 multi-signer
+rule. Native enforcement comes from PlatformCompat; the pinned image's
+SDK policy is compiled directly into `SharedLibrariesImpl`.
+For native enforcement, `IBridge.areNativeLibraryDependenciesEnforced`
+now calls the original `PlatformCompat.isChangeEnabledInternal` install
+API with package name and target SDK, without looking up PMS state.
+`native_dependencies_enforced` uses generated Binder transaction codes
+and preserves transport errors and owner exceptions. The bridge serves
+the system UID only; it currently attaches after bootstrap, so C's facade
+still must expose the same owner query before the native boot scan (#702).
+A disposable original-PMS boot (2026-10-02, boot completed) tested the
+Rust-to-Java call: SDK 30 returned false, SDK 31/36 true. Device-service
+linkage verification and 159 package unit tests pass. The image has no
+`android.content.pm.Flags.sdkLibIndependence` API or loaded aconfig entry
+for that flag. Inspecting its original `services.jar` shows that the SDK
+dependency collection call passes `required=true` directly. `Policy::pinned`
+uses that compiled policy (independence disabled), and `Policy::from_bridge`
+combines it with the owner's native-enforcement answer. An explicitly run
+integration test reads the original image through `aim_paths`, checks the
+SDK call signature/range registers and constant assignment without an
+intervening write or branch, and rejects a changed image implementation.
+SDK dependency/certificate CTS remains open (#800); this is provenance
+verification, not CTS acceptance.
+`scan::Inputs` now loads persisted active and disabled-system APK records
+without the original parser cache or feed, using physical scan-location
+flags and full signature verification. It retains native SPKI keys and
+returns contextual errors without mutating persistence. An explicitly run
+original-image integration test covers active/disabled GSF, nonstandard
+APK paths, v3 lineage, SPKI retention and missing-code errors. On a
+disposable original-PMS boot (2026-10-02, boot completed), all 243 active
+APK packages and five disabled system packages parsed and verified;
+all active certificates, scheme versions and lineages matched original
+persisted settings. Disabled originals do not persist their signatures.
+Settings launched successfully (warm, 90 ms). These inputs are not a
+reconciled query snapshot. APEX state stays separate for apexd verification,
+and new/removed image package reconciliation and publication remain
+unimplemented (#702).
+`scan::Image` now supplies image inputs for a first boot without settings.
+It follows the pinned partition capabilities and scan-directory order,
+inherits each active APEX's preinstalled partition and factory/change
+metadata from the owner, retains duplicate declarations for reconciliation,
+and rejects a missing framework package. Parser features not implemented
+and signature failures abort the candidate; malformed system-directory
+candidates retain their failure reasons. On a disposable original-PMS
+boot (2026-10-02, boot completed), all 243 image APK candidates parsed and
+verified. Their manifest names match all 243 system packages from
+`pm list packages -s -f --match-libraries`; every non-updated system APK
+path matches, while five updates run from data. Five directories without
+APKs are retained as rejected. Settings started successfully (warm,
+126 ms). Explicit integration tests use original APKs to check discovery
+without settings, ordering, duplicate names, stage exclusion and
+empty/absent framework failure. The records do not allocate UIDs or
+publish a reconciled snapshot (#702).
+The native UID-slot owner (`owner::app_ids::AppIds`) restores active
+package and shared-user identities without modifying persisted settings;
+disabled originals do not register again. The sparse map retains the
+pinned AppIdSettingMap's array extent and deletion cursor, including its
+runtime restriction on reusing deleted IDs and fresh-restoration holes.
+An explicitly run original-runtime test matches allocation, deletion,
+ownership replacement and exhaustion. On its disposable original-PMS
+boot (boot completed), all 243 active packages and 16 shared UID groups
+restored with their saved IDs. Java API linkage and 159 package unit tests
+pass. `owner::shared_users::Bootstrap` now seeds the nine pinned platform
+shared users and the valid OEM declarations with fixed IDs and
+system/privileged flags (#803). Rejected OEM names, ranges and slot
+conflicts retain their reasons. SystemConfig reads `oem-defined-uid`
+regardless of partition allow bits, applies later-name replacement and
+preserves ArrayMap's signed hash order and stable collision ties. Malformed
+declarations retain their file, raw attributes and rejection reason. An
+explicit original-runtime test compares the same disposable XMLs with
+original SystemConfig, covering invalid/missing attributes, replacements,
+signed integer limits and Arabic/fullwidth digits. Retained saved platform
+groups match the seed IDs; the original prunes unused seeds after scanning.
+`Bootstrap::restore` merges decoded settings with the initial groups,
+preserving seeded flags and saved signing details. Post-reconciliation
+pruning retains active and disabled-only members, removes empty groups and
+updates the UID owner's deletion cursor. An explicit disposable
+original-PMS boot (2026-10-02, boot completed) restores all 243 active
+package IDs; after pruning, all 16 group names, IDs and signing records
+match the original saved settings. Unit tests cover flags, memberships,
+disabled-only members, snapshot/input immutability and cursor behavior;
+all 159 package unit tests pass. Conflicting decoded settings fail with
+context; ordered recovery from corrupt raw Settings
+records remains pending (#803). `scan::UidScan` now prepares UID
+ownership from fully parsed and verified system-directory Code inputs.
+Saved names retain their IDs and manifest groups; duplicate image names
+reuse the same identity. New packages join an existing manifest group or
+create it with Settings' zero initial flags, while new leaving packages
+receive independent UIDs. Static-library names use the selected version
+suffix. `Bootstrap::get_shared_user` preserves existing groups/flags and
+creates a new group only after UID allocation succeeds. Lookup without
+creation, exhausted allocation, older snapshots and rejected transitions
+remain unchanged. Disabled/original-package metadata adoption and changed
+saved groups reject explicitly (#804). All 159 package unit tests, six
+explicit original-APK scan tests and four original-image DEX policy tests
+pass. The DEX policy test pins group creation and package registration
+branches, including the original insufficient-storage error and cleanup
+and empty-group removal guards. UID preparations now track pending members.
+After reconciliation, accept_uid retains their ownership; reject_pending
+removes only a rejected independently allocated package slot and advances
+the original allocation cursor. A rejected shared member loses its candidate
+membership while its group slot survives until final pruning. Restored and
+accepted identities remain intact; a changed slot owner rejects cleanup.
+Final pruning requires all preparations resolved and retains accepted active
+or saved disabled members. Six explicit native scan tests include verified
+GSF input rejected, pruned and retried under the next UID. All 159 package
+unit tests and four original-image DEX policy tests pass. These are UID
+candidates; complete new PackageSettings, new-member signing reconciliation,
+full pipeline failure/side-effect cleanup, persistence and query publication
+remain under #702, #803 and #798. Saved signing reconciliation and UID conversion
+persistence are verified below.
+`scan::Identity` now selects manifest, internal and real names using the
+pinned static-library suffix and authorized original-package system rename
+rules (#804). Persisted scan inputs compare the selected internal name
+with Settings and reject mismatches. Full signature verification alone
+does not authorize a saved package identity/UID. An explicit disposable
+original-PMS boot (2026-10-02, boot completed) reads the actual display
+density and native-parses/verifies all 243 active APKs plus disabled
+originals. Every active selected internal name and restored UID matches
+the original saved state; static library internal names differ from their
+manifest names as the original records. Original-image scan-input tests
+cover a different saved name pointing at a valid signed APK and preserve
+input settings on failure. After signature verification, Identity::apply
+now follows original PackageImpl.setPackageName: the package and all
+seven component kinds get the selected internal owning name; manifest,
+class and process names retain their parsed values. An explicit original
+runtime fixture fills the ComponentName cache before renaming and compares
+all seven kinds, their recomputed ComponentNames and unchanged name fields
+with native records. Java linkage verification and all explicit
+scan/runtime tests pass. All 159 package unit tests pass, and every active
+parsed package carries its selected internal name.
+`sign::History` now follows pinned SigningDetails certificate relationship
+rules: lineage capabilities, strict/existing ancestors and exact
+multi-signer matches. Its normal existing-package gate accepts installed
+data capability or reverse rollback capability; an owner-authorized
+rollback also accepts a previous ancestor. An explicit original-runtime
+matrix compares all 486 combinations of nine histories and six capability
+masks, including unknown details, revoked lineage rights, signer ordering
+and rollback direction. Every result matches original SigningDetails.
+The disposable original-PMS boot (2026-10-02, boot completed) native-parses
+and fully verifies all 243 active APKs; their verified histories all pass
+the normal existing-package gate against saved certificates. All 148
+package unit tests and Java linkage pass. The shared UID join gate
+distinguishes new installs, updates and system scans, honors revoked
+lineage capabilities and checks every existing member for new installs.
+An explicit original-runtime matrix of 2,187 candidate/group/member/join
+type combinations matches PackageManagerServiceUtils; every active shared
+UID APK on that boot passes the update join gate against its saved group.
+`has_common_ancestor` rejects histories that diverge before their shared
+signer. An explicit original-runtime comparison matches all 144 pairs of
+12 histories, including partial lineages, equal current signers with
+different ancestors, unknown details and multiple signers. After APK
+integrity verification, `scan::Inputs::load` now applies normal saved
+package, known disabled-system and saved shared UID membership/divergence
+signature gates. All 243 active packages pass that connected path on the
+disposable original-PMS boot. Explicit original-image tests reject a
+fully signed GSF APK against unrelated package/disabled-system saved
+certificates without changing settings. `SigningDetails::merge_lineage_with`
+now joins compatible partial histories with self/other/restricted capability
+rules, preserving the unchanged-instance signal. The shared UID owner
+merges an authorized candidate, then applies restricted capabilities from
+other parsed members only if that first merge changed the group. An
+explicit original-runtime matrix with real DER certificates matches 507
+two-history merges and 2,197 group/candidate/member merges: signer order,
+capabilities, scheme version, key count and changed signal all match. All
+16 restored groups retain their original saved signatures after merging
+the verified active members. Invalid saved certificates fail without
+changing the group. The shared UID owner now preserves per-scan
+`signaturesChanged`: normal reconciliation sets false only when unset;
+commit initializes unknown signers; a physical-system signature failure
+may replace the first unchecked group signer, and later failures must pass
+the SYSTEM join rule. /data updates cannot use that exception even if
+FLAG_SYSTEM is saved. Inconsistent later system members reject at first
+API <=29 and raise a fatal system error above 29. An explicit original-
+image test pins inspected ReconcilePackageUtils and Settings commit DEX,
+including these branches and null-signer initialization. All three explicit
+native scan tests pass; real GSF/platform certificates check initialization,
+first/later OTA replacements, /data rejection, snapshots and error
+atomicity. Scan records retain physical origin for this policy.
+`scan::SigningScan` now connects normal authorization, shared lineage
+merging, OTA state and initial signer commit for already-saved APKs in
+caller-supplied order. The pinned manifest selector retains a declared
+shared group for an existing member even while leaving; it ignores a leaving
+declaration after the saved package has become independent. Changed or
+removed groups are rejected before OTA signature exceptions because this
+saved-identity phase cannot allocate replacement UID ownership (#804).
+Candidate settings preserve saved UID/metadata;
+package/group signing state changes only after all fallible work succeeds,
+and later rejection or fatal mismatch leaves earlier candidate commits
+intact. `Inputs::load_verified_code` supplies integrity-verified code for
+this owner phase; its records do not grant saved signer/UID authorization.
+Six explicit native scan tests pass, including initial/OTA sequences and
+/data, origin and UID-change rejection, missing/changed manifest groups,
+and retained versus already-left shared UID declarations. The OTA sequence
+uses an explicitly synthetic signer candidate with an unchanged manifest.
+On a disposable original-PMS boot
+all 243 active saved APKs pass SigningScan in supplied persisted-record
+order. Package metadata and all 16 saved group signing/UID records survive;
+verified serialized keys are supplied for package records. This is not
+the complete image/data scan order or query-snapshot publication. Candidate shared UID migration now implements the
+pinned single-user conversion: an accepted active member must be leaving,
+and at most one disabled version may remain, itself parsed and leaving.
+With the image's BEST_EFFORT policy selected explicitly, both versions
+become independent under the same app ID, the group is removed, and the
+UID-slot owner becomes the package without moving the allocation cursor.
+NEW_INSTALL_ONLY remains the default and leaves existing groups intact.
+Six explicit scan tests cover unparsed/non-leaving members, absent or
+non-leaving disabled code, multiple members, policy selection, unchanged
+metadata, snapshots and preserved allocation. An original-image DEX test
+pins the three inspected eligibility/conversion methods. `Store::commit_shared_uid_migrations` now persists owner-authorized
+single-member conversions together with signing state. It switches active
+and disabled records from sharedUserId to the same numeric userId, removes
+the group, and rebuilds certificate definitions/references after removal.
+Unrelated XML nodes and package metadata survive; partial conversions,
+remapped IDs, empty/multiple-member group deletion and cleared retained
+signers reject before writing. All 159 package unit tests pass. A real
+signed APK fixture is installed and updated by original PMS, native-parsed
+and integrity-verified, reconciled and migrated under BEST_EFFORT, then
+written while that disposable original PMS is stopped. On reboot original
+PMS retains the migrated UID (10213 in the recorded run), all 244 package
+UID/signature records and the other 16 groups; Settings launches. Main and
+reserve bytes match and owned data/process cleanup completes. The signed fixture now requests READ_CONTACTS and READ_CALENDAR. Original
+permissionmgr grants contacts with USER_SET and denies calendar with
+USER_SET/USER_FIXED; original AppOps sets RUN_IN_BACKGROUND to ignore.
+The test waits for those exact flags/mode in AccessPersistence before
+stopping its owner. Native package persistence leaves access.abx bytes and
+its decoded state unchanged. Original reboot preserves the complete fixture
+app ID permission flags and AppOps modes, and original permissionmgr and
+AppOps queries confirm the grant, fixed denial and ignore mode. These
+Android 16 states remain attached to the same numeric app ID during the
+conversion. Live permission-owner notifications/package feed, publication,
+complete native boot and CTS remain under #803, #798 and #702.
+`Store::commit_signatures` now persists package/group certificate and
+lineage capability state in the retained packages.xml document. It emits
+ABX with document-wide certificate definitions/references and the existing
+backup/reserve/inode protocol, preserving unrelated attributes and nodes.
+Serialized public keys remain in the scan snapshot; packages.xml stores
+certificates. Metadata changes, cleared retained identities, duplicate/
+unmodelled owners and external document changes reject before commit.
+All 159 package unit tests pass. The disposable original-PMS runtime test
+wrote all 243 active package and 16 group signing records into a separate
+native-owned fixture; native re-read matches complete persisted settings
+and main/reserve bytes match. Its live original-PMS data was not written.
+Original PackageSignatures.readXml now reads that native file; all 259
+signature owners match certificate bytes, scheme version, lineage
+capability flags and derived key counts. A separate explicit two-boot
+test stops original PMS, mounts its own stopped data volume, writes native
+signature persistence, detaches and restarts original PMS. Both boots
+complete; all 243 package and 16 shared UID signing/UID records survive,
+no signature XML read error is logged and Settings launches (`Status: ok`).
+This verifies original-reader and reboot compatibility of signature
+persistence. Complete package-state persistence/publication remains
+pending (#798). New/removed package
+reconciliation, boot wiring and an actual OTA boot remain pending
+(#702, #803, #805). Legacy certificate compatibility/recovery,
+upgrade keysets, owner-authorized rollback, full UID reconciliation and
+snapshot publication remain unimplemented (#804). These normal signature
+gates and merge primitives do not activate C.
+The pinned Settings
+DEX compiles out the SDK/no-ID exception in the source: SDK libraries
+require a positive app/shared-user ID (#802). An explicit original-image
+test pins the inspected read/registration control flow, and native reader
+and restoration tests cover negative/zero/positive/shared ownership.
+Verified SPKI keys now become the pinned runtime's Serializable public
+keys for native query records (#738). An explicitly run disposable-boot
+integration test compares six RSA/EC/DSA serialization streams byte for
+byte, reads the native streams through the original ObjectInputStream,
+and verifies ArraySet's signed hash ordering and key deduplication. The
+complete native GSF SigningInfo parcel matches an actual original-PMS
+`getPackageInfo(GET_SIGNING_CERTIFICATES)` reply, including the rotation
+lineage. The runtime uses Conscrypt/Bouncy Castle class layouts; its
+BigInteger serialized cache fields differ from the host JDK's. Java API
+linkage verification passes. These checks complete public-key reply
+serialization, not native PMS activation or CTS acceptance.
+`Selection::files` assembles the provider's base/split paths followed by
+its already-resolved transitive files, preserving first occurrence.
+Tests cover ordering, missing/optional dependencies, SDK policy,
+certificate validation and duplicate files. `Registry::resolve` computes
+an acyclic provider graph into a separate candidate, resolving provider
+file paths before consumers, copying nested APK dependency records and
+applying static-library installation for direct consumers' installed
+users. Built-in library paths do not become APK dependency edges, matching
+`addSharedLibraryLPr`. Tests check multihop paths, nested records, user
+effects and unchanged inputs on failure. Cyclic provider scan/update
+order is explicitly unsupported (#799); this is not an Android install
+error. Policy wiring, scan/update integration, the native scan and #707's CTS
+acceptance still remain; declaration records are not yet served as full
+shared-library query results.
+
+The split asset loader prerequisite in `parse::resources` now compares
+matching resource configurations across all supplied APK tables instead
+of stopping at the first table. It combines all type-spec change flags,
+including nonmatching configurations, and retains the first ordinary APK
+on a configuration tie, as pinned `AssetManager2` does. This is tested
+with base/language-split tables. Nonisolated cluster parsing validates
+package/version and split names, orders splits by name and merges their
+application manifests. Split type names are validated as `ApkLite` does;
+install-time type requirements remain the install owner's responsibility.
+An explicitly run integration test compiles base/feature/config APKs with
+the pinned aapt2 and checks the merged components, class loader, split
+fields and cache serialization, plus rejection of malformed clusters.
+On a disposable original-PMS boot (2026-10-02, boot completed), native
+output matches all 288 scan cache entries byte for byte, including the
+system GMS/Play Store packages. Isolated loading now builds the pinned
+`SplitDependencyLoader` tree, rejects missing targets, config targets that
+are not features and cycles, and serializes the tree in the original
+sparse-array format. Each feature's assets include its ancestors and their
+configuration splits, then its own APK and configuration splits; sibling
+feature assets are excluded. Config-only split parsing uses its own APK,
+as `SplitAssetDependencyLoader` does. The compiled integration test covers
+feature dependencies, config targeting, serialization and malformed trees;
+a unit test checks the asset scopes. Installed GMS parses, but its complete
+parcel comparison against the original is still pending (#760).
 
 **Who writes what, by slice:**
 
@@ -577,7 +944,28 @@ reads both.
   state then moves after the switch, through the seam permissions.md
   describes, with no second package feed: the facade's replica is the
   feed. This amends #616's order: the access state follows M4's switch
-  rather than landing in it.
+  rather than landing in it. The private bootstrap bridge now exposes the
+  original `LegacyPermissionDataProvider.getLegacyPermissionState(appId)` over
+  an explicitly resolved user inventory, including pre-created users. Its
+  detached native projection and original-object reconstruction preserve
+  missing state, nullable names, original hash/collision order, runtime/grant
+  bits and signed API flags. Native Binder tests cover failure/replacement/death;
+  an explicit original ART codec/copy oracle verifies transport and isolation.
+  These are separate checks, not a live SystemServer query. This exporter is
+  distinct from `SettingBase`'s legacy migration input: on this image the original
+  AccessCheckingService's `writeLegacyPermissionStateTEMP` is empty. Resolving
+  boot order and actual user/shared UID restoration/import remain #858/#836.
+  A distinct native `Migration` owner now implements the original migration
+  readers, user/name/missing/reset behavior and detached copies. Explicit
+  active/factory/shared owners with resolved users can be assigned to SigningScan;
+  Store rejects stale owner inventories and retains earlier versions. Setting
+  pages carry the migration projection, and Java reconstructs detached original
+  LegacyPermissionState objects. An unresolved owner is represented explicitly
+  and its getter fails rather than supplying an empty state. Native Binder and
+  original ART tests verify capture/reconstruction/copy isolation and 16 text/ABX
+  pinned reader-loop ports using original parsers/owners. Actual Settings boot
+  restoration, original import/live producers,
+  callbacks and complete PackageState/SharedUserApi export remain #858/#836.
 - **Users.** UserManagerService is built by PMS's injector (D2).
 - **The original keeps running until parity.** Slices A and B change no
   answer an app or system_server gets. Slice C replaces the original
@@ -609,8 +997,9 @@ nothing.
   `PackageUserState` getters, signing, the install source of
   `getInstallSourceInfo`, the domain verification state, the installed
   permission definitions, gids and granted permissions), each parsed
-  package as `PackageCacher.toCacheEntryStatic` writes it (sent again only
-  when the original holds another `AndroidPackage`), each shared user,
+  package as `PackageCacher.toCacheEntryStatic` writes it inside that same
+  snapshot (sent again when its content hash changes, even if the original
+  retains the same mutable object), each shared user,
   each user's preferred activities (`getPreferredActivityBackup`, in
   full) and AppsFilter's configuration, a large record in chunks. A batch
   sends what differs from what the host holds and ends with the SHA-256
@@ -672,7 +1061,12 @@ owner without side effects, and compared with the original's outcome.
   Modelled: setComponentEnabledSetting and setApplicationEnabledSetting
   (not yet a caller changing another package, #754), installs and
   updates (app id, shared user, users' state; not yet signing and
-  libraries), removals for every user and for some users. Not yet: the
+  libraries), removals for every user and for some users. The APK signature
+  adapter now verifies the parsed base/split paths directly, supporting
+  file inputs and cluster base names other than `base.apk` (#801). It
+  rejects null/unreadable paths; an original signed APK test checks both
+  nonstandard base/split guest paths and its v3 signing lineage without
+  altering the original. Not yet: the
   parser's oracle on installs (#760), restoring a system package,
   suspension, preferred activities.
 - The parser's oracle runs here too: every APK the original parses
@@ -712,13 +1106,18 @@ results per module are the baseline each slice is held to. By kind:
 
 | Slice | Device-side (run today with `am instrument`) | Host-side (Tradefed) |
 | --- | --- | --- |
-| A | CtsContentTestCases (`android.content.pm.cts`), CtsPackageManagerTestCases, CtsAppEnumerationTestCases, CtsDomainVerificationDeviceStandaloneTestCases (#618), CtsSuspendAppsTestCases, CtsShortcutManagerTestCases, CtsInstantAppTests, CtsHibernationTestCases | CtsPackageManagerParsingHostTestCases, CtsPackageManagerPreferredActivityHostTestCases, CtsPackageSettingHostTestCases |
+| A | CtsPackageManagerTestCases, CtsAppEnumerationTestCases, CtsDomainVerificationDeviceStandaloneTestCases (#618), CtsSuspendAppsTestCases, CtsShortcutManagerTestCases, CtsInstantAppTests, CtsHibernationTestCases | CtsPackageManagerParsingHostTestCases, CtsPackageManagerPreferredActivityHostTestCases, CtsPackageSettingHostTestCases |
 | B | CtsPackageInstallTestCases, CtsPackageInstallSessionTestCases, CtsAtomicInstallTestCases, CtsPackageUninstallTestCases, CtsPackageInstallAppOpDefaultTestCases, CtsPackageInstallAppOpDeniedTestCases, CtsAdminPackageInstallerTestCases, CtsSecureFrpInstallTestCases, CtsPackageInstallerTapjackingTestCases, the eight CtsPackageInstallerCUJ* modules | CtsPackageManagerHostTestCases, CtsAppSecurityHostTestCases, CtsInstallHostTestCases, CtsUsesLibraryHostTestCases, CtsClassloaderSplitsHostTestCases, CtsDexMetadataHostTestCases, CtsAppMetadataHostTestCases, CtsInstantAppsHostTestCases |
 | C | all of the above, CtsSuspendAppsPermissionTestCases, CtsDomainVerificationDeviceMultiUserTestCases, CtsRollbackManagerTestCases, CtsPackageWatchdogTestCases, the permission modules of permissions.md, CtsOsTestCases | CtsApexTestCases, CtsStagedInstallHostTestCases, CtsRollbackManagerHostTestCases, CtsOverlayHostTestCases, CtsShortcutHostTestCases, CtsCompilationTestCases, CtsDomainVerificationHostTestCases, CtsIncrementalInstallHostTestCases, CtsInstalledLoadingProgressHostTests, CtsPackageManagerStatsHostTestCases, CtsPackageManagerIncrementalStatsHostTestCases, CtsPackageManagerMultiUserHostTestCases |
 
-Of these 52 modules 22 are host-side, and no host-side module runs
-against this device today (#701): most of PackageManager's install,
-signing and parsing coverage is there, so C needs them.
+The verified relevant C inventory is 23 host-side modules plus 43 device
+modules after expanding the eight CUJ names and the deduplicated permission
+modules, for 66 modules. All 23 host configs use `HostTest` or `JarHostTest`;
+42 device configs use `AndroidJUnitTest` and one uses `GTest`. The former
+52-total/22-host counts were inaccurate (#1063). Android 16 r1 moved
+`android.content.pm.cts` out of `CtsContentTestCases`, so that unrelated module
+is not expanded for this PM gate. All required release inputs are now pinned;
+native C results remain unrun (#701).
 
 **App checks**, each slice: the integration gate; Settings (app info,
 storage, default apps, the app list's permissions); Chrome and WebView
@@ -793,17 +1192,38 @@ configs install or push are pinned in `upstream/cts.lock`.
 | CtsPackageInstallerCUJ{Installation, InstallationViaIntentForResult, InstallationViaSession, Uninstallation, UpdateOwnerShip, UpdateSelf}TestCases, CtsPackageInstallerTapjackingTestCases | PackageInstaller's user journeys | 55, 27, 20, 14, 28, 16, 2 |
 | CtsShortcutManagerTestCases | `shortcut` and `launcherapps` | about 76 (JUnit 3) |
 
-Not pinned: CtsSecureFrpInstallTestCases (its config pushes
-`TestAppAv1.apk`, which the release does not contain);
-CtsPackageInstallerCUJDeviceAdminTestCases and
-CtsAdminPackageInstallerTestCases (a device owner);
-CtsPackageInstallerCUJMultiUsersTestCases and
-CtsDomainVerificationDeviceMultiUserTestCases (a secondary user);
-CtsRollbackManagerTestCases, CtsPackageWatchdogTestCases and
-CtsHibernationTestCases (services next to PackageManager, for slice C).
+**Input inventory (2026-10-08).** The explicit PM device cohort (the eight
+CUJ modules included) and the deduplicated modules from permissions.md now
+cover 43 modules: 42 `AndroidJUnitTest` configs and the native
+`CtsPermissionManagerNativeTestCases` `GTest` config. Their arm64
+instrumentation APKs, module-local helpers, explicit file dependencies and
+native GTest bitness inputs account for 934 official archive paths (846
+unique cache filenames). Together with the existing inputs for other service
+gates, `upstream/cts.lock` now has 1,065 verified pins. No module has acquired
+a native C pass from this preparation.
+
+Secure FRP's official test APK includes `TestAppAv1.apk` as an install-library
+resource; its standalone FilePusher stanza is commented out. The previous
+"missing helper" input rationale was wrong (#1087); no APK rebuild or
+modification is needed. The device-owner and secondary-user modules now have
+their release inputs, while their device setup and results still need actual
+validation. `CtsContentTestCases` is not expanded for this PM cohort: its
+`android.content.pm.cts` classes moved to `CtsPackageManagerTestCases` in
+Android 16 r1.
+
 The host-side modules of section 5's CTS table (Tradefed `HostTest`
-and `JarHostTest`) need an adb transport and a Tradefed host, which the
-runner below does not have (#701).
+and `JarHostTest`) use the adb/Tradefed runner in [cts.md](cts.md).
+The pinned harness now covers all 23 host modules explicitly listed in
+section 5, with complete module directories and explicit config file
+dependencies: 375 module files, eight harness entries and the shared
+BackupPreparer dependency. All 384 host/shared pins and 1,065 device-input pins
+have verified hashes. Native C69 ParsingHost completes with 11 passes and no
+failures; later PreferredActivity and PackageSetting replays expose owner gaps
+tracked in GitHub and current evidence is recorded in boot-status.md. A complete
+66-module original/native campaign remains unrun (#701); historical single-module
+results do not establish acceptance of a later source/image cohort. The verified
+expanded device/permission inventory resolves the former count discrepancy in
+#1063.
 
 **Run.** On a first boot of a new data directory in window mode, each
 module as its Tradefed config prepares it: the config's commands and

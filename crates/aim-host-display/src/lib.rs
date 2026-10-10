@@ -22,11 +22,10 @@ pub mod shell;
 pub mod windows;
 pub mod wire;
 
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-use std::os::unix::net::UnixStream;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use aim_storage::{private_fd::PrivateFd,socket_inode::Receipt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use aim_hostcall::display::{
     Buffer, Connect, Cursor, FN_CONNECT, FN_CURSOR, FN_IMPORT, FN_LAYERS, FN_PRESENT, FN_RELEASE,
@@ -51,7 +50,12 @@ pub fn set_server(socket: &Path) {
 }
 
 /// The module's end of the connection, for requests.
-static CONNECTION: Mutex<Option<OwnedFd>> = Mutex::new(None);
+pub struct Hooks{pub allocated:fn(BorrowedFd<'_>)->Result<Receipt,i32>,pub publish:fn(BorrowedFd<'_>,Receipt)->Result<i32,i32>}
+static HOOKS:OnceLock<Hooks>=OnceLock::new();
+pub fn set_hooks(hooks:Hooks){let _=HOOKS.set(hooks);}
+struct NativeStream{fd:PrivateFd,receipt:Receipt}
+impl AsFd for NativeStream{fn as_fd(&self)->BorrowedFd<'_>{self.fd.as_fd()}}
+static CONNECTION: Mutex<Option<NativeStream>> = Mutex::new(None);
 
 fn neg(e: i32) -> i64 {
     -(e as i64)
@@ -91,16 +95,31 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
     r.unwrap_or_else(|e| e)
 }
 
+fn private_connect(path:&Path)->std::io::Result<PrivateFd>{
+    use std::os::unix::ffi::OsStrExt;
+    let bytes=path.as_os_str().as_bytes();let mut address:libc::sockaddr_un=unsafe{std::mem::zeroed()};
+    if bytes.contains(&0)||bytes.len()>=address.sun_path.len(){return Err(std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));}
+    address.sun_family=libc::AF_UNIX as u8;address.sun_len=(2+bytes.len()+1)as u8;
+    for(out,byte)in address.sun_path.iter_mut().zip(bytes){*out=*byte as libc::c_char;}
+    let descriptor=PrivateFd::allocate(||{let fd=unsafe{libc::socket(libc::AF_UNIX,libc::SOCK_STREAM,0)};if fd<0{return Err(std::io::Error::last_os_error());}let fd=unsafe{OwnedFd::from_raw_fd(fd)};if unsafe{libc::fcntl(fd.as_raw_fd(),libc::F_SETFD,libc::FD_CLOEXEC)}<0{return Err(std::io::Error::last_os_error());}Ok(fd)})?;
+    // Only allocation/adoption holds the descriptor lifecycle admission.
+    if unsafe{libc::connect(descriptor.as_raw_fd(),(&address as *const libc::sockaddr_un).cast(),address.sun_len as libc::socklen_t)}<0{return Err(std::io::Error::last_os_error());}
+    Ok(descriptor)
+}
+
 /// Connect to the server, send `hello` and read its answer.
-fn open<T: Copy + Default>(hello: &Request) -> Result<(UnixStream, T), i64> {
+fn open<T: Copy + Default>(hello: &Request) -> Result<(NativeStream, T), i64> {
     let path = SERVER.get().ok_or(neg(errno::ENODEV))?;
-    let stream = UnixStream::connect(path).map_err(|_| neg(errno::ECONNREFUSED))?;
+    let hooks=HOOKS.get().ok_or(neg(errno::ENODEV))?;
+    let stream=private_connect(path).map_err(|_|neg(errno::ECONNREFUSED))?;
+    let receipt=(hooks.allocated)(stream.as_fd()).map_err(neg)?;
+    let stream=NativeStream{fd:stream,receipt};
     // A write after the server has gone must fail, not raise SIGPIPE.
     let on: libc::c_int = 1;
     // SAFETY: setsockopt on our socket with a local int.
     unsafe {
         libc::setsockopt(
-            stream.as_raw_fd(),
+            stream.fd.as_raw_fd(),
             libc::SOL_SOCKET,
             libc::SO_NOSIGPIPE,
             (&on as *const libc::c_int).cast(),
@@ -108,12 +127,12 @@ fn open<T: Copy + Default>(hello: &Request) -> Result<(UnixStream, T), i64> {
         )
     };
     // The server answers at once; a hung one must not hang the guest.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let timeout=libc::timeval{tv_sec:5,tv_usec:0};unsafe{libc::setsockopt(stream.fd.as_raw_fd(),libc::SOL_SOCKET,libc::SO_RCVTIMEO,(&timeout as *const libc::timeval).cast(),size_of::<libc::timeval>()as libc::socklen_t); }
     match wire::send(stream.as_fd(), wire::bytes(hello), None)
         .and_then(|()| wire::recv_record::<T>(stream.as_fd()))
     {
         Ok(Some(answer)) => {
-            let _ = stream.set_read_timeout(None);
+            let timeout=libc::timeval{tv_sec:0,tv_usec:0};unsafe{libc::setsockopt(stream.fd.as_raw_fd(),libc::SOL_SOCKET,libc::SO_RCVTIMEO,(&timeout as *const libc::timeval).cast(),size_of::<libc::timeval>()as libc::socklen_t);}
             Ok((stream, answer))
         }
         _ => Err(neg(errno::ECONNREFUSED)),
@@ -121,13 +140,9 @@ fn open<T: Copy + Default>(hello: &Request) -> Result<(UnixStream, T), i64> {
 }
 
 /// A guest fd for our end of `stream`; we keep the original.
-fn give_to_guest(stream: &UnixStream) -> Result<i64, i64> {
-    // SAFETY: fcntl on a fd we own; the guest owns the duplicate.
-    let guest = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if guest < 0 {
-        return Err(neg(errno::ENODEV));
-    }
-    Ok(guest as i64)
+fn give_to_guest(stream:&NativeStream)->Result<i64,i64>{
+    let hooks=HOOKS.get().ok_or(neg(errno::ENODEV))?;
+    (hooks.publish)(stream.as_fd(),stream.receipt).map(|fd|fd as i64).map_err(neg)
 }
 
 fn connect(out: &mut Connect) -> i64 {
@@ -143,7 +158,7 @@ fn connect(out: &mut Connect) -> i64 {
             display: out.display,
             ..info
         };
-        *CONNECTION.lock().unwrap() = Some(stream.into());
+        *CONNECTION.lock().unwrap() = Some(stream);
         Ok(guest)
     });
     r.unwrap_or_else(|e| e)
@@ -212,7 +227,7 @@ fn present(p: &mut Present) -> i64 {
     // The server has its own copy of the writer now.
     drop(writer);
     if r == 0 {
-        p.present = aim_sync_file::give_to_guest(fence);
+        p.present = match aim_sync_file::give_to_guest(fence){Ok(fd)=>fd,Err(error)=>return neg(error)};
     }
     r
 }
@@ -291,7 +306,7 @@ fn layers(f: &mut Layers) -> i64 {
     if ok.is_err() {
         return neg(errno::ENOTCONN);
     }
-    f.present = aim_sync_file::give_to_guest(fence);
+    f.present = match aim_sync_file::give_to_guest(fence){Ok(fd)=>fd,Err(error)=>return neg(error)};
     0
 }
 

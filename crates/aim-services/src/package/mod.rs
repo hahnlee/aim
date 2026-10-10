@@ -9,26 +9,88 @@
 //! `android-16.0.0_r1`.
 
 pub mod apps_filter;
+pub mod application_data;
+pub mod install_verification;
+pub mod legacy_domain_mutation;
+pub mod legacy_domain_routes;
+pub mod bootstrap;
 pub mod component_resolver;
+pub mod domain_verification;
+pub mod diagnostics;
+pub mod dump;
+pub mod dexopt_completion;
+pub mod diagnostics_storage;
+pub mod feed;
+pub mod info;
+pub(crate) mod list_slice;
+pub mod installer;
+pub mod installer_attribution;
+pub mod instant_components;
+pub mod instant;
+pub mod uri_access;
+pub mod user_policy;
+pub mod security_policy;
+pub mod archive;
+pub mod permission_groups;
+pub mod hold_lock;
+pub mod launch;
+pub mod app_metadata;
+pub mod lifecycle;
 pub mod intent;
 pub mod intent_filter;
-pub mod info;
 pub mod intent_resolver;
-pub mod feed;
+pub mod keysets;
+pub mod libraries;
+mod library_parcel;
 pub mod list;
 pub mod model;
+pub mod moves;
+pub mod move_package;
+pub mod module_metadata;
+pub mod mutations;
+pub mod user_operations;
+pub mod internal_host;
+pub mod internal_mutation_record;
+pub mod internal_mutation_apply;
+pub mod mutation_reservation;
+pub mod diagnostic_inputs;
+pub mod observers;
+pub mod boot_captures;
+pub mod boot_image;
+pub mod boot_configuration;
+pub mod boot_session;
+pub mod web_instant_state;
+pub mod early_user_operations;
+pub mod kernel_mappings;
+pub mod mutation_producers;
+pub mod owner;
+pub mod page_size_compat;
 pub mod parse;
+pub mod permissions;
 pub mod pkg;
 pub mod preferred;
+pub mod policies;
+pub mod effects;
+pub mod changes;
+pub mod customization;
+pub mod suspension;
+pub mod mutation_dispatch;
 pub mod query;
+pub mod registry;
 pub mod reply;
-pub mod permissions;
 pub mod resolve;
+pub mod resolver_owner;
 pub mod restrictions;
+pub mod roles;
+pub mod scan;
+pub mod scan_snapshot;
+pub mod service;
 pub mod settings;
 pub mod sign;
 pub mod system_config;
+pub mod timsort;
 pub mod uri;
+pub mod users;
 pub mod write;
 
 use std::borrow::Cow;
@@ -75,15 +137,46 @@ impl State {
     /// `None` without settings, which makes the original's boot a first
     /// boot.
     pub fn read(data: &Path, users: &[u32]) -> Result<Option<State>, String> {
+        Self::read_with_config(data, users, &Default::default())
+    }
+
+    /// Image SystemConfig supplies OEM UID seeds before Settings restoration.
+    pub fn read_with_config(
+        data: &Path,
+        users: &[u32],
+        config: &system_config::SystemConfig,
+    ) -> Result<Option<State>, String> {
         let system = data.join("system");
         let Some(settings) = resilient(
             &system.join("packages.xml"),
             &system.join("packages-backup.xml"),
-            Settings::parse,
+            |root| Settings::parse_with_config(root, config),
         )?
         else {
             return Ok(None);
         };
+        Self::read_related(data, users, settings).map(Some)
+    }
+
+    fn read_related(data: &Path, users: &[u32], settings: Settings) -> Result<State, String> {
+        Self::read_related_mode(data, users, settings, true)
+    }
+
+    pub fn read_related_seeded(data:&Path,users:&[u32],settings:Settings,restore_package_users:bool,
+        seed:&settings::native_read::NativeRead)->Result<State,String>{
+        Self::read_related_native(data,users,settings,restore_package_users,Some(seed))
+    }
+    fn read_related_mode(
+        data: &Path,
+        users: &[u32],
+        settings: Settings,
+        restore_package_users: bool,
+    ) -> Result<State, String> {
+        Self::read_related_native(data,users,settings,restore_package_users,None)
+    }
+    fn read_related_native(data:&Path,users:&[u32],settings:Settings,restore_package_users:bool,
+        seed:Option<&settings::native_read::NativeRead>)->Result<State,String>{
+        let system = data.join("system");
         let list = journaled(&system.join("packages.list"))?
             .map(|text| list::parse(&text))
             .transpose()?
@@ -94,35 +187,63 @@ impl State {
         )?;
         let users = users
             .iter()
-            .map(|&user| Ok((user, read_user(data, user, &settings)?)))
+            .map(|&user| {
+                Ok((
+                    user,
+                    read_user(data, user, &settings, restore_package_users, seed.filter(|_| user == 0))?,
+                ))
+            })
             .collect::<Result<_, String>>()?;
-        Ok(Some(State {
+        Ok(State {
             settings,
             list,
             access,
             users,
-        }))
+        })
     }
 }
 
-fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String> {
+fn read_user(
+    data: &Path,
+    user: u32,
+    settings: &Settings,
+    restore_package_users: bool,
+    seed: Option<&settings::native_read::NativeRead>,
+) -> Result<User, String> {
     let dir = data.join("system/users").join(user.to_string());
-    let file = resilient(
-        &dir.join("package-restrictions.xml"),
-        &dir.join("package-restrictions-backup.xml"),
-        Restrictions::parse,
-    )?;
+    let file = if restore_package_users {
+        resilient(
+            &dir.join("package-restrictions.xml"),
+            &dir.join("package-restrictions-backup.xml"),
+            Restrictions::parse,
+        )?
+    } else {
+        None
+    };
     // A package the settings do not know is dropped, one the file does not
     // know has the default state; a first install time the file lacks is
     // the settings' legacy one.
     let legacy_times = file.is_some();
     let mut restrictions = file.unwrap_or_default();
+    if restrictions.default_browser.is_none(){restrictions.default_browser=seed.and_then(|seed|seed.default_browser_user_zero.clone());}
+    restrictions
+        .legacy_domain_states
+        .retain(|(name, _)| settings.packages.iter().any(|p| &p.name == name));
     let mut states: HashMap<String, UserState> = restrictions.packages.drain(..).collect();
     restrictions.packages = settings
         .packages
         .iter()
         .map(|p| {
-            let mut state = states.remove(&p.name).unwrap_or_default();
+            let mut state = states.remove(&p.name).unwrap_or_else(|| {
+                if let Some(state)=seed.and_then(|seed|seed.legacy_user_zero.get(&p.name)){return state.clone();}
+                if legacy_times {
+                    UserState::default()
+                } else if restore_package_users {
+                    UserState::initialized()
+                } else {
+                    UserState::default()
+                }
+            });
             if legacy_times && state.first_install_time == 0 {
                 state.first_install_time = p.legacy_first_install_time;
             }
@@ -136,13 +257,16 @@ fn read_user(data: &Path, user: u32, settings: &Settings) -> Result<User, String
     Ok(User {
         restrictions,
         access: atomic(&permissions.join("access.abx"), AccessUser::parse)?,
-        runtime_permissions: atomic(
-            &permissions.join("runtime-permissions.xml"),
-            RuntimePermissions::parse,
-        )?,
+        runtime_permissions: if restore_package_users {
+            atomic(
+                &permissions.join("runtime-permissions.xml"),
+                RuntimePermissions::parse,
+            )?
+        } else {
+            None
+        },
     })
 }
-
 /// `path`'s bytes; `None` when it does not exist.
 fn bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match fs::read(path) {
@@ -170,7 +294,7 @@ fn first<T>(
     let mut failed = Vec::new();
     for path in candidates {
         let Some(b) = bytes(path)? else { continue };
-        match aim_android_xml::read(&b).and_then(|root| parse(&root)) {
+        match aim_android_xml::read_next(&b).and_then(|root| parse(&root)) {
             Ok(v) => return Ok(Some(v)),
             Err(e) => failed.push(format!("{}: {e}", path.display())),
         }
@@ -279,21 +403,39 @@ mod tests {
   </shared-user>
   <renamed-package new="org.example.new" old="org.example.old" />
   <keyset-settings version="1">
-    <keys><public-key identifier="1" value="a2V5" /></keys>
+    <keys><public-key identifier="1" value="MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAIBVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVQMCAwEAAQ==" /></keys>
     <keysets><keyset identifier="1"><key-id identifier="1" /></keyset></keysets>
     <lastIssuedKeyId value="1" />
     <lastIssuedKeySetId value="3" />
   </keyset-settings>
+  <domain-verifications>
+    <active>
+      <package-state packageName="android" id="00000000-0000-0000-0000-000000000001" hasAutoVerifyDomains="true" signature="abc">
+        <state><domain name="example.com" state="1" /><domain name="other.com" state="2" /><domain name="example.com" state="4" /></state>
+        <user-states>
+          <user-state userId="0" allowLinkHandling="true"><enabled-hosts><host name="example.com" /><host name="example.com" /><host name="" /></enabled-hosts></user-state>
+          <user-state allowLinkHandling="true" />
+        </user-states>
+        <uri-relative-filter-groups>
+          <domain name="example.com"><uri-relative-filter-group action="1"><uri-relative-filter uri-part="1" pattern-type="0" filter="/path" /></uri-relative-filter-group></domain>
+        </uri-relative-filter-groups>
+      </package-state>
+    </active>
+    <restored><package-state packageName="org.example.app" id="00000000-0000-0000-0000-000000000002" hasAutoVerifyDomains="false" /></restored>
+  </domain-verifications>
+  <domain-verifications-legacy>
+    <user-states packageName="android"><user-state userId="0" state="2" /><user-state userId="10" state="3" /><user-state userId="0" state="4" /></user-states>
+  </domain-verifications-legacy>
 </packages>
 "#;
 
     const RESTRICTIONS: &str = r#"<package-restrictions>
-  <pkg name="android" ceDataInode="5" />
+  <pkg name="android" ceDataInode="5" domainVerificationStatus="2" />
   <pkg name="org.example.app" ceDataInode="9181" deDataInode="9203" stopped="true" nl="true" enabled="3" enabledCaller="shell:1000" install-reason="4" first-install-time="2b" blockUninstall="true">
     <enabled-components><item name="org.example.app.A" /></enabled-components>
     <disabled-components><item name="org.example.app.B" /><item name="org.example.app.B" /></disabled-components>
   </pkg>
-  <pkg name="org.example.unknown" />
+  <pkg name="org.example.unknown" domainVerificationStatus="3" />
   <preferred-activities />
   <default-apps><default-browser packageName="org.example.app" /></default-apps>
 </package-restrictions>
@@ -392,7 +534,11 @@ mod tests {
             };
             fs::write(path, bytes).unwrap();
         };
-        write("system/packages.xml", PACKAGES, binary);
+        write(
+            "system/packages.xml",
+            std::str::from_utf8(&super::test_certificates::xml(PACKAGES.as_bytes())).unwrap(),
+            binary,
+        );
         write(
             "system/users/0/package-restrictions.xml",
             RESTRICTIONS,
@@ -428,6 +574,29 @@ mod tests {
         }
 
         let s = &state.settings;
+        let domains = &s.domain_verification;
+        assert_eq!(domains.active.len(), 1);
+        assert_eq!(domains.restored.len(), 1);
+        assert_eq!(domains.active[0].name, "android");
+        assert!(domains.active[0].has_auto_verify_domains);
+        assert_eq!(domains.active[0].signature.as_deref(), Some("abc"));
+        assert_eq!(
+            domains.active[0].domains,
+            [
+                (Some("example.com".into()), 4),
+                (Some("other.com".into()), 2)
+            ]
+        );
+        assert_eq!(domains.active[0].users.len(), 1);
+        assert_eq!(domains.active[0].users[0].enabled_hosts, ["example.com"]);
+        assert!(domains.active[0].users[0].allow_link_handling);
+        let group = &domains.active[0].uri_relative_filter_groups[0].1[0];
+        assert_eq!(group.action, 1);
+        assert_eq!(group.filters[0].filter.as_deref(), Some("/path"));
+        assert_eq!(
+            domains.legacy,
+            [(Some("android".into()), vec![(0, 4), (10, 3)])]
+        );
         assert_eq!(s.versions.len(), 2);
         assert_eq!(
             s.versions[1].volume_uuid.as_deref(),
@@ -459,19 +628,28 @@ mod tests {
         assert!(!app.uses_sdk_libraries[0].optional);
         // A certificate's key is written once, then named by its index.
         let sigs = app.signatures.as_ref().unwrap();
-        assert_eq!(sigs.signatures, [vec![0x30, 0x82, 0xbb]]);
+        assert_eq!(sigs.signatures, [super::test_certificates::certificate(1)]);
         assert_eq!(
             sigs.past_signatures,
             Some(vec![
-                (vec![0x30, 0x82, 0xcc], 23),
-                (vec![0x30, 0x82, 0xbb], 17)
+                (super::test_certificates::certificate(2), 23),
+                (super::test_certificates::certificate(1), 17)
             ])
         );
         let initiator = app.install_source.initiating_package_signatures.as_ref();
-        assert_eq!(initiator.unwrap().signatures, [vec![0x30, 0x82, 0xaa]]);
+        assert_eq!(
+            initiator.unwrap().signatures,
+            [super::test_certificates::certificate(0)]
+        );
         assert_eq!(s.shared_users[0].signatures, android.signatures);
-        assert_eq!(app.key_set_data.defined_key_sets, [("upgrade".into(), 3)]);
-        assert_eq!(app.mime_groups[0].1, ["image/png", "image/gif"]);
+        assert_eq!(
+            app.key_set_data.defined_key_sets,
+            [(Some("upgrade".into()), 3)]
+        );
+        assert_eq!(
+            app.mime_groups[0].1,
+            [Some("image/gif".into()), Some("image/png".into())]
+        );
         let sys = &s.disabled_system_packages[0];
         assert_eq!((sys.flags, sys.private_flags), (1, 8));
         assert!(sys.shared_user);
@@ -479,7 +657,13 @@ mod tests {
             s.renamed_packages,
             [("org.example.new".into(), "org.example.old".into())]
         );
-        assert_eq!(s.key_sets.public_keys, [(1, b"key".to_vec())]);
+        assert_eq!(
+            s.key_sets.public_keys,
+            [(
+                1,
+                include_bytes!("../../tests/fixtures/settings-public-key-1.der").to_vec()
+            )]
+        );
         assert_eq!(s.key_sets.key_sets, [(1, vec![1])]);
         assert_eq!(s.key_sets.last_issued_key_set_id, 3);
 
@@ -490,6 +674,10 @@ mod tests {
         // The unknown package is dropped; a missing first install time is
         // the settings' legacy one.
         assert_eq!(r.packages.len(), 2);
+        assert_eq!(
+            r.legacy_domain_states,
+            [("android".into(), 2), ("org.example.app".into(), 0)]
+        );
         let (_, android) = &r.packages[0];
         assert!(android.installed && android.ce_data_inode == 5);
         assert_eq!(android.first_install_time, 0x1234);
@@ -498,7 +686,10 @@ mod tests {
         assert_eq!((app.enabled, app.install_reason), (3, 4));
         assert_eq!(app.last_disable_app_caller.as_deref(), Some("shell:1000"));
         assert_eq!(app.first_install_time, 0x2b);
-        assert_eq!(app.disabled_components, ["org.example.app.B"]);
+        assert_eq!(
+            app.disabled_components.as_deref(),
+            Some(["org.example.app.B".to_string()].as_slice())
+        );
         assert_eq!(r.default_browser.as_deref(), Some("org.example.app"));
         assert_eq!(r.block_uninstall, ["org.example.app"]);
 
@@ -528,7 +719,10 @@ mod tests {
         let legacy = &rp.packages[0].1;
         assert!(legacy[0].granted && legacy[0].flags == 0x300);
         assert!(!legacy[1].granted);
-        assert_eq!(rp.shared_users, [("android.uid.system".into(), Vec::new())]);
+        assert_eq!(
+            rp.shared_users,
+            [(Some("android.uid.system".into()), Vec::new())]
+        );
     }
 
     #[test]
@@ -562,7 +756,12 @@ mod tests {
         let state = read().unwrap().unwrap();
         let r = &state.users[0].1.restrictions;
         assert_eq!(r.packages.len(), 2);
-        assert!(r.packages.iter().all(|(_, s)| *s == UserState::default()));
+        assert!(r.legacy_domain_states.is_empty());
+        assert!(
+            r.packages
+                .iter()
+                .all(|(_, s)| *s == UserState::initialized())
+        );
 
         // A missing access file is missing even with a reserve copy: the
         // original then migrates.
@@ -573,3 +772,27 @@ mod tests {
         fs::remove_dir_all(d).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/common/certificates.rs"]
+mod test_certificates;
+
+pub mod visibility_mutation;
+
+pub mod staging;
+
+pub mod permission_mutation;
+
+
+pub mod verifier;
+
+pub mod events;
+
+pub mod shell;
+
+pub(crate) mod shell_profile;
+pub(crate) mod shell_read;
+pub(crate) mod shell_install;
+pub(crate) mod shell_mutation;
+
+pub(crate) mod shell_user;

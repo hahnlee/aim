@@ -16,8 +16,52 @@ pub struct ClassPath {
     jars: Vec<Vec<u8>>,
 }
 
+/// Immutable type relations from a class path; no class initialization occurs.
+#[derive(Debug)]
+pub struct Hierarchy {
+    parents: HashMap<String, Vec<String>>,
+}
+impl Hierarchy {
+    pub fn contains(&self, descriptor: &str) -> bool {
+        let component = descriptor.trim_start_matches('[');
+        if component != descriptor {
+            return matches!(component, "B" | "C" | "D" | "F" | "I" | "J" | "S" | "Z")
+                || self.parents.contains_key(component);
+        }
+        self.parents.contains_key(descriptor)
+    }
+    pub fn assignable(&self, actual: &str, required: &str) -> bool {
+        if actual.starts_with('[') && self.contains(actual) {
+            if matches!(
+                required,
+                "Ljava/lang/Object;" | "Ljava/lang/Cloneable;" | "Ljava/io/Serializable;"
+            ) {
+                return self.contains(required);
+            }
+            if let Some(component) = required.strip_prefix('[') {
+                return actual == required || self.assignable(&actual[1..], component);
+            }
+        }
+        let mut pending = vec![actual];
+        let mut seen = HashSet::new();
+        while let Some(next) = pending.pop() {
+            if !seen.insert(next) {
+                continue;
+            }
+            if next == required && self.contains(next) {
+                return true;
+            }
+            if let Some(parents) = self.parents.get(next) {
+                pending.extend(parents.iter().map(String::as_str));
+            }
+        }
+        false
+    }
+}
+
 /// A class's supertypes and declared members.
 struct Class {
+    access: u32,
     superclass: Option<String>,
     interfaces: Vec<String>,
     fields: HashSet<(String, String)>,
@@ -28,6 +72,7 @@ impl Class {
     fn read(dex: &Dex<'_>, def: &ClassDef) -> Result<Self, String> {
         let (fields, methods) = dex.members(def)?;
         Ok(Class {
+            access: def.access,
             superclass: def.superclass.clone(),
             interfaces: dex.interfaces(def)?,
             fields: fields
@@ -83,6 +128,12 @@ impl<'a> Classes<'a> {
         member: &(String, String),
         method: bool,
     ) -> Result<bool, String> {
+        // Constructors are resolved on their declaring class, never inherited.
+        if method && member.0 == "<init>" {
+            return Ok(self
+                .get(owner)?
+                .is_some_and(|class| class.methods.contains(member)));
+        }
         let mut pending = vec![owner.to_string()];
         let mut seen = HashSet::new();
         while let Some(next) = pending.pop() {
@@ -142,6 +193,19 @@ impl ClassPath {
         Ok(Classes::new(dexes))
     }
 
+    pub fn hierarchy(&self) -> Result<Hierarchy, String> {
+        let classes = self.classes(None)?;
+        let mut parents = HashMap::new();
+        for (name, (d, c)) in &classes.index {
+            let dex = &classes.dexes[*d];
+            let class = &dex.classes[*c];
+            let mut types = dex.interfaces(class)?;
+            types.extend(class.superclass.iter().cloned());
+            parents.insert(name.clone(), types);
+        }
+        Ok(Hierarchy { parents })
+    }
+
     /// What `dex` refers to that neither it nor the class path has, one
     /// line each; empty if everything links.
     pub fn unresolved(&self, dex: &[u8]) -> Result<Vec<String>, String> {
@@ -198,6 +262,11 @@ impl ClassPath {
                 out.push(format!("no class {name}"));
                 continue;
             };
+            // Interface invocation has a different ART contract from a class
+            // invocation even when the member descriptors are identical.
+            if class.access & 0x4200 != stub.access & 0x4200 {
+                out.push(format!("{name} class/interface/enum kind differs from the image"));
+            }
             if class.superclass != stub.superclass {
                 out.push(format!(
                     "{name} extends {:?}, not {:?}",
@@ -209,7 +278,24 @@ impl ClassPath {
                     out.push(format!("no field {name}->{field}:{ty}"));
                 }
             }
+            // Java always emits a class constructor. A private compile-only
+            // constructor may disappear from a shrunk image; executable method
+            // references are still checked independently by unresolved().
+            let private_constructors: HashSet<_> = stubs
+                .direct_methods(def)?
+                .into_iter()
+                .filter(|(_, access)| access & 0x2 != 0)
+                .map(|(id, _)| stubs.method(id))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(_, name, _)| name == "<init>")
+                .map(|(_, _, sig)| sig)
+                .collect();
+            let constructorless = !class.methods.iter().any(|(name, _)| name == "<init>");
             for (method, sig) in &stub.methods {
+                if method == "<init>" && constructorless && private_constructors.contains(sig) {
+                    continue;
+                }
                 if method != "<clinit>" && !class.methods.contains(&(method.clone(), sig.clone())) {
                     out.push(format!("no method {name}->{method}{sig}"));
                 }
@@ -225,5 +311,70 @@ impl ClassPath {
         }
         out.sort();
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructors_resolve_only_on_the_requested_class() {
+        let class = |parent: Option<&str>, methods: &[(&str, &str)]| Class {
+            access: 1,
+            superclass: parent.map(str::to_owned),
+            interfaces: Vec::new(),
+            fields: HashSet::new(),
+            methods: methods
+                .iter()
+                .map(|(n, s)| (n.to_string(), s.to_string()))
+                .collect(),
+        };
+        let mut classes = Classes {
+            dexes: Vec::new(),
+            index: HashMap::new(),
+            read: HashMap::from([
+                (
+                    "Base".into(),
+                    Some(class(None, &[("<init>", "()V"), ("method", "()V")])),
+                ),
+                (
+                    "Child".into(),
+                    Some(class(Some("Base"), &[("<init>", "(I)V")])),
+                ),
+                ("StaticOnly".into(), Some(class(Some("Base"), &[]))),
+            ]),
+        };
+        let member = |name: &str, sig: &str| (name.to_string(), sig.to_string());
+        assert!(
+            classes
+                .resolves("Base", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            classes
+                .resolves("Child", &member("<init>", "(I)V"), true)
+                .unwrap()
+        );
+        assert!(
+            !classes
+                .resolves("Child", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            !classes
+                .resolves("StaticOnly", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            !classes
+                .resolves("Missing", &member("<init>", "()V"), true)
+                .unwrap()
+        );
+        assert!(
+            classes
+                .resolves("Child", &member("method", "()V"), true)
+                .unwrap()
+        );
     }
 }

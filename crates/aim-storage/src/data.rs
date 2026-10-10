@@ -50,8 +50,8 @@ const TRIM_BATCH_DIVISOR: u64 = 24;
 const PATIENCE: Duration = Duration::from_secs(20);
 /// How long a synced volume is waited for at stop. The security agent
 /// keeps a boot's freshly written files open longer than a stop should
-/// wait (still scanning after 21 s); once the volume is synced, the forced
-/// unmount after this only closes its reads.
+/// wait (still scanning after 21 s); a remaining dissenter keeps the image
+/// attached and is reported rather than forced away.
 const SYNCED_PATIENCE: Duration = Duration::from_secs(2);
 
 /// The size the data image `image` may reach: that of the host volume
@@ -150,6 +150,10 @@ fn copy_template(template: &Path, image: &Path) -> Result<(), String> {
     let _ = fs::remove_file(&part);
     // std's copy clones where it can (fclonefileat).
     fs::copy(template, &part).map_err(|e| format!("{}: {e}", template.display()))?;
+    // A template may be immutable; the new guest's private image is writable.
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("{}: {e}", part.display()))?;
     fs::rename(&part, image).map_err(|e| format!("{}: {e}", image.display()))
 }
 
@@ -451,6 +455,35 @@ mod tests {
         );
         assert_eq!(template(&dir, None, Some("light")), empty);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "creates and attaches one owned disposable APFS data image"]
+    fn readonly_template_clone_is_private_writable_and_preserves_source() {
+        use std::os::unix::fs::{MetadataExt,PermissionsExt};
+        use sha2::{Digest,Sha256};
+        let root=std::env::temp_dir().join(format!("aim-ro-clone-{}",std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let template=root.join("empty.asif");create(&template).unwrap();
+        fs::set_permissions(&template,fs::Permissions::from_mode(0o444)).unwrap();
+        let source_metadata=fs::metadata(&template).unwrap();
+        let source_hash=Sha256::digest(fs::read(&template).unwrap());
+        let inherited=root.join("inherited.asif");fs::copy(&template,&inherited).unwrap();
+        assert_eq!(fs::metadata(&inherited).unwrap().permissions().mode()&0o777,0o444);
+        fs::remove_file(&inherited).unwrap();
+        let dir=root.join("data");
+        let data=DataImage::attach(&dir,Some(&template)).unwrap();
+        let copied=fs::metadata(data.image()).unwrap();
+        assert_eq!(copied.permissions().mode()&0o777,0o600);
+        assert_eq!(copied.uid(),unsafe{libc::geteuid()});
+        assert_ne!((copied.dev(),copied.ino()),(source_metadata.dev(),source_metadata.ino()));
+        let file=data.dir().join("owner-write");fs::write(&file,b"private writable clone").unwrap();
+        File::open(&file).unwrap().sync_all().unwrap();sync_volume(data.dir()).unwrap();
+        assert_eq!(fs::read(&file).unwrap(),b"private writable clone");data.detach().unwrap();
+        assert_eq!(Sha256::digest(fs::read(&template).unwrap()),source_hash);
+        let after=fs::metadata(&template).unwrap();
+        assert_eq!((after.dev(),after.ino(),after.permissions().mode()),(source_metadata.dev(),source_metadata.ino(),source_metadata.permissions().mode()));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

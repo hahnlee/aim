@@ -1,0 +1,159 @@
+//! Keyset record/retry projections; public-key factory coverage is separate.
+use aim_services::package::{
+    owner::{app_ids::AppIds, key_sets},
+    settings::{Package, PackageReadAttempt, ReadError, ReadOwners, Settings, SharedUser},
+};
+
+pub fn inputs() -> Vec<Vec<u8>> {
+    let prefix = "<packages><package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><proper-signing-keyset identifier='2'/></package>";
+    let mut out = Vec::new();
+    for body in [
+        "<keyset-settings version='1'><keysets><keyset identifier='2'/></keysets><lastIssuedKeyId value='9'/><lastIssuedKeySetId value='7'/></keyset-settings>",
+        "<keyset-settings version='anything'><unknown><keysets><keyset identifier='3'/><keyset identifier='2'/><keyset identifier='2'/></keysets></unknown></keyset-settings>",
+        "<keyset-settings version='1'><lastIssuedKeyId value='9'/><keysets><keyset identifier='2'/></keysets><lastIssuedKeySetId value='bad'/></keyset-settings>",
+        "<keyset-settings version='1'><lastIssuedKeyId value='9'/><keysets><key-id identifier='1'/></keysets></keyset-settings>",
+        "<keyset-settings><keysets><keyset identifier='2'/></keysets></keyset-settings>",
+        "<keyset-settings><",
+        "<keyset-settings version='1'><keysets><keyset identifier='2'/></keysets></keyset-settings><keyset-settings/>",
+    ] {
+        let bytes = format!("{prefix}{body}</packages>").into_bytes();
+        out.push(bytes.clone());
+        if let Ok(root) = aim_android_xml::read(&bytes) {
+            out.push(aim_android_xml::abx::write(&root).unwrap());
+        }
+    }
+    for records in [
+        "<package name='p' codePath='/p' userId='10001' domainSetId='00000000-0000-0000-0000-000000000001'><defined-keyset alias='same' identifier='2'/><defined-keyset alias='same' identifier='2'/></package>",
+        "<package name='pending' codePath='/pending' sharedUserId='10002' domainSetId='00000000-0000-0000-0000-000000000002'><proper-signing-keyset identifier='3'/></package>",
+    ] {
+        let bytes = format!("{prefix}{records}<keyset-settings version='1'><keysets><keyset identifier='2'/><keyset identifier='3'/><keyset identifier='4'/></keysets><lastIssuedKeyId value='9'/><lastIssuedKeySetId value='7'/></keyset-settings></packages>").into_bytes();
+        out.push(bytes.clone());
+        out.push(aim_android_xml::abx::write(&aim_android_xml::read(&bytes).unwrap()).unwrap());
+    }
+    let binary = aim_android_xml::abx::write(&aim_android_xml::read(format!("{prefix}<keyset-settings version='1'><lastIssuedKeyId value='9'/><keysets><keyset identifier='2'/></keysets><lastIssuedKeySetId value='7'/></keyset-settings></packages>").as_bytes()).unwrap()).unwrap();
+    for end in 1..binary.len() {
+        if let Ok(mut reader) = aim_android_xml::pull::Reader::new(&binary[..end]) {
+            if reader.next().is_ok() && reader.next().is_ok() {
+                // Restrict truncation to after the complete package container.
+                loop {
+                    match reader.next() {
+                        Ok(aim_android_xml::pull::Event::End(name)) if name == "package" => {
+                            out.push(binary[..end].to_vec());
+                            break;
+                        }
+                        Ok(aim_android_xml::pull::Event::EndDocument) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn read(bytes: &[u8]) -> (Settings, &'static str) {
+    let mut state = Settings::default();
+    let mut ids = AppIds::default();
+    let mut attempt = PackageReadAttempt::default();
+    let result = state.read_owned_document(bytes, &mut ids, &mut attempt, true, &mut ProjectionOwners::default());
+    let status = if matches!(result, Err(ReadError::FatalInput(_))) {
+        "fatal"
+    } else {
+        "ok"
+    };
+    assert!(
+        !matches!(result, Err(ReadError::Owner(_))),
+        "unexpected native owner error: {result:?}"
+    );
+    // File-error retry reads an empty reserve, retaining registered pool effects.
+    (state, status)
+}
+
+pub fn trace(state: &Settings, status: &str) -> String {
+    let proper = state
+        .packages
+        .iter()
+        .find(|p| p.name == "p")
+        .map(|p| p.key_set_data.proper_signing_key_set)
+        .unwrap_or(-1);
+    let refs = if state.key_sets.key_sets.iter().any(|(id, _)| *id == proper) {
+        state
+            .key_sets
+            .reference_counts
+            .as_ref()
+            .and_then(|counts| counts.get(&proper))
+            .copied()
+            .unwrap_or(0)
+            .to_string()
+    } else {
+        "absent".into()
+    };
+    let mut sets = state
+        .key_sets
+        .key_sets
+        .iter()
+        .map(|(id, keys)| {
+            format!(
+                "{id}:{}",
+                keys.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>();
+    sets.sort();
+    format!(
+        "{status}|{proper}|{refs}|{},{}|{}",
+        state.key_sets.last_issued_key_id,
+        state.key_sets.last_issued_key_set_id,
+        sets.join(";")
+    )
+}
+
+pub fn retire(state: &mut Settings) {
+    key_sets::clear_package(state, "p").unwrap();
+}
+
+#[derive(Default)]
+struct ProjectionOwners { headers: aim_services::package::settings::native_read::NativeRead }
+impl ReadOwners for ProjectionOwners {
+    fn package_header(&mut self, package: &Package, start: &aim_android_xml::Element) -> Result<(), ReadError> {
+        self.headers.package_header(package, start)
+    }
+    fn factory_record(&mut self, _: &mut Settings, _: &mut aim_android_xml::pull::Reader<'_>, _: &aim_android_xml::Element, _: &AppIds) -> Result<(), ReadError> { panic!("factory outside projection") }
+
+    fn start_attempt(&mut self, _: &Settings, _: &[Package]) -> Result<(), ReadError> { Ok(()) }
+
+    fn package_registered(&mut self, _: &Package, _: bool) -> Result<(), ReadError> { Ok(()) }
+    fn shared_registered(&mut self, _: &SharedUser, _: bool) -> Result<(), ReadError> { Ok(()) }
+
+    fn package_child(
+        &mut self,
+        _: &mut Package,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+        _: &AppIds,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
+    fn shared_child(
+        &mut self,
+        _: &mut SharedUser,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+    ) -> Result<bool, ReadError> {
+        panic!("shared UID outside keyset projection")
+    }
+    fn public_key(&mut self, _: &[u8]) -> Result<Option<Vec<u8>>, ReadError> {
+        panic!("public key outside this projection")
+    }
+    fn global_record(
+        &mut self,
+        _: &mut Settings,
+        _: &mut aim_android_xml::pull::Reader<'_>,
+        _: &aim_android_xml::Element,
+    ) -> Result<bool, ReadError> {
+        Ok(false)
+    }
+}

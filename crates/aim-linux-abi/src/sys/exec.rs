@@ -95,14 +95,19 @@ pub struct ExecState {
     pub mounts: String,
     /// The armed interval timers (`itimer::exec_text`).
     pub itimers: String,
+    pub regular_fds:String,
+    pub close_receipt:Option<i32>,
 }
 
 const SIG_SETMASK: u64 = 2;
 const SIG_IGN: u64 = 1;
 
 impl ExecState {
+    pub fn apply_posix_closes(&self)->Result<(),String>{
+        if let Some(fd)=self.close_receipt{super::exec_fd_receipt::consume(fd).map_err(|error|format!("exec descriptor receipt: errno {error}"))?;}Ok(())
+    }
     /// Install this state in the new process, before the guest runs.
-    pub fn apply(&self) {
+    pub fn apply(&self) -> Result<(),String> {
         if let Some(cwd) = &self.cwd {
             vfs::set_cwd(cwd.clone());
         }
@@ -115,8 +120,10 @@ impl ExecState {
             }
         }
         super::pstate::set_personality(self.personality);
-        vfs::load_own_mounts(&self.mounts);
+        vfs::load_own_mounts(&self.mounts).map_err(|error|format!("exec mount namespace: errno {error}"))?;
         super::itimer::exec_restore(&self.itimers);
+        super::fdtab::restore_regular_exec(&self.regular_fds).map_err(|error|format!("regular exec inheritance: errno {error}"))?;
+        Ok(())
     }
 
     fn current() -> ExecState {
@@ -138,6 +145,9 @@ impl ExecState {
             personality: super::pstate::personality_value(),
             mounts: vfs::own_mounts_text(),
             itimers: super::itimer::exec_text(),
+            // Descriptor receipts are captured under the final exec admission.
+            regular_fds:String::new(),
+            close_receipt:None,
         }
     }
 }
@@ -146,20 +156,24 @@ impl ExecState {
 ///
 /// # Safety
 /// `p` must be null or point at a readable guest array of string pointers.
-unsafe fn guest_strv(p: u64) -> Vec<CString> {
+fn guest_strv(p: u64,budget:&mut usize) -> Result<Vec<CString>,errno::Errno> {
     let mut v = Vec::new();
     if p == 0 {
-        return v;
+        return Ok(v);
     }
     let mut i = 0;
     loop {
         // SAFETY: caller contract.
-        let s = unsafe { ((p + i * 8) as *const u64).read_unaligned() };
+        let at=p.checked_add(i*8).ok_or(EFAULT)?;
+        let bytes=super::user_memory::read_exact(at,8)?;let s=u64::from_le_bytes(bytes.try_into().unwrap());
         if s == 0 {
-            return v;
+            return Ok(v);
         }
         // SAFETY: caller contract.
-        v.push(unsafe { CStr::from_ptr(s as *const libc::c_char) }.to_owned());
+        let bytes=super::user_memory::read_cstr(s,32*super::mem::PAGE as usize).map_err(|error|if error==36{errno::E2BIG}else{error})?;
+        *budget=budget.checked_sub(bytes.len()+1+8).ok_or(errno::E2BIG)?;
+        v.push(CString::new(bytes).map_err(|_|EFAULT)?);
+        if v.len()>0x7fff_ffff{return Err(errno::E2BIG);}
         i += 1;
     }
 }
@@ -219,16 +233,9 @@ fn classify(host: &CStr) -> Result<Kind, i64> {
         {
             return Err(-(EACCES as i64));
         }
-        let fd = libc::open(host.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
-        if fd < 0 {
-            return Err(-(errno::last() as i64));
-        }
+        let source=super::verified_source::VerifiedSource::open(host,true).map_err(|error|-(error as i64))?;
         let mut buf = [0u8; BINPRM_BUF_SIZE];
-        let n = libc::pread(fd, buf.as_mut_ptr().cast(), buf.len(), 0);
-        libc::close(fd);
-        if n < 0 {
-            return Err(-(errno::last() as i64));
-        }
+        let n=source.read_at(&mut buf,0).map_err(|error|-(error as i64))? as i64;
         if let Some((interp, arg)) = parse_shebang(&buf) {
             return Ok(Kind::Script(interp, arg));
         }
@@ -253,7 +260,16 @@ pub fn execveat(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
     exec(ctx, a[0] as i32, a[1], a[2], a[3], a[4])
 }
 
+fn trace_stage(stage: &str) {
+    if super::tracing() {
+        // SAFETY: getpid reads this process's host identity.
+        let pid = unsafe { libc::getpid() };
+        crate::diag!("[linux-exec] pid={pid} tid={} stage={stage}", super::host_tid());
+    }
+}
+
 fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
+    trace_stage("arguments.enter");
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -(EINVAL as i64);
     }
@@ -261,17 +277,16 @@ fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, fla
         return -(EFAULT as i64);
     }
     // SAFETY: guest string and string arrays.
-    let (path, mut argv, envp) = unsafe {
-        (
-            guest_cstr(path).to_vec(),
-            guest_strv(argv),
-            guest_strv(envp),
-        )
-    };
+    let path=match guest_cstr(path){Ok(path)=>path,Err(error)=>return -(error as i64)};
+    let mut stack:libc::rlimit=unsafe{std::mem::zeroed()};if unsafe{libc::getrlimit(libc::RLIMIT_STACK,&mut stack)}<0{return -(errno::last()as i64);}
+    let mut budget=(stack.rlim_cur/4).min(6<<20).max(32*super::mem::PAGE)as usize;
+    let mut argv=match guest_strv(argv,&mut budget){Ok(argv)=>argv,Err(error)=>return -(error as i64)};
+    let envp=match guest_strv(envp,&mut budget){Ok(envp)=>envp,Err(error)=>return -(error as i64)};
     // Since Linux 5.18 an empty argv gets an empty argv[0].
     if argv.is_empty() {
         argv.push(CString::default());
     }
+    trace_stage("arguments.leave");
     // The filename as Linux records it (bprm->filename): AT_EXECFN, and
     // what a script's interpreter is given.
     let filename: Vec<u8> = if path.is_empty() {
@@ -286,13 +301,19 @@ fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, fla
         f.extend_from_slice(&path);
         f
     };
+    trace_stage("resolve.enter");
     let target = match resolve(dirfd, &path, flags) {
         Ok(r) => r,
         Err(e) => return e,
     };
+    trace_stage("resolve.leave");
+    trace_stage("interpret.enter");
     match interpret(target, &filename, argv) {
-        Ok((target, argv)) => in_place(ctx, &target, &argv, &envp, &filename)
-            .unwrap_or_else(|| relaunch(&target.guest, &argv, &envp, &filename)),
+        Ok((target, argv)) => {
+            trace_stage("interpret.leave");
+            in_place(ctx, &target, &argv, &envp, &filename)
+                .unwrap_or_else(|| relaunch(&target.guest, &argv, &envp, &filename))
+        }
         Err(e) => e,
     }
 }
@@ -306,6 +327,7 @@ fn in_place(
     envp: &[CString],
     execfn: &[u8],
 ) -> Option<i64> {
+    trace_stage("in-place.eligibility");
     if !context::is_live(ctx)
         || !super::thread::alone()
         || crate::hostcall::used()
@@ -314,8 +336,9 @@ fn in_place(
     {
         return None;
     }
+    trace_stage("in-place.interpreter");
     // What Linux checks before the point of no return: the interpreter.
-    let interp = crate::loader::interpreter(&target.host).ok()?;
+    let interp=match crate::loader::interpreter_errno(&target.host){Ok(interp)=>interp,Err(error)=>return Some(-(error as i64))};
     if let Some(i) = interp {
         let r = match vfs::resolve(LINUX_AT_FDCWD, i.as_bytes(), true) {
             Ok(r) => r,
@@ -327,8 +350,11 @@ fn in_place(
     }
     let argv: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
     let envp: Vec<Vec<u8>> = envp.iter().map(|e| e.as_bytes().to_vec()).collect();
+    trace_stage("in-place.handovers.enter");
     super::fork::spawn::wait_handovers();
-    super::fs::close_on_exec();
+    trace_stage("in-place.close-on-exec");
+    if let Err(error)=super::fs::close_on_exec(){crate::diag!("[linux-abi] exec descriptor close: errno {error}");super::signal::die(SIGSEGV)}
+    trace_stage("in-place.reset");
     super::fdtab::adopt_plain();
     super::binder::exec_reset();
     super::mem::exec_reset();
@@ -338,6 +364,7 @@ fn in_place(
     super::thread::exec_reset();
     super::misc::exec_reset();
     super::cred::exec();
+    trace_stage("in-place.load");
     match crate::load_program(target, &argv, &envp, execfn) {
         Ok((entry, sp)) => {
             ctx.x = [0; 31];
@@ -422,7 +449,9 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     let Some(launch) = LAUNCH.get() else {
         return -(ENOEXEC as i64);
     };
+    trace_stage("relaunch.state.enter");
     let state = ExecState::current();
+    trace_stage("relaunch.state.leave");
     let mut id = super::cred::current();
     id.exec_transform();
     let mut host = vec![launch.exe.clone()];
@@ -454,14 +483,32 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
         arg(program),
     ]);
     host.extend(argv.iter().cloned());
+    trace_stage("relaunch.handovers.enter");
     super::fork::spawn::wait_handovers();
+    trace_stage("relaunch.receipt.prepare");
+    let mut receipt=match super::exec_fd_receipt::Receipt::prepare(){Ok(receipt)=>receipt,Err(error)=>return -(error as i64)};
+    trace_stage("relaunch.lifecycle.enter");
+    let guard=super::fdtab::lifecycle();
+    trace_stage("relaunch.receipt.capture");
+    if let Some(receipt)=&mut receipt{if let Err(error)=receipt.capture(){drop(guard);return -(error as i64);}}
+    trace_stage("relaunch.descriptors");
+    let mut descriptors=Vec::new();
+    for fd in super::fd_visibility::visible(){let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{let error=errno::last();drop(guard);return -(error as i64);}if flags&libc::FD_CLOEXEC==0{descriptors.push(fd.to_string());}}
+    let mut options=vec![arg("--guest-fds"),arg(descriptors.join(",")),arg("--socket-receipts"),arg(super::fdtab::socket_exec_text())];
+    trace_stage("relaunch.regular-fds");
+    let regular=match super::fdtab::regular_exec_text(){Ok(text)=>text,Err(error)=>{drop(guard);return -(error as i64);}};if !regular.is_empty(){options.extend([arg("--regular-fds"),arg(regular)]);}
+    if let Some(receipt)=&receipt{options.extend([arg("--exec-close-receipt"),arg(receipt.fd().to_string())]);}
+    host.splice(1..1,options);
     let mut hargv: Vec<*const libc::c_char> = host.iter().map(|s| s.as_ptr()).collect();
     hargv.push(std::ptr::null());
     let mut henv: Vec<*const libc::c_char> = envp.iter().map(|s| s.as_ptr()).collect();
     henv.push(std::ptr::null());
     // SAFETY: NULL-terminated arrays of C strings that outlive the call.
+    trace_stage("relaunch.writer-flags");
+    let writer_flags=match super::fdtab::prepare_regular_exec(){Ok(flags)=>flags,Err(error)=>{drop(guard);return -(error as i64)}};
+    trace_stage("relaunch.host-exec");
     unsafe { libc::execve(hargv[0], hargv.as_ptr(), henv.as_ptr()) };
-    -(errno::last() as i64)
+    let error=errno::last();drop(guard);drop(writer_flags);drop(receipt);-(error as i64)
 }
 
 #[cfg(test)]

@@ -24,10 +24,7 @@ global_asm!(
     pid = sym LINUX_ABI_PID,
     ids = sym crate::sys::cred::IDS,
     trace = sym crate::sys::TRACE,
-    errtab = sym crate::errno::DARWIN_TO_LINUX,
     hostcall_hi = const aim_hostcall::SYSCALL_NR >> 16,
-    slow = sym crate::sys::fdtab::SLOW,
-    budget = sym crate::sys::space::BUDGET,
     in_host = const std::mem::offset_of!(GuestContext, in_host),
     attn = const std::mem::offset_of!(GuestContext, attn),
     orig = const std::mem::offset_of!(GuestContext, orig_x0),
@@ -270,6 +267,7 @@ impl HostStacks {
 /// # Safety
 /// `ctx` must stay valid while bound.
 pub unsafe fn bind(ctx: *mut GuestContext, tp: u64) -> HostStacks {
+    crate::sys::initialize_verity_fault_slot();
     claim_slots();
     let st = HostStacks::map();
     // SAFETY: slots claimed above; this thread owns its slots.

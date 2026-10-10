@@ -1,5 +1,6 @@
 package dev.aim.server;
 
+import dev.aim.server.IPackageDiagnosticInputs;
 import dev.aim.server.ILocationBridge;
 import dev.aim.server.ILocationHost;
 import dev.aim.server.IPackageFeed;
@@ -57,4 +58,15 @@ interface IBridge {
      * original's install sessions from now on (IPackageWritesHost).
      */
     void watchPackageWrites(IPackageWritesHost host);
+
+    /** PlatformCompat's install-time native shared-library policy. */
+    boolean areNativeLibraryDependenciesEnforced(String packageName, int targetSdk);
+
+    /** The selected image's PackageBackwardCompatibility build policy. */
+    boolean isTestBaseOnBootclasspath();
+
+    /** Original permission owner's supplementary GIDs for a complete UID. */
+    int[] getPermissionGidsForUid(int uid);
+
+    IPackageDiagnosticInputs getPackageDiagnosticInputs();
 }

@@ -105,9 +105,9 @@ impl Bridge {
             return None;
         };
         let file = self.process.file(fd)?;
-        read_bounded(std::fs::File::from(aim_binder_host::server::file_fd(
+        read_bounded(aim_binder_host::server::file_fd(
             &file,
-        )?))
+        )?)
     }
 }
 
@@ -127,7 +127,7 @@ impl ReadParcelable for Fd {
 
 /// A file or pipe to its end, up to [`MAX_BLOB`] bytes, each read within
 /// [`READ_TIMEOUT_MS`].
-fn read_bounded(mut f: std::fs::File) -> Option<Vec<u8>> {
+fn read_bounded(mut f: aim_binder_host::server::RetainedFd) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut chunk = vec![0u8; 64 << 10];
     loop {

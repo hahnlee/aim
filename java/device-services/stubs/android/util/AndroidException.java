@@ -2,4 +2,7 @@
 // the members used, checked against the image by the device-services node.
 package android.util;
 
-public class AndroidException extends Exception {}
+public class AndroidException extends Exception {
+    public AndroidException() { throw new RuntimeException("stub"); }
+    public AndroidException(String message) { super(message); throw new RuntimeException("stub"); }
+}

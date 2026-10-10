@@ -147,14 +147,26 @@ fn stream_of(fd: i32) -> Result<Arc<Mutex<DirStream>>, i64> {
     Ok(d)
 }
 
+/// Called under FD lifecycle admission before a directory is pinned.
+pub(super) fn adopt(fd: i32) -> Result<(), crate::errno::Errno> {
+    if fdtab::get(fd).is_some() { return Ok(()); }
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } < 0 { return Err(errno::last()); }
+    if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        stream_of(fd).map_err(|error| (-error) as crate::errno::Errno)?;
+    }
+    Ok(())
+}
+
 const DIRENT_HEADER: usize = 19;
 
 pub fn getdents64(a: [u64; 6]) -> i64 {
-    let (fd, buf, count) = (a[0] as i32, a[1], a[2] as usize);
-    let d = match stream_of(fd) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
+    use std::os::fd::AsRawFd;
+    let pin = match fdtab::pin_guest(a[0] as i32) { Ok(pin) => pin, Err(error) => return -(error as i64) };
+    if matches!(pin.kind(), Some(Kind::Path(_))) { return -(crate::errno::EBADF as i64); }
+    let (fd, buf, count) = (pin.descriptor().as_raw_fd(), a[1], a[2] as usize);
+    if let Some(result)=super::fuse_client::getdents(fd,buf,count){return result;}
+    let Some(Kind::Dir(d)) = pin.kind() else { return -(ENOTDIR as i64); };
     let mut d = d.lock().unwrap();
     if d.entries.is_none() {
         match read_host_entries(fd) {
@@ -221,5 +233,30 @@ pub fn synthesized_path(fd: i32) -> Option<String> {
     match fdtab::get(fd) {
         Some(Kind::Dir(d)) => d.lock().unwrap().guest.clone(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn repeated_pins_retain_directory_position_and_unknown_slots_are_rejected() {
+        if fdtab::isolated_kernel_test("sys::dir::pin_tests::repeated_pins_retain_directory_position_and_unknown_slots_are_rejected"){return;}
+        let (_view, root) = crate::vfs::test_view();
+        let directory = root.join("directory-pin");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("entry"), b"data").unwrap();
+        let file = std::fs::File::open(&directory).unwrap();
+        let fd = unsafe { libc::dup(file.as_raw_fd()) };
+        assert!(fd >= 0);
+        fdtab::publish_guest(fd).unwrap();
+        let mut first = [0u8; 4096];
+        assert!(getdents64([fd as u64, first.as_mut_ptr() as u64, first.len() as u64, 0, 0, 0]) > 0);
+        let mut next = [0u8; 4096];
+        assert_eq!(getdents64([fd as u64, next.as_mut_ptr() as u64, next.len() as u64, 0, 0, 0]), 0);
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(getdents64([file.as_raw_fd() as u64, next.as_mut_ptr() as u64, next.len() as u64, 0, 0, 0]), -(crate::errno::EBADF as i64));
     }
 }

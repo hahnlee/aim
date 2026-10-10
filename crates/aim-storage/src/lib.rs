@@ -13,4 +13,30 @@
 pub mod copy;
 pub mod data;
 pub mod disk;
+pub mod guest_inode;
 pub mod system;
+
+pub mod process_namespace;
+pub mod mount_namespace;
+
+pub mod socket_inode;
+
+pub mod inode_lease;
+
+pub mod fsverity;
+
+pub mod private_fd;
+
+pub mod verity_control;
+
+pub mod posix_control;
+
+pub mod posix_broker;
+
+pub mod socket_queue_root;
+
+pub mod constructor_capture;
+
+pub mod pty_owner;
+
+pub mod pipe_identity;

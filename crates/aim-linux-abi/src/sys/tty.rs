@@ -1,21 +1,11 @@
-//! Terminals: the tty ioctls (tty_ioctl(4)) on host terminals, and Linux's
-//! pseudo-terminals (pty(7)) over the host's.
+//! Linux terminal ioctls over Darwin's line discipline.
 //!
-//! The guest's `/dev/ptmx` is the host's: opening it makes a host master,
-//! whose slave the host names `/dev/ttysNNN` and the guest `/dev/pts/N`
-//! ([`pts_host`], [`pts_guest`]). `TIOCGPTN` gives that number and
-//! `TIOCSPTLCK` unlocks the slave (bionic's `ptsname` and `unlockpt`; its
-//! `grantpt` does nothing, as devpts needs nothing), which on the host is
-//! `grantpt` and `unlockpt`. Reads, writes, `poll` and the line discipline
-//! are the host's. termios is translated both ways: the flags, control
-//! characters and speed of Linux's `struct termios` (36 bytes on arm64)
-//! against Darwin's.
+//! The native PTY owner retains the physical pair and completed output after
+//! the final guest slave closes (#1259). Logical locks, open-description flags
+//! and controlling sessions belong to that owner; `/dev/pts/N` names its real
+//! Darwin slave. termios flags, characters and speeds are translated here.
 //!
-//! Where Darwin differs: an exiting process waits until the master has
-//! read its slave output, which Linux would keep for it
-//! ([`drain_on_exit`]); a master's termios exist only while its slave is
-//! open (before, they are ENOTTY where Linux answers); and closing the
-//! master sends the slave's session no SIGHUP (#749).
+//! Legacy inherited terminals retain their existing native drain behavior.
 
 use crate::errno::{self, EINVAL, ENOTTY};
 use crate::sys::pidns;
@@ -37,6 +27,7 @@ const TIOCGSID: u64 = 0x5429;
 const TIOCGPTN: u64 = 0x8004_5430;
 /// `_IOW('T', 0x31, int)`.
 const TIOCSPTLCK: u64 = 0x4004_5431;
+const TIOCGPTLCK: u64 = 0x8004_5439;
 /// Darwin's `TIOCPTYGNAME`, `_IOR('t', 83, char[128])`: a master's slave.
 const DARWIN_TIOCPTYGNAME: libc::c_ulong = 0x4080_7453;
 
@@ -52,8 +43,51 @@ pub fn pts_guest(host: &str) -> Option<String> {
     Some(format!("/dev/pts/{n}"))
 }
 
+/// Linux devpts_new_index uses the allocating filesystem identity. Pinned
+/// first_stage_init mounts devpts with NULL options, whose slave mode is 0600.
+/// Darwin grantpt prepares the physical node; guest attributes belong to its
+/// actual allocated inode, not the host user's uid or reusable slave number.
+pub(super) fn allocated_master(fd: i32, identity: &super::cred::Identity) -> Result<(), crate::errno::Errno> {
+    allocated_attributes(fd, identity, true)
+}
+pub(super) fn allocated_owned_master(fd: i32, identity: &super::cred::Identity) -> Result<(), crate::errno::Errno> {
+    allocated_attributes(fd, identity, false)
+}
+fn allocated_attributes(fd: i32, identity: &super::cred::Identity, grant: bool) -> Result<(), crate::errno::Errno> {
+    if !super::attrs::recording() { return Ok(()); }
+    let mut name = [0 as libc::c_char;128];
+    if unsafe { libc::ioctl(fd, DARWIN_TIOCPTYGNAME, name.as_mut_ptr()) } != 0 { return Err(errno::last()); }
+    if grant && unsafe { libc::grantpt(fd) } != 0 { return Err(errno::last()); }
+    let host = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    pts_guest(host.to_str().map_err(|_| EINVAL)?).ok_or(EINVAL)?;
+    super::attrs::allocated_character(super::attrs::Host::Path(host),
+        super::attrs::Attr { uid:Some(identity.uid[3]), gid:Some(identity.gid[3]), mode:Some(0o600) })
+}
+
 /// The terminal ioctls; None for a request that is not one.
 pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
+    if let Some(super::fdtab::Kind::Pty(description))=super::fdtab::get(fd){
+        if matches!(req,TCSETS|TCSETSW|TCSETSF|TCSBRK|TCFLSH|TIOCSPGRP|TIOCSWINSZ) {
+            if let Err(error)=description.job_control(true,true){return Some(-(error as i64));}
+        }
+        let result=match req{
+            TIOCSCTTY=>Some(description.claim_tty(arg==1).map(|_|0)),
+            TIOCNOTTY=>Some(description.detach_tty().map(|_|0)),
+            TIOCGSID|TIOCGPGRP=>Some(description.tty_session().and_then(|(sid,pgrp)|{
+                let id=pidns::guest_pid(if req==TIOCGSID{sid}else{pgrp}).map_err(|error|-error as crate::errno::Errno)?;
+                super::user_memory::write_exact(arg,&id.to_le_bytes()).map(|_|0)
+            })),
+            TIOCSPGRP=>Some(super::user_memory::read_exact(arg,4).and_then(|bytes|{
+                let pgrp=i32::from_le_bytes(bytes.try_into().unwrap());if pgrp<0{return Err(crate::errno::EINVAL);}
+                let pgrp=pidns::syscall_pid(pgrp).map_err(|error|-error as crate::errno::Errno)?;
+                description.set_foreground(pgrp).map(|_|0)
+            })),
+            TIOCGPTLCK=>Some(description.slave_lock(None).and_then(|locked|super::user_memory::write_exact(arg,&i32::from(locked).to_le_bytes()).map(|_|0))),
+            TIOCSPTLCK=>Some(super::user_memory::read_exact(arg,4).and_then(|bytes|description.slave_lock(Some(i32::from_le_bytes(bytes.try_into().unwrap())!=0)).map(|_|0))),
+            _=>None,
+        };
+        if let Some(result)=result{return Some(result.unwrap_or_else(|error|-(error as i64)));}
+    }
     if !matches!(
         req,
         TCGETS
@@ -86,18 +120,18 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                 if libc::tcgetattr(fd, &mut t) < 0 {
                     return Some(-(errno::last() as i64));
                 }
-                (arg as *mut [u8; LINUX_TERMIOS]).write_unaligned(to_linux(&t));
-                0
+                super::user_memory::write_exact(arg, &to_linux(&t)).map(|_|0).unwrap_or_else(|error|-(error as i64))
             }
             TCSETS | TCSETSW | TCSETSF => {
                 let mut t: libc::termios = std::mem::zeroed();
                 if libc::tcgetattr(fd, &mut t) < 0 {
                     return Some(-(errno::last() as i64));
                 }
-                from_linux(
-                    &(arg as *const [u8; LINUX_TERMIOS]).read_unaligned(),
-                    &mut t,
-                );
+                let bytes = match super::user_memory::read_exact(arg, LINUX_TERMIOS) {
+                    Ok(bytes) => bytes,
+                    Err(error) => return Some(-(error as i64)),
+                };
+                from_linux(bytes.as_slice().try_into().unwrap(), &mut t);
                 let when = match req {
                     TCSETS => libc::TCSANOW,
                     TCSETSW => libc::TCSADRAIN,
@@ -124,19 +158,18 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                 if pgrp < 0 {
                     return Some(-(errno::last() as i64));
                 }
-                (arg as *mut i32).write_unaligned(pidns::id_in_ns(pgrp));
-                0
+                super::user_memory::write_exact(arg, &pidns::id_in_ns(pgrp).to_le_bytes()).map(|_|0).unwrap_or_else(|error|-(error as i64))
             }
             TIOCGSID => {
                 let sid = libc::tcgetsid(fd);
                 if sid < 0 {
                     return Some(-(errno::last() as i64));
                 }
-                (arg as *mut i32).write_unaligned(pidns::id_in_ns(sid));
-                0
+                super::user_memory::write_exact(arg, &pidns::id_in_ns(sid).to_le_bytes()).map(|_|0).unwrap_or_else(|error|-(error as i64))
             }
             TIOCSPGRP => {
-                errno::check(libc::tcsetpgrp(fd, (arg as *const i32).read_unaligned()) as i64)
+                let bytes = match super::user_memory::read_exact(arg,4) { Ok(bytes)=>bytes,Err(error)=>return Some(-(error as i64)) };
+                errno::check(libc::tcsetpgrp(fd, i32::from_le_bytes(bytes.try_into().unwrap())) as i64)
             }
             TIOCGWINSZ | TIOCSWINSZ => {
                 // struct winsize has the same layout on both kernels.
@@ -145,7 +178,16 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                 } else {
                     libc::TIOCSWINSZ
                 };
-                errno::check(libc::ioctl(fd, host, arg as *mut libc::winsize) as i64)
+                let mut size:libc::winsize=std::mem::zeroed();
+                if req==TIOCSWINSZ {
+                    let bytes=match super::user_memory::read_exact(arg,std::mem::size_of::<libc::winsize>()){Ok(bytes)=>bytes,Err(error)=>return Some(-(error as i64))};
+                    size=std::ptr::read_unaligned(bytes.as_ptr().cast());
+                }
+                let result=errno::check(libc::ioctl(fd, host, &mut size) as i64);
+                if result<0||req==TIOCSWINSZ {result} else {
+                    let bytes=std::slice::from_raw_parts((&size as *const libc::winsize).cast::<u8>(),std::mem::size_of::<libc::winsize>());
+                    super::user_memory::write_exact(arg,bytes).map(|_|0).unwrap_or_else(|error|-(error as i64))
+                }
             }
             TIOCGPTN => {
                 let mut name = [0 as libc::c_char; 128];
@@ -159,16 +201,27 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
                 else {
                     return Some(-(ENOTTY as i64));
                 };
-                (arg as *mut u32).write_unaligned(n);
-                0
+                super::user_memory::write_exact(arg,&n.to_le_bytes()).map(|_|0).unwrap_or_else(|error|-(error as i64))
             }
             // TIOCSPTLCK with 0 unlocks; the host has no way to lock again.
             _ => {
-                if (arg as *const i32).read_unaligned() != 0 {
+                let bytes=match super::user_memory::read_exact(arg,4){Ok(bytes)=>bytes,Err(error)=>return Some(-(error as i64))};
+                if i32::from_le_bytes(bytes.try_into().unwrap()) != 0 {
                     return Some(-(EINVAL as i64));
                 }
                 // Darwin's slave opens only after grantpt; devpts needs none.
-                if libc::grantpt(fd) != 0 {
+                let mut name = [0 as libc::c_char;128];
+                let allocated = if super::attrs::recording()
+                    && libc::ioctl(fd, DARWIN_TIOCPTYGNAME, name.as_mut_ptr()) == 0 {
+                    match super::attrs::character_attributes(super::attrs::Host::Path(
+                        std::ffi::CStr::from_ptr(name.as_ptr()))) {
+                        Ok(attributes) => attributes.is_some(),
+                        Err(error) => return Some(-(error as i64)),
+                    }
+                } else { false };
+                // Allocation already performed grantpt. Repeating it would
+                // change the devfs cookie after guest ownership was recorded.
+                if !allocated && libc::grantpt(fd) != 0 {
                     return Some(-(errno::last() as i64));
                 }
                 errno::check(libc::unlockpt(fd) as i64)
@@ -177,14 +230,16 @@ pub fn ioctl(fd: i32, req: u64, arg: u64) -> Option<i64> {
     })
 }
 
-/// At a process's exit: output its terminals still hold for a pty master
+/// Native-owned PTYs retain their output after this process exits. For
+/// legacy terminals, output still held for a pty master
 /// is read first. Linux keeps a slave's output for the master after the
 /// slave's last close; Darwin's master reads end-of-file once its slave is
 /// closed or its session leader exits, and the output is lost (an adbd
 /// subprocess's, when it exits before adbd reads). So the process waits
 /// until the master has read it, or closed.
 pub fn drain_on_exit() {
-    for fd in super::fdtab::open_fds() {
+    for fd in super::fd_visibility::visible() {
+        if matches!(super::fdtab::get(fd),Some(super::fdtab::Kind::Pty(_))){continue;}
         let mut queued: libc::c_int = 0;
         // SAFETY: host terminal calls on this process's own fds.
         unsafe {
@@ -367,6 +422,23 @@ fn from_linux(linux: &[u8; LINUX_TERMIOS], t: &mut libc::termios) {
 mod tests {
     use super::*;
 
+    fn native_owner_fixture() -> aim_storage::pty_owner::transport::RunningServer {
+        use std::os::unix::fs::DirBuilderExt;
+        let runtime = crate::vfs::runtime_dir().unwrap();
+        let pairs = runtime.join("pty-fixture-pairs");
+        std::fs::DirBuilder::new().mode(0o700).create(&pairs).unwrap();
+        let pairs = std::fs::canonicalize(pairs).unwrap();
+        let table = crate::sys::cred::publish_current_for_owner(&runtime.join("identity/by-pid")).unwrap();
+        let name = format!("dev.aim.pty-fixture.{}", std::process::id());
+        let owner = aim_storage::pty_owner::transport::RunningServer::start_with_credentials(&name, &pairs, &table).unwrap();
+        owner.config.write(&runtime.join("pty-control-owner")).unwrap();
+        owner
+    }
+    struct GuestFd(i32);
+    impl std::os::fd::AsRawFd for GuestFd { fn as_raw_fd(&self) -> i32 { self.0 } }
+    impl Drop for GuestFd {
+        fn drop(&mut self) { crate::sys::fdtab::close_owned_guest(self.0, false).unwrap(); }
+    }
     #[test]
     fn pts_names_round_trip() {
         assert_eq!(pts_host("/dev/pts/7").as_deref(), Some("/dev/ttys007"));
@@ -407,6 +479,115 @@ mod tests {
         );
         assert_eq!(back.c_ospeed, 38400);
         assert_eq!(back.c_cc[libc::VINTR], 3);
+    }
+
+    #[test]
+    fn pty_allocator_filesystem_identity_survives_unlock_and_reuse_without_foreign_grants() {
+        if crate::sys::fdtab::isolated_kernel_test("sys::tty::tests::pty_allocator_filesystem_identity_survives_unlock_and_reuse_without_foreign_grants"){return;}
+        use std::{ffi::CString, os::fd::AsRawFd};
+        use crate::sys::{attrs, fs, fsops};
+        let (_guard, root) = crate::vfs::test_view();
+        let _owner = native_owner_fixture();
+        let device = root.join("shell-pty-device");
+        std::fs::create_dir_all(device.join("pts")).unwrap();
+        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "shell-pty-device", "tmpfs").unwrap();
+        let mut shell = crate::sys::cred::current();
+        shell.uid = [2000;4]; shell.gid = [2000;4]; shell.groups.clear();
+        shell.cap_eff = 0; shell.cap_perm = 0;
+        let mut foreign = shell.clone(); foreign.uid = [2001;4]; foreign.gid = [2001;4];
+        let allocate = |identity: &crate::sys::cred::Identity| unsafe {
+            let fd = fs::openat_as([crate::vfs::LINUX_AT_FDCWD as u64, c"/dev/ptmx".as_ptr() as u64, 2 | 0x100, 0, 0, 0],identity);
+            assert!(fd>=0,"PTY allocation: {fd}");
+            let master = GuestFd(fd as i32);
+            let mut number = u32::MAX;
+            assert_eq!(ioctl(master.as_raw_fd(),TIOCGPTN,&mut number as *mut u32 as u64),Some(0));
+            (master,number)
+        };
+        let unlock = |master: &GuestFd| { let mut value=0i32;
+            assert_eq!(ioctl(master.as_raw_fd(),TIOCSPTLCK,&mut value as *mut i32 as u64),Some(0)); };
+        let open = |path: &CString, identity: &crate::sys::cred::Identity| fs::openat_as(
+            [crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,2|0x100,0,0,0],identity);
+        let (master,number) = allocate(&shell);
+        let path = CString::new(format!("/dev/pts/{number}")).unwrap();
+        let stat = attrs::path_stat(path.to_str().unwrap()).unwrap();
+        assert_eq!((stat.st_uid,stat.st_gid,stat.st_mode & 0o777),(2000,2000,0o600));
+        unlock(&master);
+        assert_eq!(fsops::fchmodat([crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,0o640,0,0,0]),0);
+        assert_eq!(fsops::fchownat([crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr() as u64,2000,2020,0,0]),0);
+        // Physical backend grant operations may alter ctime. Guest ownership
+        // is bound to the immutable allocation inode/generation, not ctime.
+        assert_eq!(unsafe{libc::grantpt(master.as_raw_fd())},0);
+        assert_eq!(unsafe{libc::grantpt(master.as_raw_fd())},0);
+        unlock(&master);
+        let changed = attrs::path_stat(path.to_str().unwrap()).unwrap();
+        assert_eq!((changed.st_uid,changed.st_gid,changed.st_mode & 0o777),(2000,2020,0o640));
+        assert_eq!(open(&path,&foreign),-(crate::errno::EACCES as i64));
+        let slave = open(&path,&shell); assert!(slave>=0);
+        assert_eq!(fs::close([slave as u64,0,0,0,0,0]),0); drop(master);
+        let mut held = Vec::new(); let mut reused = None;
+        // Retain lower-numbered allocations while searching so unrelated host
+        // PTYs cannot make an immediate-global-reuse assumption flaky.
+        for _ in 0..64 {
+            let allocation = allocate(&foreign);
+            if allocation.1 == number { reused = Some(allocation.0); break; }
+            held.push(allocation.0);
+        }
+        let master = reused.expect("freed owned slave not found within allocation bound");
+        unlock(&master);
+        let fresh = attrs::path_stat(path.to_str().unwrap()).unwrap();
+        assert_ne!((fresh.st_dev,fresh.st_ino),(stat.st_dev,stat.st_ino));
+        assert_eq!((fresh.st_uid,fresh.st_gid,fresh.st_mode & 0o777),(2001,2001,0o600));
+        assert_eq!(open(&path,&shell),-(crate::errno::EACCES as i64));
+        let slave = open(&path,&foreign); assert!(slave>=0);
+        assert_eq!(fs::close([slave as u64,0,0,0,0,0]),0); drop(master); drop(held);
+        // A durable metadata failure must fail allocation and close its new
+        // master, rather than report an unowned successful terminal.
+        let journal = crate::vfs::runtime_dir().unwrap().join("fs-attrs");
+        let saved = journal.with_extension("pty-test-saved");
+        std::fs::rename(&journal,&saved).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        let failed = fs::openat_as([crate::vfs::LINUX_AT_FDCWD as u64,c"/dev/ptmx".as_ptr() as u64,2|0x100,0,0,0],&shell);
+        std::fs::remove_dir(&journal).unwrap();
+        std::fs::rename(saved,journal).unwrap();
+        assert_eq!(failed,-(crate::errno::EISDIR as i64));
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        std::fs::remove_dir_all(device).unwrap();
+    }
+
+    #[test]
+    fn pty_slave_open_obeys_real_guest_namespace_ancestors_and_exec_import() {
+        if crate::sys::fdtab::isolated_kernel_test("sys::tty::tests::pty_slave_open_obeys_real_guest_namespace_ancestors_and_exec_import"){return;}
+        use std::ffi::CString;
+        let (_guard, root) = crate::vfs::test_view();
+        let _owner = native_owner_fixture();
+        let device = root.join("owned-pty-dev");
+        std::fs::create_dir_all(&device).unwrap();
+        crate::vfs::add_mount("/dev", device.clone(), crate::vfs::Area::Writable, "owned-pty-dev", "tmpfs").unwrap();
+        unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0);
+            let mut unlock = 0i32;
+            assert_eq!(ioctl(master, TIOCSPTLCK, &mut unlock as *mut i32 as u64), Some(0));
+            let mut number = u32::MAX;
+            assert_eq!(ioctl(master, TIOCGPTN, &mut number as *mut u32 as u64), Some(0));
+            let slave = CString::new(format!("/dev/pts/{number}")).unwrap();
+            let open = || crate::sys::fs::openat([crate::vfs::LINUX_AT_FDCWD as u64, slave.as_ptr() as u64, 2 | 0x100, 0, 0, 0]);
+            // A real master does not make a missing guest ancestor searchable.
+            assert_eq!(open(), -(crate::errno::ENOENT as i64));
+            std::fs::create_dir(device.join("pts")).unwrap();
+            for imported in [false, true] {
+                if imported { let mounts = crate::vfs::own_mounts_text(); crate::vfs::load_own_mounts(&mounts).unwrap(); }
+                let fd = open(); assert!(fd >= 0, "PTY slave open after import={imported}: {fd}");
+                let mut size: libc::winsize = std::mem::zeroed();
+                assert_eq!(libc::ioctl(fd as i32, libc::TIOCGWINSZ, &mut size), 0);
+                assert_eq!(crate::sys::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+            }
+            libc::close(master);
+        }
+        assert!(crate::vfs::remove_mount("/dev").unwrap());
+        // Importing the same live namespace retains its one mount object.
+        assert!(!crate::vfs::remove_mount("/dev").unwrap());
+        std::fs::remove_dir_all(device).unwrap();
     }
 
     #[test]

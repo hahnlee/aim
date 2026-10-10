@@ -63,9 +63,9 @@ fn check_free(files: &Files) -> Result<(), String> {
     Ok(())
 }
 
-fn inputs() -> Result<(), String> {
+fn inputs(selected: &crate::inputs::Inputs) -> Result<(), String> {
     for (path, what) in [
-        (aim_paths::derived_image(), "the derived image"),
+        (selected.image.clone(), "the selected image"),
         (aim_paths::angle(), "ANGLE"),
         (aim_paths::moltenvk(), "MoltenVK"),
     ] {
@@ -81,14 +81,14 @@ fn inputs() -> Result<(), String> {
 
 /// `aimctl start`: `aimctl run` in a session of its own, its output in the
 /// log, and back once guest-init has laid out the guest.
-pub fn start(files: &Files, windows: bool) -> Result<ExitCode, String> {
+pub fn start(files: &Files, windows: bool, selected: &crate::inputs::Inputs) -> Result<ExitCode, String> {
     check_free(files)?;
-    inputs()?;
+    inputs(selected)?;
     fs::create_dir_all(files.dir()).map_err(|e| format!("{}: {e}", files.dir().display()))?;
     let log =
         fs::File::create(files.log()).map_err(|e| format!("{}: {e}", files.log().display()))?;
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
-    command.arg("--data").arg(&files.data).arg("run");
+    command.arg("--data").arg(&files.data).arg("run").args(selected.arguments());
     if windows {
         command.arg("--windows");
     }
@@ -166,17 +166,17 @@ fn display_args(files: &Files, windows: bool) -> Vec<OsString> {
 /// directory, following installs; with bundle identifiers of their own
 /// unless this is the user's data directory (`own`), whose shims keep
 /// theirs (and with them their notification settings).
-fn shims_args(files: &Files, own: bool) -> Vec<OsString> {
+fn shims_args(files: &Files, own: bool, selected: &crate::inputs::Inputs) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "shims".into(),
         "--image".into(),
-        aim_paths::derived_image().into(),
+        selected.image.clone().into(),
         "--data".into(),
         files.guest_data().into(),
         "--display".into(),
         files.display().into(),
         "--host".into(),
-        program("aim-display").into(),
+        selected.program("aim-display").into(),
         "--into".into(),
         files.apps().into(),
         "--watch".into(),
@@ -187,10 +187,10 @@ fn shims_args(files: &Files, own: bool) -> Vec<OsString> {
     args
 }
 
-fn guest_init_args(files: &Files) -> Vec<OsString> {
+fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Vec<OsString> {
     vec![
         "--image".into(),
-        aim_paths::derived_image().into(),
+        selected.image.clone().into(),
         "--data".into(),
         files.data.clone().into(),
         "--run".into(),
@@ -201,7 +201,9 @@ fn guest_init_args(files: &Files) -> Vec<OsString> {
         "--display".into(),
         files.display().into(),
         "--userdata".into(),
-        aim_paths::userdata().into(),
+        selected.userdata.clone().into(),
+        "--linux-run".into(),
+        selected.program("linux-run").into(),
         "--quiet".into(),
     ]
 }
@@ -240,10 +242,10 @@ fn end(children: &mut [Child], patience: Duration) -> Vec<u32> {
     killed
 }
 
-fn start_display(files: &Files, windows: bool) -> Result<Child, String> {
+fn start_display(files: &Files, windows: bool, selected: &crate::inputs::Inputs) -> Result<Child, String> {
     let socket = files.display();
     let _ = fs::remove_file(&socket);
-    let mut display = Command::new(program("aim-display"))
+    let mut display = Command::new(selected.program("aim-display"))
         .args(display_args(files, windows))
         .spawn()
         .map_err(|e| format!("aim-display: {e}"))?;
@@ -261,7 +263,7 @@ fn start_display(files: &Files, windows: bool) -> Result<Child, String> {
 
 /// `aimctl run`: the guest in the foreground until guest-init ends, or
 /// SIGTERM, SIGINT or SIGHUP stops it.
-pub fn run(files: &Files, windows: bool) -> Result<ExitCode, String> {
+pub fn run(files: &Files, windows: bool, selected: crate::inputs::Inputs) -> Result<ExitCode, String> {
     fs::create_dir_all(files.dir()).map_err(|e| format!("{}: {e}", files.dir().display()))?;
     let _lock = state::lock(&files.lock())
         .map_err(|_| format!("{}: a guest is already running", files.data.display()))?;
@@ -271,7 +273,7 @@ pub fn run(files: &Files, windows: bool) -> Result<ExitCode, String> {
             files.data.display()
         ));
     }
-    inputs()?;
+    inputs(&selected)?;
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         // SAFETY: the handler only stores to an atomic.
         unsafe {
@@ -286,6 +288,7 @@ pub fn run(files: &Files, windows: bool) -> Result<ExitCode, String> {
         guest: None,
         windows,
         started: now(),
+        inputs: selected,
     };
     state.write(&files.state())?;
     let result = supervise(files, &mut state);
@@ -295,17 +298,17 @@ pub fn run(files: &Files, windows: bool) -> Result<ExitCode, String> {
 }
 
 fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
-    let mut children = Children(vec![start_display(files, state.windows)?]);
+    let mut children = Children(vec![start_display(files, state.windows, &state.inputs)?]);
     if state.windows {
         children.0.push(
             Command::new(program("aim-apps"))
-                .args(shims_args(files, files.is_default()))
+                .args(shims_args(files, files.is_default(), &state.inputs))
                 .spawn()
                 .map_err(|e| format!("aim-apps: {e}"))?,
         );
     }
-    let mut guest = Command::new(program("guest-init"))
-        .args(guest_init_args(files))
+    let mut guest = Command::new(state.inputs.program("guest-init"))
+        .args(guest_init_args(files, &state.inputs))
         .spawn()
         .map_err(|e| format!("guest-init: {e}"))?;
     state.guest = Some(guest.id());
@@ -331,6 +334,17 @@ fn supervise(files: &Files, state: &mut State) -> Result<ExitCode, String> {
         std::thread::sleep(Duration::from_millis(100));
     };
     drop(children);
+    let cleanup = Command::new(state.inputs.program("linux-run"))
+        .arg("--sweep-memfds")
+        .output()
+        .map_err(|error| format!("memfd cleanup: {error}"))?;
+    if !cleanup.status.success() {
+        return Err(format!(
+            "memfd cleanup: {}: {}",
+            cleanup.status,
+            String::from_utf8_lossy(&cleanup.stderr)
+        ));
+    }
     Ok(if status.success() || stopping.is_some() {
         ExitCode::SUCCESS
     } else {
@@ -438,13 +452,13 @@ mod tests {
     #[test]
     fn guest_init_boots_the_data_directory() {
         let files = Files::of(Path::new("/d")).unwrap();
-        let args = guest_init_args(&files);
+        let args = guest_init_args(&files, &crate::inputs::Inputs::default());
         let args = strings(&args);
         let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
         assert_eq!(after("--data"), "/d");
         assert_eq!(after("--display"), "/d.aimctl/display");
         assert!(args.contains(&"--run"));
-        let shims = shims_args(&files, false);
+        let shims = shims_args(&files, false, &crate::inputs::Inputs::default());
         let shims = strings(&shims);
         assert_eq!(
             shims[shims.iter().position(|a| *a == "--data").unwrap() + 1],
@@ -456,8 +470,25 @@ mod tests {
         );
         assert!(shims.contains(&"--scoped"));
         // The user's own guest keeps the stable identifiers.
-        assert!(!strings(&shims_args(&files, true)).contains(&"--scoped"));
+        assert!(!strings(&shims_args(&files, true, &crate::inputs::Inputs::default())).contains(&"--scoped"));
         assert!(files.is_of(Path::new("/d")) && !files.is_of(Path::new("/e")));
+    }
+
+    #[test]
+    fn selected_inputs_reach_init_display_and_shims() {
+        let files = Files::of(Path::new("/d")).unwrap();
+        let selected = crate::inputs::Inputs { image: "/image".into(),
+            host_runtime: "/runtime".into(), userdata: "/templates".into() };
+        let args = guest_init_args(&files, &selected);
+        let args = strings(&args);
+        let after = |flag: &str| args[args.iter().position(|arg| *arg == flag).unwrap() + 1];
+        assert_eq!(after("--image"), "/image");
+        assert_eq!(after("--linux-run"), "/runtime/linux-run");
+        assert_eq!(after("--userdata"), "/templates");
+        let shims = shims_args(&files, false, &selected);
+        let shims = strings(&shims);
+        assert!(shims.windows(2).any(|pair| pair == ["--image", "/image"]));
+        assert!(shims.windows(2).any(|pair| pair == ["--host", "/runtime/aim-display"]));
     }
 
     /// `program` with `args`, in a session of its own, SIGTERM ignored

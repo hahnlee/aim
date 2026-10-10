@@ -32,6 +32,7 @@ pub(super) const VM: u32 = 10;
 pub(super) const MAPS: u32 = 11;
 pub(super) const FDS: u32 = 12;
 pub(super) const FD_LINK: u32 = 13;
+pub(super) const NET_SOCKET_METADATA: u32 = 16;
 pub(super) const STOPPED: u32 = 14;
 pub(super) const SIGNAL: u32 = 15;
 
@@ -500,6 +501,15 @@ fn handle(op: u32, r: &mut Reader, peer: i32) -> Vec<u8> {
                 .collect();
             reply(0, |w| w.seq(fds.into_iter(), |w, fd| w.i32(fd)))
         }
+        NET_SOCKET_METADATA => {
+            if !crate::sys::pidns::contains(peer) { return err(EPERM); }
+            let sockets = match crate::sys::net::proc_metadata() { Ok(sockets) => sockets, Err(error) => return err(error) };
+            reply(0, |w| w.seq(sockets.into_iter(), |w, owner| {
+                w.i32(owner.fd); w.u32(owner.uid); w.u64(owner.inode); w.u64(owner.cookie);
+                w.opt(owner.local, |w, value| w.bytes(&value));
+                w.opt(owner.peer, |w, value| w.bytes(&value)); w.bool(owner.port_zero); w.bool(owner.probes_known);
+            }))
+        }
         FD_LINK => match procfs::fd_link(r.i32()) {
             Some(l) => reply(0, |w| w.str(&l)),
             None => err(ENOENT),
@@ -623,14 +633,12 @@ fn vm(r: &mut Reader) -> Vec<u8> {
 /// Fork: this process's sockets, which the child closes.
 pub fn fork_save(w: &mut Writer) {
     let own = lock(&OWN).clone();
-    w.seq(own.into_iter(), |w, fd| w.i32(fd));
+    w.seq(own.into_iter(), |w, fd| {w.retain_private(fd);w.i32(fd)});
 }
 
 pub fn fork_restore(r: &mut Reader) {
     for fd in r.seq(|r| r.i32()) {
-        fdtab::unhide(fd);
-        // SAFETY: the parent's socket, inherited and not ours.
-        unsafe { libc::close(fd) };
+        if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("fork ptrace private close: errno {error}");r.invalidate();return;}
     }
     start();
 }

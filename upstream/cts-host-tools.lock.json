@@ -1,0 +1,63 @@
+{
+  "aosp_tag": "android-16.0.0_r1",
+  "git": {
+    "apex": [
+      "system/apex",
+      "9921a73777f97def1d8851dd0a1529f1c45bcc72"
+    ],
+    "e2fsprogs": [
+      "external/e2fsprogs",
+      "8df6ce75f219bbc78f0a7fe546615cac3080c814"
+    ],
+    "erofs": [
+      "external/erofs-utils",
+      "17cf2a79ccf54b95ad0fdf93f79a6614e9e7fe79"
+    ],
+    "lz4": [
+      "external/lz4",
+      "f072532f6846b40417438d29daa8183a8e53b63c"
+    ],
+    "zstd": [
+      "external/zstd",
+      "d127fae3539665f55751ef320265c22e4c81b583"
+    ],
+    "protobuf": [
+      "external/protobuf",
+      "da98e5a6593907dd162bb6c206570c0afa5326ac"
+    ]
+  },
+  "archives": {
+    "autoconf": [
+      "https://ftp.gnu.org/gnu/autoconf/autoconf-2.72.tar.xz",
+      "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
+    ],
+    "automake": [
+      "https://ftp.gnu.org/gnu/automake/automake-1.17.tar.xz",
+      "8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990"
+    ],
+    "pkgconf": [
+      "https://distfiles.ariadne.space/pkgconf/pkgconf-2.3.0.tar.xz",
+      "3a9080ac51d03615e7c1910a0a2a8df08424892b5f13b0628a204d3fcce0ea8b"
+    ],
+    "xz": [
+      "https://github.com/tukaani-project/xz/releases/download/v5.6.4/xz-5.6.4.tar.xz",
+      "829ccfe79d769748f7557e7a4429a64d06858e27e1e362e25d01ab7b931d9c95"
+    ],
+    "m4": [
+      "https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.xz",
+      "63aede5c6d33b6d9b13511cd0be2cac046f2e70fd0a07aa9573a04a82783af96"
+    ],
+    "cmake": [
+      "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz",
+      "330b9514f5112e5ed4fb08b8b05803b776fd9b539a6ae12927d14dcc0ee2ba8d"
+    ],
+    "zlib": [
+      "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+      "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+    ],
+    "libtool": [
+      "https://ftp.gnu.org/gnu/libtool/libtool-2.5.4.tar.xz",
+      "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"
+    ]
+  }
+}

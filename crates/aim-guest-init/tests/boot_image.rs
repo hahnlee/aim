@@ -165,12 +165,13 @@ fn real_image_dry_run_boot() {
     // Roles: no ueventd process; apexd only serves apexservice.
     assert!(!launched.contains("ueventd"));
     assert!(!launched.contains("apexd-bootstrap"));
-    // linkerconfig runs once, at `perform_apex_config --bootstrap`: the
-    // post-fs-data run would see the same APEXes.
-    assert_eq!(
-        boot.executor.launches.iter().filter(|l| l.helper).count(),
-        1
-    );
+    // Each perform_apex_config generates the selected namespace's config.
+    let helpers=boot.executor.launches.iter().filter(|launch|launch.helper).collect::<Vec<_>>();
+    assert_eq!(helpers.len(),2);
+    for helper in helpers{
+        assert_eq!(helper.spec.argv.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["/apex/com.android.runtime/bin/linkerconfig","--target","/linkerconfig"]);
+    }
     assert_eq!(boot.property("apexd.status").as_deref(), Some("ready"));
     // apex.all.ready is the replaced apexd's to set once it serves; a dry
     // run starts no process.

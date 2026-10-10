@@ -97,7 +97,7 @@ fn verifies_v3_and_collects_the_same_without_verifying() {
     let full = verify_bytes(&apk, None, SIGNING_BLOCK_V2, true).unwrap();
     assert_eq!(full.scheme_version, SIGNING_BLOCK_V3);
     assert_eq!(full.signatures.len(), 1);
-    assert_eq!(full.public_keys.len(), 1);
+    assert_eq!(full.public_keys.as_ref().unwrap().len(), 1);
     assert_eq!(full.past_signing_certificates, None);
     assert_eq!(
         verify_bytes(&apk, None, SIGNING_BLOCK_V2, false).unwrap(),

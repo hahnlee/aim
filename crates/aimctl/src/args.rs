@@ -17,7 +17,10 @@ pub const USAGE: &str = "usage: aimctl [--data DIR] COMMAND
   logs [--follow] [LOGCAT OPTION...]
                         the guest's log
 
-  --data DIR            the data directory (default: ~/Library/Application Support/aim/data)";
+  --data DIR            the data directory (default: ~/Library/Application Support/aim/data)
+  --image DIR           image root for start/run
+  --host-runtime DIR    host programs for start/run
+  --userdata DIR        data templates for start/run";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -37,6 +40,7 @@ pub enum Command {
 #[derive(Debug, PartialEq)]
 pub struct Args {
     pub data: Option<PathBuf>,
+    pub inputs: crate::inputs::Selection,
     pub command: Command,
 }
 
@@ -49,6 +53,7 @@ fn usage_error(what: String) -> String {
 /// options forwarded to logcat are taken verbatim.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
     let mut data = None;
+    let mut inputs = crate::inputs::Selection::default();
     let mut it = argv.iter();
     let value = |it: &mut std::slice::Iter<String>, option: &str| {
         it.next()
@@ -59,9 +64,13 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         match it.next().map(String::as_str) {
             None => return Err(USAGE.into()),
             Some("--data") => data = Some(value(&mut it, "--data")?),
+            Some("--image") => inputs.image = Some(value(&mut it, "--image")?),
+            Some("--host-runtime") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
+            Some("--userdata") => inputs.userdata = Some(value(&mut it, "--userdata")?),
             Some("-h" | "--help" | "help") => {
                 return Ok(Args {
                     data,
+                    inputs,
                     command: Command::Help,
                 });
             }
@@ -81,6 +90,9 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         match a.as_str() {
             "--" => verbatim = true,
             "--data" => data = Some(value(&mut it, "--data")?),
+            "--image" if matches!(name, "start" | "run") => inputs.image = Some(value(&mut it, "--image")?),
+            "--host-runtime" if matches!(name, "start" | "run") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
+            "--userdata" if matches!(name, "start" | "run") => inputs.userdata = Some(value(&mut it, "--userdata")?),
             "--windows" if matches!(name, "start" | "run") => windows = true,
             "--follow" if name == "logs" => follow = true,
             s if s.starts_with('-') && name != "logs" => {
@@ -111,7 +123,11 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         "logs" => Command::Logs { follow, args: rest },
         _ => return Err(usage_error(format!("unknown command {name}"))),
     };
-    Ok(Args { data, command })
+    if !matches!(command, Command::Start { .. } | Command::Run { .. })
+        && inputs != crate::inputs::Selection::default() {
+        return Err(usage_error("image, runtime and userdata can only be selected for start/run".into()));
+    }
+    Ok(Args { data, inputs, command })
 }
 
 #[cfg(test)]
@@ -134,6 +150,7 @@ mod tests {
                 p(args).unwrap(),
                 Args {
                     data: Some("/d".into()),
+                    inputs: crate::inputs::Selection::default(),
                     command: Command::Start { windows: true }
                 }
             );
@@ -159,6 +176,21 @@ mod tests {
         );
         assert_eq!(command("open com.x"), Command::Open("com.x".into()));
         assert_eq!(command("--help"), Command::Help);
+    }
+
+    #[test]
+    fn selected_inputs_are_start_options_and_shell_arguments_stay_verbatim() {
+        for command in ["--image /i --host-runtime /r --userdata /u start",
+            "run --image /i --host-runtime /r --userdata /u"] {
+            let selected = p(command).unwrap().inputs;
+            assert_eq!(selected.image, Some("/i".into()));
+            assert_eq!(selected.host_runtime, Some("/r".into()));
+            assert_eq!(selected.userdata, Some("/u".into()));
+        }
+        assert!(p("--image /i status").is_err());
+        assert!(p("start --host-runtime").is_err());
+        assert_eq!(command("shell echo --image /i"),
+            Command::Shell(vec!["echo".into(), "--image".into(), "/i".into()]));
     }
 
     #[test]

@@ -45,6 +45,7 @@ const MAX_SYMLINKS: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapKind {
+    ReadOnly,
     /// Reads and writes go to the host directory or file.
     Writable,
     /// `/proc` and `/sys`: the syscall layer synthesizes them; this tree
@@ -62,6 +63,7 @@ pub enum MapKind {
 impl MapKind {
     pub fn keyword(self) -> &'static str {
         match self {
+            MapKind::ReadOnly => "ro",
             MapKind::Writable => "rw",
             MapKind::Kernfs => "kernfs",
             MapKind::Cgroup2 => "cgroup2",
@@ -105,6 +107,8 @@ pub struct Resolved {
 pub struct PathMap {
     image: PathBuf,
     entries: Vec<MapEntry>,
+    bind_sources:std::collections::BTreeMap<String,String>,
+    propagation:std::collections::BTreeMap<String,String>,
 }
 
 impl PathMap {
@@ -118,19 +122,36 @@ impl PathMap {
         Self {
             image: image.into(),
             entries,
+            bind_sources:Default::default(),
+            propagation:Default::default(),
         }
     }
 
+    pub fn bind_source_of(&self,target:&str)->Option<&str>{self.bind_sources.get(target).map(String::as_str)}
+    pub fn bind_source(&mut self,target:&str,source:&str){self.bind_sources.insert(target.into(),source.into());}
+    pub fn propagation(&mut self,target:&str,kind:&str,recursive:bool){
+        if recursive{let prefix=format!("{}/",target.trim_end_matches('/'));self.propagation.retain(|root,_|root!=target&&!(target=="/"||root.starts_with(&prefix)));}
+        self.propagation.insert(target.into(),kind.into());
+    }
     pub fn image(&self) -> &Path {
         &self.image
     }
 
     /// Add `entry`, replacing one at the same guest path.
     pub fn add(&mut self, entry: MapEntry) {
+        self.bind_sources.remove(&entry.guest);
         self.entries.retain(|e| e.guest != entry.guest);
         let mut entries = std::mem::take(&mut self.entries);
         entries.push(entry);
+        let bind_sources=std::mem::take(&mut self.bind_sources);
+        let propagation=std::mem::take(&mut self.propagation);
         *self = Self::new(std::mem::take(&mut self.image), entries);
+        self.bind_sources=bind_sources;self.propagation=propagation;
+    }
+
+    pub fn retain_entries(&mut self,mut keep:impl FnMut(&MapEntry)->bool){
+        self.entries.retain(|entry|keep(entry));
+        self.bind_sources.retain(|target,_|self.entries.iter().any(|entry|entry.guest==*target));
     }
 
     pub fn entries(&self) -> &[MapEntry] {
@@ -161,6 +182,7 @@ impl PathMap {
                     MapKind::Writable | MapKind::Cgroup2 | MapKind::Bpf => Area::Writable {
                         prefix: entry.guest.clone(),
                     },
+                    MapKind::ReadOnly => Area::ReadOnlyImage,
                     MapKind::Kernfs => Area::Kernfs {
                         prefix: entry.guest.clone(),
                     },
@@ -277,7 +299,9 @@ impl PathMap {
                 entry.guest,
                 entry.host.display()
             ));
+            if let Some(source)=self.bind_sources.get(&entry.guest){out.push_str(&format!("bind-source\t{}\t{}\n",entry.guest,source));}
         }
+        for(target,kind)in &self.propagation{out.push_str(&format!("propagation\t{target}\t{kind}\n"));}
         out
     }
 
@@ -285,11 +309,14 @@ impl PathMap {
     pub fn parse_file_text(text: &str) -> Result<Self, String> {
         let mut image = None;
         let mut entries = Vec::new();
+        let mut binds=std::collections::BTreeMap::new();let mut propagation=std::collections::BTreeMap::new();
         for (number, line) in text.lines().enumerate() {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let fields: Vec<&str> = line.split('\t').collect();
+            if let ["bind-source",guest,source]=fields.as_slice(){binds.insert((*guest).into(),(*source).into());continue;}
+            if let ["propagation",guest,kind]=fields.as_slice(){if !matches!(*kind,"shared"|"slave"|"private"){return Err("invalid mount propagation".into());}propagation.insert((*guest).into(),(*kind).into());continue;}
             let [kind, guest, host] = fields[..] else {
                 return Err(format!(
                     "line {}: expected 3 tab-separated fields",
@@ -298,10 +325,11 @@ impl PathMap {
             };
             match kind {
                 "root" => image = Some(PathBuf::from(host)),
-                "rw" | "kernfs" | "cgroup2" | "bpf" => entries.push(MapEntry {
+                "ro" | "rw" | "kernfs" | "cgroup2" | "bpf" => entries.push(MapEntry {
                     guest: guest.to_string(),
                     host: PathBuf::from(host),
                     kind: match kind {
+                        "ro" => MapKind::ReadOnly,
                         "rw" => MapKind::Writable,
                         "kernfs" => MapKind::Kernfs,
                         "cgroup2" => MapKind::Cgroup2,
@@ -312,7 +340,7 @@ impl PathMap {
             }
         }
         let image = image.ok_or("missing root line")?;
-        Ok(Self::new(image, entries))
+        let mut map=Self::new(image,entries);map.bind_sources=binds;map.propagation=propagation;Ok(map)
     }
 }
 
@@ -521,6 +549,9 @@ impl Layout {
         for dir in [
             self.properties_dir(),
             self.socket_dir(),
+            // The PTY owner maps numeric slaves to actual host terminals;
+            // their guest namespace directory must exist for DAC traversal.
+            self.dev_dir().join("pts"),
             self.kernfs_dir().join("proc"),
             self.kernfs_dir().join("sys"),
             self.cgroup_dir(),
@@ -544,6 +575,17 @@ impl Layout {
         for name in DATA_DIRS {
             fs::create_dir_all(self.data.join(name))?;
         }
+        // Kernel inode proofs live on the persistent volume outside mapped /data.
+        let verity = self.data.join("fs-verity");
+        fs::create_dir_all(&verity)?;
+        if fs::symlink_metadata(&verity)?.file_type().is_symlink() {
+            return Err(io::Error::from_raw_os_error(libc::ELOOP));
+        }
+        let verity = fs::canonicalize(verity)?;
+        use std::os::unix::ffi::OsStrExt;
+        let mut locator = b"AIMVRTROOT01\0".to_vec();
+        locator.extend_from_slice(verity.as_os_str().as_bytes());
+        fs::write(self.runtime.join("fs-verity-root"), locator)?;
         // The mount point of /data/user/0, a symlink to /data/data in
         // earlier layouts (#221).
         let user0 = self.data.join("data/user/0");
@@ -606,6 +648,41 @@ mod tests {
 
     fn map() -> PathMap {
         Layout::new("/img".into(), "/w".into(), Some("/r".into())).path_map()
+    }
+
+    #[test]
+    fn verity_locator_is_persistent_private_and_rejects_foreign_symlink() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let dir = std::env::temp_dir().join(format!("aim-verity-layout-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("custom-runtime")));
+        layout.prepare().unwrap();
+        let store = fs::canonicalize(layout.data.join("fs-verity")).unwrap();
+        fs::write(store.join("retained-proof"), b"proof").unwrap();
+        let locator = fs::read(layout.runtime.join("fs-verity-root")).unwrap();
+        assert_eq!(&locator[..13], b"AIMVRTROOT01\0");
+        assert_eq!(&locator[13..], store.as_os_str().as_bytes());
+        assert_ne!(layout.path_map().lookup("/data/fs-verity").0, store);
+        layout.prepare().unwrap();
+        assert_eq!(fs::read(store.join("retained-proof")).unwrap(), b"proof");
+        assert_eq!(fs::read(layout.runtime.join("fs-verity-root")).unwrap(), locator);
+        fs::remove_dir_all(&store).unwrap();
+        let foreign = dir.join("foreign"); fs::create_dir(&foreign).unwrap();
+        symlink(&foreign, layout.data.join("fs-verity")).unwrap();
+        assert_eq!(layout.prepare_data().err().unwrap().raw_os_error(), Some(libc::ELOOP));
+        assert!(fs::read_dir(foreign).unwrap().next().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn prepared_runtime_contains_the_actual_pty_namespace_directory() {
+        let dir = std::env::temp_dir().join(format!("aim-runtime-pts-{}", std::process::id()));
+        let layout = Layout::new(dir.join("image"), dir.join("data"), Some(dir.join("runtime")));
+        layout.prepare_runtime().unwrap();
+        let pts = layout.dev_dir().join("pts");
+        assert!(fs::metadata(&pts).unwrap().is_dir());
+        assert_eq!(layout.path_map().lookup("/dev/pts/3").0, pts.join("3"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

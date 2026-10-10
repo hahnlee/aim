@@ -8,4 +8,5 @@ description = "Host-call module for lmkd: the Mac's memory pressure level and fr
 
 [dependencies]
 aim-hostcall.workspace = true
+aim-storage.workspace = true
 libc.workspace = true

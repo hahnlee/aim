@@ -57,7 +57,7 @@ fn same(ri: &ResolveInfo, c: &ComponentName) -> bool {
 impl Resolution {
     /// `getSetupWizardPackageNameImpl`: the one system activity for
     /// MAIN/SETUP_WIZARD, else none.
-    fn setup_wizard(&self) -> Result<Option<&str>> {
+    pub(super) fn setup_wizard(&self) -> Result<Option<&str>> {
         if self.setup_wizard.get().is_none() {
             let intent = Intent {
                 action: Some(ACTION_MAIN.into()),
@@ -75,7 +75,7 @@ impl Resolution {
         Ok(self.setup_wizard.get().and_then(|n| n.as_deref()))
     }
 
-    fn activity(&self, c: &ComponentName, flags: i64, calling_uid: i32, user: i32) -> Result<bool> {
+    pub(super) fn activity(&self, c: &ComponentName, flags: i64, calling_uid: i32, user: i32) -> Result<bool> {
         let found = self
             .query(calling_uid)
             .activity_info(c, flags, calling_uid, user);
@@ -83,7 +83,7 @@ impl Resolution {
     }
 
     /// `findPersistentPreferredActivity`.
-    fn find_persistent(
+    pub(super) fn find_persistent(
         &self,
         intent: &Intent,
         resolved_type: Option<&str>,
@@ -96,7 +96,9 @@ impl Resolution {
             return Ok(None);
         };
         let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-        for ppa in preferred::query(&p.persistent, intent, resolved_type, default_only) {
+        for ppa in preferred::query(&p.persistent, intent, resolved_type, default_only)
+            .map_err(ResolutionError::UriMatching)?
+        {
             let c = &ppa.component;
             if !self.activity(c, flags | MATCH_DISABLED_COMPONENTS, calling_uid, user)? {
                 continue;
@@ -121,7 +123,7 @@ impl Resolution {
         user: i32,
         calling_uid: i32,
     ) -> Result<Option<ResolveInfo>> {
-        let capture = self.implicit_image_capture(intent, user, resolved_type, flags);
+        let capture = self.implicit_image_capture(intent, user, resolved_type, flags)?;
         let flags =
             self.update_flags_for_resolve(flags, user, calling_uid, false, false, capture)?;
         let intent = intent.selector.as_deref().unwrap_or(intent);
@@ -134,7 +136,8 @@ impl Resolution {
             return Ok(None);
         };
         let default_only = flags & MATCH_DEFAULT_ONLY != 0;
-        let prefs = preferred::query(&p.preferred, intent, resolved_type, default_only);
+        let prefs = preferred::query(&p.preferred, intent, resolved_type, default_only)
+            .map_err(ResolutionError::UriMatching)?;
         if prefs.is_empty() {
             return Ok(None);
         }
@@ -142,7 +145,7 @@ impl Resolution {
         let has = |c: &str| intent.categories.iter().flatten().any(|x| x == c);
         let home = intent.action.as_deref() == Some(ACTION_MAIN) && has(CATEGORY_HOME);
         let exclude_setup_wizard =
-            home && has(CATEGORY_DEFAULT) && !self.state.platform.device_provisioned;
+            home && has(CATEGORY_DEFAULT) && !self.device_provisioned()?;
         for pa in prefs {
             if pa.match_ != best || !pa.always {
                 continue;
@@ -179,7 +182,7 @@ impl Resolution {
     /// every result is in the set (but the setup wizard's, and packages
     /// not installed or installed for device setup), and all of the set
     /// is.
-    fn same_set(
+    pub(super) fn same_set(
         &self,
         pa: &preferred::PreferredActivity,
         query: &[ResolveInfo],
@@ -250,7 +253,7 @@ impl Resolution {
             if let Info::Activity(ai) = &ri.info
                 && ai.info.application_info.private_flags & PRIVATE_FLAG_INSTANT != 0
             {
-                return Err(NotModelled("an instant app's domain approval"));
+                return Err(NotModelled("an instant app's domain approval").into());
             }
         }
         let mut ai = self.resolver_activity()?;
@@ -292,8 +295,10 @@ impl Resolution {
     /// `mResolveActivity` as `setPlatformPackage` builds it: the `android`
     /// application of the system user, with its overlays.
     fn resolver_activity(&self) -> Result<ActivityInfo> {
+        if let Some(owner)=&self.state.system.resolver_owner {return Ok(owner.activity.clone());}
+        if let Some(activity)=&self.state.system.custom_resolver_activity {return Ok((**activity).clone());}
         if self.state.platform.custom_resolver.is_some() {
-            return Err(NotModelled("a custom resolver activity"));
+            return Err(NotModelled("a custom resolver activity").into());
         }
         let ps = self
             .state

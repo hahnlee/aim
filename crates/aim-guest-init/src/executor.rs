@@ -34,6 +34,16 @@ use crate::mount::DataMount;
 use crate::props::{Properties, decode_persistent_properties, encode_persistent_properties};
 use crate::supervisor::{Planner, StartOutcome, Supervisor, SupervisorEvent, template_service};
 
+fn setup_cgroup_hierarchy(fs: &mut FsOps, root: &str, mode: u32, uid: u32, gid: u32) -> Result<(), String> {
+    // MountV2CgroupController applies the descriptor to the mounted root before
+    // CreateV2SubHierarchy. ProcessGroup reads this root's owner for new groups.
+    fs.mkdir(root, Some(mode), Some(uid), Some(gid))?;
+    for sub in ["apps", "system"] {
+        fs.mkdir(&format!("{root}/{sub}"), Some(mode), Some(uid), Some(gid))?;
+    }
+    Ok(())
+}
+
 /// Something the boot loop must hand to the action manager.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outgoing {
@@ -513,6 +523,7 @@ impl GuestExecutor {
                         pid,
                     });
                     return if exit.is_success() {
+                        crate::service_namespace::linker_config_completed(&self.planner.layout.runtime)?;
                         Ok(())
                     } else {
                         Err(format!("linkerconfig {exit}"))
@@ -709,18 +720,14 @@ impl GuestExecutor {
                 "created /data/misc/apexdata for {made} of {} APEXes",
                 names.len()
             )));
-            // init runs linkerconfig again here because apexd has activated
-            // the APEXes since the bootstrap run. Every APEX of the derived
-            // image is active from the start (`apex`), so that run already
-            // saw the same list and wrote the same configuration.
-            if self.launches.iter().any(|l| l.helper) {
-                self.effect(Effect::NoOp(
-                    "linkerconfig: the APEXes are those of the bootstrap run".to_string(),
-                ));
-                return Ok(());
-            }
         }
-        self.update_linker_config()
+        self.update_linker_config()?;
+        if !bootstrap {
+            let mut failures=Vec::new();
+            for name in self.supervisor.take_delayed(){match self.start_service(&name){Ok(effect)=>self.effect(effect),Err(error)=>{let message=format!("delayed service '{name}': {error}");self.log.push(message.clone());failures.push(message);}}}
+            if !failures.is_empty(){return Err(failures.join("; "));}
+        }
+        Ok(())
     }
 
     /// Runs `onrestart` commands (`Action::ExecuteAllCommands` on the
@@ -1045,7 +1052,9 @@ impl GuestExecutor {
                 "file-based encryption keys: /data is a host directory without FBE".to_string(),
             ),
             Command::EnterDefaultMountNs => {
-                Effect::NoOp("one mount namespace; nothing to enter".to_string())
+                let effect=self.fs.enter_default_mount_namespace()?;
+                self.planner.map=self.fs.map.clone();
+                effect
             }
             Command::Ifup { interface } => Effect::NoOp(format!(
                 "ifup {interface}: networking is the replaced netd's (ADR 0012 appendix)"
@@ -1064,10 +1073,7 @@ impl GuestExecutor {
                 // isolation directories.
                 InitAction::SetupCgroups => match self.fs.cgroup2.clone() {
                     Some((root, mode, uid, gid)) => {
-                        for sub in ["apps", "system"] {
-                            let path = format!("{root}/{sub}");
-                            self.fs.mkdir(&path, Some(mode), Some(uid), Some(gid))?;
-                        }
+                        setup_cgroup_hierarchy(&mut self.fs, &root, mode, uid, gid)?;
                         Effect::Applied(format!(
                             "SetupCgroups: {root}/apps and {root}/system (cgroup v2; no controller acts)"
                         ))
@@ -1124,5 +1130,91 @@ impl PropertyLookup for PropsAdapter {
 impl InitProperties for PropsAdapter {
     fn init_set(&mut self, name: &str, value: &str) -> Result<Vec<(String, String)>, String> {
         InitProperties::init_set(&mut *self.0.borrow_mut(), name, value)
+    }
+}
+
+#[cfg(test)]
+mod cgroup_tests {
+    use super::*;
+    use crate::paths::Layout;
+
+    #[test]
+    fn setup_cgroups_applies_configured_owner_to_mounted_root_before_children() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = std::env::temp_dir().join(format!("aim-cgroup-setup-{}",std::process::id()));
+        std::fs::create_dir_all(directory.join("image")).unwrap();
+        let layout = Layout::new(directory.join("image"),directory.join("data"),Some(directory.join("run")));
+        layout.prepare().unwrap();
+        let mut fs = FsOps::new(layout.path_map(),layout.fs_attrs_file(),true);
+        fs.mount("cgroup2","none","/sys/fs/cgroup", &[]).unwrap();
+        let root = layout.cgroup_dir(); let before = std::fs::metadata(&root).unwrap();
+        let mounted = crate::guest_inode::read(&root).unwrap().unwrap();
+        assert_eq!((mounted.uid,mounted.gid,mounted.mode),(Some(0),Some(0),Some(0o755)));
+        setup_cgroup_hierarchy(&mut fs,"/sys/fs/cgroup",0o775,1000,1000).unwrap();
+        let after = std::fs::metadata(&root).unwrap();
+        assert_eq!((before.dev(),before.ino()),(after.dev(),after.ino()));
+        for suffix in ["","apps","system"] {
+            let inode=crate::guest_inode::read(&root.join(suffix)).unwrap().unwrap();
+            assert_eq!((inode.uid,inode.gid,inode.mode),(Some(1000),Some(1000),Some(0o775)));
+        }
+        let records=&fs.attrs()[1..];
+        assert_eq!(records.iter().map(|record|record.guest.as_str()).collect::<Vec<_>>(),
+            ["/sys/fs/cgroup","/sys/fs/cgroup/apps","/sys/fs/cgroup/system"]);
+        setup_cgroup_hierarchy(&mut fs,"/sys/fs/cgroup",0o750,2100,2200).unwrap();
+        for suffix in ["","apps","system"] {
+            let inode=crate::guest_inode::read(&root.join(suffix)).unwrap().unwrap();
+            assert_eq!((inode.uid,inode.gid,inode.mode),(Some(2100),Some(2200),Some(0o750)));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod apex_linkerconfig_tests {
+    use super::*;
+    use crate::paths::{Layout,MapEntry,MapKind};
+    use aim_storage::mount_namespace::Namespace;
+    type InvocationRecord=(String,Vec<String>,Vec<String>);
+    struct RecordingLauncher{namespace:Rc<RefCell<Namespace>>,seen:Rc<RefCell<Vec<InvocationRecord>>>,pending:Vec<(u32,Exit)>,exit:Rc<RefCell<Exit>>}
+    impl Launcher for RecordingLauncher {
+        fn launch(&mut self,spec:&LaunchSpec)->Result<u32,String>{
+            let owner=self.namespace.borrow();let state=owner.read().map_err(|e|e.to_string())?;
+            let map=crate::paths::PathMap::parse_file_text(&state.base)?;
+            let directory=map.resolve("/apex",true)?.host;
+            let mut inventory=std::fs::read_dir(directory).map_err(|e|e.to_string())?.map(|entry|entry.unwrap().file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();inventory.sort();
+            let mut seen=self.seen.borrow_mut();seen.push((owner.id().to_owned(),inventory,spec.argv.clone()));let pid=1000+seen.len()as u32;
+            self.pending.push((pid,*self.exit.borrow()));Ok(pid)
+        }
+        fn kill_group(&mut self,_pid:u32,_signal:i32){panic!("fixture helper must finish rather than time out");}
+        fn reap(&mut self)->Vec<(u32,Exit)>{std::mem::take(&mut self.pending)}
+    }
+    #[test]
+    fn nonbootstrap_apex_config_invokes_selected_full_namespace_after_bootstrap_and_reports_failure(){
+        let directory=std::env::temp_dir().join(format!("aim-apex-linkerconfig-{}",std::process::id()));
+        std::fs::create_dir_all(directory.join("image")).unwrap();
+        let layout=Layout::new(directory.join("image"),directory.join("data"),Some(directory.join("run")));layout.prepare().unwrap();
+        let bootstrap_dir=directory.join("bootstrap-view");let full_dir=directory.join("full-view");
+        for (view,names) in [(&bootstrap_dir,vec!["com.android.runtime"]),(&full_dir,vec!["com.android.runtime","optional"]) ]{
+            for name in names{let package=view.join(name);std::fs::create_dir_all(&package).unwrap();std::fs::write(package.join("apex_manifest.pb"),b"fixture inventory entry").unwrap();if name=="com.android.runtime"{std::fs::create_dir(package.join("bin")).unwrap();std::fs::write(package.join("bin/linkerconfig"),b"recording-launcher input").unwrap();}}
+        }
+        let base=layout.path_map();let mut first=base.clone();first.add(MapEntry{guest:"/apex".into(),host:bootstrap_dir,kind:MapKind::ReadOnly});
+        let mut second=base;second.add(MapEntry{guest:"/apex".into(),host:full_dir,kind:MapKind::ReadOnly});
+        let bootstrap=Namespace::open(&layout.runtime,"bootstrap").unwrap();bootstrap.initialize(&first.to_file_text()).unwrap();
+        let default=Namespace::open(&layout.runtime,"default").unwrap();default.initialize(&second.to_file_text()).unwrap();
+        let selected=Rc::new(RefCell::new(bootstrap));let seen=Rc::new(RefCell::new(Vec::new()));let exit=Rc::new(RefCell::new(Exit::Code(0)));
+        let launcher=RecordingLauncher{namespace:selected.clone(),seen:seen.clone(),pending:vec![],exit:exit.clone()};
+        let info=aim_android_init::props::info::build_trie(&[],"u:object_r:default_prop:s0","string").unwrap();
+        let props=Rc::new(RefCell::new(crate::props::heap_properties(info).unwrap()));
+        let planner=Planner{layout:layout.clone(),map:first.clone(),ids:aim_android_init::rc::IdResolver::builtin(),vendor_api_level:36,env:vec![],rlimits:vec![],boot_epoch:Instant::now()};
+        let fs=FsOps::new(first,layout.fs_attrs_file(),true);let mut executor=GuestExecutor::new(props,Box::new(launcher),planner,fs,None);
+        executor.perform_apex_config(true).unwrap();assert_eq!(executor.launches.len(),1);
+        *selected.borrow_mut()=default;executor.fs.map=second.clone();executor.planner.map=second;
+        executor.perform_apex_config(false).unwrap();assert_eq!(executor.launches.len(),2);
+        assert_eq!(seen.borrow()[0].0,"bootstrap");assert_eq!(seen.borrow()[0].1,["com.android.runtime"]);
+        assert_eq!(seen.borrow()[1].0,"default");assert_eq!(seen.borrow()[1].1,["com.android.runtime","optional"]);
+        for (_,_,argv) in seen.borrow().iter(){assert_eq!(argv.iter().map(String::as_str).collect::<Vec<_>>(),["/apex/com.android.runtime/bin/linkerconfig","--target","/linkerconfig"]);}
+        *exit.borrow_mut()=Exit::Code(7);assert!(executor.perform_apex_config(false).unwrap_err().contains("linkerconfig exited with status 7"));assert_eq!(executor.launches.len(),3);
+        assert!(!executor.current.iter().any(|effect|matches!(effect,Effect::NoOp(reason)if reason.contains("APEXes are those"))));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

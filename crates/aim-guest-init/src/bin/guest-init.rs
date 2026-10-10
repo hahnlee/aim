@@ -2,7 +2,7 @@
 //! [--only svc1,svc2] [--exclude svc1,svc2] [--runtime DIR] [--linux-run PATH]
 //! [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]
 //! [--binder-trace FILE] [--binder-shadow SERVICES --binder-shadow-log FILE]
-//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR]`
+//! [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]`
 //!
 //! Development entry point for aimd's init role. With `--run`, the data
 //! directory's persistent content lives in a case-sensitive disk image
@@ -12,8 +12,11 @@
 //! (docs/storage.md). `--androidboot` adds an entry to the device's
 //! bootconfig (`hardware=aim`) or replaces the one of its key. A reboot
 //! (`sys.powerctl` `reboot,...`) boots again in the same process.
+//! `--package-constructor-capture` captures the initial construction only;
+//! automatic reboots consume the option and preserve its immutable output.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -27,13 +30,21 @@ fn usage() -> ! {
         "usage: guest-init --image DIR --data DIR (--dry-run | --run) [--only a,b] [--exclude a,b] [--runtime DIR]\n\
          \x20                 [--linux-run PATH] [--gpu DIR] [--vulkan DIR] [--display SOCKET] [--trace]\n\
          \x20                 [--binder-trace FILE] [--binder-shadow a,b --binder-shadow-log FILE]\n\
-         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR]"
+         \x20                 [--timeout SECS] [--androidboot KEY=VALUE]... [--quiet] [--userdata DIR] [--package-constructor-capture DIR]\n\
+         \x20 --package-constructor-capture DIR captures the initial construction once; automatic reboots preserve the output and omit this option."
     );
     std::process::exit(2);
 }
 
 extern "C" fn stop(_: libc::c_int) {
     boot::request_stop();
+}
+
+/// Remove only option/value pairs identified by the initial CLI parser.
+fn reboot_arguments(args: impl IntoIterator<Item = OsString>, captures: &[usize]) -> Vec<OsString> {
+    args.into_iter().enumerate()
+        .filter(|(index, _)| !captures.iter().any(|&capture| *index == capture || *index == capture + 1))
+        .map(|(_, argument)| argument).collect()
 }
 
 fn main() {
@@ -48,6 +59,8 @@ fn main() {
         };
     }
     let mut args = std::env::args().skip(1);
+    let argument_count = args.len();
+    let mut capture_arguments = Vec::new();
     let (mut image, mut data, mut mode) = (None, None, None);
     let mut runtime = None;
     let mut only = None;
@@ -61,7 +74,9 @@ fn main() {
     let mut androidboot = Vec::new();
     let mut quiet = false;
     let mut userdata = None;
+    let mut package_constructor_capture = None;
     while let Some(arg) = args.next() {
+        let option_index = argument_count - args.len() - 1;
         let mut value = || args.next().unwrap_or_else(|| usage());
         match arg.as_str() {
             "--image" => image = Some(PathBuf::from(value())),
@@ -102,6 +117,10 @@ fn main() {
             "--binder-shadow-log" => binder_shadow_log = Some(PathBuf::from(value())),
             "--quiet" => quiet = true,
             "--userdata" => userdata = Some(PathBuf::from(value())),
+            "--package-constructor-capture" => {
+                package_constructor_capture = Some(PathBuf::from(value()));
+                capture_arguments.push(option_index);
+            }
             "--timeout" => {
                 timeout = Some(Duration::from_secs_f64(
                     value().parse().unwrap_or_else(|_| usage()),
@@ -128,6 +147,7 @@ fn main() {
     options.display = display;
     options.trace = trace;
     options.binder_trace = binder_trace;
+    options.package_constructor_capture = package_constructor_capture;
     options.binder_shadow = match (binder_shadow, binder_shadow_log) {
         (None, None) => None,
         (Some(names), Some(log)) => Some((names, log)),
@@ -135,10 +155,7 @@ fn main() {
     };
     options.timeout = timeout;
     options.userdata = userdata;
-    for (key, value) in androidboot {
-        options.androidboot.retain(|(k, _)| *k != key);
-        options.androidboot.push((key, value));
-    }
+    options.merge_androidboot(androidboot);
     let mut boot = match Boot::prepare(options) {
         Ok(boot) => boot,
         Err(error) => {
@@ -195,12 +212,13 @@ fn main() {
     }
     println!("triggers: {}", report.triggers.join(" "));
     println!("{}", report.summary());
-    if report.fatal.is_some() {
+    if let Some(fatal)=report.fatal.as_deref() {
+        eprintln!("guest-init: native boot fatal: {fatal}");
         std::process::exit(1);
     }
     // A reboot restarts the device: the kernel's reboot(2) is this
     // process's to carry out, so the boot runs again from the start, with
-    // the same arguments and pid (which names the boot's binder, so its
+    // the same behavior arguments and pid (which names the boot's binder, so its
     // keeper and shells find the new boot as they found the old).
     if mode == RunMode::Run
         && report
@@ -208,11 +226,32 @@ fn main() {
             .as_deref()
             .is_some_and(|command| command.starts_with("reboot"))
     {
+        eprintln!("guest-init: native reboot requested: {}",report.shutdown.as_deref().unwrap());
         let _ = std::io::stdout().flush();
+        let args = reboot_arguments(std::env::args_os().skip(1), &capture_arguments);
         let error = std::env::current_exe()
-            .map(|exe| Command::new(exe).args(std::env::args_os().skip(1)).exec())
+            .map(|exe| Command::new(exe).args(args).exec())
             .unwrap_or_else(|error| error);
         eprintln!("guest-init: reboot: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<OsString> { values.iter().map(OsString::from).collect() }
+    #[test]
+    fn automatic_reboot_consumes_only_parser_recorded_capture_pairs() {
+        let original = args(&["--image", "derived image", "--package-constructor-capture", "first capture", "--display", "--package-constructor-capture", "--androidboot", "literal='$(shell)' \"words\" --package-constructor-capture", "--package-constructor-capture", "last capture", "--data", "data path", "--runtime", "runtime dir", "--run", "--binder-trace", "trace file", "--quiet"]);
+        let expected = args(&["--image", "derived image", "--display", "--package-constructor-capture", "--androidboot", "literal='$(shell)' \"words\" --package-constructor-capture", "--data", "data path", "--runtime", "runtime dir", "--run", "--binder-trace", "trace file", "--quiet"]);
+        assert_eq!(reboot_arguments(original, &[2, 8]), expected);
+    }
+    #[test]
+    fn behavior_args_and_raw_values_are_unchanged_without_capture_positions() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut original = args(&["--future-option", "--package-constructor-capture", "--userdata", "template path", "--linux-run", "loader path", "--gpu", "gpu path", "--vulkan", "vulkan path", "--binder-shadow", "package,permission", "--binder-shadow-log", "shadow file", "--timeout", "120", "--only", "zygote,vold", "--exclude", "audio", "--trace", "--run"]);
+        original.extend([OsString::from("--opaque-path"), OsString::from_vec(vec![b'd', 0xff])]);
+        assert_eq!(reboot_arguments(original.clone(), &[]), original);
     }
 }

@@ -9,7 +9,7 @@
 //! their original label (android-image-extract). libselinux's restorecon
 //! (installd, for app data) reads the label before it sets one.
 
-use std::ffi::{CStr, CString};
+use std::{ffi::{CStr, CString}, os::fd::AsRawFd};
 
 use super::fs::check_writable;
 use super::{genfs, procfs};
@@ -47,7 +47,8 @@ fn host_name(name: &[u8]) -> Result<CString, i64> {
 
 fn path_target(path: u64, follow: bool, write: bool) -> Result<Target, i64> {
     // SAFETY: guest path pointer.
-    let p = unsafe { guest_cstr(path) };
+    let path=guest_cstr(path).map_err(|error|-(error as i64))?;
+    let p=path.as_slice();
     let r = vfs::resolve(AT_FDCWD, p, follow).map_err(|e| -(e as i64))?;
     if write {
         check_writable(&r)?;
@@ -104,7 +105,8 @@ fn exists(t: &Target) -> Result<(), i64> {
 
 fn get(t: Target, name: u64, value: u64, size: u64) -> i64 {
     // SAFETY: guest name pointer.
-    let name = unsafe { guest_cstr(name) };
+    let name=match guest_cstr(name){Ok(name)=>name,Err(error)=>return -(error as i64)};
+    let name=name.as_slice();
     let hname = match host_name(name) {
         Ok(n) => n,
         Err(e) => return e,
@@ -144,7 +146,8 @@ fn get(t: Target, name: u64, value: u64, size: u64) -> i64 {
 
 fn set(t: Target, name: u64, value: u64, size: u64, flags: u64) -> i64 {
     // SAFETY: guest name pointer.
-    let name = unsafe { guest_cstr(name) };
+    let name=match guest_cstr(name){Ok(name)=>name,Err(error)=>return -(error as i64)};
+    let name=name.as_slice();
     let hname = match host_name(name) {
         Ok(n) => n,
         Err(e) => return e,
@@ -241,7 +244,8 @@ fn list(t: Target, buf: u64, size: u64) -> i64 {
 
 fn remove(t: Target, name: u64) -> i64 {
     // SAFETY: guest name pointer.
-    let name = unsafe { guest_cstr(name) };
+    let name=match guest_cstr(name){Ok(name)=>name,Err(error)=>return -(error as i64)};
+    let name=name.as_slice();
     let hname = match host_name(name) {
         Ok(n) => n,
         Err(e) => return e,
@@ -256,8 +260,18 @@ fn remove(t: Target, name: u64) -> i64 {
     errno::check(r as i64)
 }
 
+fn pin_target(nr: u64, descriptor_call: u64, args: &mut [u64; 6]) -> Result<Option<super::fdtab::Pinned>, i64> {
+    if nr != descriptor_call { return Ok(None); }
+    let pin = super::fdtab::pin_guest(args[0] as i32).map_err(|error| -(error as i64))?;
+    if matches!(pin.kind(), Some(super::fdtab::Kind::Path(_))) { return Err(-(errno::EBADF as i64)); }
+    args[0] = pin.descriptor().as_raw_fd() as u64;
+    Ok(Some(pin))
+}
+
 /// setxattr (5), lsetxattr (6), fsetxattr (7).
-pub fn setxattr(nr: u64, a: [u64; 6]) -> i64 {
+pub fn setxattr(nr: u64, mut a: [u64; 6]) -> i64 {
+    let _pin = match pin_target(nr, 7, &mut a) { Ok(pin) => pin, Err(error) => return error };
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         7 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 5, true) {
@@ -269,7 +283,9 @@ pub fn setxattr(nr: u64, a: [u64; 6]) -> i64 {
 }
 
 /// getxattr (8), lgetxattr (9), fgetxattr (10).
-pub fn getxattr(nr: u64, a: [u64; 6]) -> i64 {
+pub fn getxattr(nr: u64, mut a: [u64; 6]) -> i64 {
+    let _pin = match pin_target(nr, 10, &mut a) { Ok(pin) => pin, Err(error) => return error };
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         10 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 8, false) {
@@ -281,7 +297,9 @@ pub fn getxattr(nr: u64, a: [u64; 6]) -> i64 {
 }
 
 /// listxattr (11), llistxattr (12), flistxattr (13).
-pub fn listxattr(nr: u64, a: [u64; 6]) -> i64 {
+pub fn listxattr(nr: u64, mut a: [u64; 6]) -> i64 {
+    let _pin = match pin_target(nr, 13, &mut a) { Ok(pin) => pin, Err(error) => return error };
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         13 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 11, false) {
@@ -293,7 +311,9 @@ pub fn listxattr(nr: u64, a: [u64; 6]) -> i64 {
 }
 
 /// removexattr (14), lremovexattr (15), fremovexattr (16).
-pub fn removexattr(nr: u64, a: [u64; 6]) -> i64 {
+pub fn removexattr(nr: u64, mut a: [u64; 6]) -> i64 {
+    let _pin = match pin_target(nr, 16, &mut a) { Ok(pin) => pin, Err(error) => return error };
+    if let Some(result)=super::fuse_client::xattr_syscall(nr,a){return result;}
     let t = match nr {
         16 => Target::Fd(a[0] as i32),
         _ => match path_target(a[0], nr == 14, true) {
@@ -307,6 +327,29 @@ pub fn removexattr(nr: u64, a: [u64; 6]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptor_xattrs_keep_the_pinned_inode_after_original_slot_reuse() {
+        if super::super::fdtab::isolated_kernel_test("sys::xattr::tests::descriptor_xattrs_keep_the_pinned_inode_after_original_slot_reuse"){return;}
+        use std::{fs::OpenOptions, os::fd::{AsFd, AsRawFd}};
+        let (_view, root) = vfs::test_view();
+        let original = OpenOptions::new().read(true).write(true).create_new(true).open(root.join("xattr-original")).unwrap();
+        let other = OpenOptions::new().read(true).write(true).create_new(true).open(root.join("xattr-other")).unwrap();
+        let fd = unsafe { libc::dup(original.as_raw_fd()) };
+        assert!(fd >= 0); super::super::fdtab::publish_guest(fd).unwrap();
+        let mut args = [fd as u64, 0, 0, 0, 0, 0];
+        let pin = pin_target(7, 7, &mut args).unwrap().unwrap();
+        assert_eq!(super::super::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(unsafe { libc::dup2(other.as_raw_fd(), fd) }, fd);
+        let value = b"owned";
+        assert_eq!(set(Target::Fd(args[0] as i32), c"user.pin".as_ptr() as u64, value.as_ptr() as u64, value.len() as u64, 0), 0);
+        let mut read = [0u8; 8];
+        assert_eq!(get(Target::Fd(original.as_fd().as_raw_fd()), c"user.pin".as_ptr() as u64, read.as_mut_ptr() as u64, 8), 5);
+        assert_eq!(&read[..5], value);
+        assert!(get(Target::Fd(other.as_raw_fd()), c"user.pin".as_ptr() as u64, read.as_mut_ptr() as u64, 8) < 0);
+        drop(pin); assert_eq!(unsafe { libc::close(fd) }, 0);
+        assert!(pin_target(10, 10, &mut [other.as_raw_fd() as u64, 0, 0, 0, 0, 0]).is_err());
+    }
 
     #[test]
     fn only_guest_names_are_listed() {

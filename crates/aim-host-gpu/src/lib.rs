@@ -326,7 +326,7 @@ unsafe fn call(func: u32, args: u64, len: u64) -> i64 {
                 let pool = metal::pool_push();
                 let r = fence::fence(display::host(a.display as usize));
                 metal::pool_pop(pool);
-                r.map_or_else(|e| e, |f| aim_sync_file::give_to_guest(f) as i64)
+                r.map_or_else(|e| e, |f| aim_sync_file::give_to_guest(f).map(|fd|fd as i64).unwrap_or_else(|error|-(error as i64)))
             }
             Err(e) => e,
         },

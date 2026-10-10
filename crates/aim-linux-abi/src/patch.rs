@@ -376,12 +376,19 @@ impl PatchStats {
 }
 
 /// Rewrite the given sites (absolute addresses) of code in `[lo, hi)`.
-pub fn rewrite_sites(
+pub fn rewrite_sites(sites:&[(u64,Kind,u32)],lo:u64,hi:u64,use_islands:bool)->PatchStats {
+    let(words,stats)=prepare_rewrite_sites(sites,lo,hi,use_islands);
+    write_words(&words);stats
+}
+
+/// Complete immutable executable stubs before a demand page publishes its
+/// branch words. This does not write into any guest source page.
+pub fn prepare_rewrite_sites(
     sites: &[(u64, Kind, u32)],
     lo: u64,
     hi: u64,
     use_islands: bool,
-) -> PatchStats {
+) -> (Vec<(u64,u32)>,PatchStats) {
     let mut stats = PatchStats::default();
     let ctr = crate::a64::host_ctr_el0();
     let mut islands = ISLANDS.lock().unwrap_or_else(|e| e.into_inner());
@@ -415,12 +422,25 @@ pub fn rewrite_sites(
     }
     drop(islands);
     site_words.sort_unstable_by_key(|&(a, _)| a);
-    write_words(&site_words);
-    stats
+    (site_words,stats)
 }
 
 /// Find and rewrite every candidate site in `[addr, addr+len)` by scanning
 /// all words: code with no metadata (run-time generated code).
+/// Validate an inherited word against actual immutable island ownership and
+/// the authenticated original instruction recipe, never a serialized claim.
+pub(crate) fn validate_prepared_word(site:u64,kind:Kind,rt:u32,word:u32)->bool {
+    if word==a64::brk_fallback(kind,rt){return true;}
+    if word&0xfc00_0000!=0x1400_0000{return false;}
+    let displacement=(((word&0x03ff_ffff)as i32)<<6>>4)as i64;
+    let target=site.wrapping_add_signed(displacement);
+    let islands=ISLANDS.lock().unwrap_or_else(|error|error.into_inner());
+    let Some(words)=a64::stub_for(kind,rt,a64::host_ctr_el0(),target,site)else{return false;};
+    let bytes=(words.len()*4)as u64;
+    if !islands.iter().any(|island|target>=island.rx&&target.checked_add(bytes).is_some_and(|end|end<=island.rx+island.used)){return false;}
+    unsafe{std::slice::from_raw_parts(target as*const u32,words.len())==words.as_slice()}
+}
+
 pub fn rewrite_region(addr: u64, len: u64) -> PatchStats {
     rewrite_region_with(addr, len, true)
 }

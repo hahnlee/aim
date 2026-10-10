@@ -216,27 +216,94 @@ pub fn attach(image: &Path, how: Attach) -> Result<String, String> {
         .ok_or_else(|| format!("{}: attached without a device", image.display()))
 }
 
-/// Detaches the image of `device`. A volume in use is retried for
-/// `patience` (the Mac's security agent scans freshly written files for a
-/// while), then unmounted by force.
+/// Detaches the image of `device`. Busy volumes are retried for `patience`.
+/// A dissenter is an owner, not permission to force its volume away (#1094).
 pub fn detach(device: &str, patience: Duration) -> Result<(), String> {
-    let deadline = Instant::now() + patience;
+    detach_with(device, patience, || {
+        run(Command::new("diskutil").args(["eject", device])).map(|_| ())
+    })
+}
+
+fn detach_with(device: &str, patience: Duration, eject: impl FnMut() -> Result<(), String>) -> Result<(), String> {
+    detach_with_clock(device, patience, eject, Instant::now, std::thread::sleep)
+}
+
+fn detach_with_clock(
+    device: &str,
+    patience: Duration,
+    mut eject: impl FnMut() -> Result<(), String>,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Result<(), String> {
+    let deadline = now() + patience;
     loop {
-        match run(Command::new("diskutil").args(["eject", device])) {
-            Ok(_) => return Ok(()),
-            Err(e) if Instant::now() < deadline => {
-                if !e.contains("could not be unmounted") && !e.contains("dissented") {
-                    return Err(e);
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
+        match eject() {
+            Ok(()) => return Ok(()),
             Err(e) => {
-                eprintln!("aim-storage: {e}; unmounting by force");
-                run(Command::new("diskutil").args(["unmountDisk", "force", device]))?;
-                run(Command::new("diskutil").args(["eject", device]))?;
-                return Ok(());
+                let busy = e.contains("dissented") || e.contains("could not be unmounted");
+                if !busy || now() >= deadline {
+                    return Err(format!("refusing to force detach {device}: {e}"));
+                }
+                sleep(Duration::from_millis(500).min(deadline.saturating_duration_since(now())));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod detach_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn transient_dissenter_is_retried_without_force() {
+        let mut calls = 0;
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let result = detach_with_clock("fixture-device", Duration::from_secs(10), || {
+            calls += 1;
+            if calls == 1 { Err("Unmount was dissented by PID 42".into()) } else { Ok(()) }
+        }, || start + elapsed.get(), |delay| elapsed.set(elapsed.get() + delay));
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+        assert_eq!(elapsed.get(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn persistent_dissenter_expires_with_final_diagnostic() {
+        let mut calls = 0;
+        let start = Instant::now();
+        let elapsed = Cell::new(Duration::ZERO);
+        let result = detach_with_clock("fixture-device", Duration::from_millis(750), || {
+            calls += 1;
+            Err(format!("Unmount was dissented by PID {}", 40 + calls))
+        }, || start + elapsed.get(), |delay| elapsed.set(elapsed.get() + delay));
+        assert_eq!(calls, 3);
+        assert_eq!(elapsed.get(), Duration::from_millis(750));
+        let error = result.unwrap_err();
+        assert!(error.contains("refusing to force detach"));
+        assert!(error.contains("PID 43"));
+    }
+
+    #[test]
+    fn zero_patience_dissenter_is_not_retried() {
+        let mut calls = 0;
+        let result = detach_with("fixture-device", Duration::ZERO, || {
+            calls += 1;
+            Err("Unmount was dissented by PID 42".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn unrelated_eject_error_is_not_retried_or_forced() {
+        let mut calls = 0;
+        assert!(detach_with("fixture-device", Duration::from_secs(20), || {
+            calls += 1;
+            Err("permission denied".into())
+        }).is_err());
+        assert_eq!(calls, 1);
     }
 }
 

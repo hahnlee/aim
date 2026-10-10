@@ -315,6 +315,33 @@ The first boot then runs the original from that state: PMS as on a repeat
 boot, every other owner as on a first boot, generating the device's own
 identities, keys and seeds.
 
+### Isolated owner validation
+
+The standalone `template` command uses explicit existing image, immutable host
+runtime, display binary and empty-template inputs. It runs no build graph and
+requires a new output directory outside the shared templates and every input.
+Its log, raw disposable boot data and constructor captures remain inside that
+output; published templates elsewhere are untouched. Input hashes, including the
+image overlay receipt, are captured before boot and checked again before publish.
+
+```sh
+cargo build -p aim-build --bin cargo-aim --target-dir target/aim/template-tool-cargo
+target/aim/template-tool-cargo/debug/cargo-aim template \
+  --output target/aim/native-template-gates/native-1 \
+  --image /path/to/frozen-derived/root \
+  --host-runtime /path/to/immutable-host-runtime \
+  --display-bin /path/to/frozen/aim-display \
+  --empty-template target/aim/userdata/empty.asif
+```
+
+Repeat with a second new output and the same inputs/SKU for a native-owner
+structure comparison. The private `inputs` directory contains only the empty
+image, so each build is a genuine first boot. Raw boot events are preserved before
+shutdown. A comparison against an original template with a different overlay
+receipt establishes structural correspondence only; it does not establish
+same-image CTS parity. Official BootStats and template-consumer first-boot checks
+remain separate runtime gates.
+
 ### Checks
 
 - **Structure.** Two builds of the template must give the same shipped

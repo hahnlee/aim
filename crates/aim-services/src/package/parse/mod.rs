@@ -8,8 +8,8 @@
 //! This parser makes what `PackageParser2.parsePackage` caches during a
 //! scan: no certificates (`PARSE_COLLECT_CERTIFICATES` is not set), and
 //! nothing the scan sets afterwards. What it does not port yet it refuses
-//! with [`Error::Unsupported`] rather than guess, among them split APKs,
-//! `<key-sets>`, `<install-constraints>`, `<extension-sdk>` and advanced
+//! with [`Error::Unsupported`] rather than guess, among them
+//! `<install-constraints>` and advanced
 //! glob patterns; none of the image's packages has them.
 //!
 //! Ported from the Android Open Source Project (`android-16.0.0_r1`,
@@ -19,8 +19,11 @@
 //! Project, Licensed under the Apache License, Version 2.0.
 
 mod attrs;
+mod cluster;
 pub mod component;
 mod components;
+mod key_sets;
+pub mod lite;
 pub mod package;
 pub mod parcel;
 pub mod platform;
@@ -75,6 +78,9 @@ pub struct Platform {
     pub sdk: i32,
     /// `Build.VERSION.ACTIVE_CODENAMES`.
     pub codenames: Vec<String>,
+    /// Activated original SdkExtensions properties, supplied by the runtime
+    /// property owner separately from image build.props.
+    pub sdk_extensions: Option<HashMap<i32,i32>>,
     /// The system features (`hasSystemFeature`).
     pub features: HashSet<String>,
     /// The aconfig flags' values, by `package.name`, and the packages that
@@ -104,6 +110,21 @@ pub struct Platform {
 }
 
 impl Platform {
+    pub fn set_sdk_extensions(&mut self,property:&dyn Fn(&str)->std::result::Result<Option<String>,String>)
+        ->std::result::Result<(),String> {
+        let mut versions=HashMap::new();
+        for (sdk,suffix) in [(30,"r"),(31,"s"),(33,"t"),(34,"u"),(35,"v"),(36,"b"),(1_000_000,"ad_services")] {
+            let value=property(&format!("build.version.extensions.{suffix}"))?;
+            let version=value.as_deref().and_then(|value|{
+                let value=value.trim();
+                if let Some(hex)=value.strip_prefix("0x").or_else(||value.strip_prefix("0X")) {
+                    i32::from_str_radix(hex,16).ok()
+                }else{value.parse::<i32>().ok()}
+            }).unwrap_or(0); // Original SystemProperties.getInt(..., 0).
+            versions.insert(sdk,version);
+        }
+        self.sdk_extensions=Some(versions);Ok(())
+    }
     fn flag(&self, name: &str) -> bool {
         self.flags.get(name).copied().unwrap_or(false)
     }
@@ -140,6 +161,8 @@ pub struct SplitPermission {
 pub enum Error {
     /// The original fails too (`INSTALL_PARSE_FAILED_*`), or skips it.
     Parse(String),
+    /// Original INSTALL_FAILED_OLDER_SDK compatibility rejection.
+    OlderSdk(String),
     /// Something this parser does not port yet.
     Unsupported(String),
 }
@@ -148,6 +171,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Parse(s) => write!(f, "parse failed: {s}"),
+            Error::OlderSdk(s) => write!(f, "older sdk: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported: {s}"),
         }
     }
@@ -204,45 +228,29 @@ struct Parser<'a> {
     platform: &'a Platform,
     ctx: Ctx<'a>,
     flags: i32,
-    input: RefCell<Input>,
+    input: &'a RefCell<Input>,
 }
 
 /// Parses the package at `host` (an APK or a directory holding one) that
 /// the guest sees at `path`, with the scan's `flags`.
 pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result<Package> {
     let (host, path) = descend(host, path)?;
-    let (apk_host, apk_path, code_path) = if host.is_dir() {
-        let apks: Vec<_> = std::fs::read_dir(&host)
-            .map_err(|e| Error::Parse(format!("{}: {e}", host.display())))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".apk"))
-            .collect();
-        match apks.as_slice() {
-            [one] => {
-                let name = one.file_name().to_string_lossy().into_owned();
-                (one.path(), format!("{path}/{name}"), path.clone())
-            }
-            [] => return fail("No packages found in split"),
-            _ => return Err(Error::Unsupported("split APKs".into())),
-        }
-    } else {
-        (host.clone(), path.clone(), path.clone())
-    };
-    let apk = Apk::open(&apk_host).map_err(|e| Error::Parse(e.to_string()))?;
-    let manifest = apk.manifest().map_err(|e| Error::Parse(e.to_string()))?;
-    let app_table = apk.file("resources.arsc").ok().map(|b| Table::parse(&b));
-    let app_table = app_table
-        .transpose()
-        .map_err(|e| Error::Parse(e.to_string()))?;
+    let parts = cluster::load(&host, &path)?;
+    let dependencies = cluster::dependencies(&parts)?;
+    let base = &parts[0];
+    let manifest = &base.manifest;
     let mut tables = vec![&platform.framework];
-    if let Some(t) = &app_table {
-        tables.push(t);
-    }
+    tables.extend(
+        cluster::assets(parts.len(), dependencies.as_ref(), 0)
+            .iter()
+            .filter_map(|i| parts[*i].table.as_ref()),
+    );
     let res = Resources {
         tables,
         overlays: &platform.framework_overlays,
         config: platform.config(),
     };
+    let input = RefCell::new(Input::default());
     let parser = Parser {
         platform,
         ctx: Ctx {
@@ -251,9 +259,52 @@ pub fn parse(host: &Path, path: &str, flags: i32, platform: &Platform) -> Result
             error: RefCell::new(None),
         },
         flags,
-        input: RefCell::new(Input::default()),
+        input: &input,
     };
-    let mut pkg = parser.parse_base_apk(&manifest, &apk_path, &code_path)?;
+    let mut pkg = parser.parse_base_apk(manifest, &base.path, &path)?;
+    if base.table.as_ref().is_some_and(Table::defines_overlayable) {
+        for t in &res.tables {
+            for (name, actor) in t.overlayables() {
+                pkg.overlayables.put(name, actor.to_owned());
+            }
+        }
+    }
+    if parts.len() > 1 {
+        pkg.split_dependencies = dependencies.clone();
+        let splits = &parts[1..];
+        pkg.split_names = Some(splits.iter().map(|p| p.split.clone().unwrap()).collect());
+        pkg.split_code_paths = Some(splits.iter().map(|p| p.path.clone()).collect());
+        pkg.split_revision_codes = Some(splits.iter().map(|p| p.revision).collect());
+        pkg.split_flags = Some(vec![0; splits.len()]);
+        pkg.split_class_loader_names = Some(vec![None; splits.len()]);
+        for (index, part) in splits.iter().enumerate() {
+            let mut tables = vec![&platform.framework];
+            tables.extend(
+                cluster::assets(parts.len(), dependencies.as_ref(), index + 1)
+                    .iter()
+                    .filter_map(|i| parts[*i].table.as_ref()),
+            );
+            let split_res = Resources {
+                tables,
+                overlays: &platform.framework_overlays,
+                config: platform.config(),
+            };
+            let split_parser = Parser {
+                platform,
+                ctx: Ctx {
+                    res: &split_res,
+                    attrs: &platform.framework_attrs,
+                    error: RefCell::new(None),
+                },
+                flags,
+                input: &input,
+            };
+            split_parser.parse_split(&mut pkg, part, index)?;
+            if let Some(e) = split_parser.ctx.error.take() {
+                return fail(e);
+            }
+        }
+    }
     if let Some(e) = parser.ctx.error.take() {
         return fail(e);
     }
@@ -272,12 +323,15 @@ fn descend(host: &Path, path: &str) -> Result<(std::path::PathBuf, String)> {
     if host.is_dir() {
         let entries: Vec<_> = std::fs::read_dir(host)
             .map_err(|e| Error::Parse(format!("{}: {e}", host.display())))?
-            .filter_map(|e| e.ok())
-            .collect();
+            .map(|entry| entry.map_err(|e| Error::Parse(format!("{}: {e}", host.display()))))
+            .collect::<Result<_>>()?;
         if let [one] = entries.as_slice()
             && one.path().is_dir()
         {
-            let name = one.file_name().to_string_lossy().into_owned();
+            let name = one
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::Parse(format!("{}: non-UTF8 package path", host.display())))?;
             return descend(&one.path(), &format!("{path}/{name}"));
         }
     }
@@ -431,16 +485,6 @@ impl Parser<'_> {
         );
         pkg.set(b::CORE_APP, attr_bool(manifest, "", "coreApp", false));
         self.parse_base_apk_tags(&mut pkg, manifest)?;
-        // `parseBaseApk`: when the APK's resources define overlayables,
-        // those of every package its resources hold, the framework's too.
-        let res = self.ctx.res;
-        if res.tables.last().is_some_and(|t| t.defines_overlayable()) {
-            for t in &res.tables {
-                for (name, actor) in t.overlayables() {
-                    pkg.overlayables.put(name, actor.to_owned());
-                }
-            }
-        }
         Ok(pkg)
     }
 
@@ -585,7 +629,9 @@ impl Parser<'_> {
     fn parse_base_apk_tag(&self, pkg: &mut Package, e: &Element) -> Result<()> {
         match e.name.as_str() {
             "overlay" => self.parse_overlay(pkg, e),
-            "key-sets" => Err(Error::Unsupported("<key-sets>".into())),
+            "key-sets" => {
+                key_sets::parse(pkg, e, |e, name| self.obtain(e).non_resource_string(name))
+            }
             "feature" | "attribution" => {
                 let a = self.parse_attribution(e)?;
                 pkg.attributions.push(a);
@@ -890,7 +936,18 @@ impl Parser<'_> {
         let mut min_extensions: Option<Vec<(i32, i32)>> = None;
         for c in &e.children {
             if c.name == "extension-sdk" {
-                return Err(Error::Unsupported("<extension-sdk>".into()));
+                let attrs=self.obtain(c);
+                let sdk=attrs.int("sdkVersion",-1);
+                let minimum=attrs.int("minExtensionVersion",-1);
+                if sdk<0{return fail("<extension-sdk> must specify an sdkVersion >= 0");}
+                if minimum<0{return fail("<extension-sdk> must specify minExtensionVersion >= 0");}
+                if sdk<30{return fail(format!("Specified sdkVersion {sdk} is not valid"));}
+                let versions=self.platform.sdk_extensions.as_ref().ok_or_else(||Error::Unsupported("extension SDK runtime property owner unavailable".into()))?;
+                let available=versions.get(&sdk).copied().unwrap_or(0);
+                if available<minimum{return Err(Error::OlderSdk(format!("Package requires {sdk} extension version {minimum} which exceeds device version {available}")));}
+                let versions=min_extensions.get_or_insert_with(Vec::new);
+                if let Some((_,version))=versions.iter_mut().find(|(key,_)|*key==sdk){*version=minimum;}
+                else{versions.push((sdk,minimum));}
             }
         }
         if let Some(v) = &mut min_extensions {
@@ -1070,6 +1127,7 @@ impl Parser<'_> {
         pkg.process_name = process;
         if let Some(cl) = &pkg.class_loader_name
             && cl != "dalvik.system.PathClassLoader"
+            && cl != "dalvik.system.DexClassLoader"
             && cl != "dalvik.system.DelegateLastClassLoader"
         {
             return fail(format!("Invalid class loader name: {cl}"));

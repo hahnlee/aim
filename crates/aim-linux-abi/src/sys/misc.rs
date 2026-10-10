@@ -122,7 +122,7 @@ pub fn prctl(a: [u64; 6]) -> i64 {
         PR_GET_SECCOMP => SECCOMP.load(Relaxed) as i64,
         PR_SET_NAME => {
             // SAFETY: guest string (at most 16 bytes used).
-            let s = unsafe { crate::sys::guest_cstr(a[1]) };
+            let s = match super::user_memory::read_cstr(a[1],15){Ok(bytes)=>bytes,Err(36)=>match super::user_memory::read_exact(a[1],15){Ok(bytes)=>bytes,Err(error)=>return -(error as i64)},Err(error)=>return -(error as i64)};
             let len = s.len().min(15);
             let mut b = [0u8; 16];
             b[..len].copy_from_slice(&s[..len]);

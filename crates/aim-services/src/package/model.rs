@@ -28,6 +28,23 @@ pub struct State {
     pub disabled_system_packages: BTreeMap<String, PackageState>,
     /// By name.
     pub shared_users: BTreeMap<String, SharedUser>,
+    /// Native AppIdSettingMap slots; None is the original shadow-feed model.
+    pub uid_owners: Option<BTreeMap<i32, UidOwner>>,
+    /// Settings renamed-package table; absent in the shadow feed.
+    pub renamed_packages: Option<Vec<(String, String)>>,
+    /// Complete finalized native SharedLibraries name/version owner.
+    pub shared_libraries: Option<Vec<SharedLibrary>>,
+    pub legacy_domains: Option<Vec<(Option<String>, Vec<(i32, i32)>)>>,
+    pub key_sets: Option<super::settings::KeySets>,
+    pub package_registry: Option<Arc<super::registry::Registry>>,
+    /// Broadcast names registered from the accepted native code set.
+    pub protected_broadcasts: Option<std::collections::BTreeSet<String>>,
+    pub shared_process_inputs: BTreeMap<String, super::scan::OriginalSharedProcesses>,
+    pub apex_inventory: Option<super::bootstrap::ApexInventory>,
+    pub scan_users: Option<super::bootstrap::ScanUsers>,
+    pub user_scopes: BTreeMap<(String, bool), super::scan::OriginalUserScope>,
+    /// Complete scoped runtime owners exported by the original snapshot.
+    pub runtime_inputs: BTreeMap<(String, bool), super::scan::OriginalRuntime>,
     /// By user id.
     pub users: BTreeMap<i32, User>,
     pub system: System,
@@ -38,6 +55,8 @@ pub struct State {
 /// at boot and the platform's settings, as the feed gives them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Platform {
+    /// PMS setPlatformPackage metadata retained independently of package lookup.
+    pub android_application: Option<Arc<super::info::ApplicationInfo>>,
     /// The resolver activity's theme (`Theme.Material.Dialog.Alert`).
     pub resolver_theme: i32,
     /// `ResolverActivity.ActionTitle`'s labels (`getLabelRes`): action (`None` for the
@@ -47,6 +66,7 @@ pub struct Platform {
     pub custom_resolver: Option<String>,
     /// `Settings.Global.DEVICE_PROVISIONED`.
     pub device_provisioned: bool,
+    pub settings_owner: Option<Arc<super::resolve::settings::Owner>>,
     /// The instant app resolver and installer PackageManager chose at
     /// boot, flattened.
     pub instant_app_resolver: Option<String>,
@@ -61,8 +81,19 @@ pub struct Platform {
 pub struct PackageState {
     pub name: String,
     pub app_id: i32,
+    /// Raw SettingBase flags; absent in the legacy shadow feed.
+    pub setting_flags: Option<(i32, i32)>,
+    /// Persisted PackageSetting flags; absent in the legacy shadow feed.
+    pub page_size_compat: Option<i32>,
+    /// Outer None means the real-name owner was not captured.
+    pub real_name: Option<Option<String>>,
+    pub key_set_data: Option<super::settings::KeySetData>,
+    pub app_metadata_source: Option<i32>,
+    pub app_metadata_file_path: Option<Option<String>>,
     /// The shared user's name (`getSharedUser`; `hasSharedUser`).
     pub shared_user: Option<String>,
+    /// Declared relationship can outlive its registered shared UID group.
+    pub shared_user_app_id: Option<i32>,
     /// The code path.
     pub path: String,
     pub volume_uuid: Option<String>,
@@ -80,12 +111,12 @@ pub struct PackageState {
     pub restrict_update_hash: Option<Vec<u8>>,
     pub apex_module_name: Option<String>,
     /// MIME groups and their types.
-    pub mime_groups: Vec<(String, Vec<String>)>,
+    pub mime_groups: Vec<(Option<String>, Vec<Option<String>>)>,
     /// Static shared libraries used: name and version.
     pub uses_static_libraries: Vec<(String, i64)>,
     pub uses_sdk_libraries: Vec<UsesSdkLibrary>,
     /// `getUsesLibraryFiles`.
-    pub uses_library_files: Vec<String>,
+    pub uses_library_files: Vec<Option<String>>,
     /// `getSharedLibraryDependencies`, in order.
     pub uses_library_infos: Vec<SharedLibrary>,
     pub is: StateFlags,
@@ -110,7 +141,7 @@ pub struct PackageState {
     pub syncable_authorities: Vec<(String, String)>,
     /// The `AndroidPackage` as `PackageCacher.toCacheEntryStatic` writes
     /// it (the parser cache's format); `None` without code. Shared across
-    /// versions while the original keeps the same object.
+    /// versions while the original cache bytes remain unchanged.
     pub parcel: Option<Arc<[u8]>>,
     /// `parcel`, read (`AndroidPackage::read_cache_entry`).
     pub pkg: Option<Arc<AndroidPackage>>,
@@ -181,7 +212,7 @@ impl Default for InstallSource {
 pub struct SharedLibrary {
     pub path: Option<String>,
     pub package_name: Option<String>,
-    pub code_paths: Option<Vec<String>>,
+    pub code_paths: Option<Vec<Option<String>>>,
     pub name: Option<String>,
     pub version: i64,
     /// `SharedLibraryInfo.TYPE_*`.
@@ -189,8 +220,15 @@ pub struct SharedLibrary {
     pub native: bool,
     /// The declaring package: name and version code.
     pub declaring: (String, i64),
-    pub dependents: Vec<(String, i64)>,
-    pub dependencies: Vec<SharedLibrary>,
+    /// SDK dependency placeholders have no declaring package.
+    pub declaring_absent: bool,
+    pub dependents: Vec<Option<(String, i64)>>,
+    pub dependencies: Vec<Option<SharedLibrary>>,
+    pub dependents_initialized: bool,
+    pub dependencies_initialized: bool,
+    /// Raw Parcelable list and string list; null and allocated-empty are distinct.
+    pub optional_dependents: Option<Vec<Option<(String, i64)>>>,
+    pub cert_digests: Option<Vec<Option<String>>>,
 }
 
 /// `PackageUserState`: one package's state for one user.
@@ -207,6 +245,7 @@ pub struct PackageUserState {
     pub quarantined: bool,
     pub distraction_flags: i32,
     /// The suspending packages.
+    pub suspensions: Option<Vec<super::restrictions::Suspension>>,
     pub suspended_by: Vec<String>,
     /// `COMPONENT_ENABLED_STATE_*`.
     pub enabled: i32,
@@ -251,6 +290,7 @@ impl Default for PackageUserState {
             virtual_preload: false,
             quarantined: false,
             distraction_flags: 0,
+            suspensions: None,
             suspended_by: Vec::new(),
             enabled: 0,
             last_disable_app_caller: None,
@@ -280,6 +320,12 @@ pub struct OverlayPaths {
     pub overlay_paths: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum UidOwner {
+    Package(Box<PackageState>),
+    SharedUser(String),
+}
+
 /// `SharedUserApi`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SharedUser {
@@ -291,6 +337,8 @@ pub struct SharedUser {
     pub seinfo_target_sdk_version: i32,
     /// Its packages' names.
     pub packages: Vec<String>,
+    /// Native current and retained instances, including distinct same-name owners.
+    pub native_packages: Option<Vec<PackageState>>,
     pub signatures: Option<Signatures>,
 }
 
@@ -319,6 +367,44 @@ pub struct User {
 /// SystemConfig and the device's constants the info generators read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct System {
+    pub diagnostic_dates: Option<Arc<super::dump::Dates>>,
+    pub runtime_permission_queries: Option<Arc<super::owner::runtime_metadata::Queries>>,
+    pub visibility_logging: Option<Arc<super::apps_filter::logging::Owner>>,
+    pub settings_read_messages: Option<Arc<super::diagnostic_inputs::SettingsMessages>>,
+    pub maintenance_diagnostics: Option<Arc<super::diagnostic_inputs::Maintenance>>,
+    pub web_instant_policy: Option<Arc<super::web_instant_state::Snapshot>>,
+    pub settings_package_order: Option<Vec<String>>,
+    /// Native preferred registry captured alongside this exact package state.
+    pub preferred_owner: Option<Arc<super::preferred::registry::Handle>>,
+    /// Global Settings uninstall-block owner; absent until restrictions restore.
+    pub uninstall_blocks: Option<Arc<super::mutations::UninstallBlocks>>,
+    pub lifecycle: Option<Arc<super::lifecycle::Owner>>,
+    pub resolver_owner: Option<Arc<super::resolver_owner::Owner>>,
+    pub custom_resolver_activity: Option<Arc<super::info::ActivityInfo>>,
+    /// Original PMS selection; outer None means the owner was not captured.
+    pub sdk_sandbox_package: Option<Option<String>>,
+    /// Native boot selection, frozen across query generations.
+    pub permission_controller_package: Option<Option<String>>,
+    pub module_metadata: Option<Arc<super::module_metadata::Owner>>,
+    pub key_set_tokens: Option<Arc<super::keysets::Tokens>>,
+    pub roles: Option<Arc<super::roles::Owner>>,
+    pub instant_components: Option<Arc<super::instant_components::Owner>>,
+    pub instant_registry: Option<Arc<super::instant::Owner>>,
+    pub instant_access: Option<Arc<super::instant::Access>>,
+    pub uri_access: Option<Arc<super::uri_access::Owner>>,
+    pub resolution_policy: Option<Arc<super::resolve::policy::Owner>>,
+    pub user_policy: Option<Arc<super::user_policy::Owner>>,
+    pub security_policy: Option<Arc<super::security_policy::Owner>>,
+    pub archive_owner: Option<Arc<super::archive::Owner>>,
+    pub permission_groups: Option<Arc<super::permission_groups::Owner>>,
+    pub launch_sender: Option<Arc<super::launch::Owner>>,
+    pub app_metadata_files: Option<Arc<super::app_metadata::Owner>>,
+    pub page_size_compat: Option<Arc<super::page_size_compat::Owner>>,
+    /// None means SystemConfig exact-UID assignments were not captured.
+    pub system_permissions: Option<BTreeMap<i32, std::collections::BTreeSet<String>>>,
+    pub initial_non_stopped_system_packages: Option<Vec<String>>,
+    /// Native AppsFilter interaction grants, carried with each query snapshot.
+    pub implicit_access: super::apps_filter::ImplicitAccess,
     /// `mAvailableFeatures`: name and version.
     pub features: Vec<(String, i32)>,
     /// `ro.opengles.version`, the `reqGlEsVersion` feature.

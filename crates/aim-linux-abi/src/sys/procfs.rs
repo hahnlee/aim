@@ -25,6 +25,8 @@ use crate::vfs::{self, Area};
 /// What a synthesized path is.
 pub enum Node {
     File(Vec<u8>),
+    NetTable(String),
+    MountTable {host_pid:i32,info:bool},
     Dir(Vec<Entry>),
     Link(String),
 }
@@ -109,6 +111,9 @@ pub fn fd_guest_path(fd: i32) -> Result<String, Errno> {
 pub(super) fn fd_link(fd: i32) -> Option<String> {
     if fdtab::is_hidden(fd) {
         return None;
+    }
+    if let Some((inode, _)) = super::net::proc_socket_identity(fd) {
+        return Some(format!("socket:[{inode}]"));
     }
     if let Some(n) = fdtab::anon_name(fd) {
         return Some(n);
@@ -386,11 +391,12 @@ fn stat_line(p: i32, thread: Option<i32>) -> Option<String> {
         }
         None => (p, comm(p), ti.pti_total_user, ti.pti_total_system, state),
     };
+    let id=super::pidns::guest_pid(id).ok()?;
     Some(format!(
         "{id} ({name}) {state} {} {} {} 0 -1 4194560 {} 0 {} 0 {} {} 0 0 20 {} {} 0 {start} {} {rss_pages} 18446744073709551615 0 0 {} 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 {} {} {} {} 0\n",
         super::process::linux_ppid(b.pbi_ppid as i32),
-        b.pbi_pgid,
-        b.pbi_pgid,
+        super::pidns::id_in_ns(b.pbi_pgid as i32),
+        super::pidns::id_in_ns(unsafe{libc::getsid(p)}),
         ti.pti_faults,
         ti.pti_pageins,
         ns_to_ticks(user),
@@ -428,8 +434,9 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
     };
     let kb = |b: u64| b / 1024;
     let n = ncpu();
+    let guest_tgid=super::pidns::guest_pid(p).ok()?;
     Some(format!(
-        "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{p}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t{}\n\
+        "Name:\t{}\nUmask:\t0022\nState:\t{state}\nTgid:\t{guest_tgid}\nNgid:\t0\nPid:\t{}\nPPid:\t{}\nTracerPid:\t{}\n\
          {}FDSize:\t256\n\
          VmPeak:\t{} kB\nVmSize:\t{} kB\nVmLck:\t0 kB\nVmPin:\t0 kB\nVmHWM:\t{} kB\nVmRSS:\t{} kB\n\
          RssAnon:\t{} kB\nRssFile:\t0 kB\nRssShmem:\t0 kB\nVmData:\t{} kB\nVmStk:\t8192 kB\nVmExe:\t0 kB\n\
@@ -440,9 +447,9 @@ fn status(p: i32, thread: Option<i32>) -> Option<String> {
         thread
             .and_then(|tid| thread_comm(p, tid))
             .unwrap_or_else(|| comm(p)),
-        thread.unwrap_or(p),
+        super::pidns::guest_pid(thread.unwrap_or(p)).ok()?,
         super::process::linux_ppid(t.pbsd.pbi_ppid as i32),
-        tracer(p, thread.unwrap_or(p)),
+        super::pidns::guest_pid(tracer(p,thread.unwrap_or(p))).ok()?,
         cred_lines(p),
         kb(t.ptinfo.pti_virtual_size),
         kb(t.ptinfo.pti_virtual_size),
@@ -485,6 +492,7 @@ fn statm(p: i32) -> Option<String> {
 
 /// Linux-format `/proc/self/maps` from the VM map.
 pub(super) fn maps() -> String {
+    let paths = vfs::HostPathView::capture();
     let stack = stack().unwrap_or_default();
     let mut out = String::new();
     let mut regions = vmmap::regions(0, u64::MAX).peekable();
@@ -515,7 +523,7 @@ pub(super) fn maps() -> String {
         let guest_file = r.file.as_ref().and_then(|(path, d, i)| {
             super::memfd::link_name(path, *d, *i)
                 .or_else(|| crate::xrt::original_guest_path_of_host(path))
-                .or_else(|| vfs::guest_path_of_host(path))
+                .or_else(|| paths.as_ref().and_then(|view| view.guest_path(path)))
                 .map(|n| (n, *d, *i))
         });
         if let Some((n, d, i)) = guest_file {
@@ -856,6 +864,7 @@ fn pids() -> Vec<i32> {
             v
         },
     };
+    v = v.into_iter().filter_map(|host|super::pidns::guest_pid(host).ok()).collect();
     v.retain(|&p| p > 0);
     v.sort_unstable();
     v.dedup();
@@ -890,6 +899,7 @@ const PID_ENTRIES: &[(&str, u8)] = &[
     ("environ", dir::DT_REG),
     ("exe", dir::DT_LNK),
     ("fd", dir::DT_DIR),
+    ("net", dir::DT_DIR),
     ("maps", dir::DT_REG),
     ("mountinfo", dir::DT_REG),
     ("mounts", dir::DT_REG),
@@ -908,14 +918,9 @@ const BLOCK_MOUNTS: &[&str] = &["/data", "/metadata", "/cache"];
 
 /// The mount table: the read-only image at `/` and the path map's areas.
 /// Each is `(source, target, fstype, options)`.
-fn mount_table() -> Vec<(String, String, String, &'static str)> {
-    let mut out = vec![(
-        "/dev/root".into(),
-        "/".into(),
-        "erofs".into(),
-        "ro,relatime",
-    )];
-    for mp in vfs::mount_points() {
+fn mount_table(points: Vec<vfs::MountPoint>) -> Vec<(String, String, String, &'static str)> {
+    let mut out = Vec::new();
+    for mp in points {
         let guest = mp.guest;
         // A kernel filesystem of the path map (cgroup2, bpf) or a mount the
         // process made.
@@ -929,6 +934,7 @@ fn mount_table() -> Vec<(String, String, String, &'static str)> {
             continue;
         }
         let (source, fstype, options) = match (mp.area, guest.as_str()) {
+            (vfs::Area::Image,_) => ("/dev/root".into(),"erofs","ro,relatime"),
             (vfs::Area::Kernfs, "/proc") => {
                 ("proc".into(), "proc", "rw,nosuid,nodev,noexec,relatime")
             }
@@ -949,8 +955,8 @@ fn mount_table() -> Vec<(String, String, String, &'static str)> {
 }
 
 /// `/proc/<pid>/mounts`, as fstab(5) lines.
-fn mounts() -> String {
-    mount_table()
+fn mounts(points:Vec<vfs::MountPoint>) -> String {
+    mount_table(points)
         .into_iter()
         .map(|(source, target, fstype, options)| {
             format!("{source} {target} {fstype} {options} 0 0\n")
@@ -958,19 +964,26 @@ fn mounts() -> String {
         .collect()
 }
 
-/// `/proc/<pid>/mountinfo` (proc(5)): `/` is mount 1 and the parent of the
-/// others.
-fn mountinfo() -> String {
-    mount_table()
-        .into_iter()
-        .enumerate()
-        .map(|(i, (source, target, fstype, options))| {
-            let id = i + 1;
-            let parent = if i == 0 { 0 } else { 1 };
-            let rw = options.split(',').next().unwrap_or("rw");
-            format!("{id} {parent} 0:{id} / {target} {options} - {fstype} {source} {rw}\n")
+/// The actual mount objects of the target process, including cloned IDs.
+fn mountinfo(points:Vec<vfs::MountPoint>) -> String {
+    use std::os::unix::fs::MetadataExt;
+    points.into_iter().filter_map(|point|{
+        let id=point.id;let parent=point.parent;let root=point.root.clone();
+        let mut propagation=String::new();if point.shared!=0{propagation.push_str(&format!(" shared:{}",point.shared));}if point.master!=0{propagation.push_str(&format!(" master:{}",point.master));}
+        let device=std::fs::metadata(&point.host).map(|stat|stat.dev()).unwrap_or(0);
+        mount_table(vec![point]).into_iter().next().map(|(source,target,fstype,options)|{
+            let rw=options.split(',').next().unwrap_or("rw");
+            format!("{id} {parent} {}:{} {root} {target} {options}{propagation} - {fstype} {source} {rw}\n",(device>>24)&0xff,device&0xffffff)
         })
-        .collect()
+    }).collect()
+}
+
+fn process_mount_points(host_pid:i32)->Result<Vec<vfs::MountPoint>,Errno>{
+    if host_pid==pid(){vfs::refresh_fuse_mounts()?;return vfs::mount_points();}
+    let table=super::cred::by_pid_dir().ok_or(errno::ESRCH)?;
+    let process=aim_storage::process_namespace::ProcessIdentity::running(host_pid).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    let id=aim_storage::process_namespace::mount_namespace_of(table,process).map_err(|error|errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO)))?;
+    vfs::namespace_mount_points(&id)
 }
 
 /// The `comm` of thread `tid` of process `p`, once it has been named.
@@ -987,6 +1000,8 @@ fn thread_comm(p: i32, tid: i32) -> Option<String> {
     (len > 0).then(|| String::from_utf8_lossy(&n[..len]).into_owned())
 }
 
+const NET_FILES: [&str; 4] = ["tcp", "tcp6", "udp", "udp6"];
+
 /// Nodes under `/proc/<p>/` (`rest` is the path after it); `thread` is the
 /// tid for `/proc/<p>/task/<tid>/` (and `/proc/<tid>/`).
 fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
@@ -1001,6 +1016,12 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
                 .filter(|(n, _)| thread.is_none() || *n != "task");
             Node::Dir(e.map(|(n, t)| Entry::new(1, *t, n.as_bytes())).collect())
         }
+        "net" => Node::Dir(NET_FILES.iter().map(|name| Entry::new(1, dir::DT_REG, name.as_bytes())).collect()),
+        name if name.starts_with("net/") => {
+            let kind = name.strip_prefix("net/")?;
+            if !NET_FILES.contains(&kind) { return None; }
+            Node::NetTable(kind.to_owned())
+        }
         "cmdline" => Node::File(cmdline(p)),
         "comm" => {
             let named = thread.and_then(|t| thread_comm(p, t));
@@ -1012,8 +1033,8 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "statm" => Node::File(statm(p)?.into_bytes()),
         "maps" if me => Node::File(maps().into_bytes()),
         "maps" => Node::File(super::ptrace::remote_maps(p)?.into_bytes()),
-        "mounts" => Node::File(mounts().into_bytes()),
-        "mountinfo" => Node::File(mountinfo().into_bytes()),
+        "mounts" => Node::MountTable {host_pid:p,info:false},
+        "mountinfo" => Node::MountTable {host_pid:p,info:true},
         "oom_score_adj" if me => {
             Node::File(format!("{}\n", super::cred::oom_score_adj()).into_bytes())
         }
@@ -1039,6 +1060,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
         "task" if thread.is_none() => Node::Dir(
             tids(p)
                 .into_iter()
+                .filter_map(|t|super::pidns::guest_pid(t).ok())
                 .map(|t| Entry::new(t as u64, dir::DT_DIR, t.to_string()))
                 .collect(),
         ),
@@ -1055,6 +1077,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
             let t = rest.strip_prefix("task/").filter(|_| thread.is_none())?;
             let (tid, sub) = t.split_once('/').unwrap_or((t, ""));
             let tid: i32 = tid.parse().ok()?;
+            let tid=super::pidns::syscall_pid(tid).ok()?;
             if !tids(p).contains(&tid) {
                 return None;
             }
@@ -1065,6 +1088,7 @@ fn pid_node(p: i32, rest: &str, thread: Option<i32>) -> Option<Node> {
 
 /// The synthesized node at a normalized guest path under /proc or /sys.
 pub fn node(guest: &str) -> Option<Node> {
+    if let Some(node)=super::fuse_sysfs::node(guest){return node.ok();}
     if let Some(rest) = guest.strip_prefix("/proc") {
         let rest = rest.trim_start_matches('/');
         let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
@@ -1080,6 +1104,7 @@ pub fn node(guest: &str) -> Option<Node> {
                     ("loadavg", dir::DT_REG),
                     ("meminfo", dir::DT_REG),
                     ("mounts", dir::DT_LNK),
+                    ("net", dir::DT_LNK),
                     ("stat", dir::DT_REG),
                     ("sys", dir::DT_DIR),
                     ("uptime", dir::DT_REG),
@@ -1094,6 +1119,8 @@ pub fn node(guest: &str) -> Option<Node> {
             }
             "self" if tail.is_empty() => Node::Link(me.to_string()),
             "mounts" if tail.is_empty() => Node::Link("self/mounts".into()),
+            "net" if tail.is_empty() => Node::Link("self/net".into()),
+            "net" => return pid_node(me, &format!("net/{tail}"), None),
             "thread-self" if tail.is_empty() => {
                 Node::Link(format!("{me}/task/{}", super::process::gettid()))
             }
@@ -1118,7 +1145,8 @@ pub fn node(guest: &str) -> Option<Node> {
                 // `/proc/<tid>` of a thread other than a main thread: the
                 // thread's view of its process, as on Linux, with the
                 // process's tasks.
-                let n: i32 = n.parse().ok()?;
+                let guest: i32 = n.parse().ok()?;
+                let n=super::pidns::syscall_pid(guest).ok()?;
                 let p = super::thread::owner(n);
                 if p == n {
                     return pid_node(p, tail, None);
@@ -1272,6 +1300,16 @@ struct Pool(Mutex<Vec<i32>>);
 /// A file holding `data`, positioned at 0. Closing it gives the file back
 /// to the pool ([`recycle`]).
 pub(super) fn content_fd(data: &[u8], cloexec: bool) -> i64 {
+    let fd = content_fd_unpublished(data, cloexec);
+    if fd >= 0 {
+        if let Err(error)=fdtab::publish_guest(fd as i32){
+            fdtab::on_close(fd as i32);unsafe{libc::close(fd as i32);}return -(error as i64);
+        }
+    }
+    fd
+}
+
+pub(super) fn content_fd_unpublished(data: &[u8], cloexec: bool) -> i64 {
     let fd = match POOL.reuse(data, cloexec) {
         Some(fd) => fd,
         None => match fresh(data) {
@@ -1424,7 +1462,7 @@ fn shared(fd: i32) -> bool {
 /// A directory fd for a synthesized directory.
 fn dir_fd(guest: &str, list: Vec<Entry>, cloexec: bool) -> i64 {
     let mut list = list;
-    if let Some((host, _)) = recorded(guest)
+    if !guest.starts_with("/sys/fs/fuse") && let Some((host, _)) = recorded(guest)
         && let Ok(rd) = std::fs::read_dir(&host)
     {
         for e in rd.flatten() {
@@ -1461,6 +1499,10 @@ fn dir_fd(guest: &str, list: Vec<Entry>, cloexec: bool) -> i64 {
             all,
         )))),
     );
+if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -1475,6 +1517,18 @@ fn canonical(guest: &str) -> String {
         return format!("/proc/{me}/task/{}/{t}", super::process::gettid());
     }
     guest.to_string()
+}
+
+/// The current process's procfs descriptor magic link. Callers must retain the
+/// referenced descriptor before changing its inode, rather than reopen its name.
+pub(super) fn current_fd_link(guest: &str) -> Option<Result<i32, Errno>> {
+    let canon = canonical(guest);
+    let tail = canon.strip_prefix(&format!("/proc/{}/fd/", pid()))
+        .or_else(|| canon.strip_prefix(&format!("/proc/{}/task/{}/fd/", pid(), super::process::gettid())))?;
+    let fd: i32 = tail.parse().ok()?;
+    if fd < 0 || fdtab::is_hidden(fd) { return Some(Err(ENOENT)); }
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 { return Some(Err(ENOENT)); }
+    Some(Ok(fd))
 }
 
 /// The thread of this process whose `comm` a canonical path names.
@@ -1495,10 +1549,21 @@ const O_CREAT: u64 = 0o100;
 const O_CLOEXEC: u64 = 0o2000000;
 
 /// openat of a guest path under /proc or /sys. None: not ours.
+fn publish_plain_open(fd: i32) -> i64 {
+    if fd < 0 { return -(errno::last() as i64); }
+    if let Err(error)=fdtab::publish_guest(fd){unsafe{libc::close(fd);}return -(error as i64);}
+    fd as i64
+}
+
 pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
+    if let Some(result)=super::fuse_sysfs::open(guest,flags){return Some(result);}
     if !is_kernfs(guest) {
         return None;
     }
+    if let Some(node)=super::fuse_sysfs::node(guest){return Some(match node{
+        Ok(Node::Dir(entries))=>dir_fd(guest,entries,flags&O_CLOEXEC!=0),
+        Ok(Node::File(_) | Node::NetTable(_) | Node::MountTable{..})=>-(errno::EACCES as i64),Ok(Node::Link(_))=>-(errno::EINVAL as i64),Err(error)=>-(error as i64),
+    });}
     let cloexec = flags & O_CLOEXEC != 0;
     let write = flags & O_ACCMODE != 0;
     if let Some((host, st)) = recorded(guest)
@@ -1506,17 +1571,14 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
     {
         let c = CString::new(host.as_os_str().as_encoded_bytes()).ok()?;
         // SAFETY: opening the recorded value file.
-        return Some(errno::check(
-            unsafe { libc::open(c.as_ptr(), host_flags, 0o644) } as i64,
-        ));
+        return Some(publish_plain_open(unsafe { libc::open(c.as_ptr(), host_flags, 0o644) }));
     }
     let canon = canonical(guest);
+
     if canon.ends_with("/tracing/trace_marker") && node(&canon).is_some() {
         // Trace events are not collected: writes are discarded.
         // SAFETY: opening the host's null device.
-        return Some(errno::check(
-            unsafe { libc::open(c"/dev/null".as_ptr(), host_flags) } as i64,
-        ));
+        return Some(publish_plain_open(unsafe { libc::open(c"/dev/null".as_ptr(), host_flags) }));
     }
     if let Some(tid) = comm_tid(&canon) {
         let name = thread_comm(pid(), tid).unwrap_or_else(|| comm(pid()));
@@ -1578,6 +1640,17 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
         });
     }
     Some(match node(&canon) {
+        Some(Node::MountTable {host_pid,info}) => {
+            if write {return Some(-(EACCES as i64));}
+            match process_mount_points(host_pid){Ok(points)=>content_fd(if info{mountinfo(points)}else{mounts(points)}.as_bytes(),cloexec),Err(error)=>-(error as i64)}
+        }
+        Some(Node::NetTable(kind)) => {
+            if write { return Some(-(EACCES as i64)); }
+            match super::net::proc_table(&kind) {
+                Ok(bytes) => content_fd(&bytes, cloexec),
+                Err(error) => -(error as i64),
+            }
+        }
         Some(Node::File(data)) => {
             if write && device_tree(&canon) {
                 // A device attribute with no store method.
@@ -1598,7 +1671,13 @@ pub fn open(guest: &str, flags: u64, host_flags: i32) -> Option<i64> {
                 format!("/proc/{t}")
             };
             let linked = node(&canonical(&target));
-            if let Some(Node::Dir(list)) = linked {
+            if let Some(Node::MountTable { host_pid, info }) = linked {
+                if write { return Some(-(EACCES as i64)); }
+                match process_mount_points(host_pid) {
+                    Ok(points) => content_fd(if info { mountinfo(points) } else { mounts(points) }.as_bytes(), cloexec),
+                    Err(error) => -(error as i64),
+                }
+            } else if let Some(Node::Dir(list)) = linked {
                 dir_fd(&canonical(&target), list, cloexec)
             } else if let Some(Node::File(data)) = linked.filter(|_| !write) {
                 // /proc/mounts -> self/mounts.
@@ -1680,6 +1759,10 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
         }
         None => (0, 0),
     };
+    if let Some(node)=super::fuse_sysfs::node(&canon){return Some(node.map(|node|{
+        let mut stat:libc::stat=unsafe{std::mem::zeroed()};stat.st_ino=canon.bytes().fold(1469598103934665603u64,|hash,byte|(hash^u64::from(byte)).wrapping_mul(1099511628211));stat.st_blksize=4096;
+        match node{Node::Dir(_)=>{stat.st_mode=libc::S_IFDIR|0o555;stat.st_nlink=2;},_=>{stat.st_mode=libc::S_IFREG|0o200;stat.st_nlink=1;}}stat
+    }));}
     if let Some((_, mut st)) = recorded(guest) {
         (st.st_uid, st.st_gid) = owner;
         return Some(Ok(st));
@@ -1697,7 +1780,7 @@ pub fn stat(guest: &str, follow: bool) -> Option<Result<libc::stat, Errno>> {
     st.st_mtime = now;
     st.st_ctime = now;
     match node(&canon) {
-        Some(Node::File(_)) => {
+        Some(Node::File(_) | Node::NetTable(_) | Node::MountTable{..}) => {
             st.st_mode = libc::S_IFREG | 0o444;
             st.st_nlink = 1;
         }
@@ -1775,12 +1858,59 @@ pub fn is_self_exe(path: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn real_registered_process_mountinfo_uses_current_namespace_and_stable_clone_ids(){
+        if super::super::fdtab::isolated_kernel_test("sys::procfs::tests::real_registered_process_mountinfo_uses_current_namespace_and_stable_clone_ids"){return;}
+        let(_view,root)=crate::vfs::test_view();let runtime=crate::vfs::runtime_dir().unwrap();let table=runtime.join("identity/by-pid");std::fs::create_dir_all(&table).unwrap();
+        let bootstrap_id=crate::vfs::mount_namespace_id().unwrap();let bootstrap=aim_storage::mount_namespace::Namespace::open(runtime,&bootstrap_id).unwrap();let default=bootstrap.clone_to("actual-default-render").unwrap();
+        let process=aim_storage::process_namespace::ProcessIdentity::running(unsafe{libc::getpid()}).unwrap();
+        aim_storage::process_namespace::InitRegistration::register(&table,process,&bootstrap_id).unwrap();aim_storage::process_namespace::register_init_signals(&table,process,0).unwrap();aim_storage::process_namespace::InitRegistration::read(&table).unwrap().activate_pid_mapping(&table).unwrap();
+        super::super::cred::init(Default::default(),Some(table.clone()));
+        aim_storage::process_namespace::register_mount_namespace(&table,process,default.id()).expect("actual current namespace receipt");
+        crate::vfs::load_own_mounts(&format!("namespace-owner\t{}\n",default.id())).expect("actual current namespace view");
+        let child=std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){if self.0.try_wait().ok().flatten().is_none(){let _=self.0.kill();}let _=self.0.wait();}}let child=Child(child);
+        let child_identity=aim_storage::process_namespace::ProcessIdentity::running(child.0.id()as i32).unwrap();std::fs::write(table.join(child.0.id().to_string()),b"service\tactual-child\nuid\t0\ngid\t0\n").unwrap();aim_storage::process_namespace::register_mount_namespace(&table,child_identity,&bootstrap_id).unwrap();
+        let read_root=|pid:i32|{
+            let path=std::ffi::CString::new(format!("/proc/{pid}/mountinfo")).unwrap();let fd=super::super::fs::openat([crate::vfs::LINUX_AT_FDCWD as u64,path.as_ptr()as u64,0,0,0,0]);assert!(fd>=0,"actual mountinfo open {fd}");let mut bytes=vec![0u8;65536];let n=super::super::fs::read([fd as u64,bytes.as_mut_ptr()as u64,bytes.len()as u64,0,0,0]);assert!(n>0);assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);let text=std::str::from_utf8(&bytes[..n as usize]).unwrap();let fields=text.lines().find_map(|line|{let fields:Vec<_>=line.split(' ').collect();(fields[4]=="/").then_some(fields)}).unwrap();(fields[0].parse::<u64>().unwrap(),fields[1].parse::<u64>().unwrap())
+        };
+        let init=read_root(1);let early=read_root(child.0.id()as i32);assert_ne!(init.0,early.0);assert_eq!(init.0,init.1);assert_eq!(early.0,early.1);assert_eq!(init,read_root(1));assert!(root.is_dir());drop(child);
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 
     /// Held by tests that start processes or need no other process to
     /// inherit their fds.
     static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn mounts_symlink_opens_the_same_live_namespace_as_self_mounts() {
+        let (_view, root) = crate::vfs::test_view();
+        let read = |path: &str| {
+            let fd = super::open(path, 0, libc::O_RDONLY).unwrap();
+            assert!(fd >= 0, "{path}: errno {}", -fd);
+            let mut bytes = vec![0u8; 65536];
+            let length = unsafe { libc::pread(fd as i32, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+            assert!(length >= 0);
+            bytes.truncate(length as usize);
+            assert_eq!(crate::sys::fs::close([fd as u64, 0, 0, 0, 0, 0]), 0);
+            bytes
+        };
+        let before = read("/proc/mounts");
+        assert_eq!(before, read("/proc/self/mounts"));
+        let host = root.join("proc-mount-link-test");
+        std::fs::create_dir_all(&host).unwrap();
+        crate::vfs::add_mount("/mnt/proc-link-test", host.clone(), crate::vfs::Area::Writable,
+            "tmpfs", "tmpfs").unwrap();
+        let after = read("/proc/mounts");
+        assert_eq!(after, read("/proc/self/mounts"));
+        assert_ne!(before, after);
+        assert!(String::from_utf8(after).unwrap().contains(" /mnt/proc-link-test tmpfs "));
+        assert_eq!(super::readlink(b"/proc/mounts").unwrap().unwrap(), b"self/mounts");
+        assert_eq!(super::open("/proc/mounts", 1, libc::O_WRONLY), Some(-(crate::errno::EACCES as i64)));
+        crate::vfs::remove_mount("/mnt/proc-link-test").unwrap();
+        assert_eq!(read("/proc/mounts"), before);
+        std::fs::remove_dir(host).unwrap();
+    }
 
     fn read_all(fd: i32) -> Vec<u8> {
         let mut b = vec![0u8; 64];

@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.UserHandle;
 
 public abstract class Context {
+    public abstract void startActivityAsUser(Intent intent, UserHandle user);
     public static final String LOCATION_SERVICE = "location";
     public static final String PLATFORM_COMPAT_SERVICE = "platform_compat";
     public static final String VR_SERVICE = "vrmanager";
@@ -29,6 +30,7 @@ public abstract class Context {
     public abstract ContentResolver getContentResolver();
     public final <T> T getSystemService(Class<T> serviceClass) { throw new RuntimeException("stub"); }
     public abstract int checkPermission(String permission, int pid, int uid);
+    public abstract void enforcePermission(String permission, int pid, int uid, String message);
     public final int getColor(int id) { throw new RuntimeException("stub"); }
     public final String getString(int resId) { throw new RuntimeException("stub"); }
     public abstract String getBasePackageName();
@@ -36,4 +38,7 @@ public abstract class Context {
     public abstract void sendBroadcastAsUser(Intent intent, UserHandle user);
     public abstract void sendBroadcastAsUser(Intent intent, UserHandle user, String receiverPermission);
     public abstract void sendOrderedBroadcastAsUser(Intent intent, UserHandle user, String receiverPermission, BroadcastReceiver resultReceiver, Handler scheduler, int initialCode, String initialData, android.os.Bundle initialExtras);
+ public String getOpPackageName(){throw new RuntimeException("stub");}
+ public void sendOrderedBroadcastAsUser(Intent intent,android.os.UserHandle user,String permission,int appOp,android.os.Bundle options,BroadcastReceiver receiver,android.os.Handler scheduler,int initialCode,String initialData,android.os.Bundle initialExtras){throw new RuntimeException("stub");}
+ public String getPackageName(){throw new RuntimeException("stub");}
 }

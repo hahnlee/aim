@@ -2,6 +2,27 @@
 
 Status: accepted 2026-09-29 (migration tracked in #153)
 
+M4 D1 source: `NativePackageManagerService` provides the typed static entry
+points and native/local owner coordinator. Its ten redirect rows remain in
+`image/m4-package-switch/system-server-redirects.inactive`; no original image
+or active redirect changes are made. Activation requires the real native
+boot-session backend, the original UM/ART constructor dependencies and the C
+CTS/app gates. `NativePackageBootstrap` now supplies the concrete Java factory
+assembly over that typed native session; its source has not been activated or
+verified.
+The two unredirected PMS-bearing SystemServer calls retain the image's disabled
+OTA-dexopt and non-headless guards. This is the existing symbolic-redirect
+exception, not an additional runtime interception mechanism.
+
+The vendor bridge also exposes a UID1000-only read-only role hash diagnostic
+(#1306). It invokes the pinned original RoleServicePlatformHelperImpl with
+the actual system Context and live local owners; original service code is
+unchanged. Appended vendor AIDL methods and generated codes provide this
+capability on both controlled read-only f742 image variants, built from the
+same 6bd vendor cohort. Compilation and original-image linkage pass. The
+native host source exposes it through a UID1000-only Binder dump to a regular output
+file; four host guard tests pass. Actual stored-hash binding remains NOT RUN.
+
 ## Context
 
 ADR 0012 runs the pinned Android userspace unmodified on a Linux syscall
@@ -358,7 +379,7 @@ The migration's state and conformance results are in
 ### M4: PackageManager, the design (2026-10-02)
 
 - PackageManager's largest surface is not binder: inside system_server,
-  `PackageManagerInternal` (148 methods) is used by 111 files in 54
+  `PackageManagerInternal` (134 abstract methods in the original DEX) is used by 111 files in 54
   subsystems, with `Computer` snapshots and `PackageManagerLocal` (ART
   Service, the permission state); SystemServer calls
   `PackageManagerService.main` in bootstrap and uses the result at eleven
@@ -390,7 +411,13 @@ The migration's state and conformance results are in
   checked as the `nop` edit is (each site found as often as listed, the
   target a public static method of that signature) and verified as ART
   opens it, recorded on the `replace` of services.jar in
-  `image/overlay.toml`. The list is empty until a user lands: M4's
+  `image/overlay.toml`. On the M4 C branch, the first entry redirects PMS
+  `main` to the device's package bootstrap entry. It synchronously attaches
+  the original policy bridge after PlatformCompat registration and before
+  calling original PMS `main` (#834). Attachment failure aborts bootstrap;
+  missing policy ownership is not replaced with a default. Original PMS
+  remains until the complete facade and C acceptance gates pass (#798).
+  The remaining planned users are M4's
   slice C (PackageManagerService's `main` and its eleven uses in
   SystemServer, UserManagerService's 15 calls) and a native `power`
   (#668, core milestone). Details in

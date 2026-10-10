@@ -24,6 +24,8 @@ enum Kind {
     /// `Uri.Builder`'s: the parts of a hierarchical URI, the path made
     /// absolute when there is a scheme or an authority.
     Hierarchical,
+    /// Native Uri.Builder defaults retain their known empty path.
+    PreferredHierarchical,
 }
 
 /// `Uri.*.TYPE_ID`.
@@ -33,6 +35,20 @@ const OPAQUE_TYPE_ID: i32 = 2;
 const HIERARCHICAL_TYPE_ID: i32 = 3;
 
 impl Uri {
+    /// Decoded Uri.Builder parts used by Settings' preferred-app expansion.
+    pub fn preferred_hierarchical(scheme: &str, authority: Option<&str>, path: Option<&str>) -> Uri {
+        let mut string = format!("{scheme}:");
+        if let Some(authority) = authority { string.push_str("//"); string.push_str(&preferred_encode(authority, "@:")); }
+        if let Some(path) = path {
+            if !path.is_empty() && !path.starts_with('/') { string.push('/'); }
+            string.push_str(&preferred_encode(path, "/"));
+        }
+        Uri { kind: Kind::PreferredHierarchical, string }
+    }
+    pub fn preferred_opaque(scheme: &str, part: &str) -> Uri {
+        Uri { kind: Kind::Opaque, string: format!("{scheme}:{}", preferred_encode(part, "")) }
+    }
+
     /// `Uri.parse`.
     pub fn parse(string: &str) -> Uri {
         Uri {
@@ -52,6 +68,15 @@ impl Uri {
         };
         let string = strings.string8(r)?.ok_or(BAD_VALUE)?;
         Ok(Some(Uri { kind, string }))
+    }
+
+    pub(crate) fn write_cache(&self, writer: &mut super::parse::parcel::Writer) {
+        writer.int(match self.kind {
+            Kind::String => STRING_TYPE_ID,
+            Kind::Opaque => OPAQUE_TYPE_ID,
+            Kind::Hierarchical | Kind::PreferredHierarchical => HIERARCHICAL_TYPE_ID,
+        });
+        writer.string(Some(&self.string));
     }
 
     /// The string `toString` returns for a URI read from a parcel.
@@ -78,7 +103,7 @@ impl Uri {
     pub fn scheme_specific_part(&self) -> Option<String> {
         let encoded = match self.kind {
             Kind::String | Kind::Opaque => self.encoded_ssp(),
-            Kind::Hierarchical => {
+            Kind::Hierarchical | Kind::PreferredHierarchical => {
                 let mut ssp = String::new();
                 if let Some(authority) = self.encoded_authority() {
                     ssp.push_str("//");
@@ -164,6 +189,7 @@ impl Uri {
         let s = self.string.as_bytes();
         let ssi = self.ssi();
         let mut start = ssi.map_or(0, |ssi| ssi + 1);
+        if self.kind == Kind::PreferredHierarchical && start == s.len() { return Some(String::new()); }
         if ssi.is_some() && (start == s.len() || s[start] != b'/') {
             return None;
         }
@@ -189,7 +215,7 @@ impl Uri {
     fn absolute(&self, path: String) -> String {
         let has_scheme_or_authority = self.scheme().is_some_and(|s| !s.is_empty())
             || self.encoded_authority().is_some_and(|a| !a.is_empty());
-        if self.kind == Kind::Hierarchical
+        if matches!(self.kind, Kind::Hierarchical | Kind::PreferredHierarchical)
             && has_scheme_or_authority
             && !path.is_empty()
             && !path.starts_with('/')
@@ -382,4 +408,15 @@ mod tests {
         assert_eq!(decode("ab%4"), "ab\u{fffd}");
         assert_eq!(decode("%FF"), "\u{fffd}");
     }
+}
+
+
+fn preferred_encode(value: &str, allowed: &str) -> String {
+    let mut encoded = String::new();
+    for &byte in value.as_bytes() {
+        let character = char::from(byte);
+        if byte.is_ascii_alphanumeric() || "_-!.~'()*".contains(character) || allowed.contains(character) { encoded.push(character); }
+        else { encoded.push('%'); encoded.push_str(&format!("{byte:02X}")); }
+    }
+    encoded
 }

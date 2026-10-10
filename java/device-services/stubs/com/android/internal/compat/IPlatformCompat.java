@@ -3,6 +3,9 @@
 package com.android.internal.compat;
 
 public interface IPlatformCompat extends android.os.IInterface {
+    boolean isChangeEnabledByUid(long changeId, int uid) throws android.os.RemoteException;
+    boolean isChangeEnabled(long changeId, android.content.pm.ApplicationInfo appInfo)
+            throws android.os.RemoteException;
     CompatibilityChangeConfig getAppConfig(android.content.pm.ApplicationInfo appInfo)
             throws android.os.RemoteException;
 

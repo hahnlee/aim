@@ -15,4 +15,5 @@ public final class PowerManager {
         public void release() { throw new RuntimeException("stub"); }
         public boolean isHeld() { throw new RuntimeException("stub"); }
     }
+ public static final int THERMAL_STATUS_SEVERE=3;public int getCurrentThermalStatus(){throw new RuntimeException("stub");}
 }

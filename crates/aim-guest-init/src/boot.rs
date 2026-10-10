@@ -37,6 +37,29 @@ use crate::props::{Properties, heap_properties, mapped_properties, read_property
 use crate::propsvc::{PropertyEvent, PropertySockets, SetRequest};
 use crate::supervisor::{DEFAULT_PATH, Planner};
 
+fn init_caught_signal_mask() -> std::io::Result<u64> {
+    let mut caught = 0u64;
+    for host_signal in 1..32 {
+        // Darwin rejects even read-only sigaction queries for these signals (#1200).
+        if matches!(host_signal, libc::SIGKILL | libc::SIGSTOP) {
+            continue;
+        }
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(host_signal, std::ptr::null(), &mut action) } < 0 {
+            return Err(std::io::Error::other(format!(
+                "init signal {host_signal} disposition: {}", std::io::Error::last_os_error()
+            )));
+        }
+        if action.sa_sigaction != libc::SIG_DFL && action.sa_sigaction != libc::SIG_IGN {
+            let guest_signal = aim_storage::process_namespace::signal_from_host(host_signal);
+            if guest_signal > 0 {
+                caught |= 1u64 << (guest_signal - 1);
+            }
+        }
+    }
+    Ok(caught)
+}
+
 /// Wakes the boot loop on every SIGCHLD, as init's signalfd does, so a
 /// child's exit (an `exec` ending) is handled at once rather than at the
 /// loop's next timeout. The thread ends with the loop's receiver.
@@ -109,6 +132,8 @@ pub struct BootOptions {
     /// Run mode: compare these original services with their native models
     /// and log each call to the file (`aim_services::shadow`).
     pub binder_shadow: Option<(Vec<String>, PathBuf)>,
+    /// Build mode: claim a new host directory for the native constructor snapshot.
+    pub package_constructor_capture: Option<PathBuf>,
     /// `androidboot.*` bootconfig entries (without the prefix).
     pub androidboot: Vec<(String, String)>,
     /// Run mode: stop everything after this long.
@@ -122,6 +147,12 @@ pub struct BootOptions {
 }
 
 impl BootOptions {
+    pub fn merge_androidboot(&mut self, entries: Vec<(String, String)>) {
+        for (name, value) in entries {
+            self.androidboot.retain(|(existing, _)| existing != &name);
+            self.androidboot.push((name, value));
+        }
+    }
     pub fn new(image: PathBuf, data: PathBuf, mode: RunMode) -> Self {
         Self {
             image,
@@ -137,6 +168,7 @@ impl BootOptions {
             trace: false,
             binder_trace: None,
             binder_shadow: None,
+            package_constructor_capture: None,
             // The device: init.rc imports init.aim.rc and vold reads
             // fstab.aim (image/overlay.toml).
             androidboot: vec![("hardware".to_string(), "aim".to_string())],
@@ -299,11 +331,16 @@ pub struct Boot {
     /// Run mode: the system services implemented natively (ADR 0013),
     /// registered once servicemanager is ready.
     native_services: Option<Arc<NativeServices>>,
+    /// Drops after executor's HostLauncher has killed and reaped its children.
+    _verity_control: Option<aim_storage::verity_control::RunningServer>,
+    _posix_control: Option<Arc<aim_storage::posix_broker::Controller>>,
+    _pty_owner: Option<aim_storage::pty_owner::transport::RunningServer>,
     /// The native status bar runs (`start_status_bar`).
     status_bar: bool,
     pub report: BootReport,
     /// The previous boot's runtime directory, removed while this one runs.
     _sweep: Sweep,
+    _image_lease: Option<aim_storage::system::ImageLease>,
     /// `/data`, `/metadata` and `/cache`: in run mode the data directory's
     /// case-sensitive image, attached at it for the boot (docs/storage.md).
     /// Declared last, so it is detached after the rest is dropped.
@@ -322,9 +359,14 @@ const LIGHTWEIGHT_SHELL: &str = "ro.vendor.aim.lightweight_shell";
 /// servicemanager once it is ready.
 fn start_native_services(
     image: &ImageRoot,
+    data: &std::path::Path,
+    properties: &std::path::Path,
     server: &Arc<Server>,
+    guest_pid:i32,
+    constructor_capture: Option<&std::path::Path>,
 ) -> Result<Option<Arc<NativeServices>>, String> {
     let Ok(list) = image.read(NATIVE_SERVICES) else {
+        if constructor_capture.is_some(){return Err("original package constructor capture capability unavailable".into());}
         return Ok(None);
     };
     let names: Vec<String> = parse_native_services(&String::from_utf8_lossy(&list))
@@ -332,9 +374,18 @@ fn start_native_services(
         .into_iter()
         .map(|s| s.name)
         .collect();
-    NativeServices::new(server.driver(), &names)
-        .map(|s| Some(Arc::new(s)))
-        .map_err(|e| format!("native services: {e}"))
+    if constructor_capture.is_some() && !names.iter().any(|name| name == "package") {
+        return Err("constructor capture requires native package owner; original constructor capture unavailable".into());
+    }
+    let services = NativeServices::new_for_namespace(server.driver(), &names,guest_pid).map_err(|e| format!("native services: {e}"))?;
+    if names.iter().any(|name| name == "package") {
+        if let Some(path)=constructor_capture { services.configure_package_constructor_capture(path)?; }
+        services.configure_package_image(image.root(), data, &[])
+            .map_err(|error| format!("native package image: {error}"))?;
+        services.configure_package_property_area(properties)
+            .map_err(|error| format!("native package properties: {error}"))?;
+    }
+    Ok(Some(Arc::new(services)))
 }
 
 /// Trace every binder transaction into `file`, one tab-separated line
@@ -343,10 +394,19 @@ fn start_native_services(
 /// synchronous call the nanoseconds until the reply, until a target
 /// thread took it and until the sender took the reply (`-` for none); the
 /// target's free and looper threads when it was sent; and the sending
-/// thread and the target thread that took it (0 for none).
+/// thread and the target thread that took it (0 for none). The sibling
+/// `<file>.pending.tsv` samples outstanding calls and their thread/parent
+/// graph every 250 ms; snapshot headers contain pending/returning counts.
 fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::File::create(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut pending_path = file.as_os_str().to_os_string();
+    pending_path.push(".pending.tsv");
+    let pending_path = PathBuf::from(pending_path);
+    let mut pending = std::fs::File::create(&pending_path)
+        .map_err(|error| format!("{}: {error}", pending_path.display()))?;
+    writeln!(pending, "# at_us\tid\trequest_id\tphase\tage_ns\tdevice\tfrom_pid\tfrom_euid\tfrom_tid\tto_pid\tto_tid\tdescriptor\tcode\tdelivered_ns\treplied_ns\twaiting\tloopers\tfrom_parent\tto_parent\tfrom_stack\tto_stack\tfrom_queued\tto_queued")
+        .map_err(|error| format!("{}: {error}", pending_path.display()))?;
     let driver = server.driver().clone();
     driver.start_trace();
     let nanos = |d: Option<Duration>| d.map_or("-".to_string(), |d| d.as_nanos().to_string());
@@ -354,7 +414,7 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
         .name("binder-trace".into())
         .spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_secs(1));
+                std::thread::sleep(Duration::from_millis(250));
                 let mut text = String::new();
                 for r in driver.take_trace() {
                     text.push_str(&format!(
@@ -376,7 +436,26 @@ fn trace_binder(server: &Arc<Server>, file: &std::path::Path) -> Result<(), Stri
                         r.to_tid,
                     ));
                 }
-                if out.write_all(text.as_bytes()).is_err() {
+                let snapshot = driver.pending_trace();
+                let returning = snapshot.records.iter().filter(|record| record.returning).count();
+                let mut graph = format!("# snapshot\t{}\t{}\t{}\n", snapshot.at.as_micros(), snapshot.records.len() - returning, returning);
+                let id = |value: Option<u64>| value.map_or("-".to_string(), |value| value.to_string());
+                for record in snapshot.records {
+                    let r = record.record;
+                    let descriptor = r.descriptor.replace(['\t', '\r', '\n'], " ");
+                    graph.push_str(&format!(
+                        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                        snapshot.at.as_micros(), record.id, r.transaction_id,
+                        if record.returning { "returning" } else { "pending" },
+                        record.age.as_nanos(), r.device, r.from_pid, r.from_euid,
+                        r.from_tid, r.to_pid, r.to_tid, descriptor, r.code,
+                        nanos(r.delivered), nanos(r.latency), r.waiting, r.loopers,
+                        id(r.from_parent), id(r.to_parent), id(record.from_stack),
+                        id(record.to_stack), record.from_queued, record.to_queued,
+                    ));
+                }
+                if let Err(error) = out.write_all(text.as_bytes()).and_then(|()| pending.write_all(graph.as_bytes())) {
+                    eprintln!("binder trace: writing completed or pending records failed: {error}");
                     return;
                 }
             }
@@ -456,6 +535,7 @@ impl Boot {
             format!("boot started at {:.3} (Unix time)", wall.as_secs_f64()),
         )];
         let mut mark = |what: &str| timeline.push((epoch.elapsed(), what.to_string()));
+        let image_lease = aim_storage::system::ImageLease::read_root(&options.image)?;
         let image = ImageRoot::new(&options.image);
         if !image.exists("/system/etc/init/hw/init.rc") {
             return Err(format!(
@@ -463,6 +543,11 @@ impl Boot {
                 options.image.display()
             ));
         }
+        let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
+        let linux_run_options = match options.mode {
+            RunMode::DryRun => LinuxRunOptions::CONTRACT,
+            RunMode::Run => LinuxRunOptions::detect(&linux_run_binary)?,
+        };
         // The data image attaches while the boot starts; init's mount_all
         // waits for it (`mount`).
         let data = match options.mode {
@@ -484,8 +569,42 @@ impl Boot {
         let data_mount = Rc::new(RefCell::new(data_mount));
         let sweep = layout.sweep_runtime().map_err(|e| e.to_string())?;
         layout.prepare_runtime().map_err(|e| e.to_string())?;
-        let map = layout.path_map();
+        let verity_control = if options.mode == RunMode::Run {
+            data_mount.borrow_mut().mount()?;
+            let store = Arc::new(aim_storage::fsverity::Store::new(
+                &layout.data.join("fs-verity"), &layout.runtime.join("fs-verity-leases"),
+            ).map_err(|error| format!("verity store: {error:?}"))?);
+            let owner = aim_storage::verity_control::RunningServer::start_private_with_store(Duration::from_secs(5), store)
+                .map_err(|error| format!("native verity control startup: {error}"))?;
+            aim_storage::verity_control::OwnerConfig { endpoint:owner.endpoint().to_path_buf(), process: owner.process }
+                .write(&layout.runtime.join("verity-control-owner")).map_err(|error| format!("native verity owner locator: {error}"))?;
+            Some(owner)
+        } else {
+            None
+        };
+        let mut map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
+        if options.mode == RunMode::Run {
+            let process = aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
+                .map_err(|error| error.to_string())?;
+            let namespace = format!("init-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds);
+            aim_storage::mount_namespace::Namespace::open(layout.path_map_file().parent().ok_or("path-map has no owner directory")?,&namespace)
+                .and_then(|owner| owner.initialize(&map.to_file_text())).map_err(|error|error.to_string())?;
+            aim_storage::process_namespace::InitRegistration::register(&layout.identity_dir().join("by-pid"),process,&namespace)
+                .map_err(|error| error.to_string())?;
+            let identity=crate::identity::Identity{service:"init".into(),uid:0,gid:0,groups:Vec::new(),
+                capabilities:crate::identity::Capabilities::for_service(0,None),seclabel:"u:r:init:s0".into(),priority:0,oom_score_adjust:0,rlimits:Vec::new()};
+            let identity_file=layout.identity_dir().join("init.identity");
+            std::fs::write(&identity_file,identity.to_file_text()).map_err(|error|error.to_string())?;
+            std::os::unix::fs::symlink(&identity_file,layout.identity_dir().join("by-pid").join(process.host_pid.to_string())).map_err(|error|error.to_string())?;
+            aim_storage::process_namespace::register_mount_namespace(&layout.identity_dir().join("by-pid"),process,&namespace).map_err(|error|error.to_string())?;
+            let caught = init_caught_signal_mask().map_err(|error| error.to_string())?;
+            aim_storage::process_namespace::register_init_signals(&layout.identity_dir().join("by-pid"),process,caught).map_err(|error|error.to_string())?;
+            // Publish only after the actual init, mount owner and signal
+            // dispositions are registered, before any native or guest service.
+            aim_storage::process_namespace::InitRegistration::read(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?
+                .activate_pid_mapping(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+        }
         mark("runtime layout prepared");
         let mut report = BootReport::default();
 
@@ -543,6 +662,14 @@ impl Boot {
         let xml = apex::apex_info_list_xml(&apexes);
         std::fs::write(layout.apex_info_list(), &xml).map_err(|e| e.to_string())?;
         apex::write_bootstrap(&layout.bootstrap_apex_dir(), &apexes).map_err(|e| e.to_string())?;
+        let mount_namespaces=if options.mode==RunMode::Run{
+            // The pinned original apexd bootstrap vector includes virt
+            // (RELEASE_AVF_ENABLE_EARLY_VM, original ELF proof in #1228).
+            let(owner,bootstrap)=crate::mount_namespace::MountNamespaces::setup(&layout,&map,&apexes,true)?;
+            let(ids_bootstrap,ids_default)=owner.namespace_ids();
+            report.log.push(format!("native mount owners: bootstrap={ids_bootstrap}, default={ids_default}"));
+            map=bootstrap;Some(owner)
+        }else{None};
         mark("APEX list written");
 
         let ids = IdResolver::from_image(&image, &properties);
@@ -569,11 +696,38 @@ impl Boot {
         manager.queue_boot(&properties);
         mark("init scripts loaded");
 
-        let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
-        let linux_run_options = match options.mode {
-            RunMode::DryRun => LinuxRunOptions::CONTRACT,
-            RunMode::Run => LinuxRunOptions::detect(&linux_run_binary),
-        };
+        let posix_control=if options.mode==RunMode::Run {
+            let process=aim_storage::process_namespace::ProcessIdentity::running(std::process::id()as i32).map_err(|error|error.to_string())?;
+            let endpoint=format!("dev.aim.posix.{}.{}.{}",process.host_pid,process.start_seconds,process.start_microseconds);
+            let holder=std::fs::canonicalize(linux_run_binary.with_file_name("aim-lock-holder")).map_err(|error|format!("configured POSIX lock holder: {error}"))?;
+            let controller=Arc::new(aim_storage::posix_broker::Controller::start(aim_storage::posix_broker::Config{endpoint,holder,startup_timeout:Duration::from_secs(5)}).map_err(|error|error.to_string())?);
+            let table=std::fs::canonicalize(layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+            for entry in map.entries(){
+                let host=match std::fs::canonicalize(&entry.host){Ok(host)=>host,Err(error)if error.kind()==std::io::ErrorKind::NotFound=>entry.host.clone(),Err(error)=>return Err(error.to_string())};
+                if table.starts_with(&host)||layout.runtime.join("posix-control-owner").starts_with(&host){return Err("native POSIX identity receipts or locator overlap a guest mount".into());}
+            }
+            let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
+            controller.bind_namespace(&table,&init).map_err(|error|error.to_string())?;
+            controller.register_guest(aim_storage::posix_control::Owner{process,guest_pid:1}).map_err(|error|error.to_string())?;
+            controller.owner_config().and_then(|owner|owner.write(&layout.runtime.join("posix-control-owner"))).map_err(|error|error.to_string())?;
+            Some(controller)
+        }else{None};
+        let pty_owner = if options.mode == RunMode::Run {
+            use std::os::unix::fs::PermissionsExt;
+            let runtime = layout.runtime.join("pty-pairs");
+            std::fs::create_dir(&runtime).map_err(|error| format!("PTY owner directory: {error}"))?;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+            let runtime = std::fs::canonicalize(runtime).map_err(|error| error.to_string())?;
+            let endpoint = format!("dev.aim.pty.{}", std::process::id());
+            let owner = aim_storage::pty_owner::transport::RunningServer::start_with_credentials(&endpoint, &runtime,&layout.identity_dir().join("by-pid"))
+                .map_err(|error| format!("PTY owner: {error}"))?;
+            owner.config.write(&layout.runtime.join("pty-control-owner"))
+                .map_err(|error| format!("PTY owner locator: {error}"))?;
+            aim_binder_host::pty_file::install_owner(&owner.config)
+                .map_err(|error| format!("PTY transport owner: {error}"))?;
+            Some(owner)
+        } else { None };
         // The binder driver is kernel state, so the init role hosts it
         // (ADR 0012 item 7): one per boot, named for this process.
         let binder_name = format!("dev.aim.guest-init.{}.binder", std::process::id());
@@ -583,13 +737,24 @@ impl Boot {
             }
             _ => None,
         };
+        let table=layout.identity_dir().join("by-pid");
+        let ready=match std::fs::read(table.join("namespace-pid-ready")){
+            Ok(bytes)if bytes==b"AIMNS-PID-READY1\n"=>true,
+            Ok(_)=>return Err("invalid native init PID readiness record".into()),
+            Err(error)if error.kind()==std::io::ErrorKind::NotFound=>false,
+            Err(error)=>return Err(error.to_string()),
+        };
+        let native_pid=if ready{
+            let init=aim_storage::process_namespace::InitRegistration::read(&table).map_err(|error|error.to_string())?;
+            if init.process.host_pid!=unsafe{libc::getpid()}{return Err("native init registration names another process".into());}1
+        }else{unsafe{libc::getpid()}};
         let mut native_services = None;
         if let Some(server) = &binder {
             share_areas(&properties, server);
             if let Some(file) = &options.binder_trace {
                 trace_binder(server, file)?;
             }
-            native_services = start_native_services(&image, server)?;
+            native_services = start_native_services(&image, &layout.data.join("data"), &layout.properties_dir(), server,native_pid,options.package_constructor_capture.as_deref())?;
             if let Some((names, log)) = &options.binder_shadow {
                 let properties_dir = layout.properties_dir();
                 let files = map.clone();
@@ -616,10 +781,10 @@ impl Boot {
                 );
                 // The Mac's Now Playing and screen capture consent, from
                 // the original media session and projection services.
-                aim_services::media::Bridge::start(server.driver(), display);
+                aim_services::media::Bridge::start_for_namespace(server.driver(), display,native_pid);
             }
             // Android's media volume is the Mac's output volume.
-            aim_services::volume::start(server.driver());
+            aim_services::volume::start_for_namespace(server.driver(),native_pid);
             mark("binder host and native services started");
         }
         let linux_run = LinuxRun {
@@ -641,7 +806,7 @@ impl Boot {
         }
         let launcher: Box<dyn Launcher> = match options.mode {
             RunMode::DryRun => Box::new(DryRunLauncher::new(linux_run.clone())),
-            RunMode::Run => Box::new(HostLauncher::new(linux_run.clone(), layout.clone())),
+            RunMode::Run => Box::new(HostLauncher::new(linux_run.clone(), layout.clone()).with_posix(posix_control.as_ref().unwrap().clone(),layout.runtime.join("posix-control-owner"))),
         };
         let planner = Planner {
             layout: layout.clone(),
@@ -654,6 +819,7 @@ impl Boot {
         };
         let mut fs = FsOps::new(map, layout.fs_attrs_file(), options.mode == RunMode::Run);
         fs.set_path_map_file(layout.path_map_file());
+        if let Some(owner)=mount_namespaces{fs.set_mount_namespaces(owner);}
         let cgroup2 = cgroup2_hierarchy(&image);
         for root in cgroup_mount_points(&image)
             .iter()
@@ -708,9 +874,13 @@ impl Boot {
             _sockets: sockets,
             binder,
             native_services,
+            _verity_control: verity_control,
+            _posix_control: posix_control,
+            _pty_owner: pty_owner,
             status_bar: false,
             data: data_mount,
             _sweep: sweep,
+            _image_lease: image_lease,
             report,
         })
     }
@@ -956,6 +1126,9 @@ impl Boot {
     /// init's main loop. Returns when the queue is idle (dry run), on a
     /// fatal error or shutdown, or at the timeout.
     pub fn run(&mut self) -> &BootReport {
+        if self.options.mode == RunMode::Run {
+            self.sweep_memfds();
+        }
         let deadline = self.options.timeout.map(|t| Instant::now() + t);
         self.executor.stop_at = deadline;
         let dry = self.options.mode == RunMode::DryRun;
@@ -1097,6 +1270,27 @@ impl Boot {
         &self.report
     }
 
+    fn sweep_memfds(&mut self) {
+        match std::process::Command::new(&self.linux_run.binary)
+            .arg("--sweep-memfds")
+            .output()
+        {
+            Ok(output) if output.status.success() => self
+                .report
+                .log
+                .push(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            Ok(output) => self.report.log.push(format!(
+                "memfd cleanup failed: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Err(error) => self
+                .report
+                .log
+                .push(format!("memfd cleanup failed: {error}")),
+        }
+    }
+
     fn finish(&mut self) {
         if self.options.mode == RunMode::Run {
             self.executor
@@ -1104,6 +1298,7 @@ impl Boot {
                 .kill_all(self.executor.launcher.as_mut());
             std::thread::sleep(Duration::from_millis(100));
             let _ = self.executor.poll_processes();
+            self.sweep_memfds();
         }
         self.report.fatal = self.executor.fatal.clone();
         self.report.timeline.extend(self.data.borrow().timeline());
@@ -1143,5 +1338,50 @@ impl Boot {
 
     pub fn property(&self, name: &str) -> Option<String> {
         self.props.borrow().property(name)
+    }
+}
+
+#[cfg(test)]
+mod androidboot_options_tests {
+    use super::*;
+    #[test]
+    fn actual_init_signal_dispositions_exclude_uncatchable_signals() {
+        let caught = init_caught_signal_mask().unwrap();
+        assert_eq!(caught & ((1 << (9 - 1)) | (1 << (19 - 1))), 0);
+        for signal in [libc::SIGKILL, libc::SIGSTOP] {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::sigaction(signal, std::ptr::null(), &mut action) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EINVAL));
+        }
+    }
+
+    #[test]
+    fn explicit_debug_port_preserves_device_hardware_and_hardware_override_is_unique() {
+        let mut options = BootOptions::new(PathBuf::new(), PathBuf::new(), RunMode::DryRun);
+        options.merge_androidboot(vec![("aim.adb.port".into(), "5627".into())]);
+        assert!(options.androidboot.contains(&("hardware".into(), "aim".into())));
+        assert!(options.androidboot.contains(&("aim.adb.port".into(), "5627".into())));
+        options.merge_androidboot(vec![("hardware".into(), "test-device".into())]);
+        assert_eq!(options.androidboot.iter().filter(|(name, _)| name == "hardware").count(), 1);
+        assert!(options.androidboot.contains(&("hardware".into(), "test-device".into())));
+    }
+}
+
+#[cfg(test)]
+mod capability_boot_tests {
+    use super::*;
+    #[test]
+    fn failed_capability_query_returns_before_data_and_service_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let root=std::env::temp_dir().join(format!("aim-capability-boot-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let image=root.join("image");let rc=image.join("system/etc/init/hw/init.rc");
+        std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
+        std::fs::write(rc,include_bytes!("../../aim-android-init/tests/golden/image/system/etc/init/hw/init.rc")).unwrap();
+        let helper=root.join("failed-helper");std::fs::write(&helper,b"#!/bin/sh\nkill -KILL $$\n").unwrap();
+        std::fs::set_permissions(&helper,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let data=root.join("data");let mut options=BootOptions::new(image,data.clone(),RunMode::Run);options.linux_run=Some(helper);
+        let error=Boot::prepare(options).err().unwrap();assert!(error.contains("capability query") && error.contains("signal"),"{error}");
+        assert!(!data.exists());assert!(!root.join("data.asif").exists());assert!(!root.join("data.run").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

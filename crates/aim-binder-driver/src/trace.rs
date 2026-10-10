@@ -24,6 +24,9 @@ use crate::state::{Tid, TxnId};
 pub struct TraceRecord {
     /// When the call was sent, since tracing started.
     pub at: Duration,
+    pub transaction_id: u64,
+    pub from_parent: Option<u64>,
+    pub to_parent: Option<u64>,
     /// The binder device (`/dev/binder`, ...).
     pub device: String,
     pub from_pid: i32,
@@ -54,6 +57,25 @@ pub struct TraceRecord {
     pub returned: Option<Duration>,
 }
 
+/// An outstanding call or a reply that its sender has not yet read.
+#[derive(Clone, Debug)]
+pub struct PendingTraceRecord {
+    pub id: u64,
+    pub returning: bool,
+    pub age: Duration,
+    pub record: TraceRecord,
+    pub from_stack: Option<u64>,
+    pub to_stack: Option<u64>,
+    pub from_queued: usize,
+    pub to_queued: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PendingTraceSnapshot {
+    pub at: Duration,
+    pub records: Vec<PendingTraceRecord>,
+}
+
 #[derive(Default)]
 pub(crate) struct Trace {
     start: Option<Instant>,
@@ -76,6 +98,7 @@ impl Trace {
     pub fn sent(&mut self, id: TxnId, mut record: TraceRecord) {
         let now = Instant::now();
         record.at = now - self.start.unwrap_or(now);
+        record.transaction_id = id;
         if record.oneway {
             self.done.push(record);
         } else {
@@ -92,9 +115,10 @@ impl Trace {
     }
 
     /// Transaction `id` was replied to with `reply`.
-    pub fn replied(&mut self, id: TxnId, reply: TxnId) {
+    pub fn replied(&mut self, id: TxnId, reply: TxnId, to_parent: Option<TxnId>) {
         if let Some((sent, mut record)) = self.pending.remove(&id) {
             record.latency = Some(sent.elapsed());
+            record.to_parent = to_parent;
             self.returning.insert(reply, (sent, record));
         }
     }
@@ -112,6 +136,21 @@ impl Trace {
         if let Some((_, record)) = self.pending.remove(&id).or(self.returning.remove(&id)) {
             self.done.push(record);
         }
+    }
+
+    pub fn snapshot(&self) -> PendingTraceSnapshot {
+        let now = Instant::now();
+        let mut records = Vec::with_capacity(self.pending.len() + self.returning.len());
+        for (returning, entries) in [(false, &self.pending), (true, &self.returning)] {
+            for (&id, (sent, record)) in entries {
+                records.push(PendingTraceRecord {
+                    id, returning, age: now.duration_since(*sent), record: record.clone(),
+                    from_stack: None, to_stack: None, from_queued: 0, to_queued: 0,
+                });
+            }
+        }
+        records.sort_by_key(|record| record.id);
+        PendingTraceSnapshot { at: self.start.map_or(Duration::ZERO, |start| now.duration_since(start)), records }
     }
 
     pub fn take(&mut self) -> Vec<TraceRecord> {
@@ -174,7 +213,7 @@ mod tests {
         };
         trace.sent(1, record.clone());
         trace.delivered(1, 7);
-        trace.replied(1, 2);
+        trace.replied(1, 2, None);
         assert!(trace.take().is_empty());
         trace.returned(2);
         let [r] = &trace.take()[..] else { panic!() };
@@ -192,7 +231,7 @@ mod tests {
         assert_eq!((r.delivered, r.latency), (None, None));
 
         trace.sent(4, record);
-        trace.replied(4, 5);
+        trace.replied(4, 5, None);
         trace.dropped(5);
         let [r] = &trace.take()[..] else { panic!() };
         assert!(r.latency.is_some() && r.returned.is_none());

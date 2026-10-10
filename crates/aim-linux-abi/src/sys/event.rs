@@ -20,6 +20,15 @@ use super::clock::{self, Base};
 use super::fdtab::{self, Kind};
 use crate::errno::{self, EAGAIN, EBADF, EINVAL, EPERM};
 
+static TRACE_EVENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn trace_event(fd: i32, operation: &str, value: u64, semaphore: bool) {
+    if super::tracing() && TRACE_EVENT.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+        |n| (n < 64).then_some(n + 1)).is_ok() {
+        crate::diag!("eventfd receipt pid={} tid={} fd={fd} operation={operation} value={value} semaphore={semaphore}",
+            unsafe { libc::getpid() }, super::thread::host_tid());
+    }
+}
+
 const O_NONBLOCK: u64 = 0o4000;
 const O_CLOEXEC: u64 = 0o2000000;
 const EFD_SEMAPHORE: u64 = 1;
@@ -82,10 +91,8 @@ impl Drop for EventFd {
 }
 
 fn close_peer(peer: &AtomicI32) {
-    let fd = peer.load(Ordering::Relaxed);
-    fdtab::unhide(fd);
-    // SAFETY: the hidden peer end is ours.
-    unsafe { libc::close(fd) };
+    let fd=peer.swap(-1,Ordering::Relaxed);
+    if fd>=0{if let Err(error)=fdtab::close_fork_private(fd){crate::diag!("event private peer close: errno {error}");}}
 }
 
 impl EventFd {
@@ -119,6 +126,7 @@ impl EventFd {
                 if let Some(v) = v {
                     // SAFETY: guest buffer of at least 8 bytes.
                     unsafe { (buf as *mut u64).write_unaligned(v) };
+                    trace_event(fd, "read", v, self.semaphore);
                     return 8;
                 }
             }
@@ -145,6 +153,7 @@ impl EventFd {
             let _g = self.lock.lock().unwrap();
             self.add(fd, v);
         }
+        trace_event(fd, "write", v, self.semaphore);
         8
     }
 }
@@ -169,6 +178,11 @@ pub fn eventfd2(a: [u64; 6]) -> i64 {
             lock: Mutex::new(()),
         })),
     );
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
+    trace_event(fd, "create", init, flags & EFD_SEMAPHORE != 0);
     fd as i64
 }
 
@@ -261,7 +275,7 @@ fn poke() {
 
 /// Fork: an eventfd is its hidden peer (inherited) and its mode.
 pub(super) fn save_event(e: &EventFd, w: &mut super::fork_state::Writer) {
-    w.i32(e.peer.load(Ordering::Relaxed));
+    let peer=e.peer.load(Ordering::Relaxed);w.retain_private(peer);w.i32(peer);
     w.bool(e.semaphore);
 }
 
@@ -277,7 +291,7 @@ pub(super) fn load_event(r: &mut super::fork_state::Reader) -> Arc<EventFd> {
 /// Fork: a timerfd is its hidden peer and its settings (Linux children
 /// share the timer with the parent; here each process has a copy).
 pub(super) fn save_timer(t: &TimerFd, w: &mut super::fork_state::Writer) {
-    w.i32(t.peer.load(Ordering::Relaxed));
+    let peer=t.peer.load(Ordering::Relaxed);w.retain_private(peer);w.i32(peer);
     w.u32(t.base.index());
     let s = t.state.lock().unwrap();
     w.u64(s.next);
@@ -377,6 +391,10 @@ pub fn timerfd_create(a: [u64; 6]) -> i64 {
     });
     register(&t);
     fdtab::insert(fd, Kind::Timer(t));
+    if let Err(error) = fdtab::publish_guest(fd) {
+        fdtab::on_close(fd); unsafe { libc::close(fd); }
+        return -(error as i64);
+    }
     fd as i64
 }
 
@@ -487,6 +505,35 @@ pub fn relocate_hidden(fd: i32) {
             fdtab::unhide(fd);
             peer.store(fdtab::hide(fd), Ordering::Relaxed);
             return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    #[test]
+    fn actual_typed_producers_publish_guest_ends_and_keep_peers_private() {
+        let event=eventfd2([0,O_CLOEXEC,0,0,0,0]);assert!(event>=0,"eventfd {event}");
+        let peer=match fdtab::get(event as i32){Some(Kind::Event(value))=>value.peer.load(Ordering::Relaxed),_=>panic!("event description missing")};
+        assert!(fdtab::visible(event as i32));assert!(!fdtab::visible(peer));assert!(fdtab::is_hidden(peer));
+        let timer=timerfd_create([1,O_CLOEXEC,0,0,0,0]);assert!(timer>=0,"timerfd {timer}");
+        let timer_peer=match fdtab::get(timer as i32){Some(Kind::Timer(value))=>value.peer.load(Ordering::Relaxed),_=>panic!("timer description missing")};
+        assert!(fdtab::visible(timer as i32));assert!(!fdtab::visible(timer_peer));
+        let epoll=super::super::epoll::epoll_create1([O_CLOEXEC,0,0,0,0,0]);assert!(epoll>=0,"epoll {epoll}");
+        let inotify=super::super::inotify::inotify_init1([O_CLOEXEC,0,0,0,0,0]);assert!(inotify>=0,"inotify {inotify}");
+        let name=std::ffi::CString::new("typed-publication").unwrap();
+        let memfd=super::super::memfd::memfd_create([name.as_ptr() as u64,1,0,0,0,0]);assert!(memfd>=0,"memfd {memfd}");
+        let ashmem=super::super::ashmem::open("/dev/ashmem",O_CLOEXEC).unwrap();assert!(ashmem>=0,"ashmem {ashmem}");
+        let pidfd=super::super::wait::open_pidfd(unsafe{libc::getpid()},false);assert!(pidfd>=0,"pidfd {pidfd}");
+        let content=super::super::procfs::content_fd(b"native content",true);assert!(content>=0);
+        let knob=super::super::knob::open(b"native knob",true,|_|Ok(None));assert!(knob>=0);
+        assert!(matches!(fdtab::get(knob as i32),Some(Kind::Knob(_))));
+        for fd in [event,timer,epoll,inotify,memfd,ashmem,pidfd,content,knob]{
+            assert!(fdtab::visible(fd as i32));
+            assert_eq!(fdtab::SLOW[fd as usize].load(Ordering::Relaxed),1);
+            assert_eq!(super::super::fs::close([fd as u64,0,0,0,0,0]),0);
+            assert!(!fdtab::visible(fd as i32));
         }
     }
 }

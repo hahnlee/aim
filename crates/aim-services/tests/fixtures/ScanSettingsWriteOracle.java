@@ -1,0 +1,763 @@
+package com.android.server.pm;
+
+/** Actual pinned Settings writer on detached, native-captured setting owners. */
+public final class ScanSettingsWriteOracle {
+    public static void verifyLegacyDomains(java.io.File directory, android.content.Context context,
+            com.android.server.compat.PlatformCompat compat) throws Exception {
+        var code = (com.android.server.pm.pkg.AndroidPackage) com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(
+            java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-owner.cache").toPath()));
+        for (int i = 0; i < 8; i++) {
+            var domain = new com.android.server.pm.verify.domain.DomainVerificationService(context, new com.android.server.SystemConfig(false), compat);
+            var data = new java.io.File(directory, "domain-legacy-original-" + i);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(new java.io.File(directory, "domain-legacy-" + i + ".input").toPath()));
+            var settings = new Settings(data, null, null, domain, null, new PackageManagerTracedLock());
+            if (!settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>())) throw new AssertionError("legacy settings import failed");
+            var setting = settings.getPackagesLocked().get("fixture.domains");
+            if (setting == null) throw new AssertionError("legacy package owner missing");
+            setting.setPkg(code);
+            setting.setSigningDetails(new android.content.pm.SigningDetails(new android.content.pm.Signature[0], 0, new android.util.ArraySet<>(), null));
+            domain.addPackage((com.android.server.pm.pkg.PackageStateInternal) setting, null);
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "domain-legacy-" + i + ".original"))) {
+                var xml = android.util.Xml.resolveSerializer(output);
+                xml.startDocument(null, true); xml.startTag(null, "packages");
+                domain.writeSettings(null, xml, false, -1);
+                xml.endTag(null, "packages"); xml.endDocument();
+            }
+        }
+    }
+    public static void write(java.io.File cache, dev.aim.server.PackageScanLease lease,
+            PackageSetting assembled) throws Exception {
+        verifyArrayMapOrder();
+        verifyFirstWriteRetry(cache.getParentFile());
+        verifyEmptyDocuments(cache.getParentFile());
+        verifyRecoveryMatrix(cache.getParentFile());
+        verifyPullMatrix(cache.getParentFile());
+        verifySettingsVersionRecovery(cache.getParentFile());
+        verifySettingsDefaults(cache.getParentFile());
+        verifyOwnerDefaults(cache.getParentFile());
+        verifySignatureEvents(cache.getParentFile());
+        verifyPackageChildEvents(cache.getParentFile());
+        verifySharedReadEvents(cache.getParentFile());
+        verifyKeySetEvents(cache.getParentFile());
+        verifyVerifierEvents(cache.getParentFile());
+        verifyLegacyDomainEvents(cache.getParentFile());
+        verifyModernDomainEvents(cache.getParentFile());
+        verifyBootVersionEvents(cache.getParentFile());
+        verifyFalseUserContinuation(cache.getParentFile());
+        var in = android.os.Parcel.obtain();
+        PackageSetting setting;
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(cache.getPath() + ".writer-setting").toPath());
+            in.unmarshall(bytes, 0, bytes.length); in.setDataPosition(0);
+            var data = dev.aim.server.PackageSettingData.read(in);
+            if (in.dataAvail() != 0) throw new AssertionError("writer setting tail");
+            setting = CapturedPackageSetting.from(data, 1, false);
+        } finally { in.recycle(); }
+        setting.setPkg(((com.android.server.pm.pkg.PackageState)assembled).getAndroidPackage());
+        setting.setSigningDetails(assembled.getSigningDetails());
+        verifyReindexedCertificates(cache.getParentFile());
+        verifyNativeSignatures(cache.getParentFile(), lease, setting);
+        writeInventory(cache.getParentFile(), lease);
+        var settings = new Settings(java.util.Map.of());
+        var certificates = new java.util.ArrayList<android.content.pm.Signature>();
+        try (var output = new java.io.FileOutputStream(cache.getPath() + ".settings-original")) {
+            var xml = android.util.Xml.resolveSerializer(output);
+            xml.startDocument(null, true); xml.startTag(null, "packages");
+            settings.writePackageLPr(xml, certificates, setting);
+            var names = new java.util.ArrayList<>(lease.getSharedUserNames());
+            names.sort(java.util.Comparator.comparingInt(String::hashCode));
+            for (String name : names) {
+                var data = lease.getSharedUserData(name);
+                var sigs = new PackageSignatures(); sigs.mSigningDetails = data.getSigningDetails();
+                xml.startTag(null, "shared-user"); xml.attribute(null, "name", name);
+                xml.attributeInt(null, "userId", data.getAppId());
+                sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
+            }
+            xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    public static void verifyCurrentVersion(java.io.File directory, byte[] payload) throws Exception {
+        var current=new Settings.VersionInfo(); current.forceCurrent();
+        var values=android.os.Parcel.obtain();
+        try {
+            values.unmarshall(payload,0,payload.length); values.setDataPosition(0);
+            if(values.readInt()!=current.sdkVersion || values.readInt()!=current.databaseVersion || !java.util.Objects.equals(values.readString(),current.buildFingerprint) || !java.util.Objects.equals(values.readString(),current.fingerprint) || values.dataAvail()!=0) throw new AssertionError("original build-version owner differs");
+        } finally { values.recycle(); }
+        java.nio.file.Files.write(new java.io.File(directory,"current-package-version.original").toPath(),payload);
+    }
+    private static void verifyBootVersionEvents(java.io.File directory) throws Exception {
+        for (int index=0; index<8; index++) {
+            var data=new java.io.File(directory,"boot-version-original-"+index); var system=new java.io.File(data,"system"); system.mkdirs();
+            var input=new java.io.File(directory,"boot-version-input-"+index);
+            if(input.exists()) java.nio.file.Files.write(new java.io.File(system,"packages.xml").toPath(),java.nio.file.Files.readAllBytes(input.toPath()));
+            var reserve=new java.io.File(directory,"boot-version-reserve-"+index);
+            if(reserve.exists()) java.nio.file.Files.write(new java.io.File(system,"packages.xml.reservecopy").toPath(),java.nio.file.Files.readAllBytes(reserve.toPath()));
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());
+            var current=new Settings.VersionInfo(); current.forceCurrent();
+            if(current.sdkVersion!=36 || current.databaseVersion!=3) throw new AssertionError("pinned current VersionInfo differs");
+            var internal=settings.findOrCreateVersion(null); internal.sdkVersion=30; internal.databaseVersion=1; internal.buildFingerprint="old"; internal.fingerprint="old-partitions";
+            var rows=new java.util.ArrayList<String>();
+            try { rows.add(Boolean.toString(!settings.readLPw(null,java.util.List.of()))); }
+            catch(NullPointerException failure){ rows.add("fatal"); }
+            for(String uuid:new String[]{null,"primary_physical"}) {
+                var v=settings.findOrCreateVersion(uuid);
+                rows.add(v.sdkVersion==current.sdkVersion && v.databaseVersion==current.databaseVersion && java.util.Objects.equals(v.buildFingerprint,current.buildFingerprint) && java.util.Objects.equals(v.fingerprint,current.fingerprint) ? "current" : v.sdkVersion+","+v.databaseVersion+","+v.buildFingerprint+","+v.fingerprint);
+            }
+            java.nio.file.Files.write(new java.io.File(directory,"boot-version-output-"+index).toPath(),String.join("|",rows).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyFalseUserContinuation(java.io.File directory) throws Exception {
+        for(int mode=0;mode<2;mode++) {
+            var data=new java.io.File(directory,"false-user-continuation-original-"+mode);var system=new java.io.File(data,"system");system.mkdirs();
+            var userDir=new java.io.File(system,"users/0");userDir.mkdirs();
+            byte[] bad="malformed per-user input".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            var restrictions=new java.io.File(userDir,"package-restrictions.xml");java.nio.file.Files.write(restrictions.toPath(),bad);
+            var runtime=new java.io.File(data,"misc_de/0/com.android.permission");runtime.mkdirs();var runtimeFile=new java.io.File(runtime,"runtime-permissions.xml");java.nio.file.Files.write(runtimeFile.toPath(),bad);
+            if(mode==1)java.nio.file.Files.write(new java.io.File(system,"packages.xml").toPath()," ".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings=new Settings(data,null,null,null,null,new PackageManagerTracedLock());var user=new android.content.pm.UserInfo();user.id=0;
+            if(settings.readLPw(null,java.util.List.of(user)))throw new AssertionError("original initial false continuation changed");
+            if(!java.util.Arrays.equals(bad,java.nio.file.Files.readAllBytes(restrictions.toPath())) || !java.util.Arrays.equals(bad,java.nio.file.Files.readAllBytes(runtimeFile.toPath())))throw new AssertionError("original false continuation consumed user files");
+            var internal=settings.findOrCreateVersion(null);if(internal.sdkVersion!=36 || internal.databaseVersion!=3)throw new AssertionError("original false continuation missed finally versions");
+        }
+    }
+    private static void verifyModernDomainEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "modern-domain-event-input-" + index); if (!input.exists()) break;
+            com.android.server.pm.verify.domain.DomainVerificationPersistence.ReadResult result;
+            String status = "ok";
+            try (var stream = new java.io.FileInputStream(input)) {
+                var xml = android.util.Xml.resolvePullParser(stream); while (xml.next() != 2) {}
+                try { result = com.android.server.pm.verify.domain.DomainVerificationPersistence.readFromXml(xml); }
+                catch (IllegalArgumentException failure) { status = "invalid"; result = new com.android.server.pm.verify.domain.DomainVerificationPersistence.ReadResult(new android.util.ArrayMap<>(), new android.util.ArrayMap<>()); }
+            }
+            java.nio.file.Files.write(new java.io.File(directory, "modern-domain-event-status-" + index).toPath(), status.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "modern-domain-event-output-" + index))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true);
+                com.android.server.pm.verify.domain.DomainVerificationPersistence.writeToXml(xml, new com.android.server.pm.verify.domain.models.DomainVerificationStateMap<>(), result.active, result.restored, -1, null);
+                xml.endDocument();
+            }
+        }
+    }
+    private static void verifyLegacyDomainEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "legacy-domain-event-input-" + index); if (!input.exists()) break;
+            var owner = new com.android.server.pm.verify.domain.DomainVerificationLegacySettings();
+            try (var stream = new java.io.FileInputStream(input)) {
+                var xml = android.util.Xml.resolvePullParser(stream);
+                while (xml.next() != 2) {}
+                owner.readSettings(xml);
+            }
+            try (var output = new java.io.FileOutputStream(new java.io.File(directory, "legacy-domain-event-output-" + index))) {
+                var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true);
+                owner.writeSettings(xml); xml.endDocument();
+            }
+        }
+    }
+    private static void verifyVerifierEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "verifier-event-input-" + index); if (!input.exists()) break;
+            var data = new java.io.File(directory, "verifier-event-original-" + index); var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock()); String status = "ok";
+            try { settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>()); }
+            catch (NullPointerException failure) { status = "fatal"; }
+            java.nio.file.Files.write(new java.io.File(directory, "verifier-event-output-" + index).toPath(), (status + "|" + settings.getVerifierDeviceIdentityLPw(null).toString()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyKeySetEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "keyset-event-input-" + index); if (!input.exists()) break;
+            var data = new java.io.File(directory, "keyset-event-original-" + index); var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            String status = "ok";
+            try { settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>()); }
+            catch (NullPointerException failure) { status = "fatal"; }
+            for (String phase : new String[] { "read", "retired" }) {
+                if (phase.equals("retired")) settings.getKeySetManagerService().removeAppKeySetDataLPw("p");
+                var p = settings.getPackagesLocked().get("p"); long proper = p == null ? -1 : p.getKeySetData().getProperSigningKeySet();
+                var owner = settings.getKeySetManagerService(); var handle = p == null ? null : owner.getSigningKeySetByPackageNameLPr("p");
+                java.nio.file.Files.write(new java.io.File(directory, "keyset-event-" + phase + "-output-" + index).toPath(), (status + "|" + proper + "|" + (handle == null ? "absent" : handle.getRefCountLPr())).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                try (var output = new java.io.FileOutputStream(new java.io.File(directory, "keyset-event-" + phase + "-pool-" + index))) {
+                    var xml = android.util.Xml.resolveSerializer(output); xml.startDocument(null, true); xml.startTag(null, "packages");
+                    owner.writeKeySetManagerServiceLPr(xml); xml.endTag(null, "packages"); xml.endDocument();
+                }
+            }
+        }
+    }
+    private static void verifySharedReadEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "shared-read-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "shared-read-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            settings.readLPw(null, java.util.List.of());
+            var packages = new java.util.ArrayList<String>(); var groups = new java.util.ArrayList<String>();
+            for (var p : settings.getPackagesLocked().values()) packages.add(p.getPackageName() + ":" + p.getAppId() + ":" + p.hasSharedUser() + ":" + p.getPathString());
+            for (var g : settings.getAllSharedUsersLPw()) groups.add(g.getName() + ":" + g.mAppId + ":" + g.getFlags());
+            java.util.Collections.sort(packages); java.util.Collections.sort(groups);
+            java.nio.file.Files.write(new java.io.File(directory, "shared-read-output-" + index).toPath(), (String.join(";", packages) + "|" + String.join(";", groups)).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyPackageChildEvents(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "package-child-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "package-child-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml").toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(new java.io.File(system, "packages.xml.reservecopy").toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var p = settings.getPackagesLocked().get("p");
+            if (p == null) throw new AssertionError("package child owner absent: " + index);
+            var fields = new java.util.ArrayList<String>(); var entries = new java.util.ArrayList<String>();
+            var names = p.getUsesStaticLibraries(); var versions = p.getUsesStaticLibrariesVersions();
+            for (int i = 0; i < names.length; i++) entries.add(names[i] + ":" + versions[i]);
+            fields.add(String.join(",", entries)); entries.clear();
+            names = p.getUsesSdkLibraries(); versions = p.getUsesSdkLibrariesVersionsMajor(); var optional = p.getUsesSdkLibrariesOptional();
+            for (int i = 0; i < names.length; i++) entries.add(names[i] + ":" + versions[i] + ":" + optional[i]);
+            fields.add(String.join(",", entries)); entries.clear();
+            names = p.getSplitNames(); var revisions = p.getSplitRevisionCodes();
+            for (int i = 0; i < names.length; i++) entries.add(names[i] + ":" + revisions[i]);
+            fields.add(String.join(",", entries)); entries.clear();
+            var keys = p.getKeySetData(); fields.add(Long.toString(keys.getProperSigningKeySet()));
+            for (var entry : keys.getAliases().entrySet()) entries.add(entry.getKey() + ":" + entry.getValue());
+            fields.add(String.join(",", entries)); entries.clear();
+            if (keys.getUpgradeKeySets() != null) for (long id : keys.getUpgradeKeySets()) entries.add(Long.toString(id));
+            fields.add(String.join(",", entries)); entries.clear();
+            if (p.getMimeGroups() != null) for (var group : p.getMimeGroups().entrySet()) {
+                entries.add(group.getKey() + ":" + String.join(",", group.getValue()));
+            }
+            fields.add(String.join(";", entries));
+            fields.add(p.getPathString() + ":" + p.getFlags() + ":" + p.getPrivateFlags() + ":" + p.getVersionCode() + ":" + p.getDomainSetId() + ":" + String.format("%08x", Float.floatToRawIntBits(p.getLoadingProgress())) + ":" + p.getPageSizeAppCompatFlags());
+            java.nio.file.Files.write(new java.io.File(directory, "package-child-output-" + index).toPath(), String.join("|", fields).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyOwnerDefaults(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "owner-default-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "owner-default-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            var main = new java.io.File(system, "packages.xml");
+            var reserve = new java.io.File(system, "packages.xml.reservecopy");
+            java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            var configured = new java.io.File(directory, "owner-default-configured-" + index).exists();
+            com.android.server.pm.permission.LegacyPermission configuredPermission = null, configuredTree = null;
+            if (configured) {
+                configuredPermission = configuredPermission(); configuredTree = configuredPermission();
+                settings.mPermissions.replacePermissions(java.util.List.of(configuredPermission));
+                settings.mPermissions.replacePermissionTrees(java.util.List.of(configuredTree));
+            }
+            boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            if (configured && (!settings.mPermissions.getPermissions().contains(configuredPermission)
+                    || !settings.mPermissions.getPermissionTrees().contains(configuredTree)))
+                throw new AssertionError("configured permission identity replaced: " + index);
+            var output = new java.util.ArrayList<String>(); output.add(Boolean.toString(first));
+            var signatures = new java.util.ArrayList<String>();
+            for (var setting : settings.getPackagesLocked().values()) {
+                var details = setting.getSigningDetails(); var current = details.getSignatures();
+                var flags = new java.util.ArrayList<String>();
+                if (current != null) for (var certificate : current) flags.add(Integer.toString(certificate.getFlags()));
+                String trace = setting.getPackageName() + ":" + signatureTrace(details) + ":" + (current == null ? "null" : String.join(",", flags)) + ":" + publicKeyTrace(details);
+                var source = setting.getInstallSource();
+                if (source.mInitiatingPackageName != null) {
+                    var initiator = source.mInitiatingPackageSignatures;
+                    var signing = initiator == null ? android.content.pm.SigningDetails.UNKNOWN : initiator.mSigningDetails;
+                    trace += ":initiator=" + signatureTrace(signing) + ":" + publicKeyTrace(signing);
+                }
+                signatures.add(trace);
+            }
+            for (var group : settings.getAllSharedUsersLPw()) {
+                var details = group.signatures.mSigningDetails; var current = details.getSignatures();
+                var flags = new java.util.ArrayList<String>();
+                if (current != null) for (var certificate : current) flags.add(Integer.toString(certificate.getFlags()));
+                signatures.add("shared:" + group.getName() + ":" + signatureTrace(details) + ":" + (current == null ? "null" : String.join(",", flags)) + ":" + publicKeyTrace(details));
+            }
+            java.util.Collections.sort(signatures); output.add(String.join(";", signatures));
+            for (var list : java.util.List.of(settings.mPermissions.getPermissions(), settings.mPermissions.getPermissionTrees())) {
+                var permissions = new java.util.ArrayList<String>();
+                for (var permission : list) {
+                    var info = permission.getPermissionInfo();
+                    permissions.add(info.name + ":" + info.packageName + ":" + info.protectionLevel + ":" + info.icon + ":" + info.nonLocalizedLabel + ":" + permission.getType());
+                }
+                java.util.Collections.sort(permissions); output.add(String.join(";", permissions));
+            }
+            var keysets = new java.io.ByteArrayOutputStream();
+            var xml = android.util.Xml.resolveSerializer(keysets); xml.startDocument(null, true); xml.startTag(null, "packages");
+            settings.getKeySetManagerService().writeKeySetManagerServiceLPr(xml);
+            xml.endTag(null, "packages"); xml.endDocument();
+            java.nio.file.Files.write(new java.io.File(directory, "owner-default-keysets-" + index).toPath(), keysets.toByteArray());
+            output.add(main.exists() + "," + reserve.exists());
+            java.nio.file.Files.write(new java.io.File(directory, "owner-default-output-" + index).toPath(), String.join("|", output).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static com.android.server.pm.permission.LegacyPermission configuredPermission() {
+        var info = new android.content.pm.PermissionInfo();
+        info.name = "a"; info.packageName = "configured"; info.protectionLevel = 2;
+        info.icon = 42; info.nonLocalizedLabel = "configured-label";
+        return new com.android.server.pm.permission.LegacyPermission(info, 1, 1234, new int[] {1001, 1002});
+    }
+    private static String publicKeyTrace(android.content.pm.SigningDetails details) throws Exception {
+        var keys = details.getPublicKeys();
+        if (keys == null) return "null";
+        var result = new java.util.ArrayList<String>();
+        for (var key : keys) {
+            var bytes = new java.io.ByteArrayOutputStream();
+            try (var stream = new java.io.ObjectOutputStream(bytes)) { stream.writeObject(key); }
+            result.add(key.getClass().getName() + ":" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes.toByteArray())));
+        }
+        return String.join(",", result);
+    }
+    private static String signatureTrace(android.content.pm.SigningDetails details) throws Exception {
+        var current = details.getSignatures(); var past = details.getPastSigningCertificates();
+        var entries = new java.util.ArrayList<String>();
+        if (current != null) for (var cert : current) entries.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())));
+        String signatures = current == null ? "null" : String.join(",", entries); entries.clear();
+        if (past != null) for (var cert : past) entries.add(hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
+        return details.getSignatureSchemeVersion() + ":" + signatures + ":" + (past == null ? "null" : String.join(",", entries));
+    }
+    private static void verifySignatureEvents(java.io.File directory) throws Exception {
+        byte[] seed = java.nio.file.Files.readAllBytes(new java.io.File(directory, "signature-event-seed").toPath());
+        byte[] retry = java.nio.file.Files.readAllBytes(new java.io.File(directory, "signature-event-retry").toPath());
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "signature-event-input-" + index);
+            if (!input.exists()) break;
+            var owner = new PackageSignatures();
+            var table = new java.util.ArrayList<android.content.pm.Signature>();
+            readSignatureEvent(seed, owner, table);
+            String first = readSignatureEvent(java.nio.file.Files.readAllBytes(input.toPath()), owner, table);
+            String second = readSignatureEvent(retry, owner, table);
+            java.nio.file.Files.write(new java.io.File(directory, "signature-event-output-" + index).toPath(),
+                    (first + "\n" + second).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static String readSignatureEvent(byte[] bytes, PackageSignatures owner,
+            java.util.ArrayList<android.content.pm.Signature> table) throws Exception {
+        String status = "ok";
+        try {
+            var parser = android.util.Xml.resolvePullParser(new java.io.ByteArrayInputStream(bytes));
+            int type;
+            while ((type = parser.next()) != 2 && type != 1) {}
+            if (type == 1) status = "absent";
+            else owner.readXml(parser, table);
+        } catch (Exception error) { status = "error"; }
+        var flags = new java.util.ArrayList<String>();
+        var current = owner.mSigningDetails.getSignatures();
+        if (current != null) for (var cert : current) flags.add(Integer.toString(cert.getFlags()));
+        var entries = new java.util.ArrayList<String>();
+        for (var cert : table) entries.add(cert == null ? "null" : hex(java.security.MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())) + ":" + cert.getFlags());
+        var keys = new java.util.ArrayList<String>();
+        var publicKeys = owner.mSigningDetails.getPublicKeys();
+        if (publicKeys != null) for (var key : publicKeys) {
+            var bytesOut = new java.io.ByteArrayOutputStream();
+            var stream = new java.io.ObjectOutputStream(bytesOut); stream.writeObject(key); stream.close();
+            keys.add(key.getClass().getName() + ":" + hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytesOut.toByteArray())));
+        }
+        return status + "|" + signatureTrace(owner.mSigningDetails) + "|" + (current == null ? "null" : String.join(",", flags)) + "|" + String.join(",", entries) + "|" + (publicKeys == null ? "null" : String.join(",", keys));
+    }
+    private static void verifySettingsDefaults(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "defaults-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "defaults-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            var main = new java.io.File(system, "packages.xml");
+            var reserve = new java.io.File(system, "packages.xml.reservecopy");
+            java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var active = new java.util.ArrayList<String>();
+            for (var setting : settings.getPackagesLocked().values()) active.add(defaultSetting(setting, true));
+            var disabled = new java.util.ArrayList<String>();
+            for (var setting : settings.getDisabledSystemPackagesLocked().values()) disabled.add(defaultSetting(setting, false));
+            var shared = new java.util.ArrayList<String>();
+            for (var setting : settings.getAllSharedUsersLPw()) shared.add(setting.getName() + ":" + setting.mAppId + ":" + setting.getFlags());
+            java.util.Collections.sort(active); java.util.Collections.sort(disabled); java.util.Collections.sort(shared);
+            String output = first + "|" + String.join(";", active) + "|" + String.join(";", disabled) + "|" + String.join(";", shared) + "|" + main.exists() + "," + reserve.exists();
+            java.nio.file.Files.write(new java.io.File(directory, "defaults-output-" + index).toPath(), output.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static String defaultSetting(PackageSetting setting, boolean active) {
+        var state = (com.android.server.pm.pkg.PackageState)setting;
+        var fields = new java.util.ArrayList<String>();
+        fields.add(setting.getPackageName()); fields.add(Integer.toString(setting.getAppId()));
+        fields.add(Long.toString(setting.getVersionCode())); fields.add(Integer.toString(state.getTargetSdkVersion()));
+        fields.add(Integer.toString(setting.getFlags())); fields.add(Integer.toString(setting.getPrivateFlags()));
+        byte[] hash = state.getRestrictUpdateHash(); fields.add(hash == null ? "null" : hex(hash));
+        fields.add(Boolean.toString(setting.isScannedAsStoppedSystemApp()));
+        fields.add(Long.toString(state.getLastModifiedTime())); fields.add(Long.toString(state.getLastUpdateTime()));
+        fields.add(Integer.toString(setting.getAppMetadataSource()));
+        if (active) {
+            var source = setting.getInstallSource();
+            fields.add(Integer.toString(source.mInstallerPackageUid)); fields.add(Integer.toString(source.mPackageSource));
+            fields.add(Boolean.toString(source.mIsOrphaned)); fields.add(Boolean.toString(source.mIsInitiatingPackageUninstalled));
+            fields.add(Integer.toString(setting.getCategoryOverride()));
+            fields.add(Boolean.toString(state.isUpdateAvailable())); fields.add(Boolean.toString(state.isForceQueryableOverride()));
+            fields.add(Boolean.toString(state.isPendingRestore())); fields.add(Boolean.toString(state.isDebuggable()));
+            fields.add(Integer.toString(setting.getBaseRevisionCode())); fields.add(Integer.toString(setting.getPageSizeAppCompatFlags()));
+            fields.add(String.format("%08x", Float.floatToRawIntBits(setting.getLoadingProgress())));
+            fields.add(Long.toString(setting.getLoadingCompletedTime()));
+        }
+        var libraries = new java.util.ArrayList<String>();
+        String[] names = setting.getUsesStaticLibraries(); long[] versions = setting.getUsesStaticLibrariesVersions();
+        for (int i = 0; i < names.length; i++) libraries.add(names[i] + ":" + versions[i]);
+        fields.add(String.join("/", libraries)); libraries.clear();
+        names = setting.getUsesSdkLibraries(); versions = setting.getUsesSdkLibrariesVersionsMajor(); boolean[] optional = setting.getUsesSdkLibrariesOptional();
+        for (int i = 0; i < names.length; i++) libraries.add(names[i] + ":" + versions[i] + ":" + optional[i]);
+        fields.add(String.join("/", libraries));
+        if (active) {
+            libraries.clear(); names = setting.getSplitNames(); int[] revisions = setting.getSplitRevisionCodes();
+            for (int i = 0; i < names.length; i++) libraries.add(names[i] + ":" + revisions[i]);
+            fields.add(String.join("/", libraries));
+        }
+        return String.join(",", fields);
+    }
+    private static void verifySettingsVersionRecovery(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "version-input-" + index);
+            if (!input.exists()) break;
+            var data = new java.io.File(directory, "version-original-" + index);
+            var system = new java.io.File(data, "system"); system.mkdirs();
+            var main = new java.io.File(system, "packages.xml");
+            var reserve = new java.io.File(system, "packages.xml.reservecopy");
+            java.nio.file.Files.write(main.toPath(), java.nio.file.Files.readAllBytes(input.toPath()));
+            java.nio.file.Files.write(reserve.toPath(), "<packages/>".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            // Only the settings-read owner runs: these cases do not call runtime
+            // permissions, handlers or domain verification dependencies.
+            var settings = new Settings(data, null, null, null, null, new PackageManagerTracedLock());
+            var seeded = settings.findOrCreateVersion("v");
+            seeded.sdkVersion = 35; seeded.databaseVersion = 7;
+            seeded.buildFingerprint = "old"; seeded.fingerprint = "old-partitions";
+            boolean first = !settings.readSettingsLPw(null, java.util.List.of(), new android.util.ArrayMap<>());
+            var output = new java.util.ArrayList<String>(); output.add(Boolean.toString(first));
+            for (String uuid : new String[]{"v", "other", null, "primary_physical"}) {
+                var version = settings.findOrCreateVersion(uuid);
+                output.add(version.sdkVersion + "," + version.databaseVersion + "," + version.buildFingerprint + "," + version.fingerprint);
+            }
+            output.add(main.exists() + "," + reserve.exists());
+            java.nio.file.Files.write(new java.io.File(directory, "version-output-" + index).toPath(),
+                String.join("|", output).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyPullMatrix(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var input = new java.io.File(directory, "pull-input-" + index);
+            if (!input.exists()) break;
+            var events = new java.util.ArrayList<String>(); boolean started = false;
+            try (var stream = new java.io.FileInputStream(input)) {
+                var parser = android.util.Xml.resolvePullParser(stream);
+                while (true) {
+                    int event = parser.next();
+                    if (event == 2) {
+                        started = true; var attrs = new java.util.ArrayList<String>();
+                        for (String name : new String[]{"name", "codePath", "sdkVersion"}) {
+                            String value = parser.getAttributeValue(null, name);
+                            attrs.add(value == null ? "missing" : hex(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                        }
+                        events.add("start:" + parser.getName() + ":" + parser.getDepth() + ":" + String.join(",", attrs));
+                    } else if (event == 3) {
+                        events.add("end:" + parser.getName() + ":" + parser.getDepth());
+                        if (started && parser.getDepth() == 1) break;
+                    } else if (event == 4) {
+                        events.add("text:" + parser.getDepth() + ":" + hex(parser.getText().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                    } else if (event == 1) { events.add("end-document"); break; }
+                }
+            } catch (Exception failure) { events.add("error"); }
+            java.nio.file.Files.write(new java.io.File(directory, "pull-output-" + index).toPath(),
+                String.join("|", events).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyRecoveryMatrix(java.io.File directory) throws Exception {
+        for (int index = 0; ; index++) {
+            var inputFile = new java.io.File(directory, "recovery-input-" + index);
+            if (!inputFile.exists()) break;
+            var inputs = new java.util.Properties();
+            try (var input = new java.io.FileInputStream(inputFile)) { inputs.load(input); }
+            var root = new java.io.File(directory, "recovery-original-" + index); root.mkdirs();
+            var files = new java.io.File[]{new java.io.File(root, "main"), new java.io.File(root, "backup"), new java.io.File(root, "reserve")};
+            for (int slot = 0; slot < 3; slot++) {
+                files[slot].delete(); String value = inputs.getProperty(Integer.toString(slot));
+                if (value.equals("directory") || value.equals("nonempty-directory")) {
+                    files[slot].mkdir(); if (value.equals("nonempty-directory")) java.nio.file.Files.write(new java.io.File(files[slot], "keep").toPath(), new byte[] {1});
+                } else if (!value.equals("missing")) {
+                    byte[] bytes = new byte[value.length() / 2];
+                    for (int i = 0; i < bytes.length; i++) bytes[i] = (byte)Integer.parseInt(value.substring(i * 2, i * 2 + 2), 16);
+                    java.nio.file.Files.write(files[slot].toPath(), bytes);
+                }
+            }
+            boolean readOnly = "true".equals(inputs.getProperty("readonly"));
+            if (readOnly && !root.setWritable(false, false)) throw new AssertionError("cannot set recovery directory readonly");
+            var events = new java.util.ArrayList<String>(); boolean failed = false, first = false;
+            var sources = new String[]{"Main", "Backup", "Reserve"};
+            int originalUid = android.system.Os.geteuid();
+            if (readOnly) {android.system.Os.seteuid(1000); if (android.system.Os.geteuid() != 1000) throw new AssertionError("recovery euid differs");}
+            try (var atomic = new ResilientAtomicFile(files[0], files[1], files[2], 0660, "fixture", null)) {
+                while (true) {
+                    int selected = files[1].isFile() ? 1 : files[0].exists() ? 0 : files[2].exists() ? 2 : -1;
+                    if (files[1].isDirectory()) events.add("open-failed.Backup");
+                    boolean main = files[0].exists(), reserve = files[2].exists();
+                    var stream = atomic.openRead();
+                    if (stream == null) { events.add("absent"); first = !failed; break; }
+                    events.add("selected." + sources[selected]);
+                    if (selected == 1) {
+                        if (main) events.add(!files[0].exists() ? "removed.Main" : "remove-failed.Main");
+                        if (reserve) events.add(!files[2].exists() ? "removed.Reserve" : "remove-failed.Reserve");
+                    }
+                    try {
+                        var parser = android.util.Xml.resolvePullParser(stream); int event;
+                        do { event = parser.next(); } while (event != 1 && event != 2);
+                        if (event == 1) { events.add("no-root." + sources[selected]); first = !failed; break; }
+                        while (parser.next() != 1) {}
+                        first = false; stream.close(); break;
+                    } catch (Exception failure) {
+                        failed = true; events.add("failed." + sources[selected]);
+                        atomic.failRead(stream, failure); events.add("removed." + sources[selected]);
+                    }
+                }
+            }
+            finally {if (readOnly) android.system.Os.seteuid(originalUid);}
+            if (readOnly && !root.setWritable(true, true)) throw new AssertionError("cannot restore recovery directory permissions");
+            var remains = new java.util.ArrayList<String>();
+            for (var file : files) remains.add(file.isDirectory() ? (file.list().length == 0 ? "directory" : "nonempty-directory") : file.exists() ? hex(java.nio.file.Files.readAllBytes(file.toPath())) : "missing");
+            String output = first + "|" + String.join(",", events) + "|" + String.join(";", remains);
+            java.nio.file.Files.write(new java.io.File(directory, "recovery-output-" + index).toPath(), output.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+    private static void verifyEmptyDocuments(java.io.File directory) throws Exception {
+        var results = new java.util.ArrayList<String>();
+        byte[][] inputs = {new byte[0], " \n".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            new byte[]{65, 66, 88, 0}, new byte[]{65, 66, 88, 0, 16, 17}};
+        for (int i = 0; i < inputs.length; i++) {
+            try {
+                var parser = android.util.Xml.resolvePullParser(new java.io.ByteArrayInputStream(inputs[i]));
+                int event; do { event = parser.next(); } while (event != 1 && event != 2);
+                results.add(i + "=" + event);
+            } catch (Exception failure) { results.add(i + "=" + failure.getClass().getName()); }
+        }
+        java.nio.file.Files.write(new java.io.File(directory, "empty-document-original").toPath(), results);
+    }
+    private static void verifyFirstWriteRetry(java.io.File directory) throws Exception {
+        var root = new java.io.File(directory, "original-first-write-retry");
+        var main = new java.io.File(root, "main");
+        var backup = new java.io.File(root, "backup");
+        var reserve = new java.io.File(root, "reserve");
+        // Each invocation creates fresh files after the prior successful retry.
+        main.delete(); backup.delete(); reserve.delete();
+        try (var atomic = new ResilientAtomicFile(main, backup, reserve, 0660, "fixture", null)) {
+            var stream = atomic.startWrite(); stream.write(new byte[]{1, 2, 3});
+            atomic.failWrite(stream);
+            if (main.exists() || backup.exists() || !reserve.exists() || reserve.length() != 0)
+                throw new AssertionError("original first-write failure artifacts");
+            stream = atomic.startWrite(); stream.write(new byte[]{4, 5, 6});
+            atomic.finishWrite(stream, false);
+            if (backup.exists() || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), new byte[]{4, 5, 6})
+                    || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), java.nio.file.Files.readAllBytes(reserve.toPath())))
+                throw new AssertionError("original first-write retry output");
+        }
+        main.delete(); reserve.delete();
+        if (!reserve.mkdir()) throw new AssertionError("reserve failure directory");
+        var sentinel = new java.io.File(reserve, "keep"); java.nio.file.Files.write(sentinel.toPath(), new byte[]{1});
+        try (var atomic = new ResilientAtomicFile(main, backup, reserve, 0660, "fixture", null)) {
+            try { atomic.startWrite(); throw new AssertionError("original reserve open failure accepted"); }
+            catch (java.io.IOException expected) {}
+            if (!main.exists() || main.length() != 0 || backup.exists())
+                throw new AssertionError("original failed-start main ownership");
+            boolean sentinelDeleted = sentinel.delete();
+            boolean reserveDeleted = reserve.delete();
+            if (!sentinelDeleted || !reserveDeleted) throw new AssertionError("owned reserve failure cleanup: sentinel=" + sentinelDeleted
+                + " reserve=" + reserveDeleted + " children=" + java.util.Arrays.toString(reserve.list()));
+            var stream = atomic.startWrite(); stream.write(new byte[]{7}); atomic.finishWrite(stream, false);
+            if (backup.exists() || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), new byte[]{7})
+                    || !java.util.Arrays.equals(java.nio.file.Files.readAllBytes(main.toPath()), java.nio.file.Files.readAllBytes(reserve.toPath())))
+                throw new AssertionError("original failed-start retry output");
+        }
+    }
+    private static void writeInventory(java.io.File directory,
+            dev.aim.server.PackageScanLease lease) throws Exception {
+        var packages = new android.util.ArrayMap<String, PackageSetting>();
+        for (String filename : java.nio.file.Files.readAllLines(new java.io.File(directory, "settings-owner-order").toPath())) {
+            var parcel = android.os.Parcel.obtain(); PackageSetting setting;
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, filename).toPath());
+                parcel.unmarshall(bytes, 0, bytes.length); parcel.setDataPosition(0);
+                setting = CapturedPackageSetting.from(dev.aim.server.PackageSettingData.read(parcel), 1, false);
+                if (parcel.dataAvail() != 0) throw new AssertionError("inventory setting tail");
+            } finally { parcel.recycle(); }
+            var codeFile = new java.io.File(directory, filename.substring(0, filename.length() - ".writer-setting".length()));
+            var code = (com.android.internal.pm.parsing.pkg.PackageImpl)
+                com.android.server.pm.parsing.PackageCacher.fromCacheEntryStatic(java.nio.file.Files.readAllBytes(codeFile.toPath()));
+            setting.setPkg(code);
+            // SigningDetails on parsed code and on saved PackageSetting are
+            // distinct owners; persistence writes the latter's lineage flags.
+            var signingParcel = android.os.Parcel.obtain();
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(codeFile.getPath() + ".saved-signing").toPath());
+                signingParcel.unmarshall(bytes, 0, bytes.length); signingParcel.setDataPosition(0);
+                var signing = dev.aim.server.PackageSigningState.CREATOR.createFromParcel(signingParcel);
+                if (signingParcel.dataAvail() != 0 || !setting.getPackageName().equals(signing.getPackageName()))
+                    throw new AssertionError("inventory saved signer owner differs");
+                setting.setSigningDetails(signing.getPackageSigningDetails());
+            } finally { signingParcel.recycle(); }
+            packages.put(setting.getPackageName(), setting);
+        }
+        var settings = new Settings(java.util.Map.of());
+        var certificates = new java.util.ArrayList<android.content.pm.Signature>();
+        try (var output = new java.io.FileOutputStream(new java.io.File(directory, "settings-inventory-original"))) {
+            var xml = android.util.Xml.resolveSerializer(output);
+            xml.startDocument(null, true); xml.startTag(null, "packages");
+            // Detached volume owners supplied alongside the detached package
+            // owners. Version emission follows Settings.writeLPr at the pin;
+            // this inventory oracle does not execute the full boot writer.
+            var versions = new android.util.ArrayMap<String, Settings.VersionInfo>();
+            var versionParcel = android.os.Parcel.obtain();
+            try {
+                byte[] bytes = java.nio.file.Files.readAllBytes(new java.io.File(directory, "settings-versions.parcel").toPath());
+                versionParcel.unmarshall(bytes, 0, bytes.length); versionParcel.setDataPosition(0);
+                int count = versionParcel.readInt();
+                for (int i = 0; i < count; i++) {
+                    String uuid = versionParcel.readString();
+                    var version = settings.findOrCreateVersion(uuid);
+                    version.sdkVersion = versionParcel.readInt(); version.databaseVersion = versionParcel.readInt();
+                    version.buildFingerprint = versionParcel.readString(); version.fingerprint = versionParcel.readString();
+                    if (versions.containsKey(uuid)) throw new AssertionError("duplicate volume owner");
+                    versions.put(uuid, version);
+                }
+                if (count < 0 || versionParcel.dataAvail() != 0) throw new AssertionError("volume owner frame");
+            } finally { versionParcel.recycle(); }
+            for (var entry : versions.entrySet()) {
+                var version = entry.getValue();
+                xml.startTag(null, "version");
+                if (entry.getKey() != null) xml.attribute(null, "volumeUuid", entry.getKey());
+                xml.attributeInt(null, "sdkVersion", version.sdkVersion);
+                xml.attributeInt(null, "databaseVersion", version.databaseVersion);
+                if (version.buildFingerprint != null) xml.attribute(null, "buildFingerprint", version.buildFingerprint);
+                if (version.fingerprint != null) xml.attribute(null, "fingerprint", version.fingerprint);
+                xml.endTag(null, "version");
+            }
+            for (var setting : packages.values()) settings.writePackageLPr(xml, certificates, setting);
+            var groups = new android.util.ArrayMap<String, dev.aim.server.SharedUserData>();
+            for (String name : lease.getSharedUserNames()) groups.put(name, lease.getSharedUserData(name));
+            for (var entry : groups.entrySet()) {
+                var sigs = new PackageSignatures(); sigs.mSigningDetails = entry.getValue().getSigningDetails();
+                xml.startTag(null, "shared-user"); xml.attribute(null, "name", entry.getKey());
+                xml.attributeInt(null, "userId", entry.getValue().getAppId());
+                sigs.writeXml(xml, "sigs", certificates); xml.endTag(null, "shared-user");
+            }
+            xml.endTag(null, "packages"); xml.endDocument();
+        }
+    }
+    private static void verifyArrayMapOrder() {
+        var map = new android.util.ArrayMap<String, Integer>();
+        map.put("BB", 1); map.put("Aa", 2);
+        if (!new java.util.ArrayList<>(map.keySet()).get(0).equals("BB") || !new java.util.ArrayList<>(map.keySet()).get(1).equals("Aa"))
+            throw new AssertionError("original ArrayMap collision insertion order");
+        map.put("z", 0); map.put("negative.hash.owner", 5);
+        if (!new java.util.ArrayList<>(map.keySet()).equals(java.util.List.of("negative.hash.owner", "z", "BB", "Aa")))
+            throw new AssertionError("original ArrayMap signed hash order");
+        map.put("BB", 3);
+        if (!new java.util.ArrayList<>(map.keySet()).equals(java.util.List.of("negative.hash.owner", "z", "BB", "Aa")))
+            throw new AssertionError("original ArrayMap lookup order");
+        map.remove("BB"); map.put("BB", 4);
+        if (!new java.util.ArrayList<>(map.keySet()).equals(java.util.List.of("negative.hash.owner", "z", "Aa", "BB")))
+            throw new AssertionError("original ArrayMap collision recreation order");
+    }
+    private static void verifyNativeSignatures(java.io.File directory,
+            dev.aim.server.PackageScanLease lease, PackageSetting setting) throws Exception {
+        var certificates = new java.util.ArrayList<android.content.pm.Signature>();
+        try (var input = new java.io.FileInputStream(new java.io.File(directory, "native-settings-writer/system/packages.xml"))) {
+            var parser = android.util.Xml.resolvePullParser(input);
+            int event;
+            while ((event = parser.next()) != 1) {
+                if (event != 2 || !(parser.getName().equals("package") || parser.getName().equals("shared-user"))) continue;
+                String owner = parser.getName(), name = parser.getAttributeValue(null, "name");
+                int depth = parser.getDepth();
+                while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {
+                    if (event != 2) continue;
+                    String tag = parser.getName();
+                    if (!(tag.equals("sigs") || tag.equals("install-initiator-sigs"))) {
+                        int skipped = parser.getDepth();
+                        while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > skipped)) {}
+                        continue;
+                    }
+                    var actual = new PackageSignatures(); actual.readXml(parser, certificates);
+                    android.content.pm.SigningDetails expected = null;
+                    if (owner.equals("shared-user")) expected = lease.getSharedUserData(name).getSigningDetails();
+                    else if (name.equals(setting.getPackageName())) {
+                        expected = tag.equals("sigs") ? setting.getSigningDetails()
+                            : setting.getInstallSource().mInitiatingPackageSignatures.mSigningDetails;
+                    }
+                    if (expected != null) compareSignatures(actual.mSigningDetails, expected, name + "/" + tag);
+                }
+            }
+        }
+    }
+    private static void compareSignatures(android.content.pm.SigningDetails actual,
+            android.content.pm.SigningDetails expected, String owner) {
+        if (actual.getSignatureSchemeVersion() != expected.getSignatureSchemeVersion()
+                || !java.util.Arrays.equals(actual.getSignatures(), expected.getSignatures())
+                || !java.util.Arrays.equals(actual.getPastSigningCertificates(), expected.getPastSigningCertificates()))
+            throw new AssertionError("original certificate table restoration differs: " + owner);
+        var past = actual.getPastSigningCertificates();
+        if (past != null) for (int i = 0; i < past.length; i++) {
+            if (past[i].getFlags() != expected.getPastSigningCertificates()[i].getFlags())
+                throw new AssertionError("original past certificate capability differs: " + owner);
+        }
+    }
+
+    private static void verifyReindexedCertificates(java.io.File directory) throws Exception {
+        var expected = new java.util.Properties();
+        try (var input = new java.io.FileInputStream(new java.io.File(directory, "reindexed-certificates.properties"))) { expected.load(input); }
+        var certificates = new java.util.ArrayList<android.content.pm.Signature>();
+        int count = 0;
+        try (var input = new java.io.FileInputStream(new java.io.File(directory, "reindexed-settings-writer/system/packages.xml"))) {
+            var parser = android.util.Xml.resolvePullParser(input); int event;
+            while ((event = parser.next()) != 1) {
+                if (event != 2 || !(parser.getName().equals("package") || parser.getName().equals("shared-user"))) continue;
+                String owner = parser.getName(), name = parser.getAttributeValue(null, "name"); int depth = parser.getDepth();
+                while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > depth)) {
+                    if (event != 2) continue;
+                    String tag = parser.getName();
+                    if (!(tag.equals("sigs") || tag.equals("install-initiator-sigs"))) {
+                        int skipped = parser.getDepth();
+                        while ((event = parser.next()) != 1 && (event != 3 || parser.getDepth() > skipped)) {}
+                        continue;
+                    }
+                    var actual = new PackageSignatures(); actual.readXml(parser, certificates);
+                    String key = owner + "/" + name + "/" + tag;
+                    if (!describe(actual.mSigningDetails).equals(expected.getProperty(key)))
+                        throw new AssertionError("reindexed original certificate table differs: " + key);
+                    count++;
+                }
+            }
+        }
+        if (count != expected.size()) throw new AssertionError("reindexed original signature inventory differs");
+    }
+    private static String describe(android.content.pm.SigningDetails details) {
+        var current = new java.util.ArrayList<String>();
+        for (var signature : details.getSignatures()) current.add(hex(signature.toByteArray()));
+        var past = details.getPastSigningCertificates(); String history = "null";
+        if (past != null) {
+            var values = new java.util.ArrayList<String>();
+            for (var signature : past) values.add(hex(signature.toByteArray()) + ":" + signature.getFlags());
+            history = String.join(",", values);
+        }
+        return details.getSignatureSchemeVersion() + "|" + String.join(",", current) + "|" + history;
+    }
+    private static String hex(byte[] bytes) {
+        var text = new StringBuilder();
+        for (byte value : bytes) text.append(String.format("%02x", value & 255));
+        return text.toString();
+    }
+
+}

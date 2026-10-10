@@ -7,11 +7,70 @@
 //! Such an image stays attached once attached: tests and boots of every
 //! checkout read it concurrently, and attaching costs about a second.
 
-use std::fs;
+use std::fs::{self, File};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::disk::{self, Attach, Attached};
+
+/// Process-owned image use, shared by guests and exclusive for builders.
+/// The lock is beside the base image so all shadows share its ownership.
+pub struct ImageLease(File);
+impl ImageLease {
+    pub fn read(image: &Path) -> Result<Self, String> { Self::acquire(image, false) }
+    /// Resolve a mounted guest root to its real backing base image. Plain
+    /// extracted test directories have no disk-image ownership to acquire.
+    pub fn read_root(root: &Path) -> Result<Option<Self>, String> {
+        let root = fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+        let Some(image) = backing_image(&root, &disk::attached()?)? else { return Ok(None); };
+        let lease = Self::read(&image)?;
+        // A builder may have detached between inventory and acquiring the lock.
+        if backing_image(&root, &disk::attached()?)?.as_ref() != Some(&image) {
+            return Err(format!("{}: image attachment changed while acquiring ownership", root.display()));
+        }
+        Ok(Some(lease))
+    }
+    pub fn write(image: &Path) -> Result<Self, String> { Self::acquire(image, true) }
+    fn acquire(image: &Path, write: bool) -> Result<Self, String> {
+        let image = real(image);
+        let mut name = image.file_name().unwrap_or_default().to_os_string();
+        name.push(".use.lock");
+        let path = image.with_file_name(name);
+        let file = fs::OpenOptions::new().create(true).read(true).write(true).truncate(false)
+            .open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let operation = if write { libc::LOCK_EX } else { libc::LOCK_SH };
+        // SAFETY: flock on our open descriptor; no waiting or forced takeover.
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
+            return Err(format!("{}: image is in use; stop its owner before rebuilding: {}", image.display(), std::io::Error::last_os_error()));
+        }
+        Ok(Self(file))
+    }
+}
+fn backing_image(root: &Path, attached: &[Attached]) -> Result<Option<PathBuf>, String> {
+    let deepest = attached.iter().flat_map(|a| a.mounts.iter().map(move |m| (a, m)))
+        .filter(|(_, mount)| root.starts_with(mount))
+        .map(|(_, mount)| mount.components().count()).max();
+    let Some(depth) = deepest else { return Ok(None); };
+    let mut image = None;
+    for (a, mount) in attached.iter().flat_map(|a| a.mounts.iter().map(move |m| (a, m))) {
+        if root.starts_with(mount) && mount.components().count() == depth {
+            let candidate = real(&a.image);
+            if image.as_ref().is_some_and(|old| old != &candidate) {
+                return Err(format!("{}: ambiguous backing image attachment", root.display()));
+            }
+            image = Some(candidate);
+        }
+    }
+    Ok(image)
+}
+
+impl Drop for ImageLease {
+    fn drop(&mut self) {
+        // SAFETY: unlock our own descriptor, also released by process death.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN); }
+    }
+}
 
 /// Uncompressed and read-only: a first read of a block is a plain read,
 /// where a compressed image (lzfse, `ULFO`, half the size) decompresses
@@ -138,4 +197,33 @@ pub fn root(mount: &Path) -> PathBuf {
 /// The translation cache of the volume mounted at `mount`.
 pub fn translated(mount: &Path) -> PathBuf {
     mount.join("translated")
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+    #[test]
+    fn guest_root_resolves_base_image_even_with_a_shadow() {
+        let dir = std::env::temp_dir().join("aim-root-resolution-fixture");
+        let attachment = Attached { image: dir.join("base.dmg"), shadow: Some(dir.join("derived.shadow")),
+            writable: false, device: "fixture".into(), devices: vec![], mounts: vec![dir.join("derived")] };
+        assert_eq!(backing_image(&dir.join("derived/root"), &[attachment]).unwrap(), Some(dir.join("base.dmg")));
+        assert_eq!(backing_image(&dir.join("plain/root"), &[]).unwrap(), None);
+    }
+    #[test]
+    fn image_reader_refuses_rebuild_until_last_owner_releases() {
+        let dir = std::env::temp_dir().join(format!("aim-image-lease-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("fixture.dmg");
+        let first = ImageLease::read(&image).unwrap();
+        let second = ImageLease::read(&image).unwrap();
+        assert!(ImageLease::write(&image).is_err());
+        drop(first);
+        assert!(ImageLease::write(&image).is_err());
+        drop(second);
+        let writer = ImageLease::write(&image).unwrap();
+        assert!(ImageLease::read(&image).is_err());
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

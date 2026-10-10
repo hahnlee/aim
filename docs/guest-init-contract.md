@@ -90,7 +90,9 @@ kernfs	/proc	<runtime>/kernfs/proc
 | everything else | `<image>/...` | `root`, read-only | derived image |
 
 `<runtime>` defaults to `<data>.run`, beside the data directory and not
-in its image (docs/storage.md), and is recreated on every boot. An
+in its image (docs/storage.md), and is recreated on every boot. Runtime
+preparation creates `/dev/pts` as an actual directory for ancestor permission
+checks; numeric slave paths are resolved by the PTY owner to real host terminals. An
 init bind mount rewrites the file, so processes started afterwards see it
 (the data mirrors zygote binds app data from); running processes do not.
 vold's bind of `/data/data` onto `/data/user/0` (`prepare_special_dirs`)

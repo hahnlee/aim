@@ -18,9 +18,16 @@ mod epoll;
 mod evdev;
 mod event;
 mod exec;
+mod exec_fd_receipt;
 pub(crate) mod fdtab;
+mod fd_visibility;
+pub(crate) mod regular_file;
+pub(crate) mod verified_source;
 mod fork;
 mod fs;
+mod display;
+mod host_descriptors;
+mod fsverity_ioctl;
 mod fsops;
 mod futex;
 mod genfs;
@@ -29,6 +36,10 @@ mod itimer;
 mod jit;
 mod knob;
 mod mem;
+mod verity_pager;
+pub(crate) use verity_pager::{register_segment as verity_segment,Derivative as VerityDerivative,RewritePages as VerityRewritePages,ComposedPages as VerityComposedPages,register_composed as verity_composed};
+pub(crate) mod verity_control;
+pub(crate) mod posix_locks;
 mod memfd;
 mod misc;
 mod mount;
@@ -43,27 +54,33 @@ mod poll;
 mod process;
 mod procfs;
 mod procrec;
+mod proxy_file;
 mod pstate;
+mod pty_owner;
+pub(crate) use pstate::initialize_umask;
 mod ptimer;
-mod random;
 mod ptrace;
+mod random;
 mod selinuxfs;
 mod sharedfile;
 mod sigframe;
 mod signal;
+pub(crate) use signal::initialize_verity_fault_slot;
 pub(crate) mod space;
 mod sync_file;
 mod thread;
 mod tmpfile;
 pub(crate) mod tty;
 mod uevent;
+pub(crate) mod user_memory;
+pub(crate) mod close_effects;
 mod uplink;
 mod vmmap;
 mod wait;
 pub mod window;
 mod xattr;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::context::GuestContext;
 use crate::errno::ENOSYS;
@@ -75,6 +92,7 @@ pub use dir::synthesized_path as synthesized_dir_path;
 pub use exec::{ExecState, init as init_exec, interpret as interpret_script};
 pub use fdtab::adopt as adopt_fd;
 pub use fdtab::init as init_fds;
+pub use fdtab::{parse_guest_fds,parse_socket_receipts};
 pub use fork::spawn::{child_main as become_fork_child, reserve_fds as reserve_fork_fds};
 pub(crate) use fork::state as fork_state;
 pub use mem::init_brk;
@@ -93,6 +111,12 @@ pub use window::init as init_heap_window;
 /// Read by the trampoline: while set, every syscall takes the full path so
 /// it is traced.
 pub static TRACE: AtomicBool = AtomicBool::new(false);
+static TRACE_CALL: AtomicU64 = AtomicU64::new(0);
+
+/// Reclaims unused host memfd backing names after guest shutdown.
+pub fn sweep_unused_memfds() -> u64 {
+    memfd::sweep_unused()
+}
 
 pub fn set_trace(on: bool) {
     TRACE.store(on, Ordering::Relaxed);
@@ -113,16 +137,9 @@ extern "C" fn linux_abi_dispatch(ctx: *mut GuestContext) {
     }
 }
 
-/// Read a NUL-terminated guest string.
-///
-/// # Safety
-/// `p` must point to readable guest memory.
-pub(crate) unsafe fn guest_cstr<'a>(p: u64) -> &'a [u8] {
-    if p == 0 {
-        return b"";
-    }
-    // SAFETY: caller contract.
-    unsafe { std::ffi::CStr::from_ptr(p as *const libc::c_char).to_bytes() }
+/// Copy a bounded NUL-terminated guest pathname into kernel-owned memory.
+pub(crate) fn guest_cstr(p: u64) -> Result<Vec<u8>, crate::errno::Errno> {
+    user_memory::read_cstr(p, user_memory::PATH_MAX)
 }
 
 /// Syscalls whose first or second argument is a path, for tracing.
@@ -138,7 +155,12 @@ pub fn dispatch(ctx: &mut GuestContext) {
     let nr = ctx.x[8];
     let a = [ctx.x[0], ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[4], ctx.x[5]];
     let mut line = String::new();
-    if tracing() {
+    let trace = tracing().then(|| {
+        // SAFETY: getpid reads this process's host identity.
+        let pid = unsafe { libc::getpid() };
+        (pid, host_tid(), TRACE_CALL.fetch_add(1, Ordering::Relaxed))
+    });
+    if let Some((pid, tid, call)) = trace {
         let name = match names::name(nr) {
             Some(n) => n,
             None if nr == aim_hostcall::SYSCALL_NR => "hostcall",
@@ -150,11 +172,10 @@ pub fn dispatch(ctx: &mut GuestContext) {
                 line.push_str(", ");
             }
             if path_arg(nr) == Some(i) && nr != 17 {
-                // SAFETY: path arguments point at guest strings.
-                line.push_str(&format!(
-                    "\"{}\"",
-                    String::from_utf8_lossy(unsafe { guest_cstr(*v) })
-                ));
+                match guest_cstr(*v){
+                    Ok(path)=>line.push_str(&format!("\"{}\"",String::from_utf8_lossy(&path))),
+                    Err(error)=>line.push_str(&format!("<errno {error}>")),
+                }
             } else if (*v as i64) < 0 && (*v as i64) > -4096 {
                 line.push_str(&format!("{}", *v as i64));
             } else {
@@ -162,25 +183,25 @@ pub fn dispatch(ctx: &mut GuestContext) {
             }
         }
         line.push(')');
-        if matches!(nr, 93 | 94) {
-            crate::diag!("{line}");
-        }
+        crate::diag!("{line} [pid={pid} tid={tid} call={call} enter]");
     }
     // A syscall a host signal interrupted is restarted when no guest
     // handler is to run for it.
     let r = loop {
+        let release=close_effects::release_checkpoint();
         let r = handle(ctx, nr, a);
+        let r=close_effects::after_release(release,r);
         if !signal::after_syscall(ctx, nr, &a, r) {
             break r;
         }
     };
-    if tracing() {
+    if let Some((pid, tid, call)) = trace {
         if (-4095..0).contains(&r) {
-            crate::diag!("{line} = -{} ({})", -r, names::errno_name(-r as i32));
+            crate::diag!("{line} = -{} ({}) [pid={pid} tid={tid} call={call} leave]", -r, names::errno_name(-r as i32));
         } else if !(0..=0xffff).contains(&r) {
-            crate::diag!("{line} = {r:#x}");
+            crate::diag!("{line} = {r:#x} [pid={pid} tid={tid} call={call} leave]");
         } else {
-            crate::diag!("{line} = {r}");
+            crate::diag!("{line} = {r} [pid={pid} tid={tid} call={call} leave]");
         }
     }
     ctx.x[0] = r as u64;
@@ -403,3 +424,15 @@ fn handle(ctx: &mut GuestContext, nr: u64, a: [u64; 6]) -> i64 {
         }
     }
 }
+
+pub mod fuse_mount;
+
+pub mod fuse_client;
+
+pub mod fuse;
+
+pub mod fuse_cache;
+
+pub mod fuse_device;
+
+pub mod fuse_sysfs;

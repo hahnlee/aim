@@ -1,0 +1,10 @@
+[package]
+name = "aim-ashmem"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish = false
+description = "Shared ashmem file representation for native services and the Linux syscall layer"
+
+[dependencies]
+libc.workspace = true

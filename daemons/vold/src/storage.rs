@@ -151,6 +151,18 @@ pub fn prepare_user_storage(uuid: Option<&str>, user: u32, flags: i32) -> io::Re
         }
         prepare_dir(path, *mode, *uid, *gid)?;
     }
+    // FsCrypt.cpp delegates per-user subdirectories to the original helper.
+    let status = std::process::Command::new("/system/bin/vold_prepare_subdirs")
+        .args([
+            "prepare",
+            uuid.unwrap_or(""),
+            &user.to_string(),
+            &flags.to_string(),
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("vold_prepare_subdirs: {status}")));
+    }
     Ok(dirs.into_iter().map(|d| d.0).collect())
 }
 
@@ -179,27 +191,6 @@ pub fn init_user0() -> io::Result<Vec<PathBuf>> {
         AID_MEDIA_RW,
     )?;
     prepare_user_storage(None, 0, STORAGE_FLAG_DE)
-}
-
-/// The views of the emulated volume of `user` that VolumeManager and
-/// EmulatedVolume set up with mounts, as symlinks into `/data/media`:
-/// - `/storage/emulated` for processes that see the whole /storage;
-/// - `/mnt/user/<user>/emulated` and friends, which zygote bind-mounts over
-///   /storage for each app (by its mount mode);
-/// - `/mnt/user/<user>/self/primary`, the primary volume of that user.
-pub fn link_emulated(user: u32) -> io::Result<()> {
-    let everybody = user * AID_USER_OFFSET + AID_EVERYBODY;
-    link("/data/media", Path::new("/storage/emulated"))?;
-    for view in ["user", "pass_through", "installer", "androidwritable"] {
-        let dir = PathBuf::from(format!("/mnt/{view}/{user}"));
-        std::fs::create_dir_all(&dir)?;
-        let owner = if user == 0 { AID_SHELL } else { AID_ROOT };
-        prepare_dir(&dir, 0o710, owner, everybody)?;
-        link("/data/media", &dir.join("emulated"))?;
-    }
-    let slf = PathBuf::from(format!("/mnt/user/{user}/self"));
-    prepare_dir(&slf, 0o755, AID_ROOT, AID_ROOT)?;
-    link(&format!("/storage/emulated/{user}"), &slf.join("primary"))
 }
 
 /// The lower (data) path of an app directory named under a volume's

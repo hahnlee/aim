@@ -801,3 +801,276 @@ fn poll_and_process_work_notifications() {
     assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     assert!(driver.poll(q.handle, Q_PID).unwrap());
 }
+
+#[test]
+fn pending_trace_nested_graph_is_atomic_and_non_destructive() {
+    let driver = Driver::new();
+    assert!(driver.pending_trace().records.is_empty());
+    driver.start_trace();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10_001, 4);
+    p.flush(
+        P_PID,
+        Commands::new().transaction(0, 1, TF_ACCEPT_FDS, &with_binder(NODE_PTR, NODE_COOKIE)),
+    );
+    let outer_request = q.transact(Q_PID, &Commands::new());
+    let (outer, _) = find_transaction(&outer_request);
+    let outer_id = driver.pending_trace().records[0].id;
+    q.flush(
+        Q_PID,
+        Commands::new().transaction(
+            object_of(&outer, 0).handle(),
+            99,
+            TF_ACCEPT_FDS,
+            &Parcel::new(),
+        ),
+    );
+    let nested_request = p.transact(P_PID, &Commands::new());
+    let (nested, _) = find_transaction(&nested_request);
+    let first = driver.pending_trace();
+    assert_eq!(first.records.len(), 2);
+    let inner = first
+        .records
+        .iter()
+        .find(|record| record.record.code == 99)
+        .unwrap();
+    assert!(!inner.returning);
+    assert_eq!(inner.record.from_parent, Some(outer_id));
+    assert_eq!(inner.record.to_parent, Some(outer_id));
+    assert_eq!((inner.record.from_pid, inner.record.to_pid), (Q_PID, P_PID));
+    assert_eq!((inner.record.from_tid, inner.record.to_tid), (Q_PID, P_PID));
+    assert_eq!(
+        (inner.from_stack, inner.to_stack),
+        (Some(inner.id), Some(inner.id))
+    );
+    assert!(inner.record.delivered.is_some());
+    let inner_id = inner.id;
+    let repeated = driver.pending_trace();
+    assert_eq!(repeated.records.len(), 2);
+    assert!(
+        repeated
+            .records
+            .iter()
+            .find(|r| r.id == inner_id)
+            .unwrap()
+            .age
+            >= inner.age
+    );
+    assert!(driver.take_trace().is_empty());
+    p.flush(P_PID, Commands::new().reply(0, &Parcel::new()));
+    let replying = driver.pending_trace();
+    let inner = replying
+        .records
+        .iter()
+        .find(|r| r.record.transaction_id == inner_id)
+        .unwrap();
+    assert!(inner.returning);
+    assert!(inner.record.latency.is_some());
+    assert_eq!(inner.record.to_parent, Some(outer_id));
+    let nested_reply = q.transact(Q_PID, &Commands::new());
+    assert!(names(&nested_reply).contains(&"BR_REPLY"));
+    q.flush(Q_PID, Commands::new().reply(0, &Parcel::new()));
+    let outer_reply = p.transact(P_PID, &Commands::new());
+    assert!(names(&outer_reply).contains(&"BR_REPLY"));
+    assert!(driver.pending_trace().records.is_empty());
+    let done = driver.take_trace();
+    assert_eq!(done.len(), 2);
+    assert!(done.iter().all(|r| r.returned.is_some()));
+    assert!(driver.take_trace().is_empty());
+    p.flush(
+        P_PID,
+        Commands::new()
+            .free_buffer(nested.buffer)
+            .free_buffer(find_reply(&outer_reply).buffer),
+    );
+    q.flush(
+        Q_PID,
+        Commands::new()
+            .free_buffer(outer.buffer)
+            .free_buffer(find_reply(&nested_reply).buffer),
+    );
+}
+
+#[test]
+fn rejected_delivered_fd_transaction_fails_sender_and_releases_exact_buffer() {
+    let driver = Driver::new();
+    let q = context_manager(&driver, FLAT_BINDER_FLAG_ACCEPTS_FDS);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10001, 0);
+    let fd = p.add_file(Arc::new(TestFile("import".into())));
+    let mut data = Parcel::new();
+    data.write_fd(fd);
+    let caller = {
+        let p = p.clone();
+        thread::spawn(move || {
+            let mut r = p.transact(
+                P_PID,
+                Commands::new().transaction(0, 1, TF_ACCEPT_FDS, &data),
+            );
+            if !r.iter().any(|r| matches!(r, Return::FailedReply)) {
+                r.extend(p.read_until(P_PID, |r| matches!(r, Return::FailedReply)));
+            }
+            r
+        })
+    };
+    let request = q.transact(Q_PID, &Commands::new());
+    let (tr, _) = find_transaction(&request);
+    let id = driver.delivery_id(q.handle, Q_PID, tr.buffer).unwrap();
+    assert!(
+        driver
+            .reject_delivery(p.handle, P_PID, tr.buffer, id)
+            .is_err()
+    );
+    assert_eq!(
+        driver.reject_delivery(q.handle, Q_PID + 1, tr.buffer, id),
+        Err(errno::EPERM)
+    );
+    assert_eq!(
+        driver.reject_delivery(q.handle, Q_PID, tr.buffer, id + 1),
+        Err(errno::EPERM)
+    );
+    let received = object_of(&tr, 0).handle();
+    assert!(q.file(received).is_some());
+    q.close_file(received);
+    driver
+        .reject_delivery(q.handle, Q_PID, tr.buffer, id)
+        .unwrap();
+    assert_eq!(q.open_fds(), 0);
+    assert!(driver.delivery_id(q.handle, Q_PID, tr.buffer).is_err());
+    assert!(names(&caller.join().unwrap()).contains(&"BR_FAILED_REPLY"));
+    // Freed receive space is reused, but its old delivery capability cannot act.
+    let caller = {
+        let p = p.clone();
+        thread::spawn(move || {
+            p.transact(
+                P_PID,
+                Commands::new().transaction(0, 2, TF_ACCEPT_FDS, &Parcel::new()),
+            )
+        })
+    };
+    let request = q.transact(Q_PID, &Commands::new());
+    let (next, _) = find_transaction(&request);
+    assert_eq!(next.buffer, tr.buffer);
+    assert_eq!(
+        driver.reject_delivery(q.handle, Q_PID, next.buffer, id),
+        Err(errno::EPERM)
+    );
+    q.transact(Q_PID, Commands::new().reply(0, &Parcel::new()));
+    assert!(
+        driver
+            .reject_delivery(
+                q.handle,
+                Q_PID,
+                next.buffer,
+                driver
+                    .delivery_id(q.handle, Q_PID, next.buffer)
+                    .unwrap_or(id)
+            )
+            .is_err()
+    );
+    q.flush(Q_PID, Commands::new().free_buffer(next.buffer));
+    let reply = find_reply(&caller.join().unwrap());
+    p.flush(P_PID, Commands::new().free_buffer(reply.buffer));
+}
+
+#[test]
+fn rejected_oneway_delivery_advances_next_node_work_without_failure_reply() {
+    let driver = Driver::new();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10001, 0);
+    for code in [1, 2] {
+        let r = p.transact(
+            P_PID,
+            Commands::new().transaction(0, code, TF_ONE_WAY, &Parcel::new()),
+        );
+        assert!(names(&r).contains(&"BR_TRANSACTION_COMPLETE"));
+    }
+    let first = q.transact(Q_PID, &Commands::new());
+    let (first, _) = find_transaction(&first);
+    let id = driver.delivery_id(q.handle, Q_PID, first.buffer).unwrap();
+    driver
+        .reject_delivery(q.handle, Q_PID, first.buffer, id)
+        .unwrap();
+    let next = q.transact(Q_PID, &Commands::new());
+    let (next, _) = find_transaction(&next);
+    assert_eq!(next.code, 2);
+    q.flush(Q_PID, Commands::new().free_buffer(next.buffer));
+}
+
+#[test]
+fn rejected_nested_delivery_restores_both_parent_stacks() {
+    let driver = Driver::new();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10001, 4);
+    let caller = {
+        let p = p.clone();
+        let driver = driver.clone();
+        thread::spawn(move || {
+            let first = p.transact(
+                P_PID,
+                Commands::new().transaction(
+                    0,
+                    1,
+                    TF_ACCEPT_FDS,
+                    &with_binder(NODE_PTR, NODE_COOKIE),
+                ),
+            );
+            let (nested, _) = find_transaction(&first);
+            let id = driver.delivery_id(p.handle, P_PID, nested.buffer).unwrap();
+            driver
+                .reject_delivery(p.handle, P_PID, nested.buffer, id)
+                .unwrap();
+            let r = p.read_until(P_PID, |r| matches!(r, Return::Reply(_)));
+            let reply = find_reply(&r);
+            p.flush(P_PID, Commands::new().free_buffer(reply.buffer));
+        })
+    };
+    let request = q.transact(Q_PID, &Commands::new());
+    let (outer, _) = find_transaction(&request);
+    let handle = object_of(&outer, 0).handle();
+    let r = q.transact(
+        Q_PID,
+        Commands::new().transaction(handle, 99, TF_ACCEPT_FDS, &Parcel::new()),
+    );
+    assert!(names(&r).contains(&"BR_FAILED_REPLY"));
+    q.transact(Q_PID, Commands::new().reply(0, &Parcel::new()));
+    q.flush(Q_PID, Commands::new().free_buffer(outer.buffer));
+    caller.join().unwrap();
+}
+
+#[test]
+fn flush_returns_parked_loopers_without_releasing_or_dropping_commands() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let driver = Driver::new();
+    let q = context_manager(&driver, 0);
+    let p = Process::open(&driver, Device::Binder, P_PID, 10_001, 0);
+    let resumed = Arc::new(AtomicUsize::new(0));
+    let callback = || -> aim_binder_driver::Resume {
+        let resumed=resumed.clone();
+        Box::new(move || { resumed.fetch_add(1,Ordering::SeqCst); })
+    };
+    let mut read=vec![0;READ_CAPACITY];
+    let mut arg=WriteRead { read_size:read.len()as u64,read_buffer:read.as_mut_ptr()as u64,..Default::default() }.encode();
+    assert_eq!(q.ioctl_or_park(Q_PID,BINDER_WRITE_READ,&mut arg,callback()),None);
+    assert_eq!(resumed.load(Ordering::SeqCst),0);
+    driver.flush(q.handle).unwrap();
+    assert_eq!(resumed.load(Ordering::SeqCst),1);
+    q.ioctl(Q_PID,BINDER_WRITE_READ,&mut arg).unwrap();
+    let done=WriteRead::decode(&arg);
+    assert_eq!(names(&parse_returns(&read[..done.read_consumed as usize])),["BR_NOOP"]);
+    // A flush asks a current read to return; it neither tears down this proc
+    // nor leaves the next empty read spuriously ready.
+    arg=WriteRead { read_size:read.len()as u64,read_buffer:read.as_mut_ptr()as u64,..Default::default() }.encode();
+    assert_eq!(q.ioctl_or_park(Q_PID,BINDER_WRITE_READ,&mut arg,callback()),None);
+    let mut payload=Parcel::new();payload.write_i32(0x1307);
+    p.transact(P_PID,Commands::new().transaction(0,0x1307,TF_ONE_WAY,&payload));
+    assert_eq!(resumed.load(Ordering::SeqCst),2);
+    driver.flush(q.handle).unwrap();
+    q.ioctl(Q_PID,BINDER_WRITE_READ,&mut arg).unwrap();
+    let done=WriteRead::decode(&arg);
+    let returns=parse_returns(&read[..done.read_consumed as usize]);
+    let (transaction,_)=find_transaction(&returns);
+    assert_eq!(transaction.code,0x1307);
+    assert_eq!(data_of(&transaction),payload.data);
+    q.release();
+    assert_eq!(driver.flush(q.handle),Err(errno::EBADF));
+}

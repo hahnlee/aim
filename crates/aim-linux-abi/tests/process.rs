@@ -144,6 +144,9 @@ fn check(name: &str) {
 }
 
 #[test]
+fn new_mount_namespace_clone_preserves_parent_view(){check("clone_new_mount_namespace");}
+
+#[test]
 fn fork_returns_twice_and_wait4_reports_the_exit() {
     check("fork_wait");
 }
@@ -514,6 +517,18 @@ fn orphaned_linux_run(root: &Path, args: &[&str]) -> (Vec<u8>, Vec<u8>) {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     (out.join().unwrap(), err.join().unwrap())
+}
+
+#[test]
+fn socket_inode_owner_is_shared_across_real_guest_fork() {
+    check("socket_inode_owner_fork");
+}
+
+/// Linux retains blocked default-disposition SIGCHLD for synchronous waits,
+/// including fork+exec exit before the wait and an explicit SIG_DFL reset.
+#[test]
+fn default_blocked_sigchld_is_consumed_by_sigtimedwait() {
+    check("default_sigchld_sigtimedwait");
 }
 
 /// The image's mksh forks, pipes and execs itself; its parent waits for

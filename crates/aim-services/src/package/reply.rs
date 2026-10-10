@@ -487,8 +487,10 @@ impl<'r, 'a> D<'r, 'a> {
         self.push("declaringPackage", declaring);
         // readArrayList of VersionedPackages, each a length-prefixed value.
         self.array("dependentPackages", |r| {
-            if r.read_i32()? != VAL_PARCELABLE {
-                return Err(BAD_VALUE);
+            match r.read_i32()? {
+                VAL_NULL => return Ok(Value::Null),
+                VAL_PARCELABLE => {}
+                _ => return Err(BAD_VALUE),
             }
             r.read_i32()?;
             Self::versioned_package(r)

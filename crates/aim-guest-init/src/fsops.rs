@@ -115,6 +115,7 @@ pub struct FsOps {
     /// The `--path-map` file processes start with; init's bind mounts
     /// become entries of it.
     path_map_file: Option<PathBuf>,
+    namespaces:Option<crate::mount_namespace::MountNamespaces>,
 }
 
 /// Legacy cgroup v1 controllers init.rc still addresses although the
@@ -137,10 +138,34 @@ impl FsOps {
             unmounted: Vec::new(),
             cgroup2: None,
             path_map_file: None,
+            namespaces:None,
         }
     }
 
     /// Where the path map is written when a bind mount changes it.
+    fn publish_mount_owner(&self) -> Result<(),String> {
+        if let Some(owner)=&self.namespaces{return owner.publish_map(&self.map);}
+        let Some(file) = &self.path_map_file else { return Ok(()); };
+        let Some(runtime) = file.parent() else { return Err("path-map has no owner directory".into()); };
+        let table = runtime.join("identity/by-pid");
+        match aim_storage::process_namespace::InitRegistration::read(&table) {
+            Ok(init) => {
+                let id=aim_storage::process_namespace::mount_namespace_of(&table,init.process).map_err(|error|error.to_string())?;
+                aim_storage::mount_namespace::Namespace::open(runtime,&id).and_then(|owner|owner.update_base(&self.map.to_file_text())).map(|_|()).map_err(|error|error.to_string())
+            },
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn set_mount_namespaces(&mut self,owner:crate::mount_namespace::MountNamespaces){self.namespaces=Some(owner);}
+    pub fn enter_default_mount_namespace(&mut self)->Result<Effect,String>{
+        if !self.apply{return Ok(Effect::Applied("enter default mount namespace".into()));}
+        let owner=self.namespaces.as_ref().ok_or("native mount namespace owner is absent")?;
+        self.map=owner.enter_default()?;
+        Ok(Effect::Applied("entered default mount namespace and linkerconfig view".into()))
+    }
+
     pub fn set_path_map_file(&mut self, file: PathBuf) {
         self.path_map_file = Some(file);
     }
@@ -154,7 +179,7 @@ impl FsOps {
     fn bind(&mut self, source: &str, target: &str, rec: bool) -> Result<Option<Effect>, String> {
         let from = self.resolve(source, true)?;
         let to = self.resolve(target, true)?;
-        if !matches!(from.area, Area::Writable { .. }) || !matches!(to.area, Area::Writable { .. })
+        if !matches!(from.area, Area::Writable { .. }|Area::ReadOnlyImage) || !matches!(to.area, Area::Writable { .. }|Area::ReadOnlyImage)
         {
             return Ok(None);
         }
@@ -182,8 +207,9 @@ impl FsOps {
         self.map.add(MapEntry {
             guest: to.guest.clone(),
             host: from.host.clone(),
-            kind: MapKind::Writable,
+            kind: if from.area==Area::ReadOnlyImage{MapKind::ReadOnly}else{MapKind::Writable},
         });
+        self.map.bind_source(&to.guest,&from.guest);
         for entry in below {
             self.map.add(entry);
         }
@@ -191,6 +217,7 @@ impl FsOps {
             && let Some(file) = &self.path_map_file
         {
             fs::write(file, self.map.to_file_text()).map_err(|e| e.to_string())?;
+            if let Some(owner)=&self.namespaces{owner.publish_bind(&self.map,&to.guest)?;}else{self.publish_mount_owner()?;}
         }
         Ok(Some(Effect::Applied(format!(
             "mount {source} {target} bind: path-map entry {} -> {}",
@@ -585,6 +612,12 @@ impl FsOps {
         options: &[String],
     ) -> FsResult {
         let resolved = self.resolve(target, true)?;
+        if let Some(kind)=options.iter().find(|option|matches!(option.as_str(),"shared"|"slave"|"private")){
+            self.map.propagation(&resolved.guest,kind,options.iter().any(|option|option=="rec"));
+            if self.apply&&let Some(file)=&self.path_map_file{fs::write(file,self.map.to_file_text()).map_err(|error|error.to_string())?;self.publish_mount_owner()?;}
+            return Ok(Effect::Applied(format!("mount propagation {} {kind}",resolved.guest)));
+        }
+
         if options.iter().any(|o| o == "bind" || o == "rbind") || device.starts_with('/') {
             let rec = options.iter().any(|o| o == "rec" || o == "rbind");
             if options.iter().any(|o| o == "bind" || o == "rbind")
@@ -679,6 +712,22 @@ mod tests {
     }
 
     #[test]
+    fn init_storage_bind_and_slave_keep_explicit_namespace_relations(){
+        let layout=temp_layout("storage-propagation");let mut ops=FsOps::new(layout.path_map(),layout.fs_attrs_file(),true);ops.set_path_map_file(layout.path_map_file());
+        ops.mkdir("/mnt/user",Some(0o755),None,None).unwrap();
+        ops.mkdir("/mnt/user/0",Some(0o755),None,None).unwrap();
+        ops.mount("none","/mnt/user/0","/storage",&["bind".into(),"rec".into()]).unwrap();
+        ops.mount("none","none","/storage",&["slave".into(),"rec".into()]).unwrap();
+        // Later original init binds reorder map entries but retain all prior
+        // namespace relationships and policies.
+        ops.mkdir("/data/user_de",Some(0o755),None,None).unwrap();
+        ops.mkdir("/data_mirror/metadata-test",Some(0o755),None,None).unwrap();
+        ops.mount("none","/data/user_de","/data_mirror/metadata-test",&["bind".into(),"rec".into()]).unwrap();
+        let text=fs::read_to_string(layout.path_map_file()).unwrap();
+        assert!(text.contains("bind-source\t/storage\t/mnt/user/0\n"));assert!(text.contains("propagation\t/storage\tslave\n"));
+        let parsed=crate::paths::PathMap::parse_file_text(&text).unwrap();assert_eq!(parsed.to_file_text(),text);
+    }
+    #[test]
     fn init_bind_mounts_become_path_map_entries() {
         let layout = temp_layout("bind");
         let mut ops = FsOps::new(layout.path_map(), layout.fs_attrs_file(), true);
@@ -720,12 +769,16 @@ mod tests {
             .unwrap();
         assert_eq!(r.host, layout.data.join("data/data/com.example"));
         assert!(layout.data.join("data/user/0").is_dir());
-        // A bind out of the read-only image stays unsupported.
+        // Linux permits an image bind while preserving its read-only view.
         assert!(matches!(
-            ops.mount("none", "/system/bin", "/data_mirror/data_de/null", &bind)
-                .unwrap(),
-            Effect::NoOp(_)
+            ops.mount("none", "/system/bin", "/data_mirror/data_de/null", &bind).unwrap(),
+            Effect::Applied(_)
         ));
+        let mounted=ops.map.resolve("/data_mirror/data_de/null",true).unwrap();
+        assert_eq!(mounted.host,layout.image.join("system/bin"));
+        assert_eq!(mounted.area,Area::ReadOnlyImage);
+        assert!(ops.write("/data_mirror/data_de/null/forbidden", "original image must remain unchanged").is_err());
+        assert!(!layout.image.join("system/bin/forbidden").exists());
     }
 
     #[test]

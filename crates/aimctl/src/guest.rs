@@ -1,10 +1,8 @@
 //! Programs run in the resident guest, and what its processes use.
 
-use std::io::Read;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use crate::state::{Files, State};
 
@@ -12,6 +10,7 @@ use crate::state::{Files, State};
 /// filesystem view and binder, in its pid namespace.
 pub struct Guest {
     pub linux_run: PathBuf,
+    pub image: PathBuf,
     pub path_map: PathBuf,
     pub by_pid: PathBuf,
     pub environ: PathBuf,
@@ -23,7 +22,8 @@ impl Guest {
     pub fn of(files: &Files, state: &State) -> Option<Guest> {
         let guest = state.guest?;
         files.path_map().exists().then(|| Guest {
-            linux_run: crate::program("linux-run"),
+            linux_run: state.inputs.program("linux-run"),
+            image: state.inputs.image.clone(),
             path_map: files.path_map(),
             by_pid: files.by_pid(),
             environ: files.environ(),
@@ -44,51 +44,20 @@ impl Guest {
         }
         command
             .arg("--root")
-            .arg(aim_paths::derived_image())
+            .arg(&self.image)
             .arg("--path-map")
             .arg(&self.path_map)
             .args(["--binder", &self.binder])
             .arg("--by-pid")
             .arg(&self.by_pid)
+            .arg("--mount-namespace-from-init")
             .args(argv);
         command
     }
 
-    /// `argv`'s exit status and output; its whole process group is killed
-    /// after `timeout`.
+    /// Capture a command within its deadline and reap only its own child PID.
     pub fn output(&self, argv: &[&str], timeout: Duration) -> Result<(ExitStatus, String), String> {
-        let mut child = self
-            .command(argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .map_err(|e| format!("linux-run: {e}"))?;
-        let mut stdout = child.stdout.take().expect("piped");
-        let reader = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let _ = stdout.read_to_end(&mut out);
-            out
-        });
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-                break status;
-            }
-            if Instant::now() > deadline {
-                // SAFETY: the process group of the child we started.
-                unsafe { libc::killpg(child.id() as i32, libc::SIGKILL) };
-                let _ = child.wait();
-                return Err(format!("{}: no answer after {timeout:?}", argv.join(" ")));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let out = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
-        if status.signal() == Some(libc::SIGKILL) {
-            return Err(format!("{}: linux-run was killed", argv.join(" ")));
-        }
-        Ok((status, out))
+        crate::output::run(&mut self.command(argv), timeout)
     }
 
     /// Whether Android finished booting (`sys.boot_completed`).
@@ -97,7 +66,7 @@ impl Guest {
             &["/system/bin/getprop", "sys.boot_completed"],
             Duration::from_secs(10),
         )
-        .is_ok_and(|(_, out)| out.trim() == "1")
+        .is_ok_and(|(status, out)| status.success() && out.trim() == "1")
     }
 }
 
@@ -148,6 +117,27 @@ pub fn measure(files: &Files, guest: u32) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_uses_resident_selection_and_authenticated_namespace_entry() {
+        let root = std::env::temp_dir().join(format!("aimctl-selected-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let files = Files::of(&root.join("data")).unwrap();
+        std::fs::create_dir_all(files.path_map().parent().unwrap()).unwrap();
+        std::fs::write(files.path_map(), b"fixture").unwrap();
+        let selected = crate::inputs::Inputs { image: "/selected-image".into(),
+            host_runtime: "/selected-runtime".into(), userdata: "/selected-templates".into() };
+        let original = State { pid: 1, guest: Some(42), windows: false, started: 0, inputs: selected };
+        let stored = State::parse(&original.to_text()).unwrap();
+        let guest = Guest::of(&files, &stored).unwrap();
+        let command = guest.command(&["/system/bin/getprop", "sys.boot_completed"]);
+        assert_eq!(command.get_program(), "/selected-runtime/linux-run");
+        let args = command.get_args().map(|arg| arg.to_string_lossy()).collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--root", "/selected-image"]));
+        assert!(args.windows(2).any(|pair| pair == ["--binder", "dev.aim.guest-init.42.binder"]));
+        assert!(args.iter().any(|arg| arg == "--mount-namespace-from-init"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn processes_of_one_guest() {
