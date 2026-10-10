@@ -17,10 +17,10 @@ fn start(boot: &Boot) {
 #[ignore = "requires aimctl and the pinned derived image; run explicitly"]
 fn original_pms_boots_with_native_keyset_registration() {
     use aim_services::package::owner::key_sets;
-    let dir = std::env::temp_dir().join(format!("aim-keyr-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     start(&boot);
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -147,10 +147,10 @@ fn original_pms_boots_with_native_keyset_registration() {
 #[test]
 #[ignore = "requires aimctl and the pinned derived image; run explicitly"]
 fn original_pms_boots_with_native_library_metadata_persistence() {
-    let dir = std::env::temp_dir().join(format!("aim-libr-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     start(&boot);
     run(boot.command().arg("stop"));
     let volume = aim_storage::data::DataImage::attach(&boot.data, None).unwrap();
@@ -241,10 +241,10 @@ fn original_pms_boots_with_native_library_metadata_persistence() {
 #[test]
 #[ignore = "requires aimctl and the pinned derived image; run explicitly"]
 fn original_pms_boots_with_native_signature_persistence() {
-    let dir = std::env::temp_dir().join(format!("aim-sigr-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sg-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     start(&boot);
     let original = State::read(&boot.data.join("data"), &[0]).unwrap().unwrap();
     assert_eq!(original.settings.packages.len(), 243);
@@ -399,11 +399,11 @@ fn migration_apk(dir: &std::path::Path, version: i32, leaving: bool) -> std::pat
 #[ignore = "requires aimctl, pinned image, JDK and Android build tools; run explicitly"]
 fn original_pms_reboots_with_native_update_owner_clearing() {
     const NAME: &str = "org.example.aimmigration";
-    let dir = std::env::temp_dir().join(format!("aim-ownr-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ow-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let apk = migration_apk(&data.0, 1, false);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     start(&boot);
     let guest = boot.data.join("data/local/tmp/update-owner.apk");
     fs::copy(apk, &guest).unwrap();
@@ -510,12 +510,12 @@ fn original_pms_reboots_after_native_shared_uid_migration() {
     };
     const NAME: &str = "org.example.aimmigration";
     const GROUP: &str = "org.example.aimmigration.uid";
-    let dir = std::env::temp_dir().join(format!("aim-uidr-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ur-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let old = migration_apk(&data.0, 1, false);
     let leaving = migration_apk(&data.0, 2, true);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     start(&boot);
     for apk in [old, leaving] {
         let output = run(boot.command().arg("install").arg(apk));

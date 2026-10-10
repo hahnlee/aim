@@ -67,13 +67,13 @@ fn compile_original_query_oracle(data: &Data) -> std::path::PathBuf {
     dex.join("classes.dex")
 }
 fn run_original_queries() {
-    let dir = std::env::temp_dir().join(format!("aim-pure-query-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pq-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let dex = compile_original_query_oracle(&data);
     let name = format!("dev.aim.test.pure.{}", std::process::id());
     let server = aim_binder_host::server::Server::start(&name).unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

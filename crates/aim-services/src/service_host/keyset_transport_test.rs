@@ -8,7 +8,7 @@ use std::{fs,process::Command};
 #[test]
 #[ignore = "requires pinned image, built host/image, JDK and d8; run explicitly"]
 fn original_art_keysets_roundtrip_native_query_leases() {
-    let dir = std::env::temp_dir().join(format!("aim-keyset-binder-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("kb-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let classes = data.0.join("classes");
@@ -49,7 +49,7 @@ fn original_art_keysets_roundtrip_native_query_leases() {
     java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
     let name = format!("dev.aim.test.keysets.{}", std::process::id());
     let server = aim_binder_host::server::Server::start(&name).unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

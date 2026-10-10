@@ -8,7 +8,7 @@ use std::{fs,process::Command,time::{Duration,Instant}};
 #[test]
 #[ignore = "requires pinned image, built host/image, JDK and d8; run explicitly"]
 fn original_provider_registration_matches_native_runtime_views() {
-    let dir = std::env::temp_dir().join(format!("aim-prov-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pv-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let classes = data.0.join("classes");
@@ -47,7 +47,7 @@ fn original_provider_registration_matches_native_runtime_views() {
             ),
     );
     java::check_linkage(&dex.join("classes.dex"), &["/system/framework/services.jar"]).unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {

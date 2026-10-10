@@ -28,7 +28,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires aimctl and the pinned derived image; run explicitly"]
 fn saved_scan_libraries_match_original_pms() {
-    let dir = std::env::temp_dir().join(format!("aim-scan-runtime-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sr-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
@@ -75,7 +75,7 @@ fn saved_scan_libraries_match_original_pms() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("scan_runtime oracle boot readiness");
     let properties =

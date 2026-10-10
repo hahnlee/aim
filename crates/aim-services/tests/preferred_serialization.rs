@@ -12,7 +12,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires original pinned image, aimctl, JDK and d8; run explicitly"]
 fn preferred_backup_matches_original_owner() {
-    let directory = std::env::temp_dir().join(format!("aim-prefs-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("pf-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     let data = Data(directory);
     let repo = aim_paths::root();

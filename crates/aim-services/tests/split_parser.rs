@@ -14,7 +14,7 @@ impl Data {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "aim-split-parser-{}-{}",
+            "sp-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -435,7 +435,7 @@ fn compiled_update_ownership_xml_reads_selected_asset_and_raw_events() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("split_parser oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/update-ownership");
@@ -992,7 +992,7 @@ fn manifest_keysets_match_original_parser() {
         writeln!(&mut expected, "CASE {name}.apk {original_result}").unwrap();
         apks.push(apk);
     }
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("split_parser oracle boot readiness");
     let guest = boot.data.join("data/local/tmp/manifest-keysets");

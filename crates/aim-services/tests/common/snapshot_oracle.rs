@@ -189,7 +189,7 @@ pub fn verify(directory: &Path) {
         "systemserverclasspath.pb", aim_android_image::classpath::SYSTEMSERVERCLASSPATH).unwrap();
     let system_jars = system_jars.iter().map(String::as_str).collect::<Vec<_>>();
     java::check_linkage(&dex.join("classes.dex"), &system_jars).unwrap();
-    let boot_data = Data(std::env::temp_dir().join(format!("aim-dsp-{}", std::process::id())));
+    let boot_data = Data(std::env::temp_dir().join(format!("ds-{}", std::process::id())));
     fs::create_dir(&boot_data.0).unwrap();
     let boot_dir = boot_data.0.join("g");
     let boot = Boot::new(repo.join("target/release/aimctl"), boot_dir.clone());

@@ -32,7 +32,7 @@ fn original_setting_adoption_matches_the_original_runtime() {
 
 fn compare_new_settings(original_only: bool) {
     let dir = std::env::temp_dir().join(format!(
-        "aim-setting-{}-{}",
+        "ns-{}-{}",
         original_only,
         std::process::id()
     ));
@@ -82,7 +82,7 @@ fn compare_new_settings(original_only: bool) {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("new_setting oracle boot readiness");
     fs::copy(

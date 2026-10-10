@@ -16,7 +16,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires aimctl, the pinned derived image, JDK and d8; run explicitly"]
 fn allocation_matches_the_original_runtime() {
-    let dir = std::env::temp_dir().join(format!("aim-ids-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ai-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
@@ -73,7 +73,7 @@ fn allocation_matches_the_original_runtime() {
         ],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("app_ids oracle boot readiness");
     fs::copy(

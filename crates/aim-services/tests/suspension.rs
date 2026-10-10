@@ -15,7 +15,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn suspension_parameters_match_original_xml_owners() {
-    let data = Data(std::env::temp_dir().join(format!("aim-suspend-{}", std::process::id())));
+    let data = Data(std::env::temp_dir().join(format!("su-{}", std::process::id())));
     fs::create_dir(&data.0).unwrap();
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
@@ -76,7 +76,7 @@ fn suspension_parameters_match_original_xml_owners() {
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("suspension oracle boot readiness");
     let directory = boot.data.join("data/local/tmp/suspension-dialogs");

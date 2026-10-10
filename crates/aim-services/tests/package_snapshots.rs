@@ -13,7 +13,7 @@ use common::runtime::{Boot, Data, run};
 #[test]
 #[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope() {
-    let dir = std::env::temp_dir().join(format!("aim-pm-scopes-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ps-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
@@ -93,7 +93,7 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
         &["/system/framework/services.jar"],
     )
     .unwrap();
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("package_snapshots oracle boot readiness");
 

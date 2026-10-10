@@ -21,7 +21,7 @@ fn stop_and_crash_start_reclaim_memfd_backings() {
         aim_paths::skip("pinned NDK missing");
         return;
     };
-    let parent = std::env::temp_dir().join(format!("aim-memfd-instance-{}", std::process::id()));
+    let parent = std::env::temp_dir().join(format!("mf-{}", std::process::id()));
     fs::create_dir(&parent).unwrap();
     let data = Data(parent);
     let source = data.0.join("memfd.c");

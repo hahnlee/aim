@@ -352,13 +352,13 @@ fn package_parcel_oracle_compiles_against_original_api() {
 #[ignore = "requires pinned image, aimctl, JDK and d8; run explicitly"]
 fn native_package_parcels_match_original_read_write() {
     use std::collections::BTreeMap;
-    let dir = std::env::temp_dir().join(format!("aim-pm-parcels-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pp-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let data = Data(dir);
     let java = aim_paths::fetched().join("java");
     let jdk = java.join("temurin-17.0.20.1+1/jdk-17.0.20.1+1/Contents/Home");
     let dex = compile_original_parcel_oracle(&data.0, &jdk, &java);
-    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+    let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("package_parcel oracle boot readiness");
 

@@ -441,7 +441,7 @@ mod tests {
             process::Command,
             time::{Duration, Instant},
         };
-        let directory = std::env::temp_dir().join(format!("aim-timsort-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("ts-{}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let data = Data(directory);
         let java = aim_paths::fetched().join("java");
@@ -472,7 +472,7 @@ mod tests {
             .arg(&dex)
             .arg(classes.join("com/android/server/pm/TimSortOracle.class")));
         super::java::check_linkage(&dex.join("classes.dex"), &[]).unwrap();
-        let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("guest"));
+        let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
         run(boot.start_command().args(["start", "--windows"]));
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
