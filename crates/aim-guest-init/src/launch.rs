@@ -111,16 +111,30 @@ impl LinuxRunOptions {
 
     /// Which contract options a `linux-run` binary accepts, from its usage
     /// text.
-    pub fn detect(binary: &Path) -> Self {
-        let Ok(output) = Command::new(binary).arg("--help").output() else {
-            return Self::default();
-        };
+    pub fn detect(binary: &Path) -> Result<Self, String> {
+        let output = Command::new(binary).arg("--help").output()
+            .map_err(|error| format!("linux-run capability query {}: {error}", binary.display()))?;
+        Self::from_usage_output(output)
+            .map_err(|error| format!("linux-run capability query {}: {error}", binary.display()))
+    }
+
+    fn from_usage_output(output: std::process::Output) -> Result<Self, String> {
+        // linux-run's usage exits 2; a killed helper establishes no contract.
+        if !matches!(output.status.code(), Some(0 | 2)) {
+            return Err(format!("{} before usage was established", output.status));
+        }
         let usage = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        Self {
+        let header = usage.lines().any(|line| line.trim_start().starts_with("usage:"));
+        let root = usage.split_whitespace()
+            .any(|word| word.trim_matches(['[', ']']) == "--root");
+        if !header || !root {
+            return Err(format!("{} without valid usage evidence", output.status));
+        }
+        Ok(Self {
             path_map: usage.contains("--path-map"),
             identity: usage.contains("--identity"),
             inherit_env: usage.contains("--inherit-env"),
@@ -130,7 +144,7 @@ impl LinuxRunOptions {
             vulkan: usage.contains("--vulkan"),
             display: usage.contains("--display"),
             stdio_null: usage.contains("--stdio-null"),
-        }
+        })
     }
 
     pub fn missing(&self) -> Vec<&'static str> {
@@ -827,5 +841,37 @@ mod tests {
         };
         assert!(v >= 212_992, "{v}");
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod capability_failure_tests {
+    use super::LinuxRunOptions;
+    use std::process::Command;
+    fn output(script: &str) -> std::process::Output {
+        Command::new("/bin/sh").args(["-c", script]).output().unwrap()
+    }
+    #[test]
+    fn actual_signalled_usage_helper_is_not_unsupported_legacy() {
+        let error=LinuxRunOptions::from_usage_output(output("kill -KILL $$")).err().unwrap();
+        assert!(error.contains("signal") && error.contains("usage"), "{error}");
+    }
+    #[test]
+    fn real_normal_usage_exit_two_preserves_partial_legacy_options() {
+        let options=LinuxRunOptions::from_usage_output(output("printf 'usage: linux-run [--root DIR] [--gpu DIR]\n'; exit 2")).unwrap();
+        assert!(options.gpu); assert!(!options.identity); assert!(!options.path_map);
+    }
+    #[test]
+    fn empty_or_unrelated_error_output_does_not_establish_usage() {
+        for script in ["exit 2", "printf 'cannot access --root\n' >&2; exit 1", "printf 'usage: unrelated\n'; exit 2"] {
+            assert!(LinuxRunOptions::from_usage_output(output(script)).is_err());
+        }
+    }
+    #[test]
+    fn missing_usage_helper_is_a_real_spawn_error() {
+        let root=std::env::temp_dir().join(format!("aim-capability-missing-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        let error=LinuxRunOptions::detect(&root.join("absent")).err().unwrap();
+        assert!(error.contains("capability query"));std::fs::remove_dir(root).unwrap();
     }
 }

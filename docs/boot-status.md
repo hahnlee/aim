@@ -591,6 +591,23 @@ natural exit0. No test is ignored or skipped; owned processes,namespaces
 and mounts are gone. The prior900-second failure remains historical.
 The separate resident proxy natural-exit gate (#1294) is not proven by this
 codec body.
+The next manual package-parcel body stops before its oracle with recurring
+original vendor BoringSSL reboot requests (#1312). A bounded nonquiet replay
+records 80 vendor self-test processes terminated by SIGKILL, together with
+bootstrap linkerconfig, prng and runtime cleanup helpers. It does not prove
+an original FIPS assertion failure or the sender of those historical signals.
+Its initial cleanup60 fails; subsequent independent checks find all147 held
+births and the data attachment gone, without extra signals or forced unmount.
+The capability owner previously interpreted failed or empty linux-run help as
+missing options and launched a reduced identity/namespace/environment contract.
+It now requires normal help status (0 or documented usage2), a usage header and
+an explicit --root token, returning an error before data attach or services
+otherwise (#1313). Five new actual host-helper/Boot admission regressions and
+one existing capability-default test pass; no Android replay uses this fix yet.
+A later exact f742 help query returns SIGKILL with empty output, while a
+read-only current host-security popup reports that linux-run execution is
+blocked. This proves the current obstruction, not all prior signal senders;
+no security policy or original self-test is changed.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,

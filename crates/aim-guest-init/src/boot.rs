@@ -543,6 +543,11 @@ impl Boot {
                 options.image.display()
             ));
         }
+        let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
+        let linux_run_options = match options.mode {
+            RunMode::DryRun => LinuxRunOptions::CONTRACT,
+            RunMode::Run => LinuxRunOptions::detect(&linux_run_binary)?,
+        };
         // The data image attaches while the boot starts; init's mount_all
         // waits for it (`mount`).
         let data = match options.mode {
@@ -691,7 +696,6 @@ impl Boot {
         manager.queue_boot(&properties);
         mark("init scripts loaded");
 
-        let linux_run_binary = options.linux_run.clone().unwrap_or_else(default_linux_run);
         let posix_control=if options.mode==RunMode::Run {
             let process=aim_storage::process_namespace::ProcessIdentity::running(std::process::id()as i32).map_err(|error|error.to_string())?;
             let endpoint=format!("dev.aim.posix.{}.{}.{}",process.host_pid,process.start_seconds,process.start_microseconds);
@@ -724,10 +728,6 @@ impl Boot {
                 .map_err(|error| format!("PTY transport owner: {error}"))?;
             Some(owner)
         } else { None };
-        let linux_run_options = match options.mode {
-            RunMode::DryRun => LinuxRunOptions::CONTRACT,
-            RunMode::Run => LinuxRunOptions::detect(&linux_run_binary),
-        };
         // The binder driver is kernel state, so the init role hosts it
         // (ADR 0012 item 7): one per boot, named for this process.
         let binder_name = format!("dev.aim.guest-init.{}.binder", std::process::id());
@@ -1364,5 +1364,24 @@ mod androidboot_options_tests {
         options.merge_androidboot(vec![("hardware".into(), "test-device".into())]);
         assert_eq!(options.androidboot.iter().filter(|(name, _)| name == "hardware").count(), 1);
         assert!(options.androidboot.contains(&("hardware".into(), "test-device".into())));
+    }
+}
+
+#[cfg(test)]
+mod capability_boot_tests {
+    use super::*;
+    #[test]
+    fn failed_capability_query_returns_before_data_and_service_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let root=std::env::temp_dir().join(format!("aim-capability-boot-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let image=root.join("image");let rc=image.join("system/etc/init/hw/init.rc");
+        std::fs::create_dir_all(rc.parent().unwrap()).unwrap();
+        std::fs::write(rc,include_bytes!("../../aim-android-init/tests/golden/image/system/etc/init/hw/init.rc")).unwrap();
+        let helper=root.join("failed-helper");std::fs::write(&helper,b"#!/bin/sh\nkill -KILL $$\n").unwrap();
+        std::fs::set_permissions(&helper,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let data=root.join("data");let mut options=BootOptions::new(image,data.clone(),RunMode::Run);options.linux_run=Some(helper);
+        let error=Boot::prepare(options).err().unwrap();assert!(error.contains("capability query") && error.contains("signal"),"{error}");
+        assert!(!data.exists());assert!(!root.join("data.asif").exists());assert!(!root.join("data.run").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
