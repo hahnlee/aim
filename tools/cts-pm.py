@@ -374,8 +374,9 @@ def compare(original, native):
                 name = module['name']
                 if name != requested and not name.startswith(requested + '[') and not name.startswith(requested + ' ['):
                     raise ValueError(f'{requested}: official XML includes foreign module {name}')
-            command = ['cts', '-s', f"127.0.0.1:{campaign['port']}", '--skip-device-info',
-                       '--skip-preconditions', '-m', requested, *campaign['cts_args']]
+            command = invocation_command(requested, argparse.Namespace(
+                port=campaign['port'], cts_args=campaign['cts_args'],
+                host_tool_selection=campaign.get('cts_host_tools')))
             matches = shlex.split(result['command'] or '') == command
             if not matches: issues.append('official XML invocation differs from campaign')
             has_requested = any(module['name'] == requested for module in rows)

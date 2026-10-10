@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -25,15 +26,18 @@ class ComparisonEvidence(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
 
     def campaign(self, label, statuses, *, status='recorded', done=True,
-                 exit_code=0, mismatch=False, variants=False):
+                 exit_code=0, mismatch=False, variants=False,
+                 module_name='CtsFixture', selection=None, xml_command=None):
         directory = self.root / label
         directory.mkdir()
         command = ['cts', '-s', '127.0.0.1:5555', '--skip-device-info',
-                   '--skip-preconditions', '-m', 'CtsFixture']
+                   '--skip-preconditions', '-m', module_name,
+                   *pm.cts_host_tools.arguments(selection, module_name)]
+        if xml_command is not None: command = xml_command
         if mismatch: command += ['--test', 'filtered']
         tree = ET.Element('Result', suite_name='CTS', suite_version='16_r1',
                           suite_build_number='13467367', command_line_args=' '.join(command))
-        for name, results in [('CtsFixture', statuses)] + ([('CtsFixture[instant]', ['pass'])] if variants else []):
+        for name, results in [(module_name, statuses)] + ([(module_name + '[instant]', ['pass'])] if variants else []):
             module = ET.SubElement(tree, 'Module', name=name, abi='arm64-v8a',
                                    done=str(done).lower(), total_tests=str(len(results)))
             case = ET.SubElement(module, 'TestCase', name='fixture.Class')
@@ -41,12 +45,51 @@ class ComparisonEvidence(unittest.TestCase):
                 ET.SubElement(case, 'Test', name=f'test{index}', result=outcome)
         xml = directory / 'official.xml'
         ET.ElementTree(tree).write(xml, encoding='utf-8', xml_declaration=True)
-        row = {'module': 'CtsFixture', 'status': status, 'wrapper_exit': exit_code,
+        row = {'module': module_name, 'status': status, 'wrapper_exit': exit_code,
                'xml': str(xml), 'xml_sha256': pm.digest(xml), 'summary': pm.summarize(xml)}
-        campaign = {'label': label, 'modules': ['CtsFixture'], 'port': 5555, 'cts_args': [],
+        campaign = {'label': label, 'modules': [m['name'] for m in pm.modules()], 'port': 5555, 'cts_args': [],
                     'manifest_sha256': pm.digest(self.manifest), 'runs': [row]}
+        if selection is not None: campaign['cts_host_tools'] = selection
         (directory / 'campaign.json').write_text(json.dumps(campaign))
         return directory
+
+    def test_selected_host_tool_command_matches_runner_and_comparison(self):
+        module = pm.cts_host_tools.MODULE
+        self.manifest.write_text(json.dumps({'modules': [
+            {'name': module, 'kind': 'host'}, {'name': 'CtsUnrunFixture', 'kind': 'host'}]}))
+        selection = {'module_arg': module + ':{config-descriptor}metadata:module-dir-path:=' + str(self.root / 'tools')}
+        args = SimpleNamespace(port=5555, cts_args=[], host_tool_selection=selection)
+        original = self.campaign('original', ['pass'], module_name=module, selection=selection)
+        native = self.campaign('native', ['pass'], module_name=module, selection=selection)
+        self.assertTrue(pm.validate_result(pm.summarize(original / 'official.xml'), module, args))
+        report = pm.compare(original, native)
+        self.assertTrue(report['original_module_evidence'][0]['invocation_matches'])
+        self.assertTrue(report['native_module_evidence'][0]['invocation_matches'])
+        self.assertFalse(report['acceptance_pass'], 'unrun module remains incomplete')
+
+    def test_missing_host_tool_selection_is_rejected(self):
+        self.check_wrong_host_tool_command(None)
+
+    def test_changed_host_tool_selection_is_rejected(self):
+        self.check_wrong_host_tool_command(pm.cts_host_tools.MODULE + ':{config-descriptor}metadata:module-dir-path:=wrong')
+
+    def test_foreign_host_tool_selection_is_rejected(self):
+        self.check_wrong_host_tool_command('CtsCompilationTestCases:{config-descriptor}metadata:module-dir-path:=wrong')
+
+    def check_wrong_host_tool_command(self, actual_option):
+        module = pm.cts_host_tools.MODULE
+        self.manifest.write_text(json.dumps({'modules': [{'name': module, 'kind': 'host'}]}))
+        selection = {'module_arg': module + ':{config-descriptor}metadata:module-dir-path:=' + str(self.root / 'tools')}
+        command = ['cts', '-s', '127.0.0.1:5555', '--skip-device-info', '--skip-preconditions', '-m', module]
+        if actual_option is not None: command += ['--module-arg', actual_option]
+        original = self.campaign('original', ['pass'], module_name=module, selection=selection, xml_command=command)
+        native = self.campaign('native', ['pass'], module_name=module, selection=selection, xml_command=command)
+        args = SimpleNamespace(port=5555, cts_args=[], host_tool_selection=selection)
+        with self.assertRaises(ValueError):
+            pm.validate_result(pm.summarize(original / 'official.xml'), module, args)
+        report = pm.compare(original, native)
+        self.assertFalse(report['original_module_evidence'][0]['invocation_matches'])
+        self.assertFalse(report['acceptance_pass'])
 
     def test_verified_nonrecorded_xml_keeps_failures_and_assumptions_separate_from_completion(self):
         original = self.campaign('original', ['pass', 'fail', 'ASSUMPTION_FAILURE'],

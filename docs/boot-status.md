@@ -582,9 +582,19 @@ The instrumented actual replay remains pending (#1304).
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,
-paired with the authenticated host init birth. Final payload/cleanup
-verification is pending; matched Original/template parity, second Native
-determinism, rollback, apps and full66CTS remain unproven.
+paired with the authenticated host init birth. All70 copied payloads match
+bytes,mode,mtime andxattrs, and owned processes,namespaces and mounts are
+gone. A second unchanged-cohort Native run reaches settings in125.77s but
+fails the300-second boot/permission limit without publishing a template;
+its owned resources are also gone. Native-pair comparison is NOT RUN,
+and matched Original/template parity, rollback, apps and full66CTS remain
+unproven. The instrumented Original parcel replay also fails boot-query
+readiness before launching its oracle; its progress checks are NOT RUN.
+The full66 CTS runner's comparison now reconstructs the same staged-install
+host-tool module argument as execution (#1305). Ten host comparison checks
+pass, including refusal of missing,changed and foreign selectors and
+incomplete campaigns. This is harness verification, not CTS execution.
+Three collector regressions cannot rerun without their captured XML input.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally
