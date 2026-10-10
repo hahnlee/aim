@@ -59,8 +59,88 @@ public final class InstallerProxyOracle {
         }
         System.out.println("PROXY original SCM_RIGHTS retransmit exec classification revoke");
     }
+    private static byte[] permissionFrame(java.io.DataInputStream in) throws Exception {
+        int length = in.readInt();
+        if (length < 10 || length > 65536) throw new IllegalArgumentException("permission frame length");
+        byte[] bytes = new byte[length]; in.readFully(bytes); return bytes;
+    }
+    private static String permissionString(java.io.DataInputStream in) throws Exception {
+        int length = in.readInt();
+        if (length < 0 || length > 60000 || length > in.available()) throw new IllegalArgumentException("permission string length");
+        byte[] bytes = new byte[length]; in.readFully(bytes);
+        return java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            .decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+    }
+    private static void permissionString(java.io.DataOutputStream out, String text) throws Exception {
+        byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (bytes.length > 60000) throw new IllegalArgumentException("permission string length");
+        out.writeInt(bytes.length); out.write(bytes);
+    }
+    private static void permissionReply(java.io.DataOutputStream out, byte[] bytes) throws Exception {
+        if (bytes.length > 65536) throw new IllegalArgumentException("permission reply length");
+        out.writeInt(bytes.length); out.write(bytes); out.flush();
+        if (System.out.checkError()) throw new IllegalStateException("permission protocol stdout failed");
+    }
+    private static void permissionIdentity(int pid) {
+        if (pid <= 0 || android.os.Process.myPid() != pid || android.os.Process.myUid() != 1000
+                || android.os.Binder.getCallingUid() != 1000 || android.os.Binder.getCallingPid() != pid)
+            throw new IllegalStateException("original permission caller credentials differ");
+    }
+    private static void permissionServer() throws Exception {
+        System.err.println("PERMISSION_ENTERED_MAIN"); System.err.flush();
+        if (System.err.checkError()) throw new IllegalStateException("permission entry stderr failed");
+        int pid = android.os.Process.myPid(); permissionIdentity(pid);
+        if (android.app.ActivityManager.getService() == null) throw new IllegalStateException("original activity permission owner unavailable");
+        var input = new java.io.DataInputStream(System.in);
+        var output = new java.io.DataOutputStream(System.out);
+        var bytes = new java.io.ByteArrayOutputStream();
+        var ready = new java.io.DataOutputStream(bytes);
+        ready.writeByte(1); ready.writeByte(1); ready.writeLong(0);
+        ready.writeInt(pid); ready.writeInt(1000); ready.writeInt(android.os.Binder.getCallingPid()); ready.writeInt(android.os.Binder.getCallingUid());
+        permissionReply(output, bytes.toByteArray());
+        long expected = 1;
+        for (;;) {
+            var frame = new java.io.DataInputStream(new java.io.ByteArrayInputStream(permissionFrame(input)));
+            if (frame.readUnsignedByte() != 1) throw new IllegalArgumentException("permission protocol version");
+            int kind = frame.readUnsignedByte(); long sequence = frame.readLong();
+            if (sequence != expected || sequence <= 0) throw new IllegalArgumentException("permission sequence");
+            permissionIdentity(pid);
+            bytes.reset(); var reply = new java.io.DataOutputStream(bytes);
+            if (kind == 4) {
+                if (frame.available() != 0) throw new IllegalArgumentException("shutdown tail");
+                reply.writeByte(1); reply.writeByte(5); reply.writeLong(sequence); reply.writeInt(pid); reply.writeInt(1000);
+                permissionReply(output, bytes.toByteArray()); return;
+            }
+            if (kind != 2) throw new IllegalArgumentException("permission request kind");
+            String permission = permissionString(frame); int targetPid = frame.readInt(); int targetUid = frame.readInt();
+            if (frame.available() != 0) throw new IllegalArgumentException("permission request tail");
+            try {
+                System.err.println("PERMISSION_REQUEST sequence=" + sequence);
+                System.err.println("PERMISSION_PHASE main pid=" + pid + " uid=" + android.os.Process.myUid());
+                System.err.println("PERMISSION_PHASE getService pid=" + pid + " uid=" + android.os.Process.myUid());
+                System.err.flush();
+                var activity = android.app.ActivityManager.getService();
+                if (activity == null) throw new IllegalStateException("original activity permission owner unavailable");
+                System.err.println("PERMISSION_PHASE checkPermission pid=" + pid + " uid=" + android.os.Process.myUid()); System.err.flush();
+                int status = activity.checkPermission(permission, targetPid, targetUid);
+                if (status != 0 && status != -1) throw new IllegalStateException("invalid original permission status " + status);
+                System.err.println("PERMISSION_PHASE reply pid=" + pid + " uid=" + android.os.Process.myUid() + " status=" + status); System.err.flush();
+                if (System.err.checkError()) throw new IllegalStateException("permission phase stderr failed");
+                reply.writeByte(1); reply.writeByte(3); reply.writeLong(sequence); reply.writeInt(pid); reply.writeInt(1000);
+                permissionString(reply, permission); reply.writeInt(targetPid); reply.writeInt(targetUid); reply.writeInt(status);
+                permissionReply(output, bytes.toByteArray()); expected++;
+            } catch (Throwable failure) {
+                bytes.reset(); reply = new java.io.DataOutputStream(bytes);
+                reply.writeByte(1); reply.writeByte(6); reply.writeLong(sequence); permissionString(reply, failure.toString());
+                permissionReply(output, bytes.toByteArray()); throw failure;
+            }
+        }
+    }
     public static void main(String[] args) {
         try {
+            if (args.length == 1 && "permission-server".equals(args[0])) { permissionServer(); return; }
             if (args.length == 4 && "permission-check".equals(args[0])) {
                 System.err.println("PERMISSION_ENTERED_MAIN");
                 System.err.flush();

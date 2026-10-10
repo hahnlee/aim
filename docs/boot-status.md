@@ -476,6 +476,14 @@ A separate bounded syscall diagnostic proves successful app_process exec
 and ART boot-image loading, with no oracle DEX open or stdout/stderr writes;
 it does not establish the later permission/Binder stage. Its failure and
 clean shutdown are retained, with owned PID/mount residue zero.
+The installer fixture now prepares one credential-verified original AMS
+permission reader before publishing its native installer (#1287), with a
+separate60-second startup budget, the original15-second request limit and
+60-second proxy total. Bounded typed pipe replies retain actual caller and
+subject identities; queue/error failures terminate the channel. Explicit
+Native-to-reader-to-Boot cleanup also reaps a held child when policy
+references or a busy request mutex remain. Seven actual host boundary/child
+tests and original Java/D8 linkage pass; quiet Android replay is not run.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later
 writes (#1270). Two actual fresh/recovered Store write-and-reread tests pass
