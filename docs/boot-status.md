@@ -465,7 +465,12 @@ Initial system-package scans now apply the pinned sysconfig update-owner
 policy (#1292): fresh non-APEX system packages receive their configured
 owner, existing records retain only a matching owner, and session installs
 retain their separately authorized source. Three actual scan/factory
-regressions pass; a rebuilt runtime and Android template replay remain unrun.
+regressions pass. A whole committed-source441 runtime now publishes70
+files in261.9 seconds with every copy field equal. Actual captured GMS
+updateOwner is com.android.vending; owned producer/init/display births,
+namespace members and mounts are gone after normal cleanup. Cross-runtime
+comparison with prior7a templates still fails and remains qualified; this
+one replay does not establish pair reliability or full acceptance.
 Eighteen fixture files shorten only disposable path components (#1293).
 A canonical-path audit of27 remaining bodies reduces Unix socket path
 length violations from22 to zero (maximum101 bytes, limit103); related
