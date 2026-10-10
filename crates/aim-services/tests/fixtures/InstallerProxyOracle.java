@@ -62,6 +62,9 @@ public final class InstallerProxyOracle {
     public static void main(String[] args) {
         try {
             if (args.length == 4 && "permission-check".equals(args[0])) {
+                System.err.println("PERMISSION_ENTERED_MAIN");
+                System.err.flush();
+                if (System.err.checkError()) throw new IllegalStateException("permission entry stderr failed");
                 System.err.println("PERMISSION_PHASE main pid=" + android.os.Process.myPid() + " uid=" + android.os.Process.myUid());
                 System.err.flush();
                 if (android.os.Process.myUid() != 1000 || android.os.Binder.getCallingUid() != 1000

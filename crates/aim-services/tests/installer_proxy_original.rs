@@ -162,7 +162,7 @@ fn original_permission(boot: &Boot, permission: &str, pid: i32, uid: i32)
         .and_then(|line|line.split_whitespace().find_map(|part|part.strip_prefix("pid=")))
         .and_then(|value|value.parse::<i32>().ok()).filter(|pid|*pid>0)
         .ok_or_else(||failure("original permission proof PID missing".into()))?;
-    let mut expected=String::new();
+    let mut expected=String::from("PERMISSION_ENTERED_MAIN\n");
     for phase in ["main","getService","checkPermission"] {
         expected.push_str(&format!("PERMISSION_PHASE {phase} pid={reader_pid} uid=1000\n"));
     }
