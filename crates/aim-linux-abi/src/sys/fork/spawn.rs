@@ -1079,6 +1079,9 @@ fn become_child(h: Handover) -> String {
     if !r.ok() {
         return format!("fork child: damaged state tail ({})",r.diagnostic());
     }
+    if let Err(error) = crate::diag::retain_exec_fd() {
+        return format!("fork diagnostics descriptor: errno {error}");
+    }
     if let Err(error)=super::super::verity_pager::restore_memberships(){return format!("fork restored mapping publication: {error}");}
     if let Err(error)=confirm_ready(h.parent,crate::verity_client().map(|client|client.member).unwrap_or(0)){return error;}
     drop(h);

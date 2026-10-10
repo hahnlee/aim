@@ -542,13 +542,21 @@ then the same PID/TID/call completes with11 bytes after release; the child
 exits0 and is reaped. Original boot validation is pending. This is
 diagnostic instrumentation, not a fix for the boot stall or slice C
 acceptance.
-The subsequent bounded5ee original boot identifies a live idmap2 child
-inside execve and its zygote parent blocked in wait4 for that exact child.
-Its main syscall entry has no completion before owned shutdown; this
-does not identify the exec substage. The existing trace option now also
-records generic argument, file resolution, image replacement, descriptor
-inheritance and host-exec stages. Their actual replay remains pending
-(#1298); no guest or program-specific execution path is added.
+The bounded5ee original boot identifies a live idmap2 child in execve
+and its zygote parent waiting for that exact child. Generic exec-stage
+tracing in the nextd4de replay shows the child reaches host exec; its
+same PID/birth changes argv from fork-child to idmap2, proving actual
+replacement. Missing later logs do not prove an exec or startup deadlock.
+Fork restoration marks private transfers close-on-exec, including the
+hidden diagnostics FD that should survive exec (#1302). Restoration now
+clears that flag only for the hidden diagnostics FD, retaining ordinary
+guest and other private descriptor flags and reporting failures.
+Compilation passes; actual fork/host-exec retention verification is
+pending. The original boot wait remains unresolved (#1298).
+The same diagnostic stops normally at its1GiB log guard: netd repeatedly
+gets one epoll event with an infinite timeout (#1301). Its watched event
+identity and blocking cause remain unproven. Both owned987MB log copies
+are losslessly compressed to26MB each, with decompression SHA verified.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally

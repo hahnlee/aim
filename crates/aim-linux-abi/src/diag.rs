@@ -26,6 +26,26 @@ pub fn keep_log_fd(fd: i32) {
     log_to(fd);
 }
 
+/// Fork transfers make private descriptors close-on-exec. The hidden
+/// diagnostics descriptor is deliberately retained across guest exec.
+pub(crate) fn retain_exec_fd() -> Result<(), crate::errno::Errno> {
+    let fd = log_fd();
+    if !crate::sys::fdtab::is_hidden(fd) {
+        return Ok(());
+    }
+    // SAFETY: this process owns its hidden diagnostics descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(crate::errno::last());
+    }
+    if flags & libc::FD_CLOEXEC != 0
+        && unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0
+    {
+        return Err(crate::errno::last());
+    }
+    Ok(())
+}
+
 /// `--stdio-null`: keep stderr as the (hidden, exec-surviving)
 /// diagnostics descriptor and give the guest `/dev/null` as stdin, stdout
 /// and stderr, as init gives its services. Returns the descriptor.
