@@ -38,6 +38,7 @@ pub struct SigningScan {
     pub libraries: Registry,
     pub(super) package_registry: crate::package::registry::Registry,
     pub update_ownership: crate::package::owner::update_ownership::UpdateOwnership,
+    pub(super) system_app_update_owners: BTreeMap<String, String>,
     pub installers: crate::package::owner::install_sources::Installers,
     pub(super) disabled_users: BTreeMap<String, super::disabled::DisabledUserStates>,
     pub(super) scanned_users: BTreeMap<String, BTreeMap<i32, UserState>>,
@@ -918,6 +919,7 @@ impl SigningScan {
             libraries: Registry::new(config),
             package_registry: Default::default(),
             update_ownership: Default::default(),
+            system_app_update_owners: config.system_app_update_owners.clone(),
             installers: crate::package::owner::install_sources::Installers::restore(settings),
             // readDisabledSysPackageLPw creates fresh settings; it does not
             // restore the active package's restriction state into them.

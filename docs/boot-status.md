@@ -424,8 +424,8 @@ Java/D8 linkage and Rust compilation pass; traced Android replay is unrun.
 Cleanup preserves the original error and data without a double panic; all
 owned PIDs and image attachments are gone. The kernel admission guard
 remains unchanged.
-A fresh roster has63 required manual bodies:34 scoped host bodies pass,
-the proxy body fails, and28 are unrun; full aggregate acceptance remains
+A fresh roster has63 required manual bodies:35 scoped host bodies pass,
+the proxy body fails, and27 are unrun; full aggregate acceptance remains
 unproven. The three shared bootstrap fixtures now inject failures into their
 actual captured-persistence metadata/directory owners and retain separate
 malformed live-getter checks (#1289); all three actual host bodies pass.
@@ -454,13 +454,27 @@ compilation. Corrected whole-runtime Native replay now passes initial admission,
 260.3s and70 mandatory-validated file copies with zero owned PID/mount
 residue. A second Native replay boots250.6s and the same-runtime Original
 boots295.6s; each publishes70 files with unchanged copy metadata and normal
-detach. Strict XML comparison still fails six files: roles packagesHash,
-42 domain UUIDs absent from package Setting IDs, generated data inode and
-preferred-row order. These differences are under owner/normalizer analysis;
-no parity acceptance or ART load/checksum/context acceptance is claimed.
-The traced proxy replay still exceeds its15-second original reader bound
-without phase output. Tool-mode output is not redirected; the stage before
-the first actual PID/UID expression remains unobserved. Its failure and
+detach. Domain identities are now compared through validated persisted
+owner mappings, including the42 domain owners absent from PackageSetting
+IDs (#1291); canonical UUID encoding, bijection and cross-owner references
+are checked. Eighteen comparator tests pass. Strict Native-pair comparison
+still fails four XML files (primary/reserve roles hash and restrictions);
+each Native-to-Original comparison still fails six. No parity acceptance
+or ART load/checksum/context acceptance is claimed.
+Initial system-package scans now apply the pinned sysconfig update-owner
+policy (#1292): fresh non-APEX system packages receive their configured
+owner, existing records retain only a matching owner, and session installs
+retain their separately authorized source. Three actual scan/factory
+regressions pass; a rebuilt runtime and Android template replay remain unrun.
+Eighteen fixture files shorten only disposable path components (#1293).
+A canonical-path audit of27 remaining bodies reduces Unix socket path
+length violations from22 to zero (maximum101 bytes, limit103); related
+lib/integration targets compile. Their Android bodies remain unrun.
+The quiet proxy replay still exceeds its15-second original reader bound
+without phase output, including a literal flushed before PID/UID lookup.
+A separate bounded syscall diagnostic proves successful app_process exec
+and ART boot-image loading, with no oracle DEX open or stdout/stderr writes;
+it does not establish the later permission/Binder stage. Its failure and
 clean shutdown are retained, with owned PID/mount residue zero.
 The Settings restrictions writer now emits its actual default-apps owner,
 including the empty container and pending browser, on initial and later

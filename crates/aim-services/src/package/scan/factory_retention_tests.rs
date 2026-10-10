@@ -104,7 +104,10 @@ fn current_factory_record_survives_loading_completion_and_real_existing_scan() {
         use_round_icon:false,recents_limit:16,framework:crate::package::parse::resources::Table::parse(&table).unwrap(),
         framework_overlays:vec![],framework_overlay_apks:vec![],framework_attrs:Default::default(),density_dpi:Some(160),
     };
-    let apks=crate::package::write::Apks {signing_overrides:None,files:Box::new(move |_|Some(apk.clone())),platform};
+    let image_root=files.0.clone();
+    let apks=crate::package::write::Apks {signing_overrides:None,files:Box::new(move |path|
+        if matches!(path,"/product/app/Factory/base.apk"|"/data/app/replacement/base.apk") {Some(apk.clone())}
+        else {path.strip_prefix('/').map(|path|image_root.join(path))}),platform};
     use p256::elliptic_curve::sec1::ToEncodedPoint;
     let mut public_key=vec![0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,
         0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00];
@@ -130,8 +133,16 @@ fn current_factory_record_survives_loading_completion_and_real_existing_scan() {
         version_code:1,flags:crate::package::settings::FLAG_SYSTEM,private_flags:0,last_modified_time:0,
         uses_sdk_libraries:vec![],uses_static_libraries:vec![],mime_groups:vec![],domain_set_id:[1;16],target_sdk_version:35,restrict_update_hash:None};
     let users=[User{id:0,pre_created:false,adb_install_disallowed:false}];
-    let mut owner=SigningScan::new(&Default::default(),&Default::default(),36).unwrap();
-    let admitted=owner.scan_new_system(&code,meta,UserPolicy{install_user:None,users:Some(&users),allow_install:true,instant_app:false,virtual_preload:false,stopped_system_app:false},&apks,inputs()).unwrap();
+    let mut config=crate::package::system_config::SystemConfig::default();
+    config.system_app_update_owners.insert("factory.example".into(),"fixture.store".into());
+    let mut owner=SigningScan::new(&config,&Default::default(),36).unwrap();
+    let initial=inputs();
+    let initial=ScanMetadataCompletion{context:AbiScanContext{
+        mode:AbiScanMode::Existing{first_boot_or_upgrade:true,old_was_stub:true,saved:None},..initial.context},..initial};
+    let admitted=owner.scan_new_system(&code,meta,UserPolicy{install_user:None,users:Some(&users),allow_install:true,instant_app:false,virtual_preload:false,stopped_system_app:false},&apks,initial).unwrap();
+    assert_eq!(admitted.candidate.record.settings.install_source.update_owner.as_deref(),Some("fixture.store"));
+    assert_eq!(owner.settings.packages[0],admitted.candidate.record.settings);
+    assert_init_update_owner_policy(&owner,&admitted.candidate);
     assert_eq!(owner.loaded_packages()["factory.example"].package,admitted.candidate.record.parsed);
     assert!(owner.seinfo("factory.example").unwrap().is_some());
     let old_progress=admitted.candidate.record.settings.loading_progress;
@@ -166,4 +177,70 @@ fn current_factory_record_survives_loading_completion_and_real_existing_scan() {
     assert_eq!(owner.settings.packages[0].code_path,replacement.location.path);
     assert_eq!(owner.settings.disabled_system_packages[0],current.settings);
     assert_eq!(owner.disabled_loaded_packages()["factory.example"].package,current.parsed);
+}
+
+
+fn assert_init_update_owner_policy(base:&SigningScan, admitted:&NewPackageOutcome) {
+    let candidate=||NewPackageOutcome{
+        record:Record{settings:admitted.record.settings.clone(),parsed:admitted.record.parsed.clone(),
+            signing:admitted.record.signing.clone(),identity:admitted.record.identity.clone(),origin:admitted.record.origin},
+        users:admitted.users.clone(),
+        signing:SigningOutcome{system_signature_mismatch:admitted.signing.system_signature_mismatch.clone()},
+    };
+    for (old_owner,configured,expected) in [
+        (Some("fixture.store"),Some("fixture.store"),Some("fixture.store")),
+        (None,Some("fixture.store"),None),
+        (Some("different.store"),Some("fixture.store"),None),
+        (Some("fixture.store"),None,None),
+    ] {
+        let mut owner=base.clone();let mut candidate=candidate();
+        candidate.record.settings.install_source.update_owner=old_owner.map(str::to_owned);
+        owner.settings.packages[0]=candidate.record.settings.clone();
+        match configured {Some(value)=>{owner.system_app_update_owners.insert("factory.example".into(),value.into());},None=>{owner.system_app_update_owners.clear();}}
+        let saved=candidate.record.settings.clone();
+        let before=saved.install_source.clone();
+        let result=owner.finish_init_update_owner(candidate,AbiScanMode::Existing{
+            first_boot_or_upgrade:false,old_was_stub:false,saved:Some(&saved)}).unwrap();
+        assert_eq!(result.record.settings.install_source.update_owner.as_deref(),expected);
+        let mut unchanged=result.record.settings.install_source.clone();unchanged.update_owner=before.update_owner.clone();
+        assert_eq!(unchanged,before);
+        assert_eq!(owner.settings.packages[0],result.record.settings);
+        owner.accepted_slot(&result.record,"update-owner-test").unwrap();
+    }
+    for mode in [AbiScanMode::Install{moved:None},AbiScanMode::Apex] {
+        let mut owner=base.clone();let result=owner.finish_init_update_owner(candidate(),mode).unwrap();
+        assert_eq!(result.record.settings.install_source.update_owner.as_deref(),
+            if matches!(mode,AbiScanMode::Apex){None}else{Some("fixture.store")});
+        assert_eq!(owner.settings.packages[0],result.record.settings);
+    }
+    let mut owner=base.clone();let mut ordinary=candidate();
+    ordinary.record.settings.flags&=!crate::package::settings::FLAG_SYSTEM;
+    owner.settings.packages[0]=ordinary.record.settings.clone();
+    let result=owner.finish_init_update_owner(ordinary,AbiScanMode::Existing{
+        first_boot_or_upgrade:false,old_was_stub:false,saved:None}).unwrap();
+    assert_eq!(result.record.settings.install_source.update_owner.as_deref(),Some("fixture.store"));
+    for kind in 0..3 {
+        let mut owner=base.clone();let mut foreign=admitted.record.settings.clone();
+        match kind{0=>foreign.name="foreign.owner".into(),1=>foreign.app_id+=1,_=>foreign.install_source.update_owner=Some("foreign.store".into())}
+        let unchanged=owner.clone();
+        assert!(owner.finish_init_update_owner(candidate(),AbiScanMode::Existing{
+            first_boot_or_upgrade:false,old_was_stub:false,saved:Some(&foreign)}).is_err());
+        assert_eq!(owner,unchanged);
+    }
+    let mut owner=base.clone();let mut stale=candidate();stale.record.settings.category_hint=123;
+    let unchanged=owner.clone();
+    assert!(owner.finish_init_update_owner(stale,AbiScanMode::Existing{
+        first_boot_or_upgrade:false,old_was_stub:false,saved:None}).is_err());
+    assert_eq!(owner,unchanged);
+    // Rename mode uses the actual renamed parsed/setting name for sysconfig,
+    // while old ownership comes from the installed manifest-name request.
+    let mut owner=base.clone();let mut renamed=candidate();
+    renamed.record.identity.manifest_name="replacement.manifest".into();
+    owner.system_app_update_owners.insert("replacement.manifest".into(),"wrong.lookup".into());
+    let original=renamed.record.settings.clone();
+    let mut installed=original.clone();installed.name="replacement.manifest".into();
+    let result=owner.finish_init_update_owner(renamed,AbiScanMode::Original{
+        first_boot_or_upgrade:false,old_was_stub:false,installed:&installed,original:&original}).unwrap();
+    assert_eq!(result.record.settings.install_source.update_owner.as_deref(),Some("fixture.store"));
+    assert_eq!(owner.settings.packages[0],result.record.settings);
 }
