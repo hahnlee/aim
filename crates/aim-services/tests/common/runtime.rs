@@ -16,6 +16,122 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+/// Captured EOF stdin/stdout/stderr for the archive oracle only; not a streaming caller.
+#[track_caller]
+pub fn run_with_status_receipt(command: &mut Command) -> Output {
+    let output = match scoped_output(command, std::time::Duration::from_secs(60)) {
+        Ok(output) => output,
+        Err(failure) => {
+            use std::os::unix::process::ExitStatusExt;
+            let receipt = std::env::temp_dir().join(format!("aim-archive-capture-{}-{}", std::process::id(), failure.pid));
+            let record = format!("reason={} pid={} raw={:?} code={:?} signal={:?} stdout_eof={} stderr_eof={} stdout_bytes={} stderr_bytes={}\n",
+                failure.reason, failure.pid, failure.status.map(|s| s.into_raw()), failure.status.and_then(|s| s.code()),
+                failure.status.and_then(|s| s.signal()), failure.stdout_eof, failure.stderr_eof, failure.stdout.len(), failure.stderr.len());
+            let saved = (|| -> std::io::Result<()> {
+                std::fs::create_dir(&receipt)?;
+                std::fs::write(receipt.join("stdout.partial"), &failure.stdout)?;
+                std::fs::write(receipt.join("stderr.partial"), &failure.stderr)?;
+                std::fs::write(receipt.join("receipt.txt"), &record)
+            })();
+            eprintln!("fixture-child failure {record}partial_receipt={receipt:?} persistence={saved:?}");
+            panic!("archive child capture failed: {}", failure.reason);
+        }
+    };
+    assert!(output.status.success(), "{:?}: {}: {}", command.get_program(), output.status,
+        String::from_utf8_lossy(&output.stderr));
+    output
+}
+#[derive(Debug)]
+struct CaptureFailure {
+    reason: String,
+    pid: u32,
+    status: Option<std::process::ExitStatus>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_eof: bool,
+    stderr_eof: bool,
+}
+fn scoped_output(command: &mut Command, eof_limit: std::time::Duration) -> Result<Output, CaptureFailure> {
+    use std::{io::Read, os::{fd::AsRawFd, unix::process::ExitStatusExt}, process::Stdio, time::{Duration, Instant}};
+    const OUTPUT_LIMIT: usize = 1024 * 1024;
+    let mut child = QueryChild(command.stdin(Stdio::null()).stdout(Stdio::piped())
+        .stderr(Stdio::piped()).spawn().unwrap());
+    let pid = child.0.id();
+    eprintln!("fixture-child phase=spawn pid={pid} program={:?} args={:?}",
+        command.get_program(), command.get_args().collect::<Vec<_>>());
+    let mut stdout = child.0.stdout.take().unwrap();
+    let mut stderr = child.0.stderr.take().unwrap();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let (mut out_eof, mut err_eof) = (false, false);
+    let mut status = None;
+    let mut failure = None;
+    let mut eof_deadline = None;
+    for fd in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            failure = Some(format!("pipe configuration: {}", std::io::Error::last_os_error()));
+            break;
+        }
+    }
+    let drain = |pipe: &mut dyn Read, bytes: &mut Vec<u8>, other: usize| -> Result<bool, String> {
+        let mut buffer = [0u8; 8192];
+        for _ in 0..16 {
+            let room = OUTPUT_LIMIT - bytes.len() - other;
+            let capacity = buffer.len().min(room + 1);
+            match pipe.read(&mut buffer[..capacity]) {
+                Ok(0) => return Ok(true),
+                Ok(n) => {
+                    bytes.extend_from_slice(&buffer[..n.min(room)]);
+                    if n > room { return Err("combined output exceeds 1MiB diagnostic budget".into()); }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(format!("output read: {error}")),
+            }
+        }
+        Ok(false)
+    };
+    loop {
+        if failure.is_none() && !out_eof {
+            match drain(&mut stdout, &mut out, err.len()) { Ok(eof) => out_eof = eof, Err(error) => failure = Some(error) }
+        }
+        if failure.is_none() && !err_eof {
+            match drain(&mut stderr, &mut err, out.len()) { Ok(eof) => err_eof = eof, Err(error) => failure = Some(error) }
+        }
+        if status.is_none() {
+            match child.0.try_wait() {
+                Ok(Some(done)) => {
+                    eprintln!("fixture-child phase=wait pid={pid} raw={} code={:?} signal={:?}", done.into_raw(), done.code(), done.signal());
+                    status = Some(done);
+                    eof_deadline = Some(Instant::now() + eof_limit);
+                }
+                Ok(None) => {}
+                Err(error) => failure = Some(format!("wait: {error}")),
+            }
+        }
+        if failure.is_none() && status.is_some() && out_eof && err_eof { break; }
+        if eof_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            failure = Some(format!("output EOF exceeded {eof_limit:?}"));
+        }
+        if let Some(mut reason) = failure {
+            if status.is_none() {
+                if let Err(error) = child.0.kill() { reason.push_str(&format!("; held child kill: {error}")); }
+                match child.0.wait() {
+                    Ok(done) => status = Some(done),
+                    Err(error) => reason.push_str(&format!("; held child reap: {error}")),
+                }
+            }
+            eprintln!("fixture-child capture-error pid={pid} reason={reason} raw={:?} stdout_bytes={} stderr_bytes={} stdout_eof={out_eof} stderr_eof={err_eof}",
+                status.map(|s| s.into_raw()), out.len(), err.len());
+            return Err(CaptureFailure { reason, pid, status, stdout: out, stderr: err, stdout_eof: out_eof, stderr_eof: err_eof });
+        }
+        // Active-child lifetime remains under the enclosing held body supervisor's 900s.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eprintln!("fixture-child phase=output-eof pid={pid} stdout_bytes={} stderr_bytes={}", out.len(), err.len());
+    Ok(Output { status: status.unwrap(), stdout: out, stderr: err })
+}
+
 #[track_caller]
 pub fn run(command: &mut Command) -> Output {
     let output = command.output().unwrap();

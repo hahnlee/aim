@@ -662,7 +662,7 @@ fn check_archives(boot: &Boot, directory: &std::path::Path) {
         }
     }
     let count = expected.len().to_string();
-    let result = run(boot.command().args([
+    let result = common::runtime::run_with_status_receipt(boot.command().args([
         "shell",
         "/system/bin/app_process",
         "-Djava.class.path=/data/local/tmp/suspension-dialogs/oracle.dex:/system/framework/services.jar",

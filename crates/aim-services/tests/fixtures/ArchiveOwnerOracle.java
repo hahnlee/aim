@@ -24,7 +24,9 @@ public final class ArchiveOwnerOracle {
 
     private static void check(String[] args) throws Exception {
         int count = Integer.parseInt(args[1]);
+        System.err.println("archive-oracle phase=start count=" + count);
         for (int i = 0; i < count; i++) {
+            System.err.println("archive-oracle case=" + i + " phase=input");
             ArchiveState archive = null;
             boolean invalid = false;
             try (var input = new FileInputStream(args[0] + "/archive-" + i + ".xml")) {
@@ -53,6 +55,7 @@ public final class ArchiveOwnerOracle {
                         : new ArchiveState(activities, installer, time);
             }
             catch (IllegalStateException error) { invalid = true; }
+            System.err.println("archive-oracle case=" + i + " phase=parsed invalid=" + invalid);
             try (var output = new DataOutputStream(new FileOutputStream(args[0] + "/archive-" + i + ".original"))) {
                 if (invalid) { output.writeByte(2); continue; }
                 output.writeBoolean(archive != null);
@@ -67,8 +70,12 @@ public final class ArchiveOwnerOracle {
                     text(output, activity.getMonochromeIconBitmap() == null ? null
                             : activity.getMonochromeIconBitmap().toString());
                 }
+            } finally {
+                System.err.println("archive-oracle case=" + i + " phase=output-scope-ended");
             }
         }
+        System.err.println("archive-oracle phase=before-final-stdout count=" + count);
         System.out.println("ARCHIVES " + count);
+        System.err.println("archive-oracle phase=after-final-stdout count=" + count);
     }
 }
