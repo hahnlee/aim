@@ -586,8 +586,14 @@ paired with the authenticated host init birth. All70 copied payloads match
 bytes,mode,mtime andxattrs, and owned processes,namespaces and mounts are
 gone. A second unchanged-cohort Native run reaches settings in125.77s but
 fails the300-second boot/permission limit without publishing a template;
-its owned resources are also gone. Native-pair comparison is NOT RUN,
-and matched Original/template parity, rollback, apps and full66CTS remain
+its owned resources are also gone. An isolated third run completes boot
+in247.8s and permissions in254.6s; all70 copied files match bytes,mode,mtime
+andxattrs and all owned resources are released. Strict first/third comparison
+fails four XML files: roles primary/reserve differ in packagesHash, and
+user0 package restrictions primary/reserve differ in five CE/DE inode values.
+packages.xml matches. The fields remain checked; inode bindings and hash
+preimages still require owner evidence. Matched Original/template parity,
+rollback, apps and full66CTS remain
 unproven. The instrumented Original parcel replay also fails boot-query
 readiness before launching its oracle; its progress checks are NOT RUN.
 The full66 CTS runner's comparison now reconstructs the same staged-install
