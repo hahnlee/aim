@@ -81,6 +81,45 @@ class TemplateStructure(unittest.TestCase):
                 b['xml']['data/system/packages.xml']['children'][1]['attrs'][field] = value
                 self.assertFalse(audit.compare(a, b, {})['structure_pass'])
 
+    def domain_fixture(self):
+        result = fixture()
+        tree = result['xml']['data/system/packages.xml']
+        states = [node('package-state', {'packageName': p['attrs']['name'],
+                  'id': p['attrs']['domainSetId']}, [node('state', {'value': '1'})])
+                  for p in tree['children'] if p['tag'] == 'package']
+        states.append(node('package-state', {'packageName': 'fixture.dvs_only',
+                      'id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'}, [node('state', {'value': '1'})]))
+        tree['children'].append(node('domain-verifications', children=[node('active', children=states)]))
+        result['xml']['data/system/packages.xml.reservecopy'] = copy.deepcopy(tree)
+        return result
+
+    def test_dvs_only_generated_identity_keeps_owner_and_state(self):
+        a, b = self.domain_fixture(), self.domain_fixture()
+        for filename in ('data/system/packages.xml', 'data/system/packages.xml.reservecopy'):
+            state = b['xml'][filename]['children'][-1]['children'][0]['children'][-1]
+            state['attrs']['id'] = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+        self.assertTrue(audit.compare(a, b, {})['structure_pass'])
+        b['xml']['data/system/packages.xml']['children'][-1]['children'][0]['children'][-1]['children'][0]['attrs']['value'] = '2'
+        self.assertFalse(audit.compare(a, b, {})['structure_pass'])
+
+    def test_domain_owner_identity_conflicts_and_invalid_references_fail(self):
+        for kind in ('invalid_uuid', 'duplicate_owner', 'shared_uuid', 'setting_mismatch', 'reserve_mismatch'):
+            with self.subTest(kind=kind):
+                a, b = self.domain_fixture(), self.domain_fixture()
+                states = b['xml']['data/system/packages.xml']['children'][-1]['children'][0]['children']
+                if kind == 'invalid_uuid':
+                    states[-1]['attrs']['id'] = 'invalid'
+                elif kind == 'duplicate_owner':
+                    states.append(copy.deepcopy(states[-1]))
+                elif kind == 'shared_uuid':
+                    states[-1]['attrs']['id'] = states[0]['attrs']['id']
+                elif kind == 'setting_mismatch':
+                    states[0]['attrs']['id'] = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+                else:
+                    b['xml']['data/system/packages.xml.reservecopy']['children'][-1]['children'][0]['children'][-1]['attrs']['id'] = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+                with self.assertRaises(ValueError):
+                    audit.compare(a, b, {})
+
     def test_preferred_record_order_is_preserved(self):
         a, b = fixture(), fixture()
         b['xml']['data/system/users/0/package-restrictions.xml']['children'][1]['children'].reverse()

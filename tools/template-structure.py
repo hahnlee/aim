@@ -171,11 +171,7 @@ class Normalizer:
                     raise ValueError('certificate index has multiple values')
             if tag == 'public-key':
                 self.keys[attrs['identifier']] = attrs['value']
-            if tag in ('package', 'updated-package') and 'domainSetId' in attrs:
-                value = attrs['domainSetId']
-                uuid.UUID(value)
-                if uuid.UUID(value).int != 0:
-                    self.domains[value] = '<domain:' + attrs['name'] + '>'
+        self.domain_owners = self.domain_aliases(tree)
         if len(self.stub_roots) != 3 or not all(name in self.stub_roots for name in ('com.android.chrome', 'com.google.android.webview')):
             raise ValueError('three expected decompressed stub owners required')
         self.uids = {key: '|'.join(sorted(names)) for key, names in uid_names.items()
@@ -184,6 +180,53 @@ class Normalizer:
             if node['tag'] == 'keyset':
                 self.sets[node['attrs']['identifier']] = digest(json.dumps(sorted(
                     self.keys[c['attrs']['identifier']] for c in node['children'])).encode())
+
+    def domain_aliases(self, tree):
+        owners, ids, settings, seen_ps, seen_dvs = {}, {}, {}, set(), set()
+
+        def identity(owner, value, source):
+            if not isinstance(owner, str) or not owner.strip() or owner != owner.strip() or '\0' in owner:
+                raise ValueError('missing or invalid domain owner ' + source)
+            try:
+                parsed = uuid.UUID(value)
+            except (ValueError, TypeError, AttributeError) as error:
+                raise ValueError('invalid domain UUID ' + source) from error
+            return owner, str(parsed), parsed.int
+
+        def register(owner, value, nonzero, source):
+            if owner in owners and owners[owner] != value:
+                raise ValueError('domain owner has conflicting UUID ' + source)
+            owners[owner] = value
+            # The disabled zero UUID is a sentinel, not a generated owner alias.
+            if nonzero:
+                if value in ids and ids[value] != owner:
+                    raise ValueError('domain UUID has conflicting owner ' + source)
+                ids[value] = owner
+                self.domains[value] = '<domain:' + owner + '>'
+
+        for node in walk(tree):
+            tag, attrs = node['tag'], node['attrs']
+            if tag not in ('package', 'updated-package') or 'domainSetId' not in attrs:
+                continue
+            owner, value, nonzero = identity(attrs.get('name'), attrs['domainSetId'], tag)
+            key = (tag, owner)
+            if key in seen_ps:
+                raise ValueError('duplicate PackageSetting domain owner ' + owner)
+            seen_ps.add(key)
+            register(owner, value, nonzero, tag + ':' + owner)
+            settings[owner] = value
+        for node in walk(tree):
+            if node['tag'] != 'package-state':
+                continue
+            attrs = node['attrs']
+            owner, value, nonzero = identity(attrs.get('packageName'), attrs.get('id'), 'package-state')
+            if owner in seen_dvs:
+                raise ValueError('duplicate DVS domain owner ' + owner)
+            seen_dvs.add(owner)
+            if owner in settings and settings[owner] != value:
+                raise ValueError('PackageSetting/DVS domain ID mismatch ' + owner)
+            register(owner, value, nonzero, 'package-state:' + owner)
+        return owners
 
     def uid(self, value, gid=False):
         number = int(value)
@@ -217,8 +260,16 @@ class Normalizer:
                 if restrictions and tag == 'pkg' and key == 'first-install-time':
                     attrs[key] = '<boot-time>' if int(val, 16) > 0 else val
                 if key == 'domainSetId' or tag == 'package-state' and key == 'id':
-                    if val in self.domains:
-                        attrs[key] = self.domains[val]
+                    owner = attrs.get('packageName') if tag == 'package-state' else attrs.get('name')
+                    try:
+                        parsed = uuid.UUID(val)
+                    except (ValueError, TypeError, AttributeError) as error:
+                        raise ValueError('invalid domain UUID reference ' + filename) from error
+                    value = str(parsed)
+                    if owner not in self.domain_owners or self.domain_owners[owner] != value:
+                        raise ValueError('domain UUID reference owner mismatch ' + filename)
+                    if parsed.int != 0:
+                        attrs[key] = self.domains[value]
                 if key in ('codePath', 'nativeLibraryPath', 'resourcePath', 'path', 'dataDir'):
                     attrs[key] = self.path(val)
                 if settings and tag == 'cert' and key == 'index':
