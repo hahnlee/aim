@@ -222,6 +222,7 @@ dependencies = [
 name = "aim-linux-abi"
 version = "0.1.0"
 dependencies = [
+ "aim-android-image",
  "aim-android-init",
  "aim-ashmem",
  "aim-binder-driver",
