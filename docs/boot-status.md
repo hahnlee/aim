@@ -536,9 +536,19 @@ Generic tracing alone does not identify that wait: multiple restarted
 zygotes share an append log, and the441 runtime records ordinary syscalls
 only after completion. The dispatcher now emits an entry and matching
 completion with host PID, Linux TID and call sequence under the existing
---trace option (#1299). Compilation passes; actual blocking-call and
-original boot validation are pending. This is diagnostic instrumentation,
-not a fix for the boot stall or slice C acceptance.
+--trace option (#1299). The coherent5ee905a9 runtime compiles and an actual
+original-bionic pipe read proves entry is visible while input is held,
+then the same PID/TID/call completes with11 bytes after release; the child
+exits0 and is reaped. Original boot validation is pending. This is
+diagnostic instrumentation, not a fix for the boot stall or slice C
+acceptance.
+The subsequent bounded5ee original boot identifies a live idmap2 child
+inside execve and its zygote parent blocked in wait4 for that exact child.
+Its main syscall entry has no completion before owned shutdown; this
+does not identify the exec substage. The existing trace option now also
+records generic argument, file resolution, image replacement, descriptor
+inheritance and host-exec stages. Their actual replay remains pending
+(#1298); no guest or program-specific execution path is added.
 A later diagnostic invokes no readiness query before its300-second
 readiness failure, then exceeds60-second stop and aborts from a shared
 Boot::Drop double panic (#1297). Owned processes and mounts are normally

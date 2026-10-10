@@ -260,7 +260,16 @@ pub fn execveat(ctx: &mut GuestContext, a: [u64; 6]) -> i64 {
     exec(ctx, a[0] as i32, a[1], a[2], a[3], a[4])
 }
 
+fn trace_stage(stage: &str) {
+    if super::tracing() {
+        // SAFETY: getpid reads this process's host identity.
+        let pid = unsafe { libc::getpid() };
+        crate::diag!("[linux-exec] pid={pid} tid={} stage={stage}", super::host_tid());
+    }
+}
+
 fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, flags: u64) -> i64 {
+    trace_stage("arguments.enter");
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return -(EINVAL as i64);
     }
@@ -277,6 +286,7 @@ fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, fla
     if argv.is_empty() {
         argv.push(CString::default());
     }
+    trace_stage("arguments.leave");
     // The filename as Linux records it (bprm->filename): AT_EXECFN, and
     // what a script's interpreter is given.
     let filename: Vec<u8> = if path.is_empty() {
@@ -291,13 +301,19 @@ fn exec(ctx: &mut GuestContext, dirfd: i32, path: u64, argv: u64, envp: u64, fla
         f.extend_from_slice(&path);
         f
     };
+    trace_stage("resolve.enter");
     let target = match resolve(dirfd, &path, flags) {
         Ok(r) => r,
         Err(e) => return e,
     };
+    trace_stage("resolve.leave");
+    trace_stage("interpret.enter");
     match interpret(target, &filename, argv) {
-        Ok((target, argv)) => in_place(ctx, &target, &argv, &envp, &filename)
-            .unwrap_or_else(|| relaunch(&target.guest, &argv, &envp, &filename)),
+        Ok((target, argv)) => {
+            trace_stage("interpret.leave");
+            in_place(ctx, &target, &argv, &envp, &filename)
+                .unwrap_or_else(|| relaunch(&target.guest, &argv, &envp, &filename))
+        }
         Err(e) => e,
     }
 }
@@ -311,6 +327,7 @@ fn in_place(
     envp: &[CString],
     execfn: &[u8],
 ) -> Option<i64> {
+    trace_stage("in-place.eligibility");
     if !context::is_live(ctx)
         || !super::thread::alone()
         || crate::hostcall::used()
@@ -319,6 +336,7 @@ fn in_place(
     {
         return None;
     }
+    trace_stage("in-place.interpreter");
     // What Linux checks before the point of no return: the interpreter.
     let interp=match crate::loader::interpreter_errno(&target.host){Ok(interp)=>interp,Err(error)=>return Some(-(error as i64))};
     if let Some(i) = interp {
@@ -332,8 +350,11 @@ fn in_place(
     }
     let argv: Vec<Vec<u8>> = argv.iter().map(|a| a.as_bytes().to_vec()).collect();
     let envp: Vec<Vec<u8>> = envp.iter().map(|e| e.as_bytes().to_vec()).collect();
+    trace_stage("in-place.handovers.enter");
     super::fork::spawn::wait_handovers();
+    trace_stage("in-place.close-on-exec");
     if let Err(error)=super::fs::close_on_exec(){crate::diag!("[linux-abi] exec descriptor close: errno {error}");super::signal::die(SIGSEGV)}
+    trace_stage("in-place.reset");
     super::fdtab::adopt_plain();
     super::binder::exec_reset();
     super::mem::exec_reset();
@@ -343,6 +364,7 @@ fn in_place(
     super::thread::exec_reset();
     super::misc::exec_reset();
     super::cred::exec();
+    trace_stage("in-place.load");
     match crate::load_program(target, &argv, &envp, execfn) {
         Ok((entry, sp)) => {
             ctx.x = [0; 31];
@@ -427,7 +449,9 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     let Some(launch) = LAUNCH.get() else {
         return -(ENOEXEC as i64);
     };
+    trace_stage("relaunch.state.enter");
     let state = ExecState::current();
+    trace_stage("relaunch.state.leave");
     let mut id = super::cred::current();
     id.exec_transform();
     let mut host = vec![launch.exe.clone()];
@@ -459,13 +483,19 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
         arg(program),
     ]);
     host.extend(argv.iter().cloned());
+    trace_stage("relaunch.handovers.enter");
     super::fork::spawn::wait_handovers();
+    trace_stage("relaunch.receipt.prepare");
     let mut receipt=match super::exec_fd_receipt::Receipt::prepare(){Ok(receipt)=>receipt,Err(error)=>return -(error as i64)};
+    trace_stage("relaunch.lifecycle.enter");
     let guard=super::fdtab::lifecycle();
+    trace_stage("relaunch.receipt.capture");
     if let Some(receipt)=&mut receipt{if let Err(error)=receipt.capture(){drop(guard);return -(error as i64);}}
+    trace_stage("relaunch.descriptors");
     let mut descriptors=Vec::new();
     for fd in super::fd_visibility::visible(){let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};if flags<0{let error=errno::last();drop(guard);return -(error as i64);}if flags&libc::FD_CLOEXEC==0{descriptors.push(fd.to_string());}}
     let mut options=vec![arg("--guest-fds"),arg(descriptors.join(",")),arg("--socket-receipts"),arg(super::fdtab::socket_exec_text())];
+    trace_stage("relaunch.regular-fds");
     let regular=match super::fdtab::regular_exec_text(){Ok(text)=>text,Err(error)=>{drop(guard);return -(error as i64);}};if !regular.is_empty(){options.extend([arg("--regular-fds"),arg(regular)]);}
     if let Some(receipt)=&receipt{options.extend([arg("--exec-close-receipt"),arg(receipt.fd().to_string())]);}
     host.splice(1..1,options);
@@ -474,7 +504,9 @@ fn relaunch(program: &str, argv: &[CString], envp: &[CString], execfn: &[u8]) ->
     let mut henv: Vec<*const libc::c_char> = envp.iter().map(|s| s.as_ptr()).collect();
     henv.push(std::ptr::null());
     // SAFETY: NULL-terminated arrays of C strings that outlive the call.
+    trace_stage("relaunch.writer-flags");
     let writer_flags=match super::fdtab::prepare_regular_exec(){Ok(flags)=>flags,Err(error)=>{drop(guard);return -(error as i64)}};
+    trace_stage("relaunch.host-exec");
     unsafe { libc::execve(hargv[0], hargv.as_ptr(), henv.as_ptr()) };
     let error=errno::last();drop(guard);drop(writer_flags);drop(receipt);-(error as i64)
 }
