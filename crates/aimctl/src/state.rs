@@ -83,6 +83,9 @@ impl Files {
     pub fn log(&self) -> PathBuf {
         self.dir.join("log")
     }
+    pub fn cleanup(&self) -> PathBuf {
+        self.dir.join("cleanup")
+    }
     pub fn display(&self) -> PathBuf {
         self.dir.join("display")
     }

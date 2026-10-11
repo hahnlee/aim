@@ -38,6 +38,14 @@ fn run(command: &mut Command) -> Result<Output, String> {
 }
 
 fn run_within(command: &mut Command, limit: Duration) -> Result<Output, String> {
+    run_until(command, Instant::now() + limit)
+}
+
+fn run_until(command: &mut Command, deadline: Instant) -> Result<Output, String> {
+    let limit = deadline.saturating_duration_since(Instant::now());
+    if limit.is_zero() {
+        return Err("disk command cleanup deadline reached".into());
+    }
     let describe = |command: &Command| {
         let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
         format!(
@@ -63,7 +71,6 @@ fn run_within(command: &mut Command, limit: Duration) -> Result<Output, String> 
     };
     let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
     let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
-    let deadline = Instant::now() + limit;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -222,6 +229,27 @@ pub fn detach(device: &str, patience: Duration) -> Result<(), String> {
     detach_with(device, patience, || {
         run(Command::new("diskutil").args(["eject", device])).map(|_| ())
     })
+}
+
+/// Normal detach sharing the caller's absolute cleanup deadline.
+pub fn detach_until(device: &str, deadline: Instant) -> Result<(), String> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!("normal detach {device}: cleanup deadline reached"));
+        }
+        match run_until(Command::new("diskutil").args(["eject", device]), deadline) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if !(error.contains("dissented") || error.contains("could not be unmounted"))
+                    || Instant::now() >= deadline
+                {
+                    return Err(format!("refusing to force detach {device}: {error}"));
+                }
+                std::thread::sleep(Duration::from_millis(500)
+                    .min(deadline.saturating_duration_since(Instant::now())));
+            }
+        }
+    }
 }
 
 fn detach_with(device: &str, patience: Duration, eject: impl FnMut() -> Result<(), String>) -> Result<(), String> {

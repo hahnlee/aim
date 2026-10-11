@@ -684,8 +684,19 @@ body was launched after its cleanup marker. Root verifies zero live namespace
 members and normally ejects its DATA, preserving the original timeout evidence.
 The native-path oracle now batches the same72 input rows in one original ART
 process, with fresh original objects and four output fields per row; every
-per-case native assertion and missing/extra-row check remains. The updated Rust
-fixture compiles; full replay remains NOT RUN. Current C completion explicitly
+per-case native assertion and missing/extra-row check remains. The full844ade22
+replay reaches all original/native comparisons, the72 path rows,48 library
+policy cases, GSF scan/copy rollback,16 final flags and the Settings launch;
+it fails only in normal cleanup at1407.81s because DATA remains mounted.
+This is not a full PASS. Source/timing evidence for59..67 ART calls after the
+path stage justifies a2400s bound for this body; boot300s and cleanup60s stay.
+The controller now retains exact owned process births, signals individual
+PIDs, finishes only its own DATA backing after guest reap, checks actual
+detach and writes a run-bound cleanup receipt before reporting success
+(#796/#1318). Eight controller tests pass, including a foreign same-group
+peer and stale birth; five disk tests pass. Actual DATA finish and the full
+three-body replay with this controller are not yet verified.
+Current C completion explicitly
 defers games and Play Store catalog transactions per the user (#704/#1273);
 other CTS/app/template/rollback gates remain required.
 The first template on the matched Native image completes settings in110.3s,
