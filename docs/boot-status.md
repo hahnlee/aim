@@ -105,8 +105,17 @@ attachments gone. The older orphan workers remain separately tracked under
 controller ancestry #796. Full66 Android CTS remains NOT RUN.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/
-forwarding regressions and the release controller build pass; actual native
-trace replay is pending. Default boot options are unchanged.
+forwarding regressions and the release controller build pass. The260.65s
+native trace diagnostic (`c89n5`) completes with395 observed owned births gone,
+unchanged inputs and no retained mounts. Its180/220/250s samples do not reproduce
+the earlier72s PM stall (#1329); it does not execute Role or CTS. With fresh
+primary helper builds, `c89n6` stops normally in323.87s but reaches no Role call:
+owner files never remain unchanged for30s within its180s quiescence budget.
+Package-restrictions content changes116 times and Roles content22 times in the
+observed samples (#1328); these are actual content changes, not just timestamps.
+Default boot options are unchanged. Original `c89o4` already reads ADB setting1;
+writing1 and reading it back succeeds, but persistent USB configuration stays
+none. A normal two-state Settings-owner setup is now being checked (#1330).
 The native permission writer now places definitions before package/tail records
 (#1326), and callback replay retains real committed admission order (#1327).
 Six focused Rust regressions pass; the corrected native runtime has not booted.
