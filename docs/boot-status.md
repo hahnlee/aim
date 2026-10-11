@@ -122,7 +122,18 @@ prove a runtime transport defect (#1330). The existing vendor named-port path
 sets persistent debugging after properties load; `aimctl start/run --adb-port
 PORT` now forwards that exact androidboot input and stores it in resident state.
 Two port parser/state tests, one forwarding regression and the release controller
-build pass. Real named-port reboot validation remains pending.
+build pass. Original named-port `c89o6` completes real shell-v2/exec-out, shell
+UID2000, service checks, stayon and official adb reboot in343.61s. Actual offline,
+SystemServer4912→6368, renewed device/shell and retained port5637/persistent adb
+are verified. Normal stop and strict owned birth/namespace/mount/IORegistry
+attachment absence pass (#1330 closed); native reboot/full66 remain unrun.
+The diagnostic owner recorder now accepts the original SettingsState ordered
+settings/namespaceHashes ABX roots with six real immutable blobs and malformed
+controls (#1331 closed). An observed zero-byte sample is preserved without
+snapshot credit and resets stability (#1332); six offline tests pass. The next
+native `c89n9` observation stops in272.60s before Role because a restrictions
+file moves during the earlier read helper. Normal cleanup and pins pass; the
+read-race sampling gap is being corrected without weakening the Role comparison.
 The native permission writer now places definitions before package/tail records
 (#1326), and callback replay retains real committed admission order (#1327).
 Six focused Rust regressions pass; the corrected native runtime has not booted.
