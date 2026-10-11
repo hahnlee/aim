@@ -138,6 +138,7 @@ struct Reserved {
     base: Arc<Snapshot>,
     created: Mutex<Vec<(String, i32, i64)>>,
     committed: AtomicBool,
+    commit_errors: Mutex<Vec<Exception>>,
     errors: Arc<Mutex<Vec<String>>>,
     pending: Arc<super::post_install::Pending>,
 }
@@ -270,6 +271,7 @@ impl pipeline::Environment for Owner {
             base: base.clone(),
             created: Mutex::new(Vec::new()),
             committed: AtomicBool::new(false),
+            commit_errors: Mutex::new(Vec::new()),
             errors: self.errors.clone(),
             pending: self.pending.clone(),
         };
@@ -715,15 +717,15 @@ impl pipeline::Reservation for Reserved {
         self.committed.store(true, Ordering::Release);
         let created = self.created.lock().unwrap().drain(..).collect::<Vec<_>>();
         for (name, user, inode) in created {
-            if let Err(error) = (self.config.commit_app_data)(&name, user, inode) {
-                self.errors.lock().unwrap().push(format!(
-                    "Install app-data commit {name}:{user}: {}",
-                    error.message
-                ));
+            if let Err(mut error) = (self.config.commit_app_data)(&name, user, inode) {
+                error.message = format!("Install app-data commit {name}:{user}: {}", error.message);
+                self.errors.lock().unwrap().push(error.message.clone());
+                self.commit_errors.lock().unwrap().push(error);
             }
         }
     }
     fn publication_finished(&self, snapshot: &Arc<Snapshot>) -> Result<(), Exception> {
+        let result = (|| {
         let all_users=(self.config.post_install_users)()?;
         let mut plans=Vec::new();
         for member in &self.members {
@@ -737,7 +739,12 @@ impl pipeline::Reservation for Reserved {
             if plan.replacing {(self.config.clear_code_cache)(&name,&plan.cache_users)?;}
             plans.push(plan);
         }
-        self.pending.retain(snapshot.version(),plans)
+        self.pending.retain_with_errors(snapshot.version(),plans,self.commit_errors.lock().unwrap().clone())
+        })();
+        match result {
+            Ok(())=>Ok(()),
+            Err(error)=>super::post_install::committed_result(Err(error),&self.commit_errors.lock().unwrap()),
+        }
     }
 }
 impl Drop for Reserved {
@@ -867,4 +874,16 @@ mod native_library_tests {
             assert_eq!(fs::read(&apk).unwrap(),original);
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn committed_fault_reservation(config:Config,base:Arc<Snapshot>,created:Vec<(String,i32,i64)>)->(Arc<Owner>,Box<dyn pipeline::Reservation>){
+    let owner=Owner::new(config).unwrap();
+    let reservation=committed_fault_reservation_from_owner(&owner,base,created);
+    (owner,reservation)
+}
+
+#[cfg(test)]
+pub(super) fn committed_fault_reservation_from_owner(owner:&Arc<Owner>,base:Arc<Snapshot>,created:Vec<(String,i32,i64)>)->Box<dyn pipeline::Reservation>{
+    Box::new(Reserved{config:owner.config.clone(),members:vec![],base,created:Mutex::new(created),committed:AtomicBool::new(false),commit_errors:Mutex::new(vec![]),errors:owner.errors.clone(),pending:owner.pending.clone()})
 }

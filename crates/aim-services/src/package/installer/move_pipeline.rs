@@ -147,10 +147,15 @@ impl PreparedMove for Prepared {
             .map_err(|error| move_package::install_failure(error.legacy_status, error.committed, error.message))?;
         let published = match prepared.commit() {
             Ok(receipt) => receipt,
-            Err(error) => {
+            Err(pipeline::Error::Install(error)) => {
                 if error.committed { self.claim.code = None; }
                 return Err(move_package::install_failure(error.legacy_status, error.committed, error.message));
             }
+            Err(pipeline::Error::Owner { committed, error }) => {
+                if committed { self.claim.code = None; }
+                return Err(move_package::install_failure(-110, committed, format!("Native move install owner: {error:?}")));
+            }
+            Err(pipeline::Error::Pending) => return Err(move_package::install_failure(-110, false, "Native move commit did not complete")),
         };
         // Once global state committed, a later callback/receipt failure must
         // never let a rollback guard delete potentially published code.

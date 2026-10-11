@@ -108,23 +108,43 @@ mod tests {
 }
 
 #[derive(Default)]
-pub(super) struct Pending(std::sync::Mutex<std::collections::BTreeMap<u64,Vec<Plan>>>);
+pub(super) struct Pending(std::sync::Mutex<std::collections::BTreeMap<u64,(Vec<Plan>,Vec<Exception>)>>);
 impl Pending {
+    #[cfg(test)]
     pub fn retain(&self,generation:u64,plans:Vec<Plan>)->Result<(),Exception>{
+        self.retain_with_errors(generation,plans,vec![])
+    }
+    pub fn retain_with_errors(&self,generation:u64,plans:Vec<Plan>,errors:Vec<Exception>)->Result<(),Exception>{
         let mut pending=self.0.lock().unwrap();
         if pending.len()>=1024||pending.contains_key(&generation){return Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"post-install pending owner capacity/generation differs"));}
-        pending.insert(generation,plans);Ok(())
+        pending.insert(generation,(plans,errors));Ok(())
     }
     pub fn complete(&self,generation:u64,completion:impl FnOnce()->Result<(),Exception>,
         mut publish:impl FnMut(&Plan)->Result<(),Exception>,mut cleanup:impl FnMut(&str)->Result<(),Exception>)->Result<(),Exception>{
-        let plans=self.0.lock().unwrap().remove(&generation).ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"post-install published plan absent"))?;
+        let (plans,errors)=self.0.lock().unwrap().remove(&generation).ok_or_else(||Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"post-install published plan absent"))?;
+        let result = (|| {
         completion()?;
         for plan in plans {
             publish(&plan)?;
             if !plan.dont_kill {if let Some(old)=plan.old_path.as_deref().filter(|old|*old!=plan.path&&old.starts_with("/data/app/")){cleanup(old)?;}}
         }
         Ok(())
+        })();
+        committed_result(result,&errors)
     }
+}
+
+pub(super) fn committed_result(result:Result<(),Exception>,errors:&[Exception])->Result<(),Exception>{
+    if errors.is_empty(){return result;}
+    let mut error=match result {
+        Ok(())=>errors[0].clone(),
+        Err(mut error)=>{
+            error.message=format!("{}; {}",error.message,errors[0].message);
+            error
+        }
+    };
+    for additional in &errors[1..] {error.message=format!("{}; {}",error.message,additional.message);}
+    Err(error)
 }
 
 pub(super) fn validate_visibility(users:&[i32],values:&[i32])->Result<(),Exception>{

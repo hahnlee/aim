@@ -279,7 +279,25 @@ impl Owner {
         };
         let mut receipt = match prepared.commit() {
             Ok(receipt) => receipt,
-            Err(failure) => return self.failed_install(receiver, id, &archived.name, failure.legacy_status, &format!("committed={}: {}", failure.committed, failure.message)),
+            Err(super::pipeline::Error::Install(failure)) => {
+                if !failure.committed {
+                    return self.failed_install(receiver, id, &archived.name, failure.legacy_status, &failure.message);
+                }
+                self.external.install_status(receiver, id, &archived.name, failure.legacy_status, Some(&failure.message))?;
+                self.drafts.sessions.close(id, 1000)?;
+                return (self.drafts.save)();
+            }
+            Err(super::pipeline::Error::Owner { committed, error }) => {
+                if committed {
+                    self.external.install_status(receiver, id, &archived.name, -110, Some(&error.message))?;
+                    self.drafts.sessions.close(id, 1000)?;
+                    (self.drafts.save)()?;
+                } else {
+                    self.failed_install(receiver, id, &archived.name, -110, &error.message)?;
+                }
+                return Err(error);
+            }
+            Err(super::pipeline::Error::Pending) => return self.failed_install(receiver, id, &archived.name, -110, "Archived native commit did not complete"),
         };
         if let Err(failure) = self.install.confirm_publication(&receipt) {
             return self.failed_install(receiver, id, &archived.name, failure.legacy_status, &failure.message);

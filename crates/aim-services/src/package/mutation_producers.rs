@@ -82,7 +82,7 @@ impl Owner {
         let result = result.and_then(|committed| match committed {
             None => Ok(false),
             Some((committed, users)) => {
-                let receipt=committed.finish().map_err(|error|illegal(error.message))?;
+                let receipt=committed.finish()?;
                 self.native.finish(receipt)?;
                 self.bridge.clear_code_cache(name,&users)?;
                 Ok(true)

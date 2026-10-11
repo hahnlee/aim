@@ -160,7 +160,7 @@ pub fn verify_batch(
 /// must release its own reservations; the native owner implements that lifetime.
 /// It can only report success after durable state and query publication complete.
 pub trait PreparedInstall: Send {
-    fn commit(self: Box<Self>) -> Result<PublishedInstall, Failure>;
+    fn commit(self: Box<Self>) -> Result<PublishedInstall, Error>;
 }
 /// Constructible only by an owner with evidence for the published native state.
 /// Callers independently inspect that generation before sending STATUS_SUCCESS.
@@ -190,6 +190,7 @@ pub trait Owners: Send + Sync {
     fn finish(&self, receipt: PublishedInstall) -> Result<(), Exception>;
 }
 
+#[derive(Debug)]
 pub enum Error {
     Pending,
     Install(Failure),
@@ -228,7 +229,10 @@ pub fn install(
         })
         .collect();
     let prepared = owners.prepare(code).map_err(|error| Error::Install(stage_failure("Native install preparation", error)))?;
-    let receipt = prepared.commit().map_err(|error| Error::Install(stage_failure("Native install commit", error)))?;
+    let receipt = prepared.commit().map_err(|error| match error {
+        Error::Install(failure) => Error::Install(stage_failure("Native install commit", failure)),
+        error => error,
+    })?;
     let published = source().map_err(|error| Error::Owner {
         committed: true,
         error: owner_failure("Native install published query", error),
@@ -306,10 +310,10 @@ mod tests {
         fail: bool,
     }
     impl PreparedInstall for Prepared {
-        fn commit(self: Box<Self>) -> Result<PublishedInstall, Failure> {
+        fn commit(self: Box<Self>) -> Result<PublishedInstall, Error> {
             self.events.lock().unwrap().push("commit");
             if self.fail {
-                return Err(Failure::invalid("disk commit failed"));
+                return Err(Error::Install(Failure::invalid("disk commit failed")));
             }
             Ok(PublishedInstall {
                 generation: 4,
@@ -493,19 +497,19 @@ pub(crate) struct NativeCommitted {
     reservation: Box<dyn Reservation>,
 }
 impl NativeCommitted {
-    pub(crate) fn finish(self) -> Result<PublishedInstall, Failure> {
+    pub(crate) fn finish(self) -> Result<PublishedInstall, Exception> {
         self.reservation.publication_finished(&self.snapshot).map_err(|error|
-            Failure::after_commit(owner_failure("Committed publication effects", error).message))?;
+            owner_failure("Committed publication effects", error))?;
         Ok(self.receipt)
     }
 }
 impl PreparedInstall for NativePrepared {
-    fn commit(self: Box<Self>) -> Result<PublishedInstall, Failure> {
+    fn commit(self: Box<Self>) -> Result<PublishedInstall, Error> {
         let gate=self.publication_gate.clone();
         let permit=PublicationPermit::acquire(&gate);
-        let committed=(*self).commit_under_permit(&permit)?;
+        let committed=(*self).commit_under_permit(&permit).map_err(Error::Install)?;
         drop(permit);
-        committed.finish()
+        committed.finish().map_err(|error|Error::Owner{committed:true,error})
     }
 }
 impl NativePrepared {
@@ -662,10 +666,10 @@ mod publication_gate_tests {
         let prepared=NativePrepared{publication_gate:gate.clone(),snapshots:snapshots.clone(),disk:disk.clone(),environment,base:base.clone(),reservation:Box::new(ReservationProbe{gate:gate.clone(),finished:finished.clone()}),admission:crate::package::scan::live_install::CompletedAdmission{owner:candidate,completed:vec![]},verified_sessions:vec![]};
         let worker_gate=gate.clone();
         let installer=std::thread::spawn(move||{
-            if nested {let permit=PublicationPermit::acquire(&worker_gate);let committed=prepared.commit_under_permit(&permit)?;drop(permit);committed.finish()}
+            if nested {let permit=PublicationPermit::acquire(&worker_gate);let committed=prepared.commit_under_permit(&permit).map_err(Error::Install)?;drop(permit);committed.finish().map_err(|error|Error::Owner{committed:true,error})}
             else {Box::new(prepared).commit()}
         });
-        if at_projection.recv().is_err(){panic!("native commit failed before query publication: {:?}",installer.join().unwrap().err().map(|error|error.message));}
+        if at_projection.recv().is_err(){panic!("native commit failed before query publication: {:?}",installer.join().unwrap().err().map(|error|match error{Error::Install(error)=>error.message,Error::Owner{error,..}=>error.message,Error::Pending=>"pending".into()}));}
         assert_eq!(disk.lock().unwrap().state().settings.key_sets.last_issued_key_id,1);
         assert_eq!(snapshots.capture().owner().settings.key_sets.last_issued_key_id,1);
         assert_eq!(query.lock().unwrap().owner().settings.key_sets.last_issued_key_id,0);
@@ -689,5 +693,94 @@ mod failure_text_tests {
         let failure=stage_failure("Admission requests",stage_failure("Native install preparation",failure));
         assert_eq!(failure.legacy_status,-2);assert!(!failure.committed);
         assert_eq!(failure.message,"New package fails restrict-update check: owned.package");
+    }
+}
+
+#[cfg(test)]
+mod committed_effect_tests {
+    use super::*;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use std::sync::{Arc,Mutex,atomic::{AtomicUsize,Ordering}};
+    use crate::package::{scan::{self,SigningScan},settings::{Settings,Package},owner::{Store,usage::Usage},write::Apks,installer::environment};
+    use aim_binder_host::{local::{LocalProcess,Service,Call,Reply},parcel::{Parcel,Binder,EX_SERVICE_SPECIFIC}};
+    use aim_binder_driver::{Driver,Device,Credentials,GuestProcess};
+    struct NoGuest;
+    impl GuestProcess for NoGuest {
+        fn copy_from_user(&mut self,_:u64,_:&mut[u8])->Result<(),i32>{panic!("context manager ioctl must not copy guest memory")}
+        fn copy_to_user(&mut self,_:u64,_:&[u8])->Result<(),i32>{panic!("context manager ioctl must not copy guest memory")}
+        fn get_file(&mut self,_:u32)->Result<aim_binder_driver::File,i32>{panic!("no file transfer in descriptor fixture")}
+        fn install_file(&mut self,_:aim_binder_driver::File)->Result<u32,i32>{panic!("no file transfer in descriptor fixture")}
+        fn close_fd(&mut self,_:u32){panic!("no file transfer in descriptor fixture")}
+    }
+    struct Descriptor;
+    impl Service for Descriptor {
+        fn descriptor(&self)->&str{aim_service_aidl::dev_aim_server_ipackagemutationbridge::DESCRIPTOR}
+        fn transact(&self,_:&mut Call<'_>)->Reply{panic!("empty published batch must not fabricate broadcasts")}
+    }
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory{fn drop(&mut self){std::fs::remove_dir_all(&self.0).unwrap();}}
+    #[test]
+    fn reserved_commit_failure_traverses_real_store_and_pipeline(){
+        use std::os::unix::fs::MetadataExt;
+        let root=Directory(std::env::temp_dir().join(format!("aim-install-commit-fault-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        std::fs::create_dir(&root.0).unwrap();let data=root.0.join("data");std::fs::create_dir(&data).unwrap();let disk_path=root.0.join("store");std::fs::create_dir_all(disk_path.join("system/users/0")).unwrap();
+        let driver=Driver::new();
+        let server=LocalProcess::open(&driver,Device::Binder,Credentials{pid:44001,euid:1000,security_context:None});
+        let binder=server.add_service(Arc::new(Descriptor));let Binder::Local(ptr)=binder else{panic!("actual local node required")};
+        let mut object=aim_binder_driver::uapi::FlatBinderObject{kind:aim_binder_driver::uapi::BINDER_TYPE_BINDER,binder:ptr,cookie:ptr,..Default::default()}.encode();
+        driver.ioctl(server.proc_handle(),1,aim_binder_driver::uapi::BINDER_SET_CONTEXT_MGR_EXT,&mut object,&mut NoGuest).unwrap();server.start();
+        let client=LocalProcess::open(&driver,Device::Binder,Credentials{pid:44002,euid:1000,security_context:None});
+        let effects=crate::package::effects::Owner::new(client.strong(0)).unwrap();
+        let settings=Settings{packages:vec![Package{name:"p".into(),app_id:10100,code_path:"/data/app/p".into(),version_code:1,domain_set_id:Some("00000000-0000-0000-0000-000000000001".into()),..Default::default()}],..Default::default()};
+        let mut scan=SigningScan::new(&Default::default(),&settings,36).unwrap();
+        scan.capture_user_states(std::collections::BTreeMap::from([(("p".into(),false),scan::CapturedUsers{states:std::collections::BTreeMap::from([(0,crate::package::restrictions::UserState{installed:true,..Default::default()})]),active_aliases:Default::default()})])).unwrap();
+        scan.capture_replica_runtime(std::collections::BTreeMap::from([(("p".into(),false),scan::ReplicaRuntime{usage:[0;8],seinfo:None,override_seinfo:None,library_files:vec![],libraries:vec![]})])).unwrap();
+        let snapshots=Arc::new(crate::package::scan_snapshot::Store::new(scan,Usage::new(["p"])).unwrap());
+        let mut durable=Store::create(&disk_path,&[0]).unwrap();durable.commit_scan_settings(&snapshots.capture()).unwrap();let disk=Arc::new(Mutex::new(durable));
+        let query=Arc::new(Mutex::new(snapshots.capture()));let mode=Arc::new(AtomicUsize::new(0));let events=Arc::new(Mutex::new(vec![]));let rollbacks=Arc::new(AtomicUsize::new(0));
+        let mut commit=Exception::new(EX_SERVICE_SPECIFIC,"commit owner fault");commit.service_specific=7338;
+        let mut payload=Parcel::new();payload.write_string16(Some("test.PrimaryCompletionException"));payload.write_i32(19338);let primary=Exception::parcelable(None,&payload).unwrap();
+        let apks=Arc::new(Apks{signing_overrides:None,files:Box::new(|_|panic!("already-prepared postcommit fixture does not parse APKs")),platform:crate::package::parse::Platform::load(&aim_paths::derived_image(),Default::default()).unwrap()});
+        // Reuse one native Owner across distinct real Store generations: historical diagnostics must not poison success.
+        let config=environment::Config{
+            data:data.clone(),apks:apks.clone(),snapshots:snapshots.clone(),users:vec![scan::User{id:0,pre_created:false,adb_install_disallowed:false}],build_debuggable:false,cross_user_suspensions:false,factory_test:false,
+            app_data_flags:Arc::new(|_|panic!("app data already prepared")),directory_inode:aim_storage::guest_inode::GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o755)},file_inode:aim_storage::guest_inode::GuestInode{uid:Some(1000),gid:Some(1000),mode:Some(0o644)},
+            abi:scan::AbiPolicy{all:vec!["arm64-v8a".into()],bit32:vec![],bit64:vec!["arm64-v8a".into()],native32:vec![],native64:vec!["arm64-v8a".into()],force_multi_arch_match:false},library_compatibility:Arc::new(scan::LibraryCompatibility::new(&Default::default(),&|_|None,false).unwrap()),vendor_sdk:36,
+            remove_test_base:Arc::new(|_,_|panic!("policy already prepared")),preferred_abi:"arm64-v8a".into(),app_lib32_dir:"/data/app-lib".into(),seinfo:crate::package::owner::seinfo::Policy::unread(),compatibility:Arc::new(|_:&crate::package::pkg::AndroidPackage|->Result<i32,String>{panic!("seinfo already prepared")}),
+            labeler:Arc::new(|_|panic!("code already prepared")),metadata:Arc::new(|_,_,_|panic!("metadata already prepared")),install_source:Arc::new(|_,_|panic!("install source already prepared")),library_policy:Arc::new(|_|panic!("library policy already prepared")),zip_clock:Arc::new(|_|panic!("code already prepared")),app_data:Arc::new(|_|panic!("app data already prepared")),
+            rollback_app_data:{let count=rollbacks.clone();Arc::new(move|_,_,_|{count.fetch_add(1,Ordering::SeqCst);Err(Exception::new(aim_binder_host::parcel::EX_ILLEGAL_STATE,"unexpected app-data rollback in committed fixture"))})},
+            commit_app_data:{let mode=mode.clone();let events=events.clone();let disk=disk.clone();let commit=commit.clone();Arc::new(move|name,user,inode|{assert_eq!((name,user),("p",0));assert!(inode>0);assert_eq!(disk.lock().unwrap().state().settings.key_sets.last_issued_key_id,mode.load(Ordering::SeqCst)as i64+1);events.lock().unwrap().push("commit");if mode.load(Ordering::SeqCst)!=2{Err(commit.clone())}else{Ok(())}})},
+            clear_code_cache:Arc::new(|_,_|panic!("empty postcommit plan has no cache operation")),post_install_users:{let mode=mode.clone();let primary=primary.clone();Arc::new(move||if mode.load(Ordering::SeqCst)==3{Err(primary.clone())}else{Ok(vec![0])})},permissions:Arc::new(|_,_|panic!("permissions already prepared")),release_permissions:Arc::new(|_,_|panic!("empty reservation has no permission owner")),effects,
+            code_resources:Arc::new(crate::package::owner::resources::CodeResources::new(client.clone(),data.clone(),None)),
+            publish:{let query=query.clone();let events=events.clone();Arc::new(move|snapshot|{*query.lock().unwrap()=snapshot.clone();events.lock().unwrap().push("publish");Ok(())})},
+            completion:{let mode=mode.clone();let events=events.clone();let primary=primary.clone();Arc::new(move|_|{events.lock().unwrap().push("completion");if mode.load(Ordering::SeqCst)==1{Err(primary.clone())}else{Ok(())}})},
+        };
+        let (environment,first)=environment::committed_fault_reservation(config,snapshots.capture(),vec![]);drop(first);
+        for case in 0..4{
+            mode.store(case,Ordering::SeqCst);events.lock().unwrap().clear();let base=snapshots.capture();let app_data=data.join(format!("prepared-{case}"));std::fs::create_dir(&app_data).unwrap();std::fs::write(app_data.join("owned"),b"committed app data").unwrap();let inode=std::fs::metadata(&app_data).unwrap().ino()as i64;
+            let reservation=environment::committed_fault_reservation_from_owner(&environment,base.clone(),vec![("p".into(),0,inode)]);
+            let mut candidate=base.owner().clone();let mut scalar=[0u8;32];scalar[31]=case as u8+1;
+            let mut key=vec![0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00];
+            key.extend_from_slice(p256::SecretKey::from_slice(&scalar).unwrap().public_key().to_encoded_point(false).as_bytes());
+            crate::package::owner::key_sets::register(&mut candidate.settings,"p",&[key],None,&[]).unwrap();
+            let native=Native{snapshots:snapshots.clone(),disk:disk.clone(),apks:apks.clone(),environment:environment.clone(),publication_gate:Arc::new(Mutex::new(()))};
+            let prepared=NativePrepared{publication_gate:native.publication_gate.clone(),snapshots:snapshots.clone(),disk:disk.clone(),environment:environment.clone(),base:base.clone(),reservation,admission:scan::live_install::CompletedAdmission{owner:candidate,completed:vec![]},verified_sessions:vec![]};
+            let committed=Box::new(prepared).commit();
+            if case==3 {
+                let Err(Error::Owner{committed:true,error})=committed else{panic!("publication-plan failure must preserve committed owner error")};
+                assert_eq!(error.code,primary.code);assert_eq!(error.service_specific,primary.service_specific);assert_eq!(error.parcelable,primary.parcelable);assert!(error.message.contains("commit owner fault"));
+                assert_eq!(disk.lock().unwrap().state().settings.key_sets.last_issued_key_id,4);assert_eq!(snapshots.capture().owner().settings.key_sets.last_issued_key_id,4);assert_eq!(query.lock().unwrap().version(),snapshots.capture().version());
+                assert_eq!(*events.lock().unwrap(),vec!["commit","publish"]);assert!(app_data.join("owned").exists());assert_eq!(rollbacks.load(Ordering::SeqCst),0);continue;
+            }
+            let receipt=committed.unwrap();assert!(receipt.generation>base.version());assert_eq!(receipt.generation,query.lock().unwrap().version());native.confirm_publication(&receipt).unwrap();
+            assert_eq!(disk.lock().unwrap().state().settings.key_sets.last_issued_key_id,case as i64+1);assert_eq!(snapshots.capture().owner().settings.key_sets.last_issued_key_id,case as i64+1);
+            let result=native.finish(receipt);match(case,result){
+                (0,Err(error))=>{assert_eq!(error.code,commit.code);assert_eq!(error.service_specific,commit.service_specific);assert_eq!(error.parcelable,commit.parcelable);assert!(error.message.contains("commit owner fault"));},
+                (1,Err(error))=>{assert_eq!(error.code,primary.code);assert_eq!(error.service_specific,primary.service_specific);assert_eq!(error.parcelable,primary.parcelable);assert!(error.message.contains("commit owner fault"));},
+                (2,Ok(()))=>{},other=>panic!("unexpected committed completion {other:?}"),
+            }
+            assert_eq!(*events.lock().unwrap(),vec!["commit","publish","completion"]);assert!(app_data.join("owned").exists());assert_eq!(rollbacks.load(Ordering::SeqCst),0);
+        }
+        assert_eq!(environment.errors().len(),3,"normal generation must not replay historical owner errors");drop(environment);drop(disk);client.shutdown().unwrap();server.shutdown().unwrap();
     }
 }
