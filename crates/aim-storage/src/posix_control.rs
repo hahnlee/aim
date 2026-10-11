@@ -339,6 +339,7 @@ fn send(
     let (mut buffer, size) = message(dest, reply, frame, proof, once);
     let result = unsafe { mach_msg(buffer.as_mut_ptr().cast(), 1 | 16, size, 0, 0, 1000, 0) };
     if result != 0 {
+        eprintln!("[posix-owner] stage=send pid={} mach={result:#x} operation={:?} request={} destination={dest} reply={reply}", std::process::id(), frame.operation, frame.request);
         return Err(error(libc::EIO));
     }
     Ok(())
@@ -397,6 +398,7 @@ fn receive(port: u32, timeout: Duration) -> io::Result<Incoming> {
         return Err(error(libc::EINTR));
     }
     if result != 0 {
+        eprintln!("[posix-owner] stage=receive pid={} port={port} mach={result:#x}", std::process::id());
         return Err(error(libc::EIO));
     }
     let b = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), 256) };
@@ -404,6 +406,7 @@ fn receive(port: u32, timeout: Duration) -> io::Result<Incoming> {
     let count = word(b, 24);
     let offset = 28 + count as usize * 12;
     if count > 1 || word(b, 0) & 0x80000000 == 0 || size != offset + 112 || size + 52 > 256 {
+        eprintln!("[posix-owner] stage=receive-frame pid={} port={port} id={} bits={:#x} size={size} descriptors={count}", std::process::id(), word(b,20), word(b,0));
         return Err(error(libc::EPROTO));
     }
     let proof = if count == 1 {

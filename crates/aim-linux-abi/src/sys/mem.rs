@@ -203,7 +203,8 @@ pub fn mmap(mut a: [u64; 6]) -> i64 {
         return result;
     }
     use std::os::fd::AsRawFd;
-    let held = match super::fdtab::pin_guest(a[4] as i32) {
+    let guest_fd = a[4] as i32;
+    let held = match super::fdtab::pin_guest(guest_fd) {
         Ok(held) => held, Err(error) => return -(error as i64),
     };
     if matches!(held.kind(), Some(super::fdtab::Kind::Path(_))) { return -(crate::errno::EBADF as i64); }
@@ -213,13 +214,14 @@ pub fn mmap(mut a: [u64; 6]) -> i64 {
     // epoch while admission waits. Proof lookup below happens after this ACK.
     let admission=match (&client,identity){
         (Some(client),Some(identity))=>match client.admission(identity.to_bytes()){
-            Ok(admission)=>Some(admission),Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64),
+            Ok(admission)=>Some(admission),Err(error)=>{eprintln!("[mmap-owner] stage=verity-admission guest_fd={guest_fd} native_fd={} error={error}",held.descriptor().as_raw_fd());return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);},
         },_=>None,
     };
     let _epoch=super::verity_pager::mutation();
     if a[3]&MAP_FIXED!=0 {super::verity_pager::wait_pending(a[0],page_up(a[1]));}
     a[4] = held.descriptor().as_raw_fd() as u64;
     let result=mmap_pinned(a,&held);
+    if result<0{eprintln!("[mmap-owner] stage=pinned guest_fd={guest_fd} native_fd={} prot={:#x} flags={:#x} result={result}",held.descriptor().as_raw_fd(),a[2],a[3]);}
     if let Some(admission)=admission {
         let finish=if result>=0 {super::verity_pager::publish_membership(identity.unwrap(),admission)}else{admission.abort()};
         if let Err(error)=finish {
@@ -260,7 +262,7 @@ fn mmap_pinned(a:[u64;6],held:&super::fdtab::Pinned)->i64 {
     if result>=0 && let Some(super::fdtab::Kind::Regular(description))=held.kind() {
         use std::os::fd::FromRawFd;
         let data=match aim_storage::private_fd::PrivateFd::allocate(||{let fd=unsafe{libc::fcntl(held.descriptor().as_raw_fd(),libc::F_DUPFD_CLOEXEC,0)};if fd<0{return Err(std::io::Error::last_os_error());}Ok(unsafe{std::os::fd::OwnedFd::from_raw_fd(fd)})}){Ok(data)=>data,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)};
-        let cache=match super::verity_pager::MappingCache::runtime(){Ok(cache)=>cache,Err(error)=>return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64)};
+        let cache=match super::verity_pager::MappingCache::runtime(){Ok(cache)=>cache,Err(error)=>{eprintln!("[mmap-owner] stage=mapping-cache native_fd={} error={error}",held.descriptor().as_raw_fd());return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}};
         let source=std::sync::Arc::new(super::verity_pager::Source{data,proof:None,description:Some(description.clone()),cache,extent:None,derivative:None});
         if let Err(error)=super::verity_pager::track_existing(result as u64,page_up(a[1]),a[5],host_prot(a[2]),matches!(a[3]&MAP_TYPE,MAP_SHARED|MAP_SHARED_VALIDATE),source){window::unmap(result as u64,page_up(a[1]));return -(errno::from_darwin(error.raw_os_error().unwrap_or(libc::EIO))as i64);}
     }

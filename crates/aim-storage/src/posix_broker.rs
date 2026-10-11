@@ -110,7 +110,7 @@ impl State {
  fn record(&self,failure:io::Error){self.failures.lock().unwrap().push(failure.to_string());}
  fn retire_dead(&self)->io::Result<()> {
   let dead={let mut owners=self.owners.lock().unwrap();let keys=owners.iter().filter(|(_,holder)|!holder.owner.process.is_live()).map(|(key,_)|*key).collect::<Vec<_>>();keys.into_iter().filter_map(|key|owners.remove(&key)).collect::<Vec<_>>()};
-  for holder in dead{holder.stop()?;}
+  for holder in dead{if let Err(failure)=holder.stop(){eprintln!("[posix-owner] stage=retire-dead controller={:?} actor={:?} error={failure}",self.controller,holder.owner.process);return Err(failure);}}
   if let Some(namespace)=self.namespace.lock().unwrap().clone(){crate::process_namespace::InitNamespaceEntry::retire_dead(&namespace.table,self.controller)?;}
   Ok(())
  }
@@ -231,6 +231,7 @@ impl Controller {
      }
     }Ok(())
    })();
+   if let Err(failure)=&result{eprintln!("[posix-owner] stage=controller-terminal controller={:?} error={failure}",serving.controller);}
    let cleanup=serving.retire_all();
    for request in requests{match request.join(){Ok(Ok(()))=>{},Ok(Err(failure))=>serving.record(failure),Err(_)=>serving.record(error(libc::EIO))}}
    result.and(cleanup)

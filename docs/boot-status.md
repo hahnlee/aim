@@ -634,9 +634,25 @@ without reaching the diagnostic90s/16MiB cap. The pinned Android16r1
 PackageManagerLocalImpl permits that creation and checks closure on reads.
 The vendor snapshot adapter now follows that behavior; corrected full-body
 replay and rebuilt image acceptance remain NOT RUN. Original crash reporting
-also fails Binder checkService2 with EBADF (#1317), a separate owner gap.
+also reports Binder checkService2 EBADF after app_process has closed Binder
+during JNI exception unwinding. Matching original source and the absence of
+later Binder ioctls explain this secondary error; #1317 is closed without a
+runtime or guest change.
 Native stop succeeds and all held births/mounts are independently gone;
 diagnostic logs and disposable DATA remain preserved.
+The normal faa6423f replay of the snapshot fix fails earlier in boot readiness:
+the query reports POSIX close EPROTO/EIO and libdl header mmap ENOENT (#1318).
+Its224.69s body and failed cleanup60 remain recorded. Root subsequently
+rechecks the owned init birth and its four remaining namespace service births,
+ends only those processes and normally ejects the disposable DATA. All283 held
+births, namespace members and mounts are gone; failed DATA remains preserved.
+Corrected snapshot assertions and rebuilt native image acceptance remain NOT RUN.
+POSIX transport errors now record raw Mach status and malformed message
+identity/size, and controller retirement errors record the affected actor birth
+before preserving the original error. File mmap failures distinguish verity
+admission, pinned mapping and cache setup. Four actual POSIX owner/control tests
+pass after building their required holder helper; syscall library compilation
+passes. No corrected Android replay uses these diagnostics yet (#1318).
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,
