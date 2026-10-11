@@ -156,7 +156,11 @@ independent success and typed publication-plan failure. The focused test,
 existing publication-gate test and post-install classification test each pass
 without skips. This fixture has an empty post-install plan batch: it does not
 qualify original ART, broadcasts, old-code cleanup or signed APK installation.
-The app/CTS gates still determine migration acceptance.
+The d9993a24 release runtime build passes in47.28s; guest-init is now69b1441e,
+while linux-run remains c3ad24a3 and the other four runtime hashes are unchanged.
+The prior678d5f3c runtime is preserved as verified copy-on-write binaries.
+The app/CTS gates still determine migration acceptance; no Android execution
+has yet qualified the new installer runtime.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/
 forwarding regressions and the release controller build pass. The260.65s
