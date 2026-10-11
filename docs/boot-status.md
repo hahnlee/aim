@@ -133,8 +133,10 @@ on actual spawn failure, nonmutating stdio FD flags; original errors and success
 paths are retained. Two focused native regressions pass without skips: actual
 invalid owned spawn-file-action EBADF preserves errno/stage and survives closed
 stderr; actual broker child admission succeeds after the producer proof is closed,
-and parent POSIX locks are not inherited. Release qualification, precise native
-IO site and owner repair remain pending. Native
+and parent POSIX locks are not inherited. The678d5f3c release build of linux-run,
+guest-init and both native holder binaries passes in56.47s. The new kernel is
+c3ad24a3 and init isdeff6975; display and binderd hashes remain unchanged. This
+qualifies diagnostics only; precise native IO site and owner repair remain pending. Native
 FULL66, apps, fresh-template parity and rollback remain unrun on this cohort.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/
