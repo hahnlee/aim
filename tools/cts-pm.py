@@ -126,7 +126,7 @@ def result_for(module, before, scope):
             continue
         try:
             result = summarize(path)
-        except (ValueError, ET.ParseError) as error:
+        except (ValueError, OSError, ET.ParseError) as error:
             raise ValueError(f'{module}: cannot bind new official XML {path}: {error}') from error
         if shlex.split(result['command'] or '') != scope['command']:
             continue
@@ -151,6 +151,87 @@ def save(path, value):
     temp.replace(path)
 
 
+RUNTIME_FILES = ('linux-run', 'guest-init', 'aim-display', 'aim-binderd', 'aim-lock-holder', 'aim-pty-holder')
+
+
+def runtime_pins(executable):
+    result = {}
+    for name in RUNTIME_FILES:
+        path = executable.parent / name
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise ValueError('missing runtime sibling: ' + str(path))
+        result[name] = digest(path)
+    return result
+
+
+def execution_tools(args):
+    tools = {}
+    for name, value, version_args in (('java', args.cts_java, ['-version']),
+                                      ('adb', args.cts_adb, ['version']),
+                                      ('aapt2', args.cts_aapt2, ['version'])):
+        path = value.resolve(strict=True)
+        if path.name != name or not path.is_file() or not os.access(path, os.X_OK):
+            raise ValueError('invalid selected CTS executable: ' + name)
+        version = subprocess.run([str(path), *version_args], capture_output=True, timeout=15)
+        if version.returncode != 0:
+            raise ValueError('selected executable version failed: ' + name)
+        text = (version.stdout + version.stderr).decode('utf-8', errors='strict')
+        if name == 'java' and 'version "21.' not in text:
+            raise ValueError('CTS requires selected JDK21')
+        tools[name] = {'path': str(path), 'sha256': digest(path), 'version': text}
+    owner = args.cts_owner.resolve(strict=True)
+    if owner.name != 'aim-cts-owner' or not owner.is_file() or not os.access(owner, os.X_OK):
+        raise ValueError('normal primary aim-cts-owner executable required')
+    tools['owner'] = {'path': str(owner), 'sha256': digest(owner)}
+    return tools
+
+
+def revalidate_execution(provenance):
+    if runtime_pins(Path(provenance['linux_run'])) != provenance['runtime_files_sha256']:
+        raise ValueError('retained runtime generation changed')
+    for name, record in provenance['execution_tools'].items():
+        path = Path(record['path'])
+        if not path.is_file() or digest(path) != record['sha256']:
+            raise ValueError('selected executable changed: ' + name)
+    selection = provenance['cts_host_tools']
+    directory = Path(selection['directory'])
+    if digest(directory / 'provenance.json') != selection['provenance_sha256'] or digest(directory / 'validation.json') != selection['validation_sha256']:
+        raise ValueError('Darwin host-tool receipts changed')
+    for name, sha in selection['components'].items():
+        if digest(directory / name) != sha:
+            raise ValueError('Darwin host-tool component changed: ' + name)
+    cts_runtime_bundle.validate(provenance['wrapper_bundle']['directory'])
+
+
+def compare_provenance(original, native):
+    for key in ('release', 'campaign_script_sha256', 'linux_run_sha256', 'runtime_files_sha256', 'cts_host_tools', 'execution_tools'):
+        if not original.get(key) or original[key] != native.get(key):
+            raise ValueError('baseline/native provenance differs or is missing: ' + key)
+    left = original.get('wrapper_bundle', {}).get('identity')
+    right = native.get('wrapper_bundle', {}).get('identity')
+    if not left or left != right:
+        raise ValueError('baseline/native wrapper generation differs or is missing')
+
+
+def validate_owner_receipt(path, command, pid, executable_sha256):
+    receipt = json.loads(path.read_text())
+    if receipt.get('schema') != 'AIM_CTS_OWNER1' or receipt.get('cleanup') != 'complete':
+        raise ValueError('owned process cleanup incomplete or unproven')
+    if receipt.get('supervisor_pid') != pid or receipt.get('helper_sha256') != executable_sha256 or receipt.get('wrapper_argv') != command[command.index('--') + 1:]:
+        raise ValueError('foreign owned process cleanup receipt')
+    if receipt.get('uncertainties') != [] or receipt.get('remaining_owned') != []:
+        raise ValueError('owned process cleanup retained uncertainty or live process')
+    births = receipt.get('processes')
+    if not isinstance(births, list) or not births:
+        raise ValueError('owned process cleanup lacks kernel births')
+    for birth in births:
+        if not isinstance(birth, dict) or not isinstance(birth.get('pid'), int) or birth['pid'] <= 0 or not isinstance(birth.get('start_seconds'), int) or birth['start_seconds'] <= 0 or not isinstance(birth.get('start_microseconds'), int) or not 0 <= birth['start_microseconds'] < 1000000 or birth.get('terminal') is not True:
+            raise ValueError('owned process cleanup birth/terminal evidence invalid')
+    if receipt.get('jvm_identity') not in [{k: birth[k] for k in ('pid', 'start_seconds', 'start_microseconds')} for birth in births]:
+        raise ValueError('actual direct JVM exec identity missing')
+    return receipt
+
+
 def campaign_provenance(args):
     receipt = args.image / '.overlay-receipt'
     if not receipt.is_file():
@@ -160,11 +241,13 @@ def campaign_provenance(args):
             'manifest_sha256': digest(MANIFEST), 'modules': [m['name'] for m in modules()],
             'image_receipt_sha256': digest(receipt)}
     provenance['campaign_script_sha256'] = digest(Path(__file__))
+    provenance['execution_tools'] = execution_tools(args)
     if args.linux_run is not None:
         executable = args.linux_run.resolve(strict=True)
         if not os.access(executable, os.X_OK):
             raise ValueError('--linux-run requires an executable path')
-        provenance.update(linux_run=str(executable), linux_run_sha256=digest(executable))
+        provenance.update(linux_run=str(executable), linux_run_sha256=digest(executable),
+                          runtime_files_sha256=runtime_pins(executable))
     if getattr(args, 'cts_host_toolsdir', None) is not None:
         if any('module-dir-path' in value for value in args.cts_args):
             raise ValueError('conflicting module-dir-path selection')
@@ -279,12 +362,18 @@ def run(args):
         shell_args = ['--linux-run', provenance['linux_run']] if args.linux_run is not None else []
         if args.host_tool_selection and module == cts_host_tools.MODULE:
             shell_args += ['--cts-host-toolsdir', args.host_tool_selection['directory']]
+        revalidate_execution(provenance)
         bundle = cts_runtime_bundle.validate(provenance['wrapper_bundle']['directory'])
         base = Path(bundle['directory'])
-        command = [str(base / 'tools/cts-tradefed.sh'), '--repository-root', str(ROOT),
+        selected_tools = [value for name, record in provenance['execution_tools'].items() if name != 'owner'
+                          for value in ['--cts-' + name, record['path']]]
+        wrapper = [str(base / 'tools/cts-tradefed.sh'), *selected_tools, '--repository-root', str(ROOT),
                    '--guest-shell', str(base / 'tools/guest-shell.sh'),
                    '--host-tool-helper', str(base / 'tools/lib/cts_host_tools.py'),
                    '--harness', str(base / 'harness/android-cts'), *shell_args, str(args.data), str(args.port), '-m', module, *args.cts_args]
+        owner_receipt = args.output / (stem + '.owner.json')
+        command = [provenance['execution_tools']['owner']['path'], '--receipt', str(owner_receipt),
+                   '--adb', provenance['execution_tools']['adb']['path'], '--server-port', str(args.port + 1), '--java', provenance['execution_tools']['java']['path'], '--', *wrapper]
         row = {'module': module, 'log': str(log), 'status': 'not-run-complete',
                'wrapper_bundle_identity': bundle['identity'], 'wrapper_command': command}
         history = list(prior.get('attempts', [])) if prior else []
@@ -303,16 +392,24 @@ def run(args):
             try:
                 code = child.wait(timeout=args.timeout)
             except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                # Only our wrapper PID; its trap cleans its own harness group.
+                # Only our directly spawned supervisor PID; it owns positive child PIDs.
                 child.send_signal(signal.SIGTERM)
                 child.wait()
                 scope['finished_ms'] = time.time_ns() // 1_000_000
                 row['wrapper_exit'] = child.returncode
+                try:
+                    revalidate_execution(provenance)
+                except (ValueError, OSError) as error:
+                    row['error'] = 'post-invocation provenance: ' + str(error)
                 record()
                 raise
         scope['finished_ms'] = time.time_ns() // 1_000_000
         row['wrapper_exit'] = code
         try:
+            revalidate_execution(provenance)  # Before selecting or crediting official XML.
+            owner_receipt = args.output / (stem + '.owner.json')
+            validate_owner_receipt(owner_receipt, command, child.pid, provenance['execution_tools']['owner']['sha256'])
+            row['owner_receipt_sha256'] = digest(owner_receipt)
             xml = result_for(module, before, scope)
             result = summarize(xml)
             copied = args.output / (stem + '.xml')
@@ -321,7 +418,7 @@ def run(args):
             row.update(xml=str(copied), xml_sha256=digest(copied), summary=result)
             if validate_result(result, module, args):
                 row['status'] = 'recorded'
-        except (ValueError, ET.ParseError) as error:
+        except (ValueError, OSError, ET.ParseError) as error:
             row['error'] = str(error)
         record()
         completed += 1
@@ -399,6 +496,7 @@ def compare(original, native):
     a, old, ai, au, ae, aw = load(original); b, new, bi, bu, be, bw = load(native)
     if a['label'] != 'original' or b['label'] != 'native' or a['manifest_sha256'] != b['manifest_sha256'] or a['cts_args'] != b['cts_args']:
         raise ValueError('baseline/native labels, module manifest or harness arguments differ')
+    compare_provenance(a, b)
     regressions = [key for key in old.keys() & new.keys() if old[key] == 'pass' and new[key] != 'pass']
     changes = [key for key in old.keys() & new.keys() if old[key] != new[key]]
     report = {'regressions': regressions, 'changed_outcomes': changes,
@@ -421,8 +519,12 @@ def main():
     runner = sub.add_parser('run'); runner.add_argument('data', type=Path); runner.add_argument('port', type=int)
     runner.add_argument('--label', choices=['original', 'native'], required=True); runner.add_argument('--image', type=Path, required=True)
     runner.add_argument('--output', type=Path, required=True); runner.add_argument('--timeout', type=int, default=10800)
-    runner.add_argument('--linux-run', type=Path, help='explicit immutable runtime executable for guest shell authorization')
-    runner.add_argument('--cts-host-toolsdir', type=Path, help='verified Darwin dependency for the staged-install host module')
+    runner.add_argument('--linux-run', type=Path, required=True, help='explicit immutable runtime executable for guest shell authorization')
+    runner.add_argument('--cts-host-toolsdir', type=Path, required=True, help='verified Darwin dependency for the staged-install host module')
+    runner.add_argument('--cts-java', type=Path, required=True)
+    runner.add_argument('--cts-adb', type=Path, required=True)
+    runner.add_argument('--cts-aapt2', type=Path, required=True)
+    runner.add_argument('--cts-owner', type=Path, required=True)
     runner.add_argument('--resume', action='store_true')
     runner.add_argument('--stop-after', type=int, help='stop after N completed invocations in this run')
     runner.add_argument('--cts-args', nargs=argparse.REMAINDER, default=[])

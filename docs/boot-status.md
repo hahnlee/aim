@@ -698,7 +698,19 @@ peer and stale birth; five disk tests pass. A disposable original-image DATA
 attach/stop with thee28f1d82 controller passes: the run-bound receipt is ok,
 and independent kernel/IORegistry checks find no live owned births,
 namespaces, mounts or DATA attachment. This early stop does not prove Android
-boot completion. The full three-body replay with this controller is unrun.
+boot completion. At0b6107a1 all three complete original oracle bodies now pass:
+setting adoption293.84s, permission lifecycle296.80s and new-setting1386.24s.
+Each exits naturally0 without failed/ignored/skipped cases; owned births,
+namespaces and mounts are0, and each fixture is removed. The new-setting
+body includes72 path cases,48 library policies, GSF scan/copy rollback,
+16 final flags and Settings launch. This qualifies the controller fix and
+these comparisons against the pinned historical Role6bd image, not a current
+rebuilt native image or full CTS/app acceptance.
+The CTS campaign now requires identical runtime, wrapper and selected
+JDK/adb/aapt2/helper provenance across both peers. Its Rust process owner
+uses actual birth-checked positive PIDs and foreground adb; six lifecycle
+tests and Python/Bash syntax gates pass. Actual harness admission and the
+complete66-module paired campaign remain unrun (#1321/#1322/#1323).
 Current C completion explicitly
 defers games and Play Store catalog transactions per the user (#704/#1273);
 other CTS/app/template/rollback gates remain required.

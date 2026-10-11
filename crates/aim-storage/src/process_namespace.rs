@@ -11,6 +11,20 @@ impl ProcessIdentity {
         if unsafe{libc::proc_pidinfo(pid,libc::PROC_PIDTBSDINFO,1,(&mut info as *mut libc::proc_bsdinfo).cast(),size)}!=size{return Err(io::Error::from_raw_os_error(libc::ESRCH));}
         Ok(Self{host_pid:pid,start_seconds:info.pbi_start_tvsec,start_microseconds:info.pbi_start_tvusec})
     }
+    /// Preserve metadata errors for owners that must prove process termination.
+    pub fn running_strict(pid:i32)->io::Result<Self>{
+        Self::metadata_strict(pid).map(|info|Self{host_pid:pid,start_seconds:info.pbi_start_tvsec,start_microseconds:info.pbi_start_tvusec})
+    }
+    pub fn metadata_strict(pid:i32)->io::Result<libc::proc_bsdinfo>{
+        if pid<=0{return Err(io::Error::from_raw_os_error(libc::EINVAL));}
+        let mut info:libc::proc_bsdinfo=unsafe{std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as i32;
+        unsafe{*libc::__error()=0;}
+        let returned=unsafe{libc::proc_pidinfo(pid,libc::PROC_PIDTBSDINFO,1,(&mut info as *mut libc::proc_bsdinfo).cast(),size)};
+        let errno=io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if returned!=size{return Err(io::Error::from_raw_os_error(if errno!=0{errno}else{libc::EIO}));}
+        Ok(info)
+    }
     pub fn is_live(self)->bool{Self::running(self.host_pid).is_ok_and(|current|current==self)}
 }
 #[derive(Clone,Debug)]
