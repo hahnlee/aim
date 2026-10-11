@@ -121,7 +121,7 @@ const PERMISSIONS: [&str; 8] = [
     "data/misc_de/0/apexdata/com.android.permission/roles.xml.reservecopy",
 ];
 const QUIET: Duration = Duration::from_secs(3);
-const BOOT_PATIENCE: Duration = Duration::from_secs(300);
+pub const DEFAULT_BOOT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_millis(50);
 
 pub fn out() -> PathBuf {
@@ -245,6 +245,7 @@ pub struct IsolatedTemplate {
     pub host_runtime: PathBuf,
     pub display: PathBuf,
     pub empty: PathBuf,
+    pub boot_timeout: Duration,
 }
 
 fn canonical_future(path: &Path) -> Result<PathBuf, String> {
@@ -293,6 +294,7 @@ fn template_inputs(config: &IsolatedTemplate) -> Result<serde_json::Value, Strin
         "linux_run_sha256": hash(&config.host_runtime.join("linux-run"))?,
         "posix_lock_holder_sha256": hash(&config.host_runtime.join("aim-lock-holder"))?,
         "display_sha256": hash(&config.display)?, "empty_sha256": hash(&config.empty)?,
+        "boot_timeout_seconds": config.boot_timeout.as_secs(),
     }))
 }
 
@@ -304,6 +306,7 @@ pub fn run_isolated_template(ctx: &Ctx, config: &IsolatedTemplate) -> Result<(),
         host_runtime: fs::canonicalize(&config.host_runtime).map_err(|error| error.to_string())?,
         display: fs::canonicalize(&config.display).map_err(|error| error.to_string())?,
         empty: fs::canonicalize(&config.empty).map_err(|error| error.to_string())?,
+        boot_timeout: config.boot_timeout,
     };
     let config = &canonical;
     if output.exists() {
@@ -465,6 +468,7 @@ fn first_boot(
     log: &mut Log,
     isolated: Option<&IsolatedTemplate>,
 ) -> Result<(Option<String>, stubs::Admission), String> {
+    let boot_patience = isolated.map_or(DEFAULT_BOOT_TIMEOUT, |config| config.boot_timeout);
     let template = isolated.map_or_else(
         || aim_paths::userdata().join(EMPTY_TEMPLATE),
         |config| config.output.join("inputs").join(EMPTY_TEMPLATE),
@@ -573,9 +577,9 @@ fn first_boot(
     let (mut written, mut granted, mut completed, mut asked) = (None, None, None, start);
     while written.is_none() || granted.is_none() || completed.is_none() {
         session.check()?;
-        if start.elapsed() > BOOT_PATIENCE {
+        if start.elapsed() > boot_patience {
             return Err(format!(
-                "after {BOOT_PATIENCE:?}: settings {written:?}, permissions {granted:?}, \
+                "after {boot_patience:?}: settings {written:?}, permissions {granted:?}, \
                  sys.boot_completed {completed:?}"
             ));
         }
@@ -611,7 +615,7 @@ fn first_boot(
             asked = Instant::now();
             if guest.path_map.exists()
                 && binder_ready::poll(&data::runtime_of(dir), init_identity, &guest.binder,
-                    BOOT_PATIENCE.saturating_sub(start.elapsed()).as_millis().min(20) as u32)?
+                    boot_patience.saturating_sub(start.elapsed()).as_millis().min(20) as u32)?
                 && getprop("sys.boot_completed")? == "1" {
                 completed = Some(start.elapsed());
             }
@@ -904,6 +908,7 @@ mod isolation_tests {
             host_runtime: directory.join("host"),
             display: directory.join("display"),
             empty: directory.join("empty.asif"),
+            boot_timeout: DEFAULT_BOOT_TIMEOUT,
         };
         assert!(isolated_output(&config).is_ok());
         config.output = out().join("must-not-create");

@@ -50,7 +50,7 @@ commands:
   bench --compare A.json B.json
                          the change of every median from A to B
   template --output NEWDIR --image EXISTING_ROOT --host-runtime BIN_DIR
-           --display-bin FILE --empty-template FILE
+           --display-bin FILE --empty-template FILE [--boot-timeout SECONDS]
                          isolated first-boot template from existing inputs;
                          no graph build and no shared template replacement
   check-service-java DEX STUB_DEX
@@ -112,6 +112,7 @@ struct Args {
     keep: bool,
     compare: Vec<String>,
     template_inputs: std::collections::HashMap<String, String>,
+    template_boot_timeout: Option<Duration>,
 }
 
 fn parse(args: Vec<String>) -> Result<Args, String> {
@@ -131,10 +132,20 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         keep: false,
         compare: Vec::new(),
         template_inputs: std::collections::HashMap::new(),
+        template_boot_timeout: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
         match arg.as_str() {
+            "--boot-timeout" if parsed.command == "template" => {
+                if parsed.template_boot_timeout.is_some() {
+                    return Err("duplicate --boot-timeout".into());
+                }
+                let seconds = value(&arg)?.parse::<u64>()
+                    .ok().filter(|seconds| (1..=3600).contains(seconds))
+                    .ok_or("--boot-timeout needs seconds in 1..=3600")?;
+                parsed.template_boot_timeout = Some(Duration::from_secs(seconds));
+            }
             "--output" | "--image" | "--host-runtime" | "--display-bin" | "--empty-template"
                 if parsed.command == "template" =>
             {
@@ -187,6 +198,36 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         }
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod template_timeout_tests {
+    use super::*;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn template_boot_timeout_is_explicit_and_bounded() {
+        let default = parse(arguments(&["template"])).unwrap();
+        assert_eq!(default.template_boot_timeout, None);
+        assert_eq!(nodes::userdata::DEFAULT_BOOT_TIMEOUT.as_secs(), 300);
+        for seconds in [1, 600, 3600] {
+            let parsed = parse(arguments(&["template", "--boot-timeout", &seconds.to_string()])).unwrap();
+            assert_eq!(parsed.template_boot_timeout, Some(Duration::from_secs(seconds)));
+        }
+        for value in ["0", "-1", "3601", "1.5", "invalid", "18446744073709551616"] {
+            assert!(parse(arguments(&["template", "--boot-timeout", value])).is_err());
+        }
+    }
+
+    #[test]
+    fn template_boot_timeout_rejects_missing_duplicate_and_graph_options() {
+        assert!(parse(arguments(&["template", "--boot-timeout"])).is_err());
+        assert!(parse(arguments(&["template", "--boot-timeout", "600", "--boot-timeout", "300"])).is_err());
+        assert!(parse(arguments(&["build", "userdata/template", "--boot-timeout", "600"])).is_err());
+    }
 }
 
 fn load(verbose: bool) -> Result<(Graph, Ctx), String> {
@@ -284,6 +325,8 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
                 host_runtime: input("--host-runtime")?,
                 display: input("--display-bin")?,
                 empty: input("--empty-template")?,
+                boot_timeout: args.template_boot_timeout
+                    .unwrap_or(nodes::userdata::DEFAULT_BOOT_TIMEOUT),
             };
             let (_, ctx) = load(args.verbose)?;
             nodes::userdata::run_isolated_template(&ctx, &config)?;

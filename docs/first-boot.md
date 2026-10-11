@@ -324,6 +324,16 @@ Its log, raw disposable boot data and constructor captures remain inside that
 output; published templates elsewhere are untouched. Input hashes, including the
 image overlay receipt, are captured before boot and checked again before publish.
 
+`--boot-timeout SECONDS` selects the standalone template's first-boot budget
+(1–3600 seconds). The standalone default and the build graph remain 300 seconds.
+The selected budget is recorded as `boot_timeout_seconds` in the input provenance;
+settings capture, initialized permissions, quiet time and `sys.boot_completed`
+are still all required. Use an explicit `--boot-timeout 600` for a slower factory
+boot. In the Original `m4-ot1` run, settings were captured at 207.816 seconds and
+`sys.boot_completed` at 298.408 seconds, but the 300-second budget expired while
+waiting for permissions (#1263). Reaching boot completion alone does not publish
+a template.
+
 ```sh
 cargo build -p aim-build --bin cargo-aim --target-dir target/aim/template-tool-cargo
 target/aim/template-tool-cargo/debug/cargo-aim template \

@@ -67,8 +67,13 @@ and reserve hashes remain different and fail the comparison (#1306). Their
 live original-owner hash binding remains required. The collector handles
 bare diskutil identifiers and hdiutil device paths strictly (#1324):20 pure
 tests pass without skips, and both actual DATA collection lifetimes pass.
-Current-pair original template, consumer, Role hash binding, apps, rollback and
-full 66-module CTS parity remain unverified.
+The current original template attempt captures settings in207.816s and reaches
+boot completion in298.408s, then fails its300-second permission-capture budget
+without publication (#1263); owned processes, namespaces, mounts and attachments
+are gone. The standalone factory now accepts an explicit1–3600-second CLI
+budget and records it in provenance; default and graph budgets remain300s.
+Two parser tests pass without skips. Original template publication, consumer,
+Role hash binding, apps, rollback and full66CTS parity remain unverified.
 The current CTS host owner integration passes the official 16_r1 launcher,
 selected Java21 JVM and foreground adb: exit0 in3.807s, ten recorded process
 births terminal, no remaining actors/listeners or uncertain queries, and all
