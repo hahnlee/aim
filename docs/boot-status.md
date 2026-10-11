@@ -626,6 +626,17 @@ help subsequently exits0. A PID-associated unified-log query finds no
 termination sender; the open security popup has no PID/time association.
 This is a failed oracle replay, not conformance acceptance or proof that host
 security caused this particular termination.
+The subsequent bounded syscall/crash diagnostic boots in277.276s and identifies
+the actual exception: `Snapshot already closed` at the oracle's creation of a
+filtered scope after its parent closes (#1316). The original app_process then
+requests SIGKILL against its own PID; the parent shell exits137 naturally,
+without reaching the diagnostic90s/16MiB cap. The pinned Android16r1
+PackageManagerLocalImpl permits that creation and checks closure on reads.
+The vendor snapshot adapter now follows that behavior; corrected full-body
+replay and rebuilt image acceptance remain NOT RUN. Original crash reporting
+also fails Binder checkService2 with EBADF (#1317), a separate owner gap.
+Native stop succeeds and all held births/mounts are independently gone;
+diagnostic logs and disposable DATA remain preserved.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,

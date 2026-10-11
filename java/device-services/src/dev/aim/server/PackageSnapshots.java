@@ -1481,7 +1481,6 @@ public final class PackageSnapshots {
 
         @Override
         public PackageManagerLocal.FilteredSnapshot filtered(int callingUid, UserHandle user) {
-            checkClosed();
             return new Filtered(data, callingUid, user, this, null);
         }
 
