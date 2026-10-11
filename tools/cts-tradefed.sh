@@ -21,6 +21,7 @@ selected_adb=
 selected_aapt2=
 owner_admission_fd=
 selected_owner=
+selected_image=
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --repository-root|--guest-shell|--host-tool-helper|--harness)
@@ -32,11 +33,12 @@ while [[ "${1:-}" == --* ]]; do
         --harness) harness_override="$2" ;;
       esac
       shift 2 ;;
-    --owner-admission-fd|--cts-owner)
+    --owner-admission-fd|--cts-owner|--image)
       [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
       case "$1" in
         --owner-admission-fd) owner_admission_fd="$2" ;;
         --cts-owner) selected_owner="$2" ;;
+        --image) selected_image="$2" ;;
       esac
       shift 2 ;;
     --cts-java|--cts-adb|--cts-aapt2)
@@ -80,7 +82,7 @@ if [[ -n "$host_tools" ]]; then
   echo "cts host-tool selection: $selection"
   set -- "$@" --module-arg "$module_arg"
 fi
-[[ "$owner_admission_fd" == 198 && -x "$selected_owner" && -n "$selected_java" && -n "$selected_adb" && -n "$selected_aapt2" ]] || {
+[[ "$owner_admission_fd" == 198 && -x "$selected_owner" && -d "$selected_image" && -n "$selected_java" && -n "$selected_adb" && -n "$selected_aapt2" ]] || {
   echo 'CTS wrapper requires the owned supervisor and explicit selected tools' >&2; exit 2;
 }
 jdk="$(dirname "$selected_java")"
@@ -101,7 +103,7 @@ export ANDROID_ADB_SERVER_PORT=$((port + 1))
 # allowed ("Always allow from this computer"): adbd checks adb_keys before
 # it asks, and the lightweight shell has no dialog to ask with.
 key="$(cat "$HOME/.android/adbkey.pub")"
-"$guest_shell" --repository-root "$root" ${shell_args[@]+"${shell_args[@]}"} "$data" "grep -qxF '$key' /data/misc/adb/adb_keys 2>/dev/null ||
+"$guest_shell" --repository-root "$root" --image "$selected_image" --cts-owner "$selected_owner" ${shell_args[@]+"${shell_args[@]}"} "$data" "grep -qxF '$key' /data/misc/adb/adb_keys 2>/dev/null ||
   { echo '$key' >> /data/misc/adb/adb_keys; };
   chown system:shell /data/misc/adb/adb_keys && chmod 0640 /data/misc/adb/adb_keys"
 

@@ -105,7 +105,49 @@ fn executable(process: ProcessIdentity) -> io::Result<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
     Ok(PathBuf::from(std::ffi::OsString::from_vec(path)).canonicalize()?)
 }
+fn read_owner_text(path: &std::path::Path) -> io::Result<String> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    let mut file=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;
+    if !file.metadata()?.is_file() {return Err(invalid());}
+    let deadline=Instant::now()+Duration::from_secs(1);
+    loop {
+        if unsafe {libc::flock(file.as_raw_fd(),libc::LOCK_SH|libc::LOCK_NB)}==0 {break;}
+        let error=io::Error::last_os_error();
+        if !matches!(error.raw_os_error(),Some(libc::EWOULDBLOCK)|Some(libc::EINTR)) {return Err(error);}
+        if Instant::now()>=deadline {return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));}
+        thread::sleep(Duration::from_millis(5));
+    }
+    let mut text=String::new();Read::by_ref(&mut file).take(16385).read_to_string(&mut text)?;
+    if text.len()>16384 {return Err(invalid());}
+    Ok(text)
+}
+fn authenticated_init_pid(table: &std::path::Path) -> io::Result<i32> {
+    use aim_storage::process_namespace::InitRegistration;
+    let table=table.canonicalize()?;
+    let registration=read_owner_text(&table.join("namespace-init"))?;
+    let fields=registration.trim_end_matches('\n').split('\t').collect::<Vec<_>>();
+    if fields.len()!=5 || fields[0]!="AIMNS1" {return Err(invalid());}
+    let process=ProcessIdentity {host_pid:fields[1].parse().map_err(|_|invalid())?,
+        start_seconds:fields[2].parse().map_err(|_|invalid())?,start_microseconds:fields[3].parse().map_err(|_|invalid())?};
+    if process.host_pid<=0 || process.start_seconds==0 || process.start_microseconds>=1000000 {return Err(invalid());}
+    let init=InitRegistration {process,mount_namespace:fields[4].into()};
+    if init.mount_namespace!=format!("init-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds) {return Err(invalid());}
+    if ProcessIdentity::running_strict(process.host_pid)?!=process {return Err(io::Error::from_raw_os_error(libc::EPERM));}
+    let expected=table.parent().ok_or_else(invalid)?.join("init.identity").canonicalize()?;
+    if table.join(process.host_pid.to_string()).canonicalize()?!=expected {return Err(io::Error::from_raw_os_error(libc::EPERM));}
+    let identity=read_owner_text(&expected)?;
+    let lines=identity.lines().collect::<Vec<_>>();
+    if lines.first()!=Some(&"# aim-guest-init identity v1") {return Err(invalid());}
+    for (key,value) in [("service","init"),("uid","0"),("gid","0")] {
+        let values=lines.iter().filter_map(|line|line.strip_prefix(&format!("{key}\t"))).collect::<Vec<_>>();
+        if values!=[value] {return Err(io::Error::from_raw_os_error(libc::EPERM));}
+    }
+    if read_owner_text(&table.join("namespace-init"))?!=registration || ProcessIdentity::running_strict(process.host_pid)?!=process {return Err(io::Error::from_raw_os_error(libc::EPERM));}
+    Ok(process.host_pid)
+}
+
 fn run(args:Vec<String>) -> io::Result<i32> {
+    if args.len()==2 && args[0]=="--init-pid" {println!("{}",authenticated_init_pid(std::path::Path::new(&args[1]))?);return Ok(0);}
     if args.len()==2 && args[0]=="--admit" {admit(args[1].parse().map_err(|_|invalid())?)?; return Ok(0);}
     if args.len()<10 || args[0]!="--receipt" || args[2]!="--adb" || args[4]!="--server-port" || args[6]!="--java" || args[8]!="--" {return Err(invalid());}
     let java=PathBuf::from(&args[7]).canonicalize()?;
@@ -218,6 +260,21 @@ mod tests {
         let child=sleeper();let actual=identity(&child.0).unwrap();let mut registry=BTreeMap::from([(actual.host_pid,actual)]);
         assert_eq!(discover(&mut registry,Instant::now()).unwrap_err().raw_os_error(),Some(libc::ETIMEDOUT));
         assert!(live(actual).unwrap());assert_eq!(registry.len(),1);
+    }
+    #[test]
+    fn init_selection_requires_registered_birth_and_init_kind() {
+        use std::os::unix::fs::symlink;
+        let root=std::env::temp_dir().join(format!("aim-cts-init-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let table=root.join("by-pid");fs::create_dir_all(&table).unwrap();
+        let child=sleeper();let process=identity(&child.0).unwrap();
+        let record=format!("AIMNS1\t{}\t{}\t{}\tinit-{}-{}-{}\n",process.host_pid,process.start_seconds,process.start_microseconds,process.host_pid,process.start_seconds,process.start_microseconds);
+        fs::write(table.join("namespace-init"),&record).unwrap();
+        let identity=root.join("init.identity");fs::write(&identity,"# aim-guest-init identity v1\nservice\tinit\nuid\t0\ngid\t0\n").unwrap();
+        symlink(&identity,table.join(process.host_pid.to_string())).unwrap();
+        assert_eq!(authenticated_init_pid(&table).unwrap(),process.host_pid);
+        fs::write(&identity,"# aim-guest-init identity v1\nservice\tcontroller\nuid\t0\ngid\t0\n").unwrap();assert!(authenticated_init_pid(&table).is_err());
+        fs::write(table.join("namespace-init"),record.replace(&format!("\t{}\t",process.start_seconds),&format!("\t{}\t",process.start_seconds+1))).unwrap();assert!(authenticated_init_pid(&table).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn invalid_admission_descriptor_fails_before_touching_foreign_fd() {

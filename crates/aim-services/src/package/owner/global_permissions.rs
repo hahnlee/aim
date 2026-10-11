@@ -45,7 +45,13 @@ pub(super) fn replace(original: &Element, desired: &Settings) -> Result<Element,
             section.content.push(Node::Element(item));
         }
         root.content.retain(|n| !matches!(n, Node::Element(e) if e.name == tag));
-        root.content.push(Node::Element(section));
+        // Settings.writeLPr writes definitions before package records and
+        // domain/keyset owners, including when no packages remain.
+        let at = root.content.iter().position(|node| matches!(node, Node::Element(e)
+            if matches!(e.name.as_str(), "package" | "updated-package" | "shared-user"
+                | "renamed-package" | "domain-verifications" | "domain-verifications-legacy"
+                | "keyset-settings"))).unwrap_or(root.content.len());
+        root.content.insert(at, Node::Element(section));
     }
     let parsed = Settings::parse(&root)?;
     if parsed.permissions != persisted(&desired.permissions)
@@ -81,6 +87,34 @@ mod tests {
         assert!(normal.children().any(|e| e.name == "vendor"));
         for key in ["protection", "type", "icon", "label"] { assert!(normal.string(key).is_none()); }
     }
+    #[test]
+    fn definition_containers_follow_pinned_writer_before_package_and_tail_owners() {
+        for xml in [
+            "<packages><version volumeUuid='private' sdkVersion='36' databaseVersion='3' fingerprint='fixture'/><package name='p' codePath='/system/app/p' userId='10001'/><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings><permissions future='section'><item name='old' package='p'/><vendor/></permissions><permission-trees/></packages>",
+            "<packages><version volumeUuid='private' sdkVersion='36' databaseVersion='3' fingerprint='fixture'/><domain-verifications><active/><restored/></domain-verifications><keyset-settings version='1'><keys/><keysets/><lastIssuedKeyId value='0'/><lastIssuedKeySetId value='0'/></keyset-settings></packages>",
+        ] {
+            let original = aim_android_xml::read(xml.as_bytes()).unwrap();
+            let before = original.clone();
+            let desired = Settings { permissions: vec![Permission {name:"p.DEF".into(),package:"p".into(),owner:PermissionOwner::Manifest,protection_level:0,dynamic:None}], ..Default::default() };
+            let written = replace(&original, &desired).unwrap();
+            let tags = written.children().map(|e|e.name.as_str()).collect::<Vec<_>>();
+            assert_eq!(&tags[..3], &["version", "permission-trees", "permissions"]);
+            assert_eq!(Settings::parse(&written).unwrap().permissions, desired.permissions);
+            assert_eq!(original, before);
+            let rewritten = replace(&written, &desired).unwrap();
+            assert_eq!(rewritten, written);
+            for tag in ["package", "domain-verifications", "keyset-settings"] {
+                let old = original.children().find(|e|e.name==tag);
+                if let Some(old) = old { assert_eq!(rewritten.children().find(|e|e.name==tag), Some(old)); }
+            }
+            if xml.contains("future=") {
+                let definitions = written.children().find(|e|e.name=="permissions").unwrap();
+                assert_eq!(definitions.string("future").as_deref(),Some("section"));
+                assert!(definitions.children().any(|e|e.name=="vendor"));
+            }
+        }
+    }
+
     #[test]
     fn completed_scan_persists_real_definitions_and_domains_and_reopens_without_grants() {
         use crate::package::{owner::Store, scan::SigningScan, owner::usage::Usage};
@@ -119,6 +153,11 @@ mod tests {
             assert_eq!(reopened.state().settings.key_sets, before_keys);
             let document = aim_android_xml::read(&fs::read(&path).unwrap()).unwrap();
             assert!(document.children().any(|e| e.name == "vendor-global"));
+            let tags = document.children().map(|e|e.name.as_str()).collect::<Vec<_>>();
+            let package = tags.iter().position(|tag|*tag=="package").unwrap();
+            let trees = tags.iter().position(|tag|*tag=="permission-trees").unwrap();
+            let permissions = tags.iter().position(|tag|*tag=="permissions").unwrap();
+            assert!(trees < permissions && permissions < package);
             assert!(document.children().filter(|e| e.name == "package").all(|e| !e.children().any(|e| e.name == "perms")));
             let bytes = fs::read(&path).unwrap();
             let unchanged = disk.state().settings.clone();

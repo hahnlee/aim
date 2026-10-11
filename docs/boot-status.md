@@ -67,17 +67,31 @@ and reserve hashes remain different and fail the comparison (#1306). Their
 live original-owner hash binding remains required. The collector handles
 bare diskutil identifiers and hdiutil device paths strictly (#1324):20 pure
 tests pass without skips, and both actual DATA collection lifetimes pass.
-The current original template attempt captures settings in207.816s and reaches
-boot completion in298.408s, then fails its300-second permission-capture budget
-without publication (#1263); owned processes, namespaces, mounts and attachments
-are gone. The standalone factory now accepts an explicit1–3600-second CLI
-budget and records it in provenance; default and graph budgets remain300s.
-Two parser tests pass without skips. Original template publication, consumer,
-Role hash binding, apps, rollback and full66CTS parity remain unverified.
-The current CTS host owner integration passes the official 16_r1 launcher,
-selected Java21 JVM and foreground adb: exit0 in3.807s, ten recorded process
-births terminal, no remaining actors/listeners or uncertain queries, and all
-input hashes unchanged. This probe executes zero Android CTS modules.
+The first original template attempt fails the300-second permission-capture
+budget after boot completion (#1263). The second publishes70 files with an
+explicit600-second budget: settings203.7s, boot294.8s, permissions298.4s.
+Owned processes, namespaces, mounts and attachments are gone. The standalone
+factory records the selected CLI budget; default and graph remain300s.
+Two parser tests pass without skips. Original/native structure still differs
+in Role hashes, global XML section ordering and preferred record ordering.
+Six permission declaration winners differ only within the documented pair of
+system owners; both real APKs and the pinned permission policy confirm it.
+The native nt1 consumer reaches boot completion and rebinds package DATA inodes.
+Actual native init authentication and explicit-image guest-shell entry pass.
+Its Role diagnostic refuses two different original-owner hash results (#1328);
+a retained regular output file proves that failure. The stored hash binding is
+not accepted. After stop, recorded actors and mounts are gone. Apps, rollback,
+BootStats, full66CTS and complete consumer parity remain unverified.
+The current CTS host owner integration passes the official16_r1 launcher,
+selected Java21 JVM and foreground adb with the new strict init helper: exit0
+in4.194s,13 recorded births terminal, no remaining actors/listeners or uncertain
+queries, and unchanged hashes. Comparison and resume revalidate each retained
+owner receipt before XML completion credit (#1321). The wrapper carries the
+actual frozen image and authenticates init by kernel birth (#1325);19 comparator
+and4 shell tests pass. This host probe executes zero Android CTS modules.
+The native permission writer now places definitions before package/tail records
+(#1326), and callback replay retains real committed admission order (#1327).
+Six focused Rust regressions pass; the corrected native runtime has not booted.
 
 The frozen b04c9e67 original/native pair uses the same pinned 66-module CTS
 inputs. The original campaign is terminal and all owned processes are reaped:

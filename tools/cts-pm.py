@@ -232,6 +232,59 @@ def validate_owner_receipt(path, command, pid, executable_sha256):
     return receipt
 
 
+def persisted_owner_receipt(campaign, row, directory):
+    """Recheck the process evidence attached to one retained module attempt."""
+    tools = campaign['execution_tools']
+    for name, record in tools.items():
+        if digest(Path(record['path'])) != record['sha256']:
+            raise ValueError('current selected executable differs: ' + name)
+    scope = row.get('invocation_scope', {})
+    pid = scope.get('wrapper_pid')
+    if type(pid) is not int or pid <= 0:
+        raise ValueError('owner proof lacks the actual invocation supervisor PID')
+    started, finished = scope.get('started_ms'), scope.get('finished_ms')
+    if type(started) is not int or type(finished) is not int or not 0 < started <= finished:
+        raise ValueError('owner proof lacks the recorded invocation time bounds')
+    module = row['module']
+    args = argparse.Namespace(port=campaign['port'], cts_args=campaign['cts_args'],
+                              host_tool_selection=campaign.get('cts_host_tools'))
+    if scope.get('command') != invocation_command(module, args) or scope.get('serial') != f"127.0.0.1:{campaign['port']}":
+        raise ValueError('owner proof invocation scope differs')
+    log = Path(row['log'])
+    receipt_path = log.with_suffix('.owner.json')
+    if log.parent.resolve() != directory.resolve() or receipt_path.is_symlink():
+        raise ValueError('owner receipt is outside its campaign or linked')
+    receipt_path = receipt_path.resolve(strict=True)
+    if receipt_path.parent != directory.resolve() or row.get('owner_receipt_sha256') != digest(receipt_path):
+        raise ValueError('owner receipt hash differs or is missing')
+    bundle = campaign['wrapper_bundle']
+    if row.get('wrapper_bundle_identity') != bundle['identity']:
+        raise ValueError('owner proof wrapper generation differs')
+    base = Path(bundle['directory'])
+    selected = [value for name in ('java', 'adb', 'aapt2')
+                for value in ['--cts-' + name, tools[name]['path']]]
+    shell = ['--linux-run', campaign['linux_run']]
+    if campaign.get('cts_host_tools') and module == cts_host_tools.MODULE:
+        shell += ['--cts-host-toolsdir', campaign['cts_host_tools']['directory']]
+    wrapper = [str(base / 'tools/cts-tradefed.sh'), *selected,
+               '--repository-root', bundle['manifest']['root'], '--image', campaign['image'],
+               '--guest-shell', str(base / 'tools/guest-shell.sh'),
+               '--host-tool-helper', str(base / 'tools/lib/cts_host_tools.py'),
+               '--harness', str(base / 'harness/android-cts'), *shell,
+               campaign['data'], str(campaign['port']), '-m', module, *campaign['cts_args']]
+    command = [tools['owner']['path'], '--receipt', str(log.with_suffix('.owner.json')),
+               '--adb', tools['adb']['path'], '--server-port', str(campaign['port'] + 1),
+               '--java', tools['java']['path'], '--', *wrapper]
+    if row.get('wrapper_command') != command:
+        raise ValueError('owner proof command differs from selected campaign inputs')
+    receipt = validate_owner_receipt(receipt_path, command, pid, tools['owner']['sha256'])
+    for birth in receipt['processes']:
+        birth_ms = birth['start_seconds'] * 1000 + birth['start_microseconds'] // 1000
+        if not started <= birth_ms <= finished:
+            raise ValueError('owner process birth is outside the recorded invocation')
+    return receipt
+
+
 def campaign_provenance(args):
     receipt = args.image / '.overlay-receipt'
     if not receipt.is_file():
@@ -297,6 +350,12 @@ def resume_state(args, provenance):
             raise ValueError(f'unexpected or duplicate campaign module: {module}')
         seen.add(module)
         if row['status'] != 'recorded':
+            continue
+        try:
+            persisted_owner_receipt(state, row, args.output)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            row['status'] = 'not-run-complete'
+            row['error'] = 'owner proof: ' + str(error)
             continue
         xml = Path(row['xml']).resolve()
         if xml.parent != args.output.resolve():
@@ -367,10 +426,10 @@ def run(args):
         base = Path(bundle['directory'])
         selected_tools = [value for name, record in provenance['execution_tools'].items() if name != 'owner'
                           for value in ['--cts-' + name, record['path']]]
-        wrapper = [str(base / 'tools/cts-tradefed.sh'), *selected_tools, '--repository-root', str(ROOT),
+        wrapper = [str(base / 'tools/cts-tradefed.sh'), *selected_tools, '--repository-root', str(ROOT), '--image', provenance['image'],
                    '--guest-shell', str(base / 'tools/guest-shell.sh'),
                    '--host-tool-helper', str(base / 'tools/lib/cts_host_tools.py'),
-                   '--harness', str(base / 'harness/android-cts'), *shell_args, str(args.data), str(args.port), '-m', module, *args.cts_args]
+                   '--harness', str(base / 'harness/android-cts'), *shell_args, provenance['data'], str(args.port), '-m', module, *args.cts_args]
         owner_receipt = args.output / (stem + '.owner.json')
         command = [provenance['execution_tools']['owner']['path'], '--receipt', str(owner_receipt),
                    '--adb', provenance['execution_tools']['adb']['path'], '--server-port', str(args.port + 1), '--java', provenance['execution_tools']['java']['path'], '--', *wrapper]
@@ -448,6 +507,10 @@ def compare(original, native):
             if row['status'] != 'recorded': issues.append(f"campaign status: {row['status']}")
             if row.get('wrapper_exit') != 0: issues.append(f"wrapper exit: {row.get('wrapper_exit')}")
             if row.get('error'): issues.append(row['error'])
+            try:
+                persisted_owner_receipt(campaign, row, path)
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                issues.append('owner proof: ' + str(error))
             record = {'module': requested, 'campaign_status': row['status'],
                       'wrapper_exit': row.get('wrapper_exit'), 'wrapper_error': row.get('error'),
                       'xml_retained': bool(row.get('xml')), 'xml_complete': False,
