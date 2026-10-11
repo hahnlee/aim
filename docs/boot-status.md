@@ -118,8 +118,23 @@ actual native-controller regression passes (one test, no skips), covering
 missing init, absent endpoint, authenticated broker denial and successful owner
 registration while guest stderr is null. The627d4323 release build passes in
 59.74s; linux-run is now4ebb702f, while guest-init and the remaining recorded
-runtime/tool hashes are unchanged. Actual original adbd failing stage/errno
-reproduction and its owner repair remain pending. Native
+runtime/tool hashes are unchanged. Fresh diagnostic Original FULL66 at8a2e6c05 reproduces the actual failure:
+original adbd fork admission receives authenticated broker-reply EBADF9 during
+PackageVisibility, after48 host test end events. Parsing11/0 and Setting2/0 have
+complete official XML; Preferred has one failure and incomplete XML. The fourth
+module was stopped with owned supervisor TERM and has no official XML;48 end
+events are not final test PASS credit. Normal Android stop exits0 in14.17s,
+and the final seal proves all captured births, namespaces, DATA mounts and both
+IORegistry attachments absent, both named listeners quiet and exclusive DATA
+lock. Cleanup errors and input changes are empty. Parent-file-close failure is
+not established: fork admission does not inherit POSIX lock descriptions.
+Source now records native broker fork/holder-spawn/rebind substages and, only
+on actual spawn failure, nonmutating stdio FD flags; original errors and successful
+paths are retained. Two focused native regressions pass without skips: actual
+invalid owned spawn-file-action EBADF preserves errno/stage and survives closed
+stderr; actual broker child admission succeeds after the producer proof is closed,
+and parent POSIX locks are not inherited. Release qualification, precise native
+IO site and owner repair remain pending. Native
 FULL66, apps, fresh-template parity and rollback remain unrun on this cohort.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/

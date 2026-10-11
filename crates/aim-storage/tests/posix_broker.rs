@@ -102,6 +102,19 @@ fn fork_attach_requires_native_parent_and_birth_bound_namespace_receipt(){
  std::fs::remove_file(table.join(format!("{}.mount-namespace",actor.process.host_pid))).unwrap();assert_eq!(child.call("attach")[0]as i32,libc::EPERM,"no receipt cannot be guessed from ppid");
  aim_storage::process_namespace::register_mount_namespace(&table,actor.process,"foreign-mount").unwrap();assert_eq!(child.call("attach")[0]as i32,libc::EPERM);
  aim_storage::process_namespace::register_mount_namespace(&table,actor.process,"parent-current-mount").unwrap();
+ // Dropping the producer's file proof must not break a later fork admission.
+ // The parent's native holder retains its independent POSIX lock until Close.
+ let parent=Client::lookup(&endpoint).unwrap();let file=std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+ let identity=Identity::from_fd(file.as_fd()).unwrap();let mut register=Frame::new(Operation::Register,1);register.key=identity.to_bytes();register.access=libc::O_RDWR;
+ let registered=parent.call(register,Some(file.as_fd())).unwrap();assert_eq!(registered.errno,0);assert_ne!(registered.ticket,0);
+ let mut lock=Frame::new(Operation::Set,2);lock.ticket=registered.ticket;lock.range=Range{kind:1,start:0,len:8};assert_eq!(parent.call(lock,None).unwrap().errno,0);
+ drop(file);
  let attached=child.call("attach");assert_eq!(attached[0],0);assert_eq!(attached[2],actor.process.host_pid as i64,"authoritative namespace mapping, no payload PID");
- child.call("register");assert_eq!(child.call("set 1 0 8")[0],0);child.quit();controller.guest_exited(actor).unwrap();controller.shutdown().unwrap();std::fs::remove_dir_all(directory).unwrap();
+ assert_eq!(child.call("register")[0],0);
+ assert_eq!(child.call("get 1 0 8")[2],1,"parent holder still owns the real conflicting lock");
+ assert_eq!(child.call("set 2 0 8")[0],0);
+ assert_eq!(child.call("get 1 0 8")[2],1,"child unlock must not release the parent's independent POSIX lock");
+ assert!(matches!(child.call("set 1 0 8")[0]as i32,libc::EACCES|libc::EAGAIN));
+ let mut close=Frame::new(Operation::Close,3);close.key=identity.to_bytes();assert_eq!(parent.call(close,None).unwrap().errno,0);
+ assert_eq!(child.call("set 1 0 8")[0],0);child.quit();controller.guest_exited(actor).unwrap();controller.shutdown().unwrap();std::fs::remove_dir_all(directory).unwrap();
 }

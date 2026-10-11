@@ -27,6 +27,29 @@ pub fn read_credentials(table:&std::path::Path,actor:ProcessIdentity)->io::Resul
 }
 fn key(p:ProcessIdentity)->Key{(p.host_pid,p.start_seconds,p.start_microseconds)}
 static NEXT:AtomicU64=AtomicU64::new(1);
+fn admission_diagnostic(arguments:std::fmt::Arguments<'_>) {
+ use std::io::Write;
+ // Diagnostics must not replace the original owner error if stderr is closed.
+ let _=writeln!(io::stderr().lock(),"{arguments}");
+}
+fn admission_failure(stage:&str,actor:ProcessIdentity,failure:io::Error)->io::Error {
+ admission_diagnostic(format_args!("[posix-owner] stage={stage} controller_pid={} actor={actor:?} host_errno={:?} error={failure}",std::process::id(),failure.raw_os_error()));
+ failure
+}
+fn spawn_failure(config:&Config,owner:Owner,controller:ProcessIdentity,failure:io::Error)->io::Error {
+ // Snapshot only: closed stdio is legal and these numbers are not ownership proofs.
+ // The command supplies null stdin and inherits stdout/stderr. Never reopen or retry here.
+ for fd in 0..3 {
+  let flags=unsafe{libc::fcntl(fd,libc::F_GETFD)};
+  let flags_errno=if flags<0{io::Error::last_os_error().raw_os_error()}else{None};
+  let access=unsafe{libc::fcntl(fd,libc::F_GETFL)};
+  let access_errno=if access<0{io::Error::last_os_error().raw_os_error()}else{None};
+  admission_diagnostic(format_args!("[posix-owner] stage=holder-command-spawn-stdio controller={controller:?} actor={:?} fd={fd} getfd={flags} getfd_errno={flags_errno:?} getfl={access} getfl_errno={access_errno:?} stdin=null stdout=inherit stderr=inherit",owner.process));
+ }
+ admission_diagnostic(format_args!("[posix-owner] stage=holder-command-spawn-context controller={controller:?} actor={:?} executable={}",owner.process,config.holder.display()));
+ admission_failure("holder-command-spawn",owner.process,failure)
+}
+
 #[derive(Clone)]
 pub struct Config {pub endpoint:String,pub holder:PathBuf,pub startup_timeout:Duration}
 #[derive(Clone,Debug)]
@@ -58,13 +81,13 @@ struct Holder {owner:Owner,process:ProcessIdentity,client:Client,child:Mutex<Opt
 impl Holder {
  fn spawn(config:&Config,owner:Owner,controller:ProcessIdentity)->io::Result<Arc<Self>>{
   let name=format!("com.aim.posix-holder.{}.{}.{}",controller.host_pid,controller.start_microseconds,NEXT.fetch_add(1,Ordering::Relaxed));
-  let mut child=Command::new(&config.holder).args(["--service-name",&name,"--controller-pid",&controller.host_pid.to_string(),"--controller-seconds",&controller.start_seconds.to_string(),"--controller-microseconds",&controller.start_microseconds.to_string()]).stdin(Stdio::null()).spawn()?;
+  let mut child=Command::new(&config.holder).args(["--service-name",&name,"--controller-pid",&controller.host_pid.to_string(),"--controller-seconds",&controller.start_seconds.to_string(),"--controller-microseconds",&controller.start_microseconds.to_string()]).stdin(Stdio::null()).spawn().map_err(|failure|spawn_failure(config,owner,controller,failure))?;
   let result=(||{
-   let process=ProcessIdentity::running(child.id()as i32)?;let deadline=Instant::now()+config.startup_timeout;
-   let client=loop{match Client::lookup(&name){Ok(client)=>break client,Err(failure)if failure.raw_os_error()==Some(libc::ENOENT)=>{if child.try_wait()?.is_some(){return Err(error(libc::ECHILD));}if Instant::now()>=deadline{return Err(error(libc::ETIMEDOUT));}thread::sleep(Duration::from_millis(5));},Err(failure)=>return Err(failure)}};
-   if !owner.process.is_live(){return Err(error(libc::ESRCH));}Ok((process,client))
+   let process=ProcessIdentity::running(child.id()as i32).map_err(|failure|admission_failure("holder-running-pid",owner.process,failure))?;let deadline=Instant::now()+config.startup_timeout;
+   let client=loop{match Client::lookup(&name){Ok(client)=>break client,Err(failure)if failure.raw_os_error()==Some(libc::ENOENT)=>{if child.try_wait().map_err(|failure|admission_failure("holder-try-wait",owner.process,failure))?.is_some(){return Err(admission_failure("holder-exited-before-lookup",owner.process,error(libc::ECHILD)));}if Instant::now()>=deadline{return Err(admission_failure("holder-lookup-timeout",owner.process,error(libc::ETIMEDOUT)));}thread::sleep(Duration::from_millis(5));},Err(failure)=>return Err(admission_failure("holder-client-lookup",owner.process,failure))}};
+   if !owner.process.is_live(){return Err(admission_failure("holder-actor-live",owner.process,error(libc::ESRCH)));}Ok((process,client))
   })();
-  match result{Ok((process,client))=>Ok(Arc::new(Self{owner,process,client,child:Mutex::new(Some(child)),requests:Mutex::new(BTreeMap::new()),next_request:AtomicU64::new(1),dispatch:Mutex::new(()),rebinding:AtomicBool::new(false)})),Err(failure)=>{if child.try_wait()?.is_none(){child.kill()?;}child.wait()?;Err(failure)}}
+  match result{Ok((process,client))=>Ok(Arc::new(Self{owner,process,client,child:Mutex::new(Some(child)),requests:Mutex::new(BTreeMap::new()),next_request:AtomicU64::new(1),dispatch:Mutex::new(()),rebinding:AtomicBool::new(false)})),Err(failure)=>{if child.try_wait().map_err(|failure|admission_failure("holder-try-wait",owner.process,failure))?.is_none(){child.kill().map_err(|failure|admission_failure("holder-failed-start-cleanup-kill",owner.process,failure))?;}child.wait().map_err(|failure|admission_failure("holder-failed-start-cleanup-wait",owner.process,failure))?;Err(failure)}}
  }
  fn remap(&self,mut frame:Frame)->io::Result<Frame>{
   if self.rebinding.load(Ordering::Acquire){return Err(error(libc::EAGAIN));}
@@ -80,10 +103,10 @@ impl Holder {
  fn finished(&self,original:u64,native:u64){let mut requests=self.requests.lock().unwrap();if requests.get(&original).is_some_and(|(_,request)|*request==native){requests.remove(&original);}}
  fn rebind(&self)->io::Result<()> {
   let waits={let _dispatch=self.dispatch.lock().unwrap();
-   if self.rebinding.swap(true,Ordering::AcqRel){return Err(error(libc::EBUSY));}
+   if self.rebinding.swap(true,Ordering::AcqRel){return Err(admission_failure("rebind-busy",self.owner.process,error(libc::EBUSY)));}
    self.requests.lock().unwrap().values().filter(|(operation,_)|*operation==Operation::Wait).map(|(_,request)|*request).collect::<Vec<_>>()};
   let result=(||{
-   for waiting in waits {let native=self.next_request.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|next|next.checked_add(1)).map_err(|_|error(libc::EOVERFLOW))?;let mut cancel=Frame::new(Operation::Cancel,native);cancel.ticket=waiting;let response=self.client.call_right(cancel,None)?;if response.errno!=0{return Err(error(response.errno));}}
+   for waiting in waits {let native=self.next_request.fetch_update(Ordering::Relaxed,Ordering::Relaxed,|next|next.checked_add(1)).map_err(|_|admission_failure("rebind-request-overflow",self.owner.process,error(libc::EOVERFLOW)))?;let mut cancel=Frame::new(Operation::Cancel,native);cancel.ticket=waiting;let response=self.client.call_right(cancel,None).map_err(|failure|admission_failure("rebind-cancel-call",self.owner.process,failure))?;if response.errno!=0{return Err(admission_failure("rebind-cancel-reply",self.owner.process,error(response.errno)));}}
    self.requests.lock().unwrap().clear();Ok(())
   })();
   self.rebinding.store(false,Ordering::Release);result
@@ -120,23 +143,24 @@ impl State {
   match failure{Some(error)=>Err(error),None=>Ok(())}
  }
  fn admit_fork(&self,actor:ProcessIdentity)->io::Result<Arc<Holder>> {
-  let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||error(libc::EPERM))?;
+  let failed=|stage:&str,failure:io::Error|admission_failure(stage,actor,failure);
+  let namespace=self.namespace.lock().unwrap().clone().ok_or_else(||failed("fork-bound-namespace",error(libc::EPERM)))?;
   let mut info:libc::proc_bsdinfo=unsafe{std::mem::zeroed()};let size=std::mem::size_of_val(&info)as i32;
-  if unsafe{libc::proc_pidinfo(actor.host_pid,libc::PROC_PIDTBSDINFO,1,(&mut info as *mut libc::proc_bsdinfo).cast(),size)}!=size{return Err(error(libc::ESRCH));}
-  let parent=self.owners.lock().unwrap().values().find(|holder|holder.owner.process.host_pid==info.pbi_ppid as i32&&holder.owner.process.is_live()).cloned().ok_or_else(||error(libc::EPERM))?;
-  let init=crate::process_namespace::InitRegistration::read(&namespace.table)?;
-  let parent_namespace=crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process)?;
-  let child_namespace=crate::process_namespace::mount_namespace_of(&namespace.table,actor).map_err(|failure|if failure.kind()==io::ErrorKind::NotFound{error(libc::EPERM)}else{failure})?;
+  if unsafe{libc::proc_pidinfo(actor.host_pid,libc::PROC_PIDTBSDINFO,1,(&mut info as *mut libc::proc_bsdinfo).cast(),size)}!=size{return Err(failed("fork-actor-metadata",error(libc::ESRCH)));}
+  let parent=self.owners.lock().unwrap().values().find(|holder|holder.owner.process.host_pid==info.pbi_ppid as i32&&holder.owner.process.is_live()).cloned().ok_or_else(||{admission_diagnostic(format_args!("[posix-owner] stage=fork-parent-lookup controller={:?} actor={actor:?} parent_host_pid={}",self.controller,info.pbi_ppid));failed("fork-parent-lookup",error(libc::EPERM))})?;
+  let init=crate::process_namespace::InitRegistration::read(&namespace.table).map_err(|failure|failed("fork-init-record",failure))?;
+  let parent_namespace=crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process).map_err(|failure|failed("fork-parent-namespace",failure))?;
+  let child_namespace=crate::process_namespace::mount_namespace_of(&namespace.table,actor).map_err(|failure|failed("fork-child-namespace",if failure.kind()==io::ErrorKind::NotFound{error(libc::EPERM)}else{failure}))?;
   if init.process!=namespace.init.process||init.mount_namespace!=namespace.init.mount_namespace
-   ||child_namespace!=parent_namespace{return Err(error(libc::EPERM));}
-  if !actor.is_live()||!parent.owner.process.is_live(){return Err(error(libc::ESRCH));}
+   ||child_namespace!=parent_namespace{return Err(failed("fork-namespace-match",error(libc::EPERM)));}
+  if !actor.is_live()||!parent.owner.process.is_live(){return Err(failed("fork-parent-child-live",error(libc::ESRCH)));}
   let owner=Owner{process:actor,guest_pid:if actor==namespace.init.process{1}else{actor.host_pid}};
-  let holder=Holder::spawn(&self.config,owner,self.controller)?;
-  if !actor.is_live()||!parent.owner.process.is_live(){holder.stop()?;return Err(error(libc::ESRCH));}
-  if crate::process_namespace::mount_namespace_of(&namespace.table,actor)?!=child_namespace
-   ||crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process)?!=parent_namespace{holder.stop()?;return Err(error(libc::EPERM));}
+  let holder=Holder::spawn(&self.config,owner,self.controller).map_err(|failure|failed("fork-holder-spawn",failure))?;
+  if !actor.is_live()||!parent.owner.process.is_live(){holder.stop().map_err(|failure|failed("fork-holder-stop",failure))?;return Err(failed("fork-post-spawn-live",error(libc::ESRCH)));}
+  if crate::process_namespace::mount_namespace_of(&namespace.table,actor).map_err(|failure|failed("fork-post-child-namespace",failure))?!=child_namespace
+   ||crate::process_namespace::mount_namespace_of(&namespace.table,parent.owner.process).map_err(|failure|failed("fork-post-parent-namespace",failure))?!=parent_namespace{holder.stop().map_err(|failure|failed("fork-holder-stop",failure))?;return Err(failed("fork-post-namespace-match",error(libc::EPERM)));}
   let mut owners=self.owners.lock().unwrap();
-  if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop()?;return Ok(existing);}
+  if let Some(existing)=owners.get(&key(actor)).cloned(){drop(owners);holder.stop().map_err(|failure|failed("fork-duplicate-holder-stop",failure))?;return Ok(existing);}
   owners.insert(key(actor),holder.clone());Ok(holder)
  }
  fn external_namespace(&self,actor:ProcessIdentity)->io::Result<String> {
@@ -279,3 +303,65 @@ impl Controller {
  fn join(&mut self)->io::Result<()>{self.stop.store(true,Ordering::Release);match self.thread.take(){Some(thread)=>thread.join().map_err(|_|error(libc::EIO))?,None=>Ok(())}}
 }
 impl Drop for Controller {fn drop(&mut self){if let Err(failure)=self.join(){eprintln!("POSIX controller shutdown: {failure}");}}}
+
+#[cfg(test)]
+mod diagnostics_tests {
+ use super::*;
+ use std::{ffi::CString,fs::File,os::fd::{AsRawFd,FromRawFd,OwnedFd}};
+ struct Stderr {saved:OwnedFd,capture:File}
+ impl Stderr {
+  fn capture(path:&std::path::Path)->Self {
+   let capture=std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap();
+   let saved=unsafe{libc::fcntl(2,libc::F_DUPFD_CLOEXEC,3)};assert!(saved>=0);
+   assert_eq!(unsafe{libc::dup2(capture.as_raw_fd(),2)},2);
+   Self{saved:unsafe{OwnedFd::from_raw_fd(saved)},capture}
+  }
+  fn text(&self)->String {
+   use std::os::unix::fs::FileExt;
+   let mut bytes=vec![0;self.capture.metadata().unwrap().len()as usize];self.capture.read_exact_at(&mut bytes,0).unwrap();String::from_utf8(bytes).unwrap()
+  }
+ }
+ impl Drop for Stderr {fn drop(&mut self){assert_eq!(unsafe{libc::dup2(self.saved.as_raw_fd(),2)},2);}}
+ struct Actions(libc::posix_spawn_file_actions_t);
+ impl Drop for Actions {fn drop(&mut self){assert_eq!(unsafe{libc::posix_spawn_file_actions_destroy(&mut self.0)},0);}}
+ #[test]
+ fn native_spawn_file_action_failure_preserves_errno_and_stage() {
+  const MARKER:&str="posix-native-spawn-diagnostics-fixture";
+  if !std::env::args().any(|arg|arg==MARKER){
+   let output=Command::new(std::env::current_exe().unwrap()).args(["--exact","posix_broker::diagnostics_tests::native_spawn_file_action_failure_preserves_errno_and_stage","--skip",MARKER,"--nocapture"]).output().unwrap();
+   assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+   assert!(String::from_utf8_lossy(&output.stdout).contains("NATIVE_SPAWN_DIAGNOSTICS_EXECUTED"));return;
+  }
+  let actual=ProcessIdentity::running(std::process::id()as i32).unwrap();
+  let root=std::env::temp_dir().join(format!("aim-posix-spawn-diag-{}-{}",actual.host_pid,actual.start_microseconds));std::fs::create_dir(&root).unwrap();
+  let capture=Stderr::capture(&root.join("stderr"));
+  let file=std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(root.join("source")).unwrap();
+  let raw=unsafe{libc::fcntl(file.as_raw_fd(),libc::F_DUPFD_CLOEXEC,128)};assert!(raw>=128);
+  let source=unsafe{OwnedFd::from_raw_fd(raw)};
+  let mut actions=Actions(unsafe{std::mem::zeroed()});assert_eq!(unsafe{libc::posix_spawn_file_actions_init(&mut actions.0)},0);
+  assert_eq!(unsafe{libc::posix_spawn_file_actions_adddup2(&mut actions.0,raw,2)},0);
+  drop(source);
+  assert_eq!(unsafe{libc::fcntl(raw,libc::F_GETFD)},-1);assert_eq!(io::Error::last_os_error().raw_os_error(),Some(libc::EBADF));
+  let executable=CString::new("/usr/bin/true").unwrap();
+  let arguments=[executable.as_ptr()as*mut libc::c_char,std::ptr::null_mut()];let environment=[std::ptr::null_mut()];let mut pid=0;
+  let returned=unsafe{libc::posix_spawn(&mut pid,executable.as_ptr(),&actions.0,std::ptr::null(),arguments.as_ptr(),environment.as_ptr())};
+  if returned==0{assert_eq!(unsafe{libc::waitpid(pid,std::ptr::null_mut(),0)},pid);}
+  assert_eq!(returned,libc::EBADF,"actual invalid owned file action must fail before execution");
+  drop(actions);
+  let config=Config{endpoint:"unused-native-spawn-diagnostics".into(),holder:PathBuf::from("/usr/bin/true"),startup_timeout:Duration::from_secs(1)};
+  let owner=Owner{process:actual,guest_pid:1};let failure=error(returned);let kind=failure.kind();let message=failure.to_string();
+  let preserved=spawn_failure(&config,owner,actual,failure);
+  assert_eq!(preserved.raw_os_error(),Some(libc::EBADF));assert_eq!(preserved.kind(),kind);assert_eq!(preserved.to_string(),message);
+  let text=capture.text();let prefix=format!("[posix-owner] stage=holder-command-spawn controller_pid={} ",actual.host_pid);
+  assert_eq!(text.lines().filter(|line|line.starts_with(&prefix)).count(),1,"{text}");
+  assert!(text.contains("host_errno=Some(9)"),"{text}");assert!(text.contains(&format!("actor={actual:?}")),"{text}");
+  for fd in 0..3{assert_eq!(text.lines().filter(|line|line.contains("stage=holder-command-spawn-stdio ")&&line.contains(&format!(" fd={fd} "))).count(),1,"{text}");}
+  assert!(text.contains("stdin=null stdout=inherit stderr=inherit"),"{text}");
+  // fd2 is our capture alias here, not an unowned inherited descriptor.
+  assert_eq!(unsafe{libc::close(2)},0);
+  let closed=std::panic::catch_unwind(||spawn_failure(&config,owner,actual,error(returned))).unwrap();
+  assert_eq!(closed.raw_os_error(),Some(libc::EBADF));assert_eq!(closed.to_string(),message);
+  drop(capture);drop(file);std::fs::remove_dir_all(root).unwrap();
+  println!("NATIVE_SPAWN_DIAGNOSTICS_EXECUTED");
+ }
+}
