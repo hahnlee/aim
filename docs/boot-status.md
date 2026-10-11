@@ -115,7 +115,14 @@ Package-restrictions content changes116 times and Roles content22 times in the
 observed samples (#1328); these are actual content changes, not just timestamps.
 Default boot options are unchanged. Original `c89o4` already reads ADB setting1;
 writing1 and reading it back succeeds, but persistent USB configuration stays
-none. A normal two-state Settings-owner setup is now being checked (#1330).
+none. In `c89o5`, normal Settings0→1 correctly stops and restarts adbd, but still
+leaves persistent USB configuration none. Actual USB dump has no device manager,
+as expected on AIM's USB-host-only device. These failed setup bodies do not
+prove a runtime transport defect (#1330). The existing vendor named-port path
+sets persistent debugging after properties load; `aimctl start/run --adb-port
+PORT` now forwards that exact androidboot input and stores it in resident state.
+Two port parser/state tests, one forwarding regression and the release controller
+build pass. Real named-port reboot validation remains pending.
 The native permission writer now places definitions before package/tail records
 (#1326), and callback replay retains real committed admission order (#1327).
 Six focused Rust regressions pass; the corrected native runtime has not booted.

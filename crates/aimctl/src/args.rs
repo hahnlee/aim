@@ -21,7 +21,8 @@ pub const USAGE: &str = "usage: aimctl [--data DIR] COMMAND
   --image DIR           image root for start/run
   --host-runtime DIR    host programs for start/run
   --userdata DIR        data templates for start/run
-  --binder-trace FILE    native Binder diagnostic trace for start/run";
+  --binder-trace FILE    native Binder diagnostic trace for start/run
+  --adb-port PORT        named TCP adb port for start/run (nonzero u16)";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -68,6 +69,10 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             Some("--image") => inputs.image = Some(value(&mut it, "--image")?),
             Some("--host-runtime") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
             Some("--userdata") => inputs.userdata = Some(value(&mut it, "--userdata")?),
+            Some("--adb-port") => {
+                if inputs.adb_port.is_some(){return Err(usage_error("duplicate --adb-port".into()));}
+                inputs.adb_port=Some(crate::inputs::parse_adb_port(it.next().ok_or_else(||usage_error("--adb-port needs a value".into()))?)?);
+            },
             Some("--binder-trace") => {
                 if inputs.binder_trace.is_some(){return Err(usage_error("duplicate --binder-trace".into()));}
                 inputs.binder_trace=Some(value(&mut it,"--binder-trace")?);
@@ -98,6 +103,10 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--image" if matches!(name, "start" | "run") => inputs.image = Some(value(&mut it, "--image")?),
             "--host-runtime" if matches!(name, "start" | "run") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
             "--userdata" if matches!(name, "start" | "run") => inputs.userdata = Some(value(&mut it, "--userdata")?),
+            "--adb-port" if matches!(name, "start" | "run") => {
+                if inputs.adb_port.is_some(){return Err(usage_error("duplicate --adb-port".into()));}
+                inputs.adb_port=Some(crate::inputs::parse_adb_port(it.next().ok_or_else(||usage_error("--adb-port needs a value".into()))?)?);
+            },
             "--binder-trace" if matches!(name, "start" | "run") => {
                 if inputs.binder_trace.is_some(){return Err(usage_error("duplicate --binder-trace".into()));}
                 inputs.binder_trace=Some(value(&mut it,"--binder-trace")?);
@@ -134,7 +143,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     };
     if !matches!(command, Command::Start { .. } | Command::Run { .. })
         && inputs != crate::inputs::Selection::default() {
-        return Err(usage_error("image, runtime and userdata can only be selected for start/run".into()));
+        return Err(usage_error("image, runtime, userdata and diagnostics can only be selected for start/run".into()));
     }
     Ok(Args { data, inputs, command })
 }
@@ -200,6 +209,19 @@ mod tests {
         assert!(p("start --host-runtime").is_err());
         assert_eq!(command("shell echo --image /i"),
             Command::Shell(vec!["echo".into(), "--image".into(), "/i".into()]));
+    }
+
+    #[test]
+    fn adb_port_is_nonzero_start_run_configuration_not_a_shell_option() {
+        for command in ["--adb-port 5637 start","run --adb-port 65535"] {
+            assert!(p(command).unwrap().inputs.adb_port.is_some());
+        }
+        for command in ["start --adb-port","start --adb-port 0","run --adb-port 65536",
+                        "start --adb-port -1","start --adb-port +1",
+                        "--adb-port 1 start --adb-port 2","--adb-port 5637 status"] {
+            assert!(p(command).is_err(),"{command}");
+        }
+        assert_eq!(command("shell echo --adb-port 5637"),Command::Shell(vec!["echo".into(),"--adb-port".into(),"5637".into()]));
     }
 
     #[test]

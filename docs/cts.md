@@ -39,6 +39,8 @@ jars require JDK 21, supplied by Android Studio's JBR or Homebrew
 ```sh
 cargo aim build
 cargo aim boot --data DATA -- --androidboot aim.adb.port=5611
+# With the resident controller:
+aimctl --data DATA start --adb-port 5611
 # once sys.boot_completed is 1:
 tools/cts-tradefed.sh DATA 5611 -m CtsPackageSettingHostTestCases
 ```

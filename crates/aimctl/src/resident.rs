@@ -211,6 +211,7 @@ fn guest_init_args(files: &Files, selected: &crate::inputs::Inputs) -> Vec<OsStr
         "--quiet".into(),
     ];
     if let Some(path)=&selected.binder_trace {args.extend(["--binder-trace".into(),path.clone().into()]);}
+    if let Some(port)=selected.adb_port {args.extend(["--androidboot".into(),format!("aim.adb.port={port}").into()]);}
     args
 }
 
@@ -710,6 +711,7 @@ mod tests {
         assert_eq!(after("--display"), "/d.aimctl/display");
         assert!(args.contains(&"--run"));
         assert!(!args.contains(&"--binder-trace"));
+        assert!(!args.contains(&"--androidboot"));
         let shims = shims_args(&files, false, &crate::inputs::Inputs::default());
         let shims = strings(&shims);
         assert_eq!(
@@ -730,7 +732,7 @@ mod tests {
     fn selected_inputs_reach_init_display_and_shims() {
         let files = Files::of(Path::new("/d")).unwrap();
         let selected = crate::inputs::Inputs { image: "/image".into(),
-            host_runtime: "/runtime".into(), userdata: "/templates".into(), binder_trace: Some("/trace.tsv".into()) };
+            host_runtime: "/runtime".into(), userdata: "/templates".into(), binder_trace: Some("/trace.tsv".into()), adb_port: Some(5637) };
         let args = guest_init_args(&files, &selected);
         let args = strings(&args);
         let after = |flag: &str| args[args.iter().position(|arg| *arg == flag).unwrap() + 1];
@@ -738,6 +740,7 @@ mod tests {
         assert_eq!(after("--linux-run"), "/runtime/linux-run");
         assert_eq!(after("--userdata"), "/templates");
         assert_eq!(after("--binder-trace"), "/trace.tsv");
+        assert_eq!(after("--androidboot"), "aim.adb.port=5637");
         let shims = shims_args(&files, false, &selected);
         let shims = strings(&shims);
         assert!(shims.windows(2).any(|pair| pair == ["--image", "/image"]));
