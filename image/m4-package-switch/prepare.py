@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare/finalize an experimental C artifact in an isolated Git worktree."""
+"""Prepare/finalize a controlled C artifact with explicit repository outputs."""
 import argparse
 import hashlib
+import json
 import pathlib
 import re
 import subprocess
@@ -57,19 +58,24 @@ def stamp(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["prepare", "finalize"])
-    parser.add_argument("--isolated-repo", type=pathlib.Path, required=True)
+    parser.add_argument("--repo", "--isolated-repo", dest="repo", type=pathlib.Path, required=True)
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--original", type=pathlib.Path)
     parser.add_argument("--redirect-cli", type=pathlib.Path)
     args = parser.parse_args()
-    repo = args.isolated_repo.resolve(strict=True)
-    source_repo = pathlib.Path(__file__).resolve().parents[2]
-    if repo == source_repo or not (repo / ".git").exists():
-        parser.error("--isolated-repo must be a separate Git worktree")
+    repo = args.repo.resolve(strict=True)
+    root = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--show-toplevel"], text=True).strip()
+    if pathlib.Path(root).resolve(strict=True) != repo:
+        parser.error("--repo must name a Git checkout root")
     out = args.out.resolve()
     relative_out = out.relative_to(repo).as_posix()
     if not relative_out.startswith("target/"):
-        parser.error("--out must be a fresh target/ directory inside the isolated worktree")
+        parser.error("--out must be a fresh target/ directory inside --repo")
+    protected = [repo / "target/aim" / name for name in
+                 ["derived", "system-server", "oat", "device-services", "art", "boot-image", "hal", "gen", "userdata", "boot"]]
+    protected.extend([repo / "target/aim-cache", repo / "target/release", repo / "target/debug"])
+    if any(out.is_relative_to(path.resolve()) or path.resolve().is_relative_to(out) for path in protected):
+        parser.error("--out overlaps a normal build output; use a fresh pair artifact directory")
     if args.mode == "prepare":
         if args.original is None or args.redirect_cli is None:
             parser.error("prepare requires --original and --redirect-cli")
@@ -85,6 +91,8 @@ def main():
                      repo / "crates/aim-services/tests/fixtures/native-user-manager-redirects"]:
             for entry in rows(path):
                 combined[tuple(entry[:2])] = entry
+        if len(combined) != 19:
+            raise ValueError("controlled C inventory must contain exactly 19 redirect rows")
         um = [entry for entry in combined.values() if entry[0].startswith("com.android.server.pm.UserManagerService")]
         if sum(int(entry[3]) for entry in um) != 14:
             raise ValueError("pinned original UM inventory must account for 14 calls")
@@ -93,23 +101,39 @@ def main():
                              "\n".join(" ".join(entry) for entry in combined.values()) + "\n")
         services = (repo / "image/native-services").read_text()
         if any(line.split()[0] == "package" for line in services.splitlines() if line.strip() and not line.startswith("#")):
-            raise ValueError("isolated baseline native-services already activates package")
+            raise ValueError("baseline native-services already activates package")
         (out / "native-services").write_text(services + "\npackage com.android.server.pm.PackageManagerService\n")
         command = [str(args.redirect_cli.resolve(strict=True)), "--input", str(original / "system/framework/services.jar"),
                    "--redirects", str(redirects), "--targets", str(repo / "target/aim/device-services/aim-services.jar"),
                    "--native-services", str(repo / "image/native-services"), "--out", str(out / "services.jar")]
         subprocess.run(command, check=True)
         (out / "services.sha256").write_text(digest(out / "services.jar") + "\n")
-        print(f"Prepared {out}; rebuild system-server/oat using this redirect table in the isolated worktree before finalize.")
+        device_stamp = stamp(repo / "target/aim-cache/device-services.stamp")
+        (out / "prepared.json").write_text(json.dumps({
+            "version": 1,
+            "source_head": subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip(),
+            "original_tree": str(original),
+            "original_services_sha256": digest(original / "system/framework/services.jar"),
+            "device_services_sha256": digest(repo / "target/aim/device-services/aim-services.jar"),
+            "device_services_key": device_stamp["key"],
+            "redirect_rows": len(combined),
+            "um_calls": sum(int(entry[3]) for entry in um),
+        }, indent=2) + "\n")
+        print(f"Prepared {out}; rebuild system-server/oat using this redirect table in --repo before finalize.")
     else:
         services = repo / "target/aim/system-server/services.jar"
         if digest(services) != digest(out / "services.jar"):
             raise ValueError("oat's system-server input differs from prepared experimental C jar")
         if (repo / "image/system-server-redirects").read_bytes() != (out / "system-server-redirects").read_bytes():
-            raise ValueError("isolated build did not use the experimental C redirect table")
+            raise ValueError("build did not use the experimental C redirect table")
         system_stamp = stamp(repo / "target/aim-cache/system-server.stamp")
         oat_stamp = stamp(repo / "target/aim-cache/oat.stamp")
         device_stamp = stamp(repo / "target/aim-cache/device-services.stamp")
+        prepared = json.loads((out / "prepared.json").read_text())
+        if prepared.get("version") != 1 or prepared.get("redirect_rows") != 19 or prepared.get("um_calls") != 14:
+            raise ValueError("invalid prepared controlled C inventory receipt")
+        if device_stamp["key"] != prepared["device_services_key"] or digest(repo / "target/aim/device-services/aim-services.jar") != prepared["device_services_sha256"]:
+            raise ValueError("device-services changed after C preparation")
         if system_stamp["inputs"].get("image/system-server-redirects") != digest(out / "system-server-redirects"):
             raise ValueError("system-server stamp does not bind this experimental table")
         for name, built in [("system-server", system_stamp), ("device-services", device_stamp)]:
@@ -143,7 +167,7 @@ def main():
                 block = re.sub(r'^source = .*$', 'source = "image/m4-package-switch/native-services.experimental"', block, flags=re.M)
             build_blocks.append(block)
         (out / "build-overlay.toml").write_text("".join(build_blocks))
-        print(f"Ready for the isolated derived-image build owner: {out / 'build-overlay.toml'}")
+        print(f"Ready for the controlled derived-image build owner: {out / 'build-overlay.toml'}")
 
 
 if __name__ == "__main__":

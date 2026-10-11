@@ -1,15 +1,24 @@
 # Experimental native PackageManager image
 
-This path creates an isolated C image for validation. The default image still
-runs original PMS. Use a separate Git worktree with independent `target/` outputs
-and the real original image tree; never point `--original` at a symlink.
+This path creates a controlled C image for validation. The default image still
+runs original PMS. `--repo` accepts the primary checkout or a separate worktree;
+`--isolated-repo` remains an alias. Use fresh explicit `target/` outputs and the
+real original image tree; never point `--original` at a symlink.
 
-Build the current device-services jar and `android-image-redirect` in that
-worktree. From the primary checkout, prepare explicit artifacts:
+In the primary checkout, finish all pinned tests and image readers before
+activation. Save exact bytes, mode and mtime of both build inputs below and
+restore them on every exit, including failure. Preserve each completed peer's
+detached shadow before the next build, attach it read-only, and verify its
+installed payload and actual producer stamps. After restoring the inputs,
+rebuild the default graph normally and check its freshness. Do not restore old
+stamps or activate the default native service list.
+
+Build the current device-services jar and `android-image-redirect` in the
+selected checkout, then prepare explicit artifacts:
 
 ```sh
 python3 image/m4-package-switch/prepare.py prepare \
-  --isolated-repo "$EXPERIMENT_REPO" \
+  --repo "$EXPERIMENT_REPO" \
   --out "$EXPERIMENT_REPO/target/aim/m4-package-switch" \
   --original "$ORIGINAL_TREE" \
   --redirect-cli "$EXPERIMENT_REPO/target/release/android-image-redirect"
@@ -22,14 +31,14 @@ decoder requires exactly 14 original UM-to-PMS calls, zero remaining calls and
 same symbolic patcher the default system-server node uses.
 
 Copy the generated redirect table to `image/system-server-redirects` **only in
-the isolated worktree**, then run its existing build owners:
+the selected checkout after saving its baseline**, then run its build owners:
 
 ```sh
 cp "$EXPERIMENT_REPO/target/aim/m4-package-switch/system-server-redirects" \
    "$EXPERIMENT_REPO/image/system-server-redirects"
 (cd "$EXPERIMENT_REPO" && cargo aim build system-server oat)
 python3 image/m4-package-switch/prepare.py finalize \
-  --isolated-repo "$EXPERIMENT_REPO" \
+  --repo "$EXPERIMENT_REPO" \
   --out "$EXPERIMENT_REPO/target/aim/m4-package-switch"
 ```
 
@@ -48,8 +57,8 @@ Finalize also verifies that the prepared runtime registration pairs match
 `native-services.experimental`. It writes `build-overlay.toml` with the graph's
 actual services.jar path and the checked-in experimental registration list.
 
-After finalization, install this manifest **only in the isolated worktree** and
-use its existing derived-image owner:
+After finalization, install this manifest in the selected checkout and use its
+derived-image owner, then restore both saved inputs:
 
 ```sh
 cp "$EXPERIMENT_REPO/target/aim/m4-package-switch/build-overlay.toml" \
