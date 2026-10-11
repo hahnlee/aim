@@ -694,8 +694,11 @@ The controller now retains exact owned process births, signals individual
 PIDs, finishes only its own DATA backing after guest reap, checks actual
 detach and writes a run-bound cleanup receipt before reporting success
 (#796/#1318). Eight controller tests pass, including a foreign same-group
-peer and stale birth; five disk tests pass. Actual DATA finish and the full
-three-body replay with this controller are not yet verified.
+peer and stale birth; five disk tests pass. A disposable original-image DATA
+attach/stop with thee28f1d82 controller passes: the run-bound receipt is ok,
+and independent kernel/IORegistry checks find no live owned births,
+namespaces, mounts or DATA attachment. This early stop does not prove Android
+boot completion. The full three-body replay with this controller is unrun.
 Current C completion explicitly
 defers games and Play Store catalog transactions per the user (#704/#1273);
 other CTS/app/template/rollback gates remain required.
