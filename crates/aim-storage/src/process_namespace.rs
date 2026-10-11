@@ -33,25 +33,46 @@ impl InitRegistration {
     fn text(&self)->String{format!("AIMNS1\t{}\t{}\t{}\t{}\n",self.process.host_pid,self.process.start_seconds,self.process.start_microseconds,self.mount_namespace)}
     pub fn register(table:&Path,process:ProcessIdentity,mount_namespace:&str)->io::Result<Self>{
         if !process.is_live()||mount_namespace.is_empty()||mount_namespace.contains(['\t','\n','/','\0']){return Err(io::Error::from_raw_os_error(libc::EINVAL));}
-        fs::create_dir_all(table)?;let value=Self{process,mount_namespace:mount_namespace.into()};
+        fs::create_dir_all(table)?;let _lock=entry_lock(table)?;
+        let value=Self{process,mount_namespace:mount_namespace.into()};
         atomic_write(&table.join("namespace-init"),value.text().as_bytes())?;Ok(value)
     }
     pub fn read(table:&Path)->io::Result<Self>{
+        let value=Self::read_record(table)?;
+        if ProcessIdentity::running_strict(value.process.host_pid)?!=value.process {
+            return Err(io::Error::from_raw_os_error(libc::ESRCH));
+        }
+        Ok(value)
+    }
+    fn read_record(table:&Path)->io::Result<Self>{
         let text=fs::read_to_string(table.join("namespace-init"))?;let fields:Vec<_>=text.trim_end_matches('\n').split('\t').collect();
         if fields.len()!=5||fields[0]!="AIMNS1"{return Err(io::Error::from_raw_os_error(libc::EPROTO));}
         let number=|at:usize|fields[at].parse::<u64>().map_err(|_|io::Error::from_raw_os_error(libc::EPROTO));
         let host_pid=i32::try_from(number(1)?).map_err(|_|io::Error::from_raw_os_error(libc::EPROTO))?;
         let value=Self{process:ProcessIdentity{host_pid,start_seconds:number(2)?,start_microseconds:number(3)?},mount_namespace:fields[4].into()};
-        if !value.process.is_live(){return Err(io::Error::from_raw_os_error(libc::ESRCH));}Ok(value)
+        Ok(value)
     }
     pub fn activate_pid_mapping(&self,table:&Path)->io::Result<()> {
+        let _lock=entry_lock(table)?;
         let current=Self::read(table)?;
         if current.process!=self.process||current.mount_namespace!=self.mount_namespace{return Err(io::Error::from_raw_os_error(libc::ESRCH));}
         init_caught_signals(table,self.process)?;
         atomic_write(&table.join("namespace-pid-ready"),b"AIMNS-PID-READY1\n")
     }
     pub fn remove(&self,table:&Path)->io::Result<()> {
-        if Self::read(table).is_ok_and(|current|current.process==self.process){fs::remove_file(table.join("namespace-init"))?;}Ok(())
+        let _lock=entry_lock(table)?;
+        let current=match Self::read_record(table){
+            Ok(current)=>current,
+            Err(error)if error.kind()==io::ErrorKind::NotFound=>return Ok(()),
+            Err(error)=>return Err(error),
+        };
+        if current.process!=self.process||current.mount_namespace!=self.mount_namespace {
+            return Err(io::Error::from_raw_os_error(libc::ESTALE));
+        }
+        match fs::remove_file(table.join("namespace-pid-ready")) {
+            Ok(())=>{},Err(error)if error.kind()==io::ErrorKind::NotFound=>{},Err(error)=>return Err(error),
+        }
+        fs::remove_file(table.join("namespace-init"))
     }
 }
 #[derive(Clone,Debug)]
@@ -159,6 +180,39 @@ mod tests{
   assert!(!stale.is_live());assert!(InitRegistration::register(&root,stale,"namespace-original").is_err());
   child.0.kill().unwrap();child.0.wait().unwrap();assert!(InitRegistration::read(&root).is_err());
   registration.remove(&root).unwrap();fs::remove_dir_all(root).unwrap();
+ }
+ #[test]
+ fn retirement_closes_namespace_admission_while_owner_process_is_live(){
+  let root=std::env::temp_dir().join(format!("aim-retire-admission-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+  let table=root.join("identity/by-pid");let image=root.join("image");fs::create_dir_all(&image).unwrap();
+  let process=ProcessIdentity::running_strict(std::process::id()as i32).unwrap();
+  let namespace=crate::mount_namespace::Namespace::open(&root,"owned").unwrap();
+  namespace.initialize(&format!("root\t/\t{}\n",image.display())).unwrap();
+  let registration=InitRegistration::register(&table,process,namespace.id()).unwrap();
+  register_mount_namespace(&table,process,namespace.id()).unwrap();register_init_signals(&table,process,0).unwrap();
+  registration.activate_pid_mapping(&table).unwrap();
+  assert_eq!(InitNamespaceEntry::capture(&table,process).unwrap().id(),namespace.id());
+  registration.remove(&table).unwrap();
+  assert!(process.is_live());assert!(namespace.read().is_ok());
+  assert!(!table.join("namespace-init").exists());assert!(!table.join("namespace-pid-ready").exists());
+  assert_eq!(InitNamespaceEntry::capture(&table,process).err().unwrap().kind(),io::ErrorKind::NotFound);
+  fs::remove_dir_all(root).unwrap();
+ }
+ #[test]
+ fn retirement_preserves_new_namespace_and_foreign_process_records(){
+  let root=std::env::temp_dir().join(format!("aim-retire-cas-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+  let process=ProcessIdentity::running_strict(std::process::id()as i32).unwrap();
+  let old=InitRegistration::register(&root,process,"old").unwrap();
+  let new=InitRegistration::register(&root,process,"new").unwrap();register_init_signals(&root,process,0).unwrap();new.activate_pid_mapping(&root).unwrap();
+  let before=fs::read(root.join("namespace-init")).unwrap();let ready=fs::read(root.join("namespace-pid-ready")).unwrap();
+  assert_eq!(old.remove(&root).unwrap_err().raw_os_error(),Some(libc::ESTALE));
+  assert_eq!(fs::read(root.join("namespace-init")).unwrap(),before);assert_eq!(fs::read(root.join("namespace-pid-ready")).unwrap(),ready);
+  let child=Child(Command::new("sleep").arg("30").stdout(Stdio::null()).spawn().unwrap());
+  let foreign=ProcessIdentity::running_strict(child.0.id()as i32).unwrap();InitRegistration::register(&root,foreign,"foreign").unwrap();
+  let before=fs::read(root.join("namespace-init")).unwrap();
+  assert_eq!(new.remove(&root).unwrap_err().raw_os_error(),Some(libc::ESTALE));
+  assert_eq!(fs::read(root.join("namespace-init")).unwrap(),before);assert_eq!(fs::read(root.join("namespace-pid-ready")).unwrap(),ready);
+  drop(child);fs::remove_dir_all(root).unwrap();
  }
 }
 

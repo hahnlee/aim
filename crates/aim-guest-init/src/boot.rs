@@ -335,6 +335,7 @@ pub struct Boot {
     _verity_control: Option<aim_storage::verity_control::RunningServer>,
     _posix_control: Option<Arc<aim_storage::posix_broker::Controller>>,
     _pty_owner: Option<aim_storage::pty_owner::transport::RunningServer>,
+    init_registration: Option<aim_storage::process_namespace::InitRegistration>,
     /// The native status bar runs (`start_status_bar`).
     status_bar: bool,
     pub report: BootReport,
@@ -584,13 +585,14 @@ impl Boot {
         };
         let mut map = layout.path_map();
         std::fs::write(layout.path_map_file(), map.to_file_text()).map_err(|e| e.to_string())?;
+        let mut init_registration = None;
         if options.mode == RunMode::Run {
             let process = aim_storage::process_namespace::ProcessIdentity::running(unsafe { libc::getpid() })
                 .map_err(|error| error.to_string())?;
             let namespace = format!("init-{}-{}-{}",process.host_pid,process.start_seconds,process.start_microseconds);
             aim_storage::mount_namespace::Namespace::open(layout.path_map_file().parent().ok_or("path-map has no owner directory")?,&namespace)
                 .and_then(|owner| owner.initialize(&map.to_file_text())).map_err(|error|error.to_string())?;
-            aim_storage::process_namespace::InitRegistration::register(&layout.identity_dir().join("by-pid"),process,&namespace)
+            let registration = aim_storage::process_namespace::InitRegistration::register(&layout.identity_dir().join("by-pid"),process,&namespace)
                 .map_err(|error| error.to_string())?;
             let identity=crate::identity::Identity{service:"init".into(),uid:0,gid:0,groups:Vec::new(),
                 capabilities:crate::identity::Capabilities::for_service(0,None),seclabel:"u:r:init:s0".into(),priority:0,oom_score_adjust:0,rlimits:Vec::new()};
@@ -602,8 +604,8 @@ impl Boot {
             aim_storage::process_namespace::register_init_signals(&layout.identity_dir().join("by-pid"),process,caught).map_err(|error|error.to_string())?;
             // Publish only after the actual init, mount owner and signal
             // dispositions are registered, before any native or guest service.
-            aim_storage::process_namespace::InitRegistration::read(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?
-                .activate_pid_mapping(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+            registration.activate_pid_mapping(&layout.identity_dir().join("by-pid")).map_err(|error|error.to_string())?;
+            init_registration = Some(registration);
         }
         mark("runtime layout prepared");
         let mut report = BootReport::default();
@@ -877,6 +879,7 @@ impl Boot {
             _verity_control: verity_control,
             _posix_control: posix_control,
             _pty_owner: pty_owner,
+            init_registration,
             status_bar: false,
             data: data_mount,
             _sweep: sweep,
@@ -1293,6 +1296,13 @@ impl Boot {
 
     fn finish(&mut self) {
         if self.options.mode == RunMode::Run {
+            // Stop new namespace admission before adbd goes offline and the
+            // serving Binder/POSIX/verity owners begin their shutdown.
+            if let Some(registration) = self.init_registration.take()
+                && let Err(error) = registration.remove(&self.layout.identity_dir().join("by-pid"))
+            {
+                self.executor.fatal.get_or_insert_with(|| format!("init namespace retirement: {error}"));
+            }
             self.executor
                 .supervisor
                 .kill_all(self.executor.launcher.as_mut());

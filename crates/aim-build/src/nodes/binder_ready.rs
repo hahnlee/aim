@@ -95,8 +95,11 @@ mod tests {
         let server = aim_binder_host::server::Server::start(&name).unwrap();
         assert!(poll(&fixture.root, child, &name, 20).unwrap_err().contains("another process birth"));
         let actual = ProcessIdentity::running(std::process::id() as i32).unwrap();
-        InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial").unwrap();
+        let registration = InitRegistration::register(&fixture.root.join("identity/by-pid"), actual, "initial").unwrap();
         assert!(poll(&fixture.root, actual, &name, 20).unwrap());
+        registration.remove(&fixture.root.join("identity/by-pid")).unwrap();
+        // The same live native driver must not admit a boot that is retiring.
+        assert!(!poll(&fixture.root, actual, &name, 20).unwrap());
         InitRegistration::register(&fixture.root.join("identity/by-pid"), child, "initial").unwrap();
         assert!(poll(&fixture.root, actual, &name, 20).unwrap_err().contains("another process birth"));
         fixture.child.kill().unwrap(); fixture.child.wait().unwrap();
