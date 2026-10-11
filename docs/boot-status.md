@@ -633,7 +633,7 @@ requests SIGKILL against its own PID; the parent shell exits137 naturally,
 without reaching the diagnostic90s/16MiB cap. The pinned Android16r1
 PackageManagerLocalImpl permits that creation and checks closure on reads.
 The vendor snapshot adapter now follows that behavior; corrected full-body
-replay and rebuilt image acceptance remain NOT RUN. Original crash reporting
+replay passes as qualified below; rebuilt image acceptance remains NOT RUN. Original crash reporting
 also reports Binder checkService2 EBADF after app_process has closed Binder
 during JNI exception unwinding. Matching original source and the absence of
 later Binder ioctls explain this secondary error; #1317 is closed without a
@@ -646,26 +646,35 @@ Its224.69s body and failed cleanup60 remain recorded. Root subsequently
 rechecks the owned init birth and its four remaining namespace service births,
 ends only those processes and normally ejects the disposable DATA. All283 held
 births, namespace members and mounts are gone; failed DATA remains preserved.
-Corrected snapshot assertions and rebuilt native image acceptance remain NOT RUN.
+The older readiness failure remains separate from the later successful snapshot
+replay; rebuilt native image acceptance remains NOT RUN.
 POSIX transport errors now record raw Mach status and malformed message
 identity/size, and controller retirement errors record the affected actor birth
 before preserving the original error. File mmap failures distinguish verity
 admission, pinned mapping and cache setup. Four actual POSIX owner/control tests
 pass after building their required holder helper; syscall library compilation
-passes. No corrected Android replay uses these diagnostics yet (#1318).
+passes. The full snapshot replay now uses these diagnostics successfully;
+#1318 retains the earlier separately qualified readiness failure.
 The clean7a48307b runtime rebuild (all eight runtime/controller binaries) passes
 in57.09s and its help exits0. Its first replay is cancelled by an observer
 FileNotFoundError while an ephemeral identity file retires (#1315): the
 supervisor stop starts before the failing readiness query. Only that replay's
 verity/POSIX endpoint errors have this proven observer cause. The observer now
 tolerates only such vanished inventory entries, preserving all other failures.
-The corrected-observer full replay passes boot readiness but fails its first
-oracle with verity admission ENOENT, Scudo map failure and SIGABRT (#1318).
-Body348.13s, sealed348.74s; owned births/namespaces/mounts0. Snapshot assertions
-remain unproven. Failed fixtures now retain their unmounted diagnostic evidence
-when a test panics (#1319); success still removes them and actual cleanup errors
-remain separate. The updated fixture compiles; its retained-failure replay is
-not yet run.
+The first corrected-observer replay is explicitly aborted by its disk guard
+at333.71s with8,545,263,616bytes free, below the8GiB running floor, before any
+Rust panic. Its subsequent verity admission ENOENT, Scudo map failure and
+SIGABRT follow that controller stop; they do not establish an independent
+owner failure for that replay. The historical failed body348.13s/seal348.74s
+and zero owned residue are retained. Redundant .proc payload capture produced
+three368MB JSON files; lossless archives preserve them, and current observation
+retains actual births/namespaces/credentials without those duplicate dumps.
+Failed fixtures now retain unmounted evidence on panic (#1319); cleanup errors
+remain distinct. The complete b3a4d1e0 snapshot body passes in389.84s with the
+7a48307b runtime and pinned historical Role6bd image: all four original Java
+oracles, original assertions/stdout, natural exit0, zero failed/ignored/skipped,
+owned births/namespaces/mounts0 and fixture removed (#1316 closed). This proves
+the snapshot scope fix, not rebuilt-image, full CTS or app acceptance.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,
