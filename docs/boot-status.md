@@ -116,8 +116,10 @@ separately (#1335). Source now records admission stage/errno on the hidden
 diagnostics FD and distinguishes owner failure from blob damage; the new
 actual native-controller regression passes (one test, no skips), covering
 missing init, absent endpoint, authenticated broker denial and successful owner
-registration while guest stderr is null. Release build and actual fork failure
-reproduction remain pending. Native
+registration while guest stderr is null. The627d4323 release build passes in
+59.74s; linux-run is now4ebb702f, while guest-init and the remaining recorded
+runtime/tool hashes are unchanged. Actual original adbd failing stage/errno
+reproduction and its owner repair remain pending. Native
 FULL66, apps, fresh-template parity and rollback remain unrun on this cohort.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/
