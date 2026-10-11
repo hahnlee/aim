@@ -653,6 +653,19 @@ before preserving the original error. File mmap failures distinguish verity
 admission, pinned mapping and cache setup. Four actual POSIX owner/control tests
 pass after building their required holder helper; syscall library compilation
 passes. No corrected Android replay uses these diagnostics yet (#1318).
+The clean7a48307b runtime rebuild (all eight runtime/controller binaries) passes
+in57.09s and its help exits0. Its first replay is cancelled by an observer
+FileNotFoundError while an ephemeral identity file retires (#1315): the
+supervisor stop starts before the failing readiness query. Only that replay's
+verity/POSIX endpoint errors have this proven observer cause. The observer now
+tolerates only such vanished inventory entries, preserving all other failures.
+The corrected-observer full replay passes boot readiness but fails its first
+oracle with verity admission ENOENT, Scudo map failure and SIGABRT (#1318).
+Body348.13s, sealed348.74s; owned births/namespaces/mounts0. Snapshot assertions
+remain unproven. Failed fixtures now retain their unmounted diagnostic evidence
+when a test panics (#1319); success still removes them and actual cleanup errors
+remain separate. The updated fixture compiles; its retained-failure replay is
+not yet run.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,

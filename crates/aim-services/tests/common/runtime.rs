@@ -154,6 +154,12 @@ impl Drop for Data {
         }
         let result=mounted_under(&self.0).and_then(|mounted|{
             if mounted { return Err("fixture data still contains an actual mount".into()); }
+            if std::thread::panicking() {
+                fs::write(self.0.join(".aim-fixture-failed"), "test panic; data unmounted; diagnostic evidence retained\n")
+                    .map_err(|error|error.to_string())?;
+                eprintln!("failed fixture evidence preserved at {}", self.0.display());
+                return Ok(());
+            }
             fs::remove_dir_all(&self.0).map_err(|error|error.to_string())
         });
         if let Err(error)=result {
