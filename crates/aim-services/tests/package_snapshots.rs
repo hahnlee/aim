@@ -72,11 +72,15 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
         .arg("--output")
         .arg(&dex)
         .args(class_files));
-    common::java::check_linkage(
-        &dex.join("classes.dex"),
-        &["/system/framework/services.jar"],
-    )
-    .unwrap();
+    let system_jars = aim_android_image::classpath::jars(
+        &common::runtime::cohort::original_image(),
+        "systemserverclasspath.pb",
+        aim_android_image::classpath::SYSTEMSERVERCLASSPATH,
+    ).unwrap();
+    let jars = system_jars.iter().map(String::as_str).collect::<Vec<_>>();
+    common::java::check_linkage(&dex.join("classes.dex"), &jars).unwrap();
+    let guest_classpath = format!("-Djava.class.path=/data/local/tmp/package-snapshots.dex:{}",
+        system_jars.join(":"));
     let boot = Boot::new(aim_paths::root().join("target/release/aimctl"), data.0.join("g"));
     run(boot.start_command().args(["start", "--windows"]));
     boot.wait_ready(Duration::from_secs(300)).expect("package_snapshots oracle boot readiness");
@@ -89,7 +93,7 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
     let result = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:/system/framework/services.jar",
+        guest_classpath.as_str(),
         "/system/bin",
         "com.android.server.pm.PackageSnapshotsOracle",
     ]));
@@ -125,7 +129,7 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
     let result = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:/system/framework/services.jar",
+        guest_classpath.as_str(),
         "/system/bin",
         "com.android.server.pm.PackageUsageOracle",
         "/data/local/tmp/usage-oracle",
@@ -138,11 +142,11 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
     original.read(&directory.join("usage.list")).unwrap();
     assert_eq!(original.times("a"), Some(&[9, 10, 44, 4, 5, 6, 7, 55]));
     assert_eq!(original.times("b"), Some(&[0; 8]));
-    verify_shared_processes(&boot);
+    verify_shared_processes(&boot, &guest_classpath);
     let result = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:/system/framework/services.jar",
+        guest_classpath.as_str(),
         "/system/bin",
         "com.android.server.pm.SharedSeInfoOracle",
     ]));
@@ -185,7 +189,7 @@ fn encode_processes(owner: &aim_services::package::owner::shared_processes::Proc
     out
 }
 
-fn verify_shared_processes(boot: &Boot) {
+fn verify_shared_processes(boot: &Boot, guest_classpath: &str) {
     use aim_services::package::{
         owner::shared_processes::Processes,
         pkg::{AndroidPackage, Process},
@@ -269,7 +273,7 @@ fn verify_shared_processes(boot: &Boot) {
     let result = run(boot.command().args([
         "shell",
         "/system/bin/app_process",
-        "-Djava.class.path=/data/local/tmp/package-snapshots.dex:/system/framework/services.jar",
+        guest_classpath,
         "/system/bin",
         "com.android.server.pm.SharedProcessesOracle",
         "/data/local/tmp/shared-processes",
