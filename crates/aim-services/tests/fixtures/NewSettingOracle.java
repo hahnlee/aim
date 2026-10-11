@@ -2,6 +2,16 @@ package com.android.server.pm;
 
 public final class NewSettingOracle {
     public static void main(String[] args) throws Exception {
+        if (args.length != 0 && args[0].equals("native-paths-batch")) {
+            for (String line : java.nio.file.Files.readAllLines(java.nio.file.Path.of(args[1]))) {
+                String[] row = line.split("\t", -1);
+                if (row.length != 8 || !row[0].equals("native-paths")) {
+                    throw new IllegalArgumentException("invalid native paths row");
+                }
+                main(row);
+            }
+            return;
+        }
         if (args.length != 0 && args[0].equals("original-setting")) {
             try { originalSetting(); System.exit(0); }
             catch (Throwable error) { error.printStackTrace(); System.exit(1); }

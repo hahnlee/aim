@@ -1126,6 +1126,12 @@ services' idle traffic; for B and C, an install, update and uninstall
 from Play Store and of a local APK with `pm install` and through
 `PackageInstaller` sessions.
 
+For the current C completion, the user explicitly deferred the tracked games
+(#704) and the Play Store catalog install/update/uninstall gate (#1273) on
+2026-10-11. These gates remain open follow-ups, not passing results. The other
+app checks, complete CTS comparison, template parity and return to the original
+on native-written files remain required.
+
 ## 6. Decisions
 
 Tracked on #702.

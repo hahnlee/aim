@@ -675,6 +675,19 @@ remain distinct. The complete b3a4d1e0 snapshot body passes in389.84s with the
 oracles, original assertions/stdout, natural exit0, zero failed/ignored/skipped,
 owned births/namespaces/mounts0 and fixture removed (#1316 closed). This proves
 the snapshot scope fix, not rebuilt-image, full CTS or app acceptance.
+The full preferred backup serialization body passes in313.96s atb958fb5c,
+natural exit0, no failures/skips, owned births/namespaces/mounts0. The next
+new-setting body completes its reported shared-UID/ABI/ZIP/page-size stages but
+is externally stopped at900.02s by its whole-body budget before a Rust panic
+(#1320). The interrupted result911.89s is not a semantic pass; no remaining
+body was launched after its cleanup marker. Root verifies zero live namespace
+members and normally ejects its DATA, preserving the original timeout evidence.
+The native-path oracle now batches the same72 input rows in one original ART
+process, with fresh original objects and four output fields per row; every
+per-case native assertion and missing/extra-row check remains. The updated Rust
+fixture compiles; full replay remains NOT RUN. Current C completion explicitly
+defers games and Play Store catalog transactions per the user (#704/#1273);
+other CTS/app/template/rollback gates remain required.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,

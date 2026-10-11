@@ -1443,6 +1443,8 @@ fn compare_new_settings(original_only: bool) {
         "native/original bundled ABI inventory matches {bundled_cases} image apps (4 present, 1 removed)"
     );
     let mut path_cases = 0;
+    let mut path_inputs = String::new();
+    let mut path_expected = Vec::new();
     for code in [
         "/system/app/Fixture",
         "/system/app/fixture.apk",
@@ -1461,16 +1463,11 @@ fn compare_new_settings(original_only: bool) {
                         });
                         pkg.primary_cpu_abi = primary.map(Into::into);
                         pkg.secondary_cpu_abi = secondary.map(Into::into);
-                        let original = run(boot.command().args([
-                            "shell", "/system/bin/app_process",
-                            "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
-                            "/system/bin", "com.android.server.pm.NewSettingOracle", "native-paths",
-                            "/data/local/tmp/code-time.cache",
-                            if system { "true" } else { "false" },
-                            if updated { "true" } else { "false" },
-                            code, pkg.base_apk_path.as_deref().unwrap(),
+                        path_inputs.push_str(&format!(
+                            "native-paths\t/data/local/tmp/code-time.cache\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                            system, updated, code, pkg.base_apk_path.as_deref().unwrap(),
                             primary.unwrap_or("-"), secondary.unwrap_or("-"),
-                        ]));
+                        ));
                         let paths = NativeLibraryPaths::derive(
                             &pkg,
                             &NativeLibraryEnvironment {
@@ -1490,11 +1487,8 @@ fn compare_new_settings(original_only: bool) {
                             paths.primary,
                             paths.secondary.as_deref().unwrap_or("null")
                         );
-                        assert_eq!(
-                            String::from_utf8(original.stdout).unwrap(),
-                            expected,
-                            "native library paths: {code}, {primary:?}, {secondary:?}, {system}, {updated}"
-                        );
+                        path_expected.push((expected,
+                            format!("native library paths: {code}, {primary:?}, {secondary:?}, {system}, {updated}")));
                         path_cases += 1;
                     }
                 }
@@ -1502,6 +1496,19 @@ fn compare_new_settings(original_only: bool) {
         }
     }
     assert_eq!(path_cases, 72);
+    fs::write(boot.data.join("data/local/tmp/native-paths.tsv"), path_inputs).unwrap();
+    let original = run(boot.command().args([
+        "shell", "/system/bin/app_process",
+        "-Djava.class.path=/data/local/tmp/new-setting.dex:/system/framework/services.jar",
+        "/system/bin", "com.android.server.pm.NewSettingOracle", "native-paths-batch",
+        "/data/local/tmp/native-paths.tsv",
+    ]));
+    let output = String::from_utf8(original.stdout).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), path_cases * 4);
+    for ((expected, label), actual) in path_expected.iter().zip(lines.chunks_exact(4)) {
+        assert_eq!(&format!("{}\n", actual.join("\n")), expected, "{label}");
+    }
     eprintln!("native/original library paths match {path_cases} selected-ABI cases");
     let config = SystemConfig::read(&common::runtime::cohort::original_image(), &|p| properties.get(p).cloned());
     let framework =
