@@ -52,6 +52,28 @@ redirect native construction, UserManager/ART adapters and lifecycle calls;
 `package` and `package_native` identify the native guest-init owner. All 298
 planned methods are implemented; this is not conformance acceptance.
 
+The current f89fddbf matched original/native images are build-qualified: both
+use the same vendor artifacts and the primary workflow restores the default
+image configuration with zero stale nodes. Native identity 9fdad5ca has two
+published standalone first-boot templates (`target/m4-nt1` and `target/m4-nt2`),
+70 files each; boot completion is 218.3s and 217.3s, respectively. Independent
+observations find no remaining owned direct processes, namespaces, DATA mounts
+or DATA attachments. Both templates use the same image/SKU/runtime inputs.
+Their strict structure comparison initially differs in four XML files. Actual
+read-only raw DATA observations bind all104 positive CE/DE inode references
+(52 per template) to their physical package directories, with normal detach and
+unchanged input hashes; the owner-qualified restrictions match. Role primary
+and reserve hashes remain different and fail the comparison (#1306). Their
+live original-owner hash binding remains required. The collector handles
+bare diskutil identifiers and hdiutil device paths strictly (#1324):20 pure
+tests pass without skips, and both actual DATA collection lifetimes pass.
+Current-pair original template, consumer, Role hash binding, apps, rollback and
+full 66-module CTS parity remain unverified.
+The current CTS host owner integration passes the official 16_r1 launcher,
+selected Java21 JVM and foreground adb: exit0 in3.807s, ten recorded process
+births terminal, no remaining actors/listeners or uncertain queries, and all
+input hashes unchanged. This probe executes zero Android CTS modules.
+
 The frozen b04c9e67 original/native pair uses the same pinned 66-module CTS
 inputs. The original campaign is terminal and all owned processes are reaped:
 26 pass / 41 fail / five assumptions in verified associated XML, plus ten

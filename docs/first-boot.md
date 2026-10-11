@@ -319,7 +319,7 @@ identities, keys and seeds.
 
 The standalone `template` command uses explicit existing image, immutable host
 runtime, display binary and empty-template inputs. It runs no build graph and
-requires a new output directory outside the shared templates and every input.
+requires a new output directory outside `target/aim` and every input.
 Its log, raw disposable boot data and constructor captures remain inside that
 output; published templates elsewhere are untouched. Input hashes, including the
 image overlay receipt, are captured before boot and checked again before publish.
@@ -327,7 +327,7 @@ image overlay receipt, are captured before boot and checked again before publish
 ```sh
 cargo build -p aim-build --bin cargo-aim --target-dir target/aim/template-tool-cargo
 target/aim/template-tool-cargo/debug/cargo-aim template \
-  --output target/aim/native-template-gates/native-1 \
+  --output target/native-template-gates/native-1 \
   --image /path/to/frozen-derived/root \
   --host-runtime /path/to/immutable-host-runtime \
   --display-bin /path/to/frozen/aim-display \

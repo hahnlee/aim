@@ -597,6 +597,24 @@ def image_attachments(image):
             if Path(entry['image-path']).resolve() == image]
 
 
+def device_path(value):
+    match = re.fullmatch(r'(?:/dev/)?(disk[0-9]+(?:s[0-9]+)*)', value or '')
+    if not match:
+        raise ValueError('invalid image device identity')
+    return '/dev/' + match.group(1)
+
+
+def attachment_metadata(entities, device, mounted, mount):
+    # diskutil emits bare disk identifiers; hdiutil info emits /dev paths.
+    matches = [entry for entry in entities if entry.get('mount-point') and
+               Path(entry['mount-point']).resolve() == mount.resolve()]
+    if not entities or device_path(entities[0].get('dev-entry')) != device or len(matches) != 1:
+        raise ValueError('attach metadata/image ownership mismatch')
+    if device_path(matches[0].get('dev-entry')) != device_path(mounted.get('dev-entry')):
+        raise ValueError('attach metadata/image volume mismatch')
+    return device_path(mounted['dev-entry'])
+
+
 def owned_attachment(image, mount):
     matches = []
     for entry in image_attachments(image):
@@ -604,9 +622,9 @@ def owned_attachment(image, mount):
         mounted = [item for item in entities if item.get('mount-point') and
                    Path(item['mount-point']).resolve() == mount.resolve()]
         if mounted:
-            if len(mounted) != 1 or not entities or not re.fullmatch(r'/dev/disk[0-9]+', entities[0].get('dev-entry', '')):
+            if len(mounted) != 1 or not entities or not re.fullmatch(r'/dev/disk[0-9]+', device_path(entities[0].get('dev-entry'))):
                 raise ValueError('ambiguous owned image attachment')
-            matches.append((entities[0]['dev-entry'], mounted[0]))
+            matches.append((device_path(entities[0]['dev-entry']), mounted[0]))
     if len(matches) > 1:
         raise ValueError('multiple owned image attachments')
     return matches[0] if matches else None
@@ -647,16 +665,13 @@ def collect_owner_bindings(capture_path, image, pins, owner_source):
         device, mounted = ownership
         lifecycle['owned_device'] = device
         entities = plistlib.loads(attach.stdout)['system-entities']
-        matches = [entry for entry in entities if entry.get('mount-point') and
-                   Path(entry['mount-point']).resolve() == mount.resolve()]
-        if not entities or entities[0].get('dev-entry') != device or matches != [mounted]:
-            raise ValueError('attach metadata/image ownership mismatch')
-        info = plistlib.loads(subprocess.run(['diskutil', 'info', '-plist', mounted['dev-entry']],
+        volume_device = attachment_metadata(entities, device, mounted, mount)
+        info = plistlib.loads(subprocess.run(['diskutil', 'info', '-plist', volume_device],
             capture_output=True, check=True, timeout=10).stdout)
         if info.get('Writable') is not False or info.get('MountPoint') != mounted['mount-point']:
             raise ValueError('volume is not verified readonly')
         receipt['attachment'] = {'readonly': True, 'device': device,
-            'volume_device': mounted['dev-entry'], 'volume_uuid': info.get('VolumeUUID'),
+            'volume_device': volume_device, 'volume_uuid': info.get('VolumeUUID'),
             'mount': str(mount.resolve()), 'stat_dev': mount.stat().st_dev}
         raw_capture = {'xml': {}, 'inventory': {}}
         receipt['raw_restrictions'] = {}

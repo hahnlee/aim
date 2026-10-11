@@ -254,6 +254,33 @@ class TemplateStructure(unittest.TestCase):
             audit.compare(a, b, {'fixture.permission': {'owner.one', 'owner.other'}})
 
 
+class AttachmentIdentity(unittest.TestCase):
+    def test_diskutil_and_hdiutil_identify_the_same_owned_volume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mount = Path(directory)
+            mounted = {'dev-entry': '/dev/disk19s1', 'mount-point': str(mount), 'content-hint': 'Apple_APFS'}
+            entities = [{'dev-entry': 'disk18'}, {'dev-entry': 'disk19'},
+                        {'dev-entry': 'disk19s1', 'mount-point': str(mount), 'filesystem-name': 'Case-sensitive APFS'}]
+            self.assertEqual(audit.attachment_metadata(entities, '/dev/disk18', mounted, mount), '/dev/disk19s1')
+            for entry in entities:
+                entry['dev-entry'] = '/dev/' + entry['dev-entry']
+            self.assertEqual(audit.attachment_metadata(entities, '/dev/disk18', mounted, mount), '/dev/disk19s1')
+
+    def test_foreign_device_duplicate_mount_and_malformed_identifiers_fail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mount = Path(directory)
+            mounted = {'dev-entry': '/dev/disk19s1', 'mount-point': str(mount)}
+            volume = {'dev-entry': 'disk19s1', 'mount-point': str(mount)}
+            for entities in [[{'dev-entry': 'disk20'}, volume],
+                             [{'dev-entry': 'disk18'}, dict(volume, **{'dev-entry': 'disk19s2'})],
+                             [{'dev-entry': 'disk18'}, volume, volume]]:
+                with self.assertRaises(ValueError):
+                    audit.attachment_metadata(entities, '/dev/disk18', mounted, mount)
+            for identifier in ['', '/dev/../disk18', 'disk18/other', '/dev/rdisk18', 'disk18s', None]:
+                with self.assertRaises(ValueError):
+                    audit.device_path(identifier)
+
+
 class DarwinCapture(unittest.TestCase):
     def setUp(self):
         if sys.platform != 'darwin':
