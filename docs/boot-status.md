@@ -604,10 +604,15 @@ It now requires normal help status (0 or documented usage2), a usage header and
 an explicit --root token, returning an error before data attach or services
 otherwise (#1313). Five new actual host-helper/Boot admission regressions and
 one existing capability-default test pass; no Android replay uses this fix yet.
-A later exact f742 help query returns SIGKILL with empty output, while a
-read-only current host-security popup reports that linux-run execution is
-blocked. This proves the current obstruction, not all prior signal senders;
-no security policy or original self-test is changed.
+A later exact f742 help query in the worktree returns SIGKILL with empty output,
+while a read-only host-security popup reports that linux-run execution is
+blocked. This identifies that executable's obstruction, not all prior signal
+senders or other checkouts. On2026-10-11, the primary checkout's existing
+release linux-run help exits0. A normal release build of all six runtime
+binaries from d37eda49 also passes there in62s, and its linux-run help exits0
+with the required namespace, FD and POSIX-control options. Android replay with
+this primary build remains NOT RUN; no security policy or original self-test
+is changed.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,
