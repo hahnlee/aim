@@ -613,6 +613,19 @@ binaries from d37eda49 also passes there in62s, and its linux-run help exits0
 with the required namespace, FD and POSIX-control options. Android replay with
 this primary build remains NOT RUN; no security policy or original self-test
 is changed.
+The2026-10-11 primary snapshot replay at1bf96053 compiles the complete
+vendor/AIDL dependency closure and links against the image's recorded
+SystemServer classpath (#1314). Its current primary controller removes stale
+worktree build paths. The supervisor now observes empty pending PID fields
+without aborting the boot (#1315). The full body passes authenticated init
+readiness and actual sys.boot_completed=1, then fails at its first original
+app_process snapshot command with exit137 and stderr `Killed` (#1316), before
+snapshot assertions. The body takes364.40s; the supervisor seals the result
+in368.76s with all owned births, namespaces and mounts gone. Same-path runtime
+help subsequently exits0. A PID-associated unified-log query finds no
+termination sender; the open security popup has no PID/time association.
+This is a failed oracle replay, not conformance acceptance or proof that host
+security caused this particular termination.
 The first template on the matched Native image completes settings in110.3s,
 boot in250.1s and permissions in256.6s and publishes70 mandatory files.
 Actual dumpsys reports package and package_native owned by guest initPID1,
