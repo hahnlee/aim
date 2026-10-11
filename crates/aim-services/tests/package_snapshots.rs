@@ -30,36 +30,20 @@ fn facade_package_snapshots_use_original_interfaces_and_preserve_capture_scope()
         .args(sources(
             &aim_paths::root().join("java/device-services/stubs"),
         )));
+    let production = common::java::production_classes(&data.0, &jdk, &stubs);
+    let classpath = std::env::join_paths([stubs.as_path(), production.as_path()]).unwrap();
     run(Command::new(jdk.join("bin/javac"))
         .args(["--release", "17", "-d"])
         .arg(&classes)
         .arg("-classpath")
-        .arg(&stubs)
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/PackageSnapshotsOracle.java"),
-        )
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/PackageUsageOracle.java"),
-        )
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/SharedSeInfoOracle.java"),
-        )
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/SharedProcessesOracle.java"),
-        )
-        .arg(
-            aim_paths::root()
-                .join("java/device-services/src/com/android/server/pm/SharedProcessFeed.java"),
-        )
-        .arg(aim_paths::root().join("java/device-services/src/dev/aim/server/NativePackageCapabilities.java"))
-        .arg(
-            aim_paths::root().join("java/device-services/src/dev/aim/server/PackageSnapshots.java"),
-        ));
-    let mut pending = vec![classes.clone()];
+        .arg(&classpath)
+        .args([
+            "PackageSnapshotsOracle.java",
+            "PackageUsageOracle.java",
+            "SharedSeInfoOracle.java",
+            "SharedProcessesOracle.java",
+        ].map(|name| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name))));
+    let mut pending = vec![classes.clone(), production];
     let mut class_files = Vec::new();
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(dir).unwrap() {
