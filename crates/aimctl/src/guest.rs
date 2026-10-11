@@ -126,7 +126,7 @@ mod tests {
         std::fs::create_dir_all(files.path_map().parent().unwrap()).unwrap();
         std::fs::write(files.path_map(), b"fixture").unwrap();
         let selected = crate::inputs::Inputs { image: "/selected-image".into(),
-            host_runtime: "/selected-runtime".into(), userdata: "/selected-templates".into() };
+            host_runtime: "/selected-runtime".into(), userdata: "/selected-templates".into(), binder_trace: None };
         let original = State { pid: 1, guest: Some(42), windows: false, started: 0, inputs: selected };
         let stored = State::parse(&original.to_text()).unwrap();
         let guest = Guest::of(&files, &stored).unwrap();

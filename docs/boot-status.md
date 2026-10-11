@@ -89,17 +89,24 @@ queries, and unchanged hashes. Comparison and resume revalidate each retained
 owner receipt before XML completion credit (#1321). The wrapper carries the
 actual frozen image and authenticates init by kernel birth (#1325);19 comparator
 and4 shell tests pass. This host probe executes zero Android CTS modules.
-The current-pair original `target/c89o` body also completes actual shell-v2
-and exec-out queries and `svc power stayon true` (natural exit0 in19.839s).
-Official adb reboot exits0 and goes offline, but the first following shell
-fails with POSIX EPROTO/dead Mach destination and verity/libdl mmap ENOENT
-(#1318). Post-reboot readiness and full66 remain unverified. Native init now
-withdraws its exact namespace registration under the admission lock before
-stopping services and retiring Binder/POSIX/PTY/verity owners. Replacement
-process/namespace records survive stale removal, and errors surface. This
-source fix and its new owner regressions are not yet built or run. The four
-orphan workers separately reclaimed by Root are a controller ancestry issue;
-this patch does not claim to fix that observation.
+The current-pair original reboot exposed stale namespace admission while native
+Binder/POSIX/PTY/verity owners were retiring (#1318). Init now withdraws the
+captured registration before stopping services, preserves replacement records,
+and surfaces retirement errors. Three owner regressions pass and the release
+runtime builds. With that runtime, `c89o2` and `c89o3` both reach post-reboot
+boot-completed1 through successful authenticated direct shells without the old
+transport errors. Complete real-ADB reboot acceptance still fails: `c89o2`
+checked only adb-connect exit0, although stdout reported Connection refused;
+`c89o3` corrects that validation (#1330) and observes no renewed device state
+within the unchanged300s budget. Actual post-reboot properties show adbd stopped
+and USB configuration/state `none`; the cause remains under investigation.
+Both runs stop normally with strict owned births, namespaces, mounts and image
+attachments gone. The older orphan workers remain separately tracked under
+controller ancestry #796. Full66 Android CTS remains NOT RUN.
+`aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
+path into guest-init and retains it in controller state. Three parser/state/
+forwarding regressions and the release controller build pass; actual native
+trace replay is pending. Default boot options are unchanged.
 The native permission writer now places definitions before package/tail records
 (#1326), and callback replay retains real committed admission order (#1327).
 Six focused Rust regressions pass; the corrected native runtime has not booted.

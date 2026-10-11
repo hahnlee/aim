@@ -20,7 +20,8 @@ pub const USAGE: &str = "usage: aimctl [--data DIR] COMMAND
   --data DIR            the data directory (default: ~/Library/Application Support/aim/data)
   --image DIR           image root for start/run
   --host-runtime DIR    host programs for start/run
-  --userdata DIR        data templates for start/run";
+  --userdata DIR        data templates for start/run
+  --binder-trace FILE    native Binder diagnostic trace for start/run";
 
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -67,6 +68,10 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             Some("--image") => inputs.image = Some(value(&mut it, "--image")?),
             Some("--host-runtime") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
             Some("--userdata") => inputs.userdata = Some(value(&mut it, "--userdata")?),
+            Some("--binder-trace") => {
+                if inputs.binder_trace.is_some(){return Err(usage_error("duplicate --binder-trace".into()));}
+                inputs.binder_trace=Some(value(&mut it,"--binder-trace")?);
+            },
             Some("-h" | "--help" | "help") => {
                 return Ok(Args {
                     data,
@@ -93,6 +98,10 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--image" if matches!(name, "start" | "run") => inputs.image = Some(value(&mut it, "--image")?),
             "--host-runtime" if matches!(name, "start" | "run") => inputs.host_runtime = Some(value(&mut it, "--host-runtime")?),
             "--userdata" if matches!(name, "start" | "run") => inputs.userdata = Some(value(&mut it, "--userdata")?),
+            "--binder-trace" if matches!(name, "start" | "run") => {
+                if inputs.binder_trace.is_some(){return Err(usage_error("duplicate --binder-trace".into()));}
+                inputs.binder_trace=Some(value(&mut it,"--binder-trace")?);
+            },
             "--windows" if matches!(name, "start" | "run") => windows = true,
             "--follow" if name == "logs" => follow = true,
             s if s.starts_with('-') && name != "logs" => {
@@ -191,6 +200,17 @@ mod tests {
         assert!(p("start --host-runtime").is_err());
         assert_eq!(command("shell echo --image /i"),
             Command::Shell(vec!["echo".into(), "--image".into(), "/i".into()]));
+    }
+
+    #[test]
+    fn binder_trace_is_explicit_start_run_only_and_shell_arguments_stay_verbatim() {
+        for command in ["--binder-trace /trace start", "run --binder-trace /trace"] {
+            assert_eq!(p(command).unwrap().inputs.binder_trace,Some("/trace".into()));
+        }
+        assert!(p("start --binder-trace").is_err());
+        assert!(p("start --binder-trace /a --binder-trace /b").is_err());
+        assert!(p("--binder-trace /a status").is_err());
+        assert_eq!(command("shell echo --binder-trace /trace"),Command::Shell(vec!["echo".into(),"--binder-trace".into(),"/trace".into()]));
     }
 
     #[test]
