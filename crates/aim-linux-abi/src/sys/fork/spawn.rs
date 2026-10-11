@@ -1064,6 +1064,7 @@ fn become_child(h: Handover) -> String {
         return e;
     }
     if !state::restore(&mut r) {
+        if let Some(error)=r.owner_error(){return format!("fork child: POSIX owner admission errno={error} ({})",r.diagnostic());}
         return format!("fork child: damaged state ({})",r.diagnostic());
     }
     let mut consumed=fdtab::take_restored_private_targets();

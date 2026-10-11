@@ -102,7 +102,23 @@ within the unchanged300s budget. Actual post-reboot properties show adbd stopped
 and USB configuration/state `none`; the cause remains under investigation.
 Both runs stop normally with strict owned births, namespaces, mounts and image
 attachments gone. The older orphan workers remain separately tracked under
-controller ancestry #796. Full66 Android CTS remains NOT RUN.
+controller ancestry #796. The current Original FULL66 attempt at9941e844 is
+terminal and incomplete: Parsing11/0, Preferred1/1 and Setting2/0 have complete
+official XML; PackageManagerHost33/1 has incomplete XML after original adbd
+fork children repeatedly fail POSIX admission (#1337). All34 captured failures
+have intact Reader state; the actual owner errno was lost on guest stderr under
+stdio-null. A same-namespace external-admission getprop control succeeds, so
+endpoint failure is not established. Normal owned stop exits0 in15.19s and a
+fresh independent seal confirms all captured births/namespaces, owned mounts,
+attachments and listeners absent, with exclusive DATA lock. The original
+orchestrator's successful-empty legacy IORegistry parse failure is preserved
+separately (#1335). Source now records admission stage/errno on the hidden
+diagnostics FD and distinguishes owner failure from blob damage; the new
+actual native-controller regression passes (one test, no skips), covering
+missing init, absent endpoint, authenticated broker denial and successful owner
+registration while guest stderr is null. Release build and actual fork failure
+reproduction remain pending. Native
+FULL66, apps, fresh-template parity and rollback remain unrun on this cohort.
 `aimctl start/run --binder-trace FILE` now forwards the selected diagnostic
 path into guest-init and retains it in controller state. Three parser/state/
 forwarding regressions and the release controller build pass. The260.65s
@@ -136,7 +152,8 @@ file moves during the earlier read helper. Normal cleanup and pins pass; the
 read-race sampling gap is being corrected without weakening the Role comparison.
 The native permission writer now places definitions before package/tail records
 (#1326), and callback replay retains real committed admission order (#1327).
-Six focused Rust regressions pass; the corrected native runtime has not booted.
+Six focused Rust regressions pass; two fresh current-factory captures and
+complete current-runtime parity/CTS acceptance remain unverified.
 
 The frozen b04c9e67 original/native pair uses the same pinned 66-module CTS
 inputs. The original campaign is terminal and all owned processes are reaped:

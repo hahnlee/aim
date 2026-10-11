@@ -267,27 +267,38 @@ pub(crate) fn start_external(locator: Option<&std::path::Path>) -> Result<(), Er
     attach(locator,Operation::ExternalAttach)
 }
 fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), Errno> {
+    let failure = |stage: &str, error: Errno| {
+        crate::diag!("POSIX admission pid={} stage={stage} errno={error}", unsafe { libc::getpid() });
+        error
+    };
+    let owner_io = |stage: &str, error: std::io::Error| {
+        let host_errno = error.raw_os_error();
+        let message = error.to_string();
+        let linux = io(error);
+        crate::diag!("POSIX admission pid={} stage={stage} errno={linux} host_errno={host_errno:?} error={message}", unsafe { libc::getpid() });
+        linux
+    };
     let Some(locator) = locator else {
         return Ok(());
     };
-    let table = super::cred::by_pid_dir().ok_or(errno::ESRCH)?;
-    let init = aim_storage::process_namespace::InitRegistration::read(table).map_err(io)?;
-    let config = aim_storage::posix_broker::OwnerConfig::read(locator, init.process).map_err(io)?;
+    let table = super::cred::by_pid_dir().ok_or_else(||failure("identity-table",errno::ESRCH))?;
+    let init = aim_storage::process_namespace::InitRegistration::read(table).map_err(|error|owner_io("init-record",error))?;
+    let config = aim_storage::posix_broker::OwnerConfig::read(locator, init.process).map_err(|error|owner_io("owner-config",error))?;
     if config.process != init.process {
-        return Err(errno::EPERM);
+        return Err(failure("config-identity",errno::EPERM));
     }
-    let process = ProcessIdentity::running(unsafe { libc::getpid() }).map_err(io)?;
-    let control = posix_control::Client::lookup(&config.endpoint).map_err(io)?;
+    let process = ProcessIdentity::running(unsafe { libc::getpid() }).map_err(|error|owner_io("actor-birth",error))?;
+    let control = posix_control::Client::lookup(&config.endpoint).map_err(|error|owner_io("endpoint-lookup",error))?;
     let frame = Frame::new(operation, 1);
     let reply = Client::reply(
         control
             .begin(frame, None)
-            .map_err(io)?
+            .map_err(|error|owner_io("attach-send",error))?
             .wait_authenticated(Duration::from_secs(5), config.process)
-            .map_err(io)?,
-    )?;
+            .map_err(|error|owner_io("authenticated-reply",error))?,
+    ).map_err(|error|failure("broker-reply",error))?;
     if reply.guest_pid <= 0 {
-        return Err(errno::ESRCH);
+        return Err(failure("reply-guest-pid",errno::ESRCH));
     }
     let client = Client::new(
         control,
@@ -296,15 +307,61 @@ fn attach(locator: Option<&std::path::Path>,operation:Operation) -> Result<(), E
             guest_pid: reply.guest_pid,
         },
         config.process,
-    )?;
+    ).map_err(|error|failure("client-owner-live",error))?;
     // Attach consumed request1 in the same native owner incarnation.
     client.next.store(2, Ordering::Relaxed);
-    install(client)
+    install(client).map_err(|error|failure("install-owner",error))
 }
 
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    struct Diagnostics {
+        capture: std::fs::File,
+        saved: Vec<std::os::fd::OwnedFd>,
+        hidden: std::os::fd::OwnedFd,
+        previous: i32,
+    }
+    impl Diagnostics {
+        fn new(path: &std::path::Path) -> Self {
+            use std::os::fd::FromRawFd;
+            let capture = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path).unwrap();
+            let saved = (0..3).map(|fd| {
+                let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+                assert!(copy >= 0);
+                unsafe { std::os::fd::OwnedFd::from_raw_fd(copy) }
+            }).collect();
+            assert_eq!(unsafe { libc::dup2(capture.as_raw_fd(), 2) }, 2);
+            let previous = crate::diag::log_fd();
+            let hidden = unsafe { std::os::fd::OwnedFd::from_raw_fd(crate::diag::stdio_null().unwrap()) };
+            Self { capture, saved, hidden, previous }
+        }
+        fn text(&self) -> String {
+            use std::os::unix::fs::FileExt;
+            let mut bytes = vec![0; self.capture.metadata().unwrap().len() as usize];
+            self.capture.read_exact_at(&mut bytes, 0).unwrap();
+            String::from_utf8(bytes).unwrap()
+        }
+        fn stage(&self, pid: i32, stage: &str, errno: Errno) {
+            let text = self.text();
+            let prefix = format!("POSIX admission pid={pid} stage={stage} errno={errno}");
+            let lines = text.lines().filter(|line| *line == prefix.as_str() || line.strip_prefix(prefix.as_str()).is_some_and(|tail| tail.starts_with(' '))).collect::<Vec<_>>();
+            assert_eq!(lines.len(), 1, "{text}");
+            if stage != "broker-reply" {
+                assert!(lines[0].contains(&format!("host_errno=Some({})", libc::ENOENT)), "{text}");
+            }
+            assert!(!text.contains("GUEST_STDERR_SENTINEL"), "{text}");
+        }
+    }
+    impl Drop for Diagnostics {
+        fn drop(&mut self) {
+            for (fd, saved) in self.saved.iter().enumerate() {
+                assert_eq!(unsafe { libc::dup2(saved.as_raw_fd(), fd as i32) }, fd as i32);
+            }
+            crate::diag::log_to(self.previous);
+            super::super::fdtab::unhide(self.hidden.as_raw_fd());
+        }
+    }
     #[test]
     fn authenticated_bootstrap_and_fork_reset_require_actual_owner_evidence() {
         const MARKER: &str = "posix-bootstrap-owner-fixture";
@@ -342,15 +399,40 @@ mod lifecycle_tests {
             .unwrap();
         let locator = root.join("posix-control-owner");
         controller.owner_config().unwrap().write(&locator).unwrap();
+        let diagnostics = Diagnostics::new(&root.join("admission-diagnostics"));
+        assert_eq!(crate::diag::log_fd(), diagnostics.hidden.as_raw_fd());
+        assert!(super::super::fdtab::is_hidden(diagnostics.hidden.as_raw_fd()));
+        let stat = |fd| {
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0);
+            (stat.st_dev, stat.st_ino, stat.st_rdev, stat.st_mode)
+        };
+        assert_eq!(stat(diagnostics.hidden.as_raw_fd()), stat(diagnostics.capture.as_raw_fd()));
+        let null = std::fs::File::open("/dev/null").unwrap();
+        assert_eq!(stat(2), stat(null.as_raw_fd()));
+        let sentinel = b"GUEST_STDERR_SENTINEL\n";
+        assert_eq!(unsafe { libc::write(2, sentinel.as_ptr().cast(), sentinel.len()) }, sentinel.len() as isize);
+        crate::diag!("HIDDEN_DIAGNOSTICS_SENTINEL");
+        assert_eq!(diagnostics.text(), "HIDDEN_DIAGNOSTICS_SENTINEL\n");
         assert_eq!(start(Some(&locator)), Err(errno::ENOENT));
         assert!(current().is_err());
+        diagnostics.stage(actual.host_pid, "init-record", errno::ENOENT);
         let registration = aim_storage::process_namespace::InitRegistration::register(
             &table,
             actual,
             &format!("posix-fixture-{}", actual.host_pid),
         )
         .unwrap();
+        let missing = root.join("missing-control-owner");
+        aim_storage::posix_broker::OwnerConfig {
+            endpoint: format!("com.aim.posix-bootstrap-absent.{}.{}", actual.host_pid, actual.start_microseconds),
+            process: actual,
+        }.write(&missing).unwrap();
+        assert_eq!(start(Some(&missing)), Err(errno::ENOENT));
+        assert!(current().is_err());
+        diagnostics.stage(actual.host_pid, "endpoint-lookup", errno::ENOENT);
         assert_eq!(start(Some(&locator)), Err(errno::EPERM));
+        diagnostics.stage(actual.host_pid, "broker-reply", errno::EPERM);
         assert!(
             current().is_err(),
             "no native admission is not a host PID fallback"
@@ -369,6 +451,8 @@ mod lifecycle_tests {
                 guest_pid: 1
             }
         );
+        assert_eq!(diagnostics.text().lines().filter(|line| line.starts_with("POSIX admission ")).count(), 3);
+        drop(diagnostics);
         use std::os::fd::AsFd;
         let file_path = root.join("actual-lock");
         std::fs::write(&file_path, b"authenticated native owner").unwrap();

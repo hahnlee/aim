@@ -89,12 +89,15 @@ pub struct Reader<'a> {
     bad: bool,
     stage: &'static str,
     failure: Option<(&'static str, usize)>,
+    owner_error: Option<crate::errno::Errno>,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, total: buf.len(), bad: false, stage: "header", failure: None }
+        Reader { buf, total: buf.len(), bad: false, stage: "header", failure: None, owner_error: None }
     }
+
+    pub fn owner_error(&self) -> Option<crate::errno::Errno> { self.owner_error }
 
     /// Whether everything read so far was there, and all of it was read.
     pub fn ok(&self) -> bool {
@@ -272,7 +275,7 @@ pub fn restore(r: &mut Reader) -> bool {
     if let Err(error)=fdtab::after_fork_child(){eprintln!("fork descriptor rebuild: errno {error}");r.invalidate();return false;}
     super::super::posix_locks::reset_fork();
     r.stage("posix-admission");
-    if let Err(error)=super::super::posix_locks::attach_fork(){eprintln!("fork POSIX owner admission: errno {error}");return false;}
+    if let Err(error)=super::super::posix_locks::attach_fork(){r.owner_error=Some(error);crate::diag!("fork POSIX owner admission: errno {error}");return false;}
     true
 }
 
