@@ -703,3 +703,16 @@ fn mutation_prepare_original_leaf_allows_concurrent_native_component_notificatio
     assert!(error.message.contains("protected package"));
     assert!(Arc::ptr_eq(&capture,&fixture.system.capture_package_queries().unwrap()),"protected owner result must reject publication");
 }
+
+#[test]
+fn unchanged_component_use_does_not_wait_for_install_publication() {
+    let mut fixture=Fixture::new();let bridge=fixture.attach();let before=publish(&fixture,&bridge);
+    assert!(!crate::package::info::user_state(before.state().packages.get("p").unwrap(),0).stopped);
+    let install=fixture.system.package_install_guard();
+    let system=fixture.system.clone();let (send,receive)=std::sync::mpsc::channel();
+    let worker=std::thread::spawn(move||send.send(system.internal_notify_component_used(Some("p".into()),0,None,None,1000,0)).unwrap());
+    let result=receive.recv_timeout(std::time::Duration::from_secs(2));
+    drop(install);worker.join().unwrap();
+    result.expect("unchanged component use waited for install publication").unwrap();
+    assert!(Arc::ptr_eq(&before,&fixture.system.capture_package_queries().unwrap()));
+}

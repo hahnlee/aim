@@ -246,8 +246,15 @@ six-binary release build completes in63s; only guest-init changes, to SHA256
 The typed compressed/system-install route retains its prior rebase contract
 until its exact lower-owner publication receipt is implemented (#1348). A fresh
 runtime49c5760b replay passes actual signed v1 installation, same-signer v2
-replacement with exact installed APK hashes, uninstall and missing-path checks;
-the former watchdog does not recur. The body then reaches a separate session
+replacement with exact installed APK hashes, uninstall and missing-path checks.
+Runtime9e33f2f4 later reproduces a narrower form during v2 publication: an AMS
+thread calls native `notifyComponentUsed` for an already non-stopped package and
+waits on the install publication gate while that publisher reads original query
+compatibility through AMS. Canonical v2 metadata reaches generation632 before
+Watchdog retires SystemServer. The no-change component-use owner now returns
+from its retained immutable package state without entering the publication gate;
+the held-gate and original policy-reentry regressions pass without skips. Fresh
+live replay is pending. The earlier body then reached a separate session
 commit conflict (#1346). It stops normally, leaves no owned DATA mount or either
 attachment, and obtains an exclusive DATA lock. Its remaining app, donor and
 conformance results are not run.

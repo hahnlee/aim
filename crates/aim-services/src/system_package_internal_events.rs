@@ -128,12 +128,11 @@ impl System {
         calling_uid: i32,
         calling_pid: i32,
     ) -> Result<()> {
-        let install = self.package_install_guard();
         let (bridge, capture, dependencies) = {
             let state = self.package_bootstrap.lock().unwrap();
             let current = state.current.as_ref().ok_or_else(||event_error("component usage bootstrap unavailable"))?;
             (current.bridge.clone(), current.queries.clone().ok_or_else(||event_error("component usage capture unavailable"))?,
-                current.mutations.clone().ok_or_else(||event_error("component usage mutation owner unavailable"))?)
+                current.mutations.clone())
         };
         self.check_package_bootstrap(&bridge)?;
         let Some(name) = package_name.filter(|name| {
@@ -158,6 +157,14 @@ impl System {
                 name, caller, debug_info
             );
         }
+        // ActiveServices calls this while holding the AMS monitor. An already
+        // active package has no stopped-state mutation to serialize and must
+        // not wait behind install policy reads which can reenter that monitor.
+        if capture.state().packages.get(&name).is_some_and(|package|
+            !crate::package::info::user_state(package,user_id).stopped) {
+            return Ok(());
+        }
+        let dependencies=dependencies.ok_or_else(||event_error("component usage mutation owner unavailable"))?;
         let resolver = crate::package::resolve::Resolver::default();
         let resolution = resolver
             .resolution(capture.state())
@@ -183,6 +190,14 @@ impl System {
         };
         let prepared = crate::package::mutation_dispatch::prepare(call.code, &mut call.data, &query, calling_pid, &dependencies)
             .ok_or_else(||event_error("component usage stopped-state owner unavailable"))??;
+        // Preserve the same rule for any no-op resolved by the full policy.
+        if !prepared.changes_state() {
+            prepared.finish(&dependencies,capture.state(),capture.state(),calling_uid)?;
+            let mut reader=Reader::new(prepared.reply.data(),prepared.reply.objects());
+            reader.read_exception().map_err(|status|event_error(format!("component usage reply {status}")))??;
+            return Ok(());
+        }
+        let install = self.package_install_guard();
         let reply = self.publish_prepared_package_mutation_guarded(&bridge, &capture, prepared, &dependencies, calling_uid, install)?;
         let mut reader = Reader::new(reply.data(), reply.objects());
         reader
