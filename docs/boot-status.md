@@ -377,8 +377,27 @@ build pass. The matched runtime, derived image and userdata template rebuild
 with zero failures. A fresh disposable native boot reaches
 `sys.boot_completed=1`; `pm list users` and direct `cmd user list` both return
 zero with byte-identical stdout/stderr from the retained original UserManager,
-and the unaffected `pm list packages` path also returns zero. The strict donor
-capture, rollback and full66 still need replay on this rebuilt pair.
+and the unaffected `pm list packages` path also returns zero. The following
+full app replay passes the signed install/update/uninstall and session routes,
+three Calculator launches and six Settings/PermissionController surfaces,
+Chrome first-run and two local DOM/SVG loads, original WebView DOM/SVG with its
+isolated renderer, and the complete 300-second GMS idle observation. Its strict
+reader capture then exposes a retained-query allow-list omission for
+`getPermissionGroupInfo`: the original PermissionManager handler already
+exists, but `pm list permissions -g -f` receives a null group and aborts
+(#1354). Runtime `6ad17c3d` admits that existing typed transaction; two focused
+Rust tests and an actual native smoke pass, with 7,548 output lines and no
+exception. A new Native donor capture waits for three consecutive equal owner
+snapshots and passes all package, user, permission and 43 persisted Role-holder
+queries while every owner file remains byte/stat identical. Normal stop leaves
+no owned process, mount or DATA attachment. Original PMS also boots an unchanged
+APFS clone of that Native-written donor, reaches the same stable capture and
+cleans up normally. Raw comparison is not accepted: permission, Role and user
+list views match, while native `dumpsys package dexopt` is still explicitly
+unsupported and the unfiltered package dump is incomplete (#1061); package
+paths differ only in order, user dump contains elapsed time/object identities,
+and Original first boot rewrites five package owner files. Rollback CTS,
+paired full66 and owner-qualified parity therefore remain required.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
