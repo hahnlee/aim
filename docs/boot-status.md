@@ -396,8 +396,22 @@ cleans up normally. Raw comparison is not accepted: permission, Role and user
 list views match, while native `dumpsys package dexopt` is still explicitly
 unsupported and the unfiltered package dump is incomplete (#1061); package
 paths differ only in order, user dump contains elapsed time/object identities,
-and Original first boot rewrites five package owner files. Rollback CTS,
-paired full66 and owner-qualified parity therefore remain required.
+and Original first boot rewrites package owner files. One real persistent
+difference was 24 shared-UID `packages.list` labels left at
+`targetSdkVersion=10000` instead of Original's completed-boot minimum 36
+(#1355). Runtime `2f7eb520` now runs the existing owner-level boot seInfo
+finalization after the complete system/data/stub scan and before runtime
+capture, persistence and publication. Its matched Native/Original image build
+passes, and an actual disposable boot of a CoW clone of the qualified donor
+reaches `sys.boot_completed=1`: all 24 affected rows contain
+`targetSdkVersion=36`, none contains 10000, and normal stop leaves no owned
+process, mount or DATA attachment. The updated full raw comparison, rollback
+comparison from that detached Native donor into Original no longer reports
+`packages.list`: its eight remaining raw differences are the four already
+known reader views (`package-full`, `package-dexopt`, package-path ordering and
+the generated user dump) plus `packages.xml` and `package-restrictions.xml`
+with their reserve copies. Rollback CTS, paired full66 and owner-qualified
+normalization of those remaining generated owner values are still required.
 
 The app observer's inverted Success predicate is corrected with real normal
 installation plus three failure controls (#1341); AppInfo/storage/permissions
