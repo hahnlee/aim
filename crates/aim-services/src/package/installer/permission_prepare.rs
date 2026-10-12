@@ -424,7 +424,7 @@ impl Owner {
         // three-way merge against its latest canonical owner.
         let mut retained=admission.owner.clone();
         if let Some(reason)=crate::package::scan_snapshot::install_context::install_user_rebase_conflict(base,&current,&mut retained,&targets).map_err(illegal)?{
-            return Err(illegal(format!("permission install base changed: {reason}; {}",crate::package::scan_snapshot::install_context::install_identity_delta(base,&current))));
+            return Err(illegal(format!("permission install base changed: {reason}")));
         }
         let mut input = Reader::new(&bytes, &[]);
         let decode = |input: &mut Reader<'_>| -> Result<_, i32> {

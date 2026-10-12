@@ -64,21 +64,57 @@ pub(crate) fn install_user_rebase_conflict(base:&Snapshot,current:&Snapshot,cand
     latest.refresh_library_user_inputs()?;
     if normalized!=latest{
         let before=Snapshot{version:base.version(),owner:normalized,usage:current.usage().clone(),replica_validated:false,metadata_revision:base.metadata_revision(),lineage:base.lineage.clone()};
-        return Ok(Some(format!("unmerged owner: {}; targets={targets:?}, protected appIds={protected:?}",install_identity_delta(&before,current))));
+        return Ok(Some(format!("unmerged normalized owner: {}; targets={targets:?}, protected appIds={protected:?}",install_identity_delta(&before,current))));
     }
     for (name,user,state) in changes{candidate.set_user_state(&name,user,state)?;}
     candidate.refresh_library_user_inputs()?;
     Ok(None)
 }
+fn entries_delta<T:PartialEq,K:Ord+std::fmt::Debug>(field:&str,before:&[T],after:&[T],key:impl Fn(&T)->K)->String{
+    let before_keys=before.iter().map(&key).collect::<Vec<_>>();
+    let after_keys=after.iter().map(&key).collect::<Vec<_>>();
+    let keys=before.iter().chain(after).map(&key).collect::<BTreeSet<_>>();
+    let changed=keys.iter().filter(|name|before.iter().find(|value|key(value)==**name)!=after.iter().find(|value|key(value)==**name)).collect::<Vec<_>>();
+    format!("settings.{field}: count {} -> {}, changed_keys={} {:?}, key_order_changed={}",before.len(),after.len(),changed.len(),changed.iter().take(16).collect::<Vec<_>>(),before_keys!=after_keys)
+}
+fn settings_delta(before:&settings::Settings,after:&settings::Settings)->Vec<String>{
+    let mut fields=Vec::new();
+    macro_rules! entries {($field:ident,$key:expr)=>{if before.$field!=after.$field{fields.push(entries_delta(stringify!($field),&before.$field,&after.$field,$key));}};}
+    entries!(versions,|value:&settings::Version|value.volume_uuid.clone());
+    if before.verifier!=after.verifier{fields.push(format!("settings.verifier: changed, present {} -> {}",before.verifier.is_some(),after.verifier.is_some()));}
+    entries!(permission_trees,|value:&settings::Permission|value.name.clone());
+    entries!(permissions,|value:&settings::Permission|value.name.clone());
+    entries!(packages,|value:&settings::Package|value.name.clone());
+    entries!(disabled_system_packages,|value:&settings::Package|value.name.clone());
+    entries!(shared_users,|value:&settings::SharedUser|value.name.clone());
+    entries!(renamed_packages,|value:&(String,String)|value.0.clone());
+    let a=&before.key_sets;let b=&after.key_sets;
+    if a.versioned!=b.versioned{fields.push("settings.key_sets.versioned: changed".into());}
+    if a.public_keys!=b.public_keys{fields.push(entries_delta("key_sets.public_keys",&a.public_keys,&b.public_keys,|value|value.0));}
+    if a.key_sets!=b.key_sets{fields.push(entries_delta("key_sets.key_sets",&a.key_sets,&b.key_sets,|value|value.0));}
+    if a.last_issued_key_id!=b.last_issued_key_id{fields.push("settings.key_sets.last_issued_key_id: changed".into());}
+    if a.last_issued_key_set_id!=b.last_issued_key_set_id{fields.push("settings.key_sets.last_issued_key_set_id: changed".into());}
+    if a.reference_counts!=b.reference_counts{
+        let old=a.reference_counts.as_ref().map(|values|values.iter().map(|(key,value)|(*key,*value)).collect::<Vec<_>>()).unwrap_or_default();
+        let new=b.reference_counts.as_ref().map(|values|values.iter().map(|(key,value)|(*key,*value)).collect::<Vec<_>>()).unwrap_or_default();
+        fields.push(format!("{}; present {} -> {}",entries_delta("key_sets.reference_counts",&old,&new,|value|value.0),a.reference_counts.is_some(),b.reference_counts.is_some()));
+    }
+    let a=&before.domain_verification;let b=&after.domain_verification;
+    if a.active!=b.active{fields.push(entries_delta("domain_verification.active",&a.active,&b.active,|value|value.name.clone()));}
+    if a.restored!=b.restored{fields.push(entries_delta("domain_verification.restored",&a.restored,&b.restored,|value|value.name.clone()));}
+    if a.legacy!=b.legacy{fields.push(entries_delta("domain_verification.legacy",&a.legacy,&b.legacy,|value|value.0.clone()));}
+    if before.legacy_domain_info!=after.legacy_domain_info{
+        let old=before.legacy_domain_info.iter().map(|(key,value)|(key.clone(),*value)).collect::<Vec<_>>();
+        let new=after.legacy_domain_info.iter().map(|(key,value)|(key.clone(),*value)).collect::<Vec<_>>();
+        fields.push(entries_delta("legacy_domain_info",&old,&new,|value|value.0.clone()));
+    }
+    fields
+}
 pub(crate) fn install_identity_delta(before:&Snapshot,after:&Snapshot)->String{
     let old=before.owner();let new=after.owner();
     let mut fields=Vec::new();
     if old.settings!=new.settings{
-        let names=old.settings.packages.iter().map(|package|package.name.as_str()).chain(new.settings.packages.iter().map(|package|package.name.as_str())).collect::<BTreeSet<_>>();
-        for name in names{let a=old.settings.packages.iter().find(|package|package.name==name);let b=new.settings.packages.iter().find(|package|package.name==name);if a!=b{
-            fields.push(format!("package {name}: {:?} -> {:?}",a.map(|p|(p.app_id,p.code_path.as_str(),p.version_code)),b.map(|p|(p.app_id,p.code_path.as_str(),p.version_code))));
-        }}
-        if fields.is_empty(){fields.push("settings shared/factory/global metadata".into());}
+        fields.extend(settings_delta(&old.settings,&new.settings));
     }
     if old.identities!=new.identities{fields.push("UID/shared identity ownership".into());}
     if old.loaded_packages()!=new.loaded_packages(){fields.push("active parsed code".into());}
@@ -302,6 +338,64 @@ fn live_user_inputs(live:&legacy_permissions::State,user:i32,installed:bool,gids
 #[cfg(test)]
 mod permission_owner_tests {
     use super::*;
+    #[test]
+    fn install_settings_diagnostic_identifies_fields_without_key_material(){
+        let before=settings::Settings::default();
+        let mut after=before.clone();
+        after.permissions.push(settings::Permission{name:"fixture.permission".into(),package:"target".into(),owner:settings::PermissionOwner::Manifest,protection_level:0,dynamic:None});
+        after.permission_trees.push(settings::Permission{name:"fixture.tree".into(),package:"target".into(),owner:settings::PermissionOwner::Manifest,protection_level:0,dynamic:None});
+        after.shared_users.push(settings::SharedUser{name:"fixture.shared".into(),app_id:10100,..Default::default()});
+        after.disabled_system_packages.push(settings::Package{name:"fixture.factory".into(),..Default::default()});
+        after.key_sets.public_keys.push((42,b"SECRET_KEY_MATERIAL".to_vec()));
+        after.key_sets.key_sets.push((43,vec![42]));
+        after.verifier=Some("SECRET_DEVICE_IDENTITY".into());
+        after.legacy_domain_info.insert("fixture.domain".into(),1);
+        let message=settings_delta(&before,&after).join("; ");
+        for field in ["permissions","permission_trees","shared_users","disabled_system_packages","key_sets.public_keys","key_sets.key_sets","verifier","legacy_domain_info"]{
+            assert!(message.contains(&format!("settings.{field}:")),"{message}");
+        }
+        for key in ["fixture.permission","fixture.tree","fixture.shared","fixture.factory","fixture.domain"]{assert!(message.contains(key));}
+        assert!(!message.contains("SECRET_KEY_MATERIAL")&&!message.contains("SECRET_DEVICE_IDENTITY"));
+        let mut reordered=after.clone();
+        reordered.permissions.push(settings::Permission{name:"second.permission".into(),package:"target".into(),owner:settings::PermissionOwner::Manifest,protection_level:0,dynamic:None});
+        let before=reordered.clone();reordered.permissions.reverse();
+        let message=settings_delta(&before,&reordered).join("; ");
+        assert!(message.contains("changed_keys=0")&&message.contains("key_order_changed=true"));
+    }
+
+    #[test]
+    fn install_normalized_residual_keeps_global_target_and_shared_uid_conflicts(){
+        use crate::package::{scan::{SigningScan,CapturedUsers},owner::usage::Usage,restrictions::UserState};
+        let settings=settings::Settings{packages:vec![
+            settings::Package{name:"target".into(),app_id:10100,shared_user:true,..Default::default()},
+            settings::Package{name:"sibling".into(),app_id:10100,shared_user:true,..Default::default()},
+            settings::Package{name:"unrelated".into(),app_id:10101,..Default::default()},
+        ],shared_users:vec![settings::SharedUser{name:"fixture.shared".into(),app_id:10100,..Default::default()}],..Default::default()};
+        let mut owner=SigningScan::new(&Default::default(),&settings,36).unwrap();
+        owner.capture_user_states(["target","sibling","unrelated"].into_iter().map(|name|((name.into(),false),CapturedUsers{states:BTreeMap::from([(0,UserState::default())]),active_aliases:Default::default()})).collect()).unwrap();
+        let snapshot=|owner:SigningScan|super::super::Store::new(owner,Usage::new(vec!["target","sibling","unrelated"])).unwrap().capture();
+        let base=snapshot(owner.clone());
+        let targets=BTreeSet::from(["target".into()]);
+        let mut changed=owner.clone();
+        let user=UserState{enabled_components:Some(vec!["fixture.Component".into()]),..Default::default()};
+        changed.set_user_state("unrelated",0,user.clone()).unwrap();
+        let current=snapshot(changed.clone());
+        let mut candidate=owner.clone();
+        assert!(install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().is_none());
+        assert_eq!(candidate.scanned_user_states("unrelated").unwrap()[&0],user);
+        changed.settings.verifier=Some("actual-verifier-change".into());
+        let current=snapshot(changed);
+        let mut candidate=owner.clone();
+        let reason=install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().unwrap();
+        assert!(reason.contains("unmerged normalized owner")&&reason.contains("settings.verifier:"));
+        assert!(!reason.contains("package unrelated user"),"merged unrelated user must not be reported as residual: {reason}");
+        for name in ["target","sibling"]{
+            let mut changed=owner.clone();changed.set_user_state(name,0,user.clone()).unwrap();
+            let current=snapshot(changed);let mut candidate=owner.clone();
+            let reason=install_user_rebase_conflict(&base,&current,&mut candidate,&targets).unwrap().unwrap();
+            assert!(reason.contains(&format!("package {name} user 0 state ownership")),"{reason}");
+        }
+    }
     #[test]
     fn modern_context_preserves_grants_and_actual_gid_inputs_independent_of_legacy(){
         let mut modern=legacy_permissions::Migration::default();
