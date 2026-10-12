@@ -735,6 +735,7 @@ impl System {
         let parent_system = this.clone(); let parent_bridge = bridge.clone();
         let linking_system = this.clone(); let linking_bridge = bridge.clone();
         let roles_system = this.clone(); let roles_bridge = bridge.clone();
+        let managed_system = this.clone(); let managed_bridge = bridge.clone();
         let grants_system = this.clone();
         let grants_bridge = bridge.clone();
         let clone_system = this.clone();
@@ -789,6 +790,13 @@ impl System {
             let system = roles_system.upgrade().ok_or_else(|| Exception::new(
                 aim_binder_host::parcel::EX_ILLEGAL_STATE, "role system stopped"))?;
             system.read_package_live_owner(&roles_bridge, |bridge| bridge.package_role_holders(role, user))
+        })).with_organization_managed(Box::new(move |user| {
+            let system = managed_system.upgrade().ok_or_else(|| Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE, "managed user system stopped"))?;
+            system.read_package_live_owner(&managed_bridge, |bridge| {
+                bridge.installer_user_policy(user)
+            })?.map(|policy| policy.organization_managed).ok_or_else(|| Exception::new(
+                aim_binder_host::parcel::EX_ILLEGAL_STATE, "managed user policy absent"))
         })));
         let mut current = self.package_bootstrap.lock().unwrap();
         let previous = current.current.replace(PackageBootstrap {

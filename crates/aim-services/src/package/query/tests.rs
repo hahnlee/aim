@@ -123,6 +123,90 @@ fn state() -> State {
     }
 }
 
+fn install_source_state(managed: bool) -> State {
+    let mut state = state();
+    for package in state.packages.values_mut() {
+        package.is.force_queryable_override = true;
+    }
+    let source = &mut state.packages.get_mut(APP).unwrap().install_source;
+    source.installer = Some(OTHER.into());
+    source.update_owner = Some(OTHER.into());
+    source.package_source = 3;
+    state.system.user_policy = Some(Arc::new(crate::package::user_policy::Owner::new(
+        Box::new(|_| Ok(false)),
+    ).with_organization_managed(Box::new(move |user| {
+        assert_eq!(user, 0);
+        Ok(managed)
+    }))));
+    state
+}
+
+#[test]
+fn install_source_update_owner_respects_organization_management() {
+    for (managed, uid, expected) in [
+        (false, 10100, Some(OTHER)),
+        (true, 10100, None),
+        (true, 10101, Some(OTHER)),
+        (true, SYSTEM_UID, Some(OTHER)),
+    ] {
+        let state = install_source_state(managed);
+        let reply = call(&state, uid, false, pm::GET_INSTALL_SOURCE_INFO, |p| {
+            pm::GetInstallSourceInfo { package_name: Some(APP.into()), user_id: 0 }.write(p);
+        });
+        let mut reader = Reader::new(reply.data(), reply.objects());
+        reader.read_exception().unwrap().unwrap();
+        assert_eq!(reader.read_i32().unwrap(), 1);
+        assert_eq!(reader.read_string16().unwrap(), None); // Initiating package.
+        assert_eq!(reader.read_string16().unwrap(), None); // Initiating signing info.
+        assert_eq!(reader.read_string16().unwrap(), None); // Originating package.
+        assert_eq!(reader.read_string16().unwrap().as_deref(), Some(OTHER));
+        assert_eq!(reader.read_string8().unwrap().as_deref(), expected);
+        assert_eq!(reader.read_i32().unwrap(), 3);
+        assert_eq!(reader.remaining(), 0);
+    }
+}
+
+#[test]
+fn install_source_update_owner_preserves_policy_failure_and_exemptions() {
+    let mut state = install_source_state(false);
+    state.system.user_policy = Some(Arc::new(crate::package::user_policy::Owner::new(
+        Box::new(|_| Ok(false)),
+    ).with_organization_managed(Box::new(|_| {
+        Err(Exception::security("actual device policy failure"))
+    }))));
+    let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
+    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+    let error = query.install_source_info(APP, 0).unwrap().unwrap_err();
+    assert_eq!(error.code, EX_SECURITY);
+    assert_eq!(error.message, "actual device policy failure");
+    for uid in [SYSTEM_UID, 10101] {
+        let query = Query { state: &state, filter: &filter, calling_uid: uid };
+        assert_eq!(query.install_source_info(APP, 0).unwrap().unwrap().unwrap()
+            .update_owner_package_name.as_deref(), Some(OTHER));
+    }
+    state.system.user_policy = None;
+    let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
+    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+    assert!(query.install_source_info(APP, 0).is_err());
+    state.packages.get_mut(APP).unwrap().install_source.update_owner = Some("missing.owner".into());
+    let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
+    let query = Query { state: &state, filter: &filter, calling_uid: 10100 };
+    assert_eq!(query.install_source_info(APP, 0).unwrap().unwrap().unwrap().update_owner_package_name, None);
+}
+
+#[test]
+fn install_source_update_owner_keeps_package_visibility_filtering() {
+    let mut state = install_source_state(false);
+    state.packages.insert("org.example.reader".into(), package("org.example.reader", 10102, |_, _| {}));
+    state.packages.get_mut(OTHER).unwrap().is.force_queryable_override = false;
+    state.system.user_policy = None;
+    let filter = AppsFilter::new(&state, &crate::package::apps_filter::Config::default()).unwrap();
+    let query = Query { state: &state, filter: &filter, calling_uid: 10102 };
+    let source = query.install_source_info(APP, 0).unwrap().unwrap().unwrap();
+    assert_eq!(source.update_owner_package_name, None);
+    assert_eq!(source.installing_package_name, None);
+}
+
 /// Answers a call of `uid` to `package` or `package_native`.
 fn call(
     state: &State,

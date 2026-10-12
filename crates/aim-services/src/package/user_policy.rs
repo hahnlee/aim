@@ -4,10 +4,17 @@ pub struct Owner {
     profile_parent: Option<Box<dyn Fn(i32) -> Result<Option<i32>, Exception> + Send + Sync>>,
     parent_app_linking: Option<Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>>,
     role_holders: Option<Box<dyn Fn(&str, i32) -> Result<Vec<String>, Exception> + Send + Sync>>,
+    organization_managed: Option<Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>>,
     shell_debugging_restricted: Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>,
 }
 impl Owner {
-    pub fn new(shell_debugging_restricted: Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>) -> Self { Self { shell_debugging_restricted, role_holders: None, profile_parent: None, parent_app_linking: None } }
+    pub fn new(shell_debugging_restricted: Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>) -> Self { Self { shell_debugging_restricted, role_holders: None, organization_managed: None, profile_parent: None, parent_app_linking: None } }
+    pub fn with_organization_managed(mut self, read: Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>) -> Self {
+        self.organization_managed = Some(read); self
+    }
+    pub fn organization_managed(&self, user: i32) -> Result<bool, Exception> {
+        self.organization_managed.as_ref().ok_or_else(|| Exception::new(aim_binder_host::parcel::EX_UNSUPPORTED_OPERATION, "original DevicePolicy managed-user owner unavailable"))?(user)
+    }
     pub fn with_cross_profile(mut self, parent: Box<dyn Fn(i32) -> Result<Option<i32>, Exception> + Send + Sync>,
         app_linking: Box<dyn Fn(i32) -> Result<bool, Exception> + Send + Sync>) -> Self {
         self.profile_parent = Some(parent); self.parent_app_linking = Some(app_linking); self

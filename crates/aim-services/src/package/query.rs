@@ -1327,7 +1327,7 @@ impl Query<'_> {
             )
         };
         let installer = visible(&src.installer)?;
-        let update_owner = visible(&src.update_owner)?;
+        let mut update_owner = visible(&src.update_owner)?;
         if update_owner.is_some()
             && self.calling_uid != SYSTEM_UID
             && !apps_filter::is_caller_same_app(
@@ -1336,8 +1336,13 @@ impl Query<'_> {
                 self.calling_uid,
             )?
         {
-            // Whether the user is managed is the device policy's state.
-            return Err(NotModelled("an update owner shown to another app"));
+            let policy = self.state.system.user_policy.as_ref()
+                .ok_or(NotModelled("original DevicePolicy managed-user owner unavailable"))?;
+            match policy.organization_managed(user) {
+                Ok(true) => update_owner = None,
+                Ok(false) => {}
+                Err(exception) => return Ok(Err(exception)),
+            }
         }
         let initiating = if src.initiating_package_uninstalled {
             let instant = apps_filter::instant_app_package_name(self.state, self.calling_uid)?;
